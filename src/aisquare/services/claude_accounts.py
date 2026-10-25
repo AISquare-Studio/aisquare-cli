@@ -44,6 +44,7 @@ arrangement lives in ``agent_account`` (store v29).
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 import signal
@@ -613,6 +614,7 @@ def choose(
     fetch: Fetch | None = None,
     agent: str = AGENT,
     pick: AgentPick | None = None,
+    family: str | None = None,
 ) -> AccountChoice:
     """THE account resolver: which Claude account a launch runs under, and why.
 
@@ -653,7 +655,12 @@ def choose(
 
     ``pick`` is the launch's agent rung's answer (:func:`agent_pick`): an account of
     ``agent`` it chose by headroom across agents is the headroom rung's answer, with no
-    second usage read; every rung above it still wins.
+    second usage read, unless a limit mark shuts it to ``family`` (that rung ran before
+    the model was known), when the headroom rung reads as usual; every rung above it
+    still wins.
+
+    ``family`` is the launch's model family (``core.harness.launch_family``), for the
+    headroom rung's per-family weeks and limit marks (#277).
 
     ``exclude`` is honoured on EVERY rung: a binding or a project default that
     names the account being left is skipped with a note and the ladder goes on,
@@ -724,7 +731,13 @@ def choose(
     settings = accounts_settings()
     by_headroom = spread if spread is not None else settings.pick == "headroom"
     chosen = pick.account if pick is not None else None
-    if by_headroom and chosen is not None and chosen.agent == agent and chosen.slot not in skip:
+    if (
+        by_headroom
+        and chosen is not None
+        and chosen.agent == agent
+        and chosen.slot not in skip
+        and not _marked(chosen, family)
+    ):
         notes.extend(pick.notes if pick is not None else ())
         return AccountChoice(chosen, "headroom", notes)
     if by_headroom:
@@ -734,6 +747,8 @@ def choose(
             exclude=skip,
             fetch=fetch,
             max_age=PICK_MAX_AGE_SECONDS if spread is None else None,
+            family=family,
+            prefer=settings.prefer,
         )
         if spread is None:
             # The default rung since 0.8.1, so every machine walks it: one with no account
@@ -991,6 +1006,10 @@ def _http_get(url: str, headers: Mapping[str, str], timeout: float) -> tuple[int
         return int(exc.code), bytes(exc.read() or b"")
 
 
+_FAMILIES = core.MODEL_FAMILY_NAMES
+"""The model families a per-family window or limit can name (``opus``, ``sonnet``…)."""
+
+
 def usage(
     account: ClaudeAccount, *, now: datetime | None = None, fetch: Fetch | None = None
 ) -> ClaudeUsage:
@@ -1008,6 +1027,9 @@ def usage(
     Another agent's come from its adapter's accounts slot: Codex's from the
     newest reading its own sessions recorded (``core.codex_accounts.usage``),
     with no request at all — ``fetch`` is never called for it.
+    Claude Code's reading carries the per-family weeks too (#277:
+    :attr:`ClaudeUsage.family_week_percent`), and folds ``limits[]`` and a
+    ``locked_reason`` into its windows.
     """
     reading = core.kind(account.agent).usage(account, now=now, fetch=fetch or _http_get)
     if reading.available and reading.fetched_at is None:
@@ -1141,6 +1163,13 @@ def _recorded(account: ClaudeAccount) -> bool:
 def _record_sample(
     store: ContextStore, account: ClaudeAccount, result: ClaudeUsage, now: datetime | None
 ) -> None:
+    """The reading's row — and a limit mark for each family week it reads spent, which the
+    row has no column for: a launch picks from the cache, and without the mark it would put
+    an Opus agent on an account whose Opus week a live reading saw spent (#277)."""
+    for family, percent in result.family_week_percent.items():
+        resets = result.family_week_resets_at.get(family)
+        if percent >= 100 and resets is not None:
+            _write_limit(store, account.slot, family, resets, how="read", now=now)
     store.add_usage_sample(
         UsageSample(
             slot=account.slot,
@@ -1604,9 +1633,13 @@ def describe_age(fetched_at: datetime, *, now: datetime | None = None) -> str:
     return f"{minutes // 60}h ago"
 
 
-def headroom_percent(reading: ClaudeUsage) -> float | None:
+def headroom_percent(reading: ClaudeUsage, family: str | None = None) -> float | None:
     """How full an account reads for a pick: the window that limits it, or ``None``
     (``ClaudeUsage.ranked_percent``).
+
+    Given the agent's model ``family`` (``core.harness.model_family``), that family's
+    week counts too (#277): an Opus limit refuses an Opus agent exactly as a weekly one
+    does, and refuses no other family's.
 
     The FULLEST of the windows it has, percent used. A weekly limit refuses requests
     exactly as a five-hour one does, and an account that has spent its week builds no
@@ -1621,10 +1654,14 @@ def headroom_percent(reading: ClaudeUsage) -> float | None:
     (Claude Code's endpoint answering without the five-hour one), which the pick skips as
     it always has.
     """
-    return reading.ranked_percent
+    used = reading.ranked_percent
+    own = reading.family_week_percent.get(family) if family is not None else None
+    return used if used is None or own is None else max(used, own)
 
 
-def describe_headroom(account: ClaudeAccount, reading: ClaudeUsage) -> str:
+def describe_headroom(
+    account: ClaudeAccount, reading: ClaudeUsage, family: str | None = None
+) -> str:
     """``account 2 40% used (60% left)`` — ``account 2 5% used (week 100% used, 0% left)`` when
     the week is the fuller window.
 
@@ -1639,10 +1676,15 @@ def describe_headroom(account: ClaudeAccount, reading: ClaudeUsage) -> str:
     first = reading.windows[0] if reading.windows else None
     if first is None or first.used_percent is None or headroom_percent(reading) is None:
         return name
-    left = percent_left(reading)
+    left = percent_left(reading, family)
     spare = "" if left is None else f"{left:.0f}% left"
     lead = "" if first.name == SESSION_WINDOW else f"{first.name} "
     limiting = reading.limiting
+    own = reading.family_week_percent.get(family) if family is not None else None
+    fullest = limiting.used_percent if limiting is not None else None
+    if own is not None and own > (first.used_percent or 0) and (fullest is None or own > fullest):
+        detail = f"{family} week {own:.0f}% used" + (f", {spare}" if spare else "")
+        return f"{name} {lead}{first.used_percent:.0f}% used ({detail})"
     if limiting is not None and limiting != first and limiting.used_percent != first.used_percent:
         detail = f"{limiting.name} {limiting.used_percent:.0f}% used" + (
             f", {spare}" if spare else ""
@@ -1659,10 +1701,10 @@ HEADROOM_LOW_FROM = 5.0
 """From this share left up to :data:`HEADROOM_FAIR_FROM`, ``low``; over 0 below it, ``critical``."""
 
 
-def percent_left(reading: ClaudeUsage) -> float | None:
+def percent_left(reading: ClaudeUsage, family: str | None = None) -> float | None:
     """The share of an account LEFT for a pick: ``100 -`` the window that limits it, 0-100
-    (:func:`headroom_percent`)."""
-    used = headroom_percent(reading)
+    (and the ``family`` week's, given one: :func:`headroom_percent`)."""
+    used = headroom_percent(reading, family)
     return None if used is None else min(100.0, max(0.0, 100.0 - used))
 
 
@@ -1776,6 +1818,107 @@ def read_fleet_headroom(
     return fleet_headroom(candidates, readings)
 
 
+# --- the refusal memory (#277) -------------------------------------------------------------------
+#
+# A 429 is an answer the usage endpoint may not give: a family week it does not send, a
+# window it reads under the line while the account refuses. So every ``rate_limit``
+# StopFailure leaves a mark in ``team_meta`` — ``account_limit:<slot>:<window>`` = the reset
+# the message named — and :func:`headroom_choice` skips an account whose mark is still in
+# the future: always for the windows every model shares (``session``, ``weekly``), and for a
+# family's (``opus``, ``sonnet``) when the agent is of that family. No migration: a mark is
+# a ``team_meta`` row, and one whose reset has passed is simply not read.
+
+LIMIT_MARK_PREFIX = "account_limit:"
+"""``team_meta`` key prefix of a limit mark: ``account_limit:<slot>:<window>``."""
+
+
+@dataclass(frozen=True)
+class LimitMark:
+    """One remembered limit: the account refused (``how = "refused"``) or a live reading saw
+    a family week spent (``"read"``) at ``at``, until ``until``."""
+
+    slot: int
+    window: str
+    until: datetime
+    at: datetime
+    how: str = "refused"
+
+    def blocks(self, family: str | None) -> bool:
+        """Whether it shuts the account to an agent of ``family``: a window every model
+        shares blocks everyone; a family's only that family (an unknown word is shared)."""
+        return self.window not in _FAMILIES or self.window == family
+
+    def describe(self, *, now: datetime) -> str:
+        """``weekly limit until Mon 00:00 (in 2d 4h), refused 10:42``."""
+        until = self.until.astimezone()
+        at = self.at.astimezone().strftime("%H:%M")
+        distance = core.format_reset(self.until, now=now, clock=False)
+        return (
+            f"{self.window} limit until {until.strftime('%a %H:%M')} ({distance}), {self.how} {at}"
+        )
+
+
+def _write_limit(
+    store: ContextStore,
+    slot: int,
+    window: str,
+    until: datetime,
+    *,
+    how: str,
+    now: datetime | None = None,
+) -> None:
+    value = {"until": until.isoformat(), "at": (now or _now()).isoformat(), "how": how}
+    store.set_meta(f"{LIMIT_MARK_PREFIX}{slot}:{window.lower()}", json.dumps(value))
+
+
+def remember_limit(
+    slot: int | None,
+    window: str | None,
+    until: datetime | None,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Remember that account ``slot`` refused with a ``window`` limit lifting at ``until``.
+
+    Called on every ``rate_limit`` StopFailure (``services.hooks.turn_failed``). Nothing
+    to remember without all three: a 429 that names no reset (an API key's throttle)
+    leaves no mark, as it leaves no reset on the row. Best effort: a store that cannot be
+    written costs the memory, never the hook.
+    """
+    if slot is None or not window or until is None:
+        return
+    with contextlib.suppress(sqlite3.Error), store_session() as store:
+        _write_limit(store, slot, window, until, how="refused", now=now)
+
+
+def limit_marks(*, now: datetime | None = None) -> dict[int, list[LimitMark]]:
+    """Every limit mark still in force at ``now``, by slot; ``{}`` when the store cannot be
+    read (a pick then reads usage as it did before #277)."""
+    moment = now or _now()
+    try:
+        with store_session() as store:
+            rows = store.list_meta(LIMIT_MARK_PREFIX)
+    except sqlite3.Error:
+        return {}
+    marks: dict[int, list[LimitMark]] = {}
+    for key, raw in rows.items():
+        slot_text, _, window = key.removeprefix(LIMIT_MARK_PREFIX).partition(":")
+        try:
+            data = json.loads(raw)
+            mark = LimitMark(
+                slot=int(slot_text),
+                window=window,
+                until=datetime.fromisoformat(data["until"]),
+                at=datetime.fromisoformat(data["at"]),
+                how=str(data.get("how", "refused")),
+            )
+        except (ValueError, KeyError, TypeError):
+            continue
+        if mark.until > moment:
+            marks.setdefault(mark.slot, []).append(mark)
+    return marks
+
+
 _NOTHING_TO_PICK = "headroom: no enabled, signed-in account to pick from"
 
 PICK_MAX_AGE_SECONDS = 60.0
@@ -1800,8 +1943,16 @@ def headroom_choice(
     now: datetime | None = None,
     least_bad: bool = True,
     max_age: float | None = None,
+    family: str | None = None,
+    prefer: str = "priority",
 ) -> tuple[ClaudeAccount | None, list[str]]:
     """The account with headroom, and the notes that say how it was picked.
+
+    ``family`` is the agent's model family, when known: that family's week counts
+    (:func:`headroom_percent`), and so does its limit mark. An account with a limit
+    mark still in force (:func:`limit_marks`) is skipped with a note and never read.
+    ``prefer = "reset-soonest"`` takes, among the accounts under ``switch_at``, the one
+    whose week resets first, priority breaking ties (#277).
 
     ``least_bad=False`` withholds the "every account is over the line, take
     the one with the most room" answer: right for a spawn, it is what made two
@@ -1832,18 +1983,36 @@ def headroom_choice(
     ]
     if not candidates:
         return None, [_NOTHING_TO_PICK]
+    moment = now or _now()
+    marks = limit_marks(now=moment)
+    notes: list[str] = []
+    open_ones: list[ClaudeAccount] = []
+    for account in candidates:
+        mark = next((m for m in marks.get(account.slot, []) if m.blocks(family)), None)
+        if mark is None:
+            open_ones.append(account)
+        else:
+            notes.append(f"headroom: {core.label(account)} skipped — {mark.describe(now=moment)}")
+    if not open_ones:
+        notes.append("headroom: every account is at a limit it named — the default decides")
+        return None, notes
+    candidates = open_ones
     if max_age is None:
         readings = read_usage(candidates, now=now, fetch=fetch)
     elif len(candidates) == 1 and least_bad:
-        return candidates[0], _over_the_line(candidates[0], switch_at, now=now)
+        return candidates[0], [*notes, *_over_the_line(candidates[0], switch_at, now=now)]
     else:
         readings = cached_usage(candidates, max_age=max_age, now=now, fetch=fetch)
     measured: list[tuple[ClaudeAccount, float]] = []
-    notes: list[str] = []
     for account in candidates:
         reading = readings[account.slot]
-        percent = headroom_percent(reading)
-        if percent is not None:
+        percent = headroom_percent(reading, family)
+        own = reading.family_week_percent.get(family) if family is not None else None
+        if own is not None and own >= 100:
+            # Spent for this agent's family: it refuses the first request, so it is no
+            # answer at all, not even the least bad one a switch by hand takes (P0-W3c).
+            notes.append(f"headroom: {core.label(account)} skipped — its {family} week is spent")
+        elif percent is not None:
             measured.append((account, percent))
         else:
             notes.append(
@@ -1852,8 +2021,18 @@ def headroom_choice(
     if not measured:
         notes.append("headroom: no account's usage could be read — the default decides")
         return None, notes
-    summary = " · ".join(describe_headroom(a, readings[a.slot]) for a, _pct in measured)
-    under = next((a for a, pct in measured if pct < switch_at), None)
+    summary = " · ".join(describe_headroom(a, readings[a.slot], family) for a, _pct in measured)
+    under_line = [a for a, pct in measured if pct < switch_at]
+    if prefer == "reset-soonest" and len(under_line) > 1:
+        never = datetime.max.replace(tzinfo=UTC)
+        soonest = min(under_line, key=lambda a: readings[a.slot].week_resets_at or never)
+        if soonest is not under_line[0]:
+            notes.append(
+                f"headroom: {summary} — {core.label(soonest)}'s week resets first of those "
+                f"under the {switch_at}%-used line (prefer = reset-soonest)"
+            )
+            return soonest, notes
+    under = under_line[0] if under_line else None
     if under is not None:
         notes.append(
             f"headroom: {summary} — {core.label(under)} is first under the {switch_at}%-used line"
@@ -1951,15 +2130,20 @@ def choose_any(
     least_bad: bool = True,
     fetch: Fetch | None = None,
     which: Callable[[str], str | None] | None = None,
+    family: str | None = None,
 ) -> AgentPick:
     """The best account of ANY agent: the first in the one priority order with headroom.
 
     Candidates are :func:`usable_accounts` (``exclude`` a hand-over's account, ``agents``
     the agents allowed); the rule is :func:`headroom_choice`'s, with ``[accounts]
-    switch_at``: the first under the line, else the least used when ``least_bad``, read
-    in one round for every candidate, now when ``live`` (a hand-over) or through the
-    one-minute cache. No role, project or flag rung: what pins an agent or an account
-    is the caller's. Both ``None`` when nothing is usable or nothing could be read.
+    switch_at`` and ``prefer`` (#295: ``reset-soonest`` takes, of those under the line,
+    the one whose week resets first): the first under the line, else the least used when
+    ``least_bad``, read in one round for every candidate, now when ``live`` (a hand-over)
+    or through the one-minute cache. An account with a limit mark still in force is
+    skipped unread; given the agent's model ``family``, so is one whose week for that
+    family is spent or marked (#295's per-family windows). No role, project or flag rung:
+    what pins an agent or an account is the caller's. Both ``None`` when nothing is
+    usable or nothing could be read.
     """
     accounts, note = _read_arranged()
     if note is not None:
@@ -1967,12 +2151,15 @@ def choose_any(
     candidates = usable_accounts(accounts, exclude=exclude, agents=agents, which=which)
     if not candidates:
         return AgentPick(None, None, (_NOTHING_TO_PICK,))
+    settings = accounts_settings()
     picked, notes = headroom_choice(
         candidates,
-        switch_at=accounts_settings().switch_at,
+        switch_at=settings.switch_at,
         fetch=fetch,
         least_bad=least_bad,
         max_age=None if live else PICK_MAX_AGE_SECONDS,
+        family=family,
+        prefer=settings.prefer,
     )
     if picked is None:
         return AgentPick(None, None, tuple(notes))
@@ -2024,11 +2211,21 @@ def agent_pick(
     if settings.pick != "headroom":
         return AgentPick(first.agent, None, (f"{core.label(first)} is first in the order",))
     picked, notes = headroom_choice(
-        candidates, switch_at=settings.switch_at, fetch=fetch, max_age=PICK_MAX_AGE_SECONDS
+        candidates,
+        switch_at=settings.switch_at,
+        fetch=fetch,
+        max_age=PICK_MAX_AGE_SECONDS,
+        prefer=settings.prefer,
     )
     if picked is None:
         return AgentPick(first.agent, None, (*notes, f"{core.label(first)} is first in the order"))
     return AgentPick(picked.agent, picked, tuple(notes))
+
+
+def _marked(account: ClaudeAccount, family: str | None) -> bool:
+    """Whether a limit mark still in force shuts ``account`` to an agent of ``family``: the
+    launch's agent rung picked before the model was known, so a family's mark is read here."""
+    return any(mark.blocks(family) for mark in limit_marks().get(account.slot, []))
 
 
 def choose_for_handover(
@@ -2040,11 +2237,16 @@ def choose_for_handover(
     automatic: bool = False,
     fetch: Fetch | None = None,
     agent: str = AGENT,
+    family: str | None = None,
 ) -> AccountChoice:
     """The target of a hand-over: HEADROOM FIRST; the ladder only when nothing can be measured.
 
     Among ``agent``'s accounts (the agent being moved): a Codex agent moves to a
     Codex account, read offline from its rollouts.
+
+    ``family`` is the agent's model family (its session's model), so an account whose
+    week for that family is spent, or that refused it with that family's limit, is no
+    target (#277).
 
     A switch exists to move an agent to the account with room, so the binding
     and project-default rungs — explicit choices for a *launch* — do not get to
@@ -2055,8 +2257,9 @@ def choose_for_handover(
     (no least-bad answer, see :func:`headroom_choice`) and otherwise refuses,
     which leaves the agent parked with Claude Code's own wait intact; a manual
     switch keeps the least-bad answer and, when no usage can be read at all,
-    falls back to the ladder minus the account being left. Either reads every
-    candidate's usage live, never from the cache a launch uses: it is moving an
+    falls back to the ladder minus the account being left — and minus an account
+    with a limit mark still in force for the agent (#277): only ``--to`` names one.
+    Either reads every candidate's usage live, never from the cache a launch uses: it is moving an
     agent off an account that just filled, and a figure even a minute old could
     send it to another that has filled since.
 
@@ -2081,6 +2284,8 @@ def choose_for_handover(
         exclude=skip,
         fetch=fetch,
         least_bad=not automatic,
+        family=family,
+        prefer=settings.prefer,
     )
     notes.extend(more)
     if picked is not None:
@@ -2088,8 +2293,30 @@ def choose_for_handover(
     if automatic:
         return AccountChoice(None, None, notes)
     fallback = choose(
-        None, role=role, project=project, exclude=skip, spread=False, fetch=fetch, agent=agent
+        None,
+        role=role,
+        project=project,
+        exclude=skip,
+        spread=False,
+        fetch=fetch,
+        agent=agent,
+        family=family,
     )
+    # The ladder's rungs read no marks: on a hand-over they are not a choice someone made for
+    # THIS move, and with every other account marked the machine default moved the agent
+    # back onto the account that had just refused it (review of #304, reviewer-a, major 2).
+    # Only `--to` (``explicit``, above) may name a marked account.
+    if fallback.account is not None:
+        moment = _now()
+        mark = next(
+            (m for m in limit_marks(now=moment).get(fallback.account.slot, []) if m.blocks(family)),
+            None,
+        )
+        if mark is not None:
+            said = f"{core.label(fallback.account)} ({fallback.source}) skipped — "
+            return AccountChoice(
+                None, None, [*notes, *fallback.notes, said + mark.describe(now=moment)]
+            )
     return AccountChoice(fallback.account, fallback.source, [*notes, *fallback.notes])
 
 

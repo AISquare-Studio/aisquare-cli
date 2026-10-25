@@ -17,6 +17,7 @@ import pytest
 from aisquare.core import claude_accounts as core
 from aisquare.core.store import store_session
 from aisquare.models import ProjectInfo, TeamSession, TeamTask
+from aisquare.services import delivery
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from tests import fakebin
@@ -24,6 +25,7 @@ from tests.test_codex_accounts import _rollout, _sign_in, _token_count, _window
 from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     FakeTmux,
     _command,
+    _first_lines,
     _flag,
     clock,
     project,
@@ -105,8 +107,12 @@ def test_a_limited_codex_agent_is_switched_fresh_onto_the_codex_slot_with_room(
     assert "--resume" not in command and str(rollout) not in command  # fresh, never resumed
     assert receipt.started.agent == "codex" and receipt.started.account_slot == roomy.slot
     assert any("cannot resume a thread" in note for note in receipt.notes)
-    # The hand-off prompt: Codex takes it as its positional argument, never typed in.
-    assert any("under another Codex account" in part for part in command), command
+    # The hand-off prompt: Codex takes it as its positional argument, never typed in, from
+    # the file its launch reads (P0-W1a): never in the window's command.
+    assert not [t for t in tmux.typed if t[1] == "paste"] and delivery.FIRST_PROMPT_FLAG in command
+    assert not any("under another Codex account" in part for part in command), command
+    [first] = _first_lines(tmux, receipt.started.pane_id)
+    assert "under another Codex account" in first, first
     with store_session() as store:
         moved = store.get_task(task.id)
         kinds = [e.kind for e in store.recent_events(project.id, limit=10)]

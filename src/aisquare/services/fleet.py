@@ -62,7 +62,6 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters import (
     DEFAULT_AGENT,
     adapter_for_binary,
-    claude_screen,
     get_adapter,
     recorded_adapter,
 )
@@ -100,9 +99,7 @@ from aisquare.core.tmux import (
     PaneFacts,
     SocketAnswer,
     TmuxError,
-    TmuxPartlyTyped,
     TmuxServer,
-    TmuxTimedOut,
     TmuxUnavailable,
     WindowInfo,
 )
@@ -132,13 +129,27 @@ from aisquare.services import (
     agent_events,
     agent_launch,
     auto_mode,
+    delivery,
     explainability_ops,
     install_route,
+    pane_idle,
 )
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import personas as personas_service
 from aisquare.services import project as project_service
+from aisquare.services.captain import screen as pane_screen
+
+# How a write into a pane ends lives with the one door every write goes through
+# (``services.delivery``, P0-W1a); its names stay importable from here, where every caller
+# and test reads them.
+from aisquare.services.delivery import PaneWrite as PaneWrite
+from aisquare.services.delivery import TellResult as TellResult
+from aisquare.services.delivery import Typed as Typed
+from aisquare.services.delivery import pane_write as pane_write
+from aisquare.services.delivery import pane_writes as pane_writes
+from aisquare.services.delivery import pasted_unsent as pasted_unsent
+from aisquare.services.delivery import prompt_typed_json as prompt_typed_json
 
 FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator", "ui-tester")
 """The fleet's own roles (§3.3). Any harness or ``team bind`` role is accepted too."""
@@ -177,6 +188,15 @@ NUDGE_OWED = "nudge-owed:"
 that project's manager and could not send: tmux refused the writer (a command in Codex's
 sandbox, :func:`nudge_manager`). Its value is when; :func:`deliver_owed_nudge` takes it."""
 
+NUDGE_DEFERRED = "nudge_deferred:"
+"""The ``team_meta`` prefix of a nudge a draft held back (P0-W2): ``nudge_deferred:<session>``
+→ when it was held back. :func:`retry_deferred_nudges` sends it once the box is clear."""
+
+_NUDGE_RE_PRESS: tuple[float, ...] = (2.0,)
+_NUDGE_LAST_WAIT = 2.0
+"""A nudge's Enter is pressed again once at most, and its wait is short: it runs inside
+another agent's board write. A nudge still in the box is sent by the next one."""
+
 PROMPT_TIMEOUT = 20.0
 """How long ``spawn --prompt`` waits for the agent to come up before typing anyway."""
 
@@ -207,11 +227,6 @@ in one burst as a paste, Enter included: ``/exit`` sent with its Enter stayed in
 composer and the stop's grace ran out into a kill, with no ``SessionEnd``; the manager's
 nudge stayed there unsent, three of them by the end of a run (0.162.1 under tmux 3.7c:
 an Enter 20 ms behind the text is kept, 50 ms behind it submits)."""
-_SUBMIT_GRACE = 1.0
-"""How long a prompt may sit in Claude Code's input box after its Enter before the Enter is
-read as lost and pressed once more (:func:`_submitted`)."""
-_SUBMIT_TIMEOUT = 5.0
-"""How long :func:`_submitted` reads the pane back for the prompt to leave the input box."""
 _SECURITY_PRESSES = 3
 """How many Enters :func:`_at_input_box` gives Claude Code's first-run Security notes."""
 _SECURITY_REPRESS = 6.0
@@ -317,26 +332,6 @@ class ResumeSpec:
     source's, the one forked from."""
 
 
-Typed = Literal["yes", "no", "unsent", "maybe"]
-"""How a write into an agent's pane ended (:class:`PaneWrite`, :class:`TellResult`), and how a
-spawn's prompt or a replacement's first line reached it (:func:`_type_prompt`): the word an
-audit line says. ``yes``, all of it went through; ``no``, tmux refused it and typed
-nothing; ``unsent``, it is at the agent's prompt but its Enter did not go through, so an
-Enter sends it; ``maybe``, tmux did not answer in time, and it may still arrive. ``unsent``
-was ``no``, and a caller retrying on ``no`` pasted a second copy beside the first, both
-submitted by the next Enter (review of #259, round 12, 2/9). The receipts said it in a
-vocabulary of their own, ``True``/``False``/``unsent``/``maybe``, translated from this one
-by hand, which is how a tell had no word for ``unsent`` (9/9). Their JSON still says
-``true`` and ``false`` (:func:`prompt_typed_json`); a ``False``, "NOT typed … Tell it what
-to do", for the other two had the Tell go in beside the first copy (round 11, 2/13)."""
-
-
-def prompt_typed_json(typed: Typed | None) -> bool | str | None:
-    """A receipt's ``prompt_typed`` as the CLI's JSON and the remote's answer say it: ``true``,
-    typed and sent; ``false``, not typed; ``unsent`` and ``maybe`` as their words."""
-    return None if typed is None else {"yes": True, "no": False}.get(typed, typed)
-
-
 @dataclass(frozen=True)
 class SwitchReceipt:
     """What ``fleet switch`` did: the agent it stopped, the one it started, and how."""
@@ -360,7 +355,16 @@ class SwitchReceipt:
     """Whether the replacement's first line reached its pane: the line telling a resumed
     session to continue, or a fresh one's hand-off prompt. ``no`` leaves it idle at an
     empty prompt, ``unsent`` and ``maybe`` with the line at its prompt or on its way
-    (:data:`Typed`), and ``notes`` say why."""
+    (:data:`Typed`), and ``notes`` say why. On the command line it is ``yes``: handed over
+    with the launch (``prompt_delivery``)."""
+    prompt_delivery: delivery.Delivery | None = None
+    """How the first line reached it: ``argv`` (Claude Code's command line), ``typed``, or
+    ``None`` when there was none."""
+    prompt_acked: bool | None = None
+    """Whether the first line started a turn (its ``UserPromptSubmit``) within the wait the
+    caller gave (``[fleet] prompt_ack_seconds`` from the CLI): ``False`` is still pending,
+    which a listing reads ``attention`` once that wait is past at an idle input box;
+    ``None`` when there was none, or nothing could say."""
 
     @property
     def how(self) -> str:
@@ -381,9 +385,18 @@ class SpawnReceipt:
     join the board. NOT a permission-mode fallback — there is none: the mode is the
     flag, then the role's config, then ``auto``, and nothing here rewrites it."""
     prompt_typed: Typed | None = None
-    """Whether the ``prompt`` asked for reached the pane (:data:`Typed`): ``None`` when none
-    was asked for; otherwise the notes say why it is not ``yes``. One an agent takes as its
-    argument (``capabilities.positional_prompt``) is on its command line: ``yes``."""
+    """Whether the first message reached the agent (:data:`Typed`): ``None`` when there was
+    none; otherwise the notes say why it is not ``yes``. A message on the command line is
+    ``yes``: handed over with the launch (``prompt_delivery``), as its argument for an agent
+    that takes one (``capabilities.positional_prompt``)."""
+    prompt_delivery: delivery.Delivery | None = None
+    """How the first message reached it: ``argv`` (its command line), ``typed``, or
+    ``None`` when there was none."""
+    prompt_acked: bool | None = None
+    """Whether the first message started a turn (its ``UserPromptSubmit``) within the wait the
+    caller gave (``[fleet] prompt_ack_seconds`` from the CLI): ``False`` is still pending,
+    which a listing reads ``attention`` once that wait is past at an idle input box;
+    ``None`` when there was none, or nothing could say."""
     failures: list[str] = field(default_factory=list)
     """The notes about what did NOT happen once the agent was up: the prompt not typed,
     the claims of a hand-over not moved, the previous session not marked ended. Each
@@ -393,121 +406,6 @@ class SpawnReceipt:
     its account (a folder's trust copied, its settings.json linked), or a key the launcher
     pressed so its prompt went in (#32: past the Security notes, a lost Enter pressed
     again). Each is in ``notes`` too."""
-
-
-@dataclass(frozen=True)
-class TellResult:
-    """How a message reached (or did not reach) an agent: ``typed`` as :class:`PaneWrite` says
-    it, ``yes`` once its text and its Enter went through; ``unsent``, its text is at the
-    agent's prompt and its Enter was refused; ``maybe``, tmux did not answer in time with one
-    of them, which may still arrive. One field for them all, as on
-    :class:`PaneWrite`: ``delivered`` and a ``maybe`` beside it could say "delivered, maybe"
-    (review of #259, round 11, 13/13)."""
-
-    typed: Typed
-    how: str
-
-    @property
-    def delivered(self) -> bool:
-        """Whether the message went in and was sent: ``typed`` is ``yes``."""
-        return self.typed == "yes"
-
-
-@dataclass(frozen=True)
-class PaneWrite:
-    """How one write into an agent's pane ended (:func:`pane_write`): ``yes``, tmux typed it;
-    ``no``, tmux refused it and typed nothing; ``unsent``, refused past the writes of its chain
-    that went in (``went``), or past a part of it (``TmuxPartlyTyped``); ``maybe``, tmux did
-    not answer in time (``TmuxTimedOut``), and a wedged server may still type it once it
-    recovers, or the rest of a part it typed.
-
-    Every write that types into an agent on someone's word asks it here: the remote's tell
-    in each of its modes, its Escapes, ``send-keys`` and quick answers, and ``fleet tell``.
-    A ``maybe`` is said by :meth:`late` and audited ``…=maybe``. It is never "nothing was
-    typed", nor advice to type it again: a second paste is submitted beside the first, and
-    a second Enter answers whatever prompt the first one's message brought up. Rounds 7 to
-    9 of #259's review taught that to one call site at a time, each in words of its own,
-    and the sites not reached yet took a timeout for a refusal (round 10, 8/9).
-    """
-
-    typed: Typed
-    what: str
-    error: TmuxError | None = None
-    went: tuple[str, ...] = ()
-    """The writes of a chain (:func:`pane_writes`) that went through before ``what``, which are
-    in the pane whatever came of it: refused past them, it is ``unsent``."""
-
-    def said(self, label: str, *, press: str, again: str = "send it again") -> str:
-        """The sentence for an ``unsent`` or ``maybe`` write into ``label``'s pane: past a write
-        that went in (``went``), what waits at its prompt, or its Enter on its way
-        (:func:`pasted_unsent`, ``press``); otherwise what tmux may still type (:meth:`late`,
-        ``again``). A ``no`` typed nothing, and its caller words it."""
-        if self.went:
-            return f"{label}: {pasted_unsent(self, label, press=press, put='typed').how}"
-        return self.late(label, again=again)
-
-    @property
-    def audited(self) -> str:
-        """The word its audit line ends on: ``failed`` for a ``no``, else ``delivered=…``."""
-        return "failed" if self.typed == "no" else f"delivered={self.typed}"
-
-    def late(self, label: str, *, then: str = "", again: str = "send it again") -> str:
-        """``maybe``'s sentence: ``what`` may still reach ``label``'s pane (and ``then``), or a
-        part of it did, and an ``unsent`` part's, so its live screen is read before anyone does
-        ``again``."""
-        error = self.error
-        read = f"read its live screen before you {again}"
-        if isinstance(error, TmuxPartlyTyped):
-            typed = f"tmux typed {error.typed} of the {error.size} bytes of {self.what} into"
-            if isinstance(error.cause, TmuxTimedOut):
-                return (
-                    f"{typed} {label}'s pane, then did not answer in time ({error.cause}): "
-                    f"more of it may still arrive{then} — {read}"
-                )
-            return f"{typed} {label}'s pane, then refused the rest ({error.cause}){then} — {read}"
-        return (
-            f"tmux did not answer in time with {self.what} for {label}'s pane ({error}): "
-            f"it may still arrive{then} — {read}"
-        )
-
-
-def pane_write(what: str, write: Callable[[], object]) -> PaneWrite:
-    """``write()``, which types ``what`` into an agent's pane, and how it ended
-    (:class:`PaneWrite`). ``TmuxError`` is every way a tmux call fails (``core.tmux._tmux``),
-    ``TmuxTimedOut`` the one way that may still happen, and ``TmuxPartlyTyped`` a write of
-    several calls that failed past its first: ``core.tmux`` says which of its calls timed out
-    (review of #259, round 11, 7/13). Past a refusal no more of it can arrive: ``unsent``, not
-    ``maybe``, which audited it ``delivered=maybe`` (round 12, 7/9)."""
-    try:
-        write()
-    except TmuxPartlyTyped as exc:
-        return PaneWrite("maybe" if isinstance(exc.cause, TmuxTimedOut) else "unsent", what, exc)
-    except TmuxTimedOut as exc:
-        return PaneWrite("maybe", what, exc)
-    except TmuxError as exc:
-        return PaneWrite("no", what, exc)
-    return PaneWrite("yes", what)
-
-
-def pane_writes(*writes: tuple[str, Callable[[], object]] | None) -> PaneWrite:
-    """``writes`` in turn, each ``(what, write)`` as :func:`pane_write` takes it (``None``: none
-    here), up to the first that did not go through: how that one ended, its ``what`` saying
-    which it was and ``went`` the ones before it, in the pane; the last one's when all did.
-    What comes after a write tmux refused or did not answer would land beside it, or ahead of
-    what may still arrive. ``send-keys`` and a quick answer chained it by hand, the first
-    beside a stand-in "nothing" write (review of #259, round 11, 12/13). And each worked out
-    by hand what was in the pane before the write that failed, a quick answer not at all
-    (round 12, 1/9 and 8/9): :meth:`PaneWrite.said` says it, :attr:`PaneWrite.audited`
-    audits it."""
-    wrote = PaneWrite("yes", "nothing")
-    went: tuple[str, ...] = ()
-    for what, write in filter(None, writes):
-        wrote = pane_write(what, write)
-        if wrote.typed != "yes":
-            typed: Typed = "unsent" if went and wrote.typed == "no" else wrote.typed
-            return replace(wrote, typed=typed, went=went)
-        went = (*went, what)
-    return wrote
 
 
 def type_then_enter(
@@ -520,43 +418,22 @@ def type_then_enter(
     done: str = "typed into its pane at its prompt",
     what: str = "the text",
 ) -> TellResult | PaneWrite:
-    """Paste ``text`` (``what``) at the prompt in ``label``'s pane, then press Enter: how every
-    message is typed into an agent, by :func:`tell`, a spawn's prompt (:func:`_type_prompt`)
-    and the remote's paste (``remote_actions.action_paste``).
-
-    A paste that did not go through is answered as its :class:`PaneWrite`, its caller's to
-    say: a tell files the text as a note, the remote refuses with a 409, a spawn notes it.
-    Past the paste the text is at the prompt, and the answer is how the Enter ended:
-    ``done``, or :func:`pasted_unsent` (``press``). The three wrote paste, Enter and
-    :func:`pasted_unsent` out each in words of its own (review of #259, round 11, 12/13).
-    """
-
-    def enter() -> None:
-        # A key of its own, :data:`_KEY_GAP` after the paste: Codex takes keys that arrive
-        # in one burst for a paste and keeps the Enter in it as text (``PlacedPane.type_line``).
-        _sleep(_KEY_GAP)
-        server.send_keys(pane_id, "Enter")
-
-    wrote = pane_writes((what, lambda: server.paste(pane_id, text)), ("Enter", enter))
-    if wrote.typed == "yes":
-        return TellResult("yes", done)
-    return pasted_unsent(wrote, label, press=press) if wrote.went else wrote
-
-
-def pasted_unsent(entered: PaneWrite, label: str, *, press: str, put: str = "pasted") -> TellResult:
-    """A message ``put`` at ``label``'s prompt (pasted, or typed as ``send-keys`` types it)
-    whose Enter did not go through (``entered``): the text is there either way. Refused, it
-    waits there unsent, and ``press`` says where an Enter sends it. Not answered in time, the
-    Enter may still send it, so nothing invites a second one: that would answer whatever
-    prompt the message brings up, "1. Yes" to a permission nobody saw (review of #259, round
-    10, 3/9)."""
-    if entered.typed == "maybe":
-        how = entered.late(label, then=", and send it", again="press Enter")
-        return TellResult("maybe", f"{put} it at its prompt, but {how}")
-    return TellResult(
-        "unsent",
-        f"{put} it at its prompt, but tmux could not press Enter ({entered.error}) — {press} "
-        "to send it",
+    """:func:`delivery.type_then_enter`, how a message is typed into an agent outside the one
+    door's acknowledged way (the remote's paste, ``remote_actions.action_paste``, which keeps
+    what the human typed, ``\r`` included): its Enter :data:`_KEY_GAP` after the paste, a key
+    of its own, as Codex takes keys that arrive in one burst for a paste and keeps the Enter
+    in it as text (:meth:`PlacedPane.type_line`). The fleet's own text goes through
+    :meth:`PlacedPane.type_then_enter`, without its control characters."""
+    return delivery.type_then_enter(
+        server,
+        pane_id,
+        text,
+        label,
+        press=press,
+        done=done,
+        what=what,
+        gap=_KEY_GAP,
+        sleep=_sleep,
     )
 
 
@@ -1052,6 +929,41 @@ class PlacedPane:
         :data:`_KEY_GAP` after the paste (:meth:`type_line`), each saying how it ended."""
         return type_then_enter(
             self.server(), self.pane_id, _typeable(text), label, press=press, done=done, what=what
+        )
+
+    def deliver_typed(
+        self,
+        text: str,
+        label: str,
+        *,
+        press: str,
+        acked: Callable[[], bool] | None,
+        reads_box: bool,
+        done: str = "typed into its pane at its prompt",
+        what: str = "the text",
+        guard: float | None = None,
+        re_press: tuple[float, ...] = delivery.RE_PRESS,
+        last_wait: float = delivery.LAST_WAIT,
+    ) -> delivery.Delivered:
+        """``delivery.deliver_typed`` into this pane, the one door's acknowledged way: ``text``
+        without its control characters (:func:`_typeable`), its Enter :data:`_KEY_GAP` after the
+        text is in, a key of its own (:meth:`type_line`)."""
+        return delivery.deliver_typed(
+            self.server(),
+            self.pane_id,
+            _typeable(text),
+            label,
+            press=press,
+            acked=acked,
+            reads_box=reads_box,
+            sleep=_sleep,
+            monotonic=_monotonic,
+            done=done,
+            what=what,
+            guard=guard,
+            re_press=re_press,
+            last_wait=last_wait,
+            gap=_KEY_GAP,
         )
 
     def type_line(self, text: str, *, command: bool = False) -> None:
@@ -3280,8 +3192,17 @@ def _derive(
     now: datetime,
     screen: Callable[[], Sequence[str] | None] | None = None,
     held: bool = False,
+    idle_box: Callable[[], bool] | None = None,
+    quiet: timedelta = timedelta(seconds=30),
 ) -> tuple[FleetAgentState, str | None]:
     """State from the board first, tmux second (§5.1) — with two honest exceptions.
+
+    And one check (#123): a fresh board ``working`` is trusted while the pane has
+    printed within ``quiet`` (``[fleet] busy_quiet_seconds``). Past that, ``idle_box``
+    (``services.pane_idle.box_idle_now``, one capture) is asked whether Claude Code sits
+    idle at its prompt — a turn ended with Esc fires no Stop — and an idle box reads
+    ``waiting``, "idle (the board said working)". Only rows in that state are captured;
+    without ``idle_box`` the row is trusted as before.
 
     A dead or vanished pane is a hard fact no board row can contradict: a
     process that has exited cannot be waiting, however recently its hooks
@@ -3362,6 +3283,15 @@ def _derive(
             if answered:
                 return "working", None
             return "attention", None
+        elif fresh and board_state == "working":
+            quiet_pane = (
+                observed
+                and pane is not None
+                and (pane.last_output is None or now - pane.last_output > quiet)
+            )
+            if quiet_pane and idle_box is not None and idle_box():
+                return "waiting", IDLE_SAID_WORKING
+            return "working", None
         elif fresh and board_state is not None:
             return board_state, None
     if not observed or pane is None:
@@ -3373,6 +3303,10 @@ def _derive(
         return "unknown", unasked if hooks is None else f"{unasked}; {hooks}"
     busy = pane.last_output is not None and now - pane.last_output <= ACTIVITY_WINDOW
     return ("working" if busy else "waiting"), hooks
+
+
+IDLE_SAID_WORKING = "idle (the board said working)"
+"""``_derive``'s detail for a ``working`` row whose quiet pane shows an idle prompt (#123)."""
 
 
 def _redraws_while_asking(agent: FleetAgent) -> bool:
@@ -3510,7 +3444,7 @@ def _start_dialog(agent: FleetAgent, pane: PlacedPane) -> str | None:
         if claude_sharing.shows_security_notes(lines):
             # Its only key is Enter, which a spawn presses (#32, L2): still there, it is one
             # nobody typed into — a window the human opened first, or a refused key.
-            return f"{SECURITY_NOTES} — press Enter in its window"
+            return SECURITY_NOTES_DETAIL
         return None
     words = read(lines)
     if words is None:
@@ -3519,6 +3453,120 @@ def _start_dialog(agent: FleetAgent, pane: PlacedPane) -> str | None:
     if prompt is not None and (asked := prompt(lines)) is not None and asked.shape == "trust":
         return trust_prompt_detail(agent.cwd)
     return f"{AT_A_DIALOG}: {words}"
+
+
+def _with_first_prompts(
+    statuses: list[FleetAgentStatus],
+    project: ProjectInfo,
+    config: FleetSettings,
+    placements: Sequence[Placement],
+) -> list[FleetAgentStatus]:
+    """``statuses``, every agent whose first message never started a turn read ``attention``
+    (P0-W1a, #122), with the detail that says what to do.
+
+    A row whose message is still ``pending`` past ``[fleet] prompt_ack_seconds`` is looked
+    at once: at an idle prompt, as the pane's own agent reads it (``captain.screen.ready``:
+    Claude Code's idle input box, ``claude_screen.box_idle``), or at Claude Code's first-run
+    Security notes (P0-FU1), nothing is going to take it, so it moves to ``unsent`` and its
+    board says so, once (:func:`_first_prompt_unsent`). A command-line first message waits
+    behind the notes, and its SessionStart has fired, so :func:`_with_trust_prompts`, which
+    asks only a row no hook has spoken for, never looked: it read ``waiting``, silent.
+
+    A row already ``unsent`` reads ``attention`` until a prompt takes the message
+    (``store.mark_prompted``, a human's Enter or a ``tell``), its detail the way on: at the
+    notes, their one key (a ``tell`` typed there is lost), else a ``tell`` or a restart
+    (:func:`unsent_detail`). Which of the two is read off its screen, one capture of a row
+    already stuck for the human, so a human's Enter past the notes turns it to the second.
+    Only a row whose session the board knows is asked: an agent with no hooks never
+    acknowledges anything, and its message would read not taken however its turn went. A
+    row the listing already reads ``attention`` (the trust question) or not live keeps what
+    it says. The screen read is the pane each row's launch record places (``placements``,
+    :func:`resolve_place`); a row no record places is not asked.
+    """
+    panes = {placement.row.id: placement.pane for placement in _placed_only(placements)}
+    now = _now()
+    shown: list[FleetAgentStatus] = []
+    for status in statuses:
+        agent = status.agent
+        live = (
+            agent.ended_at is None
+            and not status.held
+            and status.session is not None
+            and status.state in ("waiting", "working")
+        )
+        pane = panes.get(agent.id)
+        at_notes = False
+        if live and pane is not None and delivery.overdue(agent, now, config.prompt_ack_seconds):
+            agent, at_notes = _unsent_if_idle(agent, status.session, config, pane)
+        elif live and pane is not None and agent.first_prompt == "unsent":
+            at_notes = claude_sharing.shows_security_notes(_first_prompt_screen(pane))
+        if live and agent.first_prompt == "unsent":
+            status = status.model_copy(
+                update={
+                    "agent": agent,
+                    "state": "attention",
+                    "detail": SECURITY_NOTES_DETAIL
+                    if at_notes
+                    else unsent_detail(project, agent.label),
+                }
+            )
+        shown.append(status)
+    return shown
+
+
+def unsent_detail(project: ProjectInfo, label: str) -> str:
+    """What a listing says of an agent whose first message never started a turn: the two ways
+    on, each naming ``project`` (``project_service.fleet_command``)."""
+    tell = project_service.fleet_command("tell", project, label)
+    restart = project_service.fleet_command("restart", project, label)
+    return f"first prompt not taken — `{tell} …` or `{restart}`"
+
+
+def _first_prompt_screen(pane: PlacedPane) -> list[str]:
+    """``pane`` as tmux shows it now, escapes kept; nothing for a screen tmux will not show."""
+    try:
+        return pane.captured()
+    except TmuxError:
+        return []
+
+
+def _unsent_if_idle(
+    agent: FleetAgent,
+    session: TeamSession | None,
+    config: FleetSettings,
+    pane: PlacedPane,
+) -> tuple[FleetAgent, bool]:
+    """``agent`` as it stands once its overdue first message was looked at, and whether its
+    pane shows Claude Code's first-run Security notes: moved to ``unsent`` when the pane
+    shows its agent idle at its prompt (``captain.screen.ready``) or those notes (P0-FU1),
+    and read again when another reader moved it first (or a prompt took it meanwhile). A
+    screen that cannot be read says nothing, and the row stays ``pending``.
+
+    A prompt the session has had since the message was given (``prompted_at``) took it:
+    its ``UserPromptSubmit`` stamped the session and could not move the row (a store locked
+    for that write), and it is taken here instead of read as not taken (review of #330,
+    round 1). A ``Stop`` takes it too (``team.hook_stop``); a turn whose hooks both failed
+    leaves nothing to tell it by."""
+    prompted = session.prompted_at if session is not None else None
+    given = agent.first_prompt_at
+    if session is not None and prompted is not None and given is not None and prompted >= given:
+        with contextlib.suppress(Exception), store_session() as store:
+            store.take_first_prompt(prompted, session_id=session.id, agent_id=agent.id)
+            return store.get_fleet_agent(agent.id) or agent, False
+        return agent, False
+    lines = _first_prompt_screen(pane)
+    at_notes = claude_sharing.shows_security_notes(lines)
+    if at_notes:
+        why = "held at Claude Code's Security notes"
+    elif pane_screen.ready(agent, lines):
+        why = f"no turn started on it within {config.prompt_ack_seconds:.0f} s"
+    else:
+        return agent, False
+    if _first_prompt_unsent(agent, why):
+        return agent.model_copy(update={"first_prompt": "unsent"}), at_notes
+    with contextlib.suppress(Exception), store_session() as store:
+        return store.get_fleet_agent(agent.id) or agent, at_notes
+    return agent, at_notes
 
 
 def _maybe_at_trust_prompt(status: FleetAgentStatus, session: TeamSession | None = None) -> bool:
@@ -3597,6 +3645,10 @@ def _status(
         now=now,
         screen=(lambda: _screen_of(placement.pane)) if pane is not None else None,
         held=held,
+        idle_box=lambda: pane_idle.box_idle_now(
+            placement.pane.server(), placement.pane.pane_id, placement.agent
+        ),
+        quiet=timedelta(seconds=placement.pane.config.busy_quiet_seconds),
     )
     return FleetAgentStatus(
         agent=placement.agent,
@@ -4034,9 +4086,26 @@ def spawn(
     start_point: str | None = None,
     fork: bool = False,
     hub: str | None = None,
+    kickoff: bool = True,
+    ack_wait: float = 0.0,
     replaces: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
+
+    THE FIRST MESSAGE (P0-W1a, #122) is ``prompt``, and with ``task_id`` and ``kickoff`` a
+    kickoff before it that names the task as the agent's ASSIGNED TO YOU block does
+    (``team.kickoff_prompt``): ``fleet spawn coder --task 12`` with no ``--prompt`` used to
+    type nothing, and the coder waited at an empty prompt. A Claude Code agent is given it
+    on its command line (``services.delivery``): written to a file only this user reads,
+    named to ``launch`` as ``--first-prompt-file``, read and deleted there, and passed to
+    Claude Code after ``--``. Nothing is typed, so no Enter can be dropped, and the row's
+    recorded launch holds the file's path at most, never the text, so a restart replays no
+    old message. Any other binary, and every agent under ``[fleet] first_prompt =
+    "type"``, has it typed (:func:`_type_prompt`). The row records it ``pending`` until the
+    agent's ``UserPromptSubmit`` takes it (``store.mark_prompted``); ``ack_wait`` is how long
+    this call waits for that (the CLI gives ``[fleet] prompt_ack_seconds``), said on the
+    receipt as ``prompt_acked``. A replacement (:func:`_respawn`) and a fork pass their own
+    first line and no kickoff.
 
     ``spec`` REPLAYS a recorded launch (#144): the binary, permission mode,
     worktree choice and arguments come from what the agent was started with,
@@ -4382,6 +4451,7 @@ def spawn(
     with store_session() as store:
         task = _task_for(store, board, task_id)
         resolved_task_id = task.id if task is not None else None
+        statuses = store.task_statuses(board) if task is not None and kickoff else {}
         if fork:
             # Held by nothing, where a spawn's label is kept apart from the live agents
             # only: a fork is not the next agent under a label (review of #240, finding 3).
@@ -4441,9 +4511,22 @@ def spawn(
     # agent's account refused here, naming both.
     choice = claude_accounts_service.AccountChoice(account=None, source=None)
     if selected.adapter.accounts is not None:
+        # The model family the agent will run, for the pick's per-family weeks (#277): a
+        # family is AISquare's model ladder's (``capabilities.model_ladders``), so an agent
+        # that keeps its own models runs none.
+        family = (
+            harness.launch_family(role, [*model_args, *arguments.argv])
+            if selected.adapter.capabilities.model_ladders
+            else None
+        )
         try:
             choice = claude_accounts_service.choose(
-                account, role=role, project=project, agent=selected.adapter.id, pick=selected.pick
+                account,
+                role=role,
+                project=project,
+                agent=selected.adapter.id,
+                pick=selected.pick,
+                family=family,
             )
         except claude_accounts_service.NoSuchAccount as exc:
             raise FleetError(str(exc)) from exc
@@ -4565,6 +4648,28 @@ def spawn(
     if chosen_persona is not None:
         # A flag, not an env var: the window's environment is the tmux SERVER's.
         flags += ["--persona", chosen_persona]
+    first = _first_message(
+        prompt,
+        task if kickoff else None,
+        role=role,
+        label=picked,
+        session_id=identity.session_id,
+        statuses=statuses,
+    )
+    way = (
+        delivery.first_prompt_way(
+            positional=selected.adapter.capabilities.positional_prompt,
+            setting=config.first_prompt,
+        )
+        if first is not None
+        else None
+    )
+    prompt_file: Path | None = None
+    if first is not None and way == "argv":
+        # Written before the window opens, so its launch finds it; named to the launch by
+        # path, so the command tmux carries and the row records never holds the text.
+        prompt_file = delivery.write_prompt_file(agent_id, first)
+        flags += [delivery.FIRST_PROMPT_FLAG, str(prompt_file)]
     env = {
         orchestrator.FLEET_AGENT_ENV_VAR: agent_id,
         "AISQUARE_LAUNCH_ID": "",
@@ -4613,13 +4718,6 @@ def spawn(
     command = selfcli.isolated_argv_for(
         ["launch", role, *flags, "--", *native, *model_args, *arguments.argv]
     )
-    # A spawn for a task with no prompt of its own is told to read it (#32, L1; the owner's
-    # D2): worked out before the window's command, which carries the prompt of an agent
-    # that takes it as its argument.
-    if prompt is None and task is not None and resume is None and takes_over is None:
-        prompt = task_prompt(task)
-    if prompt and selected.adapter.capabilities.positional_prompt:
-        command += ["--", prompt]
     # The hub as THIS process resolves it, blank for none: the window's
     # `launch` joins the project the spawner — and the UI's Explainability tab
     # beside it — resolves, and takes that project's key, not the one the tmux
@@ -4822,6 +4920,8 @@ def spawn(
                 )
             )
         except TmuxError as exc:
+            if prompt_file is not None:
+                delivery.discard_prompt_file(prompt_file)
             raise FleetError(f"tmux could not start the window: {exc}") from exc
         tmux_session = window.session
         if window.resize_refused is not None:
@@ -4927,6 +5027,8 @@ def spawn(
             board=board,
             created_at=created_at,
             persona=chosen_persona,
+            first_prompt="pending" if first is not None else None,
+            first_prompt_at=_now() if first is not None else None,
         )
         stored = _record(
             fleet_agent,
@@ -4967,31 +5069,40 @@ def spawn(
     typing: list[str] = []
     # The keys pressed so the prompt went in (#32): done, not a warning.
     done: list[str] = []
-    # A prompt an agent takes on its command line went into the window's command: it
-    # reaches the agent as its argument, and the restart or switch that passed it reads
-    # that as delivered.
-    typed: Typed | None = (
-        None
-        if not prompt
-        else "yes"
-        if selected.adapter.capabilities.positional_prompt
-        else _type_prompt(
+    typed: Typed | None = None
+    acked: bool | None = None
+    if first is not None and way == "argv":
+        typed = "yes"  # handed over with the launch: nothing to type, no Enter to lose
+    elif first is not None:
+        typed, acked = _type_prompt(
             started,
-            prompt,
+            first,
             typing,
             project=project,
             session_id=identity.session_id or stored.session_id,
             launched=launched,
             folder=cwd,
+            agent_id=stored.id,
+            guard=config.draft_quiet_seconds,
             done=done,
         )
-    )
+        if typed == "unsent":
+            _first_prompt_unsent(stored, "its first message is still in its input box")
+    if first is not None and typed not in ("no", "maybe") and acked is None:
+        acked = delivery.await_ack(stored.id, ack_wait, sleep=_sleep, monotonic=_monotonic)
+    if acked is False and typed == "yes" and way == "argv" and ack_wait > 0:
+        typing.append(
+            "no turn has started on its first message yet — `fleet ls` says `attention` if it "
+            f"is still waiting in {config.prompt_ack_seconds:.0f} s"
+        )
     return SpawnReceipt(
         agent=stored,
         asked_label=label,
         tmux_session=tmux_session,
         notes=[*notes, *moved, *done, *typing],
         prompt_typed=typed,
+        prompt_delivery=("argv" if way == "argv" else "typed") if first is not None else None,
+        prompt_acked=acked,
         failures=[*moved, *(typing if typed not in (None, "yes") else [])],
         shared=[*made, *done],
     )
@@ -5304,7 +5415,13 @@ def _without_session_choice(
     planner reads those whatever the binary is called and joins the row to that session, so
     a restart resumes it with its own ``--resume`` — the ``claude2`` parallel install
     (``AISQUARE_BIN_CODER=claude2``) spawned on a session its caller chose.
+
+    ``launch``'s ``--first-prompt-file`` goes for every binary: a first message is per
+    launch, and the spec replayed it to a restart's launch, which would find its file read
+    and gone (P0-W1a). The spawn passes it among ``launch``'s own flags, never in ``args``;
+    this keeps a caller's from being recorded.
     """
+    args = _without_first_prompt_file(args)
     kind = recorded_adapter(family) if family else adapter_for_binary(binary)
     if kind is not None and kind.capabilities.assigns_session_id:
         return explainability_service.without_session_choice(args, kind.capabilities.session_flags)
@@ -5315,6 +5432,21 @@ def _without_session_choice(
         flags = explainability_service.session_flags_of(binary)
         return explainability_service.without_session_choice(args, flags)
     return list(args)
+
+
+def _without_first_prompt_file(args: Sequence[str]) -> list[str]:
+    """``args`` less ``--first-prompt-file <path>`` (or ``=<path>``), wherever it is."""
+    flag = delivery.FIRST_PROMPT_FLAG
+    kept: list[str] = []
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg == flag:
+            skip = True
+        elif not arg.startswith(f"{flag}="):
+            kept.append(arg)
+    return kept
 
 
 def _supersede(
@@ -5987,11 +6119,16 @@ def _type_prompt(
     session_id: str | None,
     launched: datetime,
     folder: Path | None = None,
+    agent_id: str | None = None,
+    guard: float | None = None,
     done: list[str] | None = None,
-) -> Typed:
-    """Wait (bounded) for the agent to come up, then paste the prompt and press Enter.
+) -> tuple[Typed, bool | None]:
+    """Wait (bounded) for the agent to come up, then type the prompt: the typed way of
+    :mod:`services.delivery`, for an agent whose command line does not take it
+    (``capabilities.positional_prompt``) or under ``[fleet] first_prompt = "type"``.
 
-    Returns whether it was typed (:data:`Typed`); when it was not, a note says why.
+    Returns whether it was typed (:data:`Typed`), and whether a turn started on it
+    (``Delivered.acked``); when it was not typed, or no turn started, a note says why.
 
     An agent whose ``SessionStart`` fires at rest at its prompt
     (``capabilities.starts_at_its_prompt``: Claude Code) is up when that start has
@@ -6023,14 +6160,16 @@ def _type_prompt(
     reads what was typed; no look can close that.
 
     An agent whose screen reads its own box ready (:func:`_input_box_of`: Claude Code's
-    input box) is typed into once that box is ready (:func:`_at_input_box`), not once its
-    process runs, and read back after (:func:`_submitted`) (#32, L3). Until its
-    prompt is mounted, Claude Code reads the keyboard with an early-input buffer that keeps
-    the text and turns the Enter into a newline, then trims it: a prompt typed then sat in
-    the input box, unsent. The same wait presses Enter past the first-run Security notes
-    screen, which ate the prompt (#32, L2; the owner's D1 at board seq 671). A key pressed
-    so is said in ``done``, not ``notes``: it is what made the prompt go in, not why it did
-    not.
+    input box) is typed into once that box is ready with no dialog over it
+    (:func:`_at_input_box`), not once its process runs (P0-W0, #32 L3: until its prompt is
+    mounted, Claude Code reads the keyboard with an early-input buffer that keeps the text
+    and turns the Enter into a newline). The same wait presses Enter past the first-run
+    Security notes screen, which ate the prompt (#32, L2; the owner's D1 at board seq 671).
+    Then :func:`_typed_prompt` checks the text is in the box, presses Enter, waits for
+    ``agent_id``'s ``UserPromptSubmit`` (``store.mark_prompted``), and presses again only
+    while the box provably still holds it (``delivery.deliver_typed``), never over a human's
+    draft (``guard``, ``[fleet] draft_quiet_seconds``). A key pressed so is said in
+    ``done``, not ``notes``: it is what made the prompt go in, not why it did not.
 
     Never raises: it runs after the row is recorded, and ``restart`` and
     ``switch`` read a raise out of ``spawn`` as "no replacement started" — they
@@ -6057,7 +6196,7 @@ def _type_prompt(
             f"the prompt was NOT typed: {placement.why}. Send it once the agent is up: "
             f"{_send_it_later(project, placement.row.label)}"
         )
-        return "no"
+        return "no", None
     agent, pane = placement.agent, placement.pane
     to = (project, agent.label)
     adapter = recorded_adapter(agent.agent)
@@ -6069,7 +6208,18 @@ def _type_prompt(
         and session_id is not None
     ):
         return _type_at_its_start(
-            pane, agent, adapter, prompt, notes, project, session_id, launched, folder, done
+            pane,
+            agent,
+            adapter,
+            prompt,
+            notes,
+            project,
+            session_id,
+            launched,
+            folder,
+            done,
+            agent_id=agent_id,
+            guard=guard,
         )
     deadline = _monotonic() + PROMPT_TIMEOUT
     ready = False
@@ -6081,10 +6231,10 @@ def _type_prompt(
                 f"tmux could not be asked whether the agent is up ({exc}) — the prompt was "
                 f"NOT typed. Send it once the agent is up: {_send_it_later(*to)}"
             )
-            return "no"
+            return "no", None
         if facts is None or facts.dead:
             notes.append("the agent exited before the prompt could be typed")
-            return "no"
+            return "no", None
         if _agent_running(facts.current_command) or facts.history_size > 0:
             ready = True
             break
@@ -6092,7 +6242,9 @@ def _type_prompt(
             break
         _sleep(_POLL_INTERVAL)
     if ready:
-        _sleep(_PROMPT_SETTLE)
+        if box is None:
+            # An agent whose box is read waits for that box below, not a fixed settle (P0-W0).
+            _sleep(_PROMPT_SETTLE)
         if _at_a_start_dialog(pane, adapter):
             # Up, and as quiet as at its prompt: the dialog's answer is the human's.
             while _at_a_start_dialog(pane, adapter):
@@ -6105,13 +6257,15 @@ def _type_prompt(
                             f"(`{project_service.fleet_command('attach', project)}`), then "
                             f"send the prompt: `{_tell(*to)} …`"
                         )
-                    return "no"
+                    return "no", None
                 _sleep(_POLL_INTERVAL)
             _sleep(_PROMPT_SETTLE)
         if not _past_trust_prompt(pane, notes, folder=folder, to=to):
-            return "no"
+            return "no", None
+        # Past the trust question and the Security notes: each is drawn where the box would
+        # be, and the box comes only once it is answered.
         if box is not None and not _at_input_box(pane, box, notes, done, folder=folder, to=to):
-            return "no"
+            return "no", None
     elif "\n" in prompt:
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s and the prompt has "
@@ -6119,23 +6273,25 @@ def _type_prompt(
             "asked for bracketed paste, and the launcher has not, so each line would arrive "
             f"as its own message. Send it once the agent is up: {_send_it_later(*to)}"
         )
-        return "no"
+        return "no", None
     else:
         if not _past_trust_prompt(pane, notes, folder=folder, to=to, wait=False):
-            return "no"
+            return "no", None
         if box is not None and not _at_input_box(
             pane, box, notes, done, folder=folder, to=to, wait=False
         ):
-            return "no"
+            return "no", None
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
         )
-    return _typed_prompt(pane, prompt, notes, done, to=to if box is not None else None)
+    return _typed_prompt(
+        pane, prompt, notes, done, to=to, reads_box=box is not None, agent_id=agent_id, guard=guard
+    )
 
 
 def _input_box_of(adapter: AgentAdapter | None) -> AgentScreen | None:
-    """The screen a spawn's prompt waits on and reads the prompt back off (:func:`_at_input_box`,
-    :func:`_submitted`; #32), or ``None``: an agent whose screen reads its own box ready
+    """The screen a spawn's prompt waits on and is read back off (:func:`_at_input_box`,
+    ``delivery.deliver_typed``; #32), or ``None``: an agent whose screen reads its own box ready
     (``AgentScreen.ready_on_screen``), Claude Code's input box. An agent that declares none
     (Codex) is typed into as before, once its process runs."""
     if adapter is None:
@@ -6150,25 +6306,106 @@ def _typed_prompt(
     notes: list[str],
     done: list[str] | None = None,
     *,
-    to: tuple[ProjectInfo, str] | None = None,
-) -> Typed:
-    """Type ``prompt`` into ``pane`` (:meth:`PlacedPane.type_then_enter`), and how it ended,
-    a note saying so when it is not ``yes``: the last step of :func:`_type_prompt` and
-    :func:`_type_at_its_start`. With ``to`` (an agent whose input box is read,
-    :func:`_input_box_of`), a prompt that went in is read back (:func:`_submitted`)."""
-    told = pane.type_then_enter(
-        prompt, "the agent", press="press Enter in its pane", what="the prompt"
-    )
+    to: tuple[ProjectInfo, str],
+    reads_box: bool = False,
+    agent_id: str | None = None,
+    guard: float | None = None,
+) -> tuple[Typed, bool | None]:
+    """Type ``prompt`` into ``pane`` through the one door (:meth:`PlacedPane.deliver_typed`),
+    and how it ended, and whether a turn started on it, a note saying so when it is not
+    ``yes``: the last step of :func:`_type_prompt` and :func:`_type_at_its_start`.
+    ``reads_box``: an agent whose input box is read (:func:`_input_box_of`), whose text is
+    checked in the box and whose Enter is pressed again while the box provably holds it."""
+    # One store connection for the whole acknowledgement wait (`delivery.acked_reader`).
+    with store_session() as store:
+        delivered = pane.deliver_typed(
+            prompt,
+            "the agent",
+            press="press Enter in its pane",
+            acked=delivery.acked_reader(store, agent_id) if agent_id and reads_box else None,
+            reads_box=reads_box,
+            what="the prompt",
+            guard=guard,
+        )
+    if delivered.refused is not None and delivered.in_box:
+        notes.append(
+            f"the prompt was NOT sent: {delivered.refused}. Read its input box before you send it "
+            f"again: {_send_it_later(*to)}"
+        )
+        return "no", None
+    if delivered.refused is not None:
+        notes.append(
+            f"the prompt was NOT typed: {delivered.refused}, which nothing types over. Send it "
+            f"once the box is clear: {_send_it_later(*to)}"
+        )
+        return "no", None
+    told = delivered.told
     if isinstance(told, PaneWrite):
         if told.typed == "maybe":
             notes.append(told.late("the agent", then=" at its prompt, unsent"))
-            return "maybe"
+            return "maybe", None
         notes.append(f"could not type the prompt: {told.error}")
-        return "no"
-    if told.typed != "yes":
+        return "no", None
+    if told.typed != "yes" or delivered.acked is False:
         notes.append(f"the prompt: {told.how}")
-        return told.typed
-    return _submitted(pane, prompt, notes, done, to=to) if to is not None else "yes"
+    if told.typed == "yes" and delivered.presses > 1 and done is not None:
+        done.append(
+            "the prompt sat in Claude Code's input box after its Enter — pressed Enter again"
+        )
+    return told.typed, delivered.acked
+
+
+def _first_message(
+    prompt: str | None,
+    task: TeamTask | None,
+    *,
+    role: str,
+    label: str,
+    session_id: str | None,
+    statuses: Mapping[str, str],
+) -> str | None:
+    """The first message a spawn gives its agent: the kickoff for ``task``, the task's own
+    ASSIGNED TO YOU lines (``team.kickoff_prompt``), then ``prompt``, a blank line apart.
+    ``None`` when there is neither."""
+    opening = (
+        _team().kickoff_prompt(
+            task, role=role, label=label, session_id=session_id, statuses=statuses
+        )
+        if task is not None
+        else None
+    )
+    parts = [part for part in (opening, prompt) if part]
+    return "\n\n".join(parts) if parts else None
+
+
+def _first_prompt_unsent(agent: FleetAgent, why: str) -> bool:
+    """Move ``agent``'s first message to ``unsent``, and say so on its board once: the
+    ``prompt_unsent`` event, which wakes its manager (``team.MANAGER_WAKE_KINDS``). The
+    store's compare-and-set decides who says it (``store.mark_first_prompt_unsent``): of a
+    spawn and two listings that all found it not taken, one writes the event. A manager's
+    own is not nudged: the nudge would type into the input box its message is stuck in.
+    Never raises: a listing calls it, and a board that cannot be written costs the line."""
+    try:
+        with store_session() as store:
+            if not store.mark_first_prompt_unsent(agent.id, _now()):
+                return False
+            _team()._emit(
+                store,
+                _board_of_row(agent),
+                "prompt_unsent",
+                f"{agent.label}: first prompt not taken — {why}",
+                session_id=agent.session_id,
+            )
+    except Exception:
+        return False
+    if agent.role != MANAGER_LABEL:
+        with contextlib.suppress(Exception):
+            nudge_manager(
+                agent.project_id,
+                reason=f"{agent.label} first prompt not taken",
+                board=_board_of_row(agent),
+            )
+    return True
 
 
 def _at_input_box(
@@ -6181,7 +6418,8 @@ def _at_input_box(
     to: tuple[ProjectInfo, str],
     wait: bool = True,
 ) -> bool:
-    """Whether Claude Code is at its input box, ready for the prompt: waited for (bounded).
+    """Whether Claude Code is at its input box, with no dialog over it, ready for the prompt:
+    waited for (bounded). The one wait for the box a typed prompt is given (P0-W0, #32 L3).
 
     On the way, Claude Code's first-run Security notes screen ("Press Enter to continue")
     is pressed past, up to :data:`_SECURITY_PRESSES` times: typed there, the prompt was
@@ -6226,10 +6464,11 @@ def _at_input_box(
         if pressed and not notes_up:
             (notes if done is None else done).append(f"pressed Enter past {SECURITY_NOTES}")
             pressed, pressed_on = 0, None  # said once: the notes are not drawn again
-        if not notes_up and screen.ready(lines):
+        modal = None if notes_up else screen.modal(lines)
+        if not notes_up and modal is None and screen.ready(lines):
             return True
         if _monotonic() >= deadline:
-            dialog = SECURITY_NOTES if notes_up else screen.modal(lines)
+            dialog = SECURITY_NOTES if notes_up else modal
             if dialog is not None:
                 notes.append(
                     f"the agent is at {dialog} — the prompt was NOT typed (its Enter would "
@@ -6247,78 +6486,10 @@ def _at_input_box(
         _sleep(_POLL_INTERVAL)
 
 
-def _submitted(
-    pane: PlacedPane,
-    prompt: str,
-    notes: list[str],
-    done: list[str] | None = None,
-    *,
-    to: tuple[ProjectInfo, str],
-) -> Typed:
-    """How a prompt typed into Claude Code with its Enter ended, read back from the pane.
-
-    ``yes`` once it has left the input box (:func:`_in_input_box`). Still there after
-    :data:`_SUBMIT_GRACE`, its Enter was lost — read by an early-input buffer as a
-    newline (:func:`_type_prompt`) — and Enter is pressed once more: the box holds the
-    prompt, so that Enter sends it and answers nothing else. Still there at
-    :data:`_SUBMIT_TIMEOUT`, ``unsent``, and the note says where to press Enter. A screen
-    tmux will not show is ``yes``, as before this read (#32, L3).
-    """
-    start = _monotonic()
-    pressed = False
-    while True:
-        _sleep(_POLL_INTERVAL)
-        try:
-            lines = pane.captured()
-        except TmuxError:
-            return "yes"
-        if not _in_input_box(lines, prompt):
-            return "yes"
-        waited = _monotonic() - start
-        if not pressed and waited >= _SUBMIT_GRACE:
-            enter = pane_write("Enter", lambda: pane.press("Enter"))
-            if enter.typed != "yes":
-                notes.append(
-                    "the prompt: typed it at its prompt, but it sat there unsent and "
-                    + pasted_unsent(enter, "the agent", press="press Enter in its pane").how
-                )
-                return "maybe" if enter.typed == "maybe" else "unsent"
-            pressed = True
-            (notes if done is None else done).append(
-                "the prompt sat in Claude Code's input box after its Enter — pressed Enter again"
-            )
-            continue
-        if waited >= _SUBMIT_TIMEOUT:
-            notes.append(
-                "the prompt: typed it at its prompt, but it is still in the input box, unsent "
-                f"— press Enter in its window (`{project_service.fleet_command('attach', to[0])}`)"
-            )
-            return "unsent"
-
-
-def _in_input_box(lines: Sequence[str], prompt: str) -> bool:
-    """Whether Claude Code's input box, drawn at the foot of ``lines``, holds ``prompt``: its
-    first words, or the placeholder a long paste is shown as (``[Pasted text #1 …]``)."""
-    rows = claude_screen.tail(lines)
-    top = claude_screen.input_box_at(rows)
-    if top is None:
-        return False
-    body: list[str] = []
-    for row in rows[top + 1 :]:
-        if claude_screen.RULE.match(row):
-            break
-        body.append(row)
-    text = " ".join(" ".join(body).replace(claude_screen.PROMPT_MARK, " ").split())
-    words = " ".join(prompt.split())[:_PROMPT_HEAD]
-    return bool(text) and (text.startswith(words) or text.startswith("[Pasted text"))
-
-
-_PROMPT_HEAD = 24
-"""How much of a prompt :func:`_in_input_box` matches: enough to be the prompt, short enough
-to fit on the box's first row."""
-
 SECURITY_NOTES = "Claude Code's first-run Security notes screen"
 """How the Security notes screen is named in a note and an ``attention`` detail."""
+SECURITY_NOTES_DETAIL = f"{SECURITY_NOTES} — press Enter in its window"
+"""The ``attention`` detail of an agent at those notes: their one key, in its window."""
 
 
 def _tell(project: ProjectInfo, label: str) -> str:
@@ -6398,7 +6569,10 @@ def _type_at_its_start(
     launched: datetime,
     folder: Path | None = None,
     done: list[str] | None = None,
-) -> Typed:
+    *,
+    agent_id: str | None = None,
+    guard: float | None = None,
+) -> tuple[Typed, bool | None]:
     """:func:`_type_prompt` for an agent whose ``SessionStart`` fires at rest at its prompt.
 
     Typed once that start has come (:func:`_started_since`), at once: Claude Code took a
@@ -6436,15 +6610,15 @@ def _type_at_its_start(
                 f"tmux could not be asked whether the agent is up ({exc}) — the prompt was "
                 f"NOT typed. Send it once the agent is up: {_send_it_later(*to)}"
             )
-            return "no"
+            return "no", None
         if facts is None or facts.dead:
             notes.append("the agent exited before the prompt could be typed")
-            return "no"
+            return "no", None
         if _started_since(session_id, launched):
             break
         if box is not None and _at_security_notes(pane):
             if not _at_input_box(pane, box, notes, done, folder=folder, to=to):
-                return "no"
+                return "no", None
             continue
         now = _monotonic()
         at_a_dialog = now >= deadline and _at_a_start_dialog(pane, adapter)
@@ -6477,17 +6651,19 @@ def _type_at_its_start(
                 f"prompt was NOT typed — {how}. {then} `{_tell(*to)} …` types its first "
                 "prompt, which brings the note"
             )
-            return "no"
+            return "no", None
         _sleep(_POLL_INTERVAL)
     # Claude Code starts once its folder-trust question is answered (measured on 2.1.300),
     # so the question is not on its screen now; one look all the same, as every prompt a
     # spawn types takes one (`_past_trust_prompt`): a start the board took for this launch's
     # cannot type an Enter into "No, exit".
     if not _past_trust_prompt(pane, notes, folder=folder, to=to):
-        return "no"
+        return "no", None
     if box is not None and not _at_input_box(pane, box, notes, done, folder=folder, to=to):
-        return "no"
-    return _typed_prompt(pane, prompt, notes, done, to=to if box is not None else None)
+        return "no", None
+    return _typed_prompt(
+        pane, prompt, notes, done, to=to, reads_box=box is not None, agent_id=agent_id, guard=guard
+    )
 
 
 def _at_security_notes(pane: PlacedPane) -> bool:
@@ -6682,7 +6858,9 @@ def list_agents(
         )
         for placement in placements
     ]
-    return _with_trust_prompts(statuses, placements, by_id)
+    return _with_first_prompts(
+        _with_trust_prompts(statuses, placements, by_id), project, config, placements
+    )
 
 
 def _record_failed_turns(
@@ -7105,6 +7283,14 @@ def tell(
     was not typed is then the caller's to decide. :func:`attach_persona` asks so, because
     its message is a persona's body, which the board never carries (review of #240,
     finding 7). Not typed, ``how`` is the reason alone.
+
+    It types through the one door (``delivery.deliver_typed``, P0-W2, #276): never over a
+    draft in the agent's input box or while someone types in its pane (``draft_guard``) —
+    then it is filed as a note and says why ("a draft is in its input box"; one that
+    appears as the text is pasted stops it before its Enter, and says so) — and an
+    Enter the agent dropped is pressed again only while the text provably still waits
+    there, the agent's ``UserPromptSubmit`` its acknowledgement. A busy agent gets the note
+    at the end of its turn (``team.hook_stop``, ``[fleet] deliver_notes_at_turn_end``).
     """
 
     def noted(why: str, to: FleetAgent) -> str:
@@ -7216,12 +7402,26 @@ def tell(
             except FleetError as exc:
                 raise FleetError(f"not typed: {why}; {exc}") from exc
             return TellResult("no", f"{why} — {how}")
-        told = pane.type_then_enter(
-            text,
-            label,
-            press="press Enter in its pane",
-            done="typed into its pane (it was waiting)",
-        )
+        # One store connection for the acknowledgement wait (`delivery.prompted_since`).
+        with store_session() as store:
+            done = pane.deliver_typed(
+                text,
+                label,
+                press="press Enter in its pane",
+                acked=(
+                    delivery.prompted_since(store, agent.session_id, _now())
+                    if agent.session_id is not None
+                    else None
+                ),
+                reads_box=_input_box_of(adapter) is not None,
+                done="typed into its pane (it was waiting)",
+                guard=settings().draft_quiet_seconds,
+            )
+        if done.refused is not None and done.in_box:
+            return TellResult("no", noted(done.refused, agent))
+        if done.refused is not None:
+            return TellResult("no", noted(f"{done.refused}, which nothing types over", agent))
+        told = done.told
         if not isinstance(told, PaneWrite):
             return told
         if told.typed == "maybe":
@@ -9852,8 +10052,16 @@ def switch(
     automatic: bool = False,
     agent_id: str | None = None,
     before_stop: Callable[[], None] | None = None,
+    ack_wait: float = 0.0,
+    force: bool = False,
 ) -> SwitchReceipt:
     """Move a running agent to another Claude account — the hand-over of #146.
+
+    One switch per limit (#277): a row the automatic hand-over spawned less than
+    ``hooks.HANDOVER_COOLDOWN`` ago is refused without ``force`` — the hand-over has
+    just moved it, and a manager woken by the same limit moved the replacement again.
+    The pick knows the agent's model family (its session's model), so an account
+    whose week for that family is spent is no target.
 
     The target is ``to`` (a slot, alias or email) or, without it, HEADROOM
     FIRST among the enabled, signed-in accounts that are NOT the one the agent
@@ -9930,6 +10138,11 @@ def switch(
             # own row, and its take-back wrote a stale state over the second's mark
             # (review of #163, round 2).
             raise _in_hand_over(project, "switch", label)
+        if not (automatic or force):
+            from aisquare.services import hooks  # lazy, as `_team()`: kept off the import path
+
+            if (refusal := hooks.fresh_replacement_refusal(agent, now=_now())) is not None:
+                raise FleetError(refusal)  # one switch per limit (#277)
         # `spawn`'s refusal for the task (done, dropped, gone from the board), asked
         # before anything is stopped, as `restart` asks it. After the stop it left the
         # agent stopped and nothing started: a row spawned before rule 3 still names
@@ -9965,6 +10178,13 @@ def switch(
             exclude=() if current is None else (current,),
             automatic=automatic,
             agent=kind,
+            # The family is AISquare's model ladder's (``capabilities.model_ladders``): the
+            # session's model names one only for an agent whose models it picks (#277).
+            family=(
+                harness.model_family(session.model if session is not None else None)
+                if adapter is not None and adapter.capabilities.model_ladders
+                else None
+            ),
         )
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc
@@ -10081,6 +10301,7 @@ def switch(
             # The hook's hand-over is nobody's add (#139): `spawn`'s `onboard`.
             onboard=not automatic,
             board_and_hub=board_and_hub,
+            ack_wait=ack_wait,
         )
     except Exception:
         if handed_over.withheld:
@@ -10119,6 +10340,8 @@ def switch(
         notes=notes,
         failures=failures,
         prompt_typed=typed,
+        prompt_delivery=receipt.prompt_delivery,
+        prompt_acked=receipt.prompt_acked,
     )
 
 
@@ -10141,6 +10364,7 @@ def _respawn(
     role: str | None = None,
     persona: str | None = None,
     board_and_hub: tuple[str, str],
+    ack_wait: float = 0.0,
     team_line: str | None = None,
     replaces: str | None = None,
 ) -> tuple[SpawnReceipt, bool, list[str]]:
@@ -10262,6 +10486,10 @@ def _respawn(
             if resume is not None and record.session is not None
             else None
         ),
+        # Its own first line, never a kickoff: the resume line and the hand-off prompt
+        # both name the task already.
+        kickoff=False,
+        ack_wait=ack_wait,
         replaces=replaces,
     )
     # Said once the replacement is up, for what it really took from the record: a
@@ -10801,6 +11029,14 @@ class RestartReceipt:
     notes: list[str] = field(default_factory=list)
     prompt_typed: Typed = "yes"
     """Whether the replacement's first line reached its pane, as on :class:`SwitchReceipt`."""
+    prompt_delivery: delivery.Delivery | None = None
+    """How the first line reached it: ``argv`` (Claude Code's command line), ``typed``, or
+    ``None`` when there was none."""
+    prompt_acked: bool | None = None
+    """Whether the first line started a turn (its ``UserPromptSubmit``) within the wait the
+    caller gave (``[fleet] prompt_ack_seconds`` from the CLI): ``False`` is still pending,
+    which a listing reads ``attention`` once that wait is past at an idle input box;
+    ``None`` when there was none, or nothing could say."""
     failures: list[str] = field(default_factory=list)
     """The notes that say what did NOT happen, as on :class:`SwitchReceipt`: the stop's
     claims not released, the hand-over mark not taken back, the replacement's first line
@@ -10826,6 +11062,7 @@ def restart(
     account: str | None = None,
     persona: str | None = None,
     before_stop: Callable[[], None] | None = None,
+    ack_wait: float = 0.0,
     team: Sequence[FleetAgentStatus] | None = None,
 ) -> RestartReceipt:
     """Start an agent again under its own label — the **Restart** of #138.
@@ -11088,6 +11325,7 @@ def restart(
             role=role,
             persona=persona,
             board_and_hub=board_and_hub,
+            ack_wait=ack_wait,
             # An agent that ended on its own: the owner's `fleet stop` of its 💤 row while
             # the replacement starts wins at the insert, as the guard above has it before
             # (last delta review, m3). Not a hand-over, whose own stop writes `stopped`, nor
@@ -11124,6 +11362,8 @@ def restart(
         tmux_session=receipt.tmux_session,
         notes=notes,
         prompt_typed=typed,
+        prompt_delivery=receipt.prompt_delivery,
+        prompt_acked=receipt.prompt_acked,
         failures=[*failures, *receipt.failures],
     )
 
@@ -11346,6 +11586,7 @@ def hand_off(
         family=record.session.agent if record.session is not None else None,
         start_point=_fork_point(project, agent, Path(record.cwd), notes) if own else None,
         fork=True,
+        kickoff=False,  # its own first line names the source and the task
     )
     resumed = resume is not None
     how = "resumed its session as a fork" if resumed else "started fresh"
@@ -11757,26 +11998,6 @@ def _handoff_events(store: ContextStore, agent: FleetAgent) -> list[TeamEvent]:
     )
     human = _team().HUMAN_BOARD_KINDS
     return [event for event in events if event.kind not in human][-_HANDOFF_NOTES:]
-
-
-def task_prompt(task: TeamTask) -> str:
-    """The first message of an agent spawned for ``task`` with no prompt of its own (#32, L1;
-    the owner's D2, board seq 671): read the task, and do what its briefing's ASSIGNED TO YOU
-    line says. Without it the agent sat idle at an empty prompt until someone typed this.
-
-    It names no claim. Whether to claim is the briefing's to say, per role and per state
-    (``team._assignment_lines``): a tester or reviewer is told a todo task is "not yours to
-    claim", a task waiting on its needs is not to be claimed yet, and one in review is to
-    be verified. "Claim it" here had a verifier take a coder's task, and fail on a review
-    one (delta review of #274, m1).
-    """
-    ref = str(task.number) if task.number is not None else task.id
-    named = f"#{ref}" if task.number is not None else ref
-    return (
-        f"Start on your assigned task {named}: {' '.join(task.title.split())}. Read its whole "
-        f"contract with `aisquare task show {ref}`, then do what the ASSIGNED TO YOU line of "
-        "your briefing says for it — claim it only if that line tells you to."
-    )
 
 
 def _handoff_prompt(
@@ -12995,6 +13216,13 @@ def nudge_manager(project_id: str, *, reason: str, board: str | None = None) -> 
     — that would let it type into any pane — so the nudge is left owed
     (:data:`NUDGE_OWED`) for a process outside it to send: :func:`deliver_owed_nudge`,
     from the writer's own hooks, which Codex runs outside.
+
+    It types through the one door (``delivery.deliver_typed``, P0-W2, #276), and never over a
+    human (``draft_guard``): a draft in the manager's input box, or someone typing in its
+    pane in ``asq``, and the nudge waits — recorded (:data:`NUDGE_DEFERRED`), and sent by the
+    next board write or by ``asq``'s refresh once the box is clear
+    (:func:`retry_deferred_nudges`). Nothing is lost meanwhile: the human's own submit runs
+    ``UserPromptSubmit``, which hands the manager the same delta.
     """
     return _nudge(project_id, owe=True, board=board)
 
@@ -13074,11 +13302,68 @@ def _nudge(project_id: str, *, owe: bool, board: str | None = None) -> bool:
             state, _ = _derive(manager, session, view, observed=True, now=now)
             if not _at_its_prompt(pane, manager, session, state, now):
                 return False
+            # Typed as `tell` types a line (`PlacedPane.deliver_typed`): its Enter a key of its
+            # own, so a Codex manager does not keep it unsent in its composer.
+            done = pane.deliver_typed(
+                NUDGE_TEXT,
+                MANAGER_LABEL,
+                press="press Enter in its pane",
+                acked=delivery.prompted_since(store, session.id, now),
+                reads_box=_input_box_of(recorded_adapter(manager.agent)) is not None,
+                what="the nudge",
+                guard=settings().draft_quiet_seconds,
+                re_press=_NUDGE_RE_PRESS,
+                last_wait=_NUDGE_LAST_WAIT,
+            )
+            deferred = f"{NUDGE_DEFERRED}{session.id}"
+            if done.refused is not None:
+                if not store.get_meta(deferred):
+                    store.set_meta(deferred, now.isoformat())
+                return False
             store.set_meta(key, now.isoformat())
-            pane.type_line(NUDGE_TEXT)
-            return True
+            if store.get_meta(deferred):
+                store.set_meta(deferred, "")  # sent: nothing is held back any more
+            return done.told.typed == "yes"
     except Exception:
         return False
+
+
+def retry_deferred_nudges() -> int:
+    """Send each manager nudge a draft held back (:data:`NUDGE_DEFERRED`), now that its input
+    box may be clear: ``asq``'s refresh asks every frame. How many were sent.
+
+    One indexed read when nothing is held back. A nudge whose manager has prompted since it
+    was held back is dropped unsent: that prompt's ``UserPromptSubmit`` handed it the delta
+    the nudge was for. One whose manager row has ended is dropped too. A draft still there
+    keeps it held back (``nudge_manager`` asks the guard again). Never raises."""
+    try:
+        with store_session() as store:
+            held = {
+                key.removeprefix(NUDGE_DEFERRED): since
+                for key, since in store.list_meta(NUDGE_DEFERRED).items()
+                if since
+            }
+            targets: list[FleetAgent] = []
+            for session_id, since in held.items():
+                row = store.fleet_agent_for_session(session_id)
+                session = store.get_session(session_id)
+                prompted = session.prompted_at if session is not None else None
+                gone = row is None or row.ended_at is not None or row.label != MANAGER_LABEL
+                if gone or (prompted is not None and prompted >= datetime.fromisoformat(since)):
+                    store.set_meta(f"{NUDGE_DEFERRED}{session_id}", "")
+                    continue
+                assert row is not None
+                targets.append(row)
+    except Exception:
+        return 0
+    return sum(
+        nudge_manager(
+            row.project_id,
+            reason="deferred: a draft was in its input box",
+            board=_board_of_row(row),
+        )
+        for row in targets
+    )
 
 
 def attach_argv(project: ProjectInfo) -> list[str]:

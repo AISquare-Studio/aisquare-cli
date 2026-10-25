@@ -1044,7 +1044,9 @@ def test_a_codex_turn_that_hit_its_limit_parks_the_row_and_hands_over(
         ]
     assert session is not None and session.state == "limited"
     assert session.limit_resets_at == datetime.fromtimestamp(int(resets.timestamp()), tz=UTC)
-    assert "limited" in kinds
+    # The hand-over goes (another Codex slot has room), so the line says so and wakes no
+    # manager: one switch per limit (#295's W3), Codex's as Claude Code's.
+    assert "limited_handing_over" in kinds and "limited" not in kinds
     stopped.assert_not_called()  # the limit takes the Stop's place, as StopFailure does
     [argv] = detached
     assert argv[-4:-2] == ["hand-over", session_id] and argv[-1] == "session limit"
@@ -1127,7 +1129,11 @@ def test_a_healthy_codex_stop_is_handled_as_it_always_was(
 @pytest.mark.parametrize(
     ("info", "message", "state", "kind"),
     [
-        pytest.param("usage_limit_exceeded", SPEND_CAP, "limited", "limited", id="limit"),
+        # Handed over (another Codex slot has room): one switch per limit, said once and
+        # waking no manager (#295's W3).
+        pytest.param(
+            "usage_limit_exceeded", SPEND_CAP, "limited", "limited_handing_over", id="limit"
+        ),
         pytest.param("other", "fixture says no", "waiting", "turn_failed", id="other-error"),
     ],
 )

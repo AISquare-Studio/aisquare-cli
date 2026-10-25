@@ -50,7 +50,7 @@ from aisquare.core.agent_adapters.types import BadEffortError, LaunchPart
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
-from aisquare.services import agent_launch, explainability_ops
+from aisquare.services import agent_launch, delivery, explainability_ops
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import team as team_service
@@ -406,6 +406,16 @@ def launch(
             metavar="NAME",
         ),
     ] = None,
+    first_prompt_file: Annotated[
+        Path | None,
+        typer.Option(
+            delivery.FIRST_PROMPT_FLAG,
+            help="A file holding the agent's first message: read, deleted, and passed to the "
+            "agent as its prompt, after `--` (what `fleet spawn` gives a Claude Code agent).",
+            metavar="PATH",
+            hidden=True,
+        ),
+    ] = None,
 ) -> None:
     """Launch an agent session already attached to this project's team board.
 
@@ -722,6 +732,29 @@ def launch(
         *persona_args,
         *arguments.argv,
     ]
+    # The first message (P0-W1a, #122), last: the agent's positional prompt, after `--`
+    # (`capabilities.positional_prompt`).
+    # Read from a file and the file deleted, so the window's command, which tmux carries and
+    # the row records, never holds the text, and a replay of that command finds no file and
+    # starts without one: a restart is given a line of its own.
+    if first_prompt_file is not None:
+        try:
+            first = delivery.take_prompt_file(first_prompt_file)
+        except delivery.NotAPromptFile as exc:
+            stderr_console().print(
+                f"first prompt: {exc} — not read, not deleted; starting without one",
+                style="dim",
+                markup=False,
+            )
+            first = ""
+        if first is None:
+            stderr_console().print(
+                f"first prompt: {first_prompt_file} is not there (read by an earlier launch) "
+                "— starting without one",
+                style="dim",
+            )
+        elif first:
+            argv += delivery.argv_tail(first)
     # Last, over the environment as it will be exec'd: the store is read-only in the
     # agent's sandbox, and its board calls go through this launch's broker.
     from aisquare.services.store_broker import LaunchRefused

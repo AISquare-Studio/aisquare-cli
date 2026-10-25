@@ -337,7 +337,9 @@ class AgentCapabilities:
     """AISquare's role model ladder and its probe choose the model (Claude Code); an
     agent without keeps its native default unless a model is pinned."""
     positional_prompt: bool = False
-    """The first prompt is a positional argument (Codex); otherwise the fleet types it."""
+    """The first prompt is a positional argument, after ``--`` (Claude Code, Codex): a spawn's
+    first message goes on its command line (``services.delivery.first_prompt_way``, through a
+    file ``launch`` reads and deletes); otherwise the fleet types it."""
     first_context_file_only: bool = False
     """Of its config dir's instruction files (:meth:`AgentAdapter.instruction_files` with no
     ``cwd``, in its precedence) the agent reads the first that is not blank alone (Codex's

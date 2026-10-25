@@ -159,6 +159,11 @@ ON_LIMIT_MODES: tuple[tuple[str, str], ...] = (
 """``[accounts] on_limit``: what the fleet does when an agent's turn ends on a usage limit.
 Said of every agent alike: what an agent does at the reset is its own (Claude Code goes on
 by itself; a Codex agent waits for its next prompt), so no option names one."""
+PREFER_MODES: tuple[tuple[str, str], ...] = (
+    ("the first in priority order", "priority"),
+    ("the week that resets soonest", "reset-soonest"),
+)
+"""``[accounts] prefer`` (#277): which account under ``switch_at`` a pick takes."""
 _ID_KEPT = re.compile(r"[A-Za-z0-9-]")
 """The characters of a role name its widget ids keep as they are (:func:`widget_suffix`)."""
 SANDBOX_OPTIONS = [
@@ -189,7 +194,7 @@ _INPUTS = (
     "accounts-switch-at",
     "accounts-wait-minutes",
 )
-_SELECTS = ("default-agent", "accounts-pick", "accounts-on-limit")
+_SELECTS = ("default-agent", "accounts-pick", "accounts-on-limit", "accounts-prefer")
 
 FALLBACK_AGENT_TIP = (
     "The agent a launch runs only when no account is usable (no one signed in, an API key, "
@@ -873,6 +878,11 @@ class AppSettingsView(Vertical):
             yield Label("switch at (% used)")
             yield Input(value=str(self.accounts.switch_at), type="integer", id="accounts-switch-at")
         with Horizontal(classes="row"):
+            yield Label("under the line, prefer")
+            yield Select(
+                PREFER_MODES, value=self.accounts.prefer, allow_blank=False, id="accounts-prefer"
+            )
+        with Horizontal(classes="row"):
             yield Label("wait if reset within (min)")
             yield Input(
                 value=str(self.accounts.wait_if_reset_within_minutes),
@@ -1082,6 +1092,7 @@ class AppSettingsView(Vertical):
         self.query_one("#accounts-pick", Select).value = self.accounts.pick
         self.query_one("#accounts-switch-at", Input).value = str(self.accounts.switch_at)
         self.query_one("#accounts-on-limit", Select).value = self.accounts.on_limit
+        self.query_one("#accounts-prefer", Select).value = self.accounts.prefer
         self.query_one("#accounts-wait-minutes", Input).value = str(
             self.accounts.wait_if_reset_within_minutes
         )
@@ -1229,7 +1240,11 @@ class AppSettingsView(Vertical):
             "switch_at": switch_at,
             "wait_if_reset_within_minutes": wait_minutes,
         }
-        for wid, key in (("accounts-pick", "pick"), ("accounts-on-limit", "on_limit")):
+        for wid, key in (
+            ("accounts-pick", "pick"),
+            ("accounts-on-limit", "on_limit"),
+            ("accounts-prefer", "prefer"),
+        ):
             value = self.query_one(f"#{wid}", Select).value
             if wid in changed and isinstance(value, str):
                 update[key] = value

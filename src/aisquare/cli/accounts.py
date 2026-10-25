@@ -166,6 +166,11 @@ def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> t
     week = _percent(usage.week_percent)
     if usage.week_resets_at is not None:
         week += f" · resets {format_reset(usage.week_resets_at, now=now)}"
+    # The per-family weeks (#277), each with its own reset: they bind that family alone.
+    for family, percent in sorted(usage.family_week_percent.items()):
+        week += f" · {family} {_percent(percent)}"
+        if (resets := usage.family_week_resets_at.get(family)) is not None:
+            week += f" resets {format_reset(resets, now=now)}"
     return session, week
 
 

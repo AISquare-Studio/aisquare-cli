@@ -693,6 +693,10 @@ def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
         }
         await _resized(pilot, 140, 30)
         seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
+        deadline = time.monotonic() + FLEET_HOLD_S
+        while seen["wide"][0] <= 60 and time.monotonic() < deadline:
+            await pilot.pause(0.05)
+            seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
         return seen
 
     seen = drive(

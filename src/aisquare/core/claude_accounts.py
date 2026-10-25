@@ -88,6 +88,7 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aisquare.core import claude_sharing, paths
+from aisquare.core.harness import MODEL_FAMILIES, model_family
 from aisquare.core.names import name_flaw, name_key
 from aisquare.core.version import __version__
 from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage, session_and_week
@@ -1360,6 +1361,8 @@ USAGE_TIMEOUT_SECONDS = 10.0
 
 
 def _window(raw: Any) -> tuple[float | None, datetime | None]:
+    """One window's percent USED and its reset; a non-null ``locked_reason`` reads 100 %: the
+    endpoint says the window refuses requests, whatever its figure (#277)."""
     if not isinstance(raw, dict):
         return None, None
     percent = raw.get("utilization")
@@ -1371,7 +1374,96 @@ def _window(raw: Any) -> tuple[float | None, datetime | None]:
         except ValueError:
             when = None
     value = float(percent) if isinstance(percent, int | float) else None
+    if raw.get("locked_reason") is not None:
+        value = 100.0
     return value, when
+
+
+_FAMILY_WEEK = "seven_day_"
+"""The prefix of a per-family weekly window in the usage payload: ``seven_day_opus``…"""
+MODEL_FAMILY_NAMES = frozenset(MODEL_FAMILIES.values())
+"""The model families a per-family window or limit can name (``opus``, ``sonnet``…)."""
+_SESSION_KINDS = frozenset({"session", "five_hour"})
+_WEEK_KINDS = frozenset({"weekly", "weekly_all", "week", "seven_day"})
+_SCOPED_KIND = "weekly_scoped"
+"""The ``limits[]`` kind of a per-family week (P0-W0, Claude Code 2.1.309): its
+``scope.model.display_name`` names the family ("Fable", "Opus")."""
+
+
+def _fuller(a: float | None, b: float | None) -> float | None:
+    return b if a is None else a if b is None else max(a, b)
+
+
+@dataclass(frozen=True)
+class _Limit:
+    """One ``limits[]`` entry: its kind, percent USED, the model family a ``weekly_scoped``
+    entry is scoped to (``None`` otherwise, or when the name is no family), and its reset."""
+
+    kind: str
+    percent: float
+    family: str | None = None
+    resets_at: datetime | None = None
+
+
+def _family_weeks(payload: Mapping[str, Any]) -> tuple[dict[str, float], dict[str, datetime]]:
+    """Every per-family week in ``payload``, keyed by family, the fuller figure winning.
+
+    Two places can say it. ``limits[]`` entries of kind ``weekly_scoped``, scoped to a
+    model by ``scope.model.display_name``, are where the endpoint really sends it (P0-W0:
+    every ``seven_day_<family>`` key was null). A top-level ``seven_day_<family>`` window
+    is read too, but only for a known family: ``seven_day_breakdown`` and its like are
+    ``seven_day_*`` dicts that are no window (#277, P0-W3c). A ``limits[]`` kind named
+    after a family (``opus``, ``seven_day_opus``) counts as that family's week as well.
+    """
+    percents: dict[str, float] = {}
+    resets: dict[str, datetime] = {}
+    for key, raw in payload.items():
+        family = key.removeprefix(_FAMILY_WEEK)
+        if not key.startswith(_FAMILY_WEEK) or family not in MODEL_FAMILY_NAMES:
+            continue
+        percent, when = _window(raw)
+        if percent is not None:
+            percents[family] = percent
+        if when is not None:
+            resets[family] = when
+    for limit in _limits(payload):
+        named = limit.kind.removeprefix(_FAMILY_WEEK)
+        scoped = limit.family or (named if named in MODEL_FAMILY_NAMES else None)
+        if scoped is None:
+            continue
+        percents[scoped] = max(percents.get(scoped, limit.percent), limit.percent)
+        if limit.resets_at is not None and scoped not in resets:
+            resets[scoped] = limit.resets_at
+    return percents, resets
+
+
+def _limits(payload: Mapping[str, Any]) -> list[_Limit]:
+    """``limits[]`` as :class:`_Limit`: an entry without a string kind or a number is
+    skipped — the field is undocumented, and an unknown shape costs it, never the reading."""
+    raw = payload.get("limits")
+    found: list[_Limit] = []
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        kind, percent = entry.get("kind"), entry.get("percent", entry.get("utilization"))
+        if not isinstance(kind, str) or not isinstance(percent, int | float):
+            continue
+        family = _scoped_family(entry) if kind.lower() == _SCOPED_KIND else None
+        _percent, when = _window({"resets_at": entry.get("resets_at")})
+        found.append(_Limit(kind.lower(), float(percent), family, when))
+    return found
+
+
+def _scoped_family(entry: Mapping[str, Any]) -> str | None:
+    """The family a ``weekly_scoped`` entry's ``scope.model.display_name`` names, or ``None``."""
+    scope = entry.get("scope")
+    model = scope.get("model") if isinstance(scope, dict) else None
+    name = model.get("display_name") if isinstance(model, dict) else None
+    return model_family(name) if isinstance(name, str) else None
+
+
+def _limit_of(payload: Mapping[str, Any], kinds: frozenset[str]) -> float | None:
+    return max((limit.percent for limit in _limits(payload) if limit.kind in kinds), default=None)
 
 
 def endpoint_usage(
@@ -1387,6 +1479,12 @@ def endpoint_usage(
     does. A Keychain that would not show the token says why (locked, refused),
     and asks for no log-in. No reason ever carries the token. ``fetched_at`` is
     left for the caller to stamp.
+
+    Every window the endpoint sends is read (#277): the per-family weeks
+    (``seven_day_opus``, ``seven_day_sonnet``: :attr:`ClaudeUsage.family_week_percent`),
+    the ``limits[]`` entries, folded into the window of their kind as the fuller figure,
+    and a ``locked_reason``, which reads that window 100 % used. Keys it does not know
+    are ignored.
     """
     login = stored_login(account)
     creds = login.credentials
@@ -1438,12 +1536,19 @@ def endpoint_usage(
         return ClaudeUsage(
             available=False, reason="the usage endpoint answered without the two windows"
         )
+    family_percent, family_resets = _family_weeks(payload)
     return ClaudeUsage(
         available=True,
         # Both windows, each read or not: one the endpoint answered without went unread.
         windows=session_and_week(
-            session_percent, session_resets, week_percent, week_resets, every=True
+            _fuller(session_percent, _limit_of(payload, _SESSION_KINDS)),
+            session_resets,
+            _fuller(week_percent, _limit_of(payload, _WEEK_KINDS)),
+            week_resets,
+            every=True,
         ),
+        family_week_percent=family_percent,
+        family_week_resets_at=family_resets,
         fetched_at=now,
     )
 

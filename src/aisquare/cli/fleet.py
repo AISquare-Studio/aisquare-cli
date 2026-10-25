@@ -224,8 +224,8 @@ def spawn(
         str | None,
         typer.Option(
             "--prompt",
-            help="First message to type once the agent is up. With --task and no --prompt, "
-            "the agent is told to read its task and follow its briefing.",
+            help="First message for the agent: on Claude Code's command line, typed for any "
+            "other binary. With --task it follows the task's kickoff.",
         ),
     ] = None,
     account: Annotated[
@@ -274,6 +274,7 @@ def spawn(
             spawned_by=as_session or "user",
             account=account,
             persona=persona,
+            ack_wait=fleet_service.settings().prompt_ack_seconds,
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
@@ -285,6 +286,7 @@ def spawn(
                     "asked_label": receipt.asked_label,
                     "tmux_session": receipt.tmux_session,
                     "notes": receipt.notes,
+                    **_first_prompt_json(receipt),
                 }
             )
         )
@@ -302,6 +304,8 @@ def spawn(
         f"✓ spawned {receipt.agent.label}{asked} ({receipt.agent.id}) → "
         f"{receipt.tmux_session} {receipt.agent.pane_id}{persona}"
     )
+    if receipt.prompt_acked:
+        console.print(f"  ✓ {_first_prompt_line(receipt.prompt_delivery)}")
     for note in receipt.notes:
         console.print(f"  {'✓' if note in receipt.shared else '⚠'} {note}")
 
@@ -401,6 +405,7 @@ def restart(
             fresh=fresh,
             spawned_by=as_session or "user",
             permission_mode=permission_mode,
+            ack_wait=fleet_service.settings().prompt_ack_seconds,
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
@@ -442,6 +447,14 @@ def switch(
         str | None,
         typer.Option("--reason", help="Why (recorded on the board), e.g. 'session limit'."),
     ] = None,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Move an agent the usage-limit hand-over moved minutes ago (refused "
+            "without it: one switch per limit).",
+        ),
+    ] = False,
     project: ProjectRef = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -451,7 +464,9 @@ def switch(
     target account. With its transcript on disk the replacement resumes the
     same session (`claude --resume <transcript>`); otherwise, or with --fresh,
     it starts new with a hand-off prompt from the board. The manager runs this
-    with `--as <its session>` when an agent shows `⏳ limited`.
+    with `--as <its session>` when the usage-limit hand-over could not
+    (`handover_failed`). An agent that hand-over moved minutes ago is refused
+    without --force: one switch per limit.
     """
     target = _project(project)
     try:
@@ -462,6 +477,8 @@ def switch(
             fresh=fresh,
             reason=reason,
             spawned_by=as_session or "user",
+            ack_wait=fleet_service.settings().prompt_ack_seconds,
+            force=force,
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
@@ -475,6 +492,8 @@ def switch(
                     "to_slot": receipt.to_slot,
                     "resumed": receipt.resumed,
                     "prompt_typed": fleet_service.prompt_typed_json(receipt.prompt_typed),
+                    "prompt_delivery": receipt.prompt_delivery,
+                    "prompt_acked": receipt.prompt_acked,
                     "how": receipt.how,
                     "failures": receipt.failures,
                     "tmux_session": receipt.tmux_session,
@@ -774,12 +793,31 @@ def _restart_json(receipt: fleet_service.RestartReceipt) -> dict[str, object]:
         "started": receipt.started.model_dump(mode="json"),
         "resumed": receipt.resumed,
         "prompt_typed": fleet_service.prompt_typed_json(receipt.prompt_typed),
+        "prompt_delivery": receipt.prompt_delivery,
+        "prompt_acked": receipt.prompt_acked,
         "how": receipt.how,
         "failures": receipt.failures,
         "was_running": receipt.was_running,
         "tmux_session": receipt.tmux_session,
         "notes": receipt.notes,
     }
+
+
+def _first_prompt_json(receipt: fleet_service.SpawnReceipt) -> dict[str, object]:
+    """How a spawn's first message went, as ``fleet spawn --json`` prints it: ``prompt_typed``
+    as restart and switch say it, ``prompt_delivery`` (``argv`` | ``typed`` | null) and
+    ``prompt_acked`` (a turn started on it within ``[fleet] prompt_ack_seconds``)."""
+    return {
+        "prompt_typed": fleet_service.prompt_typed_json(receipt.prompt_typed),
+        "prompt_delivery": receipt.prompt_delivery,
+        "prompt_acked": receipt.prompt_acked,
+    }
+
+
+def _first_prompt_line(way: str | None) -> str:
+    """The receipt's line for a first message a turn started on."""
+    how = "on its command line" if way == "argv" else "typed into its pane"
+    return f"first message taken ({how})"
 
 
 def _stop_json(receipt: fleet_service.StopReceipt) -> dict[str, object]:

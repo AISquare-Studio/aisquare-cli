@@ -35,7 +35,7 @@ from tests.test_fleet_bulk import (  # noqa: F401 (fixtures)
     fleet,
     tmux,
 )
-from tests.test_fleet_service import FakeTmux, _add_task
+from tests.test_fleet_service import FakeTmux, _add_task, _first_lines
 
 KILLED = 143
 """An outside SIGTERM's exit status, as the 16:50 crash recorded it."""
@@ -47,10 +47,9 @@ def _kill(server: FakeTmux, agent: FleetAgent) -> None:
 
 
 def _ready(server: FakeTmux, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every new window runs Claude Code at once, its session started (the SessionStart a
-    Claude Code launch's prompt waits for, ``fleet._type_at_its_start``, #113), so a fresh
-    restart's hand-off prompt, which has several lines, is typed rather than (correctly)
-    held for an agent not up."""
+    """Every new window runs Claude Code at once, so the replacement is Claude Code from its
+    first poll. Its first message, the hand-off or resume line with the dead team in it, rides
+    its command line (P0-W1a); :func:`_first_lines` reads it, typed or not."""
     original = server.spawn_window
     monkeypatch.setattr(fleet_service, "_started_since", lambda session_id, launched: True)
 
@@ -215,9 +214,7 @@ def test_a_restarted_manager_is_told_its_dead_team_and_the_commands_that_restart
         assert isinstance(receipt.result, fleet_service.RestartReceipt)
         started = receipt.result.started
 
-    [prompt] = [
-        text for pane, kind, text in tmux.typed if pane == started.pane_id and kind == "paste"
-    ]
+    [prompt] = _first_lines(tmux, started.pane_id)
     with store_session() as store:
         alpha = store.get_project(fleet.alpha.id)
     assert alpha is not None and alpha.codename  # named by its codename, as a spawn gave it
@@ -238,9 +235,7 @@ def test_a_manager_whose_team_is_alive_is_told_nothing_more(
     _ready(tmux, monkeypatch)
     tmux.typed.clear()
     started = fleet_service.restart(fleet.alpha, "manager").started
-    [prompt] = [
-        text for pane, kind, text in tmux.typed if pane == started.pane_id and kind == "paste"
-    ]
+    [prompt] = _first_lines(tmux, started.pane_id)
     assert "of your team died" not in prompt
 
 

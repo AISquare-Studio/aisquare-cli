@@ -61,7 +61,7 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import agent_events, agent_launch, auto_mode, diagnostics
+from aisquare.services import agent_events, agent_launch, auto_mode, delivery, diagnostics
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
 from aisquare.services import team as team_service
@@ -72,6 +72,7 @@ from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     FakeTmux,
     _command,
     _events,
+    _first_lines,
     _flag,
     _timed_input,
     claude_on_path,
@@ -452,14 +453,17 @@ def test_restart_of_a_running_codex_agent_resumes_its_bound_thread(
     native = _native(command)
     at = native.index("resume")
     assert native[at : at + 2] == ["resume", THREAD_ONE], "the thread by its native id"
-    assert command[-2:] == ["--", fleet_service._restart_prompt(receipt.started)]
+    # The continue line rides the file its launch reads (P0-W1a), never the window's command.
+    [line] = _first_lines(tmux, receipt.started.pane_id)
+    assert line == fleet_service._restart_prompt(receipt.started)
+    assert line not in command and delivery.FIRST_PROMPT_FLAG in command
     assert "--resume" not in command, "no Claude Code flag"
-    # The window's launch puts every option before `resume <id>`, and the continue line
-    # after Codex's own `--`: `codex <options> resume <id> -- <prompt>`.
+    # The window's launch puts every option before `resume <id>`, and the continue line it
+    # read after Codex's own `--`: `codex <options> resume <id> -- <prompt>`.
     argv = _launched_argv(command, runner, monkeypatch)
     at = argv.index("resume")
     assert argv[at : at + 2] == ["resume", THREAD_ONE]
-    assert "--approve-for-me" in argv[:at] and argv[-2:] == command[-2:]
+    assert "--approve-for-me" in argv[:at] and argv[-2:] == ["--", line]
     assert _claimed_by(task.id) == first, "the same thread keeps the claim"
     assert _events(codex.project, "restarted") == [
         f"{codex.agent.label} restarted — resumed its session"
@@ -1243,12 +1247,14 @@ def test_a_codex_spawn_prompt_is_its_argument_and_nothing_is_typed_into_its_dial
 ) -> None:
     """Codex takes its first prompt on its command line and submits it once its
     folder-trust and hook-review dialogs are answered (measured on 0.162.1), so a spawn
-    types nothing into a pane those dialogs may hold."""
+    types nothing into a pane those dialogs may hold. The text travels in the file its
+    launch reads and deletes (P0-W1a), never in the window's command."""
     receipt = fleet_service.spawn(
         project, "coder", agent="codex", worktree=False, prompt="start on tsk_1"
     )
     assert receipt.prompt_typed == "yes" and tmux.typed == []
-    assert _command(tmux)[-2:] == ["--", "start on tsk_1"]
+    assert _first_lines(tmux) == ["start on tsk_1"]
+    assert "start on tsk_1" not in _command(tmux)
 
 
 def test_claude_codes_hooks_leave_an_owed_nudge_alone(
@@ -1299,6 +1305,7 @@ def _state(codex: Codex) -> str:
 
 def test_an_approval_codex_reviews_itself_rings_no_bell(
     codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
 ) -> None:
     """Under ``--approve-for-me`` Codex's own reviewer answers every escalation and no
     prompt reaches the pane, yet the hook fires all the same: 7 false bells for one small
@@ -1309,6 +1316,9 @@ def test_an_approval_codex_reviews_itself_rings_no_bell(
 
     codex.hook("PermissionRequest", THREAD_ONE, **APPROVAL)
     codex.hook("PostToolUse", THREAD_ONE, turn_id="turn-1", tool_name="Bash")
+    # The turn goes on: Codex redraws its working line every second, so its pane is not the
+    # quiet one an idle prompt is read on (#295's W1b).
+    tmux.printed(codex.agent.pane_id)
 
     assert _state(codex) == "working"
     assert _events(codex.project, "attention") == []
@@ -1889,8 +1899,8 @@ def test_nothing_a_sandbox_writes_in_a_row_reaches_its_replacement(
     assert "/tmp/x" not in " ".join(command)
     assert command[command.index("launch") : command.index("launch") + 2] == ["launch", "reviewer"]
     assert _flag(command, "--agent") == "codex" and _flag(command, "--account") is None
-    replayed = _native(command)
-    assert replayed[: replayed.index("--")] == _native(spawned), "the reviewer's own flags"
+    # Its first line rides the file its launch reads (P0-W1a), never the window's command.
+    assert _native(command) == _native(spawned), "the reviewer's own flags"
     assert tmux.spawned[-1]["cwd"] == project.root
     assert receipt.started.role == "reviewer" and receipt.started.agent == "codex"
 

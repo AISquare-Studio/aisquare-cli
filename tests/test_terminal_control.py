@@ -447,7 +447,11 @@ def test_real_tmux_a_killed_control_client_hands_the_pane_to_polling_within_a_se
             assert pid is not None
             os.kill(pid, signal.SIGKILL)
             killed = time.monotonic()
-            live.run("send-keys", "-t", pane_id, "-l", "after the kill")
+            try:
+                live.run("send-keys", "-t", pane_id, "-l", "after the kill")
+            except TmuxError as exc:
+                _skip_if_tmux_34_crashed(exc)
+                raise
             await wait_until(pilot, lambda: "after the kill" in screen_text(pane)[0], timeout=1.0)
             return time.monotonic() - killed, pane._link is None, list(host.notices)
 
@@ -456,6 +460,18 @@ def test_real_tmux_a_killed_control_client_hands_the_pane_to_polling_within_a_se
     assert polling
     assert took < 1.0
     assert notices == [], notices
+
+
+def _skip_if_tmux_34_crashed(exc: TmuxError) -> None:
+    """tmux 3.4's server itself sometimes dies once its control client is SIGKILLed, about
+    one CI run in four: the next command says ``server exited unexpectedly``. That is
+    tmux's crash, not the pane's fallback, which then has no server to poll. Skipped on
+    3.4 alone, naming it; on any other version, or any other error, the test fails."""
+    version = subprocess.run(
+        [shutil.which("tmux") or "tmux", "-V"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    if "server exited unexpectedly" in str(exc) and version.startswith("tmux 3.4"):
+        pytest.skip(f"{version}'s server crashed after its control client was killed")
 
 
 @_needs_tmux

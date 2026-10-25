@@ -236,12 +236,12 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults_and_th
             "on_limit": "switch",
             "share_trust": True,
             "share_settings": False,
+            "prefer": "priority",  # added by P0-W3 (#277)
         },
         "projects": {"capture": False},
-        # Added with the coding-agent adapters (#113): each agent's own role arguments, its
-        # model pins and whether its MCP server is wired.
+        # Added with the coding-agent adapters (#113): each agent's own role arguments (under
+        # fleet, below), its model pins and whether its MCP server is wired.
         "agents": {"mcp": False, "models": {}},
-        "fleet": {"roles": {role: {"agent_args": {}} for role in _V1_DEFAULTS["fleet"]["roles"]}},
         # The persona train and the captain's switch, added since (#201, #240).
         "persona": {
             "system_prompt": True,
@@ -250,6 +250,18 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults_and_th
         "experimental": {"captain": False},
         # App settings ▸ User preferences, added since.
         "ui": {"always_show_project_path": False},
+        "fleet": {
+            # Each role's agent arguments, per agent (#113).
+            "roles": {role: {"agent_args": {}} for role in _V1_DEFAULTS["fleet"]["roles"]},
+            # The first message's two (P0-W1a, #122).
+            "first_prompt": "argv",
+            "prompt_ack_seconds": 45.0,
+            # The idle check's quiet window (P0-W1b, #123).
+            "busy_quiet_seconds": 30,
+            # The delivery guards (P0-W2, #276).
+            "draft_quiet_seconds": 10.0,
+            "deliver_notes_at_turn_end": True,
+        },
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
 

@@ -62,6 +62,7 @@ from aisquare.core.tmux import (
 )
 from tests import fakebin
 from tests.fsperms import can_deny_reads, can_deny_writes
+from tests.private_fleets import end_private_servers, private_folder
 
 OK = Completed(0, "", "")
 FACTS_FIELDS = len(tmux_module._FACTS_FIELDS)  # what display-message is asked for
@@ -2147,27 +2148,27 @@ def test_live_a_server_under_another_tmux_tmpdir_is_reached_at_the_path_it_said(
     """Round 28 of #257: ``-L`` from a shell without the spawning shell's ``TMUX_TMPDIR`` asks
     another directory; the path the server said it listens on (what a spawn records) reaches
     it from any shell."""
-    import tempfile
-
     # An AF_UNIX path is short; resolved, as tmux reports it (macOS's /tmp is /private/tmp).
-    elsewhere = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp")).resolve()
+    # Named for this process, so tests/conftest.py's session-start sweep ends what a killed
+    # run left here: neither `live` nor no_real_fleet looks under this TMUX_TMPDIR.
+    elsewhere = private_folder().resolve()
     # This shell's own directory: another private one, never the owner's /tmp/tmux-<uid>,
     # which tests/conftest.py's no_real_fleet refuses every test (board 13220).
-    here = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp"))
-    monkeypatch.setenv("TMUX_TMPDIR", str(elsewhere))
-    window = _spawn(live, "asq-test-elk", "w0", CAT)
-    recorded = live.server_socket_path()
-    monkeypatch.setenv("TMUX_TMPDIR", str(here))
-    assert recorded is not None and recorded.parent.parent == elsewhere
-    there = live.at(recorded)
+    here = private_folder()
     try:
+        monkeypatch.setenv("TMUX_TMPDIR", str(elsewhere))
+        window = _spawn(live, "asq-test-elk", "w0", CAT)
+        recorded = live.server_socket_path()
+        monkeypatch.setenv("TMUX_TMPDIR", str(here))
+        assert recorded is not None and recorded.parent.parent == elsewhere
+        there = live.at(recorded)
         assert live.reachable() is False, "-L asks this shell's directory, where none is"
         assert there.reachable() is True
         facts = there.pane_facts_or_raise(window.pane_id)
         assert facts is not None and facts.pane_id == window.pane_id
     finally:
-        with contextlib.suppress(TmuxError):
-            there.kill_server()
+        # Every server under `elsewhere`, whatever failed: one left here outlived its run.
+        end_private_servers(elsewhere)
         shutil.rmtree(elsewhere, ignore_errors=True)
         shutil.rmtree(here, ignore_errors=True)
     assert there.reachable() is False, "no server at the path: tmux says none"

@@ -1691,3 +1691,25 @@ def test_spawn_printed_command_joins_each_paste_to_its_own_run(
     assert len(started) == 2, proc.stdout
     assert started == keyed, "the agent must start on the id its Run is keyed by"
     assert started[0] != started[1], "a second paste must not reuse the first session's id"
+
+
+def test_the_coder_cycle_names_task_show_and_the_manager_puts_the_contract_in_detail() -> None:
+    """#74: the coder was told to read a contract no command it ran had printed, and nothing
+    named `task show`; the manager pasted contracts into spawn prompts instead."""
+    coder = " ".join(harness.role_cycle("coder", "abcd1234", fleet=unscoped))
+    assert "the claim prints both; `aisquare task show <id>` is the whole task" in coder
+    manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
+    assert "the coder's claim prints the contract, so put it in `--detail`, not the prompt" in (
+        manager
+    )
+
+
+def test_the_manager_acts_on_a_failed_hand_over_not_on_a_limit() -> None:
+    """P0-W3 (#277): the cycle told the manager to `fleet switch` every `limited` agent while
+    `on_limit = "switch"` moved it already, so one limit moved an agent twice."""
+    manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
+    assert (
+        'With `on_limit = "switch"` (the default) the fleet moves a limited agent itself; '
+        "act on `handover_failed`, not on `limited`:"
+    ) in manager
+    assert "`aisquare fleet switch <label> --as abcd1234`" in manager

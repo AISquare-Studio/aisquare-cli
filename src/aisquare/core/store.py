@@ -537,7 +537,7 @@ def _has_table(connection: sqlite3.Connection, table: str) -> bool:
     return connection.execute(query, (table,)).fetchone() is not None
 
 
-#: The two triggers v37 makes (#113), each ``IF NOT EXISTS``.
+#: The two triggers v38 makes (#113), each ``IF NOT EXISTS``.
 _TEAM_META_TRIGGERS = """
 CREATE TRIGGER IF NOT EXISTS team_meta_insert_time AFTER INSERT ON team_meta BEGIN
  UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
@@ -549,7 +549,7 @@ END;
 
 
 def _date_team_meta_writes(connection: sqlite3.Connection) -> None:
-    """v36 → v37 (#113): the triggers that date every insert and change of a ``team_meta``
+    """v37 → v38 (#113): the triggers that date every insert and change of a ``team_meta``
     row. A trigger cannot be made on a table that is not there, and a store that lacks
     ``team_meta`` still opens, for the doctor to name what it lacks."""
     if _has_table(connection, "team_meta"):
@@ -558,7 +558,7 @@ def _date_team_meta_writes(connection: sqlite3.Connection) -> None:
 
 
 def _redate_team_meta(connection: sqlite3.Connection) -> None:
-    """v37 → v38 (#113): the rows #113's dogfooded v16 left dated 0, dated now."""
+    """v38 → v39 (#113): the rows #113's dogfooded v16 left dated 0, dated now."""
     if _has_table(connection, "team_meta"):
         connection.execute(
             "UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
@@ -571,8 +571,8 @@ _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
     12: _converge_v11_fork,
     25: _index_board_stamps,
     29: _index_task_numbers,
-    36: _date_team_meta_writes,
-    37: _redate_team_meta,
+    37: _date_team_meta_writes,
+    38: _redate_team_meta,
 }
 
 
@@ -746,7 +746,7 @@ def _board_existing_agents(connection: sqlite3.Connection) -> None:
 
 
 def _adopt_claude_code_identity(connection: sqlite3.Connection) -> None:
-    """v35 → v36's backfill (#113): the sessions and fleet agents Claude Code made say so.
+    """v36 → v37's backfill (#113): the sessions and fleet agents Claude Code made say so.
 
     Runs right after ``team_session.native_session_id`` is added (``agent`` is added just
     before it), in the same transaction, and only then (:data:`_BACKFILLS`). A session
@@ -760,12 +760,12 @@ def _adopt_claude_code_identity(connection: sqlite3.Connection) -> None:
 
 
 def _adopt_claude_code_fleet_agents(connection: sqlite3.Connection) -> None:
-    """v35 → v36's backfill (#113): a fleet agent started as ``claude`` is Claude Code's."""
+    """v36 → v37's backfill (#113): a fleet agent started as ``claude`` is Claude Code's."""
     connection.execute("UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude'")
 
 
 def _date_team_meta(connection: sqlite3.Connection) -> None:
-    """v36 → v37's backfill (#113): the ``team_meta`` rows from before the column are
+    """v37 → v38's backfill (#113): the ``team_meta`` rows from before the column are
     dated now, so the launch-metadata cleanup gives them a full retention period."""
     connection.execute("UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER)")
 
@@ -1141,37 +1141,52 @@ CREATE TABLE IF NOT EXISTS usage_turn (
 );
 CREATE INDEX IF NOT EXISTS usage_turn_session ON usage_turn (session_id, seq);
 """
-# v36-v40 (#113): the coding-agent steps. That line stamped them 15-17 while it was in
-# flight (the note above _SCHEMA_V15), then 26-29 once it took main's v25, then 33-36
-# once it took 0.8.1's 26-32, then 34-38 once it took 0.8.2's v33 (the persona columns);
-# #274's line took v34 (``fleet_agent.ended_by``) and v35 (the usage tables) first, so
-# these come after them, renumbered again. Idempotent like every step from v15 on: the
-# columns are in :data:`_PRODUCTS`, their backfills in :data:`_BACKFILLS`, the triggers
-# are ``IF NOT EXISTS`` and the table and its indexes too. A store #113's line stamped
-# 26-29 ran none of 0.8.1's v26-v29 under those numbers, one it stamped 33-36 has no
-# persona columns, and one it stamped 34-38 has neither ``ended_by`` nor the usage
-# tables: the presence pass (:func:`_converge_by_presence`) finds those columns, tables
-# and indexes absent and applies them, with their backfills (task numbers among them),
-# before the ladder goes on from its stamp; and these five, whose products it holds
-# already, add nothing to it but the v38 repair of rows dated 0, which converges.
+# v36 (P0-W1a, #122): whether a fleet agent's first message started a turn. The session's
+# last ``UserPromptSubmit`` (``team_session.prompted_at``), and on the agent's row where its
+# first message stands (``fleet_agent.first_prompt``: pending, acked, unsent) and since when
+# (``first_prompt_at``). Nullable: a row from before them reads as "not tracked", never as
+# a message that was not taken. The columns are the whole step, so the script is empty:
+# they are in :data:`_PRODUCTS`, added only where absent.
 #
-# v36: native coding-agent identity, independent of runtime session IDs.
+# rc/p0-reliability stamped this step v34, beside main's #38 v34 and #346 v35 (the sync
+# of main 8eb18a8a moved it here). A store that ran rc/p0 reads v34 with these columns and
+# neither ``fleet_agent.ended_by`` nor the usage tables: the presence pass
+# (:func:`_converge_by_presence`) adds the column, the ladder runs v35's ``IF NOT EXISTS``
+# script, and this step finds its columns in place.
+_SCHEMA_V36 = ""
+# v37-v42 (#113): the coding-agent steps. That line stamped them 15-17 while it was in
+# flight (the note above _SCHEMA_V15), then 26-29 once it took main's v25, then 33-36
+# once it took 0.8.1's 26-32, then 34-38 once it took 0.8.2's v33 (the persona columns),
+# then 36-41 once it took #274's v34 (``fleet_agent.ended_by``) and v35 (the usage
+# tables); #295 took v36 (the first-message columns) first, so these come after it,
+# renumbered again. Idempotent like every step from v15 on: the columns are in
+# :data:`_PRODUCTS`, their backfills in :data:`_BACKFILLS`, the triggers are ``IF NOT
+# EXISTS`` and the tables and their indexes too. A store #113's line stamped 26-29 ran
+# none of 0.8.1's v26-v29 under those numbers, one it stamped 33-36 has no persona
+# columns, one it stamped 34-38 has neither ``ended_by`` nor the usage tables, and one it
+# stamped 36-41 has no first-message columns: the presence pass
+# (:func:`_converge_by_presence`) finds those columns, tables and indexes absent and
+# applies them, with their backfills (task numbers among them), before the ladder goes on
+# from its stamp; and these steps, whose products it holds already, add nothing to it but
+# the v39 repair of rows dated 0, which converges.
+#
+# v37: native coding-agent identity, independent of runtime session IDs.
 # ``team_session.agent`` and ``native_session_id`` and ``fleet_agent.agent`` are the
 # whole step, so the script is empty; their backfill
 # (:func:`_adopt_claude_code_identity`) marks the rows Claude Code made.
-_SCHEMA_V36 = ""
-# v37: when each ``team_meta`` row was last written, for the launch-metadata cleanup.
+_SCHEMA_V37 = ""
+# v38: when each ``team_meta`` row was last written, for the launch-metadata cleanup.
 # The column, ``team_meta.updated_at``, is in :data:`_PRODUCTS`, and its backfill
 # (:func:`_date_team_meta`) dates the rows that predate it; the triggers, made in
 # Python where the table is (:func:`_date_team_meta_writes`, in :data:`_PREPARE`), date
 # every later insert and change of value.
-_SCHEMA_V37 = ""
-# v38: #113 stamped 17 for this repair while the native-agent branch was being
+_SCHEMA_V38 = ""
+# v39: #113 stamped 17 for this repair while the native-agent branch was being
 # dogfooded: its v16 stores made before that step's backfill was added hold rows
 # dated 0. An UPDATE of those rows only, where the table is (:func:`_redate_team_meta`):
 # a store that meets it twice converges.
-_SCHEMA_V38 = ""
-# v39: the arrangement of OTHER agents' account slots (Codex's, t3). The slots are
+_SCHEMA_V39 = ""
+# v40: the arrangement of OTHER agents' account slots (Codex's, t3). The slots are
 # directories like Claude Code's (``core.claude_accounts``: one ladder numbers every
 # agent's, so ``slot`` alone is the key), and this table is ``claude_account`` for
 # them, plus the agent: an alias, a rank among that agent's slots, a default PER
@@ -1182,7 +1197,7 @@ _SCHEMA_V38 = ""
 # prune every Codex row it met, on any machine where two builds share the store.
 # Aliases are unique across the two tables by the service (``set_alias`` checks the
 # other agent's before writing); within this one, by the index.
-_SCHEMA_V39 = """
+_SCHEMA_V40 = """
 CREATE TABLE IF NOT EXISTS agent_account (
     slot        INTEGER PRIMARY KEY,
     agent       TEXT NOT NULL,
@@ -1198,14 +1213,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS agent_account_alias ON agent_account (alias)
 CREATE UNIQUE INDEX IF NOT EXISTS agent_account_default ON agent_account (agent)
     WHERE is_default = 1;
 """
-# v40: every window a usage reading has (``claude_usage.windows``, the ``UsageWindow`` list as
+# v41: every window a usage reading has (``claude_usage.windows``, the ``UsageWindow`` list as
 # JSON), so the five-minute cache serves an agent whose windows are not Claude Code's five
 # hours and week (a daily quota per model) what it read. The column is the whole step, so
 # the script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps NULL, which
 # reads as its session and week columns say, as every row did.
-_SCHEMA_V40 = ""
-# v41: ONE priority order over every agent's accounts (owner, PR #113): a rank per slot,
-# whatever agent the slot is (``slot`` alone is the key, as v39 says). The per-agent
+_SCHEMA_V41 = ""
+# v42: ONE priority order over every agent's accounts (owner, PR #113): a rank per slot,
+# whatever agent the slot is (``slot`` alone is the key, as v40 says). The per-agent
 # ``position`` columns stay, and are kept in step with it, for the builds before this step
 # that share the store. A table of its own, not a column on the two registries: an older
 # build reconciles those and would never write a rank for the slots it adds, while a slot
@@ -1213,7 +1228,7 @@ _SCHEMA_V40 = ""
 # first read (``services.claude_accounts._ranked``: the default agent's accounts first,
 # so nothing changes on upgrade) since the default agent is the user's config, not the
 # store's.
-_SCHEMA_V41 = """
+_SCHEMA_V42 = """
 CREATE TABLE IF NOT EXISTS account_rank (
     slot  INTEGER PRIMARY KEY,
     rank  INTEGER NOT NULL
@@ -1262,6 +1277,7 @@ _MIGRATIONS = (
     _SCHEMA_V39,
     _SCHEMA_V40,
     _SCHEMA_V41,
+    _SCHEMA_V42,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1323,18 +1339,25 @@ _PRODUCTS: dict[int, _Products] = {
     34: _Products(("usage_session", "usage_session_project", "usage_turn", "usage_turn_session")),
     35: _Products(
         columns=(
+            ("team_session", "prompted_at", "TEXT"),
+            ("fleet_agent", "first_prompt", "TEXT"),
+            ("fleet_agent", "first_prompt_at", "TEXT"),
+        )
+    ),
+    36: _Products(
+        columns=(
             ("team_session", "agent", "TEXT"),
             ("team_session", "native_session_id", "TEXT"),
             ("fleet_agent", "agent", "TEXT"),
         )
     ),
-    36: _Products(
+    37: _Products(
         ("team_meta_insert_time", "team_meta_update_time"),
         (("team_meta", "updated_at", "INTEGER NOT NULL DEFAULT 0"),),
     ),
-    38: _Products(("agent_account", "agent_account_alias", "agent_account_default")),
-    39: _Products(columns=(("claude_usage", "windows", "TEXT"),)),
-    40: _Products(("account_rank",)),
+    39: _Products(("agent_account", "agent_account_alias", "agent_account_default")),
+    40: _Products(columns=(("claude_usage", "windows", "TEXT"),)),
+    41: _Products(("account_rank",)),
 }
 
 _PROJECT_COLUMNS = (
@@ -1400,7 +1423,7 @@ instead, which is what an unfinished turn is."""
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
     "transcript_path, account, model, effort, limit_resets_at, agent, native_session_id, "
-    "persona"
+    "persona, prompted_at"
 )
 _USAGE_COLUMNS = (
     "slot, fetched_at, session_percent, session_resets_at, week_percent, week_resets_at, "
@@ -1417,7 +1440,7 @@ _FLEET_AGENT_FIELDS = (
     "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
     "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
     "account_slot", "launch_spec", "socket_path", "boot_id", "server_started_at", "branch",
-    "board", "agent", "persona", "ended_by",
+    "board", "agent", "persona", "ended_by", "first_prompt", "first_prompt_at",
 )  # fmt: skip
 _FLEET_AGENT_COLUMNS = ", ".join(_FLEET_AGENT_FIELDS)
 
@@ -1538,6 +1561,7 @@ class ContextStore(Protocol):
     def mark_handover(self, session_id: str, *, held_after: datetime) -> bool: ...
     def mark_attention(self, session_id: str) -> bool: ...
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None: ...
+    def set_transcript_path(self, session_id: str, transcript_path: str) -> None: ...
     def unmark_handover(self, session_id: str, state: str) -> None: ...
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
     def release_claims(self, session_id: str) -> list[TeamTask]: ...
@@ -1654,6 +1678,14 @@ class ContextStore(Protocol):
     def upsert_fleet_agent_unless_stopped(
         self, agent: FleetAgent, replaces: str
     ) -> FleetAgent | None: ...
+    def mark_prompted(
+        self, session_id: str, at: datetime, *, agent_id: str | None = None
+    ) -> bool: ...
+    def mark_first_prompt_unsent(self, agent_id: str, at: datetime) -> bool: ...
+    def take_first_prompt(
+        self, at: datetime, *, session_id: str, agent_id: str | None = None
+    ) -> bool: ...
+    def first_prompt_rows(self, since: datetime) -> list[FleetAgent]: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def live_fleet_agents(self) -> list[FleetAgent]: ...
@@ -1734,7 +1766,7 @@ class ContextStore(Protocol):
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None: ...
     def set_claude_account_disabled(self, slot: int, disabled: bool) -> None: ...
     def order_claude_accounts(self, slots: Sequence[int]) -> None: ...
-    # Other agents' account registry (v39): the same arrangement, per agent.
+    # Other agents' account registry (v40): the same arrangement, per agent.
     def agent_accounts(self, agent: str) -> list[ClaudeAccountRecord]: ...
     def upsert_agent_account(
         self, agent: str, slot: int, config_dir: Path
@@ -1744,7 +1776,7 @@ class ContextStore(Protocol):
     def set_agent_account_alias(self, agent: str, slot: int, alias: str | None) -> None: ...
     def set_agent_account_disabled(self, agent: str, slot: int, disabled: bool) -> None: ...
     def order_agent_accounts(self, agent: str, slots: Sequence[int]) -> None: ...
-    # One priority order over every agent's slots (v41).
+    # One priority order over every agent's slots (v42).
     def account_ranks(self) -> dict[int, int]: ...
     def rank_accounts(self, slots: Sequence[int]) -> None: ...
     # Usage readings (v16, #146): the history behind "how fast is this window filling".
@@ -1834,6 +1866,8 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         board=row["board"],  # never NULL as read (`_FLEET_AGENT_READ`)
         persona=row["persona"],
         ended_by=row["ended_by"],
+        first_prompt=row["first_prompt"],
+        first_prompt_at=_maybe_dt(row["first_prompt_at"]),
     )
 
 
@@ -2047,6 +2081,7 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         native_session_id=row["native_session_id"],
         limit_resets_at=_maybe_dt(row["limit_resets_at"]),
         persona=row["persona"],
+        prompted_at=_maybe_dt(row["prompted_at"]),
     )
 
 
@@ -2064,7 +2099,7 @@ def _row_to_usage_sample(row: sqlite3.Row) -> UsageSample:
 
 
 def _usage_windows(raw: str | None) -> tuple[UsageWindow, ...] | None:
-    """A sample's windows as v40 keeps them; ``None`` for a row from before (or one this
+    """A sample's windows as v41 keeps them; ``None`` for a row from before (or one this
     build cannot read), which its session and week columns describe."""
     if raw is None:
         return None
@@ -2947,7 +2982,7 @@ class SqliteStore:
             return stored  # A delayed MCP upsert must not resurrect the provisional row.
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = CASE excluded.state WHEN 'waiting' THEN 'waiting' ELSE 'working' END, "
@@ -2957,7 +2992,8 @@ class SqliteStore:
             "effort = COALESCE(excluded.effort, effort), "
             "agent = COALESCE(excluded.agent, agent), "
             "native_session_id = COALESCE(excluded.native_session_id, native_session_id), "
-            "persona = COALESCE(excluded.persona, persona)",
+            "persona = COALESCE(excluded.persona, persona), "
+            "prompted_at = COALESCE(excluded.prompted_at, prompted_at)",
             (
                 session.id,
                 session.project_id,
@@ -2977,6 +3013,7 @@ class SqliteStore:
                 session.agent,
                 session.native_session_id,
                 session.persona,
+                session.prompted_at.isoformat() if session.prompted_at else None,
             ),
         )
         self._commit()
@@ -3208,6 +3245,19 @@ class SqliteStore:
         )
         self._commit()
         return cursor.rowcount == 1
+
+    def set_transcript_path(self, session_id: str, transcript_path: str) -> None:
+        """Point the row at the transcript its agent writes, and touch nothing else (P0-W3b).
+
+        For a row whose recorded transcript is not on disk: a cross-account resume reports
+        one under the new account that Claude Code never creates. ``upsert_session`` would
+        also revive the row and set it ``working``, over a hand-over's or a limit's state.
+        """
+        self._conn.execute(
+            "UPDATE team_session SET transcript_path = ? WHERE id = ?",
+            (transcript_path, session_id),
+        )
+        self._conn.commit()
 
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None:
         """The session's turn ended on a usage limit (#146): park it as ``limited``.
@@ -4271,6 +4321,11 @@ class SqliteStore:
         A second LIVE agent with the same label in the same project trips the
         partial unique index and raises ``sqlite3.IntegrityError`` — the service
         layer picks the suffixed label and retries; the store never guesses.
+
+        The first message's state is written with the row and never by an update here:
+        only its own transitions move it (:meth:`mark_prompted`,
+        :meth:`mark_first_prompt_unsent`), so an upsert of a row read before its
+        ``UserPromptSubmit`` cannot put an ``acked`` message back to ``pending``.
         """
         stored = self._upsert_fleet_agent(agent, None)
         assert stored is not None  # nothing guards it
@@ -4295,7 +4350,8 @@ class SqliteStore:
         )
         cursor = self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
             f"{guard}"
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
@@ -4330,6 +4386,8 @@ class SqliteStore:
                 agent.agent,
                 agent.persona,
                 agent.ended_by,
+                agent.first_prompt,
+                agent.first_prompt_at.isoformat() if agent.first_prompt_at else None,
                 *((unless_stopped,) if unless_stopped is not None else ()),
             ),
         )
@@ -4339,6 +4397,74 @@ class SqliteStore:
         stored = self.get_fleet_agent(agent.id)
         assert stored is not None  # just written
         return stored
+
+    def mark_prompted(self, session_id: str, at: datetime, *, agent_id: str | None = None) -> bool:
+        """A prompt started a turn in ``session_id`` (``UserPromptSubmit``): stamp the session's
+        ``prompted_at``, and take the first message of the fleet row it belongs to.
+
+        The row is the one ``agent_id`` names (``AISQUARE_FLEET_AGENT``, the window's own) or,
+        failing that, the live one bound to the session. Only a ``pending`` message is taken:
+        one already ``acked`` keeps its time, and an ``unsent`` one becomes ``acked`` too,
+        since a human's Enter sent it after the listing gave up on it. Returns whether this
+        prompt took one. One transaction, an indexed read and at most two indexed updates:
+        every prompt of every session pays it, and no row is read back.
+        """
+        self._conn.execute(
+            "UPDATE team_session SET prompted_at = ? WHERE id = ?", (at.isoformat(), session_id)
+        )
+        return self.take_first_prompt(at, session_id=session_id, agent_id=agent_id)
+
+    def take_first_prompt(
+        self, at: datetime, *, session_id: str, agent_id: str | None = None
+    ) -> bool:
+        """Mark the first message of ``session_id``'s fleet row taken (``acked``), as
+        :meth:`mark_prompted` does, without stamping ``prompted_at``: for a ``Stop``, which
+        ends a turn that only a prompt starts. A ``UserPromptSubmit`` whose own record failed
+        (a locked store; the hook fails open) left the row ``pending`` under a turn that ran,
+        and a listing read it "first prompt not taken" (review of #330, round 1). Not the
+        stamp: a tell's acknowledgement asks ``prompted_at``, and a Stop is no prompt.
+        Returns whether this took one."""
+        stamp = at.isoformat()
+        # A read, then a compare-and-set on what it found: no ``RETURNING``, which the SQLite
+        # of an older Python lacks.
+        found = self._conn.execute(
+            "SELECT id FROM fleet_agent "
+            "WHERE first_prompt IN ('pending', 'unsent') AND ended_at IS NULL "
+            "AND (id = ? OR (? IS NULL AND session_id = ?)) LIMIT 1",
+            (agent_id, agent_id, session_id),
+        ).fetchone()
+        taken = found is not None and (
+            self._conn.execute(
+                "UPDATE fleet_agent SET first_prompt = 'acked', first_prompt_at = ? "
+                "WHERE id = ? AND first_prompt IN ('pending', 'unsent')",
+                (stamp, found["id"]),
+            ).rowcount
+            == 1
+        )
+        self._conn.commit()
+        return taken
+
+    def mark_first_prompt_unsent(self, agent_id: str, at: datetime) -> bool:
+        """Move ``agent_id``'s first message from ``pending`` to ``unsent``: compare and set,
+        so of two listings that both found it overdue exactly one moves it, and only that one
+        writes the board's ``prompt_unsent``. False when it was not pending any more."""
+        cursor = self._conn.execute(
+            "UPDATE fleet_agent SET first_prompt = 'unsent', first_prompt_at = ? "
+            "WHERE id = ? AND first_prompt = 'pending'",
+            (at.isoformat(), agent_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def first_prompt_rows(self, since: datetime) -> list[FleetAgent]:
+        """Every fleet row given a first message since ``since``, in any project: what doctor's
+        ``fleet-delivery`` row counts."""
+        rows = self._conn.execute(
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
+            "WHERE first_prompt IS NOT NULL AND created_at >= ? ORDER BY created_at",
+            (since.isoformat(),),
+        ).fetchall()
+        return [_row_to_fleet_agent(row) for row in rows]
 
     # --- project groups, pins and order (#140) ------------------------------------------
 
@@ -5317,7 +5443,7 @@ class SqliteStore:
             )
         self._commit()
 
-    # --- other agents' account registry (v39) ---------------------------------------------------
+    # --- other agents' account registry (v40) ---------------------------------------------------
     #
     # ``claude_account``'s methods above, for the rows of one other agent: the same
     # one-statement writes, the default and the alias refused by the indexes.
@@ -5409,7 +5535,7 @@ class SqliteStore:
             )
         self._commit()
 
-    # --- one priority order over every agent's slots (v41) ----------------------------------
+    # --- one priority order over every agent's slots (v42) ----------------------------------
 
     def account_ranks(self) -> dict[int, int]:
         """Each ranked slot's place in the one order, 1 first."""

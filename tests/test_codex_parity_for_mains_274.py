@@ -4,8 +4,9 @@
   the board, as the Spawn dialog's *(none)* role is on Claude Code: launched as ``agent``,
   no worktree, no cycle, no ladder.
 - L5, the launcher's prompt: a ``--task`` spawn with no ``--prompt`` gives Codex the task's
-  read line (``fleet.task_prompt``) as the argument it takes its first prompt by
-  (``positional_prompt``), and types nothing into a pane its start dialogs may hold.
+  kickoff (``team.kickoff_prompt``, #295's W1a) as the argument it takes its first prompt by
+  (``positional_prompt``), from the file its launch reads, and types nothing into a pane its
+  start dialogs may hold.
 - L6, Restart all: a Codex coder that died of an outside SIGTERM is brought back, its
   hand-off on its command line, and a Codex manager restarted after it is told its dead team
   there too, with the command that brings each one back.
@@ -24,6 +25,7 @@ from aisquare.core import harness
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo, TeamTask
 from aisquare.services import claude_accounts as accounts_service
+from aisquare.services import delivery
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
@@ -40,6 +42,7 @@ from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     FakeTmux,
     _add_task,
     _command,
+    _flag,
     claude_on_path,
     project,
     repo,
@@ -51,10 +54,14 @@ KILLED = 143
 
 
 def _argument(tmux: FakeTmux, index: int = -1) -> str:  # noqa: F811
-    """The first prompt a Codex window's command hands the agent: after its last ``--``."""
+    """The first prompt a Codex window's launch hands the agent after its ``--``: the file the
+    window's command names (``--first-prompt-file``, P0-W1a), never the command itself."""
     command = _command(tmux, index)
-    assert command[-2] == "--", command
-    return command[-1]
+    path = _flag(command, delivery.FIRST_PROMPT_FLAG)
+    assert path is not None, command
+    text = Path(path).read_text(encoding="utf-8")
+    assert text not in command, "never in the window's command"
+    return text
 
 
 # --- L4: the role-less agent ---------------------------------------------------------------
@@ -97,7 +104,7 @@ def test_a_codex_task_spawn_with_no_prompt_is_given_its_task_as_its_argument(
     task = _add_task(project, "Ship auth")
     receipt = fleet_service.spawn(project, "coder", agent="codex", worktree=False, task_id=task.id)
     assert receipt.prompt_typed == "yes" and tmux.typed == []
-    assert _argument(tmux) == fleet_service.task_prompt(task)
+    assert f"ASSIGNED TO YOU: {task.id}" in _argument(tmux)
 
 
 def test_a_codex_spawn_with_no_task_and_no_prompt_has_no_argument(
@@ -109,6 +116,7 @@ def test_a_codex_spawn_with_no_task_and_no_prompt_has_no_argument(
     assert receipt.prompt_typed is None and tmux.typed == []
     native = _command(tmux)
     assert native[-2] != "--" or native.count("--") == 1, native
+    assert delivery.FIRST_PROMPT_FLAG not in native
 
 
 # --- L6: Restart all brings back a dead Codex -------------------------------------------------

@@ -85,6 +85,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+LIMITED_EVENT_KINDS: frozenset[str] = frozenset({"limited", "limited_handing_over"})
+"""The kinds a usage-limit board line is written as: ``services.team.LIMITED_KINDS`` (the
+second when the automatic hand-over is moving the agent, #277), named here so this module
+does not import the team service."""
+
 NEEDS_KINDS = (
     "permission",
     "question",
@@ -1147,7 +1152,9 @@ def needs_from_agent(
         return []
     own = [e for e in events if session is not None and e.session_id == session.id]
     attention_event = max((e for e in own if e.kind == "attention"), key=_needs_seq, default=None)
-    limited_event = max((e for e in own if e.kind == "limited"), key=_needs_seq, default=None)
+    limited_event = max(
+        (e for e in own if e.kind in LIMITED_EVENT_KINDS), key=_needs_seq, default=None
+    )
     failed_event = max((e for e in own if e.kind == "turn_failed"), key=_needs_seq, default=None)
     if status.state == "lost":
         return [
@@ -1529,7 +1536,7 @@ def _needs_limited_item(
 
     agent, session = status.agent, status.session
     resets = session.limit_resets_at if session is not None else None
-    if event is not None and event.kind == "limited":
+    if event is not None and event.kind in LIMITED_EVENT_KINDS:
         subject, since = str(event.seq), event.created_at
     else:
         subject = f"{agent.id}:{resets.isoformat() if resets is not None else '-'}"

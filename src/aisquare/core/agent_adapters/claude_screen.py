@@ -150,6 +150,52 @@ def _box_bounds(rows: Sequence[str]) -> tuple[int, int] | None:
     return None
 
 
+def composer_text(lines: Sequence[str]) -> str | None:
+    """What sits in Claude Code's input box, as typed, or ``None`` when no box is drawn.
+
+    Read BEFORE escapes are stripped: Claude Code draws its own words in an empty box dim
+    (SGR 2), a placeholder in a fresh session (``Try "edit <filepath> to..."``) and a
+    suggestion after a turn (``check the board again``), measured on 2.1.309 (P0-W0). Read
+    after the strip, they were drafts. Dim runs are dropped, then the mark and the
+    no-break space Claude Code puts after it, and the box's lines are joined with a space:
+    a long draft wraps there, and a line break typed into it reads the same. ``""`` is an
+    empty box (P0-W1a's delivery reads it; W2's draft guard will).
+    """
+    raw = [line.rstrip() for line in lines]
+    shown = [row for row in raw if PANE_ESCAPES.sub("", row).strip()][-TAIL_LINES:]
+    bounds = _box_bounds([PANE_ESCAPES.sub("", row) for row in shown])
+    if bounds is None:
+        return None
+    top, bottom = bounds
+    body = [_undimmed(row) for row in shown[top + 1 : bottom]]
+    if body:
+        body[0] = INPUT_LINE.sub("", body[0], count=1)
+    return " ".join(" ".join(row.replace("\xa0", " ").split()) for row in body).strip()
+
+
+_SGR = re.compile(r"\x1b\[([0-9;:]*)m")
+
+
+def _undimmed(row: str) -> str:
+    """``row`` with every dim run (SGR 2, until SGR 0 or 22) and then every escape removed."""
+    kept: list[str] = []
+    dim = False
+    position = 0
+    for match in _SGR.finditer(row):
+        if not dim:
+            kept.append(row[position : match.start()])
+        params = [part for part in re.split(r"[;:]", match.group(1)) if part] or ["0"]
+        for param in params:
+            if param == "2":
+                dim = True
+            elif param in ("0", "22"):
+                dim = False
+        position = match.end()
+    if not dim:
+        kept.append(row[position:])
+    return PANE_ESCAPES.sub("", "".join(kept))
+
+
 def dialog_region(rows: Sequence[str]) -> list[str]:
     """The lines a dialog would occupy: what follows the last rule (or all of ``rows``)."""
     rules = [index for index, row in enumerate(rows) if RULE.match(row)]

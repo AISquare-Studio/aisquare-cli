@@ -657,7 +657,9 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
     assert read.status_code == 200 and took < 1.0, f"the read waited {took:.2f} s"
     assert answers == [409] * taps and tmux.sent == []
     # Waited from when a thread was free, the keys behind the first 8 waited a whole 2 s more.
-    assert waits and max(waits) < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.0, waits
+    # One lock wait each, plus scheduling: +1.0 missed by 7 ms on a loaded CI runner (#329's
+    # run 40013797813), so the slack is 1.5 s, still under a second wait.
+    assert waits and max(waits) < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.5, waits
 
 
 def test_keys_whose_wait_ran_out_are_refused_before_the_store_is_read(

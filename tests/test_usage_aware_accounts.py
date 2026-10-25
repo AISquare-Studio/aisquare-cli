@@ -95,6 +95,7 @@ def _payload(
     payload: dict[str, Any] = json.loads(json.dumps(LIVE_USAGE))
     payload["five_hour"]["utilization"] = percent
     payload["five_hour"]["resets_at"] = resets_at.isoformat()
+    payload["limits"][0]["percent"] = percent  # the recorded `limits[]` mirrors the window
     if week is not None:
         payload["seven_day"]["utilization"] = week
     return payload
@@ -1171,13 +1172,20 @@ def test_under_a_hub_the_limit_is_handed_over_from_the_agents_own_row(
 
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
 
-    limited = [text for kind, text in _events(hub) if kind == "limited"]
+    limited = [text for kind, text in _events(hub) if kind in team_service.LIMITED_KINDS]
     assert len(limited) == 1 and limited[0].startswith("coder-db hit its weekly limit"), limited
-    assert f"`{switch}`" in limited[0]
-    assert nudged == [work.id], "the agent's own project's manager"
+    assert [kind for kind, _ in _events(hub) if kind in team_service.LIMITED_KINDS] == [
+        team_service.LIMITED_HANDING_OVER
+    ]
+    # The hand-over moves it, so the line names no switch and wakes no manager (#277)…
+    assert team_service.HANDING_OVER_SAID in limited[0] and switch not in limited[0]
+    assert nudged == []
     assert len(started) == 1 and started[0][-4:-2] == ["hand-over", "sess-fleet"]
     assert runner.invoke(app, ["hook", "hand-over", "sess-fleet"]).exit_code == 0
     assert moved == [(work.id, "coder-db")]
+    # …and a hand-over that fails wakes the agent's own project's manager, not the hub's.
+    team_service.hook_handover_failed(hub.id, "not switched", session_id="sess-fleet")
+    assert nudged == [work.id], "the agent's own project's manager"
 
     with store_session() as store:
         parked = store.get_session("sess-fleet")
@@ -2115,3 +2123,226 @@ def test_the_accounts_section_defaults_and_round_trips_through_config_set(
     assert limit.exit_code == 0 and load_config().accounts.on_limit == "wait"
     shown = runner.invoke(app, ["config", "get", "accounts.switch_at"])
     assert shown.stdout.strip() == "accounts.switch_at = 85"
+
+
+# --------------------------------------------------------------------------- P0-W3 (#277)
+#
+# A pick reads every window the endpoint sends — the per-family weeks and a locked one —
+# and remembers an account that refused with a 429 until the reset it named, so the
+# hand-over does not move an agent onto an account that refuses it at once. And with
+# `prefer = "reset-soonest"` the week that lapses first is spent first.
+
+
+def test_a_spent_opus_week_is_no_room_for_an_opus_agent(fake_home: Path) -> None:
+    _slot("spent@example.com", "tok-spent")  # slot 2: first in order, its Opus week gone
+    _slot("room@example.com", "tok-room")  # slot 3: busier five hours, Opus to spare
+    spent = _payload(10, week=20)
+    spent["seven_day_opus"] = {"utilization": 100.0, "resets_at": "2026-09-12T00:00:00+00:00"}
+    room = _payload(40, week=30)
+    room["seven_day_opus"] = {"utilization": 10.0, "resets_at": "2026-09-12T00:00:00+00:00"}
+    fetch = _Usage({"tok-spent": spent, "tok-room": room})
+
+    picked, notes = service.headroom_choice(
+        service.list_accounts(), switch_at=85, family="opus", fetch=fetch
+    )
+    assert picked is not None and picked.slot == 3
+    # Spent for an Opus agent: skipped outright, never ranked (P0-W3c).
+    assert any("account 2 skipped — its opus week is spent" in note for note in notes), notes
+
+    # The control: the Opus week binds an Opus agent only; another family, or none, is
+    # judged on the windows shared by every model, and slot 2 leads again.
+    for family in (None, "sonnet"):
+        other, _ = service.headroom_choice(
+            service.list_accounts(), switch_at=85, family=family, fetch=fetch
+        )
+        assert other is not None and other.slot == 2, family
+
+
+def test_a_locked_window_reads_full(fake_home: Path) -> None:
+    _slot("locked@example.com", "tok-locked")
+    _slot("open@example.com", "tok-open")
+    locked = _payload(0, week=5)
+    locked["five_hour"]["locked_reason"] = "usage_limit"
+    fetch = _Usage({"tok-locked": locked, "tok-open": _payload(60)})
+
+    reading = service.usage(service.resolve("2"), fetch=fetch)
+    assert reading.session_percent == 100.0  # however empty its figure reads
+
+    picked, _ = service.headroom_choice(service.list_accounts(), switch_at=85, fetch=fetch)
+    assert picked is not None and picked.slot == 3
+
+
+def test_an_account_that_refused_weekly_is_skipped_until_its_reset(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: None)
+    _slot("refused@example.com", "tok-refused")  # slot 2: the endpoint still reads it empty
+    _slot("other@example.com", "tok-other")  # slot 3
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_refused", "coder-db", "sess-fleet")
+    with store_session() as store:
+        row = store.get_fleet_agent("agt_refused")
+        assert row is not None
+        store.upsert_fleet_agent(row.model_copy(update={"account_slot": 2}))
+    fetch = _Usage({"tok-refused": _payload(5, week=10), "tok-other": _payload(50, week=50)})
+
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+
+    picked, notes = service.headroom_choice(service.list_accounts(), switch_at=85, fetch=fetch)
+    assert picked is not None and picked.slot == 3
+    assert any(
+        note.startswith("headroom: account 2 skipped — weekly limit until ")
+        and ", refused " in note
+        for note in notes
+    ), notes
+    assert "tok-refused" not in fetch.calls  # a refusal is an answer: not asked again
+
+    with store_session() as store:
+        [mark] = store.list_meta("account_limit:2:").values()
+    assert datetime.fromisoformat(json.loads(mark)["until"]).weekday() == 0  # the Monday named
+
+    # Past the reset it named, the account is a candidate again (the mark re-set to an hour
+    # from this suite's clock, which the test tokens outlive).
+    service.remember_limit(2, "weekly", NOW + timedelta(hours=1))
+    still, _ = service.headroom_choice(service.list_accounts(), switch_at=85, fetch=fetch)
+    assert still is not None and still.slot == 3
+    later, _ = service.headroom_choice(
+        service.list_accounts(), switch_at=85, fetch=fetch, now=NOW + timedelta(hours=2)
+    )
+    assert later is not None and later.slot == 2
+
+
+def test_reset_soonest_prefers_the_week_that_ends_first(fake_home: Path) -> None:
+    _slot("late@example.com", "tok-late")  # slot 2: first by priority, its week ends Friday
+    _slot("soon@example.com", "tok-soon")  # slot 3: its week ends tomorrow
+    _slot("over@example.com", "tok-over")  # slot 4: ends soonest, but over the line
+    late, soon, over = _payload(20, week=30), _payload(20, week=60), _payload(20, week=90)
+    late["seven_day"]["resets_at"] = (NOW + timedelta(days=3)).isoformat()
+    soon["seven_day"]["resets_at"] = (NOW + timedelta(days=1)).isoformat()
+    over["seven_day"]["resets_at"] = (NOW + timedelta(hours=2)).isoformat()
+    fetch = _Usage({"tok-late": late, "tok-soon": soon, "tok-over": over})
+
+    picked, notes = service.headroom_choice(
+        service.list_accounts(), switch_at=85, prefer="reset-soonest", fetch=fetch
+    )
+    assert picked is not None and picked.slot == 3
+    assert any("account 3's week resets first" in note for note in notes), notes
+
+    # `priority`, the default, behaves as it always has.
+    first, _ = service.headroom_choice(service.list_accounts(), switch_at=85, fetch=fetch)
+    assert first is not None and first.slot == 2
+
+
+def test_a_switch_by_hand_never_falls_back_to_a_marked_account(
+    fake_home: Path, work: ProjectInfo
+) -> None:
+    """Review of #304 (reviewer-a, major 2): the marks gated the headroom rung alone, so a
+    manual switch with every other account marked fell to the machine default and moved the
+    agent onto the account that had just refused it — the very switch `handover_failed`
+    tells the manager to run. Without `--to`, a marked account is no target; with it, the
+    choice is the operator's."""
+    _slot("left@example.com", "tok-left")  # slot 2: the account being left
+    _slot("refused@example.com", "tok-refused")  # slot 3: refused weekly, the default
+    service.set_default("3")
+    service.remember_limit(3, "weekly", NOW + timedelta(days=2))
+    fetch = _Usage({"tok-left": _payload(95), "tok-refused": _payload(5)})
+
+    by_hand = service.choose_for_handover(role="coder", project=work, exclude=(2,), fetch=fetch)
+
+    assert by_hand.account is None
+    assert any("account 3 skipped — weekly limit until " in note for note in by_hand.notes)
+    named = service.choose_for_handover("3", role="coder", project=work, exclude=(2,))
+    assert named.account is not None and named.account.slot == 3  # --to is the operator's
+
+
+# --------------------------------------------------------------------------- P0-W3c
+#
+# What the endpoint really sends (P0-W0, 2026-10-23, Claude Code 2.1.309): every
+# `seven_day_<family>` key is null, and the per-family week is a `limits[]` entry of kind
+# `weekly_scoped` whose `scope.model.display_name` names the family; the shared week is
+# `weekly_all`. W3 read only the null keys, so a spent family week never blocked a pick.
+
+
+def _w0_payload(
+    *, session: float, week: float, scoped: float, family: str = "Opus"
+) -> dict[str, Any]:
+    """W0's recorded shape (values invented), with the family week at ``scoped`` percent."""
+    resets = (NOW + timedelta(days=3)).isoformat()
+    return {
+        "five_hour": {
+            "utilization": session,
+            "resets_at": (NOW + timedelta(hours=3)).isoformat(),
+            "limit_dollars": None,
+            "locked_reason": None,
+        },
+        "seven_day": {"utilization": week, "resets_at": resets, "locked_reason": None},
+        "seven_day_oauth_apps": None,
+        "seven_day_opus": None,
+        "seven_day_sonnet": None,
+        "seven_day_breakdown": {"utilization": 99.0, "resets_at": resets},  # not a window
+        "limits": [
+            {"kind": "session", "group": "session", "percent": session, "scope": None},
+            {"kind": "weekly_all", "group": "weekly", "percent": week, "scope": None},
+            {
+                "kind": "weekly_scoped",
+                "group": "weekly",
+                "percent": scoped,
+                "resets_at": resets,
+                "scope": {"model": {"id": None, "display_name": family}, "surface": None},
+            },
+        ],
+        "weekly_scoped_shares": [{"limit_index": 2, "used_percent_of_weekly": 9}],
+    }
+
+
+def test_a_weekly_scoped_limit_is_the_family_week_and_a_spent_one_blocks_a_pick(
+    fake_home: Path, work: ProjectInfo
+) -> None:
+    _slot("spent@example.com", "tok-spent")  # slot 2: first in order, its Opus week spent
+    _slot("room@example.com", "tok-room")  # slot 3
+    fetch = _Usage(
+        {
+            "tok-spent": _w0_payload(session=20, week=30, scoped=100),
+            "tok-room": _w0_payload(session=40, week=50, scoped=10),
+        }
+    )
+
+    reading = service.usage(service.resolve("2"), fetch=fetch)
+    assert reading.family_week_percent == {"opus": 100.0}  # breakdown is no family
+    assert reading.family_week_resets_at["opus"] == NOW + timedelta(days=3)
+    assert service.headroom_percent(reading, "opus") == 100.0
+    assert service.headroom_percent(reading, "sonnet") == 30.0
+
+    picked, _ = service.headroom_choice(
+        service.list_accounts(), switch_at=85, family="opus", fetch=fetch
+    )
+    assert picked is not None and picked.slot == 3
+    # The live reading left a mark, so a launch picking from the cache (which keeps the two
+    # shared windows only) skips slot 2 too…
+    with store_session() as store:
+        assert list(store.list_meta("account_limit:2:")) == ["account_limit:2:opus"]
+    service.remember_limit(2, "opus", NOW - timedelta(hours=1))  # the mark, lifted
+    # …and without the mark, the reading itself rules it out. A switch by hand takes the
+    # least bad, but never an account whose family week is spent.
+    _spent_too = _Usage(
+        {
+            "tok-spent": _w0_payload(session=20, week=30, scoped=100),
+            "tok-room": _w0_payload(session=95, week=96, scoped=10),
+        }
+    )
+    by_hand = service.choose_for_handover(
+        role="coder", project=work, exclude=(), fetch=_spent_too, family="opus"
+    )
+    assert by_hand.account is not None and by_hand.account.slot == 3
+    assert any("account 2 skipped — its opus week is spent" in n for n in by_hand.notes), (
+        by_hand.notes
+    )
+
+
+def test_weekly_all_is_the_shared_week(fake_home: Path) -> None:
+    _slot("one@example.com", "tok-one")
+    payload = _w0_payload(session=10, week=20, scoped=5)
+    payload["limits"][1]["percent"] = 90  # the shared week reads fuller in limits[] than seven_day
+    reading = service.usage(service.resolve("2"), fetch=_Usage({"tok-one": payload}))
+    assert reading.week_percent == 90.0

@@ -38,14 +38,14 @@ from aisquare.cli.ui.app import FleetApp, HelpScreen
 from aisquare.cli.ui.remote_control import READ_ONLY_REASON, RemoteController, load_remote_state
 from aisquare.cli.ui.views import remote as remote_view
 from aisquare.cli.ui.views.remote import RemotePanel, qr_text
-from aisquare.core import paths, state_file
+from aisquare.core import clipboard, paths, state_file
 from aisquare.core import tmux as tmux_core
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import read_state, update_state
 from aisquare.core.tmux import Completed
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import remote_page, remote_server
-from aisquare.services.ngrok_tunnel import INSTALL_HINT, NgrokTunnel, build_public_url
+from aisquare.services.ngrok_tunnel import INSTALL_HINT, NgrokTunnel, Tunnel, build_public_url
 from aisquare.services.remote_server import UNLOCK_GLOBAL_FAILURES, Runtime, UnlockBudget
 from tests import toast_log
 from tests.fake_clipboard import NEEDS_POSIX, TEXT, install
@@ -111,7 +111,7 @@ def no_agents(monkeypatch: pytest.MonkeyPatch) -> None:
 def drive(
     fn: Callable[[Pilot[None]], Awaitable[T]],
     *,
-    tunnel: Callable[[int], NgrokTunnel],
+    tunnel: Callable[[int], Tunnel],
     size: tuple[int, int] = SIZE,
 ) -> T:
     """Run ``fn`` against a mounted ``FleetApp`` whose Remote uses the stub server + ``tunnel``.
@@ -279,7 +279,9 @@ def test_shift_r_opens_the_remote_panel_and_the_switch_turns_remote_on_and_off()
     drive(go, tunnel=fake_tunnel_factory(url=PUBLIC))
 
 
-def test_with_ngrok_absent_the_modal_shows_the_install_hint_and_the_local_link() -> None:
+def test_with_ngrok_absent_the_modal_shows_why_and_the_local_link() -> None:
+    """Only a damaged install, without the bundled ngrok (#34): it says so, with no command."""
+
     async def go(pilot: Pilot[None]) -> None:
         app = pilot.app
         assert isinstance(app, FleetApp)
@@ -289,7 +291,9 @@ def test_with_ngrok_absent_the_modal_shows_the_install_hint_and_the_local_link()
         assert app.remote.running  # locally on, no tunnel: PLAN §6 fallback, no crash
         status = shown(modal.query_one("#remote-status", Static))
         assert status == INSTALL_HINT
-        assert "ngrok is not installed" in status and "ngrok config add-authtoken" in status
+        assert (
+            "damaged" in status and "not installed" not in status and "ngrok config" not in status
+        )
         link = shown(modal.query_one("#remote-link", Static))
         info = app.remote.info
         assert info is not None
@@ -459,6 +463,11 @@ def test_copy_puts_the_link_on_the_native_clipboard_beside_osc52_and_says_so_onc
     # Pinned, so sys.platform is never patched while Remote's threads run (review of
     # #266, round 1): remote_server takes macOS-only paths, through libc, on "darwin".
     board = install(tmp_path, monkeypatch, platform=None, pin=True)
+    # The fake tool is a fresh interpreter, and on a loaded box it outlived the shipped
+    # 2 s: the write was killed, OSC 52 alone still made "Link copied", and the board read
+    # [] (#40, seq 1294). What is pinned here is where the link goes, not that bound,
+    # which test_clipboard pins.
+    monkeypatch.setattr(clipboard, "WRITE_TIMEOUT", 15.0)
 
     async def go(pilot: Pilot[None]) -> tuple[str | None, list[str], list[str]]:
         app = pilot.app
@@ -477,11 +486,11 @@ def test_copy_puts_the_link_on_the_native_clipboard_beside_osc52_and_says_so_onc
         monkeypatch.setattr(app._driver, "write", writes.append)
         told = toast_log.record(app)
         modal.query_one("#remote-copy", Button).press()
-        for _ in range(100):
+        for _ in range(400):  # the toast is raised once the native write is over
             if told:
                 break
             await pilot.pause(0.05)
-        await pilot.pause(0.2)
+        await pilot.pause(0.2)  # a second toast would land by now
         return app.remote.link_url(), list(told), [w for w in writes if "\x1b]52;" in w]
 
     link, told, osc52 = drive(go, tunnel=fake_tunnel_factory(url=f"https://{TEXT}.ngrok-free.dev"))
@@ -694,10 +703,11 @@ def test_m_is_refused_while_focus_is_in_a_view_and_the_palette_lists_remote_cont
     drive(go, tunnel=missing_ngrok)
 
 
-def test_r_is_off_the_footer_so_the_footer_fits_80_columns() -> None:
+def test_r_remote_is_in_the_footer_and_the_footer_still_fits_80_columns() -> None:
     """The footer is the one row every screen of the shell shares, and at 80 columns
-    "R remote" pushed the keys after it off the edge. ``R`` still opens the panel, and
-    the help screen and the palette list it (the test above)."""
+    "R remote" pushed the keys after it off the edge, so it left the footer, and the owner
+    did not find Remote (#33). It is back, and fits: the sidebar's ↓ and ↑ share one entry,
+    "↓↑ move". ``R`` opens the panel, and the help screen and the palette list it too."""
 
     async def go(pilot: Pilot[None]) -> str:
         app = pilot.app
@@ -710,7 +720,8 @@ def test_r_is_off_the_footer_so_the_footer_fits_80_columns() -> None:
 
     footer = drive(go, tunnel=missing_ngrok, size=(80, 24))
     assert "help" in footer, f"the last row is the footer: {footer!r}"
-    assert "remote" not in footer
+    assert "R remote" in footer and "↓↑ move" in footer, footer
+    assert footer.index("R remote") < footer.index("? help"), "nothing after it is cut off"
 
 
 # --- state survives a restart of the TUI ---------------------------------------------------------
@@ -784,8 +795,13 @@ def test_the_panels_first_paint_never_waits_for_another_processs_lock_on_remote_
     """The panel's first paint was the process's first read of ``remote.json``, which makes
     a missing file under ``remote.json.lock``: on Textual's thread, the fleet UI froze for
     the 2 s another process held it (sweep 3 of #243). It opens at once, and paints the file
-    once the writer's thread has read it."""
-    monkeypatch.setattr(remote_server, "STATE_LOCK_WAIT_SECONDS", 10.0)
+    once the writer's thread has read it.
+
+    Bounded by half the lock's wait, not by a wall time: a paint that waits for the lock
+    takes all of it (10 s), and a slow runner took 1.6 s to open a panel that did not (seq
+    370)."""
+    lock_wait = 10.0
+    monkeypatch.setattr(remote_server, "STATE_LOCK_WAIT_SECONDS", lock_wait)
     state = paths.remote_state_path()
     state.parent.mkdir(parents=True, exist_ok=True)
     held = os.open(state.with_name(f"{state.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
@@ -806,10 +822,7 @@ def test_the_panels_first_paint_never_waits_for_another_processs_lock_on_remote_
         return took, made_meanwhile
 
     took, made_meanwhile = drive(go, tunnel=missing_ngrok)
-    # A paint that waited on the lock takes the patched wait, 10 s. Half of it tells the two
-    # apart on a loaded runner, where an unblocked first paint took 1.6 s against the old
-    # 1.5 s bound (main 09f48563, run 39969977041, py3.12 and ambient proxy-down).
-    assert took < remote_server.STATE_LOCK_WAIT_SECONDS / 2, f"the panel took {took:.1f} s"
+    assert took < lock_wait / 2, f"the panel took {took:.1f} s to open"
     assert not made_meanwhile and state.exists() and remote_server.remote_state_loaded()
 
 
@@ -1156,6 +1169,9 @@ def test_the_write_switch_is_remote_jsons_whatever_an_older_state_json_says() ->
         app = pilot.app
         assert isinstance(app, FleetApp)
         assert app.remote.running, "restored"
+        # The restore's write of remote.json first: read mid-replace, Windows refused the
+        # open (PermissionError 13, CI run 39550669207), and this read takes no lock.
+        await written(pilot)
         assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
         modal = await open_panel(pilot)
         assert modal.query_one("#remote-allow-write", Switch).value is False
@@ -1818,6 +1834,11 @@ def test_a_remote_that_does_not_come_back_at_start_is_toasted() -> None:
             assert isinstance(app, FleetApp)
             await pilot.pause()
             assert not app.remote.running
+            # Said from the start's own thread: waited for, as one pause did not always.
+            for _ in range(100):
+                if any(note.startswith("Remote could not start — ") for note in toasts(app)):
+                    break
+                await asyncio.sleep(0.05)
             said = [note for note in toasts(app) if note.startswith("Remote could not start — ")]
             assert said and "is the port in use?" in said[0]
 

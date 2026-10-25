@@ -24,7 +24,7 @@ instead of cold. The memory also works on its own, without the UI.
 
 Needs [uv](https://docs.astral.sh/uv/) and
 [Claude Code](https://claude.com/claude-code); no installer, no tmux. Node 22+
-is optional and adds the codebase snapshot. Run `init` inside your repo:
+is optional and adds an on-demand codebase snapshot. Run `init` inside your repo:
 
 ```sh
 UV_PYTHON_DOWNLOADS=automatic uv tool install --python 3.13 aisquare-cli
@@ -91,9 +91,10 @@ board. Every effect is one of its 24 tools, each leaving one audit event with
 your words; `stop`, `spawn` and `restart` happen only when your words name what
 they act on, and a refusal is said, never faked.
 
-It ships **off**. Turn it on once, or for one shell with
-`AISQUARE_EXPERIMENTAL_CAPTAIN=1`; while it is off, `aisquare captain` refuses
-with one line saying so, and `asq` shows no captain:
+It ships **off**. Turn it on in `asq` under *⚙ Settings ▸ Captain*, at once and
+with no restart, or once from a shell, or for one shell with
+`AISQUARE_EXPERIMENTAL_CAPTAIN=1`, which wins over the setting; while it is off,
+`aisquare captain` refuses with one line saying so, and `asq` shows no captain:
 
 ```sh
 aisquare config set experimental.captain true
@@ -114,7 +115,7 @@ backed by one SQLite file: no daemon, no cloud dependency. Sign in with
 - Python 3.11+ if you install by hand (the one-liner brings its own 3.13).
 - [Claude Code](https://claude.com/claude-code) for the agents, and tmux 3.2+
   for the fleet.
-- Node 22+, optional, for the codebase snapshot each session starts from.
+- Node 22+, optional, for a codebase snapshot packed on demand (`aisquare project onboard`).
   The symbol index (`aisquare code find|refs|similar`) needs nothing extra for Python.
 
 The package is `aisquare-cli`; the command is `aisquare`, with `asq` as the

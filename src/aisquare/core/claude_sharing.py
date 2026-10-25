@@ -362,6 +362,33 @@ def shows_trust_prompt(lines: Iterable[str]) -> bool:
     return not any(_INPUT_BOX.fullmatch(row) for row in rows[exits[-1] + 1 :])
 
 
+_SECURITY_TITLE = re.compile(r"Security notes:")
+_CONTINUE = re.compile(r"Press Enter to continue")
+
+
+def shows_security_notes(lines: Iterable[str]) -> bool:
+    """Whether a captured screen is Claude Code's first-run Security notes screen.
+
+    2.1.309's onboarding draws "Security notes:" over two numbered notes and "Press Enter
+    to continue…", whose Enter is its only key: text typed there is lost (#32, L2). Read as
+    :func:`shows_trust_prompt` reads its question: the title, then the key hint on a row of
+    its own below it, with no input box under that. A Claude Code string, not a contract:
+    pinned by a test with the screen.
+    """
+    rows = [
+        row
+        for line in lines
+        if (row := " ".join(_SCREEN_ESCAPES.sub("", line).split()).strip(_BORDERS))
+    ]
+    titles = [at for at, row in enumerate(rows) if _SECURITY_TITLE.fullmatch(row)]
+    if not titles:
+        return False
+    hints = [at for at, row in enumerate(rows) if at > titles[-1] and _CONTINUE.match(row)]
+    if not hints:
+        return False
+    return not any(_INPUT_BOX.fullmatch(row) for row in rows[hints[-1] + 1 :])
+
+
 # --- one settings.json ------------------------------------------------------------------
 
 SETTINGS_FILE = "settings.json"

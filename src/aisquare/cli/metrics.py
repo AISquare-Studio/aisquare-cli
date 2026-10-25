@@ -1,5 +1,7 @@
-"""``aisquare metrics`` — what the CI test bed recorded, per turn, and what each agent
-session spent in tokens (``metrics tokens``)."""
+"""``aisquare metrics`` — what the CI test bed recorded, per turn, what each agent
+session spent in tokens as the hooks recorded it (``metrics tokens``), and the same
+counted live from each transcript with its wakes, deltas and compactions (``metrics
+ledger``)."""
 
 from __future__ import annotations
 
@@ -10,6 +12,7 @@ import typer
 from aisquare.cli.common import (
     emit_metrics_summary,
     emit_token_ledger,
+    emit_token_summary,
     emit_turn_metrics,
     parse_since,
     refuse_conflicting_scope,
@@ -68,6 +71,26 @@ def list_(
 
 @app.command("tokens")
 def tokens(
+    session: Annotated[
+        str | None, typer.Option("--session", help="One session (an id or its prefix).")
+    ] = None,
+    project: Annotated[str | None, typer.Option("--project", help=_PROJECT_HELP)] = None,
+    all_projects: Annotated[bool, typer.Option("--all", help=_ALL_HELP)] = False,
+) -> None:
+    """Token usage of recorded sessions: raw, cost-weighted and at list price.
+
+    Read off each session's transcript by the Stop hook, deduplicated per API
+    request.
+    """
+    project_id = _scope(project, all_projects, session)
+    sessions = metrics_service.session_usages(project_id=project_id, session_id=session)
+    emit_token_summary(
+        metrics_service.summarize_tokens(sessions, project_id=project_id, session_id=session)
+    )
+
+
+@app.command("ledger")
+def ledger(
     session: Annotated[str | None, typer.Option("--session", help=_SESSION_HELP)] = None,
     project: Annotated[str | None, typer.Option("--project", help=_PROJECT_HELP)] = None,
     all_projects: Annotated[bool, typer.Option("--all", help=_ALL_HELP)] = False,

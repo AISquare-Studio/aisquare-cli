@@ -3,10 +3,10 @@
 **Your agent starts every session already oriented.** `agents connect
 claude-code` installs lifecycle hooks into `~/.claude/settings.json` (merged
 carefully — your existing hooks are never touched). From then on, each session
-begins with a directive pointing Claude at a packed snapshot of the codebase
-(a structure-only skeleton, read first when it fits one Read; a per-file index
-into the rest, opened on demand — orders of magnitude cheaper than grepping
-around), your in-scope context entries, and the project's prompt history.
+begins with your in-scope context entries, less any preference a `CLAUDE.md`
+Claude Code loads already holds (it would be in front of the agent twice), and
+your prompts are captured for `aisquare log`. A session with a team also gets
+the board and its protocol; a solo one does not.
 
 **Your agent remembers what you tell it.** `aisquare remember "prefer pytest
 over unittest"` persists across every session and every project. Context
@@ -83,23 +83,14 @@ aisquare project forget ../old-checkout       # one registration; --purge delete
 aisquare project prune --missing --worktrees  # the stale ones, after a confirmation (or --yes)
 ```
 
-`aisquare project onboard` (also run by `init`) packs the codebase with
-Repomix into three artifacts under `~/.aisquare/projects/<id>/snapshot/`: a
-**full pack** (every file), a **skeleton** (structure + signatures — the
-cheap thing agents orient from), and a **per-file index** (char offsets +
-token counts, so an agent can open one file's slice of the pack instead of
-all of it). The index, `index.json`, is a JSON array with one file per line, so
-a Grep for a path returns that file's line and a Read can page it; a skeleton
-is kept only beside the pack it was made with. Re-run with `--refresh` after big
-changes.
-
-The session-start directive says "read this FIRST" only of a skeleton (the
-pack when there is no skeleton) of at most 12 000 tokens, as the snapshot
-counts them: one default Read. Claude Code's Read returns a page of at most
-25 000 of its own tokens, which held about 14 000 of these on a measured
-skeleton. A bigger one is named with its size and "never read it from the
-top": the agent finds the files it needs in the index and reads only their
-slices, so a skeleton paged in whole is never carried by every later request.
+`aisquare project onboard` packs the codebase on demand with Repomix (`init`
+no longer does, and no agent is pointed at the pack) into three artifacts
+under `~/.aisquare/projects/<id>/snapshot/`: a **full pack** (every file), a
+**skeleton** (structure + signatures), and a **per-file index** (char offsets +
+token counts, for opening one file's slice of the pack instead of all of it).
+The index, `index.json`, is a JSON array with one file per line, so a Grep for a
+path returns that file's line and a Read can page it; a skeleton is kept only
+beside the pack it was made with. Re-run with `--refresh` after big changes.
 
 A pack has to fit a **token budget**: `[snapshot] max_tokens` in
 `~/.aisquare/config.toml`, 150 000 by default (the cap the server packs with).
@@ -107,10 +98,7 @@ The full pack is tried first, then a compressed one; when even that is over,
 the compressed pack is kept as the **skeleton** with its per-file index and the
 full pack is skipped — `onboard` and `aisquare doctor` both say `snapshot:
 skeleton only: 2030000 tokens, 1234 files indexed; full pack skipped over
-budget 150000 (10990000 tokens)`, and agents are oriented from it through its
-index, told its size and never to read it from the top.
-The budget gates only the full pack: an agent is handed paths and opens slices
-through the index, never a whole pack in a prompt. To keep the full pack too,
+budget 150000 (10990000 tokens)`. The budget gates only the full pack. To keep the full pack too,
 raise the budget or leave more out, then re-pack:
 
 ```sh
@@ -150,9 +138,8 @@ The index is built when a project is onboarded (`init`, `project onboard`,
 doctor's `code index` row says "building" until it is ready. A query that comes
 first (`code find`, `refs`, `similar`) builds the index itself, or says to try
 again while the background build still holds it. Where one exists, each session
-start names the commands in its directive (two lines) and starts an incremental
-refresh in the background, at most once a minute per project, never on the hook's
-own time. `aisquare code index` brings it up to date by hand: only files whose
+start starts an incremental refresh in the background, at most once a minute per
+project, never on the hook's own time; it adds no line to the session's context. `aisquare code index` brings it up to date by hand: only files whose
 size, time or content moved are read again, deleted files are dropped, and a
 change of parser rebuilds it all. On aisquare-cli itself (500 Python files) a full
 build takes about 4 s and a one-file refresh 0.03 s. It lives in

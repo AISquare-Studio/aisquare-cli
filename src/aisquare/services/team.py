@@ -2240,6 +2240,13 @@ def hook_session_start(
     been activated — or the session was launched with ``AISQUARE_ROLE``,
     which activates it. With ``[projects] capture`` off, silent too in a project
     nobody added, role or not: ``launch`` adds its own (``team on``), a fleet spawn its.
+
+    Silent in a SOLO session too (:func:`_solo`): an active project — which starting
+    aisquare's MCP server makes one — with no role, no fleet row, no open task and no
+    other live session has nobody to coordinate with, and the board and protocol rode
+    every one of its requests. It is ON the board all the same, so the next session to
+    start sees it, and is marked unbriefed (:func:`_unbriefed`): its first prompt after
+    a team forms brings the board (:func:`hook_prompt_heartbeat`).
     """
     if not orchestrator.team_enabled():
         return ""
@@ -2250,11 +2257,13 @@ def hook_session_start(
         role = orchestrator.env_role()
         if not store.team_active(project.id) and role is None:
             return ""
+        known = store.get_session(session_id)
+        # Read before anything is written: it decides whether there is a team at all.
+        solo = _solo(store, project.id, session_id, role=role, known=known)
         # Only now, for the session row below: captured before the board was asked, every
         # session start in any directory took the store's write lock for nothing (review of
         # #259, round 18).
         project_service.capture(store, project)
-        known = store.get_session(session_id)
         now = _now()
         asked_persona, persona_note, named = _asked_persona(store, project.id)
         # The account the session runs on: its fleet row's first (P2-W7), else the reported
@@ -2290,15 +2299,21 @@ def hook_session_start(
         if source != _COMPACT_SOURCE or _take_quiet_compaction(store, session, source):
             # A session that just started, cleared or resumed sits at its prompt until
             # something is typed — whose own hook says `working`. Left at the upsert's
-            # `working`, the row read busy for its whole fresh window: `say` refused to
-            # type into the captain (T2 fix round), and every other role's `fleet tell`
-            # filed a note its idle agent never read (#123). A compaction can come
-            # mid-turn, so it keeps what the turn said; a hand-over's mark is kept by
-            # `touch_session` itself. One rule for every source (P1 WS-4, #281): the
-            # compaction the quiet compaction typed into a manager waiting at its prompt ran
-            # no turn, and left at `working` the manager was one no nudge reached.
+            # `working`, the row read busy for its whole fresh window: the captain's `say`
+            # refused to type into it (T2 fix round), every other role's `fleet tell` filed
+            # a note its idle agent never read (#123), and a `fleet spawn` with no prompt
+            # read working on the board and in `fleet ls` while it sat idle (#32, L1). A
+            # compaction can come mid-turn, so it keeps what the turn said; a hand-over's
+            # mark is kept by `touch_session` itself. One rule for every source (P1 WS-4,
+            # #281): the compaction the quiet compaction typed into a manager waiting at its
+            # prompt ran no turn, and left at `working` the manager was one no nudge reached.
             store.touch_session(session.id, state="waiting")
             session = store.get_session(session.id) or session
+        if solo:
+            store.set_meta(_unbriefed(session.id), "1")
+            return collision
+        if known is not None:
+            store.delete_meta(_unbriefed(session.id))
         if experimental.captain_role(base_role(session.role)):
             # Bound like every fleet row (rule 1 of the fleet-row section), or a
             # `/clear` left the row on the ended id and `say` waited on a session that
@@ -2316,7 +2331,6 @@ def hook_session_start(
         assigned = _assignment(store, session.id, project.id, named=named)
         _settle_owed_persona(store, session)  # this start briefs the persona itself
         fleet = _cycle_project(store, project, cwd, session.id, named=named)
-        persona_root = _directory_root(cwd) if session.persona and fleet is None else None
         if base_role(session.role) == MANAGER_ROLE:
             # Every source: a compaction, a restart and a resume all start from this, not
             # from the board a new manager then re-read in full (P1 WS-4, #281).
@@ -2327,7 +2341,7 @@ def hook_session_start(
                 assigned=assigned,
                 persona_note=persona_note,
                 fleet=fleet,
-                persona_root=persona_root,
+                cwd=cwd,
             )
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
@@ -2340,13 +2354,100 @@ def hook_session_start(
             assigned=assigned,
             briefing=True,
             persona_note=persona_note,
-            # Asked only when the briefing needs it: one git call, which a session with no
-            # persona, or one whose cycle names its project, never pays.
-            persona_root=persona_root,
+            cwd=cwd,
             labels=lambda: slot_labels_via(store),
             fleet=fleet,
             links=_link_marks(project.id, store),
         )
+
+
+#: The task states that are work someone may pick up or is doing: a board holding one is
+#: a team to coordinate with, whoever else is on it.
+_OPEN_TASKS: frozenset[TaskStatus] = frozenset({"todo", "doing", "review", "blocked"})
+
+
+def _unbriefed(session_id: str) -> str:
+    """The ``team_meta`` key that marks a session on the board that has not been shown the
+    board and protocol: it was solo when it came (:func:`_solo`). Removed when the board
+    is rendered for it, and when it ends."""
+    return f"unbriefed:{session_id}"
+
+
+#: The roles that make no session a member by themselves: none chosen, and #303's plain
+#: ``agent`` run by hand (``aisquare launch agent``), which the owner decided is solo
+#: when it is alone on the board (2026-10-24). A fleet-spawned one is a member by its
+#: fleet row, and one launched with a persona by its persona.
+_NO_ROLE = frozenset({"unassigned", harness.PLAIN_ROLE})
+
+
+def member_by_env(role: str | None) -> bool:
+    """Whether a session is a team member by how it was started, before any board is
+    read: a role that is a role (not :data:`_NO_ROLE`), a fleet row, or a persona. The one
+    rule for the hooks (:func:`_solo`) and the MCP server's instructions
+    (``mcp_server._serves_a_team``), which told a persona-only session apart (#45, n1)."""
+    if role is not None and base_role(role) not in _NO_ROLE:
+        return True
+    return orchestrator.env_fleet_agent() is not None or orchestrator.env_persona() is not None
+
+
+def _solo(
+    store: ContextStore,
+    project_id: str,
+    session_id: str,
+    *,
+    role: str | None,
+    known: TeamSession | None,
+) -> bool:
+    """Whether a session starting on this board has nobody to coordinate with: no role
+    (in its environment or on its row), no fleet row, no persona asked, and no team
+    on the board (:func:`_has_team`; decision seq 435 of #4).
+
+    A role (a manager, a ``launch``-ed coder) or a fleet row is a team member by being
+    one, and is briefed as it always was (:func:`member_by_env`). A hand-run plain
+    ``agent`` is not, by itself (:data:`_NO_ROLE`). Fail-open: a read that fails is a
+    team, so the session gets today's board.
+    """
+    if member_by_env(role):
+        return False
+    if known is not None and base_role(known.role) not in _NO_ROLE:
+        return False
+    try:
+        return not _has_team(store, project_id, session_id)
+    except Exception:
+        _log.debug("could not tell whether session %s has a team", session_id, exc_info=True)
+        return False
+
+
+def _has_team(store: ContextStore, project_id: str, session_id: str | None) -> bool:
+    """Whether a session with no role and no fleet row has a team on this board: an open
+    task, a live fleet agent, or a live session (seen within :data:`_STALE_AFTER`, not
+    ended) other than the caller's own row. Three reads on indexed columns.
+
+    ``session_id`` is the caller's row where it is known (the hooks). Where it is not —
+    the MCP server, started by its client alongside SessionStart and before that hook
+    writes the row — ANY live session is a team: it may be a teammate, and the board is
+    the fail-safe answer. A session restarting beside its own not-yet-ended previous row
+    reads as a team for that reason.
+
+    Every live ``mcp:`` row counts, a session's own MCP server's too: a remote teammate
+    over ``aisquare serve`` writes one, and no row tells the two apart for sure (owner
+    decision, 2026-10-24, option A). So a solo session that calls a board tool reads as a
+    team until that row goes stale (#45 m1, a known limitation; docs/orchestration.md).
+    Precise detection is option B, planned in draft PR #397
+    (https://github.com/AISquare-Studio/aisquare-cli/pull/397).
+    """
+    if store.has_team_task_in(project_id, _OPEN_TASKS):
+        return True
+    if store.fleet_agents(project_id, live_only=True):
+        return True
+    seen = store.team_sessions_seen_since(project_id, _now() - _STALE_AFTER)
+    return any(other.id != session_id and other.ended_at is None for other in seen)
+
+
+def board_has_team(store: ContextStore, project_id: str) -> bool:
+    """:func:`_has_team` for a caller that is not a session yet (the MCP server, started by
+    its client): its own row is not known, so any live session counts."""
+    return _has_team(store, project_id, None)
 
 
 def hook_prompt_heartbeat(
@@ -2361,13 +2462,17 @@ def hook_prompt_heartbeat(
 
     A session unknown to the orchestrator but prompting inside an *active* project
     joins right here (the orchestrator may have been activated after it started) and
-    receives the full board + protocol instead of a delta.
+    receives the full board + protocol instead of a delta — unless it is solo
+    (:func:`_solo`): then it joins unbriefed and silent, as at session start. An
+    unbriefed session gets nothing until a team forms around it, and then the full
+    board, once.
 
     Every prompt stamps the session's ``prompted_at`` and takes its fleet row's first
     message (``store.mark_prompted``, P0-W1a): the acknowledgement ``fleet spawn``,
     ``restart`` and ``switch`` wait for, and a typed delivery asks before it presses Enter
     again. The row is the window's own (``AISQUARE_FLEET_AGENT``), else the one bound to the
-    session. One indexed update, no tmux call.
+    session. One indexed update, no tmux call, on every path: an unbriefed (solo) session's
+    prompt starts a turn too.
     """
     if not orchestrator.team_enabled():
         return ""
@@ -2380,13 +2485,18 @@ def hook_prompt_heartbeat(
             role = orchestrator.env_role()
             if not store.team_active(project.id) and role is None:
                 return ""
+            solo = _solo(store, project.id, session_id, role=role, known=None)
             # Only now, as at session start: before the board was asked, every prompt of a
             # session on no board took the store's write lock again, for a directory
             # `capture_prompt` had captured already (review of #259, round 19).
             project_service.capture(store, project)
             now = _now()
-            # Read before the row is written, for its account (P2-W7) as for the binding.
-            named = _hook_named_row(store)
+            # The persona as a session start asks it, and briefed below as there: this is
+            # the session's first injection. Without it, an agent launched with --persona
+            # before its project was tracked or the team was on ran without its persona
+            # block until a /clear (review of #201, R1-F3). Read before the row is written,
+            # for its account (P2-W7) as for the binding.
+            asked_persona, persona_note, named = _asked_persona(store, project.id)
             session = store.upsert_session(
                 TeamSession(
                     id=session_id,
@@ -2399,15 +2509,20 @@ def hook_prompt_heartbeat(
                     account=session_account(transcript_path, named),
                     model=harness.clean_model_id(model),
                     effort=harness.clean_effort(effort),
+                    persona=asked_persona,
                     prompted_at=now,
                 )
             )
             store.mark_prompted(session.id, now, agent_id=orchestrator.env_fleet_agent())
+            if solo:
+                store.set_meta(_unbriefed(session.id), "1")
+                return ""
             # This door binds a fleet row too (an agent that started before the
             # orchestrator was switched on) — and does so BEFORE the tasks are
             # read: computed as an argument, the claim it moved was rendered
             # under its old holder on this very board (review of #135). Read above.
             assigned = _assignment(store, session.id, project.id, named=named)
+            _settle_owed_persona(store, session)  # this injection briefs the persona itself
             return _render_board(
                 project,
                 store.team_sessions(project.id),
@@ -2415,8 +2530,11 @@ def hook_prompt_heartbeat(
                 _briefing_events(store, project.id, session),
                 me=session,
                 assigned=assigned,
+                briefing=True,
+                persona_note=persona_note,
                 labels=lambda: slot_labels_via(store),
                 fleet=_cycle_project(store, project, cwd, session.id, named=named),
+                cwd=cwd,
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
@@ -2431,6 +2549,9 @@ def hook_prompt_heartbeat(
             store.set_transcript_path(session.id, transcript_path)
             session = session.model_copy(update={"transcript_path": transcript_path})
         collision = _shared_row_banner(session, transcript_path, _now())
+        if store.get_meta(_unbriefed(session.id)) is not None:
+            store.mark_prompted(session.id, _now(), agent_id=orchestrator.env_fleet_agent())
+            return collision + _brief_when_a_team_forms(store, session, cwd)
         # The fleet-row bind the start hook could not make is tried again here,
         # and the briefing it was owed comes with it (rule 2, second half).
         late = _late_assignment(store, session)
@@ -2478,6 +2599,38 @@ def hook_prompt_heartbeat(
             + briefing
             + _render_delta(shown, authors, truncated=truncated, board=board, numbers=numbers)
         )
+
+
+def _brief_when_a_team_forms(store: ContextStore, session: TeamSession, cwd: Path | None) -> str:
+    """An unbriefed session's prompt: nothing while it is still solo, the full board and
+    protocol, once, when a team has formed around it. Its cursor moves to the head of
+    the pipe either way, so what happened while it was alone is not replayed as a delta.
+    Fail-open: a read that fails is a team, so the board comes."""
+    lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
+    store.renew_leases(session.id, lease)
+    head = store.latest_seq(session.project_id)
+    try:
+        alone = not _has_team(store, session.project_id, session.id)
+    except Exception:
+        _log.debug("could not tell whether session %s has a team", session.id, exc_info=True)
+        alone = False
+    store.touch_session(session.id, cursor=head, state="working")
+    if alone:
+        return ""
+    store.delete_meta(_unbriefed(session.id))
+    project = store.get_project(session.project_id) or orchestrator.team_project(cwd)
+    named = _hook_named_row(store)
+    assigned = _assignment(store, session.id, session.project_id, named=named)
+    return _render_board(
+        project,
+        store.team_sessions(session.project_id),
+        store.team_tasks(session.project_id),
+        _briefing_events(store, session.project_id),
+        me=session,
+        assigned=assigned,
+        labels=lambda: slot_labels_via(store),
+        fleet=_cycle_project(store, project, cwd, session.id, named=named),
+    )
 
 
 def hook_stop(
@@ -3214,6 +3367,7 @@ def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = 
         session = store.get_session(session_id)
         if session is None:
             return
+        store.delete_meta(_unbriefed(session.id))
         # No "left" feed event either way — the board's session panel is the
         # presence view. Released claims are real work signals and do go out;
         # a clear releases nothing, so it says nothing.
@@ -3394,6 +3548,12 @@ def prune_sessions(
             released = 0
             if not dry_run:
                 released_tasks = store.end_session(session.id, release_claims=orphan_claims)
+                # Its unbriefed mark is KEPT: a prune ends by idleness, so the session may be
+                # alive, and its next turn revives the row (a Stop as much as a prompt). With
+                # the mark gone it was never briefed once a team formed (final delta review,
+                # m2), at any idle age: a session idle overnight may still be alive (the
+                # closing review's m2 undid #50 n7's 4-hour bound). The accepted cost: a
+                # crashed session's mark stays until `forget` or a purge (_purge_team_meta).
                 # end_session reports what it FOUND claimed either way, so only
                 # count them as released when they actually were — otherwise
                 # the summary claims to have freed work that is still held.
@@ -3509,14 +3669,18 @@ def _render_board(
     persona_note: str | None = None,
     labels: Mapping[int, str] | Callable[[], Mapping[int, str]] | None = None,
     fleet: ProjectInfo | None = None,
-    persona_root: Path | None = None,
+    cwd: Path | None = None,
     links: Mapping[str, str] | None = None,
 ) -> str:
     """The board, and for ``me`` the protocol and its role's cycle, whose fleet commands
-    name ``fleet`` (:func:`_cycle_project`). ``briefing`` is SessionStart's alone: it adds
-    ``me``'s persona after the role cycle — never on the board command, never on a
-    per-prompt path, so no factual surface carries persona text (§3.1).
-    ``persona_note`` is the one line saying why no attached persona was read."""
+    name ``fleet`` (:func:`_cycle_project`). ``briefing`` is a session's first injection's
+    alone — SessionStart's, or the prompt's that joins a session the board did not know
+    (review of #201, R1-F3): it adds ``me``'s persona after the role cycle. Never on the
+    board command, never on a later prompt, so no factual surface carries persona text
+    (§3.1).
+    ``persona_note`` is the one line saying why no attached persona was read. ``cwd`` is the
+    session's directory, whose project's layer the persona comes from when ``fleet`` is
+    ``None``."""
     now = _now()
     numbers = {t.id: t.number for t in tasks if t.number is not None}
     lines = ["<aisquare-team>"]
@@ -3600,7 +3764,7 @@ def _render_board(
             briefing=briefing,
             persona_note=persona_note,
             fleet=fleet,
-            persona_root=persona_root,
+            cwd=cwd,
         )
     lines.append("</aisquare-team>")
     return "\n".join(lines)
@@ -3614,7 +3778,7 @@ def _protocol_lines(
     briefing: bool,
     persona_note: str | None,
     fleet: ProjectInfo | None,
-    persona_root: Path | None,
+    cwd: Path | None,
 ) -> list[str]:
     """The protocol, ``me``'s role cycle and, at a briefing, its persona: what closes the
     board (:func:`_render_board`) and a manager's start pack (:func:`_start_pack`)."""
@@ -3632,10 +3796,11 @@ def _protocol_lines(
     if briefing and me.persona:
         # The session's own project, whose layer the persona was checked against
         # at spawn and launch: the cycle's (its fleet row's, else its directory's
-        # when registered), else ``persona_root``, the directory's own. The
-        # board's is the hub's under one (review of #201, F1 and F6).
-        root = fleet.root if fleet is not None else (persona_root or project.root)
-        lines += _persona_briefing(me.persona, root)
+        # when registered), else the project ``cwd`` is in, asked only here: one git
+        # call, which a session with no persona, or one whose cycle names its
+        # project, never pays. Never the board's, the hub's under one (review of
+        # #201, F1 and F6).
+        lines += _persona_briefing(me.persona, fleet if fleet is not None else cwd)
     if briefing and persona_note:
         lines.append(persona_note)
     return lines
@@ -3746,7 +3911,7 @@ def _start_pack(
     assigned: Assignment | None,
     persona_note: str | None,
     fleet: ProjectInfo | None,
-    persona_root: Path | None,
+    cwd: Path | None,
 ) -> str:
     """A manager's context at every SessionStart, in place of the plain board: at most
     :data:`_START_PACK_BUDGET` characters (P1 WS-4, #281).
@@ -3785,7 +3950,7 @@ def _start_pack(
         briefing=True,
         persona_note=persona_note,
         fleet=fleet,
-        persona_root=persona_root,
+        cwd=cwd,
     )
     tail.append("</aisquare-team>")
     head += _open_items(store, project, me, sessions, agents, numbers, authors)
@@ -4569,15 +4734,18 @@ def _captain_briefing(project: ProjectInfo, me: TeamSession, persona_note: str |
         *_role_cycle(me, project),
     ]
     if me.persona:
-        lines += _persona_briefing(me.persona, project.root)
+        lines += _persona_briefing(me.persona, project)
     if persona_note:
         lines.append(persona_note)
     lines.append("</aisquare-team>")
     return "\n".join(lines)
 
 
-def _persona_briefing(name: str, root: Path, *, without: str = "launched without it") -> list[str]:
-    """The persona block for a session start (docs/plans/spawn-personas.md §3.2).
+def _persona_briefing(
+    name: str, where: ProjectInfo | Path | None, *, without: str = "launched without it"
+) -> list[str]:
+    """The persona block for a session start (docs/plans/spawn-personas.md §3.2), from the
+    layers of ``where``: a project, or a directory of one (``personas.project_root``).
 
     NEVER raises: a raise here loses the whole team block, role cycle and lane
     rule included (``harness._lane_rule``'s docstring). A persona removed or
@@ -4589,22 +4757,10 @@ def _persona_briefing(name: str, root: Path, *, without: str = "launched without
     try:
         from aisquare.core import personas
 
-        return personas.briefing(personas.resolve(name, root))
+        return personas.briefing(personas.resolve(name, personas.project_root(where)))
     except Exception as exc:
         reason = getattr(exc, "rule", None) or f"{type(exc).__name__}: {exc}"
         return [f'persona "{name}": {reason} — {without}']
-
-
-def _directory_root(cwd: Path | None) -> Path | None:
-    """The root of ``cwd``'s own project, the hub aside (``orchestrator.directory_project``):
-    the persona layer ``launch --persona`` checked (``cli.launch._check_persona``). For a
-    session with no fleet row in a directory nobody added, the briefing had only the board's
-    root, the hub's under one, and said a persona the launch had found was missing (review
-    of #201, F6). ``None`` when the directory cannot be read (a symlink loop)."""
-    try:
-        return orchestrator.directory_project(cwd).root
-    except OSError:
-        return None
 
 
 def _asked_persona(
@@ -4766,9 +4922,10 @@ def _owed_persona_briefing(store: ContextStore, session: TeamSession) -> str:
         name = owed.row.persona
         if name:
             # The row's own project, as attach resolved it; the session's is the board's,
-            # the hub's under one (review of #201, F1).
-            root = _project_root(store, owed.row.project_id) or owed.row.cwd
-            lines = _persona_briefing(name, root, without=_ATTACHED_WITHOUT)
+            # the hub's under one (review of #201, F1). A row whose project is gone: the
+            # project its directory is in.
+            where = store.get_project(owed.row.project_id) or owed.row.cwd
+            lines = _persona_briefing(name, where, without=_ATTACHED_WITHOUT)
             if len(lines) > 1:  # the block; a single line is why it could not be loaded
                 replaced = owed.replaced if owed.replaced != name else None
                 lines = [persona_attached_preface(name, replaced), *lines]

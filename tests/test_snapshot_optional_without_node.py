@@ -36,7 +36,7 @@ from aisquare.core import agents as agent_core
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core.workspace import project_id_for
 from aisquare.models import CheckStatus, DoctorCheck, Snapshot
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, lifecycle
 from aisquare.services.onboarding import fix_commands
 
 _NODE_TOOLS = ("node", "npx", "repomix")
@@ -152,18 +152,20 @@ def test_doctor_without_node_reads_snapshots_off_with_nothing_to_click(runner: C
 
 
 @pytest.mark.usefixtures("with_node")
-def test_with_node_a_missing_snapshot_still_warns_and_keeps_its_button(runner: CliRunner) -> None:
-    """The control: the same machine with a Node is unchanged."""
+def test_with_node_a_missing_snapshot_is_opt_in_with_nothing_to_click(runner: CliRunner) -> None:
+    """With a Node, no pack is not a fault either: ``init`` makes none and no agent
+    reads one, so the row names the opt-in and offers no button."""
     assert runner.invoke(app, ["init", "--no-onboard"]).exit_code == 0
 
     checks = diagnostics.doctor()
     rows = _rows(checks)
 
     assert rows["repomix"].status is CheckStatus.ok
-    assert rows["snapshot"].status is CheckStatus.warn
-    assert rows["snapshot"].fix == "Pack one: aisquare project onboard"
+    assert rows["snapshot"].status is CheckStatus.ok
+    assert rows["snapshot"].fix is None
+    assert rows["snapshot"].detail == "none — opt-in: aisquare project onboard packs one"
     assert rows["tiktoken"].status is CheckStatus.warn
-    assert _onboard_buttons(checks) == [("project", "onboard", "--refresh")]
+    assert _onboard_buttons(checks) == []
 
 
 def _too_large_verdict(work_dir: Path) -> Snapshot:
@@ -244,7 +246,7 @@ def test_the_memory_route_needs_no_node(
 
     init = runner.invoke(app, ["--json", "init", "--local", "--yes", "--agent", "claude-code"])
     assert init.exit_code == 0, init.output
-    assert f"Snapshot: {snapshot_core.OFF_DETAIL}." in json.loads(init.stdout)["notes"]
+    assert f"Snapshot: {lifecycle.SNAPSHOT_OPT_IN}." in json.loads(init.stdout)["notes"]
     settings = json.loads((claude_dir / "settings.json").read_text(encoding="utf-8"))
     assert set(settings["hooks"]) == {event for event, _ in agent_core._HOOKS}
 
@@ -283,7 +285,7 @@ def test_a_repomix_that_ran_and_failed_is_not_called_off(
     assert f"snapshot: {said}" in onboard.stdout
     assert "Node.js" not in onboard.stdout
     assert init.exit_code == 0, init.output
-    assert f"Snapshot: {said}." in json.loads(init.stdout)["notes"]
+    assert f"Snapshot: {lifecycle.SNAPSHOT_OPT_IN}." in json.loads(init.stdout)["notes"]
 
 
 @pytest.mark.usefixtures("node_without_npm")
@@ -294,7 +296,7 @@ def test_a_node_with_nothing_to_pack_with_is_told_what_is_missing(runner: CliRun
     rows = _rows(diagnostics.doctor())
 
     assert init.exit_code == 0, init.output
-    assert f"Snapshot: {snapshot_core.NO_PACKER_DETAIL}." in json.loads(init.stdout)["notes"]
+    assert f"Snapshot: {lifecycle.SNAPSHOT_OPT_IN}." in json.loads(init.stdout)["notes"]
     assert f"snapshot: {snapshot_core.NO_PACKER_DETAIL}" in onboard.stdout
     assert rows["snapshot"].status is CheckStatus.ok and rows["snapshot"].fix is None
     assert rows["snapshot"].detail == snapshot_core.NO_PACKER_DETAIL
@@ -308,9 +310,9 @@ def test_a_refresh_without_node_keeps_the_last_pack_and_says_so(
     """Packed while a Node was on PATH, refreshed from a shell without one (review of #257).
 
     The installer's fnm Node is on PATH for its own run only, and an nvm Node only in
-    the shells that load it. A failed pack rewrites nothing, so the last pack stays and
-    session start keeps handing it to every agent. ``--refresh`` said "off", and the
-    doctor's snapshot row said "ready" beside a repomix row that said "off".
+    the shells that load it. A failed pack rewrites nothing, so the last pack stays.
+    ``--refresh`` said "off", and the doctor's snapshot row said "ready" beside a
+    repomix row that said "off". Session start names no pack either way.
     """
     monkeypatch.setattr(shutil, "which", _which("/opt/node/bin"))
     monkeypatch.setattr(snapshot_core, "node_version", lambda: (26, 7, 0))
@@ -331,12 +333,12 @@ def test_a_refresh_without_node_keeps_the_last_pack_and_says_so(
     assert refreshed.exit_code == 0, refreshed.output
     line = refreshed.stdout.strip().splitlines()[0]  # the code index (#285) says its own next
     assert line.startswith("snapshot: not refreshed — "), line
-    assert "Agents still get the last pack, made " in line
+    assert "The last pack stays, made " in line
     assert snapshot_core.OFF_DETAIL not in refreshed.stdout
     assert f"— {snapshot_core.NEEDS_NODE}. " in line
     assert report["snapshot"]["status"] == "ready" and report["snapshot"]["file_count"] == 2
     assert report["snapshot_note"] == line.removeprefix("snapshot: ")
-    assert "packed snapshot" in started.stdout, "what the line says: agents still get it"
+    assert "snapshot" not in started.stdout, "no agent is pointed at a pack"
     assert rows["snapshot"].status is CheckStatus.ok and rows["snapshot"].fix is None
     assert "cannot be refreshed here" in rows["snapshot"].detail, rows["snapshot"].detail
     assert rows["snapshot"].detail.startswith("snapshot ready (2 files, ")
@@ -370,10 +372,10 @@ def test_a_pack_that_failed_says_why_and_sends_nobody_to_the_doctor(
     assert f"snapshot: {said}" in onboard.stdout
     assert "doctor" not in onboard.stdout
     assert init.exit_code == 0, init.output
-    assert f"Snapshot: {said}." in json.loads(init.stdout)["notes"]
+    assert f"Snapshot: {lifecycle.SNAPSHOT_OPT_IN}." in json.loads(init.stdout)["notes"]
     assert kept.exit_code == 0, kept.output
     assert f"snapshot: not refreshed — the pack failed: {_NPM_REASON}. " in kept.stdout
-    assert "Agents still get the last pack" in kept.stdout
+    assert "The last pack stays" in kept.stdout
 
 
 @pytest.mark.usefixtures("no_node")

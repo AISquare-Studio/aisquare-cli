@@ -1616,7 +1616,7 @@ def test_the_fnm_warning_says_what_a_shell_without_its_node_still_gets(tmp_path:
     assert "fnm env --use-on-cd" in warning, "control: this is the warning in question"
     assert "reads codebase snapshots as off" not in warning
     assert "cannot pack or refresh a codebase snapshot" in warning
-    assert "agents still get any pack this run makes" in warning
+    assert "aisquare project onboard, opt-in" in warning
 
 
 def test_a_version_pin_moves_a_machine_that_is_ahead_of_it(tmp_path: Path) -> None:
@@ -2187,11 +2187,8 @@ def test_the_banner_lists_only_what_the_run_writes(
 
 @pytest.mark.parametrize(
     ("packed", "summary_says", "exit_code"),
-    [
-        ("never", "  snapshot — aisquare project onboard\n", 0),
-        ("too large", "Not expected, and worth a look:\n  snapshot\n", 2),
-    ],
-    ids=["never-packed", "packed-too-large"],
+    [("too large", "Not expected, and worth a look:\n  snapshot\n", 2)],
+    ids=["packed-too-large"],
 )
 def test_the_snapshot_advice_is_only_for_a_project_with_no_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, packed: str, summary_says: str, exit_code: int

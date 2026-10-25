@@ -303,7 +303,7 @@ class Watcher:
             items += made
         return items
 
-    def scan(
+    def look_all(
         self, now: datetime, notes: list[str] | None = None, failed: set[str] | None = None
     ) -> list[WatchItem]:
         """Everything worth a look right now, across every project. Each look is guarded:
@@ -338,7 +338,7 @@ class Watcher:
         now = now or _now()
         notes: list[str] = []
         failed: set[str] = set()
-        items = self.scan(now, notes, failed)
+        items = self.look_all(now, notes, failed)
         watch_dir().mkdir(parents=True, exist_ok=True)
         # One hold from the read of `seen` to its write, delivery between: two ticks that
         # overlap (`--once` beside the loop) would each find the same items new and deliver
@@ -382,7 +382,7 @@ class Watcher:
 
 
 def _look_of(item_id: str) -> str:
-    """Which look an item id came from (:meth:`Watcher.scan`'s names)."""
+    """Which look an item id came from (:meth:`Watcher.look_all`'s names)."""
     if item_id.startswith("needs:"):
         return "needs"
     if item_id.startswith("stale:"):

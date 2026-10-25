@@ -60,6 +60,7 @@ from aisquare.cli.app import app
 from aisquare.cli.ui.board import COLUMN_WIDTH_KEY, DETAIL_HEIGHT_KEY, BoardPanel
 from aisquare.cli.ui.divider import Divider
 from aisquare.cli.ui.terminal import TerminalPane
+from aisquare.cli.ui.views import personas_tab
 from aisquare.cli.ui.views import project as project_view_module
 from aisquare.cli.ui.views import settings as settings_view_module
 from aisquare.cli.ui.views.agent import AgentView
@@ -378,9 +379,13 @@ def test_project_view_has_the_five_tabs_with_their_widgets(project: ProjectInfo)
             ("#tab-board", BoardPanel),
             ("#tab-explainability", ExplainabilityView),
             ("#tab-settings", SettingsView),
-            ("#tab-personas", PersonasTab),
         ):
             assert view.query_one(pane_id).query_one(widget_type)
+        view.active = "tab-personas"  # built when first opened
+        await pilot.pause()
+        assert view.query_one("#tab-personas").query_one(PersonasTab)
+        view.active = "tab-manager"
+        await pilot.pause()
         ids = [pane.id or "" for pane in view.query("TabPane")]
         labels = [view.get_tab(pane_id).label_text for pane_id in ids]
         first = view.query_one(ExplainabilityView).children[0]
@@ -408,6 +413,36 @@ def test_project_view_has_the_five_tabs_with_their_widgets(project: ProjectInfo)
     assert doctors == 0
     # The AISquare tab opens on an "Explainability" heading, above the status block as before.
     assert first_id == "explainability-heading:bold" and heading == "Explainability"
+
+
+def test_the_personas_tab_reads_nothing_until_it_is_opened(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Built with the view, the Personas tab read the whole catalogue as every project view
+    mounted, on the UI thread, for a tab that may never be opened (review of #201, R1-F10).
+    It is built when first opened, reads then, and re-reads at each later opening."""
+    reads: list[Path | None] = []
+    read_entries = personas_tab.read_entries
+
+    def counted(root: Path | None) -> list[personas_tab.Entry]:
+        reads.append(root)
+        return read_entries(root)
+
+    monkeypatch.setattr(personas_tab, "read_entries", counted)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[int, int]]:
+        view = host.query_one(ProjectView)
+        seen = [(len(view.query(PersonasTab)), len(reads))]
+        for tab in ("tab-personas", "tab-board", "tab-personas"):
+            view.active = tab
+            await pilot.pause()
+            seen.append((len(view.query(PersonasTab)), len(reads)))
+        return seen
+
+    seen = drive(project, scenario)
+
+    assert seen == [(0, 0), (1, 1), (1, 1), (1, 2)]
+    assert reads == [project.root, project.root]  # the project's own layer, as spawn checks
 
 
 # --- the Manager tab ----------------------------------------------------------------------

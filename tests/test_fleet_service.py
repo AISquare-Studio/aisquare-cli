@@ -20434,6 +20434,7 @@ def test_take_over_is_the_sources_restart_with_the_dialogs_changes(
             "size": None,
             "spawned_by": "user",
             "agent_id": source.id,
+            "to_agent": None,  # its own agent: no hand-off across agents (task #15)
         }
     ]
     assert (receipt.mode, receipt.resumed, receipt.stopped) == ("take_over", True, source)

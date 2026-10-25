@@ -421,6 +421,28 @@ def test_settings_switch_the_daily_release_check_off_and_on() -> None:
     assert load_config().updates.check is True
 
 
+def test_one_save_writes_the_no_role_agents_row_and_the_release_check_together() -> None:
+    """Merged in #401 for 0.9.0: #405 made the role-less ``agent`` a default role, which gave
+    *Agent settings* its row, and #301 put the release check's switch in *User
+    preferences*. Both tabs are one form with one Save: the ``agent`` row is there, and a
+    Save writes it and the switch together, neither in place of the other."""
+    from aisquare.cli.ui.views.app_settings import role_widget_id
+    from aisquare.core.harness import PLAIN_ROLE
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> None:
+        await pilot.pause()
+        host.query_one(f"#{role_widget_id('perm', PLAIN_ROLE)}", Select).value = "acceptEdits"
+        host.query_one("#updates-check", Switch).value = False
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+
+    drive(scenario)
+    saved = _config_toml()
+    assert saved["fleet"]["roles"][PLAIN_ROLE]["permission_mode"] == "acceptEdits"
+    assert saved["updates"] == {"check": False}
+    assert load_config().fleet.roles[PLAIN_ROLE].permission_mode == "acceptEdits"
+
+
 def test_reset_all_asks_first_then_keeps_a_backup_and_shows_the_defaults() -> None:
     """Reset all is a dialog first: Cancel changes nothing; Reset all moves the file aside to a
     backup it names, and the form shows the defaults."""

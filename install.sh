@@ -488,6 +488,20 @@ hand_off() {
     # merely inherited it from a release that does not unset it (0.9.0).
     _ho_from=${AISQUARE_INSTALL_HANDED_OFF:-}
     unset AISQUARE_INSTALL_HANDED_OFF
+    # The latest version main's copy read from PyPI to check this script's stamp, so a
+    # hand-off that installs unpinned does not ask PyPI twice. Read and unset as the
+    # guard is, and taken only from a hand-off to this very script, and as a version.
+    _ho_latest=${AISQUARE_INSTALL_PYPI_LATEST:-}
+    unset AISQUARE_INSTALL_PYPI_LATEST
+    if [ -n "$_ho_from" ] && [ "$_ho_from" = "$0" ]; then
+        case "$_ho_latest" in
+            "" | [!0-9]* | *[!0-9A-Za-z.]*) ;;
+            *)
+                PYPI_LATEST=$_ho_latest
+                PYPI_ASKED=1
+                ;;
+        esac
+    fi
     [ -z "$STAMPED_VERSION" ] || return 0
     if [ -n "$_ho_from" ] && [ "$_ho_from" = "$0" ]; then
         debug "hand-off: this script is the one handed off to; not hopping again"
@@ -514,6 +528,17 @@ hand_off() {
         note "using the v$HANDOFF_VERSION installer"
         AISQUARE_INSTALL_HANDED_OFF=$HANDOFF_FILE
         export AISQUARE_INSTALL_HANDED_OFF
+        if [ -z "$PIN_VERSION" ] || [ "$PIN_VERSION" = latest ]; then
+            # No version named: the release's script installs unpinned, as this copy
+            # would. Left to its stamp, every plain one-liner install was pinned to the
+            # release (aisquare-cli==V), and `uv tool upgrade` never moved it again. Set
+            # but empty is the stamped script's documented "drop the pin"; --version V
+            # (or AISQUARE_INSTALL_VERSION=V) still pins, in the arguments or the env.
+            AISQUARE_INSTALL_VERSION=
+            export AISQUARE_INSTALL_VERSION
+            AISQUARE_INSTALL_PYPI_LATEST=$PYPI_LATEST
+            export AISQUARE_INSTALL_PYPI_LATEST
+        fi
         # From here a signal is the release's script's to handle, and the run
         # ends with its status, whether it died of the signal or survived it.
         # A no-op trap, not an ignore: an ignored signal would be inherited.

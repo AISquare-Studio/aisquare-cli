@@ -152,8 +152,8 @@ falls_back_on_404() {
     expect "using this installer (the latest release has no installer attached)" \
         "a 404 did not fall back in one line"
     expect "nothing above was actually run" "main's own dry run did not run"
-    if grep -qF "pinned to" "$WORK/out"; then
-        fail "the fallback pinned a version, so the release's script ran after all"
+    if grep -qF "using the v" "$WORK/out"; then
+        fail "the fallback handed off after all"
     fi
 }
 
@@ -175,10 +175,12 @@ for name in $SHELLS; do
     [ "$RC" = 0 ] || fail "the handed-off dry run exited $RC"
     [ "$(head -n 1 "$WORK/out")" = "  using the v$VERSION installer" ] ||
         fail "the first line is not the hand-off"
-    expect "pinned to $VERSION" "the release's installer did not pin its own version"
-    # `==` on a machine without aisquare, `@` on one that has it.
-    grep -q -e "aisquare-cli==$VERSION" -e "aisquare-cli@$VERSION" "$WORK/out" ||
-        fail "the release's installer did not install $VERSION"
+    # No version named: the release's installer installs the latest UNPINNED, as
+    # main's would (it is handed AISQUARE_INSTALL_VERSION empty).
+    ! grep -q "pinned to" "$WORK/out" || fail "the release's installer pinned its own version"
+    # Plain on a machine without aisquare, `@latest` on one that has it.
+    grep -q -e "aisquare-cli$" -e "aisquare-cli@latest" "$WORK/out" ||
+        fail "the release's installer did not install the latest release"
     expect "nothing above was actually run" "--dry-run was not passed through"
     fetched "github.com/AISquare-Studio/aisquare-cli/releases/latest/download/install.sh" \
         "the latest release's installer was not fetched"
@@ -191,6 +193,7 @@ for name in $SHELLS; do
     installer "$CURL_PATH" "$shell" $DRY --version "$VERSION"
     [ "$RC" = 0 ] || fail "the pinned hand-off exited $RC"
     expect "using the v$VERSION installer" "a pin did not hand off"
+    expect "pinned to $VERSION" "a pin did not stay a pin"
     fetched "github.com/AISquare-Studio/aisquare-cli/releases/download/v$VERSION/install.sh" \
         "the pinned release's installer was not fetched"
 

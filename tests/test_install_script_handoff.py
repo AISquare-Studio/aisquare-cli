@@ -109,6 +109,7 @@ def reporting_release(
         f'STAMPED_VERSION="{version}"\n'
         'for arg in "$@"; do\n    case "$arg" in\n' + branches + "    esac\ndone\n"
         'printf "RELEASE RAN handed_off=%s\\n" "${AISQUARE_INSTALL_HANDED_OFF:-}"\n'
+        'printf "RELEASE VERSION_ENV=%s\\n" "${AISQUARE_INSTALL_VERSION-unset}"\n'
         'printf "RELEASE IS %s\\n" "$0"\n'
         'for arg in "$@"; do printf "ARG[%s]\\n" "$arg"; done\n'
         f"{body}\n"
@@ -337,8 +338,10 @@ def test_both_downloads_are_short_and_https_only(machine: Machine) -> None:
 def test_a_release_copy_of_this_tree_runs_its_own_dry_run(machine: Machine) -> None:
     """The real thing: this tree stamped as a release, handed the same flags.
 
-    The child installs its OWN stamp (``@7.7.7``), honours ``--dry-run``, and
-    the parent prints its one line and nothing else.
+    The child installs the latest release UNPINNED, as main's copy would: no
+    version was named, so it is handed ``AISQUARE_INSTALL_VERSION`` empty, the
+    stamped script's way out of its own pin (REVIEW-401 prep for #402). It
+    honours ``--dry-run``, and the parent prints its one line and nothing else.
     """
     machine.serve_latest(stamped_copy())
     machine.pypi(STAMP)
@@ -347,8 +350,11 @@ def test_a_release_copy_of_this_tree_runs_its_own_dry_run(machine: Machine) -> N
 
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert result.stdout.splitlines()[0].strip() == "using the v7.7.7 installer"
-    assert "pinned to 7.7.7" in result.stdout, result.stdout
-    assert "aisquare-cli@7.7.7" in result.stdout, "the child did not install its own stamp"
+    assert "pinned to" not in result.stdout, result.stdout
+    assert "aisquare-cli@latest" in result.stdout, "the child did not install unpinned"
+    assert "aisquare-cli@7.7.7" not in result.stdout and "aisquare-cli==" not in result.stdout
+    pypi = [url for url in machine.requests() if "pypi" in url]
+    assert len(pypi) == 1, f"PyPI asked {len(pypi)} times: the child reuses the parent's answer"
     assert "nothing above was actually run" in result.stdout
     assert result.stdout.count("Checking this machine") == 1, "the survey ran twice"
     # The stamped child hops nowhere: one request for the release, one for PyPI.
@@ -612,6 +618,34 @@ def test_a_pin_fetches_that_releases_installer(
     assert result.returncode == 3, f"{result.stdout}\n{result.stderr}"
     assert machine.requests() == [f"{RELEASES}/download/v{STAMP}/install.sh"]
     assert _args(result.stdout) == ["--yes", *args]
+
+
+@pytest.mark.parametrize(
+    ("args", "env", "handed"),
+    [
+        ((), {}, ""),
+        (("--version", "latest"), {}, ""),
+        (("--version", STAMP), {}, "unset"),
+        ((), {"AISQUARE_INSTALL_VERSION": STAMP}, STAMP),
+    ],
+    ids=["no-version", "latest", "pinned-flag", "pinned-env"],
+)
+def test_no_version_named_hands_off_unpinned_and_a_pin_stays_a_pin(
+    machine: Machine, args: tuple[str, ...], env: dict[str, str], handed: str
+) -> None:
+    """REVIEW-401 prep for #402: handed only its arguments, the release's stamped script fell
+    back on its stamp, so every plain one-liner install was pinned (``aisquare-cli==V``) and
+    ``uv tool upgrade`` never moved it. With no version named (or ``latest``) the child gets
+    ``AISQUARE_INSTALL_VERSION`` set and empty, and installs unpinned; ``--version V`` and
+    ``AISQUARE_INSTALL_VERSION=V`` pin as before."""
+    machine.serve(f"download/v{STAMP}/install.sh", reporting_release())
+    machine.serve_latest(reporting_release())
+    machine.pypi(STAMP)
+
+    result = machine.run("--yes", *args, env=env)
+
+    assert result.returncode == 3, f"{result.stdout}\n{result.stderr}"
+    assert f"RELEASE VERSION_ENV={handed}" in result.stdout.splitlines(), result.stdout
 
 
 def test_a_pin_to_a_release_without_installers_falls_back(machine: Machine) -> None:
@@ -879,7 +913,7 @@ def test_a_piped_hand_off_leaves_the_parents_stdin_unread(machine: Machine) -> N
 
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert result.stdout.splitlines()[0].strip() == "using the v7.7.7 installer"
-    assert "aisquare-cli@7.7.7" in result.stdout
+    assert "aisquare-cli@latest" in result.stdout  # no version named: unpinned
     assert "nothing above was actually run" in result.stdout
     assert "TRAILER-RAN" not in result.stdout + result.stderr
     assert left.endswith(_SENTINEL), "the hand-off consumed the parent's stdin"

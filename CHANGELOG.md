@@ -41,8 +41,10 @@ fleet still running, and every release now carries its own installer.**
   attached, a check that fails) it says `using this installer (…)` and carries on
   itself. A stamped release script never hands off, and a second hop is stopped.
   `--no-handoff`, `AISQUARE_INSTALL_NO_HANDOFF=1`, `--offline` and
-  `AISQUARE_INSTALL_PACKAGE` keep main's copy. The install it makes is pinned to the
-  release, as a release URL's is: asq's update row and `aisquare upgrade` move it on.
+  `AISQUARE_INSTALL_PACKAGE` keep main's copy. With no `--version` the install is the
+  latest release, unpinned, as main's own would be (the release's script is handed
+  `AISQUARE_INSTALL_VERSION` empty, and the PyPI answer main's copy already read), so
+  `uv tool upgrade` still moves it; `--version V` pins.
   `install.ps1` hands WSL main's `install.sh`, so the hand-off happens there.
 - **Accounts: *Log in again* on any signed-in row.** The login column offers the same
   sign-in flow as *Log in* (as a secondary button) on a row that reads fine, so a fresh

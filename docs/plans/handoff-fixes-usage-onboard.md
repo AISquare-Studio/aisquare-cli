@@ -35,6 +35,35 @@ green; docs and CHANGELOG updated; config keys documented in `docs/reference.md`
 
 ## F1 — A rate-limited usage read sticks instead of backing off
 
+> **Status: built in PR #408, which goes straight into `main`. Whoever builds #400 must not redo F1.**
+> The text below is the original brief, kept for the record.
+>
+> What #408 delivers, against F1's acceptance:
+>
+> - [x] **`Retry-After` honoured across processes and by `--refresh`.** A 429 (or a 503 with `Retry-After`)
+>       records a wait per account on disk (a `ui_state` row, no schema step). The wait is the header, clamped
+>       to 1 s–6 h, or 60 s doubling to 30 min when it is absent, and a good read resets it. No request goes
+>       out during the wait from any process: the page, `--refresh`, a launch's pick, a hand-over or
+>       `doctor --live`. Tests count requests with a fake, including a second process. The wait belongs to
+>       the login that was refused, and clearing or replacing it is compare-and-set.
+> - [x] **A failed read shows the last good numbers, their age and the reason; `—` only when nothing was
+>       ever read.** A window of that reading that has reset since shows as `reset 1h ago`. CLI: a line
+>       under the table. Page: the age in the session cell (`▮▮▯▯▯ 40% · 12m`), the reason in its tooltip.
+> - [x] **The headroom pick is predictable and tested.** A kept or backed-off reading is never taken for a
+>       live one: the pick uses it only inside its own window with no window reset since, and otherwise
+>       skips it with a note giving its age. This holds for both a launch and a hand-over. The fleet dot
+>       ignores kept readings older than 5 min.
+> - [x] ***Log in again* on a healthy row**, the same sign-in flow as *Log in*.
+> - [x] **Docs and CHANGELOG:** `docs/fleet.md`, `docs/reference.md` and CHANGELOG. There are no new config
+>       keys. `doctor` also gets a `claude-account-backoff` row listing the backed-off accounts.
+>
+> What's left: **prefer statusline samples** ("Spend fewer reads") is board task #11, blocked on #287.
+>
+> **Related since this was written:**
+> - #403: one shared verified TLS context for every HTTPS call, so macOS python.org Python can read usage.
+> - #406: Accounts page, where rank 1 is the default and there is no status or default column. Reasons
+>   show in the session cell and its tooltip. Read F1's UI wording ("status", `—`) against that layout.
+
 ### Problem
 
 When the usage endpoint answers 429, `aisquare accounts list --usage` and the Accounts page show

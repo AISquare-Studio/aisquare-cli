@@ -137,7 +137,8 @@ fleet still running, and every release now carries its own installer.**
   <group> <project>` names a project outside the group whose manager is the group's. A
   member's questions, blocked tasks, results and delegated tasks, notes matching
   `project group route --pattern`, and any `note --to parent` land on the parent's
-  board in the same write, as one `routed` line with a pointer, and wake its manager;
+  board in the same write, as one `routed` line with a pointer (`aisquare board --project
+  <member>`, which shows that member's board), and wake its manager;
   one line per member a minute, the rest folded into a count (a question, a blocked
   task and `--to parent` always route at once). `aisquare task add "…" --project
   <member> --origin <task>` delegates a task from the parent: both boards show the

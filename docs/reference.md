@@ -99,7 +99,7 @@ aisquare
 │                   block --reason · drop · release        (all with [--as SESSION])
 │                   a task is its id, or 12 / #12 — its number on the caller's board
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
-├── board [-w] [-i SECONDS] · recall <query>
+├── board [-w] [-i SECONDS] [-P PROJECT] · recall <query>
 ├── launch <role> [--command CMD] [--env KEY=VALUE]… [--account SLOT] [… agent args]
 │                   role = planner|coder|runner|validator, a fleet role (manager,
 │                   tester, reviewer, ui-tester), a numbered seat (coder1), or any role you

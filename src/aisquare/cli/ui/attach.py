@@ -426,6 +426,16 @@ class AttachTargetScreen(ModalScreen[Target | None]):
         self.dismiss(None)
 
 
+def args_hint(agent: str) -> str:
+    """An Extra args field's example (the Spawn dialog's, the New bind's): the agent's own
+    model flag (``model_args``), so Codex is never shown Claude Code's ``--model opus``
+    (SMOKE9 N1 and r20 of #113)."""
+    try:
+        return "e.g. " + " ".join(get_adapter(agent).model_args("MODEL", None))
+    except Exception:  # an agent this install does not know, or one that refuses the name
+        return ""
+
+
 class NewBindScreen(ModalScreen[str | None]):
     """``aisquare team bind`` as a form; dismisses with the seat it saved, or ``None``."""
 
@@ -474,7 +484,7 @@ class NewBindScreen(ModalScreen[str | None]):
                 yield TextArea(id="bind-env")
             with Horizontal(classes="picker-row"):
                 yield Label("Extra args")
-                yield Input(placeholder="--model opus", id="bind-args")
+                yield Input(placeholder=args_hint(DEFAULT_AGENT), id="bind-args")
             yield Static(id="bind-rule", classes="picker-note")
             yield Static(id="bind-status", classes="picker-note")
             with Horizontal(classes="picker-buttons"):
@@ -513,10 +523,12 @@ class NewBindScreen(ModalScreen[str | None]):
             self._binary_shown = get_adapter(picked).binary
             binary.value = self._binary_shown
         self._offer_accounts()
+        self.query_one("#bind-args", Input).placeholder = args_hint(self.bind_agent())
 
     @on(Input.Changed, "#bind-binary")
     def _binary_changed(self) -> None:
         self._offer_accounts()
+        self.query_one("#bind-args", Input).placeholder = args_hint(self.bind_agent())
 
     def _offer_accounts(self) -> None:
         select = self.query_one("#bind-account", Select)

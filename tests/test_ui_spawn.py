@@ -50,7 +50,7 @@ from textual.widgets import (
 from aisquare.cli.ui import app as app_module
 from aisquare.cli.ui import spawn as spawn_module
 from aisquare.cli.ui.app import FleetApp
-from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested
+from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested, args_hint
 from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
 from aisquare.cli.ui.sidebar import AddProject, SpawnAgent, SpawnRow, agent_row_text
 from aisquare.cli.ui.spawn import (
@@ -58,7 +58,6 @@ from aisquare.cli.ui.spawn import (
     NO_TASK,
     PickTargetRequested,
     SpawnDialog,
-    args_hint,
     dice_label,
     role_choices,
 )

@@ -25,7 +25,7 @@ from textual.app import App
 from textual.pilot import Pilot
 from textual.widgets import Button, Input, OptionList, Select
 
-from aisquare.cli.ui.attach import AttachTargetScreen, NewBindScreen, Target
+from aisquare.cli.ui.attach import AttachTargetScreen, NewBindScreen, Target, args_hint
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.orchestrator import team_project
@@ -221,3 +221,22 @@ def test_new_binds_binary_follows_the_agent_until_one_is_typed(project: ProjectI
         return seen
 
     assert drive(project, scenario) == ["codex", "claude", "my-codex"]
+
+
+def test_new_binds_extra_args_example_is_the_agents_own_model_flag(project: ProjectInfo) -> None:
+    """r20 of #113, N1's sibling: the New bind's Extra args read ``--model opus``, a Claude
+    Code model, with Codex picked. It is the bind's agent's own ``model_args``."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
+        await pilot.click("#picker-new-bind")
+        form = await wait_for(pilot, NewBindScreen)
+        field = form.query_one("#bind-args", Input)
+        seen = [str(field.placeholder)]
+        form.query_one("#bind-agent", Select).value = "codex"
+        wanted = args_hint("codex")
+        await until(pilot, lambda: field.placeholder == wanted, what="codex's example")
+        return [*seen, str(field.placeholder)]
+
+    shown = drive(project, scenario)
+    assert shown == [args_hint("claude-code"), args_hint("codex")]
+    assert all("opus" not in hint for hint in shown), shown

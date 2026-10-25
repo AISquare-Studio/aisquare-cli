@@ -130,7 +130,12 @@ from textual.widgets import (
 )
 from textual.worker import Worker, WorkerState, get_current_worker
 
-from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested, Target
+from aisquare.cli.ui.attach import (
+    AttachTargetScreen,
+    NewAccountRequested,
+    Target,
+    args_hint,
+)
 from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
 from aisquare.cli.ui.views.app_settings import (
     APPROVAL_OPTIONS,
@@ -215,15 +220,6 @@ LABEL_RULE = (
     "a label is 2 to 24 characters: a lowercase letter, then lowercase letters, "
     "digits or '-' — no '.', ':' or spaces"
 )
-
-
-def args_hint(agent: str) -> str:
-    """The Extra agent args field's example: the agent's own model flag (``model_args``), so
-    Codex is never shown Claude Code's ``--model opus`` (SMOKE9 N1 of #113)."""
-    try:
-        return "e.g. " + " ".join(get_adapter(agent).model_args("MODEL", None))
-    except Exception:  # an agent this install does not know, or one that refuses the name
-        return ""
 
 
 class PickTargetRequested(Message):

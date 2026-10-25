@@ -18596,6 +18596,259 @@ def test_spawn_types_its_prompt_once_the_trust_question_is_answered(
     assert claude_sharing.shows_trust_prompt(TRUST_SCREEN)  # the fixture is the question
 
 
+# --- admission: memory and the fleet-wide budget (#283, P2-W1a) -----------------------
+
+
+def _memory(monkeypatch: pytest.MonkeyPatch, available_mb: int, pressure: str = "normal") -> None:
+    from aisquare.core import memory
+
+    monkeypatch.setattr(
+        memory,
+        "headroom",
+        lambda: memory.Headroom(available_mb, 16_384, pressure, None, "test"),  # type: ignore[arg-type]
+    )
+
+
+def _second_project(tmp_path: Path) -> ProjectInfo:
+    path = tmp_path / "repo-b"
+    path.mkdir()
+    _git("init", "-q", "-b", "main", cwd=path)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=path)
+    info = team_project(path)
+    with store_session() as store:
+        store.onboard_project(info)
+    return info
+
+
+def test_spawn_refuses_below_the_memory_floor_before_any_window_opens(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failing-first case: on the base a spawn at 1,500 MB available started."""
+    _settings(monkeypatch, min_free_mb=2048)
+    _memory(monkeypatch, 1500)
+    with pytest.raises(fleet_service.CapacityRefused) as refused:
+        _coder(project)
+    assert refused.value.code == "capacity_memory"
+    assert "1500 MB available" in str(refused.value) and "2048 MB" in str(refused.value)
+    assert "aisquare fleet capacity" in str(refused.value)
+    assert tmux.spawned == [], "refused before any window"
+    # Negative control: the floor off admits the same spawn.
+    _settings(monkeypatch, min_free_mb=0)
+    assert _coder(project).label == "coder-1"
+
+
+def test_critical_pressure_refuses_and_warn_pressure_admits_with_a_note(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings(monkeypatch, min_free_mb=2048)
+    _memory(monkeypatch, 9000, "critical")
+    with pytest.raises(fleet_service.CapacityRefused, match="pressure is critical"):
+        _coder(project)
+    _memory(monkeypatch, 9000, "warn")
+    receipt = fleet_service.spawn(project, "coder", worktree=False)
+    assert any("memory pressure is warn" in note for note in receipt.notes), receipt.notes
+
+
+def test_unknown_headroom_admits_and_says_so(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core import memory
+
+    _settings(monkeypatch, min_free_mb=2048)
+    monkeypatch.setattr(memory, "headroom", lambda: memory.UNKNOWN)
+    receipt = fleet_service.spawn(project, "coder", worktree=False)
+    assert any("could not read this machine's memory" in note for note in receipt.notes)
+
+
+def test_after_a_memory_refusal_admission_wants_more_for_five_minutes(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GNU parallel's lesson: a floor with no margin flaps. 2,100 MB clears 2,048 but not
+    the 2,560 required for five minutes after a refusal."""
+    now = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(fleet_service, "_now", lambda: now)
+    _settings(monkeypatch, min_free_mb=2048)
+    _memory(monkeypatch, 1500)
+    with pytest.raises(fleet_service.CapacityRefused):
+        _coder(project)
+    _memory(monkeypatch, 2100)
+    with pytest.raises(fleet_service.CapacityRefused, match="2560 MB"):
+        _coder(project)
+    now = now + timedelta(minutes=6)
+    assert _coder(project).label == "coder-1"
+
+
+def test_the_fleet_wide_budget_spans_projects_and_names_each_count(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings(monkeypatch, max_agents_total=3)
+    other = _second_project(tmp_path)
+    _coder(project)
+    _coder(project)
+    assert _coder(other).label == "coder-1", "one spawn in B fits the budget"
+    with pytest.raises(fleet_service.CapacityRefused) as refused:
+        _coder(other)
+    assert refused.value.code == "capacity_fleet"
+    message = str(refused.value)
+    assert "3 live agents across the fleet (max_agents_total = 3)" in message
+    shown = project_service.display_name
+    assert f"{shown(project)} 2, {shown(other)} 1" in message, (
+        "each project's count, as lists name it"
+    )
+    assert len(tmux.spawned) == 3
+
+
+def test_the_per_project_cap_is_a_capacity_refusal_too(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings(monkeypatch, max_agents_per_project=1)
+    _coder(project)
+    with pytest.raises(fleet_service.CapacityRefused) as refused:
+        _coder(project)
+    assert refused.value.code == "capacity_project"
+
+
+def test_a_spawn_that_races_past_the_fleet_budget_backs_its_row_out(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N parallel spawns at budget - 1 settle to exactly the budget, as the project cap does."""
+    _settings(monkeypatch, max_agents_total=2)
+    other = _second_project(tmp_path)
+    _coder(project)
+    original = tmux.spawn_window
+
+    def spawn_then_fill(*args: object, **kwargs: object) -> WindowInfo:
+        window = original(*args, **kwargs)  # type: ignore[arg-type]
+        with store_session() as store:  # a parallel spawn in B takes the last seat
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=new_agent_id(),
+                    project_id=other.id,
+                    label="coder-racer",
+                    role="coder",
+                    pane_id="%99",
+                    cwd=other.root,
+                    created_at=datetime.now(tz=UTC) - timedelta(seconds=1),
+                )
+            )
+        return window
+
+    monkeypatch.setattr(tmux, "spawn_window", spawn_then_fill)
+    with pytest.raises(fleet_service.CapacityRefused, match="max_agents_total = 2"):
+        _coder(project)
+    assert tmux.killed == ["%2"]
+    with store_session() as store:
+        live = [a for a in store.live_fleet_agents() if a.role != "captain"]
+    assert len(live) == 2, "the budget holds"
+
+
+def test_admissions_at_the_budget_and_refusals_are_logged(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings(monkeypatch, max_agents_total=1, min_free_mb=2048)
+    _memory(monkeypatch, 4000)
+    _coder(project)
+    with pytest.raises(fleet_service.CapacityRefused):
+        _coder(project)
+    log = paths.aisquare_home() / "fleet" / "admission.jsonl"
+    lines = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert [line["outcome"] for line in lines] == ["admitted-at-budget", "capacity_fleet"]
+    assert lines[1]["live_total"] == 1 and lines[1]["available_mb"] == 4000
+
+
+def test_the_doctor_capacity_row_warns_when_a_spawn_would_be_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aisquare.services import diagnostics
+
+    paths.ensure_home()
+    _settings(monkeypatch, min_free_mb=2048)
+    _memory(monkeypatch, 1500)
+    row = diagnostics._check_fleet_capacity()
+    assert row.status.value == "warn"
+    assert "1500 MB available" in row.detail and "aisquare fleet capacity" in (row.fix or "")
+    _memory(monkeypatch, 8000)
+    row = diagnostics._check_fleet_capacity()
+    assert row.status.value == "ok" and "8000 MB available, pressure normal" in row.detail
+    _memory(monkeypatch, 8000, "warn")
+    assert diagnostics._check_fleet_capacity().status.value == "warn"
+
+
+def test_a_restart_of_a_running_agent_at_low_memory_replaces_it_rather_than_losing_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #323 (major): the replacement was admitted AFTER the stop, so below
+    min_free_mb the agent was stopped and its replacement refused. A live 1:1
+    replacement frees its own seat and memory as it starts: it is not a new spawn."""
+    _settings(monkeypatch, min_free_mb=2048)
+    agent = _coder(project)
+    _memory(monkeypatch, 1500)
+    receipt = fleet_service.restart(project, agent.label)
+    assert receipt.was_running is True
+    assert receipt.started.label == agent.label and receipt.started.ended_at is None
+    with store_session() as store:
+        assert [a.label for a in store.fleet_agents(project.id, live_only=True)] == ["coder-1"]
+
+
+def test_a_restart_of_an_exited_agent_is_a_spawn_and_is_admitted_as_one(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control: nothing is stopped, so nothing is lost, and the floor applies."""
+    _settings(monkeypatch, min_free_mb=2048)
+    agent = _coder(project)
+    tmux.die(agent.pane_id, 130)
+    _memory(monkeypatch, 1500)
+    with pytest.raises(fleet_service.CapacityRefused, match="1500 MB available"):
+        fleet_service.restart(project, agent.label)
+
+
+def test_a_switch_at_low_memory_moves_the_agent_rather_than_losing_it(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings(monkeypatch, min_free_mb=2048)
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _memory(monkeypatch, 1500)
+    receipt = fleet_service.switch(project, agent.label, reason="session limit")
+    assert receipt.to_slot == 3
+    with store_session() as store:
+        live = store.fleet_agents(project.id, live_only=True)
+    assert [(a.label, a.account_slot) for a in live] == [("coder-1", 3)]
+
+
+def test_two_projects_that_share_a_name_are_counted_apart(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #323 (minor): two checkouts named `repo` were one entry, `repo 2 of 1`."""
+    _settings(monkeypatch, max_agents_per_project=1, max_agents_total=5)
+    path = tmp_path / "elsewhere" / "repo"
+    path.mkdir(parents=True)
+    _git("init", "-q", "-b", "main", cwd=path)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=path)
+    twin = team_project(path)
+    with store_session() as store:
+        store.onboard_project(twin)
+    _coder(project)
+    _coder(twin)
+    live = fleet_service.capacity().live
+    assert live == {f"repo ({project.root})": 1, f"repo ({twin.root})": 1}
+
+
 def test_a_switch_after_a_cross_account_resume_resumes_the_real_transcript(
     tmux: FakeTmux,
     claude_on_path: Path,

@@ -85,6 +85,7 @@ from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.captain import state as captain_state
+from tests.fleet_fakes import list_agents_as
 from tests.ui_workers import released, settle_page, settle_workers
 
 T = TypeVar("T")
@@ -397,7 +398,7 @@ def fleet(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[FleetAgentStatus]]:
     def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         return list(agents.get(project.id, []))
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
     return agents
 
 
@@ -1094,7 +1095,7 @@ def test_a_spawn_whose_read_outlives_the_users_move_leaves_them_where_they_went(
         return listing(project, live_only=live_only)
 
     spawns.answer = answer
-    monkeypatch.setattr(fleet_service, "list_agents", hung)
+    list_agents_as(monkeypatch, hung)  # the tick reads through list_agents_many (#83)
 
     async def scenario(pilot: Pilot[None], app: RecordingFleetApp) -> list[Any]:
         try:
@@ -1339,7 +1340,7 @@ def test_pick_opens_the_picker_in_new_order_and_fills_who_runs_it(
     git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, spawns: SpawnRecorder
 ) -> None:
     settings_service.bind_role("coder2", agent_bin="claude2")
-    monkeypatch.setattr(fleet_service, "list_agents", lambda project, *, live_only=True: [])
+    list_agents_as(monkeypatch, lambda project, *, live_only=True: [])
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         seen: list[Any] = []

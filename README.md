@@ -121,6 +121,7 @@ backed by one SQLite file: no daemon, no cloud dependency. Sign in with
 - Node 22.12+, optional, for browser tools like the Chrome DevTools MCP; the one-liner
   offers both, Node and the MCP registered with Claude Code (`--with chrome-devtools`
   installs them without asking). aisquare itself never runs Node.
+- The symbol index (`aisquare code find|refs|similar`) needs nothing extra for Python.
 
 The package is `aisquare-cli`; the command is `aisquare`, with `asq` as the
 short alias.

@@ -279,17 +279,65 @@ RootOpener = Callable[[str, str, str, str], RootReceipt]
 def _post_run_root(
     gateway_url: str, api_key: str, agent_name: str, pipeline_id: str
 ) -> RootReceipt:
-    """Post the Run's root span through the ops module's bounded HTTP path.
+    """Start the detached worker that posts the Run's root span; return at once.
 
-    Imported inside the function: ``explainability_ops`` imports this module
-    for ``probe_proxy``, so a module-level import is a cycle. Looked up on the
-    module at call time, so a test that patches ``_post_run_root`` on THIS
-    module reaches every caller — the same seam ``probe_proxy`` uses.
+    OFF THE LAUNCH PATH (#129 item e, #51). The post was made here, inline: a
+    WAN write with a 3 s budget between the probe and the agent's exec, over
+    budget on 2 of 11 launches #129 measured. The window waits for none of it
+    now. ``aisquare explainability post-root`` (hidden) makes the post, with
+    retries, in a process of its own session, so it outlives a pane that
+    closes first. The wiring keeps the ``traceparent`` path: the gateway holds
+    a child batch with no route as ``awaiting_trace_route`` and clears it once
+    the root lands, so the model spans that arrive first still join the Run.
+    A worker that cannot START falls back to ``X-Pipeline-Id`` as a failed post
+    did; one that starts and then fails costs the join, never the launch, and
+    says so in ``<home>/log/explainability-root.log``.
+
+    The key goes to the worker on stdin, never in its argv, where ``ps`` shows
+    it to every user of the machine. Looked up on the module at call time, so
+    a test that patches ``_post_run_root`` on THIS module reaches every caller
+    — the same seam ``probe_proxy`` uses.
     """
-    from aisquare.services import explainability_ops
+    from aisquare.core import selfcli  # lazy: only a traced launch needs it
 
-    verdict = explainability_ops.open_run_root(gateway_url, api_key, agent_name, pipeline_id)
-    return RootReceipt(posted=verdict.ok, detail=verdict.detail)
+    # What is known without the network stays a verdict here, before anything
+    # starts: a gateway URL nobody can post to falls back to `X-Pipeline-Id`
+    # rather than handing the agent a traceparent no root will ever join.
+    problem = url_problem(gateway_url, what="gateway URL")
+    if problem is not None:
+        return RootReceipt(posted=False, detail=f"not a usable URL: {problem}")
+    argv = selfcli.argv_for(
+        ["--quiet", "explainability", "post-root", gateway_url, agent_name, pipeline_id]
+    )
+    try:
+        _start_root_worker(argv, api_key.encode("utf-8"))
+    except OSError as exc:
+        return RootReceipt(posted=False, detail=f"the root worker could not start ({exc})")
+    return RootReceipt(posted=True, detail="posting in the background")
+
+
+def _start_root_worker(argv: list[str], key: bytes) -> None:
+    """Start ``argv`` in its own session, no terminal, the key on its stdin.
+
+    ``start_new_session`` keeps tmux's kill and SIGHUP of the pane from reaching
+    it, as ``hooks._detach`` does. Without this agent's tracing identity: the
+    worker is not the agent. Raises ``OSError`` when it cannot be started.
+    """
+    import subprocess  # lazy: the module is imported on every launch, traced or not
+
+    env = spawn.untraced_env()
+    env.pop("AISQUARE_FLEET_AGENT", None)
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        env=env,
+    )
+    assert process.stdin is not None
+    with process.stdin:
+        process.stdin.write(key + b"\n")
 
 
 def _resumed_session_id(value: str) -> str:
@@ -971,6 +1019,8 @@ def wire_session(
         not_owned = receipt.detail
     if owns_trace:
         reason = f"traced as {agent_name} (pipeline {pipeline_id}, run {identity.trace_id})"
+        if not_owned != "HTTP 202" and not_owned:
+            reason += f" — root {not_owned}"
     else:
         reason = (
             f"traced as {agent_name} (pipeline {pipeline_id}; the proxy keys the run — "

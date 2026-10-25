@@ -76,6 +76,93 @@ fleet still running, and every release now carries its own installer.**
   when it saves, reloads or resets, so it shows at once and the two-second refresh
   never reads `config.toml` for it. A `config set` from a shell while `asq` runs
   shows after App settings' *Reload* or at `asq`'s next start, not live.
+- **A symbol index, and `aisquare code` to ask it before grepping** (#285, phase A of
+  #91). `aisquare code find <name>` lists definitions (exact, then case-insensitive,
+  then prefix, then by name part), `code refs <name> [--defs]` every use, and
+  `code similar <name|path:line>` the like-named definitions to check before writing
+  a helper; `code index [--full] [--status]` builds, refreshes or describes it. Every
+  command takes `--json`, and `aisquare serve` offers the same as the MCP tool
+  `code_lookup`, registered only where the project has an index. The index is its own
+  SQLite file under `~/.aisquare/projects/<id>/code/`, built in the background at
+  `project onboard` (and `init`), which return at once, from git's file list less an
+  ignore list: built in, extended by `[code] ignore` (it was `[snapshot] ignore`; a
+  config that still has that is read as `[code] ignore` and moved there at the next
+  save) (the doctor's `code index` row says "building" until it is ready; a first `code find|refs|similar` builds it if none is there yet), and
+  refreshed incrementally: on this repository a full build takes about 4 s and a
+  one-file refresh 0.03 s. Python is parsed with the standard library; TypeScript and
+  JavaScript need the new optional extra `aisquare-cli[code]` (tree-sitter and the
+  grammars' own wheels, so nothing is downloaded); other languages are listed as not
+  indexed. Where a project has an index, a session start starts a detached
+  incremental refresh, at most once a minute per project. `aisquare doctor` has a `code index` row. `[code] enabled` and
+  `max_file_kb` (1024) are the keys.
+
+- **The fleet admits a spawn against the machine, not only the project** (#283).
+  `[fleet] max_agents_total` (0, no budget) caps the live agents across every
+  project, the captain excluded, and its refusal names each project's count;
+  `min_free_mb` (2048) refuses a spawn below that much available memory, or with
+  the kernel's memory pressure at critical, naming both numbers, and admits at warn
+  pressure with a note. After a memory refusal the floor is 512 MB higher for five
+  minutes, so admission does not flap. Parallel spawns at the budget's last seat
+  settle to exactly the budget, as the per-project cap does. `--json` errors are
+  `capacity_project`, `capacity_fleet` and `capacity_memory`. Memory is
+  `MemAvailable` and PSI on Linux and WSL, the pressure level and `vm_stat` on
+  macOS; elsewhere admission admits and says it could not tell.
+  `aisquare fleet capacity [--json]` shows the headroom and every limit, and
+  `aisquare doctor` has it as `fleet capacity`. `aisquare fleet gate [-- CMD]` waits
+  for memory before a heavy run and exits 75 at the deadline without running it;
+  with `test_gate_mb` set, the tester's and validator's cycles name it. Refusals and
+  admissions at the budget go to `~/.aisquare/fleet/admission.jsonl`.
+- **Finished workers stop by themselves** (#283). A tester, reviewer, validator or
+  ui-tester that has finished is stopped by the fleet, with `actor: auto-stop` and the
+  reason on its `agent_exited`, which wakes nobody. Finished means its task closed (or
+  a result posted), nothing claimed, nothing addressed to it unread, nothing queued for
+  it, idle `[fleet] auto_stop_idle_minutes` (5), and an empty input box nobody is
+  typing in. Its own Stop arms the check, a later turn cancels it, and `aisquare fleet
+  reap --finished [--dry-run]` does it on demand. A spawn refused for capacity stops
+  finished workers first and tries once more. `[fleet] auto_stop_finished = false`
+  turns it off; coders opt in through `auto_stop_roles`.
+- **`aisquare watch`: one watcher for the whole fleet, with no model** (#284). It looks
+  every minute at what needs a manager: an agent at a permission or question dialog, a
+  usage limit, a crash or a stall, and, with `[watch] github = true`, each project's pull
+  requests (approved, changes requested, checks done) through `gh` with ETags, so an
+  unchanged answer costs no rate limit. It also runs your own source commands. For each
+  project with something new it writes the details to a file (mode 600), puts one
+  `watch` line on the board for the manager with the counts and the path, never the
+  text, and nudges it. A working manager gets the line when its turn ends. `aisquare
+  watch --detach` runs it in the fleet's tmux server, one per home; `--status` and
+  `aisquare doctor` say how long ago it looked; `aisquare watch show` prints a line's
+  items; `--once` looks once, and says `busy` beside a running watcher's look. The
+  captain's queue lists approved pull requests from the same reader.
+- **A parent manager over a project group** (#199). `aisquare project group parent
+  <group> <project>` names a project outside the group whose manager is the group's. A
+  member's questions, blocked tasks, results and delegated tasks, notes matching
+  `project group route --pattern`, and any `note --to parent` land on the parent's
+  board in the same write, as one `routed` line with a pointer, and wake its manager;
+  one line per member a minute, the rest folded into a count (a question, a blocked
+  task and `--to parent` always route at once). `aisquare task add "…" --project
+  <member> --origin <task>` delegates a task from the parent: both boards show the
+  link, and `linked_all_done` asks the parent's manager to close the origin once every
+  child is closed, saying how many were done and how many dropped. `aisquare fleet pause
+  --group <group>` pauses the members and the parent, and an agent may not spawn on a
+  paused board there. `project group cap` caps their live agents. A member's manager
+  asks its parent before the human. The store moves to schema 38 (five nullable
+  columns, added by presence). A group without a parent behaves as before.
+- **Accounts can share memory, skills, agents, commands and CLAUDE.md** (#198).
+  `[accounts] share` (empty by default) and `aisquare accounts share --status |
+  --enable <parts> | --disable <parts> [--json]`. `memory` gives every launch one
+  auto-memory directory per project under `~/.aisquare/claude-shared/memory`
+  (Claude Code's `autoMemoryDirectory`, passed as `--settings`), merged from every
+  account the first time with nothing overwritten: a note kept under another
+  account's name stays a `.md`, and the merged `MEMORY.md` keeps its blank lines.
+  `skills`, `agents`, `commands` and `claude_md` make each managed account's entry a
+  link to the plain claude's, its own kept beside it (and its entries copied to the
+  plain claude's, never over one there), and `--disable` puts it back exactly; a
+  launch on an account added since links it. `plugins` is experimental. Transcripts are
+  never shared. `aisquare doctor` has a `claude-accounts sharing` line. A session is
+  attributed to the account its fleet row launched it on, not the one a shared
+  transcript path names. Cross-account resume is verified on Claude Code 2.1.309: a
+  session moved to another account keeps its id and what was said, and its turns go on
+  the original transcript (`docs/runbooks/cross-account-resume.md`).
 - **`[accounts] prefer = "reset-soonest"`** (*under the line, prefer* in App
   settings): of the accounts under `switch_at`, a spawn and a hand-over take the
   one whose week resets first, priority breaking ties, so a week's allowance is
@@ -148,7 +235,7 @@ fleet still running, and every release now carries its own installer.**
   that the folder holds aisquare's settings, the fleet database and every Claude
   account's login data, which agents working there can read and change. Removing it
   from the fleet hides it again. Every other role, fleet row and board, and the store
-  (schema v36), are the same either way. Four fleet changes that came with it are
+  (schema v38), are the same either way. Four fleet changes that came with it are
   not behind the switch, on or off: a tmux server the fleet starts holds no team
   variable, doctor's `fleet server env` row, the board each delta and wake-up line
   names, and `serve --stdio`'s idle clock (all under Fixed, below).
@@ -502,6 +589,24 @@ fleet still running, and every release now carries its own installer.**
   launches on its own directory after the upgrade. A headroom pick still
   overrides the binding, as before. An old default that is signed out or
   disabled no longer gets the launch: the next enabled, signed-in account does.
+- **`asq`'s tick costs what its agents cost, not what its project list costs** (#83).
+  Every two seconds the sidebar read every listed project: a store session each, and
+  two tmux processes each, whether it had an agent or not. It now reads them all in
+  one store session, asks each tmux server once (`list-panes -a`), and skips a project
+  with no live agent and none that ended in the last day, and the members of a
+  collapsed group, whose header counts their live agents instead. A card whose agents
+  did not change is not repainted. With 50 listed projects, 10 of them with 3 agents:
+  51 store sessions and 20 tmux processes per read became 1 and 1, the read ~200 ms to
+  ~11 ms, and the UI thread's paint ~15 ms to ~4–7 ms (measured on one Mac).
+  `aisquare ui --project <ref>` and `--group <name>` (both repeatable) list only those
+  projects for the session, plus the captain's section when it is on; a name that
+  matches nothing is refused before the app starts. The fleet's tmux server turns the
+  mouse on (#100), so the wheel scrolls Claude Code in `fleet attach`: a plain drag
+  there is tmux's selection now; hold Shift (Option in macOS Terminal and iTerm2) to
+  select in your own terminal. `[fleet] pane_clipboard = "on"` lets a program in an
+  agent's pane set your clipboard with OSC 52, which tmux keeps as a paste buffer and
+  hands to the terminal `fleet attach` runs in (#101); off, the default, keeps any pane
+  program from writing your clipboard. Both apply to a server started after the change.
 - **A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and
   the suite on one Linux leg (py3.12), the Linux package job and the other jobs
   bar the ambient legs and the demo. Pushes to `rc/**` and `main`, PRs into
@@ -567,7 +672,11 @@ fleet still running, and every release now carries its own installer.**
   deny was the reviewer's default `extra_args`, and a list replaces whole, so setting
   them launched the reviewer with Edit, Write and NotebookEdit, and `aisquare launch
   reviewer` and `team spawn reviewer` denied it nothing at all.
-- The store migrates to schema v37 on first open, from 0.8.2's v32, in five steps: v37
+- The store migrates to schema v38 on first open, from 0.8.2's v32, in six steps: v38
+  adds a group's parent manager, routing rules and cap (`project_group.parent_project_id`,
+  `route`, `max_agents`) and a task's origin (`team_task.origin_task_id`,
+  `origin_project_id`), for a parent manager over a group (above; a store the pre-release
+  P2 train stamped v36 with them reaches v38 through the presence pass). v37
   adds `team_event.actor` and `team_event.meta`, who caused a board event and its
   details (above; a store the pre-release P1 train stamped v35 with them reaches v37
   through the presence pass). v36 adds the first message's three columns (under Fixed; a store a pre-release build
@@ -764,6 +873,35 @@ fleet still running, and every release now carries its own installer.**
   launcher presses Enter past it, then types the prompt. An agent left at that
   screen reads `attention` in `fleet ls`, the sidebar and Remote, with the
   reason, and its prompt is kept rather than typed into it.
+- **A stale `ANTHROPIC_BASE_URL` is found wherever it hides, and one command removes
+  it** (#51). Tracing's proxy can outlive Disable in a Claude `settings.json` `env`
+  block (the plain claude's, a managed slot's, a project's shared or local file), a
+  role binding's `env` or `env_files`, the fleet tmux server's global environment or
+  the shell, and once that proxy is gone every agent launched with it fails at its
+  first model call. `aisquare doctor` has an `anthropic routing` row that reads them
+  all, with or without the team active: a proxy of ours (a target's, the shipped
+  default, or one carrying our identity headers) with tracing off or on another
+  target warns, naming each place and its fix; a URL the agent cannot parse warns;
+  your own gateway is information and is never changed. No header value is printed,
+  JSON included, and a URL is shown without its userinfo or query.
+  `aisquare explainability reset [--dry-run] [--yes] [--json]` turns tracing off
+  (targets kept) and removes only what is ours (a proxy URL of ours, and our header
+  lines; your gateway URL and your own headers beside them stay) from settings files
+  (a `settings.json.bak-<stamp>` copy kept, written under Claude Code's own lock),
+  from bindings and from the tmux server, prints the shell's `unset` line and the rc
+  files that mention them (never edited), and a second run says "nothing to reset".
+  `explainability disable` and the Explainability tab's Disable name the leftovers;
+  the tab then offers **Reset routing**. `doctor --fix` no longer undoes a Disable: it
+  turns tracing on only with `--target <name>`, and otherwise says how. A traced launch
+  no longer waits on the gateway (#129 (e)): the Run's root, posted inline between the
+  proxy probe and the agent's exec (a WAN write #129 measured over its 3 s budget on 2
+  of 11 launches), is posted by a detached `explainability post-root` worker with the
+  key on its stdin, which retries a transport failure or a 5xx; the agent starts on the
+  `traceparent` path at once, and the gateway holds its first spans until the root
+  lands. A gateway URL that cannot be parsed still falls back to `X-Pipeline-Id`
+  before anything starts; a post that fails in the worker leaves its reason in
+  `~/.aisquare/log/explainability-root.log`.
+
 - **Every first message reaches its agent and starts a turn, or `fleet ls` says it
   did not.** A spawn's `--prompt`, the line `fleet restart` and `fleet switch` start
   a replacement with, a fresh hand-off and the usage-limit hand-over's were typed

@@ -64,7 +64,7 @@ from aisquare.models import (
     ProjectInfo,
 )
 from aisquare.services import claude_accounts as accounts_service
-from aisquare.services import fleet as fleet_service
+from tests.fleet_fakes import list_agents_as
 from tests.test_claude_accounts import _sign_in
 from tests.test_ui_accounts import _overview, _status
 from tests.test_ui_shell import composited
@@ -418,7 +418,7 @@ def test_the_doctor_page_names_the_project_its_checks_are_about(
     def no_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         return []
 
-    monkeypatch.setattr(fleet_service, "list_agents", no_agents)
+    list_agents_as(monkeypatch, no_agents)
     doctor = HeldDoctor(first=[WARNING], then=[PASSING])
 
     async def go(pilot: Pilot[None]) -> tuple[tuple[str, str, str], tuple[str, str, str]]:

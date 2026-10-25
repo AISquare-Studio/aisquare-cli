@@ -22,6 +22,14 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return workdir
 
 
+def _said(output: str) -> str:
+    """What ``project onboard`` said of the project's facts: its output without the symbol
+    index's own line (#285, from main's P2), which comes first on every onboard."""
+    return "".join(
+        line for line in output.splitlines(keepends=True) if not line.startswith("code index: ")
+    )
+
+
 def _json(output: str) -> Any:
     return json.loads(output)
 
@@ -177,16 +185,20 @@ def test_onboard_and_refresh_seed_facts_and_start_nothing_but_git(
 
     assert first.exit_code == 0, first.output
     assert "seeded 1 project fact(s):\n  - Python project (pyproject.toml).\n" in first.stdout
+    assert first.stdout.startswith("code index: building in the background"), first.stdout
     # The Makefile is new, and a plain run does not read the markers: it says so rather
     # than "no new facts" (review of #399, m2).
-    assert plain.stdout == "✓ already onboarded; --refresh reads the markers again\n", plain.output
+    assert _said(plain.stdout) == "✓ already onboarded; --refresh reads the markers again\n", (
+        plain.output
+    )
     report = _json(refreshed.stdout)
-    assert set(report) == {"seeded", "markers_read", "restored", "warning"}
+    # code_index: the symbol index's line (#285, main's P2), None with [code] enabled off.
+    assert set(report) == {"seeded", "markers_read", "restored", "warning", "code_index"}
     assert report["markers_read"] is True
     assert [entry["text"] for entry in report["seeded"]] == [
         "Has a Makefile — check its targets for build/test commands."
     ]
-    assert again.stdout == "✓ onboarded — no new project facts to seed\n", (
+    assert _said(again.stdout) == "✓ onboarded — no new project facts to seed\n", (
         "a refresh never duplicates a fact, and says it read them"
     )
     assert set(started) <= {"git"}, started
@@ -218,22 +230,22 @@ def test_onboarding_a_forgotten_project_again_says_its_facts_are_back(
     (proj / "go.mod").touch()
     seeded = runner.invoke(app, ["project", "onboard"])
 
-    assert first.stdout == "seeded 1 project fact(s):\n  - Node.js project (package.json).\n", (
-        "control: a project never seen before is no comeback"
-    )
+    assert (
+        _said(first.stdout) == "seeded 1 project fact(s):\n  - Node.js project (package.json).\n"
+    ), "control: a project never seen before is no comeback"
     assert forgotten.exit_code == 0, forgotten.output
     assert _json(gone.stdout) == [], "control: the project really was forgotten"
     assert back.exit_code == 0, back.output
-    assert back.stdout == "✓ onboarded again; its earlier facts are back\n", back.output
+    assert _said(back.stdout) == "✓ onboarded again; its earlier facts are back\n", back.output
     assert [project["root"] for project in _json(listed.stdout)] == [str(proj.resolve())]
-    assert plain.stdout == "✓ already onboarded; --refresh reads the markers again\n"
+    assert _said(plain.stdout) == "✓ already onboarded; --refresh reads the markers again\n"
     assert report["restored"] is True
     assert report["markers_read"] is True
     assert [entry["text"] for entry in report["seeded"]] == [
         "Has a Makefile — check its targets for build/test commands."
     ], "it read the markers, and seeded only the new one"
     assert newer.exit_code == 0, newer.output
-    assert seeded.stdout == (
+    assert _said(seeded.stdout) == (
         "✓ onboarded again; its earlier facts are back\n"
         "seeded 1 project fact(s):\n"
         "  - Go module (go.mod).\n"
@@ -281,13 +293,13 @@ def test_a_forgotten_project_a_capture_brought_back_is_onboarded_again(
 
     assert forgotten.exit_code == 0, forgotten.output
     assert _json(gone.stdout) == [], "control: the capture revived it unlisted"
-    assert back.stdout == (
+    assert _said(back.stdout) == (
         "✓ onboarded again; its earlier facts are back\n"
         "seeded 1 project fact(s):\n"
         "  - Has a Makefile — check its targets for build/test commands.\n"
     ), back.output
     assert [project["root"] for project in _json(listed.stdout)] == [str(proj.resolve())]
-    assert first.stdout == "seeded 1 project fact(s):\n  - Rust project (Cargo.toml).\n", (
+    assert _said(first.stdout) == "seeded 1 project fact(s):\n  - Rust project (Cargo.toml).\n", (
         "a captured row never onboarded is a first run, not a comeback"
     )
 

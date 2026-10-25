@@ -1713,7 +1713,10 @@ def test_ui_after_update_tells_the_app(monkeypatch: pytest.MonkeyPatch, runner: 
     ordinary = runner.invoke(cli_app, ["ui"])
 
     assert after.exit_code == 0 and ordinary.exit_code == 0, after.output + ordinary.output
-    assert opened == [{"after_update": True}, {}], "an ordinary start is run as before"
+    # The scope is main's (P2's `ui --project/--group`), None for every project.
+    assert opened == [{"scope": None, "after_update": True}, {"scope": None}], (
+        "an ordinary start is run as before"
+    )
 
 
 def test_the_one_click_reopen_names_a_ui_that_takes_it() -> None:

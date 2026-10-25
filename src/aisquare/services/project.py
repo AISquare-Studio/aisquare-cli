@@ -1017,7 +1017,8 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
     not already in the pool is added, so none is ever duplicated. A forgotten project
     added again is a first run: forget kept its facts, hidden, and they are back.
     ``path`` is the user's, refused unless it is a folder (:func:`typed_root`). Nothing
-    is packed and no process is run: the codebase snapshot it once made is gone.
+    is packed: the codebase snapshot it once made is gone (#399). The symbol index (#285)
+    is started in a detached process when ``[code] enabled``, and never fails the onboard.
     """
     root = typed_root(path)
     project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
@@ -1046,5 +1047,26 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
                     store.add(new_entry(fact, "project", project.id, ["onboarding"], "onboard"))
                 )
     return OnboardReport(
-        seeded=seeded, markers_read=markers_read, restored=restored, warning=warning
+        seeded=seeded,
+        markers_read=markers_read,
+        restored=restored,
+        warning=warning,
+        code_index=_ensure_code_index(project, refresh=refresh),
     )
+
+
+def _ensure_code_index(project: ProjectInfo, *, refresh: bool) -> str | None:
+    """Start building or refreshing the symbol index (#285) detached, as one line for the
+    report; ``None`` when ``[code] enabled`` is off. Never inline: a first index of a large
+    checkout takes minutes, and the onboard (and ``init``) returns at once. Incremental
+    unless ``refresh``; never fails the onboard."""
+    from aisquare.services import code as code_service  # lazy: onboard imports this module
+    from aisquare.services import hooks as hooks_service  # lazy: hooks imports this module
+
+    if not code_service.settings().enabled:
+        return None
+    try:
+        hooks_service.start_code_index(project, full=refresh)
+    except Exception as exc:  # an index is optional; the onboard is not
+        return f"not started ({exc}) — build it with `aisquare code index`"
+    return "building in the background — `aisquare code index --status` says when it is ready"

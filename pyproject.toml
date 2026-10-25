@@ -169,6 +169,18 @@ remote = [
   # are core since #34, and `pipx install 'aisquare-cli[remote]'` was the
   # documented way to get them.
 ]
+code = [
+  # `aisquare code`'s TypeScript and JavaScript parsers (core/code_index.py, #285).
+  # Python is indexed with the standard library's `ast` and needs nothing here.
+  # The per-grammar wheels, not tree-sitter-language-pack: each wheel carries its
+  # compiled grammar AND its own queries/tags.scm, so nothing is downloaded at
+  # index time (the language pack fetches its grammars on first parse, and the
+  # index promises that nothing leaves the machine). Floors: the versions the
+  # parser was written and measured against.
+  "tree-sitter>=0.25",
+  "tree-sitter-typescript>=0.23",
+  "tree-sitter-javascript>=0.25",
+]
 tui = [
   # Kept as a no-op alias for one release: `pipx install 'aisquare-cli[tui]'`
   # was the documented way to get the board TUI before textual became core.
@@ -187,6 +199,11 @@ experiment = [
 ]
 dev = [
   "pytest>=9.1.1",
+  # The [code] extra's parsers, so tests/test_code_index.py exercises the
+  # TypeScript and JavaScript paths in CI rather than skipping them.
+  "tree-sitter>=0.25",
+  "tree-sitter-typescript>=0.23",
+  "tree-sitter-javascript>=0.25",
   # `make test` runs the suite on every core (#129 d). Each test already has a home,
   # a tmux folder and a `claude` stand-in of its own (tests/conftest.py), so workers
   # share nothing a test writes.
@@ -253,6 +270,9 @@ exclude = ["/docs/demo.gif", "/docs/demo/*.png"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# A test still running after 5 minutes dumps every thread's stack to stderr (it is not
+# failed: CI's step timeout does that), so a hang names itself in the log.
+faulthandler_timeout = 300
 
 [tool.ruff]
 line-length = 100
@@ -277,4 +297,10 @@ plugins = ["pydantic.mypy"]
 # dev extra does not install them (faster-whisper drags in ctranslate2 and av); mypy
 # still walks the import lines. Untyped here, checked for real under [voice].
 module = ["faster_whisper", "faster_whisper.*", "numpy", "segno"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The code index's TypeScript/JavaScript parsers (#285), imported lazily from the
+# optional [code] extra, which the dev extra does not install.
+module = ["tree_sitter", "tree_sitter_javascript", "tree_sitter_typescript"]
 ignore_missing_imports = true

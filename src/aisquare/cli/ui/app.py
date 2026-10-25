@@ -30,12 +30,13 @@ all of them must reach it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -318,6 +319,8 @@ class _FleetRead:
     groups: list[ProjectGroup] = field(default_factory=list)
     agents: dict[str, list[FleetAgentStatus]] = field(default_factory=dict)
     notices: dict[str, str] = field(default_factory=dict)
+    live: dict[str, int] = field(default_factory=dict)
+    """Live rows per project, for a collapsed group's members, whose agents are not read."""
     error: str | None = None
     taken_at: datetime = field(default_factory=datetime.now)
     home: ProjectInfo | None = None
@@ -333,18 +336,36 @@ class _FleetRead:
     before Settings switched it on found nothing of it, which is not "no captain"."""
 
 
-def _read_frame(show_captured: bool, captain: bool) -> _FleetRead:
+def _read_frame(
+    show_captured: bool,
+    captain: bool,
+    viewed: Collection[str] | None = None,
+    scope: Collection[str] | None = None,
+) -> _FleetRead:
     """One frame of the sidebar, read on the calling thread: the fleet, then the captain's
-    home board and row when the captain is on (``experimental.captain``)."""
-    read = _read_fleet(show_captured, captain=captain)
+    home board and row when the captain is on (``experimental.captain``). ``viewed`` and
+    ``scope`` as for :func:`_read_fleet`."""
+    read = _read_fleet(show_captured, viewed, scope, captain=captain)
     return replace(_read_captain(read), captain_asked=True) if captain else read
 
 
-def _read_fleet(show_captured: bool, *, captain: bool = False) -> _FleetRead:
+def _read_fleet(
+    show_captured: bool,
+    viewed: Collection[str] | None = None,
+    scope: Collection[str] | None = None,
+    *,
+    captain: bool = False,
+) -> _FleetRead:
     """One frame of the fleet, read on the calling thread: the projects and their groups,
-    then each project's agents. ``list_agents`` asks tmux about every row and ends the dead
-    ones through a store session it opens itself, on this thread too. The captured
-    directories are listed when ``show_captured`` and ``[projects] capture`` both say so.
+    then their agents. One store session reads them all; ``list_agents_many`` then asks
+    each tmux server once, and ends the dead rows through a store session of its own, on
+    this thread too. A project with no recent row, or folded away in a collapsed group, is
+    not read at all (#83). The captured directories are listed when ``show_captured`` and
+    ``[projects] capture`` both say so.
+
+    ``viewed``: the projects an open view shows, read even when folded away, whose view a
+    frame without them would leave to age; ``None`` folds nothing (the first frame, read
+    before the views it reopens). ``scope``: the only projects listed (``ui --project``).
 
     With ``captain``, the captain's home board is read in the same session, by the id
     resolved here: :func:`_read_captain` opened a second session and resolved the home
@@ -361,35 +382,49 @@ def _read_fleet(show_captured: bool, *, captain: bool = False) -> _FleetRead:
             projects = [
                 p
                 for p in store.list_projects(all=show_captured and capturing)
-                if p.id != home_id or p.onboarded_at is not None
+                if (p.id != home_id or p.onboarded_at is not None)
+                and (scope is None or p.id in scope)
             ]
             groups = store.project_groups()
             home = store.get_project(home_id) if captain else None
+            folded = set() if viewed is None else _folded(projects, groups) - set(viewed)
+            listings = fleet_service.read_listings(store, projects, skip=folded)
+            # A manager nudge a draft held back (P0-W2, #276), read in this frame's session.
+            owed = fleet_service.deferred_nudge_targets(store)
     except Exception as exc:  # the store is briefly unavailable — keep what is shown
         return _FleetRead(capturing, error=f"{type(exc).__name__}: {exc}")
-    agents: dict[str, list[FleetAgentStatus]] = {}
+    many = fleet_service.list_agents_many(listings)
+    # A folded project is no key: not read is not "no agents" (`group_header_text`, and
+    # `_feed_open_views`, which leaves a view of one as it is).
+    agents = {p.id: many.agents.get(p.id, []) for p in projects if p.id not in folded}
     notices: dict[str, str] = {}
-    for project in projects:
-        try:
-            statuses = fleet_service.list_agents(project)
-            if project.id == home_id:  # the captain is the captain section's, never the card's
-                statuses = [s for s in statuses if not fleet_service.is_the_captains_row(s.agent)]
-            agents[project.id] = statuses
-        except Exception as exc:  # a bug in the fleet path must not take the view down
-            agents[project.id] = []
-            notices[project.id] = f"agents unavailable — {_why_unread(exc)}"
+    for project_id, failure in many.errors.items():
+        # A bug in the fleet path must not take the view down: said, with its class.
+        notices[project_id] = f"agents unavailable — {_why_unread(failure)}"
+    if home_id in agents:  # the captain is the captain section's, never the card's
+        agents[home_id] = [
+            s for s in agents[home_id] if not fleet_service.is_the_captains_row(s.agent)
+        ]
     # The one write a frame makes: a manager nudge a draft held back goes out once its input
-    # box is clear (P0-W2, #276). One indexed read when nothing is held back; never raises.
-    fleet_service.retry_deferred_nudges()
-    return _FleetRead(capturing, projects, groups, agents, notices, home=home)
+    # box is clear (P0-W2, #276); nothing is opened when nothing is owed.
+    with contextlib.suppress(Exception):
+        fleet_service.send_deferred_nudges(owed)
+    return _FleetRead(capturing, projects, groups, agents, notices, listings.live, home=home)
 
 
-def _why_unread(exc: Exception) -> str:
-    """Why a ``list_agents`` failed, as a card and the captain's section both say it: a
-    ``FleetError`` already says what failed; anything else is named by its class."""
+def _why_unread(exc: BaseException) -> str:
+    """Why a project's agents could not be read, as a card and the captain's section both
+    say it: a ``FleetError`` already says what failed; anything else is named by its class."""
     if isinstance(exc, fleet_service.FleetError):
         return str(exc)
     return f"{type(exc).__name__}: {exc}"
+
+
+def _folded(projects: list[ProjectInfo], groups: list[ProjectGroup]) -> set[str]:
+    """The projects a collapsed group hides: its members, bar the pinned ones, which the
+    Pinned section shows (``project_groups.arrange``)."""
+    collapsed = {group.id for group in groups if group.collapsed}
+    return {p.id for p in projects if p.pinned_at is None and p.group_id in collapsed}
 
 
 def _read_captain(read: _FleetRead) -> _FleetRead:
@@ -851,8 +886,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         remote: RemoteController | None = None,
         release_check: ReleaseCheck | None = None,
         after_update: bool = False,
+        scope: Collection[str] | None = None,
     ) -> None:
         super().__init__()
+        self.scope = None if scope is None else frozenset(scope)
+        """The projects ``aisquare ui --project/--group`` listed; ``None`` lists every one."""
         self._workers = self._worker_threads = _WorkerThreads(self)
         """Textual's own manager, which ``self.workers`` reads, and the threads it ran."""
         self._hand_off_since = 0.0
@@ -1012,7 +1050,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # The first frame is read here, on the UI thread, before anything is drawn: there
         # is nothing on screen yet for the read to hold up, and what was open last time is
         # reopened from it below. Every frame after it is read in a thread (`refresh_data`).
-        self._paint_fleet(_read_frame(self.show_captured, self.captain_on))
+        self._paint_fleet(_read_frame(self.show_captured, self.captain_on, scope=self.scope))
         self.set_interval(self.refresh_seconds, self.refresh_data)
         # The status line's headroom is the usage cache's, on its own slow clock: never
         # on the two-second tick, which would ask the network as often as it went stale.
@@ -1343,8 +1381,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # `a`'s choice is read as the read begins, so one held for a hand-over and started
         # when it is called off reads what is shown then.
         self._fleet_since = time.monotonic()
+        viewed = self._viewed_projects()  # asked here, on the UI thread, not in the worker
         self._fleet_worker = self.run_worker(
-            lambda: _read_frame(self.show_captured, self.captain_on),
+            lambda: _read_frame(self.show_captured, self.captain_on, viewed, self.scope),
             name=FLEET_WORKER,
             group=FLEET_WORKER,
             thread=True,
@@ -1448,6 +1487,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             cards,
             notices=read.notices,
             groups=read.groups,
+            live=read.live,
             always_show_paths=self.always_show_project_path,
         )
         self._feed_open_views(self.snapshot)
@@ -1628,6 +1668,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.state in (WorkerState.SUCCESS, WorkerState.ERROR) and self._headroom_owed:
             self.refresh_headroom()
 
+    def _viewed_projects(self) -> frozenset[str]:
+        """The projects an open Project or Agent view shows (:func:`_read_fleet`'s ``viewed``)."""
+        content = self.content
+        return frozenset(
+            [view.project.id for view in content.query_children(ProjectView)]
+            + [view.status.agent.project_id for view in content.query_children(AgentView)]
+        )
+
     def _feed_open_views(self, snapshot: FleetSnapshot) -> None:
         """Hand every open Project/Agent view its row from the new frame.
 
@@ -1668,6 +1716,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 project_view.refresh_project(fresh_project)
             if snapshot.notices.get(fresh_project.id) is not None:
                 continue  # we could not ask — not "the fleet answered: none"
+            if fresh_project.id not in snapshot.agents:
+                continue  # folded away and not read (#83) — not "none" either
             # ProjectView.show() is the MANAGER status renderer; the snapshot
             # goes through refresh_status, which picks the manager out of it.
             project_view.refresh_status(snapshot.agents.get(fresh_project.id, []))
@@ -3121,6 +3171,7 @@ def _writing_workers() -> dict[str, str]:
         explainability.SAVE_WORKER: "Explainability's setup",
         explainability.REGISTER_WORKER: "Explainability's registration",
         explainability.SHIP_WORKER: "Explainability's ship",
+        explainability.RESET_WORKER: "Explainability's routing reset",
         accounts.SIGN_OUT_WORKER: "an AISquare sign-out",
         accounts.COMPLETE_WORKER: "a Claude sign-in",
         accounts.ABANDON_WORKER: "a Claude sign-in's discard",
@@ -3170,6 +3221,7 @@ def _waited_reads() -> dict[str, str]:
         agent.LABELS_WORKER: "an agent's account names",
         board.LABELS_WORKER: "a board's account names",
         explainability.STATUS_WORKER: "Explainability's status",
+        explainability.LEFTOVERS_WORKER: "Explainability's check for leftover routing",
         fleet_bulk.PLAN_WORKER: "Settings ▸ Fleet's read of the running agents",
         app_settings.ACCOUNTS_WORKER: "App settings' accounts",
         welcome.worker_name("look"): "Welcome's checks",

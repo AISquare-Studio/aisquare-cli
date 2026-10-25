@@ -293,6 +293,31 @@ def test_a_config_with_the_retired_snapshot_section_loads_and_the_next_save_drop
     assert load_config(target).fleet.max_agents_per_project == 6
 
 
+@pytest.mark.parametrize("code_ignore", [None, ["vendor/**"]], ids=["carried", "code-set-wins"])
+def test_a_snapshot_ignore_list_is_carried_into_code(
+    tmp_path: Path, code_ignore: list[str] | None
+) -> None:
+    """The code index (#285, from main's P2) read its extra ignore patterns from
+    ``[snapshot] ignore``, a section #399 retired with the pack: dropped at the next save,
+    the user's patterns were lost. They are read as ``[code] ignore`` and written there by
+    that save; a ``[code] ignore`` already set wins."""
+    code = "" if code_ignore is None else f"\n[code]\nignore = {code_ignore!r}\n"
+    target = tmp_path / "config.toml"
+    target.write_text(
+        "[snapshot]\nmax_tokens = 300000\nignore = ['**/fixtures/**', 'docs/generated/**']\n"
+        + code,
+        encoding="utf-8",
+    )
+    expected = code_ignore or ["**/fixtures/**", "docs/generated/**"]
+
+    assert load_config(target).code.ignore == expected
+    save_config(load_config(target), target)
+    saved = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert "snapshot" not in saved
+    assert saved["code"]["ignore"] == expected
+    assert load_config(target).code.ignore == expected, "and read back from [code] alone"
+
+
 def test_doctor_says_once_that_the_snapshot_section_is_no_longer_read(
     isolated_home: Path,
 ) -> None:
@@ -309,7 +334,7 @@ def test_doctor_says_once_that_the_snapshot_section_is_no_longer_read(
     assert row.status is CheckStatus.ok, "nothing is wrong: the section is ignored"
     assert row.detail == (
         "config.toml is valid; [snapshot] is no longer read (aisquare no longer packs a "
-        "codebase), and the next save drops it"
+        "codebase; an ignore list in it moves to [code]), and the next save drops it"
     )
     save_config(load_config())
     assert diagnostics._check_config().detail == "config.toml is valid"

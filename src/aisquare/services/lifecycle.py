@@ -196,6 +196,8 @@ def initialize(
     if onboard:
         report = project_service.onboard(path, refresh=False)
         onboarded = len(report.seeded)
+        if report.code_index is not None:
+            notes.append(f"Code index: {report.code_index}.")
 
     for agent in agents:
         try:

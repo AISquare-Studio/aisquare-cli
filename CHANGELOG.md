@@ -193,7 +193,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   there says so rather than that the pack is opt-in (a pack of it left from before
   is not served, and the next onboard or `init` deletes it). Removing it from the
   fleet hides it again. Every other role, fleet row and board, and the store
-  (schema v36), are the same either way. Four fleet changes that came with it are
+  (schema v38), are the same either way. Four fleet changes that came with it are
   not behind the switch, on or off: a tmux server the fleet starts holds no team
   variable, doctor's `fleet server env` row, the board each delta and wake-up line
   names, and `serve --stdio`'s idle clock (all under Fixed, below).
@@ -565,7 +565,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   deny was the reviewer's default `extra_args`, and a list replaces whole, so setting
   them launched the reviewer with Edit, Write and NotebookEdit, and `aisquare launch
   reviewer` and `team spawn reviewer` denied it nothing at all.
-- The store migrates to schema v37 on first open, from 0.8.2's v32, in five steps: v37
+- The store migrates to schema v38 on first open, from 0.8.2's v32, in six steps: v38
+  adds a group's parent manager, routing rules and cap (`project_group.parent_project_id`,
+  `route`, `max_agents`) and a task's origin (`team_task.origin_task_id`,
+  `origin_project_id`), for a parent manager over a group (above; a store the pre-release
+  P2 train stamped v36 with them reaches v38 through the presence pass). v37
   adds `team_event.actor` and `team_event.meta`, who caused a board event and its
   details (above; a store the pre-release P1 train stamped v35 with them reaches v37
   through the presence pass). v36 adds the first message's three columns (under Fixed; a store a pre-release build

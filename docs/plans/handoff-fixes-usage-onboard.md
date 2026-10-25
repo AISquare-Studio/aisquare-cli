@@ -35,7 +35,8 @@ green; docs and CHANGELOG updated; config keys documented in `docs/reference.md`
 
 ## F1 — A rate-limited usage read sticks instead of backing off
 
-> **Status: built in PR #408, which goes straight into `main`. Whoever builds #400 must not redo F1.**
+> **Status: built in PR #408, which goes into #401 (`feat/versioned-installers`, the 0.9.0 release), not
+> into this branch. Whoever builds #400 must not redo F1.**
 > The text below is the original brief, kept for the record.
 >
 > What #408 delivers, against F1's acceptance:

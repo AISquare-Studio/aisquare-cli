@@ -32,7 +32,7 @@ def test_no_row_is_about_node_or_the_removed_snapshot(
     monkeypatch.setattr("aisquare.services.diagnostics.shutil.which", without_node)
     checks = diagnostics.doctor()
 
-    assert not {check.name for check in checks} & {"snapshot", "tiktoken", "node"}
+    assert not {check.name for check in checks} & {"repomix", "snapshot", "tiktoken", "node"}
     for check in checks:
         if check.status is CheckStatus.ok:
             continue

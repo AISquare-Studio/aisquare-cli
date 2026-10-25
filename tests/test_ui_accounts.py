@@ -828,6 +828,43 @@ def test_a_kept_readings_age_fits_the_session_cell_without_an_ellipsis(
     assert "…" not in rendered
 
 
+def test_a_rate_limit_that_ends_between_ticks_never_shows_a_past_until(
+    no_network: dict[str, Any],
+) -> None:
+    """TUI-401b check 5 at e28697f1: after a short Retry-After passed, the session cell's
+    tooltip still said 'rate-limited until <a time already past>' until the page's next
+    re-read, a minute on: it printed the reason frozen at the read. The row now repaints
+    the moment the wait ends, and the wait is written from its end time as of then."""
+    no_network["usage"] = ClaudeUsage(available=True, session_percent=40, week_percent=10)
+    overview = _overview(_status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: "40%" in cells(view, 2)["session"])
+        until = datetime.now(tz=UTC) + timedelta(seconds=1)
+        kept = ClaudeUsage(
+            available=True,
+            session_percent=40,
+            week_percent=10,
+            fetched_at=datetime.now(tz=UTC) - timedelta(minutes=12),
+            last_failed_at=datetime.now(tz=UTC),
+            last_failed_reason=accounts_service.backoff_reason(until),
+            rate_limited=True,
+            rate_limited_until=until,
+        )
+        line = row(view, 2)
+        line.show(line.status, kept)  # a read that was refused, as the page paints it
+        during = str(line.cell("session").tooltip)
+        await pilot.pause(1.5)  # the wait is over; the page's next re-read is a minute away
+        return until.astimezone().strftime("%H:%M"), during, str(line.cell("session").tooltip)
+
+    clock, during, after = drive(go, overview=overview)
+    assert f"reading from 12m ago · rate-limited until {clock}" in during, during
+    assert "rate-limited until" not in after, after
+    assert "the rate limit has ended" in after, after
+
+
 def test_buttons_follow_each_slots_state(no_network: dict[str, Any]) -> None:
     no_network["usage"] = lambda account: (
         ClaudeUsage(available=False, reason="the token was rejected", needs_login=True)

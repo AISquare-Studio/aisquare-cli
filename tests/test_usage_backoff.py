@@ -290,6 +290,11 @@ def test_the_row_says_how_old_the_kept_reading_is_and_why() -> None:
     assert kept_tooltip(usage, now=NOW) == (
         f"reading from 12m ago · rate-limited until {clock} — logging in again does not clear it"
     )
+    # TUI-401b check 5: the reason is frozen at the read; once the wait is over it is
+    # never named, whatever time the reason held.
+    after = until + timedelta(seconds=1)
+    assert "until" not in str(kept_tooltip(usage, now=after)), kept_tooltip(usage, now=after)
+    assert str(kept_tooltip(usage, now=after)).endswith("the next read asks again")
     live = usage.model_copy(update={"last_failed_reason": None, "rate_limited": False})
     assert kept_tooltip(live, now=NOW) is None and account_cells(status, live, now=NOW)[
         "session"

@@ -432,7 +432,16 @@ def kept_tooltip(usage: ClaudeUsage | None, *, now: datetime | None = None) -> s
     if usage is None or kept_age(usage, now=now) is None or usage.fetched_at is None:
         return None
     age = accounts_service.describe_age(usage.fetched_at, now=now)
-    return f"reading from {age} · {usage.last_failed_reason}"
+    why = usage.last_failed_reason
+    if usage.rate_limited and usage.rate_limited_until is not None:
+        # The wait from its end time, as of now: the reason is a string frozen at the read,
+        # so after a short Retry-After it named a time already past until the page's next
+        # tick, a minute on (TUI-401b check 5 at e28697f1; 55d1bc78 did this for the CLI).
+        if usage.rate_limited_until > (now or accounts_service._now()):
+            why = accounts_service.backoff_reason(usage.rate_limited_until)
+        else:
+            why = "the rate limit has ended — the next read asks again"
+    return f"reading from {age} · {why}"
 
 
 def account_cells(
@@ -688,6 +697,7 @@ class AccountRow(Horizontal, can_focus=True):
         self.status = status
         self.usage: ClaudeUsage | None = None
         self.trend: UsageTrend | None = None
+        self._wait_timer: Timer | None = None
         self.first = True
         self.last = True
         self.openings = 0
@@ -820,6 +830,19 @@ class AccountRow(Horizontal, can_focus=True):
         if self.is_mounted:
             self._paint()
 
+    def _repaint_when_the_wait_ends(self) -> None:
+        """Paint again the moment the shown rate limit ends: the page re-reads once a
+        minute, and until then the tooltip kept the wait it was painted with."""
+        if self._wait_timer is not None:
+            self._wait_timer.stop()
+            self._wait_timer = None
+        usage = self.usage
+        if usage is None or not usage.rate_limited or usage.rate_limited_until is None:
+            return
+        left = (usage.rate_limited_until - accounts_service._now()).total_seconds()
+        if left > 0:
+            self._wait_timer = self.set_timer(left + 0.05, self._paint)
+
     def cell(self, key: str) -> Static:
         """The cell of column ``key`` (``name`` is the label the field covers while open)."""
         if key == "name":
@@ -829,6 +852,7 @@ class AccountRow(Horizontal, can_focus=True):
     def _paint(self) -> None:
         account = self.status.account
         cells = account_cells(self.status, self.usage)
+        self._repaint_when_the_wait_ends()
         for column in COLUMNS:
             cell = self.cell(column.key)
             cell.update(cells[column.key])

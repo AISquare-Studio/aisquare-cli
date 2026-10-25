@@ -184,6 +184,10 @@ dev = [
   # a tmux folder and a `claude` stand-in of its own (tests/conftest.py), so workers
   # share nothing a test writes.
   "pytest-xdist>=3.6",
+  # CI splits each leg's suite across runners (`--splits N --group k`), by the per-test
+  # times in .test_durations; tests/shards.py proves the shards ran it exactly once.
+  # A run without --splits is untouched, so `make test` is the whole suite as before.
+  "pytest-split>=0.11",
   "mypy>=1.10",
   "ruff>=0.5",
   # Both bounds are load-bearing, not caution. mcp 2.0.0 renamed FastMCP to
@@ -240,8 +244,9 @@ packages = ["src/aisquare"]
 
 [tool.hatch.build.targets.sdist]
 # The demo's renders (docs/demo.tape) are pictures for the README and the
-# release notes, re-rendered rather than built from; no build reads them.
-exclude = ["/docs/demo.gif", "/docs/demo/*.png"]
+# release notes, re-rendered rather than built from; no build reads them. Nor does
+# any build read .test_durations: it is how CI splits the suite into shards.
+exclude = ["/docs/demo.gif", "/docs/demo/*.png", "/.test_durations"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

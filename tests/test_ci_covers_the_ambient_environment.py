@@ -1,6 +1,6 @@
 """CI must run the suite against a machine that looks like a developer's.
 
-THE CLASS THIS PINS. The ``check`` job installs ``.[dev]`` into a pristine
+THE CLASS THIS PINS. A ``test`` leg installs ``.[dev]`` into a pristine
 runner: no ``~/.aisquare``, nothing listening on any port, no ambient
 explainability variables. A developer who has followed
 ``docs/connecting-your-agents-to-explainability.md`` has all of those. Three
@@ -15,7 +15,12 @@ separate fixtures in this repo were green on CI and red for them:
   beside the interpreter, so the real script won over the stub.
 
 The third was introduced while fixing the second. That is what moves this from
-"be careful" to "have a job".
+"be careful" to "have a job". The job was ``ambient``, running the suite serially in
+each proxy state; since 2026-10-25 (owner decision) it is two legs of ``test``, py3.11
+in the proxy-down ambient and py3.13 in proxy-up, each in shards on every core, and
+EVERY shard sets up the ambient and asserts its premise around its part of the suite.
+So the guards below read the ambient steps of the ``test`` job: the steps gated on a
+leg's ``ambient`` not being ``none``.
 
 WHY THESE ASSERTIONS ARE STRUCTURAL RATHER THAN LITERAL. An independent review
 mutated an earlier version of this file's checks and found five ways to make the
@@ -32,11 +37,12 @@ They were also blocking edits someone will legitimately want to make: a third
 matrix variant, or parameterising the port. Where a literal was load-bearing only
 by accident, it is gone.
 
-WHY TEXTUAL AT ALL. ``pyyaml`` is not a dependency of this project and adding one
-so a test can read a config file is a bad trade. The doc guards in this directory
-parse markdown with ``re`` for the same reason. The cost is that these checks see
-text rather than structure, so they slice the file into the job and the step first
-and then assert inside those slices.
+WHY TEXTUAL AT ALL. Written when ``pyyaml`` was not a dependency of this project;
+it is now, and the matrix, which is data, is read as YAML (``tests/ci_matrix.py``).
+The step guards stay textual because what they pin is the ORDER of lines inside a
+step's script, which a YAML parse sees no better than the text does. The cost is
+that these checks see text rather than structure, so they slice the file into the
+job and the step first and then assert inside those slices.
 
 WHAT THIS DELIBERATELY DOES NOT DO: run CI. It cannot know the job passes, only
 that the job is still described. A guard that claimed more would be worse than
@@ -51,6 +57,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.ci_matrix import jobs
+
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
 
 #: A top-level entry under ``jobs:`` — two spaces of indent, then a name.
@@ -61,7 +69,17 @@ _STEP = re.compile(r"^      - name: (.+)$", re.MULTILINE)
 
 #: The command that runs the suite. Its position inside the step is what several
 #: of the guards below are about, so it is named once.
-SUITE = "pytest -ra"
+SUITE = "pytest -n auto -ra"
+
+#: A step's ``if:``, which is what makes a step one of the ambient ones.
+_GATE = re.compile(r"^        if: (.+)$", re.MULTILINE)
+
+#: The gate of every ambient step: a leg whose ``ambient`` is anything but ``none``,
+#: so a leg that names no variant at all reaches the closed set and fails there.
+AMBIENT_GATE = "matrix.ambient != 'none'"
+
+#: The gate of the step that runs the suite on every other leg.
+PLAIN_GATE = "matrix.ambient == 'none'"
 
 #: An ASSIGNMENT of the ambient home, in either form — ``AISQUARE_HOME=`` in a
 #: shell line (including inside an ``echo`` bound for ``$GITHUB_ENV``) and
@@ -105,6 +123,17 @@ def _commands(text: str) -> list[str]:
     return [line.strip().split(" #")[0].strip() for line in _strip_comments(text).splitlines()]
 
 
+def _steps(job: str) -> list[str]:
+    """The job's steps, each from its ``- name:`` to the next one's."""
+    bounds = [match.start() for match in _STEP.finditer(job)] + [len(job)]
+    return [job[start:end] for start, end in pairwise(bounds)]
+
+
+def _gate(step: str) -> str:
+    found = _GATE.search(step)
+    return found.group(1).strip() if found else ""
+
+
 def _strip_comments(text: str) -> str:
     """Drop whole-line ``#`` comments, so prose cannot satisfy a guard.
 
@@ -123,19 +152,16 @@ def workflow() -> str:
 
 
 @pytest.fixture(scope="module")
-def ambient(workflow: str) -> str:
-    """The ``ambient`` job alone, so a guard cannot be satisfied by another job.
+def job(workflow: str) -> str:
+    """The ``test`` job alone, so a guard cannot be satisfied by another job.
 
-    ``package`` also installs things and ``check`` also runs pytest; asserting
-    against the whole file let one job's text stand in for another's.
+    ``package`` also installs things; asserting against the whole file let one job's
+    text stand in for another's.
     """
     starts = {match.group(1): match.start() for match in _JOB.finditer(workflow)}
-    if "ambient" not in starts:
-        pytest.fail(
-            "the ambient-environment job is gone — three bugs were invisible "
-            "without it, see this module's docstring before removing the guard too"
-        )
-    later = [pos for pos in starts.values() if pos > starts["ambient"]]
+    if "test" not in starts:
+        pytest.fail("the job that runs the suite, and the ambient legs with it, is gone")
+    later = [pos for pos in starts.values() if pos > starts["test"]]
     end = min(later) if later else len(workflow)
     # Comments stripped HERE, not just in the step. Measured: with the raw text,
     # deleting the job-level `AISQUARE_HOME:` and commenting out `aisquare
@@ -143,25 +169,111 @@ def ambient(workflow: str) -> str:
     # NAME both of those things while explaining why they matter, so the prose
     # satisfied the assertion the code no longer did. Exactly the shape of bug the
     # module exists for, in the module itself.
-    return _strip_comments(workflow[starts["ambient"] : end])
+    return _strip_comments(workflow[starts["test"] : end])
+
+
+@pytest.fixture(scope="module")
+def ambient(job: str) -> str:
+    """The ambient steps of the ``test`` job, in order: the ones gated on an ambient leg."""
+    steps = [step for step in _steps(job) if _gate(step) == AMBIENT_GATE]
+    if not steps:
+        pytest.fail(
+            "the ambient-environment steps are gone — three bugs were invisible "
+            "without them, see this module's docstring before removing the guard too"
+        )
+    return "".join(steps)
 
 
 @pytest.fixture(scope="module")
 def suite_step(ambient: str) -> str:
-    """The step that runs pytest, comments stripped."""
-    bounds = [match.start() for match in _STEP.finditer(ambient)] + [len(ambient)]
-    for start, end in pairwise(bounds):
-        if SUITE in ambient[start:end]:
-            return _strip_comments(ambient[start:end])
-    pytest.fail(f"no step in the ambient job runs `{SUITE}`")
+    """The ambient step that runs pytest, comments stripped."""
+    for step in _steps(ambient):
+        if SUITE in step:
+            return step
+    pytest.fail(f"no ambient step runs `{SUITE}`")
 
 
-def test_the_ambient_job_exists(ambient: str) -> None:
-    """Deleting it should be a decision someone argues for, not a quiet edit."""
-    assert ambient.startswith("  ambient:")
+@pytest.fixture(scope="module")
+def plain_step(job: str) -> str:
+    """The step that runs pytest on every other leg."""
+    for step in _steps(job):
+        if _gate(step) == PLAIN_GATE and SUITE in step:
+            return step
+    pytest.fail(f"no step gated `{PLAIN_GATE}` runs `{SUITE}`")
 
 
-def test_both_proxy_states_are_covered(ambient: str) -> None:
+def test_the_ambient_steps_exist(ambient: str) -> None:
+    """Deleting them should be a decision someone argues for, not a quiet edit."""
+    names = [match.group(1) for match in _STEP.finditer(ambient)]
+    assert names[:2] == [
+        "Declare the ambient environment",
+        "Configure an aisquare home, the way a developer's machine is",
+    ], names
+    assert len(names) == 3, f"expected the declare, configure and suite steps: {names}"
+
+
+def test_the_ambient_legs_are_py311_proxy_down_and_py313_proxy_up() -> None:
+    """The owner's fold (2026-10-25): two legs that ran anyway carry the two ambients.
+
+    Every shard of each runs its ambient (the gate is the leg's, not the shard's), and
+    no other leg runs one: the baseline py3.12 leg, the captain-off leg and Windows
+    stay pristine, which is the other half of what the ambient legs are compared with.
+    """
+    ambients: dict[tuple[str, str, str], set[str]] = {}
+    for leg in jobs("test", lean=False):
+        ambients.setdefault((leg["os"], leg["python"], leg["captain"]), set()).add(leg["ambient"])
+    assert ambients == {
+        ("ubuntu-latest", "3.11", "on"): {"proxy-down"},
+        ("ubuntu-latest", "3.12", "on"): {"none"},
+        ("ubuntu-latest", "3.13", "on"): {"proxy-up"},
+        ("ubuntu-latest", "3.12", "off"): {"none"},
+        ("windows-latest", "3.12", "on"): {"none"},
+    }
+
+
+def test_every_ambient_step_runs_on_an_ambient_leg_and_no_other(job: str) -> None:
+    """The declare, configure and suite steps share one gate; the plain suite the other.
+
+    Gate one of the three on anything else — ``proxy-up`` only, say — and the other
+    variant runs its suite with no home, or with a home and no premise check, all
+    green. And a step that runs the suite under neither gate runs it twice on some
+    leg, or not at all on another.
+    """
+    for step in _steps(job):
+        commands = _commands(step)
+        ambient_work = (
+            any(re.search(_ASSIGNS_HOME, line) for line in commands)
+            or any(line.startswith("aisquare explainability enable") for line in commands)
+            or any(line.startswith(f"{PREMISE} ") for line in commands)
+        )
+        if ambient_work:
+            assert _gate(step) == AMBIENT_GATE, step[:200]
+    suites = [_gate(step) for step in _steps(job) if SUITE in step]
+    assert sorted(suites) == sorted([AMBIENT_GATE, PLAIN_GATE]), suites
+    assert "\n    if:" not in job.split("    steps:")[0], (
+        "the test job has an `if:` of its own, so some event or shard skips the ambient legs"
+    )
+
+
+def test_an_ambient_shard_runs_the_same_shard_as_any_other(
+    suite_step: str, plain_step: str
+) -> None:
+    """The same pytest line on both sides: the ambient legs are split as every leg is.
+
+    A shard that ran, say, the whole suite here, or the split without its note, would
+    be a leg the shard check cannot vouch for.
+    """
+
+    def pytest_line(step: str) -> str:
+        lines = [line.removeprefix("run: ") for line in _commands(step)]
+        found = [line for line in lines if line.startswith(SUITE)]
+        assert len(found) == 1, found
+        return found[0]
+
+    assert pytest_line(suite_step) == pytest_line(plain_step)
+
+
+def test_both_proxy_states_are_covered() -> None:
     """ONE ambient configuration would have caught one of the two leaks.
 
     Measured, and measured in CI rather than only locally: with both regressions
@@ -173,18 +285,19 @@ def test_both_proxy_states_are_covered(ambient: str) -> None:
     covers half of it.
 
     Asserted per name rather than as the literal list, so adding a third variant
-    or reordering the two is not a false failure.
+    or reordering the two is not a false failure. Read from the full matrix as GitHub
+    expands it: a variant named in a comment, or in the lean set's JSON, runs nothing.
     """
-    matrix = ambient[ambient.index("matrix:") : ambient.index("steps:")]
+    variants = {leg["ambient"] for leg in jobs("test", lean=False)}
 
     for variant in ("proxy-down", "proxy-up"):
-        assert variant in matrix, (
+        assert variant in variants, (
             f"the ambient job no longer runs the {variant} variant; each proxy "
             "state catches a different leak and neither catches the other"
         )
 
 
-def test_the_ambient_environment_is_declared_exactly_once(ambient: str) -> None:
+def test_the_ambient_environment_is_declared_exactly_once(job: str, ambient: str) -> None:
     """A per-step ``AISQUARE_HOME`` can be dropped from the step that matters.
 
     Found by review, by mutation: delete it from the step that runs pytest — or
@@ -201,9 +314,9 @@ def test_the_ambient_environment_is_declared_exactly_once(ambient: str) -> None:
     # `AISQUARE_HOME:` in a step-level YAML `env:`. Counting only the first let a
     # duplicate be re-added as step-level YAML with the guard green — measured,
     # which is the whole failure this test is about.
-    defined = [line for line in _commands(ambient) if re.search(_ASSIGNS_HOME, line)]
+    defined = [line for line in _commands(job) if re.search(_ASSIGNS_HOME, line)]
 
-    assert defined, "nothing declares AISQUARE_HOME for the ambient job"
+    assert defined, "nothing declares AISQUARE_HOME for the ambient legs"
     assert len(defined) == 1, (
         f"AISQUARE_HOME is declared {len(defined)} times — one of them can be "
         "dropped or typo'd while the other keeps the guards green"
@@ -212,6 +325,7 @@ def test_the_ambient_environment_is_declared_exactly_once(ambient: str) -> None:
         "the ambient environment is no longer exported through $GITHUB_ENV, so it "
         "is not guaranteed to reach the step that runs the suite"
     )
+    assert defined[0] in ambient, "AISQUARE_HOME is declared outside the ambient steps"
     assert ambient.index(defined[0]) < ambient.index(SUITE), (
         "the ambient environment is declared after the suite runs"
     )
@@ -489,7 +603,7 @@ def test_the_variant_name_is_declared_and_closed(ambient: str, suite_step: str) 
     )
 
 
-def test_the_workflow_reuses_the_test_suites_proxy_stub(ambient: str) -> None:
+def test_the_workflow_reuses_the_test_suites_proxy_stub(job: str, ambient: str) -> None:
     """``probe_proxy`` checks ``service`` and ``mode``, so a stub is a CONTRACT.
 
     An inline server in the workflow would be a second copy of that contract, and
@@ -504,7 +618,7 @@ def test_the_workflow_reuses_the_test_suites_proxy_stub(ambient: str) -> None:
         "the ambient job no longer uses tests/proxy_stub.py"
     )
     for inlined in ("http.server", "BaseHTTPRequestHandler", "HTTPServer"):
-        assert inlined not in ambient, (
+        assert inlined not in job, (
             f"the workflow inlines its own server ({inlined}) — that is a second "
             "copy of the health contract, and the copy nobody runs locally is the "
             "one that drifts"

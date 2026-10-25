@@ -30,7 +30,7 @@ from aisquare.core import experimental
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
 from aisquare.services import ci_client
-from tests import private_fleets
+from tests import private_fleets, shards
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -1011,12 +1011,21 @@ carry it: a test that fails with the captain off and is not about the captain is
 of the off path, to be fixed in the code (review of #240)."""
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    shards.add_option(parser)
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         f"{NEEDS_CAPTAIN}: needs the experimental captain on; skipped when "
         f"{SUITE_CAPTAIN_ENV}=off runs the suite with it off, as it ships",
     )
+    # A CI shard notes what it collected and ran, for the `shards` job's check that a
+    # leg's shards ran its suite exactly once (tests/shards.py).
+    manifest = config.getoption(shards.OPTION)
+    if manifest:
+        config.pluginmanager.register(shards.plugin(Path(manifest)), "shard-manifest")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

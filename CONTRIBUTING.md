@@ -62,11 +62,11 @@ Individual targets:
 
 **Changed a dependency? Relock.** After editing `dependencies` or an extra in
 `pyproject.toml`, run `uv lock` and commit `uv.lock` with the change. `make check`
-runs `uv lock --check` when `uv` is on your PATH, and CI's `lock` job always does:
+runs `uv lock --check` when `uv` is on your PATH, and CI's `lint` job always does:
 a `pyproject.toml` change without its relock fails CI.
 
 `make test` runs `pytest -n auto`: one [pytest-xdist](https://pytest-xdist.readthedocs.io/)
-worker per core, as CI's `check` job does. Every test already gets a home, a tmux folder
+worker per core, as each of CI's `test` shards does. Every test already gets a home, a tmux folder
 and a `claude` stand-in of its own (`tests/conftest.py`), so a new test that keeps to those
 fixtures is safe in parallel; one that shares a fixed path, port or socket name with
 another is not. Run a single file as usual (`pytest tests/test_x.py`), and the whole
@@ -83,17 +83,26 @@ The next run ends them: the suite's private folders under `/tmp` are named
 `asqtx<pid>-…`, and a run starts by removing every one whose process is gone, with the
 servers in it (`tests/private_fleets.py`).
 
-CI (`.github/workflows/ci.yml`) runs lint, format-check, mypy and pytest on
-Python 3.11–3.13, a `lock` job that runs `uv lock --check`, plus a packaging job
-that builds the wheel and smoke-tests the `aisquare` / `asq` console scripts. All
-jobs must pass before a PR can merge.
+CI (`.github/workflows/ci.yml`) runs a `lint` job (ruff, the format check, mypy and
+`uv lock --check`), the suite on each leg (Python 3.11–3.13, captain off, Windows), a
+packaging job that builds the wheel and smoke-tests the `aisquare` / `asq` console
+scripts, and `ci-ok`, which passes only when every other job did. Each leg's suite
+runs in shards, parallel jobs that each run part of it on every core: pytest-split
+(`--splits N --group k`) splits it by the per-test times in `.test_durations`, and the
+`shards` job fails unless each leg's shards ran every collected test exactly once
+(`tests/shards.py`). The py3.11 leg runs in the proxy-down ambient environment and
+py3.13 in proxy-up (a configured home, the explainability variables set, the proxy
+port free or answering); `ci.yml` says why. A new test gets the average time until
+`.test_durations` is refreshed from a full run's notes:
+`gh run download <run> -p 'shard-*' -D notes`, then
+`python -m tests.shards durations notes py3.12 > .test_durations`.
 
-**A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and the
-suite on one Linux leg (Python 3.12, captain on), the Linux package job and every
-other job except the two ambient legs; the demo does not render. The full matrix
-(3.11–3.13, captain off, Windows, both ambient legs, the demo) runs on every push
-to `rc/**` and `main`, so on each sub-PR's merge, and again on the train's PR into
-`main`, nightly and by hand. A sub-PR that may break only on Windows or another
+**A pull request into a release train (`rc/**`) runs lean CI**: lint, the suite on
+one Linux leg (Python 3.12, captain on) in its shards, the shard check, the Linux
+package job and `ci-ok`; the demo does not render. The full matrix (3.11–3.13,
+captain off, Windows, both ambient legs, the demo) runs on every push to `rc/**` and
+`main`, so on each sub-PR's merge, and again on the train's PR into `main`, nightly
+and by hand. A sub-PR that may break only on Windows or another
 Python is caught on its merge to the train, before anything reaches `main`;
 `gh workflow run ci.yml --ref <branch>` runs the full matrix on a branch first.
 

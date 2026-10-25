@@ -2179,8 +2179,8 @@ follows it:
   nothing is spooled ([reference](reference.md#configuration-keys)).
 - `aisquare doctor` gains a `fleet-delivery` row.
 - The codebase snapshot is gone, and `aisquare doctor` loses its `repomix`, `snapshot`
-  and `tiktoken` rows. The first command deletes the old packs under
-  `~/.aisquare/projects/<id>/snapshot/`, once, and nothing else. A `[snapshot]` section
+  and `tiktoken` rows. The first command that opens the store deletes the old packs
+  under `~/.aisquare/projects/<id>/snapshot/`, once, and nothing else. A `[snapshot]` section
   in `config.toml` is no longer read: doctor's config row says so, and the next save
   drops it.
 - **On a shared machine**, a first message on the command line can be read by other

@@ -166,6 +166,9 @@ def refresh_latest(now: datetime | None = None) -> str | None:
     The dialog opens on the release the last check found, which can be a day old; the
     update itself installs uv's newest, as ``aisquare upgrade`` does, so the number the
     dialog names is the one asked for here (review of #301).
+
+    The release it names is announced by that: the dialog said it, so the next hourly ask
+    does not toast it again as "is out" (review of #301, n1).
     """
     found = lookup_latest()
     if found is not None:
@@ -173,6 +176,7 @@ def refresh_latest(now: datetime | None = None) -> str | None:
         with store_session() as store:
             store.set_ui_state(CHECKED_KEY, when.isoformat())
             store.set_ui_state(LATEST_KEY, found)
+            store.set_ui_state(ANNOUNCED_KEY, found)
     return found
 
 

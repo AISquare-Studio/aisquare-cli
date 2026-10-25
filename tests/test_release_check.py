@@ -271,6 +271,22 @@ def test_a_release_is_announced_once_and_a_newer_one_again(
     assert _state(updates.ANNOUNCED_KEY) == "0.9.2"
 
 
+def test_a_release_the_dialog_named_first_is_not_toasted_again(
+    running: Tool,
+    machine: Machine,  # noqa: F811
+) -> None:
+    """Review of #301, n1: the check found 0.9.1, then the dialog's own ask found 0.9.2 and the
+    dialog was cancelled. The dialog named 0.9.2, so the next check offers it unannounced."""
+    first = updates.check_for_release(NOW)
+    machine.latest = LatestRelease("0.9.2")
+    assert updates.refresh_latest(NOW + timedelta(minutes=5)) == "0.9.2"
+    next_day = updates.check_for_release(NOW + timedelta(days=1, minutes=5))
+
+    assert first is not None and first.announce
+    assert next_day is not None and next_day.version == "0.9.2"
+    assert next_day.announce is False, "the dialog said it already"
+
+
 # --- the press and the reopen -----------------------------------------------------------------
 
 

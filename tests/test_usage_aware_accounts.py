@@ -1252,17 +1252,17 @@ def test_headroom_skips_what_it_cannot_read_and_honours_disabled_and_exclude(
     assert any("no account's usage could be read" in note for note in notes)
 
 
-def test_choose_uses_headroom_only_when_configured_and_falls_back_to_the_default(
+def test_choose_uses_headroom_only_when_configured_and_falls_back_to_rank_1(
     fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _slot("work@example.com", "tok-work")
     _slot("personal@example.com", "tok-personal")
-    service.set_default("2")
+    service.set_default("2")  # moves slot 2 to rank 1: the machine default (#8 on the board)
     fetch = _Usage({"tok-work": _payload(95), "tok-personal": _payload(10)})
 
     _settings(pick="default")
     plain = service.choose(role="coder", project=work, fetch=fetch)
-    assert plain.source == "machine default" and plain.account is not None
+    assert plain.source == "preferred" and plain.account is not None
     assert plain.account.slot == 2 and fetch.calls == []  # pick=default: no request at all
 
     _settings(switch_at=85)  # pick=headroom, the default since 0.8.1
@@ -1277,12 +1277,12 @@ def test_choose_uses_headroom_only_when_configured_and_falls_back_to_the_default
     settings_service.bind_role("coder", account="2")
     assert service.choose(role="coder", project=work, fetch=fetch).source == "role binding"
 
-    # Nothing readable (a minute on, past what a launch serves): the default decides, with
+    # Nothing readable (a minute on, past what a launch serves): rank 1 decides, with
     # the notes saying why.
     later = NOW + timedelta(seconds=service.PICK_MAX_AGE_SECONDS + 1)
     monkeypatch.setattr(service, "_now", lambda: later)
     offline = service.choose(role="tester", project=work, fetch=_Usage({}))
-    assert offline.source == "machine default" and offline.account is not None
+    assert offline.source == "preferred" and offline.account is not None
     assert offline.account.slot == 2
     assert any("no account's usage could be read" in note for note in offline.notes)
 
@@ -1389,7 +1389,7 @@ def test_choose_for_handover_asks_headroom_before_the_binding_and_refuses_when_a
     service.set_default("3")
     blind = service.choose_for_handover(role="coder", project=work, exclude=(2,), fetch=_Usage({}))
     assert blind.account is not None and blind.account.slot == 3
-    assert blind.source == "machine default"
+    assert blind.source == "preferred"
     assert (
         service.choose_for_handover(
             role="coder", project=work, exclude=(2,), automatic=True, fetch=_Usage({})

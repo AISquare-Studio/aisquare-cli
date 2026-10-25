@@ -6,6 +6,7 @@ import sqlite3
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -837,7 +838,6 @@ def test_the_close_turn_compare_and_set_loses_to_a_stop_that_landed_first() -> N
     green. Here the other Stop lands between this call's SELECT and its UPDATE,
     on the same connection, so the guard alone decides the outcome."""
     from datetime import UTC, datetime, timedelta
-    from typing import Any
 
     from aisquare.models import TurnMetric
 
@@ -2460,24 +2460,17 @@ def test_the_ladder_from_v15_run_again_over_a_current_store_changes_nothing() ->
 # --- the Claude account registry and per-project settings (v15, #145) ----------------------
 
 
-def test_claude_account_registry_keeps_one_default_unique_aliases_and_a_dense_order(
+def test_claude_account_registry_keeps_unique_aliases_and_a_dense_order(
     store: ContextStore,
 ) -> None:
-    """The two invariants are the schema's: a second default and a reused alias are refused
-    by an index, not by a caller remembering to check."""
+    """The alias invariant is the schema's: a reused alias is refused by an index, not by a
+    caller remembering to check. The machine default is rank 1 of the order (#8), so there
+    is no flag left to keep single."""
     first = store.upsert_claude_account(1, Path("/h/.claude"))
     second = store.upsert_claude_account(2, Path("/h/.aisquare/claude-accounts/2"))
     assert (first.position, second.position) == (1, 2)  # queued at the end, in order
     assert not first.is_default and not second.is_default and first.alias is None
-
-    store.set_claude_account_default(2)
-    store.set_claude_account_default(1)
-    assert [r.slot for r in store.claude_accounts() if r.is_default] == [1]  # moved, never two
-    with pytest.raises(KeyError):
-        store.set_claude_account_default(9)
-    assert [r.slot for r in store.claude_accounts() if r.is_default] == [1]  # refused, unchanged
-    store.set_claude_account_default(None)
-    assert not any(r.is_default for r in store.claude_accounts())
+    assert not hasattr(store, "set_claude_account_default"), "the flag is retired (v34)"
 
     store.set_claude_account_alias(2, "work")
     with pytest.raises(sqlite3.IntegrityError):
@@ -2504,6 +2497,104 @@ def test_claude_account_registry_keeps_one_default_unique_aliases_and_a_dense_or
     assert store.delete_claude_account(1) is True
     assert store.delete_claude_account(1) is False
     assert [(r.slot, r.position) for r in store.claude_accounts()] == [(3, 1), (2, 2)]  # dense
+
+
+_FLAGGED_AT_RANK_3 = """
+INSERT INTO claude_account (slot, config_dir, position, is_default, created_at)
+VALUES (1, '/h/.claude', 1, 0, '2026-09-01T00:00:00+00:00'),
+       (2, '/h/.aisquare/claude-accounts/2', 2, 0, '2026-09-01T00:00:00+00:00'),
+       (3, '/h/.aisquare/claude-accounts/3', 3, 1, '2026-09-01T00:00:00+00:00'),
+       (4, '/h/.aisquare/claude-accounts/4', 4, 0, '2026-09-01T00:00:00+00:00');
+"""
+
+
+@pytest.mark.parametrize("stamp", [None, 40], ids=["current", "stamped-past-it"])
+def test_the_retired_default_flag_moves_its_slot_to_rank_1_once_whatever_the_version(
+    stamp: int | None,
+) -> None:
+    """Rank 1 is the machine default (#8 on the board). A slot an older build flagged
+    ``is_default`` goes to rank 1, the others behind it in their order, and the flag is
+    cleared, so no launch changes account. Keyed on the flag, not on a schema step: a
+    store another line stamped past every version this build knows (a real copy at v40
+    kept its default at rank 2 under a version-keyed step) is promoted all the same."""
+    _at_version(SCHEMA_VERSION, after=_FLAGGED_AT_RANK_3, stamp=stamp)
+    store = open_store()
+    try:
+        assert store.promote_retired_claude_account_default() == 3
+        assert [(r.slot, r.position) for r in store.claude_accounts()] == [
+            (3, 1),
+            (1, 2),
+            (2, 3),
+            (4, 4),
+        ]
+        assert not any(r.is_default for r in store.claude_accounts())  # cleared
+        # Idempotent: nothing flagged is left, so a later reorder stands.
+        store.order_claude_accounts([4])
+        assert store.promote_retired_claude_account_default() is None
+        assert [r.slot for r in store.claude_accounts()] == [4, 3, 1, 2]
+    finally:
+        store.close()
+
+
+def test_a_promote_that_lost_the_race_leaves_a_concurrent_reorder_standing() -> None:
+    """The reviewer's interleave (review of #406, the lost update): B promotes and then
+    moves slot 3 to the top between A's flag check and A's write. A read the order before
+    taking the write lock, and wrote its stale order over B's move. Now A clears the flag
+    under the lock first, finds it gone, and writes nothing."""
+    _at_version(
+        SCHEMA_VERSION,
+        after="""
+        INSERT INTO claude_account (slot, config_dir, position, is_default, created_at)
+        VALUES (4, '/h/.aisquare/claude-accounts/4', 1, 0, '2026-09-01T00:00:00+00:00'),
+               (2, '/h/.aisquare/claude-accounts/2', 2, 1, '2026-09-01T00:00:00+00:00'),
+               (3, '/h/.aisquare/claude-accounts/3', 3, 0, '2026-09-01T00:00:00+00:00'),
+               (1, '/h/.claude', 4, 0, '2026-09-01T00:00:00+00:00');
+        """,
+    )
+    a, b = open_store(), open_store()
+
+    class Interleaved:
+        """A's connection: B runs right after A's flag check, as in the repro."""
+
+        def __init__(self, real: sqlite3.Connection) -> None:
+            self.real = real
+
+        def execute(self, sql: str, *args: Any) -> sqlite3.Cursor:
+            cursor = self.real.execute(sql, *args)
+            if "WHERE is_default = 1 LIMIT 1" in sql:
+                assert b.promote_retired_claude_account_default() == 2
+                b.order_claude_accounts([3])  # B moved 3 to the top
+                assert [(r.slot, r.position) for r in b.claude_accounts()] == [
+                    (3, 1),
+                    (2, 2),
+                    (4, 3),
+                    (1, 4),
+                ]
+            return cursor
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.real, name)
+
+    try:
+        a._conn = Interleaved(a._conn)  # type: ignore[attr-defined]
+        assert a.promote_retired_claude_account_default() is None  # lost the race: no write
+        a._conn = a._conn.real  # type: ignore[attr-defined]
+        assert [(r.slot, r.position) for r in a.claude_accounts()] == [
+            (3, 1),
+            (2, 2),
+            (4, 3),
+            (1, 4),
+        ], "B's move of slot 3 stands"
+    finally:
+        a.close()
+        b.close()
+
+
+def test_with_no_flag_set_the_order_is_left_as_it_was(store: ContextStore) -> None:
+    store.upsert_claude_account(2, Path("/h/.aisquare/claude-accounts/2"))
+    store.upsert_claude_account(1, Path("/h/.claude"))
+    assert store.promote_retired_claude_account_default() is None
+    assert [(r.slot, r.position) for r in store.claude_accounts()] == [(2, 1), (1, 2)]
 
 
 def test_project_settings_round_trip_per_project_and_clear(store: ContextStore) -> None:

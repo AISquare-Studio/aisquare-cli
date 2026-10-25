@@ -318,16 +318,20 @@ def test_a_reading_served_from_the_cache_still_says_where_the_window_is_heading(
     no_network["usage"] = _answering(clock, 40.0)
     frame = _signed_in(2, tmp_path, "tok-two")
 
+    def pace(view: AccountsView) -> str:
+        # The session cell's tooltip: the pace has no column of its own (#8 on the board).
+        return str(view.query_one("#account-cell-session-2").tooltip)
+
     async def go(pilot: Pilot[None]) -> tuple[str, str, int]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         await settle_until(app, lambda: len(no_network["usage_calls"]) >= 1)
         await settle(app)
-        fetched = line(view, 2)
+        fetched = pace(view)
         clock.advance(minutes=1)
         view = await _away_and_back(pilot)
         await settle(app)
-        return fetched, line(view, 2), len(no_network["usage_calls"])
+        return fetched, pace(view), len(no_network["usage_calls"])
 
     fetched, served, calls = drive(go, overview=frame)
     assert "to the limit" in fetched, fetched

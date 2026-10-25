@@ -87,8 +87,12 @@ or the roles whose arguments do it, and `agents status` names the file; Connect
 still installs the hooks and cannot change the switch.
 
 Selection order is explicit `--agent`, role binding, an exact known binary
-override (legacy shorthand), project preference, inherited launch family,
-operator `AISQUARE_CODING_AGENT`, user default, then Claude Code. An arbitrary wrapper declares its family with
+override (legacy shorthand), project preference, the account the launch names
+(`--account`, else the role's bound one), then the agent of the best account in the
+one priority order across agents (the first usable one with room; see [Which agent a
+launch runs](orchestration.md#which-agent-a-launch-runs)), then, when no account is
+usable, inherited launch family, operator `AISQUARE_CODING_AGENT`, user default (the
+*fallback coding agent* in App settings), then Claude Code. An arbitrary wrapper declares its family with
 `team bind ROLE --agent NAME --bin PATH` or `--agent` at launch (`NAME` is
 `claude-code` or `codex`). With the implicit default or a saved Claude user default, legacy
 bin-only wrappers retain Claude compatibility, including inside an AISquare
@@ -280,6 +284,7 @@ fleet, captain and asq code asks as #113's 0.8.2 lanes wire it in.
 | `fleet restart`, Restart | `claude --resume <transcript>` | Same outcome: `codex <options> resume <thread> -- <continue line>`. It quoted its question and answer from before the restart, and its claim was kept. | Smoke 9; live hooks; SMOKE5 (restart), SMOKE6 (9): the same thread, a new broker, the claim kept; SMOKE8 (13, 14): `restart --all` |
 | `/clear` | Row and claims move to the new session. | Same: the row and the claim moved, and the new thread knew its claim. **Differs:** Codex fires no `SessionEnd` for the thread it leaves; the new thread's `SessionStart` (clear) comes with its first prompt. | Smoke 10; live hooks; SMOKE5 (/clear), SMOKE6 (10): the broker takes the new id and refuses the old |
 | A session a tool starts | `CLAUDE_PID` tells the agent's own process from a child it starts. | `CODEX_THREAD_ID`, which Codex sets only in its tools' shells, does the same. A session of another agent than the row's never takes the row, such as a `codex exec` from a Claude Code agent's Bash tool. | Measured on 0.162.1; unit tests (`5898ce7e`, review r2) |
+| One priority order across agents; the agent from it | Claude Code's accounts in the one order (the Accounts page's one table, `accounts order`/`move`); an unpinned launch runs Claude Code when a Claude account is the first with room | Same: a Codex account above the Claude ones makes an unpinned launch run Codex, by order and headroom, the account picked from the same reading; `--agent`, a role's agent, a binary, the project's agent and a named account pin it. A store from v40 or older starts with the fallback agent's accounts first. A third agent gets it by having account slots. | Unit: `tests/test_one_priority_order_across_agents.py`, `tests/test_third_agent_seams.py` (the synthetic agents on top), `tests/test_ui_codex_accounts.py` (↑ past a Claude row at 80x24), `tests/test_one_account_resolver.py` |
 | Accounts and usage | Numbered slots; usage from the endpoint Claude Code's `/usage` reads | The same slots, on one ladder (`~/.aisquare/codex-accounts/<n>`), with doctor rows. **Differs:** usage is read offline from the account's own rollouts (49 % of 5 h and 8 % of the week in the smoke). It is only as fresh as the last turn, and has no *to the limit* trend. | Smoke 11; SMOKE6 (11) |
 | Folder trust across accounts | `[accounts] share_trust`: a launch copies the folder's entry in `.claude.json` from the account that has it; `accounts trust [--sync]` | Same, among the Codex slots, in each slot's `config.toml`: the `[projects."<root>"]` table of `trust_level = "trusted"` is appended, every other byte kept, and the spawn's receipt says so. **Differs:** Codex asks only in a git checkout, and its yes records the repository root (a worktree's is the main checkout's). The folder's own entry decides first, then the root's, and nothing above them. A table that says `untrusted` is that account's no: a share never overrides it, and `accounts trust` reports it. A Claude account's yes is not a Codex account's, nor the reverse. | Measured on 0.162.1 in scratch homes (`core.codex_sharing`). Live: `test_real_codex_trust_one_slot_gave_reaches_another_and_its_spawn_asks_nothing` (slot A's yes in Codex's own dialog, a spawn on slot B with no question and a told line run; slot C with sharing off meets the question). SMOKE7 (13) |
 | *Log in* on an account row | Waits for a different stored login than the expired or rejected one on disk | Same: `codex login` in the slot, and the pane waits for `codex login` to write `auth.json` anew (a digest of the file, never a value read out of it), not the login already there. | Unit and UI tests (`tests/test_codex_sharing.py`, `tests/test_ui_codex_accounts.py`); not run live, which needs a real login. SMOKE7 (15): on a dummy API-key home, the pane closed 2 s after a new `auth.json` appeared |
@@ -334,7 +339,8 @@ fleet, captain and asq code asks as #113's 0.8.2 lanes wire it in.
 `aisquare accounts` and the Accounts page manage Codex logins as they manage
 Claude Code's ([Accounts](fleet.md#accounts)): numbered slots, an alias, a
 priority order, a default, *Disable*, usage, a headroom pick and the hand-over
-on a usage limit.
+on a usage limit. The priority order is one list over both agents' accounts, and a
+launch that nothing pins runs the agent of the first account in it with room.
 
 - **Slots.** One ladder numbers both agents' slots, so a number names one
   login: `aisquare accounts add --agent codex` takes the lowest number no

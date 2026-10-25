@@ -85,9 +85,22 @@ adapter.**
     spawn's read line as its launch argument, Restart all bringing back a killed
     Codex and a Codex manager told of its dead team, and the solo-session trim
     through `hook codex`.
+- **One priority order over every agent's accounts, and a launch's agent from it**
+  (the owner's call on r17 item 7). The Accounts page is one table, each row naming its
+  agent, and ↑/↓ (`accounts order`, `accounts move`) move an account past any other's.
+  A launch that nothing pins runs the agent of the first usable account in that order
+  with room, by the headroom rule and `switch_at` (`[accounts] pick`), and on that
+  account, from the same usage reading; with nothing measured, or `pick = "default"`,
+  the first usable account's agent. A Codex account on top makes an unpinned spawn run
+  Codex; a future agent's account the same. `--agent`, a role's agent, a binary, the
+  project's agent and the account a launch names (`--account`, or the role's bound one)
+  still pin it; a restart, Fork, switch and hand-over keep their record's agent.
+  *App settings ▸ Advanced*'s *user coding agent* is now the **fallback coding agent**:
+  the agent when no account is usable (no one signed in, an API key, the accounts
+  unreadable). `claude_accounts.choose_any` is the cross-agent pick a hand-over can ask.
 
 **Upgrading:**
-- The store migrates to schema v40 on first open, from main's v35 (0.8.2's v32 through
+- The store migrates to schema v41 on first open, from main's v35 (0.8.2's v32 through
   #274's three steps first, and 0.8.0's v25 through 0.8.1's seven steps before those).
   v33 is the persona columns, v34 `fleet_agent.ended_by` and v35 the token-usage tables
   (see Changed); this line's five steps come after them, and only add, but for one
@@ -100,11 +113,15 @@ adapter.**
   them; v40 adds `claude_usage.windows`, every window of a usage reading, so the
   five-minute usage cache serves an agent whose windows are not a five-hour and
   a weekly one what it read (a reading recorded before reads NULL there, its
-  session and week as they were). A store a build of this branch already took
-  to v39 gets v40 on its next open. One it took to v38 before #274 was merged
+  session and week as they were); v41 adds `account_rank`, the one priority order
+  over every agent's accounts, seeded on the first read with the fallback coding
+  agent's accounts first and each agent's in the order it had, so no launch changes
+  agent on the upgrade (a build before v41 sharing the store keeps each agent's own
+  order, and an account it adds is ranked last). A store a build of this branch
+  already took to v39 or v40 gets the later steps on its next open. One it took to v38 before #274 was merged
   (these five steps as v34-v38) has neither `ended_by` nor the usage tables: its
-  first open here adds them, then runs v39 and v40 again, which add nothing. Main
-  at v35, 0.8.2, 0.8.1 and 0.8.0 open a v40 store as it is. A store a build of
+  first open here adds them, then runs v39 to v41 again, which add nothing. Main
+  at v35, 0.8.2, 0.8.1 and 0.8.0 open a v41 store as it is. A store a build of
   this branch stamped before 0.8.2 was merged (v33-v36 for these steps) has no
   persona columns; its first open here adds them. One it stamped v26-v29 before
   0.8.1 was merged, without 0.8.1's v26-v29, gets those too (task numbers,

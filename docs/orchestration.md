@@ -420,6 +420,31 @@ default and lists the slots in priority order; `doctor` warns when the default i
 not signed in or is disabled, and when a binding names an account the machine no
 longer has.
 
+### Which agent a launch runs
+
+The accounts' priority order is ONE list over every agent's accounts, Claude
+Code's, Codex's and any agent added later (`aisquare accounts order`, `move`, and
+↑/↓ on the Accounts page, where each row names its agent). A launch that nothing
+pins runs the **agent of the best account in it**: the first enabled, signed-in
+account whose agent is installed and that has room by `[accounts] pick` and
+`switch_at` (the same rule a headroom pick uses), else the first such account
+when no usage can be read or `pick = "default"`. Put a Codex account on top and
+an unpinned spawn runs Codex; a Claude one, Claude Code. The account that rule
+picked is also the launch's account, from the same usage reading.
+
+What pins the agent, first wins: `--agent`; the role's agent (`team bind ROLE
+--agent`, *App settings ▸ Agent*); a binary (`--bin`, a binding's); the project's
+coding agent; the account the launch names (`--account`, else the role's bound
+account), whose agent it is. Below the order, when no account is usable (no one
+signed in, an API key, the accounts unreadable): the inherited launch family,
+`AISQUARE_CODING_AGENT`, the **fallback coding agent** under *App settings ▸ Agent
+settings ▸ Advanced* (`[agents] default`), then Claude Code. A restart, a Fork, a
+switch and a hand-over keep the agent their launch record names.
+
+A store from before this order (schema v40 or older) is ordered on its first
+read with the fallback coding agent's accounts first, each agent's in the order it
+had, so the upgrade changes no launch's agent.
+
 **Spending several accounts.** With more than one login the interesting
 questions are *where is there room* and *what happens when one runs out*. Both
 are `[accounts]` settings (in *⚙ Settings ▸ App settings*, or `aisquare config set`), and both

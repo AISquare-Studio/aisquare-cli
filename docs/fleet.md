@@ -986,7 +986,11 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
 - **Default**, **↑**/**↓** and **Disable** arrange the accounts. The row with
   the ★ is the **machine default**: what a launch runs on when nothing more
   specific says. The arrows set the **priority order** — the order the rows are
-  listed in, and the order a headroom-based pick will try them in. *Disable*
+  listed in, and the order a headroom-based pick will try them in. It is ONE
+  order over every agent's accounts, each row naming its agent: ↑ moves a Codex
+  account past a Claude one. A launch that names no agent runs the agent of the
+  first account in it with room (see [Which agent a launch
+  runs](orchestration.md#which-agent-a-launch-runs)). *Disable*
   keeps a slot out of every automatic choice (its row says `disabled`) while
   `--account <slot>` still reaches it by hand; *Enable* puts it back.
 - **Rename in place**: double-click an account's name (or press Enter or F2

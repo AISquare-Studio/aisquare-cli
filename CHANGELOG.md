@@ -30,6 +30,27 @@ machine default, and every release now carries its own installer.**
   its own URL. The default one-liner is unchanged: the copy on `main`, which
   installs the latest release, in the README, `docs/install.md` and the repair
   command `aisquare upgrade` prints. `docs/install.md` shows how to pin.
+- **Command reports: `asq exec` and `asq reports`** (`docs/command-reports.md`).
+  `asq exec [--project ID] [--task ID] [--session ID] [--raw] [--max-output-bytes N]
+  -- CMD …` runs a command once, with no shell and its arguments unchanged, and
+  saves a report of how it ended: the exit status (a death by signal is reproduced
+  after the report is saved; a command that cannot start is a saved 126 or 127),
+  `interrupted_by`, whether both streams were kept whole, and any launch error. Both
+  streams' originals are kept, the first 1 MiB each by default, with truncation
+  marked. Interrupts go to the command's process group, the second as SIGTERM and
+  the third as SIGKILL, and a background process holding the output pipe no longer
+  keeps the wrapper waiting: it stops after two seconds of silence, ten seconds
+  after the exit at most, and records `output_pipes_held_open`. With `--project`, the report holds the checkout's
+  per-file source identity before and after the command: content, not Git HEAD;
+  build directories left out among untracked files only; submodule and nested-repo
+  content counted; a worktree as its own files; the home tree refused; and a
+  capture failure recorded as unknown proof without stopping the command. Only git
+  status's usage hints and pytest's progress lines are shortened for display
+  (`--raw` or `AISQUARE_REPORTS=off` turns that off). `asq reports list | show |
+  prune | stats` read reports back without running anything. Reports live under
+  `AISQUARE_HOME/reports` for 14 days, newest 64; a `--project` report stays the
+  full 14 days, and when the list of evidence-backed reports cannot be read,
+  nothing is pruned.
 - **Exact token usage per session** — `aisquare metrics tokens [--session S]
   [--project P | --all]` (`--json` too). The Stop, StopFailure and SessionEnd hooks
   read only the bytes the session's transcript gained since the last record, plus its

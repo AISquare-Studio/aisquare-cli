@@ -39,6 +39,11 @@ setting it comes from.
   (`.credentials.json`), and in the Keychain on macOS. `aisquare accounts remove`
   renames the directory and signs nothing out, so run `/logout` in the account
   first (`aisquare accounts run <n>`).
+- `reports/` holds what `asq exec` saved: each command's argv, working
+  directory, the first 1 MiB of its standard output and error (more with
+  `--max-output-bytes`), and with `--project` a hash of each source file. Readable
+  by your user only on Linux and macOS; kept 14 days, newest 64. `asq reports
+  prune --keep 0 --days 0` removes them.
 - Everything else gets your umask's default permissions. To restrict the whole
   tree to your user, run `chmod 700 "${AISQUARE_HOME:-$HOME/.aisquare}"`.
 

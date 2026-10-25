@@ -108,15 +108,16 @@ while fleet agents run or while Remote is on in another shell or another asq.
 
 ### Updating from asq
 
-asq checks for a new release itself, at most once a day: at start when its
-last answer is a day old, and again each day while it runs. It asks PyPI what
-`aisquare upgrade --check` asks, and nothing else; a lookup that fails
-(offline) is silent and tried again within the hour. When a newer release is
+From 0.9.0 on, asq checks for a new release itself, at most once a day: at
+start when its last answer is a day old, and again each day while it runs. It
+asks PyPI what `aisquare upgrade --check` asks, and nothing else; a lookup that
+fails (offline) is silent and tried again within the hour. An 0.8.x install has
+no check yet: update it once with `aisquare upgrade`. When a newer release is
 out, a row shows under *⚙ Settings*, and a toast says so once per release:
 
 ```text
  ⚙ Settings
- ⬆ 0.8.3 · restart to update
+ ⬆ 0.9.1 · restart to update
 ```
 
 Click the row, or move to it with ↓ and press Enter. The dialog says what
@@ -139,7 +140,7 @@ Your agents keep running through it: they live on the fleet's own tmux server,
 not inside asq, and a reinstall does not touch them. asq writes down the agents
 running when you press the button; after the reopen, any whose pane is gone is
 restarted on its session, as `aisquare fleet restart` does, and the toast says
-what it found: `✓ aisquare 0.8.3 — 2 agents reattached`, plus each restart and
+what it found: `✓ aisquare 0.9.1 — 2 agents reattached`, plus each restart and
 its reason. As *Restart all* does, it leaves an agent stopped on purpose since
 the press (`aisquare fleet stop`, or Stop in its view) and one that ended by
 itself with exit 0, and names each: `1 left as it was (coder-1: stopped on
@@ -148,6 +149,11 @@ you stay in the shell, it is dropped, and one the reopen does not take within
 ten minutes of the update handing back to asq is never acted on. If the install
 fails, its output stays on screen until you press Enter, and the version you
 had reopens.
+
+An install pinned to its release, by that release's own `install.sh` or by
+`--version`, is checked too: *Restart & update* and `aisquare upgrade` move it to
+the newest release and drop the pin, which `uv tool upgrade aisquare-cli` alone
+does not.
 
 On Homebrew, pip or pipx the row still shows, and the dialog gives the command
 that updates that install instead of a restart button. A source checkout or an

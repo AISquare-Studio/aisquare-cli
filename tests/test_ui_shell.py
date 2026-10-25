@@ -110,7 +110,7 @@ from aisquare.services.captain import state as captain_state
 from tests import guard_clock, toast_log
 from tests.fleet_fakes import list_agents_as
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
-from tests.ui_workers import settle_page, settle_until_held
+from tests.ui_workers import settle_page, settle_until, settle_until_held
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -3634,16 +3634,21 @@ def test_a_successful_stop_toasts_the_ended_row_re_reads_and_leaves_its_view(
 
     async def go(pilot: Pilot[None]) -> tuple[list[str], int, str | None]:
         app = fleet_app(pilot)
-        await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        dialog = await open_stop_dialog(pilot, app, "agt_a_coder-auth")
         before = len(reads)
-        await pilot.click("#stop-confirm")
-        await settle(app)
-        await pilot.pause()
-        await pilot.pause()
-        # Every toast, not the first: the scripted pane has no tmux behind it and
-        # raises its own "(pane gone)" here, which is the harness, not the claim.
-        toasts = [toast.render().plain for toast in app.screen.query(Toast)]
-        return toasts, len(reads) - before, app.content.current
+        # Pressed on the dialog, and the toast waited for: a click the moment the dialog
+        # was pushed, then a settle and two pauses, saw no toast on windows-latest (run
+        # 40234523081 at e28697f1), as the take-over test's click once did (c6adca04).
+        dialog.query_one("#stop-confirm", Button).press()
+        wanted = f"✓ stopped coder-auth ({live.agent.id})"
+
+        def toasts() -> list[str]:
+            # Every toast, not the first: the scripted pane has no tmux behind it and
+            # raises its own "(pane gone)" here, which is the harness, not the claim.
+            return [toast.render().plain for toast in app.screen.query(Toast)]
+
+        await settle_until(app, lambda: wanted in toasts())
+        return toasts(), len(reads) - before, app.content.current
 
     toasts, re_reads, current = drive(go, notifications=True)
     assert f"✓ stopped coder-auth ({live.agent.id})" in toasts

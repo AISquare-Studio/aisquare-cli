@@ -467,9 +467,11 @@ fleet still running, and every release now carries its own installer.**
   says so. *Log in* stays beside the rows that need one, and a kept reading
   still shows its numbers and age. `accounts list --usage` and `accounts usage`
   have no hover, so they print the reason with the same fix after it (`the
-  stored token has expired; fix: press Log in, …`). In `--json` an unreadable
-  reading carries `cause` (`token_expired`, `keychain_locked`, `rate_limited`…)
-  and `fix`. Its `reason` no longer carries a fix of its own, so a token that
+  stored token has expired; fix: press Log in, …`), a slot with no login too,
+  which printed `—`. In `--json` such a row's `usage` carries `cause`
+  (`token_expired`, `not_signed_in`, `keychain_locked`, `rate_limited`…) and
+  `fix`, where a slot with no login said `null`. Its `reason` no longer carries a
+  fix of its own, so a token that
   expired or was rejected reads `the stored token has expired` or `the token was
   rejected (HTTP 401)`, and a locked or refusing Keychain reads without the
   `— unlock it …` tail.

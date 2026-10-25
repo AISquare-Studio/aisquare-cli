@@ -972,7 +972,8 @@ def test_accounts_lists_offline_and_as_json(
     assert with_usage.exit_code == 0, with_usage.output
     rows = json.loads(with_usage.stdout)["accounts"]
     assert rows[1]["usage"]["session_percent"] == 3.0
-    assert rows[0]["usage"] is None  # not signed in: nothing to ask about
+    # Not signed in: nothing is asked, and the row says why and what to do (review of #421).
+    assert rows[0]["usage"]["cause"] == "not_signed_in" and not rows[0]["usage"]["available"]
     assert len(fetch.calls) == 1
 
 
@@ -1017,6 +1018,43 @@ def test_accounts_usage_renders_the_windows_and_the_reasons(
     missing = runner.invoke(app, ["--json", "accounts", "usage", "9"])
     assert missing.exit_code == 1
     assert json.loads(missing.stdout)["error"] == "unknown_account"
+
+
+def test_accounts_usage_says_why_a_signed_out_slot_reads_nothing_and_the_fix(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #421: the CLI printed '—' for a slot with no login (never signed in, or its
+    token gone) and ``--json`` said ``"usage": null``, where the Accounts page's '!' says why
+    and the fix. Both CLI tables print the same reason and fix now, and the JSON carries
+    ``cause`` and ``fix``, from the one source (``usage_problem``); no request is sent."""
+    core.create_account()  # slot 2: never signed in
+    third = core.create_account()
+    _sign_in(third, "three@example.com", credentials=False)  # signed in once, token gone
+    fetch = _Fetch()
+    monkeypatch.setattr(service, "_http_get", fetch)
+    never = "not signed in; fix: press Log in (in a terminal: aisquare accounts run 2, then /login)"
+    gone = (
+        "no credentials file — not signed in; fix: press Log in (in a terminal: "
+        "aisquare accounts run 3, then /login)"
+    )
+
+    for args in (["accounts", "usage"], ["accounts", "list", "--usage"]):
+        result = runner.invoke(app, args, env={"COLUMNS": "400"})
+        assert result.exit_code == 0, result.output
+        assert never in result.stdout and gone in result.stdout, (args, result.stdout)
+
+    usage_json = runner.invoke(app, ["--json", "accounts", "usage"])
+    rows = {row["account"]["slot"]: row["usage"] for row in json.loads(usage_json.stdout)}
+    assert (rows[2]["cause"], rows[3]["cause"]) == ("not_signed_in", "token_missing")
+    assert rows[3]["fix"] == "press Log in (in a terminal: aisquare accounts run 3, then /login)"
+    listed = runner.invoke(app, ["--json", "accounts", "list", "--usage"])
+    by_slot = {
+        row["account"]["slot"]: row["usage"] for row in json.loads(listed.stdout)["accounts"]
+    }
+    assert by_slot[3]["cause"] == "token_missing" and by_slot[3]["reason"].startswith("no cred")
+    bare = runner.invoke(app, ["--json", "accounts", "list"])  # no --usage: no usage at all
+    assert all(row["usage"] is None for row in json.loads(bare.stdout)["accounts"])
+    assert fetch.calls == []  # nobody to ask: no login anywhere
 
 
 def test_accounts_remove_renames_and_refuses_the_default(

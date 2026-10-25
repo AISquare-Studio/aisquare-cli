@@ -271,6 +271,14 @@ def _refreshed_line(statuses: list[ClaudeAccountStatus]) -> Text | None:
     )
 
 
+def _say_why(statuses: list[ClaudeAccountStatus]) -> None:
+    """Give each row with no usage to show the reading that says why and the fix
+    (``usage_problem``, what the Accounts page's '!' says on hover), asked or not: a
+    signed-out slot printed ``—`` and ``--json`` said ``"usage": null`` (review of #421)."""
+    for status in statuses:
+        status.usage = accounts_service.usage_problem(status, status.usage) or status.usage
+
+
 def _kept_lines(statuses: list[ClaudeAccountStatus]) -> list[Text]:
     """One line per row showing an older reading because the newest try read nothing:
     ``account 2: rate-limited until 14:32 — …; showing the reading from 12m ago`` (F1 of
@@ -313,6 +321,7 @@ def list_(
         )
         for status in signed:
             status.usage = readings.get(status.account.slot)
+        _say_why(overview.accounts)
     if get_state().json_output:
         typer.echo(_overview_json(overview))
         return
@@ -349,6 +358,7 @@ def usage_(
     readings = accounts_service.cached_usage([status.account for status in asked], force=refresh)
     for status in asked:
         status.usage = readings.get(status.account.slot)
+    _say_why(statuses)
     if get_state().json_output:
         typer.echo(json.dumps([status.model_dump(mode="json") for status in statuses]))
         return

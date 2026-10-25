@@ -2289,15 +2289,18 @@ def test_a_store_from_the_stacks_v34_to_v38_reaches_v39_with_every_step(
 ) -> None:
     """Stamped v34 by the stack, with ``brief`` and neither ``fleet_agent.ended_by``, the
     usage tables nor the first message's or a board event's actor columns; v36, with
-    ``brief``, the column and the tables but neither set of columns; or v37 by #417, with
-    ``brief`` and the first message's columns but not the actor's: a store opens at v38 with
-    all of them, the schema a fresh store has. The presence pass adds what the stamp claims
-    and the store lacks, the ladder runs the steps above the stamp, and v38 finds ``brief``
-    in place. Its brief and every other row read back unchanged, and a second open changes
-    nothing.
+    ``brief``, the column and the tables but neither set of columns; v37 by #417, with
+    ``brief`` and the first message's columns but not the actor's; or v38 by #417 as pushed
+    (ce1530ae), with everything to P1's v37 and ``brief`` but not P2-W6's v38 columns, which
+    its stamp claims: a store opens at v39 with all of them, the schema a fresh store has.
+    The presence pass adds what the stamp claims and the store lacks, the ladder runs the
+    steps above the stamp, and v39 finds ``brief`` in place. Its brief and every other row
+    read back unchanged, and a second open changes nothing.
 
-    Bites: with the presence pass off, each of the three fails: the v34 store has no
-    ``ended_by``, the v36 store no ``first_prompt``, and the v37 store no ``team_event.actor``."""
+    Bites: with the presence pass off, each of the four fails: the v34 store has no
+    ``ended_by``, the v36 store no ``first_prompt``, the v37 store no ``team_event.actor``,
+    and the v38 store no ``project_group.parent_project_id`` (as with P2's columns taken
+    out of ``_PRODUCTS``)."""
     db = _at_version(
         steps,
         after=_TWO_PROJECTS + _A_SESSION_AND_AN_AGENT + _BRIEF_V34_OF_THE_STACK,
@@ -2312,7 +2315,7 @@ def test_a_store_from_the_stacks_v34_to_v38_reaches_v39_with_every_step(
     assert stamped >= _BRIEF_STEP, "the fixture"
     assert not _PARENT_COLUMNS & stamped, "the fixture: P2-W6's columns are what it lacks"
     if stamp == 38:
-        assert stamped >= _EVENT_ACTOR_COLUMNS | _FIRST_PROMPT_COLUMNS, "the fixture"
+        assert stamped >= _EVENT_ACTOR_COLUMNS, "the fixture"
     else:
         assert not _EVENT_ACTOR_COLUMNS & stamped, "the fixture"
     if stamp in (37, 38):

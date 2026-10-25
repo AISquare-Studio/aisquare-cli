@@ -322,7 +322,7 @@ its own installer.**
   that the folder holds aisquare's settings, the fleet database and every Claude
   account's login data, which agents working there can read and change. Removing it
   from the fleet hides it again. Every other role, fleet row and board, and the store
-  (schema v38), are the same either way. Four fleet changes that came with it are
+  (schema v39), are the same either way. Four fleet changes that came with it are
   not behind the switch, on or off: a tmux server the fleet starts holds no team
   variable, doctor's `fleet server env` row, the board each delta and wake-up line
   names, and `serve --stdio`'s idle clock (all under Fixed, below).

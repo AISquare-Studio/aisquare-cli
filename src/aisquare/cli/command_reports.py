@@ -94,7 +94,9 @@ def exec_command(
     project: Annotated[
         str | None,
         typer.Option(
-            "--project", help="Record the project checkout's source identity before and after."
+            "--project",
+            help="The project, by a name or an id: record its checkout's source identity "
+            "before and after.",
         ),
     ] = None,
     max_output_bytes: Annotated[
@@ -127,6 +129,8 @@ def exec_command(
             error="usage",
             exit_code=2,
         )
+    if project is not None:
+        project = _project_id(project)
     if task is not None:
         task = _board_task(task, project)
     try:
@@ -165,6 +169,22 @@ def exec_command(
             signal.signal(report.signal, signal.SIG_DFL)
         os.kill(os.getpid(), report.signal)
     raise typer.Exit(report.exit_code)
+
+
+def _project_id(ref: str) -> str:
+    """``--project`` read as ``board --project`` reads it: a name or an id, recorded as the
+    project's id. Kept as typed, a name was a board id no project has: the report was saved
+    with its source identity unknown, and ``--task`` said the task was not on that board
+    (TUI-401d (q)). A ref no project matches is refused before anything runs; with no store
+    to read, the ref is kept as typed, as ``--task``'s is: a report needs no board."""
+    from aisquare.services import fleet as fleet_service  # lazy: not every run's business
+
+    try:
+        return fleet_service.resolve_project(ref).id
+    except fleet_service.FleetError as exc:
+        fail(f"--project {ref}: {exc}; nothing was run", error="not_found", ref=ref)
+    except Exception:  # the store cannot be read: a report needs no board
+        return ref
 
 
 def _board_task(ref: str, project: str | None) -> str:

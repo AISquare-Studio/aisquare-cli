@@ -720,6 +720,39 @@ def test_exec_task_takes_a_board_ref_as_every_other_task_does(runner: CliRunner)
     assert _check(brief) == {"R1": "pass"}
 
 
+def test_exec_project_takes_a_name_or_an_id_as_board_project_does(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """TUI-401d (q): `asq exec --project <name>` saved the report under the name as if it
+    were an id, its source identity unknown, and `--task 1` said '#1 is not on this board'.
+    A name resolves as `board --project`'s does: the real id, the task found, the source
+    known. A ref no project matches is refused with exit 1, nothing run, nothing saved."""
+    _brief, task = _linked()
+    project = team.resolve_project()
+    for ref in (project.root.name, project.id):
+        ran = runner.invoke(
+            app,
+            ["--json", "exec", "--project", ref, "--task", str(task.number), "--",
+             *_py("print('ok')")],
+        )  # fmt: skip
+        assert ran.exit_code == 0, ran.output
+        report = json.loads(ran.stdout)["report"]
+        assert (report["project_id"], report["task_id"]) == (project.id, task.id), ref
+        assert reports.load_report(report["id"]).source_known, ref
+
+    marker = tmp_path / "ran"
+    before = {r.id for r in reports.list_reports()}
+    missing = runner.invoke(
+        app,
+        ["--json", "exec", "--project", "no-such-project", "--",
+         *_py(f"open({str(marker)!r}, 'w')")],
+    )  # fmt: skip
+    assert missing.exit_code == 1, missing.output
+    assert json.loads(missing.stdout)["error"] == "not_found"
+    assert not marker.exists(), "nothing was run"
+    assert {r.id for r in reports.list_reports()} == before, "nothing was saved"
+
+
 def test_exec_refuses_a_task_ref_the_board_does_not_have_and_runs_nothing(
     runner: CliRunner, tmp_path: Path
 ) -> None:

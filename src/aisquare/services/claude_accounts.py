@@ -1385,8 +1385,10 @@ def read_usage(
         backoffs = _read_backoffs(store, [account.slot for account in accounts])
     logins: dict[int, str | None] = {}
 
-    def login(account: ClaudeAccount) -> str | None:
-        """:func:`_login_key`, read once per slot, and only for a slot a wait concerns."""
+    def _login_of(account: ClaudeAccount) -> str | None:
+        """:func:`_login_key`, read once per slot, and only for a slot a wait concerns. A name
+        of its own: the call-graph guards resolve a call by its name, and ``login`` is the
+        accounts command's (``tests/test_config_writes_stay_in_the_cli.py``)."""
         if account.slot not in logins:
             logins[account.slot] = _login_key(account, moment)
         return logins[account.slot]
@@ -1394,7 +1396,7 @@ def read_usage(
     asked: list[ClaudeAccount] = []
     for account in accounts:
         held = backoffs.get(account.slot)
-        if held is not None and held.active(moment) and held.holds(login(account)):
+        if held is not None and held.active(moment) and held.holds(_login_of(account)):
             readings[account.slot] = held.reading(moment)
         else:
             asked.append(account)
@@ -1418,7 +1420,7 @@ def read_usage(
             readings[account.slot],
             backoffs.get(account.slot),
             moment,
-            login(account),
+            _login_of(account),
         )
         for account in asked
         if readings[account.slot].rate_limited

@@ -43,7 +43,7 @@ fleet still running, and every release now carries its own installer.**
   `--no-handoff`, `AISQUARE_INSTALL_NO_HANDOFF=1`, `--offline` and
   `AISQUARE_INSTALL_PACKAGE` keep main's copy. With no `--version` the install is the
   latest release, unpinned, as main's own would be (the release's script is handed
-  `AISQUARE_INSTALL_VERSION` empty, and the PyPI answer main's copy already read), so
+  `--version latest`, and the PyPI answer main's copy already read), so
   `uv tool upgrade` still moves it; `--version V` pins.
   `install.ps1` hands WSL main's `install.sh`, so the hand-off happens there.
 - **Accounts: *Log in again* on any signed-in row.** The login column offers the same

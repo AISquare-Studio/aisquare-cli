@@ -524,18 +524,24 @@ hand_off() {
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    # No version named: the release's script installs unpinned, as this copy would.
+    # Left to its stamp, every plain one-liner install was pinned to the release
+    # (aisquare-cli==V), and `uv tool upgrade` never moved it again. `--version
+    # latest` is the stamped script's way out of its pin, passed as an ARGUMENT,
+    # last so it is the one parse_args keeps, and before release_checked so the
+    # release must know it like any option given. Not an exported
+    # AISQUARE_INSTALL_VERSION=: that reached asq, the tmux server and every agent
+    # through the release's `exec asq`, and a release's own installer run later
+    # from those shells installed the latest instead of its version (review of
+    # #401, m4). A `latest` or a --version V named goes as given, and
+    # AISQUARE_INSTALL_VERSION=V still pins from the environment.
+    [ -n "$PIN_VERSION" ] || set -- "$@" --version latest
     if release_checked "$@"; then
         note "using the v$HANDOFF_VERSION installer"
         AISQUARE_INSTALL_HANDED_OFF=$HANDOFF_FILE
         export AISQUARE_INSTALL_HANDED_OFF
         if [ -z "$PIN_VERSION" ] || [ "$PIN_VERSION" = latest ]; then
-            # No version named: the release's script installs unpinned, as this copy
-            # would. Left to its stamp, every plain one-liner install was pinned to the
-            # release (aisquare-cli==V), and `uv tool upgrade` never moved it again. Set
-            # but empty is the stamped script's documented "drop the pin"; --version V
-            # (or AISQUARE_INSTALL_VERSION=V) still pins, in the arguments or the env.
-            AISQUARE_INSTALL_VERSION=
-            export AISQUARE_INSTALL_VERSION
+            # Unpinned, it needs PyPI's latest: the answer this copy already read.
             AISQUARE_INSTALL_PYPI_LATEST=$PYPI_LATEST
             export AISQUARE_INSTALL_PYPI_LATEST
         fi

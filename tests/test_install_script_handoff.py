@@ -293,7 +293,9 @@ def _args(output: str) -> list[str]:
 
 
 def test_main_hands_off_to_the_latest_release_with_the_same_arguments(machine: Machine) -> None:
-    """The release's script runs with every argument as given, and its status is the run's."""
+    """The release's script runs with every argument as given, and its status is the run's.
+
+    With no version named, ``--version latest`` comes last: the release installs unpinned."""
     machine.serve_latest(reporting_release())
     machine.pypi(STAMP)
     spaced = machine.root / "a project with spaces"
@@ -302,7 +304,14 @@ def test_main_hands_off_to_the_latest_release_with_the_same_arguments(machine: M
     result = machine.run("--yes", "--project", str(spaced), "--no-agent")
 
     assert result.returncode == 3, f"not the release's status:\n{result.stdout}\n{result.stderr}"
-    assert _args(result.stdout) == ["--yes", "--project", str(spaced), "--no-agent"]
+    assert _args(result.stdout) == [
+        "--yes",
+        "--project",
+        str(spaced),
+        "--no-agent",
+        "--version",
+        "latest",
+    ]
     assert result.stdout.count("using the v7.7.7 installer") == 1, result.stdout
     # The second-hop guard names the script it was handed to, which is the child.
     child = re.search(r"^RELEASE IS (.+)$", result.stdout, re.MULTILINE)
@@ -339,9 +348,9 @@ def test_a_release_copy_of_this_tree_runs_its_own_dry_run(machine: Machine) -> N
     """The real thing: this tree stamped as a release, handed the same flags.
 
     The child installs the latest release UNPINNED, as main's copy would: no
-    version was named, so it is handed ``AISQUARE_INSTALL_VERSION`` empty, the
-    stamped script's way out of its own pin (REVIEW-401 prep for #402). It
-    honours ``--dry-run``, and the parent prints its one line and nothing else.
+    version was named, so it is handed ``--version latest``, the stamped script's
+    way out of its own pin (REVIEW-401 prep for #402, and m4). It honours
+    ``--dry-run``, and the parent prints its one line and nothing else.
     """
     machine.serve_latest(stamped_copy())
     machine.pypi(STAMP)
@@ -360,6 +369,21 @@ def test_a_release_copy_of_this_tree_runs_its_own_dry_run(machine: Machine) -> N
     # The stamped child hops nowhere: one request for the release, one for PyPI.
     assert machine.release_requests() == [LATEST_URL]
     assert machine.leftovers() == []
+
+
+def test_a_release_copy_of_this_tree_keeps_a_pin(machine: Machine) -> None:
+    """The real thing, pinned: ``--version V`` goes as given, so vV's own installer installs
+    exactly V (review of #401, m4: the unpinned run's ``--version latest`` is the only way
+    out of the stamp, and it is never added to a pin)."""
+    machine.serve(f"download/v{STAMP}/install.sh", stamped_copy())
+
+    result = machine.run(*DRY, "--version", STAMP)
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert result.stdout.splitlines()[0].strip() == "using the v7.7.7 installer"
+    assert f"pinned to {STAMP}" in result.stdout, result.stdout
+    assert "aisquare-cli@latest" not in result.stdout, result.stdout
+    assert machine.release_requests() == [f"{RELEASES}/download/v{STAMP}/install.sh"]
 
 
 def test_a_wget_only_machine_hands_off_too(machine: Machine) -> None:
@@ -621,23 +645,32 @@ def test_a_pin_fetches_that_releases_installer(
 
 
 @pytest.mark.parametrize(
-    ("args", "env", "handed"),
+    ("args", "env", "handed", "version_env"),
     [
-        ((), {}, ""),
-        (("--version", "latest"), {}, ""),
-        (("--version", STAMP), {}, "unset"),
-        ((), {"AISQUARE_INSTALL_VERSION": STAMP}, STAMP),
+        ((), {}, ("--version", "latest"), "unset"),
+        (("--version", "latest"), {}, ("--version", "latest"), "unset"),
+        (("--version", STAMP), {}, ("--version", STAMP), "unset"),
+        ((), {"AISQUARE_INSTALL_VERSION": STAMP}, (), STAMP),
     ],
     ids=["no-version", "latest", "pinned-flag", "pinned-env"],
 )
 def test_no_version_named_hands_off_unpinned_and_a_pin_stays_a_pin(
-    machine: Machine, args: tuple[str, ...], env: dict[str, str], handed: str
+    machine: Machine,
+    args: tuple[str, ...],
+    env: dict[str, str],
+    handed: tuple[str, ...],
+    version_env: str,
 ) -> None:
     """REVIEW-401 prep for #402: handed only its arguments, the release's stamped script fell
     back on its stamp, so every plain one-liner install was pinned (``aisquare-cli==V``) and
-    ``uv tool upgrade`` never moved it. With no version named (or ``latest``) the child gets
-    ``AISQUARE_INSTALL_VERSION`` set and empty, and installs unpinned; ``--version V`` and
-    ``AISQUARE_INSTALL_VERSION=V`` pin as before."""
+    ``uv tool upgrade`` never moved it. With no version named the child is handed
+    ``--version latest`` and installs unpinned; ``--version V`` and
+    ``AISQUARE_INSTALL_VERSION=V`` pin as before.
+
+    Review of #401, m4: it was handed ``AISQUARE_INSTALL_VERSION`` set and empty, which its
+    ``exec asq`` carried into tmux and every agent, so a release's own installer run later
+    from one of them installed the latest, not its version. The child's environment, and so
+    asq's, carries no ``AISQUARE_INSTALL_VERSION`` that the user did not set."""
     machine.serve(f"download/v{STAMP}/install.sh", reporting_release())
     machine.serve_latest(reporting_release())
     machine.pypi(STAMP)
@@ -645,7 +678,8 @@ def test_no_version_named_hands_off_unpinned_and_a_pin_stays_a_pin(
     result = machine.run("--yes", *args, env=env)
 
     assert result.returncode == 3, f"{result.stdout}\n{result.stderr}"
-    assert f"RELEASE VERSION_ENV={handed}" in result.stdout.splitlines(), result.stdout
+    assert _args(result.stdout) == ["--yes", *handed], result.stdout
+    assert f"RELEASE VERSION_ENV={version_env}" in result.stdout.splitlines(), result.stdout
 
 
 def test_a_pin_to_a_release_without_installers_falls_back(machine: Machine) -> None:

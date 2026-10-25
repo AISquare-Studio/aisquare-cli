@@ -11,12 +11,14 @@
 #
 # THREE RUNS, and the sequence is the test rather than an accident:
 #
-#   1. bare machine, --no-project. Nothing but a downloader is preinstalled, so
-#      this is the run that exercises the §5 package matrix — tmux, gh, git and
-#      Node all come from the platform's own manager.
-#   2. with a project. `snapshot` is amber after run 1 by construction (no
-#      project is registered), which is also what stops run 2 short-circuiting.
-#      THIS is the run the acceptance criterion is asserted against.
+#   1. bare machine, --no-project, --with chrome-devtools. Nothing but a
+#      downloader is preinstalled, so this is the run that exercises the §5
+#      package matrix — tmux, gh, git and the extra's Node all come from the
+#      platform's own manager (Node through NodeSource or fnm where that one is
+#      too old). The extra registers its MCP only where Claude Code is installed.
+#   2. with a project. A local wheel is always installed, never short-circuited,
+#      so this run registers the project. THIS is the run the acceptance
+#      criterion is asserted against.
 #   3. again, with every package manager replaced by a stub that records being
 #      called. Asserts §3.9.4 with teeth: a current machine must print its
 #      summary and exit 0 having installed NOTHING, and the stub is what turns
@@ -151,13 +153,13 @@ cd "$WORKDIR"
 
 set +e
 # shellcheck disable=SC2086  # AGENT_FLAG is deliberately word-split (or empty).
-sh "$INSTALLER" --yes --no-project $AGENT_FLAG
+sh "$INSTALLER" --yes --no-project --with chrome-devtools $AGENT_FLAG
 run1=$?
 set -e
 printf '\nrun 1 exit: %s\n' "$run1"
-# 0 or 2 are both legitimate here: `snapshot` is amber with no project
-# registered, and whether that is classed actionable (0) or unexpected (2) is
-# the thing run 2 pins. 1 means a FATAL step failed, which is never acceptable.
+# 0 or 2 are both legitimate here: 2 is a check amber for a reason the script
+# did not expect, which run 2's gate names, or a Node that did not install, which
+# the check below names. 1 means a FATAL step failed, which is never acceptable.
 [ "$run1" = 1 ] && fail "run 1 exited 1 — a fatal step (uv or aisquare-cli) failed"
 
 command -v aisquare >/dev/null 2>&1 || fail "aisquare is not on PATH after run 1"
@@ -168,18 +170,25 @@ head1 "installed: $(aisquare --version)"
 # names which one.
 aisquare --version >/dev/null || fail "aisquare --version does not run"
 
-# Node, which run 1 asked for: this cell never passes --no-system-deps. With no
-# Node at all `aisquare doctor` reads codebase snapshots as off, which is ok, and
-# so is the tiktoken row that only snapshots use. A failed Node install would
-# therefore pass the tiktoken guard below whatever `--with` did, and run 2's
-# "exactly [brain]" gate could not see it either. Checked first, by name.
+# Node, which run 1 chose with --with chrome-devtools. It is optional, so no
+# doctor row goes amber without it and run 2's "exactly [brain]" gate could not
+# see a failed install. Checked by name.
 command -v node >/dev/null 2>&1 ||
-    fail "node absent after run 1 — the installer's Node step failed (doctor reads no Node as snapshots off)"
+    fail "node absent after run 1 — the installer's Chrome DevTools extra failed (no doctor row names Node)"
 
-# tiktoken in the CLI's OWN environment (§1.2) — the whole reason for `--with`.
-case "$(amber_checks)" in
-    *tiktoken*) fail "tiktoken is amber: --with tiktoken did not take" ;;
-esac
+# The extra's MCP, read from the file `claude mcp add --scope user` writes (`claude
+# mcp get` would start the server to health-check it). Under --no-agent, every
+# cell but one, Claude Code is left alone and nothing is registered; the cell
+# with Claude Code installed for real must have it.
+CLAUDE_JSON="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+if [ "$SKIP_AGENT" = 1 ]; then
+    if [ -f "$CLAUDE_JSON" ] && grep -q '"chrome-devtools"' "$CLAUDE_JSON"; then
+        fail "run 1 registered the Chrome DevTools MCP under --no-agent"
+    fi
+else
+    grep -q '^    "chrome-devtools": ' "$CLAUDE_JSON" 2>/dev/null ||
+        fail "the Chrome DevTools MCP is not registered after run 1 chose it with Claude Code installed"
+fi
 
 # The install shape the `install` doctor check wants (§3.1): a real binary on
 # PATH, outside any virtualenv.
@@ -212,7 +221,7 @@ git config user.email cell@example.invalid
 git config user.name "Matrix Cell"
 printf 'print("hello")\n' >main.py
 git add -A
-git commit -qm "one file, so Repomix has something to pack"
+git commit -qm "one file, so the project has a commit"
 
 set +e
 # shellcheck disable=SC2086
@@ -349,9 +358,9 @@ amber_again=$(amber_checks)
 #
 # It also asserts `tiktoken` survives, because `--force` REPLACES the tool
 # environment: an upgrade that forgot to re-state `--with tiktoken` would move
-# the version, exit 0, and silently turn the `tiktoken` doctor line amber — a
-# regression that only ever appears after an upgrade, which is the hardest kind
-# to attribute.
+# the version, exit 0, and silently turn the `tiktoken` doctor line amber. This
+# tree has no such row any more (#399), but the release this run upgrades to
+# may, and with the Node run 1 installed it asks for tiktoken.
 #
 # PyPI is the target here, not the local wheel: "did it move to latest" needs a
 # latest to move to. Skipped when the published version happens to BE 0.5.0,
@@ -405,7 +414,7 @@ else
 
     # tiktoken, in the CLI's OWN environment. `--force` replaces that
     # environment, so this is the assertion that keeps `--with tiktoken` in the
-    # upgrade command.
+    # upgrade command for as long as a release's doctor asks for it.
     case "$(amber_checks)" in
         *tiktoken*)
             fail "tiktoken is amber after the upgrade — --with tiktoken was not re-stated (section 3.9.1)"

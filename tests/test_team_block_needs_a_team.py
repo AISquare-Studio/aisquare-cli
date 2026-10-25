@@ -172,8 +172,9 @@ def test_serve_over_http_keeps_the_full_instructions() -> None:
 
 def _main_directive(snapshot_dir: Path) -> str:
     """The SessionStart directive origin/main printed for a ready pack with prompts in
-    the log (``services.hooks._directive`` before this change), for the before figure."""
-    pack = snapshot_dir / "pack.repomix.xml"
+    the log (``services.hooks._directive`` before this change), for the before figure.
+    The pack's file name is shortened: the packer that named it is gone."""
+    pack = snapshot_dir / "pack.xml"
     return "\n".join(
         [
             "<aisquare-context>",

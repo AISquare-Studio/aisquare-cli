@@ -146,11 +146,8 @@ fleet still running, and every release now carries its own installer.**
   (`aisquare init` or `aisquare project onboard` there, or `+` in asq) makes it a
   project with its own card, which never shows the captain's row; it warns once
   that the folder holds aisquare's settings, the fleet database and every Claude
-  account's login data, which agents working there can read and change. It is
-  never packed into a codebase snapshot, not even by `project onboard`, and `init`
-  there says so rather than that the pack is opt-in (a pack of it left from before
-  is not served, and the next onboard or `init` deletes it). Removing it from the
-  fleet hides it again. Every other role, fleet row and board, and the store
+  account's login data, which agents working there can read and change. Removing it
+  from the fleet hides it again. Every other role, fleet row and board, and the store
   (schema v36), are the same either way. Four fleet changes that came with it are
   not behind the switch, on or off: a tmux server the fleet starts holds no team
   variable, doctor's `fleet server env` row, the board each delta and wake-up line
@@ -465,10 +462,6 @@ fleet still running, and every release now carries its own installer.**
   those sections, so they reached every session twice. Preferences from anywhere else
   stay. For a solo onboarded repo, SessionStart output plus MCP instructions go from
   about 2,400 characters to about 130.
-- `init` no longer packs the codebase with Repomix: no agent reads the pack, and it
-  cost a minute on a large repo. `aisquare project onboard` packs one on demand, as it
-  did; doctor's snapshot row reads `none — opt-in: aisquare project onboard packs one`
-  instead of warning.
 - In `asq`, the Spawn dialog shows three fields — Role, Hand off from (with its How row
   once a teammate is picked) and Account — and folds everything else into one
   **Advanced** section: *Pick…* (moved there from beside Role, where it sat next to the
@@ -673,6 +666,51 @@ fleet still running, and every release now carries its own installer.**
   message is delivered or held, and that the usage endpoint reports a per-model window
   in `limits[]`. `tests/test_claude_accounts.py` gains a fixture shaped like the
   endpoint's answer of 2026-10-23, with invented values.
+
+- **`install.sh` offers the Chrome DevTools MCP as an opt-in extra** (#399, the owner's
+  decisions of 2026-10-24). Node 22.12+ is no longer installed for aisquare, which never
+  runs it, but for the MCP, whose floor 22.12 is. Chosen, the extra installs Node, then
+  registers the MCP with Claude Code at user scope, as the package's own guide does:
+  `claude mcp add chrome-devtools --scope user npx chrome-devtools-mcp@latest`. The
+  summary says how to undo it (`claude mcp remove -s user chrome-devtools`). It skips
+  the registration in one line under `--no-agent`, without Claude Code, or when the MCP
+  (or the chrome-devtools-mcp plugin) is already there, and a failed registration only
+  warns. It is asked about with its own prompt, which defaults to no, or chosen without
+  asking with `--with chrome-devtools`; `--yes`, a run with no terminal and
+  `--no-system-deps` install no extra unless named. The extras are a list
+  (`OPTIONAL_EXTRAS`), so more can be added the same way. A machine without Node is
+  current, and the run exits 2 only when an extra you chose did not install (its Node,
+  or the npx that starts the MCP). Doctor's browser tools row names the same command.
+  A release up to 0.8.2 still has its own `repomix`, `snapshot` and `tiktoken` doctor
+  rows: the installer expects them amber when it installs one, so `--yes` on a machine
+  with an older Node exits 0.
+
+### Removed
+
+- **The codebase snapshot, and Repomix with it** (#399; the owner's decision of
+  2026-10-24: nothing on the AISquare platform reads a CLI pack). No pack is made,
+  read or reported, and the CLI never runs Node. `aisquare project onboard` keeps its
+  other job: the first run seeds one fact per marker it finds at the root, a plain
+  second run reads nothing and says so (`already onboarded; --refresh reads the markers
+  again`; `--json` gains `markers_read`, false on that run), and `--refresh` adds only
+  the facts that are new. A forgotten project onboarded again is a first run: forget
+  kept its facts, and it says they are back (`onboarded again; its earlier facts are
+  back`; `--json` gains `restored`, true on that run). It starts
+  no process but the `git rev-parse` that finds the root. `init` makes no pack and says
+  nothing about one. Doctor's `repomix`, `tiktoken` and `snapshot` rows are gone, so a
+  machine with no Node and no tiktoken has nothing amber over them.
+  - **Old packs are deleted once**, by the first command that opens the store: every
+    `~/.aisquare/projects/<id>/snapshot/`, the aisquare home's included, and nothing
+    else (never `brain/`, never a symlink's target). It runs after the store's
+    migrations, because a store from 0.6 or older still reads a project's pack as the
+    mark of a project you added (#139): such a project stays listed, then its pack goes.
+  - **A `config.toml` with `[snapshot]` still loads.** Doctor's config row says the
+    section is no longer read (green), and the next save drops it.
+    `aisquare config get/set snapshot.*` answer `unknown config key`.
+  - **tiktoken** counted pack tokens and nothing else, and this build never imports it.
+    The one-liner still adds it for now: it can install a release up to 0.8.2, which
+    asks for tiktoken in doctor on a machine with Node. An install that has
+    it keeps a harmless unused package.
 
 ### Fixed
 
@@ -891,9 +929,8 @@ fleet still running, and every release now carries its own installer.**
   while every real document passed (measured on `rc/hackathon-v1` with two
   coder worktrees; from a clean checkout or inside a worktree it passed). The
   sweep now never enters the fleet's `worktree_dir` (the `[fleet]` default) or
-  any directory holding a `.git` *file* — a linked worktree wherever it was put
-  — the way `core/snapshot.py` already ignores `**/.aisquare-worktrees/**`. It
-  prunes as it walks, so it no longer reads every agent's `.venv` to throw the
+  any directory holding a `.git` *file* — a linked worktree wherever it was put.
+  It prunes as it walks, so it no longer reads every agent's `.venv` to throw the
   result away. The guard's rules and its document list are unchanged, and the
   positive control stays: the same fenced page at the repo's own level is still
   reported.

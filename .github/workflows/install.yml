@@ -75,13 +75,15 @@ jobs:
         run: |
           shellcheck --shell=sh install.sh \
             tests/install/cell.sh tests/install/cell-nonroot.sh tests/install/matrix.sh \
-            tests/install/handoff.sh plugins/claude-code/scripts/aisquare-hook
+            tests/install/release-cell.sh tests/install/handoff.sh \
+            plugins/claude-code/scripts/aisquare-hook
 
       - name: shfmt (format check)
         run: |
           shfmt -i 4 -ci -d install.sh \
             tests/install/cell.sh tests/install/cell-nonroot.sh tests/install/matrix.sh \
-            tests/install/handoff.sh plugins/claude-code/scripts/aisquare-hook
+            tests/install/release-cell.sh tests/install/handoff.sh \
+            plugins/claude-code/scripts/aisquare-hook
 
       - name: Parse under dash and BusyBox ash
         # `sh -n` under BOTH, because bash accepts things neither does and
@@ -98,7 +100,8 @@ jobs:
         run: |
           for script in install.sh tests/install/cell.sh \
             tests/install/cell-nonroot.sh tests/install/matrix.sh \
-            tests/install/handoff.sh plugins/claude-code/scripts/aisquare-hook; do
+            tests/install/release-cell.sh tests/install/handoff.sh \
+            plugins/claude-code/scripts/aisquare-hook; do
             dash -n "$script"
             echo "dash  ok: $script"
             busybox ash -n "$script"
@@ -381,14 +384,11 @@ jobs:
             | sort | tr '\n' ' ')
           echo "not ok: [$amber]"
           # `install` amber would mean uv produced a shape doctor rejects — the
-          # §3.1 claim this whole bootstrap choice rests on. `tiktoken` amber
-          # would mean `--with tiktoken` did not take.
+          # §3.1 claim this whole bootstrap choice rests on.
           case "$amber" in
             *install*)  echo "::error::the install check is amber on macOS"; exit 1 ;;
-            *tiktoken*) echo "::error::tiktoken is amber — --with tiktoken did not take"; exit 1 ;;
           esac
-          # `snapshot` and `brain` are expected here: --no-project registers
-          # nothing, and gbrain is out of scope.
+          # `brain` is expected here: gbrain is out of scope.
 
       - name: Re-run — a current machine installs nothing
         env:
@@ -477,3 +477,22 @@ jobs:
             -e CELL_SKIP_AGENT=0 \
             -e HOME=/root \
             debian:12 sh /mnt/tests/install/cell.sh
+
+  release-old-node:
+    name: the latest release onto an old Node, no extra
+    runs-on: ubuntu-latest
+    needs: static
+    # The one job that installs FROM PyPI, as everyone who is not CI does. Every
+    # other cell grades a wheel of this tree with --with chrome-devtools, so none
+    # could see the installed release's own doctor rows (the codebase snapshot's,
+    # up to 0.8.2) going amber on Debian's Node 18: review of #399, MAJOR 1.
+    # tests/install/release-cell.sh says what it asserts.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The release, with --yes, onto debian:12's own Node
+        run: |
+          docker run --rm \
+            -v "$PWD:/mnt:ro" \
+            -e HOME=/root \
+            debian:12 sh /mnt/tests/install/release-cell.sh

@@ -987,29 +987,14 @@ def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     ``_aisquare_command`` resolves: the console script beside this interpreter
     when there is one, otherwise the machine's ``aisquare`` — a pyenv shim on the
     author's box. Which one is ambient state, and running it would grade the
-    developer's PATH rather than this tree. Same shape as ``no_repomix`` below.
-    Tests of the probe itself capture the real function at import and call it
-    against fake scripts they write (test_doctor_stale_hook_binary.py).
+    developer's PATH rather than this tree. Tests of the probe itself capture the
+    real function at import and call it against fake scripts they write
+    (test_doctor_stale_hook_binary.py).
     """
     from aisquare.core import agents
     from aisquare.core.version import __version__
 
     monkeypatch.setattr(agents, "hook_binary_version", lambda argv, **_kwargs: __version__)
-
-
-@pytest.fixture(autouse=True)
-def no_repomix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Disable the repomix subprocess by default so tests never shell out.
-
-    Snapshot generation degrades to "skipped". Tests that exercise the packing
-    logic override ``snapshot._run_repomix`` with a fake returning synthetic XML.
-    """
-    from aisquare.core import snapshot
-
-    def _unavailable(*_args: object, **_kwargs: object) -> tuple[str, str]:
-        raise snapshot.RepomixUnavailableError("repomix disabled in tests")
-
-    monkeypatch.setattr(snapshot, "_run_repomix", _unavailable)
 
 
 @pytest.fixture(autouse=True)

@@ -39,6 +39,7 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT = Path(os.environ.get("AISQUARE_TEST_INSTALL_SH") or REPO / "install.sh")
 CELL = REPO / "tests/install/cell.sh"
 CELL_NONROOT = REPO / "tests/install/cell-nonroot.sh"
+RELEASE_CELL = REPO / "tests/install/release-cell.sh"
 MATRIX = REPO / "tests/install/matrix.sh"
 #: The hand-off's end-to-end check, run by install.yml's `handoff` job.
 HANDOFF = REPO / "tests/install/handoff.sh"
@@ -54,7 +55,7 @@ PLUGIN_HOOK = REPO / "plugins/claude-code/scripts/aisquare-hook"
 #: the tree was checked by nothing at all. Anything added to tests/install/ must
 #: be added here; the test below asserts that, so the next omission fails
 #: instead of going unnoticed.
-POSIX_SCRIPTS = (SCRIPT, CELL, CELL_NONROOT, MATRIX, HANDOFF, PLUGIN_HOOK)
+POSIX_SCRIPTS = (SCRIPT, CELL, CELL_NONROOT, RELEASE_CELL, MATRIX, HANDOFF, PLUGIN_HOOK)
 
 
 @pytest.fixture(scope="module")
@@ -227,7 +228,9 @@ def test_the_upgrade_restates_the_tiktoken_extra(source: str) -> None:
     """--force replaces the tool env, so `--with tiktoken` has to be re-stated.
 
     Dropping it would leave a machine whose `tiktoken` doctor line went amber
-    only after an UPGRADE — the hardest kind of regression to attribute.
+    only after an UPGRADE — the hardest kind of regression to attribute. This
+    tree has no such row (#399), but the script installs the latest RELEASE, and
+    every release up to 0.8.2 has it (the install.sh comment above install_cli).
     """
     upgrade = re.search(
         r"uv tool install --force[^\n]*(\n\s+[^\n]*)*?\"\$_spec\"", source
@@ -496,25 +499,20 @@ def test_no_unescaped_backticks_in_double_quotes() -> None:
 # --- the constants the script duplicates from Python ------------------------
 
 
-def test_the_node_floor_matches_the_pythons(source: str) -> None:
-    """`install.sh`'s Node floor and `core/snapshot.py`'s MIN_NODE must be equal.
-
-    The number genuinely has to exist twice: `install.sh` runs BEFORE any Python
-    is on the machine — that is the whole premise of §3.1 — so it cannot import
-    the constant. What it must not do is drift from it. If repomix raises its
-    floor and only the Python side is updated, the installer would leave a Node
-    the `repomix` check then calls too old, and the container matrix would fail
-    on the acceptance criterion with nothing pointing at the cause.
-    """
-    from aisquare.core.snapshot import MIN_NODE
-
-    match = re.search(r"^MIN_NODE_MAJOR=(\d+)$", source, re.MULTILINE)
-    assert match, "install.sh no longer declares MIN_NODE_MAJOR"
-    assert int(match.group(1)) == MIN_NODE[0], (
-        f"install.sh installs Node {match.group(1)}+ while "
-        f"core/snapshot.py's MIN_NODE is {MIN_NODE[0]} — the installer would "
-        "leave a Node that `doctor` then calls too old"
-    )
+def test_every_optional_extra_has_its_three_functions(source: str) -> None:
+    """``OPTIONAL_EXTRAS`` names functions rather than holding them: the plan, the prompt
+    and the install call ``extra_<name>_line``, ``extra_<name>_current`` and
+    ``install_<name>`` by a name built at run time, with its dashes as underscores
+    (``extra_call``). An extra added to the list without one fails only on the machine of
+    whoever picks it, so each is asserted here."""
+    match = re.search(r'^OPTIONAL_EXTRAS="([^"]*)"$', source, re.MULTILINE)
+    assert match, "install.sh no longer declares OPTIONAL_EXTRAS"
+    extras = match.group(1).split()
+    assert extras == ["chrome-devtools"], extras
+    for name in extras:
+        fn = name.replace("-", "_")
+        for function in (f"extra_{fn}_line", f"extra_{fn}_current", f"install_{fn}"):
+            assert re.search(rf"^{function}\(\) ", source, re.MULTILINE), function
 
 
 def test_the_tmux_floor_matches_the_pythons(source: str) -> None:

@@ -27,6 +27,7 @@ from aisquare.core.config import (
     _V1_DEFAULTS,
     CONFIG_VERSION,
     FLEET_DENY_TOOLS,
+    RETIRED_SECTIONS,
     AccountsSettings,
     AppConfig,
     FleetRoleSettings,
@@ -109,13 +110,13 @@ def test_a_save_writes_only_the_keys_that_differ_from_the_system_defaults(
     config = AppConfig()
     config.fleet.roles["coder"].permission_mode = "acceptEdits"
     config.accounts.pick = "default"
-    config.snapshot.ignore = ["**/fixtures/**"]
+    config.explainability.roles = ["coder"]
     save_config(config, target)
     assert _file(target) == {
         "config_version": CONFIG_VERSION,
         "fleet": {"roles": _roles(coder={"permission_mode": "acceptEdits"})},
         "accounts": {"pick": "default"},
-        "snapshot": {"ignore": ["**/fixtures/**"]},
+        "explainability": {"roles": ["coder"]},
     }
     assert load_config(target) == config
 
@@ -244,7 +245,8 @@ def test_config_list_overrides_with_none_still_prints_toml(runner: CliRunner) ->
 
 def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> None:
     """The snapshot is version 1's defaults, frozen. When a default changes later, or a
-    setting is added, it changes here — never in ``_V1_DEFAULTS``, which is what 0.8.0 wrote."""
+    setting is added, it changes here — never in ``_V1_DEFAULTS``, which is what 0.8.0 wrote.
+    A section removed since is one of ``RETIRED_SECTIONS``: 0.8.0 wrote ``[snapshot]``."""
     changed = {
         "accounts": {
             "pick": "headroom",
@@ -308,7 +310,11 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
         },
         "team": {"brief_blocks": ["objective", "acceptance", "boundaries"], "brief_strict": False},
     }
-    assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
+    then = _overlay(_V1_DEFAULTS, changed)
+    assert set(RETIRED_SECTIONS) <= set(then)
+    assert {key: value for key, value in then.items() if key not in RETIRED_SECTIONS} == (
+        system_defaults()
+    )
 
 
 def test_a_v1_file_keeps_only_what_differs_from_v1s_defaults(tmp_path: Path) -> None:

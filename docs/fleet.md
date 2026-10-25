@@ -1552,7 +1552,7 @@ and `Esc` clears the marks. Pinned projects and groups sit in a **📌 Pinned**
 section at the top, in pin order; a group header carries the roll-up of its
 members' agents, so a folded group still tells you something is running. A
 group shares **nothing**:
-context, prompts, snapshots, boards and explainability settings stay per
+context, prompts, boards and explainability settings stay per
 project, and deleting a group never deletes a project. Forgetting a project
 takes it out of its group and off the pin: added again, it comes back loose, at
 the end. The same layer from a shell, with the same store state:
@@ -1624,7 +1624,7 @@ remote; the slug is the task title lowercased, runs of anything but `[a-z0-9]`
 collapsed to `-`, clipped to 32 characters. A spawn without a task uses
 `fleet/<codename>/<label>`. Its worktree lives at
 `<repo>/.aisquare-worktrees/<label>`, excluded through `.git/info/exclude`, and
-shares the principal repo's board, context and snapshot for free — that is the
+shares the principal repo's board and context for free — that is the
 worktree resolution the memory layer already had. **A non-git project cannot
 have worktrees:** `fleet spawn coder --worktree` there refuses with
 "not a git repository — spawn without --worktree or pick a repo inside it",
@@ -2178,6 +2178,11 @@ follows it:
 - `capture.enabled = false` now stops prompt capture: `aisquare log` stays empty and
   nothing is spooled ([reference](reference.md#configuration-keys)).
 - `aisquare doctor` gains a `fleet-delivery` row.
+- The codebase snapshot is gone, and `aisquare doctor` loses its `repomix`, `snapshot`
+  and `tiktoken` rows. The first command that opens the store deletes the old packs
+  under `~/.aisquare/projects/<id>/snapshot/`, once, and nothing else. A `[snapshot]` section
+  in `config.toml` is no longer read: doctor's config row says so, and the next save
+  drops it.
 - **On a shared machine**, a first message on the command line can be read by other
   local users in `ps` while the agent runs. `aisquare config set fleet.first_prompt
   type` keeps it off the command line.
@@ -2185,7 +2190,8 @@ follows it:
 **Moving back** to 0.8.2 or earlier with `aisquare upgrade --version <v>` is safe. An
 older build opens a v36 store as it is, without migrating it down, and never reads the
 three columns. It ignores the new config keys and types first messages as it always
-did.
+did. It packs a project again on `project onboard` and `init` where its Node can,
+with its default `[snapshot]` settings once a save here has dropped yours.
 
 ### To 0.9.0, part 2: the token diet (store schema 37, config version 3)
 

@@ -1,5 +1,8 @@
 # Fleet TUI — one `asq` view over every project, agent and session
 
+> **Since then (#399):** the codebase snapshot and its packer are gone from the CLI,
+> with doctor's rows for them, so every mention of them below is history.
+>
 > **Status: implemented on this branch** (PR #71; the Decisions log at the bottom
 > records what landed and every deviation). This is a living document: update it
 > in the same PR as the code it describes, and keep the *Decisions log* at the

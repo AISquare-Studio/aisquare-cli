@@ -298,7 +298,7 @@ def test_the_hub_is_titled_settings_and_says_what_each_link_opens() -> None:
 # --- what the doctor found (review of #261, m9) ----------------------------------------
 
 FAILING = DoctorCheck(name="tmux", status=CheckStatus.fail, detail="not installed")
-WARNING = DoctorCheck(name="snapshot", status=CheckStatus.warn, detail="packed 9 days ago")
+WARNING = DoctorCheck(name="brain", status=CheckStatus.warn, detail="distilled 9 days ago")
 PASSING = DoctorCheck(name="store", status=CheckStatus.ok, detail="v30")
 NOT_THE_DOCTOR = "no-such-group"
 """A worker group nothing runs in: ``settle_page`` then waits for the messages alone, and not
@@ -395,11 +395,11 @@ def test_doctor_shows_the_report_from_start_while_it_runs_the_checks_again() -> 
     during, runs, after, row = _drive(go, doctor=doctor)
     header, report, status = during
     assert header == "checks for this machine"
-    assert "⚠ snapshot: packed 9 days ago" in report, "the report from start, at once"
+    assert "⚠ brain: distilled 9 days ago" in report, "the report from start, at once"
     assert status == "… running the checks again"
     assert runs == 2, "start, then the page's own run (still held)"
     header, report, status = after
-    assert "✓ store: v30" in report and "snapshot" not in report
+    assert "✓ store: v30" in report and "distilled" not in report
     assert status == "", "answered: the status line is clear again"
     assert row == "⚙︎ Settings", "the badge follows the newest report"
 

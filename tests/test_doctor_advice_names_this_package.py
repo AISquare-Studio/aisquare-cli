@@ -42,7 +42,6 @@ from pathlib import Path
 import pytest
 
 from aisquare.core import agents as agent_core
-from aisquare.core import snapshot as snapshot_core
 from aisquare.core.version import DISTRIBUTION
 from aisquare.models import CheckStatus, DoctorCheck
 from aisquare.services import diagnostics, install_route
@@ -97,7 +96,7 @@ def test_the_extractor_sees_the_shapes_this_project_prints() -> None:
     assert _install_commands("pip install --force-reinstall aisquare") == [
         ("pip install", "aisquare")
     ]
-    assert _install_commands("npm install -g repomix") == []
+    assert _install_commands("npm install -g chrome-devtools-mcp") == []
 
 
 def test_the_sdk_matcher_tells_the_two_distributions_apart() -> None:
@@ -146,11 +145,11 @@ def test_the_offender_detector_finds_the_bug_that_shipped() -> None:
 def _force_the_rows_that_carry_install_advice(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the sweep deterministic instead of a reading of this machine.
 
-    ONLY FOUR ROWS in ``doctor()`` can emit an install command: ``install``'s
-    two warn branches, ``tiktoken``'s, and the SDK's not-present branch. Every
-    one of them is SILENT on a well-provisioned machine — aisquare on PATH
-    outside a venv (exactly what ``_GLOBAL_INSTALL`` recommends), tiktoken
-    importable, the SDK installed. So a sweep that simply ran ``doctor()`` was
+    ONLY THREE ROWS in ``doctor()`` can emit an install command: ``install``'s
+    two warn branches and the SDK's not-present branch (a fourth, ``tiktoken``'s,
+    went with the codebase snapshot). Every one of them is SILENT on a
+    well-provisioned machine — aisquare on PATH outside a venv (exactly what
+    ``_GLOBAL_INSTALL`` recommends), the SDK installed. So a sweep that simply ran ``doctor()`` was
     strongest on a broken laptop and vacuous on a correct one: it judged nothing
     and passed, and the control below would have gone red on a *healthy* machine
     rather than a wrong one. Both are wrong for the same reason, so both use
@@ -159,7 +158,6 @@ def _force_the_rows_that_carry_install_advice(monkeypatch: pytest.MonkeyPatch) -
     Everything else in ``doctor()`` advertises ``apt``/``dnf``/``brew``,
     ``npm install -g`` or ``aisquare …``, which the extractor does not match.
     """
-    monkeypatch.setattr(diagnostics, "_has_module", lambda _name: False)
     monkeypatch.setattr("aisquare.services.diagnostics.shutil.which", lambda _name: None)
 
 
@@ -414,20 +412,6 @@ def test_install_row_never_fails_on_a_route_it_cannot_read(
     _venv_first_on_path(monkeypatch, None)
     row = diagnostics._check_install()
     assert row.status is CheckStatus.warn, row
-
-
-def test_tiktoken_hint_names_the_pipx_environment_that_actually_exists(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`pipx inject` takes an ENVIRONMENT name, and ours is the distribution."""
-    monkeypatch.setattr(diagnostics, "_has_module", lambda _name: False)
-    # The hint is printed only where snapshots can run; without a Node the row is
-    # off and has none (tests/test_snapshot_optional_without_node.py).
-    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
-    check = diagnostics._check_tiktoken()
-    assert check.status is CheckStatus.warn
-    assert f"pipx inject {DISTRIBUTION} tiktoken" in (check.fix or "")
-    assert f"uv tool install --with tiktoken {DISTRIBUTION}" in (check.fix or "")
 
 
 def test_a_check_with_no_fix_is_not_a_crash() -> None:

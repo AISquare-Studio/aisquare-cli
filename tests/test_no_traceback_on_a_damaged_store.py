@@ -91,8 +91,6 @@ UNINVOKED = {
         "test; its read-only `--check` is invoked by test_the_upgrade_check_is_held_to_it"
     ),
     "sync": "reaches the network",
-    "project onboard": "packs a codebase snapshot; minutes, not seconds",
-    "workspace onboard": "packs a codebase snapshot; minutes, not seconds",
     "team distill": "calls a model",
     "accounts add": "starts a real Claude Code session and waits for a browser sign-in",
     "accounts run": "replaces the process with Claude Code (os.execve)",

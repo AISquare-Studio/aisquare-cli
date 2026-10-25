@@ -56,18 +56,17 @@ prompt either, and says so on stderr.
 
 The **active project** is whichever repo contains your working directory, or
 the one you pin with `aisquare project switch <name>`. Everything —
-context, snapshots, prompt history, team state — scopes to it consistently.
+context, prompt history, team state — scopes to it consistently.
 
 **Git worktrees resolve to their principal repository**, so several feature
-branches checked out side by side all share one context pool, one snapshot and
-one board. Set a repo's conventions up once and every worktree of it starts
+branches checked out side by side all share one context pool and one board. Set a repo's conventions up once and every worktree of it starts
 oriented; identity comes from `git rev-parse --git-common-dir`, not from
 walking up to the nearest marker.
 
 Registrations accumulate — every directory a command once ran in is one, and
 the fleet UI loads state for all of them. `aisquare project forget` drops one
 (its context, prompt history and board rows stay in the store, hidden, until
-the root is registered again; `--purge` deletes them and the snapshot too), and
+the root is registered again; `--purge` deletes them and its brain too), and
 `aisquare project prune` sweeps the stale ones: roots that no longer exist, and
 worktrees of a repository that is itself registered. It shows the plan and asks
 before dropping anything; off a terminal it is a dry run unless `--yes`. Both
@@ -83,32 +82,10 @@ aisquare project forget ../old-checkout       # one registration; --purge delete
 aisquare project prune --missing --worktrees  # the stale ones, after a confirmation (or --yes)
 ```
 
-`aisquare project onboard` packs the codebase on demand with Repomix (`init`
-no longer does, and no agent is pointed at the pack) into three artifacts
-under `~/.aisquare/projects/<id>/snapshot/`: a **full pack** (every file), a
-**skeleton** (structure + signatures), and a **per-file index** (char offsets +
-token counts, for opening one file's slice of the pack instead of all of it). Re-run with `--refresh` after big changes.
-
-A pack has to fit a **token budget**: `[snapshot] max_tokens` in
-`~/.aisquare/config.toml`, 150 000 by default (the cap the server packs with).
-The full pack is tried first, then a compressed one; when even that is over,
-the compressed pack is kept as the **skeleton** with its per-file index and the
-full pack is skipped — `onboard` and `aisquare doctor` both say `snapshot:
-skeleton only: 2030000 tokens, 1234 files indexed; full pack skipped over
-budget 150000 (10990000 tokens)`. The budget gates only the full pack. To keep the full pack too,
-raise the budget or leave more out, then re-pack:
-
-```sh
-aisquare config set snapshot.max_tokens 300000   # raise the budget for a repo you know is big
-aisquare config set snapshot.ignore '**/fixtures/**,docs/generated/**'   # leave generated trees out
-aisquare project onboard --refresh               # re-pack; a plain onboard only reuses the verdict
-```
-
-`[snapshot] ignore` takes Repomix glob patterns (comma-separated on the command
-line) and **extends** the built-in list rather than replacing it:
-`node_modules`, `.venv`/`venv`, `.git`, `__pycache__`, `dist`, `build`,
-`coverage`, `.aisquare-worktrees`, `*.worktrees`, and any nested git repository
-or worktree found below the root — another project's checkout is never packed
-into this one. The repo's own `.gitignore` and a `.repomixignore` at the repo
-root apply on top, read by Repomix itself. A smaller pack is also a cheaper one
-for every agent that reads it.
+`aisquare project onboard` adds a folder as a project on purpose and seeds its
+context pool with one fact per marker it finds at the root (`pyproject.toml`,
+`package.json`, `Cargo.toml`, a `Makefile`, a `Dockerfile` and a few more). A
+second run seeds nothing; `--refresh` reads the markers again and adds only the
+facts that are new. It runs no packer: up to 0.8.2, `onboard` also packed a
+codebase snapshot, and the first command of 0.9.0 or later that opens the
+store deletes the old packs under `~/.aisquare/projects/<id>/snapshot/`.

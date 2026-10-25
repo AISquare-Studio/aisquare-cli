@@ -24,6 +24,7 @@ import json
 import os
 import random
 import re
+import shutil
 import sqlite3
 import sys
 import time
@@ -546,10 +547,10 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
     store another line stamped past 17 without ever running it.
     "On purpose" is read off what the row already carries: context entries, a
     codename (it entered the fleet), linked repos, board activity, a fleet
-    agent — and a codebase snapshot on disk, which ``project onboard`` and
-    ``init`` write. Everything else — the 23 of 27 registrations on the
-    reporting machine that held nothing but captured prompts — stays hidden,
-    reachable through ``project list --all``.
+    agent — and a codebase snapshot on disk, which ``project onboard`` and ``init``
+    wrote up to 0.8.2 (:func:`_snapshot_on_disk`). Everything else — the
+    23 of 27 registrations on the reporting machine that held nothing but
+    captured prompts — stays hidden, reachable through ``project list --all``.
 
     A FORGOTTEN row is never adopted, whatever it carries: ``forget`` clears
     ``onboarded_at`` so that the next prompt there revives the row captured,
@@ -570,9 +571,15 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
         ")"
     )
     rows = connection.execute(
-        "SELECT id FROM project WHERE onboarded_at IS NULL AND forgotten_at IS NULL"
+        "SELECT id, root FROM project WHERE onboarded_at IS NULL AND forgotten_at IS NULL"
     ).fetchall()
-    with_snapshot = [row[0] for row in rows if _snapshot_on_disk(str(row[0]))]
+    # Never the aisquare home's own row: builds before D5 packed the home too, and that
+    # pack is no sign the owner added it (main's snapshot.exists() said the same). The
+    # stat first: only a row with a pack has its root resolved, so roots on dead mounts
+    # cost nothing.
+    with_snapshot = [
+        row[0] for row in rows if _snapshot_on_disk(str(row[0])) and not is_the_home(Path(row[1]))
+    ]
     for project_id in with_snapshot:
         connection.execute(
             "UPDATE project SET onboarded_at = created_at WHERE id = ? AND onboarded_at IS NULL",
@@ -581,7 +588,14 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
 
 
 def _snapshot_on_disk(project_id: str) -> bool:
-    """Whether the project's snapshot is on disk; one that cannot be looked at is no evidence.
+    """Whether the project's old pack is on disk; one that cannot be looked at is no evidence.
+
+    Builds up to 0.8.2 packed a project on ``project onboard`` and on ``init``, and
+    wrote ``projects/<id>/snapshot/snapshot.json`` beside the pack. The packer is gone,
+    but a store from 0.6 or older still reaches this backfill, and for a project the
+    owner added and never used, that file is its only mark. So the check is a plain
+    path, with no packer to import, and :func:`_remove_old_packs` deletes the packs
+    only after :func:`_migrate` has run this.
 
     ``Path.exists`` answers ``False`` for a path that is not there and RAISES for a
     snapshot directory this user cannot search (``PermissionError``). Raised out of
@@ -591,12 +605,56 @@ def _snapshot_on_disk(project_id: str) -> bool:
     stays captured, as one without a snapshot does, and a later ``project
     onboard`` adds it.
     """
-    from aisquare.core import snapshot as snapshot_core  # lazy: keeps store import-light
-
     try:
-        return snapshot_core.exists(project_id)
+        return (paths.project_data_dir(project_id) / "snapshot" / "snapshot.json").exists()
     except OSError:
         return False
+
+
+#: Written in ``cache/`` once :func:`_remove_old_packs` has run, so each later open
+#: costs one stat. Disposable: run again, it finds nothing to delete.
+_OLD_PACKS_REMOVED = "old-packs-removed"
+
+
+def _remove_old_packs() -> None:
+    """Delete the codebase packs builds up to 0.8.2 left in ``projects/<id>/snapshot/``, once.
+
+    Called by :func:`open_store` after :func:`_migrate`, and never before it: the v17
+    backfill reads a pack's ``snapshot.json`` as evidence (:func:`_snapshot_on_disk`),
+    and a pack deleted before an old store migrates takes that evidence with it.
+
+    Only a directory named ``snapshot``, directly in a project's data directory, and
+    only while it resolves to one inside ``projects/``: a symlink is never followed out
+    of the home, and ``brain/`` beside it is never touched. Best effort: what cannot be
+    deleted stays, and the open goes on. ``RuntimeError`` too: on Python 3.11 and 3.12
+    ``Path.resolve()`` raises it for a symlink loop, and a ``projects/`` that points at
+    itself made every command a traceback (review of #399).
+
+    Done is recorded only once ``projects/`` was listed, or is not there at all. On
+    3.13 that loop resolves without raising and ``is_dir()`` swallows the ELOOP, so
+    asking ``is_dir()`` first marked a ``projects/`` it never read as done for good.
+    """
+    marker = paths.cache_dir() / _OLD_PACKS_REMOVED
+    try:
+        if marker.exists():
+            return
+        inside = (paths.aisquare_home() / "projects").resolve()
+        try:
+            projects = list(inside.iterdir())
+        except FileNotFoundError:
+            projects = []
+        for project in projects:
+            pack = project / "snapshot"
+            with contextlib.suppress(OSError, RuntimeError):
+                if (
+                    pack.is_dir()
+                    and not pack.is_symlink()
+                    and pack.resolve().parent.parent == inside
+                ):
+                    shutil.rmtree(pack, ignore_errors=True)
+        marker.touch()
+    except (OSError, RuntimeError):
+        pass
 
 
 def _bind_keys_to_their_destinations(connection: sqlite3.Connection) -> None:
@@ -5651,6 +5709,7 @@ def open_store() -> ContextStore:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA foreign_keys = ON")
             names = _migrate(connection)
+            _remove_old_packs()
             return SqliteStore(connection, names=names)
         except sqlite3.OperationalError as exc:
             if is_locked_error(exc):

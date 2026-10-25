@@ -565,8 +565,8 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
     _record_turn("trc_alpha", alpha)
     _record_turn("trc_beta", beta)
     data_dir = paths.project_data_dir(alpha)
-    (data_dir / "snapshot").mkdir(parents=True)
-    (data_dir / "snapshot" / "pack.xml").write_text("<pack/>", encoding="utf-8")
+    (data_dir / "brain").mkdir(parents=True)
+    (data_dir / "brain" / "page.md").write_text("a page", encoding="utf-8")
 
     result = runner.invoke(app, ["--json", "project", "forget", "alpha", "--purge"])
 
@@ -1517,7 +1517,7 @@ def test_forget_purge_completes_and_reports_a_pin_it_could_not_move(
     alpha = _register(runner, monkeypatch, work_dir / "alpha")
     beta = _register(runner, monkeypatch, work_dir / "beta")  # cwd is beta: active, unpinned
     data_dir = paths.project_data_dir(beta)
-    (data_dir / "snapshot").mkdir(parents=True)
+    (data_dir / "brain").mkdir(parents=True)
     body = _corrupt_state()
 
     result = runner.invoke(app, ["--json", "project", "forget", "beta", "--purge"])
@@ -1558,7 +1558,7 @@ def test_forget_purge_of_the_last_project_reports_a_state_file_it_can_no_longer_
     the data directory was never removed. The refusal names the file, as a write's does."""
     alpha = _register(runner, monkeypatch, work_dir / "alpha")  # the cwd's: active, unpinned
     data_dir = paths.project_data_dir(alpha)
-    (data_dir / "snapshot").mkdir(parents=True)
+    (data_dir / "brain").mkdir(parents=True)
     real_purge = SqliteStore.purge_project
     unreadable = False
 

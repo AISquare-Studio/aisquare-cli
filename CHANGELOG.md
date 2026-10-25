@@ -51,6 +51,28 @@ machine default, and every release now carries its own installer.**
   `AISQUARE_HOME/reports` for 14 days, newest 64; a `--project` report stays the
   full 14 days, and when the list of evidence-backed reports cannot be read,
   nothing is pruned.
+- **Work briefs** (`docs/work-briefs.md`): a request as numbered requirements
+  linked to the board's own tasks. `aisquare brief create | show | list | update |
+  link | evidence | finding`, every write with `--as`. Requirement ids (`R1`, `R2`,
+  …) are stable for the brief's life; one task can cover several requirements and
+  one requirement can need several tasks, each proving its own part. `brief
+  evidence --artifact` records a check as **manual** evidence, labelled so in
+  `show`, the board event and `--json`. The artifact is copied, owner-only, under
+  `~/.aisquare/briefs/` (16 MiB at most) and the check stands on the copy: the
+  original's path is provenance only, so deleting it (a temp dir, a reaped
+  worktree) leaves the check as it was. A changed or missing copy makes a pass
+  stale; a failure stays a failure. `brief finding` sends a task in review or
+  done back to todo, keeps an in-progress task's owner, leaves a dropped task
+  dropped, and blocks a task at its third distinct failure on one revision of a
+  requirement. A correction keeps every id: a changed requirement or check makes
+  its evidence stale, a changed assumption or boundary makes all of it stale, and
+  linked tasks in review or done go back to todo, with the old text and checks
+  kept. An identical update changes nothing, a dropped or vanished duplicate task
+  is ignored while a live linked task remains, and a session's own writes do not
+  wake it. Store v36 adds the `brief` table (not #136's `work_brief`, which a store
+  that ran a #136 build keeps, unread); `project forget --purge` deletes its rows.
+  The gate on `task done`, `brief check` and report-backed evidence are the next
+  part (#275).
 - **Exact token usage per session** — `aisquare metrics tokens [--session S]
   [--project P | --all]` (`--json` too). The Stop, StopFailure and SessionEnd hooks
   read only the bytes the session's transcript gained since the last record, plus its

@@ -153,6 +153,9 @@ DOCUMENTED = (
     "docs/ci-live-wiring-handoff.md",
     # Phone control: serve, allow-write, needs, revoke, regenerate-password.
     "docs/remote.md",
+    # Work briefs: create, link, evidence, finding and update, each a step the reader
+    # types (docs/plans/evidence-gate.md, part 2).
+    "docs/work-briefs.md",
 )
 
 #: Directories the staleness sweep never enters. Everything else under the repo
@@ -998,6 +1001,10 @@ CENSUS = {
     # Re-measured 2026-10-23 at (9, 1) when #34 made Remote's dependencies core: the
     # Install section has no install line left to classify.
     "docs/remote.md": (9, 1),
+    # Measured 2026-10-23, the day it was written: eight fenced `aisquare brief …`
+    # commands (create, two links, evidence, finding, three updates), no classified
+    # mentions. Re-measure when it grows.
+    "docs/work-briefs.md": (8, 0),
 }
 
 

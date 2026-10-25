@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import EllipsisType
-from typing import Any, NamedTuple, Protocol
+from typing import Any, Literal, NamedTuple, Protocol
 
 from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
@@ -1080,6 +1080,33 @@ CREATE TABLE IF NOT EXISTS usage_turn (
 );
 CREATE INDEX IF NOT EXISTS usage_turn_session ON usage_turn (session_id, seq);
 """
+# v36 (docs/plans/evidence-gate.md, part 2): work briefs. One row per brief, its
+# requirements, links, evidence and corrections as one JSON document, so every write
+# compares ``revision`` and replaces the document whole (:meth:`SqliteStore.save_brief`).
+# Named ``brief``, not ``work_brief``: #136's builds stamped their own v15 for a
+# ``work_brief (id, project_id, revision, data)`` table, and ``IF NOT EXISTS`` would
+# keep that table on such a store, without this one's ``number`` or timestamps. Its
+# rows are left where they are, unread. The script creates the table and its index,
+# both in :data:`_PRODUCTS`.
+#
+# The stack of #300, #306 and #341 stamped this step v34 on its own branches, beside
+# #38's v34 and #346's v35 here. A store that ran those branches reads v34 with
+# ``brief`` and no ``fleet_agent.ended_by``: the presence pass
+# (:func:`_converge_by_presence`) adds the column before v35, which creates the usage
+# tables, and this step then finds ``brief`` and its index in place. Every statement
+# is ``IF NOT EXISTS`` either way.
+_SCHEMA_V36 = """
+CREATE TABLE IF NOT EXISTS brief (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    revision INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS brief_number ON brief (project_id, number);
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1117,6 +1144,7 @@ _MIGRATIONS = (
     _SCHEMA_V33,
     _SCHEMA_V34,
     _SCHEMA_V35,
+    _SCHEMA_V36,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1176,6 +1204,7 @@ _PRODUCTS: dict[int, _Products] = {
     ),
     33: _Products(columns=(("fleet_agent", "ended_by", "TEXT"),)),
     34: _Products(("usage_session", "usage_session_project", "usage_turn", "usage_turn_session")),
+    35: _Products(("brief", "brief_number")),
 }
 
 _PROJECT_COLUMNS = (
@@ -1433,6 +1462,23 @@ class ContextStore(Protocol):
         self, writes: Sequence[tuple[TeamEvent, str, dict[str, Any]]]
     ) -> list[TeamEvent]: ...
     def add_team_event(self, event: TeamEvent) -> TeamEvent: ...
+    def add_brief(
+        self, brief_id: str, project_id: str, data: str, created_at: datetime, event: TeamEvent
+    ) -> tuple[int, TeamEvent]: ...
+    def get_brief(self, project_id: str, ref: str) -> BriefRow | None: ...
+    def briefs(self, project_id: str) -> list[BriefRow]: ...
+    def save_brief(
+        self,
+        brief_id: str,
+        project_id: str,
+        *,
+        expected: int,
+        revision: int,
+        data: str,
+        updated_at: datetime,
+        event: TeamEvent,
+        transitions: Sequence[TaskTransition] = (),
+    ) -> list[TeamEvent]: ...
     def get_event(self, event_id: str) -> TeamEvent | None: ...
     def get_event_by_seq(self, seq: int) -> TeamEvent | None: ...
     def find_event_by_id(self, ref: str) -> TeamEvent | None: ...
@@ -1869,6 +1915,39 @@ def _row_to_task(row: sqlite3.Row) -> TeamTask:
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
     )
+
+
+class BriefRow(NamedTuple):
+    """One stored brief: its document, and what the store keeps beside it."""
+
+    id: str
+    number: int
+    revision: int
+    data: str
+
+
+TaskTransition = tuple[str, Literal["reopen", "block"], str]
+"""A board task a brief write moves: ``(task id, what, the task event's text)``
+(:meth:`SqliteStore.save_brief`)."""
+
+_BRIEF_COLUMNS = "id, number, revision, data"
+_BRIEF_NUMBER_REF = re.compile(r"^[#Bb]?([0-9]{1,6})$")
+"""A brief ref that is its board number: ``3``, ``#3`` or ``B3``."""
+
+
+class BriefChangedError(RuntimeError):
+    """A brief write lost to another: the revision it read is not the stored one."""
+
+    def __init__(self, brief_id: str) -> None:
+        super().__init__(f"brief {brief_id} changed while this write was being made; retry it")
+        self.brief_id = brief_id
+
+
+def _row_to_brief(row: sqlite3.Row) -> BriefRow:
+    return BriefRow(
+        id=str(row["id"]), number=int(row["number"]), revision=int(row["revision"]),
+        data=str(row["data"]),
+    )  # fmt: skip
 
 
 def _row_to_event(row: sqlite3.Row) -> TeamEvent:
@@ -2330,7 +2409,7 @@ class SqliteStore:
         foreign_keys = ON``; the counts say what each table gave up. Every table
         whose foreign key references ``project`` is found in the schema
         (:meth:`_tables_referencing_project`), so a table a later migration adds
-        is purged without being listed here. The team tables, ``fleet_agent``,
+        is purged without being listed here. The team tables, ``brief``, ``fleet_agent``,
         ``metric`` and the token-usage tables carry no FK, so the schema cannot
         name them: they are
         listed, and deleted by ``project_id`` the way every read of them is
@@ -2373,6 +2452,7 @@ class SqliteStore:
                 "metric",
                 "usage_turn",
                 "usage_session",
+                "brief",
             ):
                 if table in removed:
                     continue  # it has gained the FK, and went above
@@ -3452,6 +3532,154 @@ class SqliteStore:
                 )
                 written.append(event.model_copy(update={"seq": cursor.lastrowid}))
         return written
+
+    def _insert_event(self, event: TeamEvent) -> TeamEvent:
+        """One ``team_event`` row in the caller's transaction, returned with its ``seq``."""
+        cursor = self._conn.execute(
+            "INSERT INTO team_event (id, project_id, session_id, kind, text, "
+            "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event.id,
+                event.project_id,
+                event.session_id,
+                event.kind,
+                event.text,
+                event.task_id,
+                event.to_role,
+                event.created_at.isoformat(),
+            ),
+        )
+        return event.model_copy(update={"seq": cursor.lastrowid})
+
+    def add_brief(
+        self, brief_id: str, project_id: str, data: str, created_at: datetime, event: TeamEvent
+    ) -> tuple[int, TeamEvent]:
+        """Insert a new brief at revision 1 with its board event, in one transaction; its
+        number on the board and the stored event, whose text is prefixed with the brief's
+        label (``B3 r1: ``), known only once the number is.
+
+        The number is the board's highest plus one, read in the INSERT itself, as
+        :meth:`upsert_task` numbers tasks, so two creates cannot share one.
+        """
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO brief (id, project_id, number, revision, data, created_at, "
+                "updated_at) SELECT ?, ?, COALESCE(MAX(number), 0) + 1, 1, ?, ?, ? "
+                "FROM brief WHERE project_id = ?",
+                (brief_id, project_id, data, created_at.isoformat(), created_at.isoformat(),
+                 project_id),
+            )  # fmt: skip
+            row = self._conn.execute("SELECT number FROM brief WHERE id = ?", (brief_id,))
+            number = int(row.fetchone()[0])
+            stored = self._insert_event(
+                event.model_copy(update={"text": f"B{number} r1: {event.text}"})
+            )
+        return number, stored
+
+    def get_brief(self, project_id: str, ref: str) -> BriefRow | None:
+        """The brief ``ref`` names on ``project_id``'s board: its number (``3``, ``#3``,
+        ``B3``), else its id, an id prefix or an id tail. Never another board's."""
+        number = _BRIEF_NUMBER_REF.match(ref.strip())
+        if number is not None:
+            row = self._conn.execute(
+                f"SELECT {_BRIEF_COLUMNS} FROM brief WHERE project_id = ? AND number = ?",
+                (project_id, int(number.group(1))),
+            ).fetchone()
+            return _row_to_brief(row) if row is not None else None
+        row = self._conn.execute(
+            f"SELECT {_BRIEF_COLUMNS} FROM brief WHERE project_id = ? AND id = ?",
+            (project_id, ref),
+        ).fetchone()
+        if row is not None:
+            return _row_to_brief(row)
+        stripped = _ref_stripped(ref)
+        if not stripped:
+            return None
+        for pattern in (f"{stripped}*", f"*{stripped}"):
+            matches = self._conn.execute(
+                f"SELECT {_BRIEF_COLUMNS} FROM brief WHERE project_id = ? AND id GLOB ? LIMIT 2",
+                (project_id, pattern),
+            ).fetchall()
+            if len(matches) > 1:
+                raise AmbiguousIdError(ref)
+            if matches:
+                return _row_to_brief(matches[0])
+        return None
+
+    def briefs(self, project_id: str) -> list[BriefRow]:
+        """Every brief on ``project_id``'s board, by number."""
+        rows = self._conn.execute(
+            f"SELECT {_BRIEF_COLUMNS} FROM brief WHERE project_id = ? ORDER BY number",
+            (project_id,),
+        ).fetchall()
+        return [_row_to_brief(row) for row in rows]
+
+    def save_brief(
+        self,
+        brief_id: str,
+        project_id: str,
+        *,
+        expected: int,
+        revision: int,
+        data: str,
+        updated_at: datetime,
+        event: TeamEvent,
+        transitions: Sequence[TaskTransition] = (),
+    ) -> list[TeamEvent]:
+        """Replace a brief's document, move the tasks it sends back, and write the events,
+        in one transaction; the stored events, the brief's first.
+
+        Compare-and-swap on ``revision``: a writer that read ``expected`` and finds
+        another revision raises :class:`BriefChangedError` and changes nothing, so two
+        writers never overwrite each other's evidence. Each transition is guarded by
+        the task's status in its own UPDATE: ``reopen`` takes a task in review or done
+        back to todo and unowned; ``block`` blocks a task that is neither dropped nor
+        blocked, and keeps its owner, the one who has to see why. A task whose status
+        moved on since the caller read it is left as it is, and gets no event. Each
+        moved task's event carries ``event``'s session, so the session whose write
+        moved it is not woken by it.
+        """
+        stored: list[TeamEvent] = []
+        with self._conn:
+            changed = self._conn.execute(
+                "UPDATE brief SET revision = ?, data = ?, updated_at = ? "
+                "WHERE id = ? AND project_id = ? AND revision = ?",
+                (revision, data, updated_at.isoformat(), brief_id, project_id, expected),
+            ).rowcount
+            if changed != 1:
+                raise BriefChangedError(brief_id)
+            stored.append(self._insert_event(event))
+            for task_id, action, text in transitions:
+                if action == "reopen":
+                    moved = self._conn.execute(
+                        "UPDATE team_task SET status = 'todo', claimed_by = NULL, "
+                        "claim_expires_at = NULL, updated_at = ? "
+                        "WHERE id = ? AND project_id = ? AND status IN ('review', 'done')",
+                        (_now_iso(), task_id, project_id),
+                    ).rowcount
+                    kind = "task_reopened"
+                else:
+                    moved = self._conn.execute(
+                        "UPDATE team_task SET status = 'blocked', updated_at = ? "
+                        "WHERE id = ? AND project_id = ? AND status NOT IN ('dropped', 'blocked')",
+                        (_now_iso(), task_id, project_id),
+                    ).rowcount
+                    kind = "task_blocked"
+                if moved == 1:
+                    stored.append(
+                        self._insert_event(
+                            event.model_copy(
+                                update={
+                                    "id": f"{event.id}-{task_id}",
+                                    "kind": kind,
+                                    "text": text,
+                                    "task_id": task_id,
+                                    "to_role": None,
+                                }
+                            )
+                        )
+                    )
+        return stored
 
     def add_team_event(self, event: TeamEvent) -> TeamEvent:
         cursor = self._conn.execute(

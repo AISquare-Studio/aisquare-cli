@@ -133,6 +133,10 @@ IMPLEMENTED: set[tuple[str, ...]] = {
         )
     ),
     *(
+        ("brief", command)
+        for command in ("create", "list", "show", "update", "link", "evidence", "finding")
+    ),
+    *(
         (group, command)
         for group in ("context", "ctx")
         for command in (

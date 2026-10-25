@@ -119,17 +119,20 @@ def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> t
         return usage.reason or "unavailable", ""
     session = _window_cell(usage.session_percent, usage.session_resets_at, now=now)
     week = _window_cell(usage.week_percent, usage.week_resets_at, now=now)
-    # The per-family weeks (#277), each with its own reset: they bind that family alone. A
-    # kept reading has none: the record holds no family week, a spent one is a limit mark.
+    # The per-family weeks (#277), each with its own reset: they bind that family alone.
     # One whose reset has passed says so, as a reset session or week does: its figure is
-    # for a window that is over, never 'resets now' (tester's pass on #401, (b)).
+    # for a window that is over, never 'resets now' (tester's pass on #401, (b)). A cached
+    # or kept reading has already dropped that figure and kept the reset time
+    # (_with_family_weeks, _without_reset_windows), so a family is read from either map:
+    # looped over the figures alone, it vanished (TUI-401b (b) at e28697f1, REVIEW-401 n6).
     moment = now or accounts_service._now()
-    for family, percent in sorted(usage.family_week_percent.items()):
+    passed = {f for f, when in usage.family_week_resets_at.items() if when <= moment}
+    for family in sorted(set(usage.family_week_percent) | passed):
         resets = usage.family_week_resets_at.get(family)
-        if resets is not None and resets <= moment:
+        if family in passed and resets is not None:
             week += f" · {family} reset {accounts_service.describe_age(resets, now=moment)}"
             continue
-        week += f" · {family} {_percent(percent)}"
+        week += f" · {family} {_percent(usage.family_week_percent[family])}"
         if resets is not None:
             week += f" resets {format_reset(resets, now=moment)}"
     return session, week

@@ -594,6 +594,43 @@ def test_the_fleet_dot_ignores_a_reset_or_old_kept_reading(fake_home: Path) -> N
     assert fresh.usable == 1 and fresh.left_by_slot == {other.slot: 70.0}
 
 
+def test_a_family_week_that_has_reset_shows_live_and_cached(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TUI-401b (b) at e28697f1: a live read printed 'sonnet reset 1h ago', but the same
+    reading from the store cache printed no Sonnet at all. The cache (m2) drops a reset
+    family week's figure and keeps its reset time, and the week cell looped over the
+    figures only. Both paths print it, and the cached --json is as it was."""
+    _slot("work@example.com", "tok-work")
+    payload = _payload(40, week=30)
+    payload["seven_day_opus"] = {
+        "utilization": 60,
+        "resets_at": (NOW + timedelta(days=1)).isoformat(),
+    }
+    payload["seven_day_sonnet"] = {
+        "utilization": 45,
+        "resets_at": (NOW - timedelta(hours=1)).isoformat(),
+    }
+    monkeypatch.setattr(service, "_http_get", _Endpoint({"tok-work": payload}))
+    _at(monkeypatch, NOW)
+    monkeypatch.setenv("COLUMNS", "200")  # one line a row: the week cell unwrapped
+    live = runner.invoke(app, ["accounts", "usage", "--refresh"])
+    monkeypatch.setattr(service, "_http_get", _Endpoint({"tok-work": 503}))  # never asked
+    _new_process()
+    _at(monkeypatch, NOW + timedelta(minutes=1))
+    cached = runner.invoke(app, ["accounts", "usage"])
+    as_json = runner.invoke(app, ["--json", "accounts", "usage"])
+
+    for shown in (live, cached):
+        assert shown.exit_code == 0, shown.stdout
+        assert "sonnet reset 1h ago" in shown.stdout, shown.stdout
+        assert "45%" not in shown.stdout and "resets now" not in shown.stdout
+        assert "opus 60% resets in" in shown.stdout, "a week still running is as before"
+    [row] = [row for row in json.loads(as_json.stdout) if row.get("usage")]
+    assert row["usage"]["family_week_percent"] == {"opus": 60.0}, row["usage"]
+    assert set(row["usage"]["family_week_resets_at"]) == {"opus", "sonnet"}
+
+
 def test_the_cli_shows_a_kept_readings_reset_window_as_reset(
     fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

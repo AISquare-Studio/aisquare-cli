@@ -1556,12 +1556,16 @@ install_chrome_devtools() { install_node; }
 # because `claude mcp get` and `claude mcp list` start every server they show to
 # health-check it: measured with Claude Code 2.1.310, 30 seconds and an
 # `npx chrome-devtools-mcp@latest` download each. Claude Code writes the file
-# with two-space indents, so a user-scope server is a key at four, and a project's
-# local servers, deeper in, do not match. A file laid out some other way reads as
-# absent, and `claude mcp add` then answers that it exists, which
-# register_devtools_mcp reports the same way.
+# with two-space indents, so a user-scope server is a key at four inside the
+# top-level "mcpServers" block, and only that block is read: other top-level maps
+# are keyed by name too (skillUsage counts a skill called chrome-devtools, which
+# the plugin ships), and a project's local servers sit deeper in. `{$` passes over
+# an empty `"mcpServers": {}`. A file laid out some other way reads as absent, and
+# `claude mcp add` then answers that it exists, which register_devtools_mcp
+# reports the same way.
 devtools_mcp_registered() {
-    grep -q "^    \"$DEVTOOLS_MCP_NAME\": " "$(claude_json)" 2>/dev/null && return 0
+    sed -n '/^  "mcpServers": {$/,/^  }/p' "$(claude_json)" 2>/dev/null |
+        grep -q "^    \"$DEVTOOLS_MCP_NAME\": " && return 0
     _dr_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
     grep -q '"chrome-devtools-mcp@[^"]*": *true' "${_dr_dir%/}/settings.json" 2>/dev/null
 }
@@ -1675,9 +1679,12 @@ _reread_node() {
 # it is missing.
 #
 # Called only for a run that chose the extra, so a failure is the extra's: it
-# warns here, and `summary` names the extra as not installed (exit 2).
+# warns here, and `summary` names the extra as not installed (exit 2). A dry run
+# with no package manager tried nothing, so it says what the run would warn and
+# counts no warning.
 _ensure_npx() {
     have npx && return 0
+    _en_why="there is no package manager to install npm with"
     if [ -n "$PKG" ]; then
         debug "node is present but npx is not — installing npm"
         if pkg_install npm; then
@@ -1685,8 +1692,14 @@ _ensure_npx() {
             hash -r 2>/dev/null || true
             have npx && return 0
         fi
+        _en_why="npm did not install"
     fi
-    warn "Node $NODE_VERSION is here but npx is not, and npm did not install: the Chrome
+    if [ "$DRY_RUN" = 1 ]; then
+        note "would warn: Node $NODE_VERSION is here but npx is not, and $_en_why.
+         By hand: $(pkg_hint npm)"
+        return 1
+    fi
+    warn "Node $NODE_VERSION is here but npx is not, and $_en_why: the Chrome
          DevTools MCP is started with npx. Install it with: $(pkg_hint npm)"
     return 1
 }
@@ -2525,7 +2538,8 @@ Exit codes
   0  installed (or nothing to do), with nothing unexpected
   1  a fatal step failed — uv, or aisquare-cli itself
   2  installed, but a check is amber for a reason this script did not expect,
-     or an optional extra you chose did not install
+     or an optional extra you chose did not install: Node or npx for
+     --with chrome-devtools. Its Claude Code registration only warns.
 
 Not installed, on purpose: gbrain (out of scope), explainability tracing (off
 unless asked for), and any credential — `claude` and `gh auth login` do their

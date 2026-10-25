@@ -33,7 +33,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   read or reported, and the CLI never runs Node. `aisquare project onboard` keeps its
   other job: the first run seeds one fact per marker it finds at the root, a plain
   second run reads nothing and says so (`already onboarded; --refresh reads the markers
-  again`), and `--refresh` adds only the facts that are new; it starts
+  again`; `--json` gains `markers_read`, false on that run), and `--refresh` adds only
+  the facts that are new; it starts
   no process but the `git rev-parse` that finds the root. `init` makes no pack and says
   nothing about one. Doctor's `repomix`, `tiktoken` and `snapshot` rows are gone, so a
   machine with no Node and no tiktoken has nothing amber over them.

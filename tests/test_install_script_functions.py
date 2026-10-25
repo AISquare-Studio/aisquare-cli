@@ -1591,14 +1591,19 @@ def test_a_missing_extra_alone_is_not_sent_to_the_doctor(tmp_path: Path) -> None
 
 def test_exit_2_is_documented_for_an_extra_that_did_not_install(tmp_path: Path) -> None:
     """The run exits 2 for an extra it was asked for and could not install, with no check
-    amber (review of #257)."""
+    amber (review of #257), and only for what it installs: a failed registration with
+    Claude Code warns and exits 0, the owner's call (review of #399, n7)."""
     usage = sh("usage", path=base_path(tmp_path)).stdout
     exit_codes = " ".join(usage.split("Exit codes", 1)[1].split("\n\n", 1)[0].split())
     page = " ".join((REPO / "docs" / "install.md").read_text(encoding="utf-8").split())
 
     assert "a fatal step failed" in exit_codes, "control: this is the exit-code section"
-    assert "or an optional extra you chose did not install" in exit_codes, exit_codes
-    assert "unexpectedly amber, or an optional extra you chose did not install" in page
+    said = (
+        "or an optional extra you chose did not install: Node or npx for {}--with "
+        "chrome-devtools{}. Its Claude Code registration only warns."
+    )
+    assert said.format("", "") in exit_codes, exit_codes
+    assert "unexpectedly amber, " + said.format("`", "`") in page
 
 
 # ---------------------------------------------------------------------------
@@ -1658,6 +1663,31 @@ def test_npm_is_installed_only_for_a_run_that_chose_the_extra_and_a_failure_is_s
         "Node 22.12.0 is here but npx is not, and npm did not install: the Chrome DevTools"
         " MCP is started with npx. Install it with: sudo apt install npm"
     ) in chosen
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["run", "dry-run"])
+def test_no_package_manager_for_npm_is_said_as_it_is(tmp_path: Path, dry_run: bool) -> None:
+    """No package manager, so nothing was tried: the line says so rather than "npm did not
+    install". A dry run says what the run would warn and counts no warning (review of
+    #399, n10)."""
+    result = sh(
+        f"DRY_RUN={int(dry_run)}; PKG=; NODE_VERSION=22.12.0; CHOSEN_EXTRAS=chrome-devtools; "
+        'install_extras; echo "WARNINGS=$WARNINGS"',
+        path=base_path(tmp_path),
+        no_terminal=True,
+    )
+    said = " ".join((result.stdout + result.stderr).split())
+
+    assert "npm did not install" not in said
+    reason = (
+        "Node 22.12.0 is here but npx is not, and there is no package manager to install npm with"
+    )
+    if dry_run:
+        assert f"would warn: {reason}. By hand: apt install npm" in said, said
+        assert "WARNINGS=0" in said
+    else:
+        assert f"{reason}: the Chrome DevTools MCP is started with npx." in said, said
+        assert "WARNINGS=1" in said
 
 
 @pytest.mark.parametrize("flag", [["--with", "chrome-devtools"], ["--with=chrome-devtools"]])
@@ -1896,6 +1926,52 @@ _LOCAL_SCOPE = """{
   }
 }
 """
+#: Other top-level maps are keyed by name too: skillUsage counts a skill named
+#: chrome-devtools, which the chrome-devtools-mcp plugin ships (review of #399, m9).
+_SKILL_USAGE = """{
+  "mcpServers": {},
+  "skillUsage": {
+    "chrome-devtools": {
+      "usageCount": 3,
+      "lastUsedAt": 1761300000000
+    }
+  }
+}
+"""
+_ANOTHER_SERVER_THEN_SKILL_USAGE = """{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://example.invalid/mcp"
+    }
+  },
+  "skillUsage": {
+    "chrome-devtools": {
+      "usageCount": 3,
+      "lastUsedAt": 1761300000000
+    }
+  }
+}
+"""
+#: The user's server after another, with skillUsage after the block: read to its end.
+_USER_SCOPE_AMONG_OTHERS = """{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://example.invalid/mcp"
+    },
+    "chrome-devtools": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "chrome-devtools-mcp@latest"
+      ],
+      "env": {}
+    }
+  },
+  "skillUsage": {}
+}
+"""
 
 
 def _fake_claude(
@@ -1945,6 +2021,42 @@ def _register(
     )
 
 
+@pytest.mark.parametrize("registered", [False, True], ids=["mcp-absent", "mcp-registered"])
+def test_the_survey_decides_whether_the_extra_still_has_its_registration_to_do(
+    tmp_path: Path, registered: bool
+) -> None:
+    """Through the real survey, not a DEVTOOLS_MCP set by hand (review of #399, m8): Claude
+    Code, Node 22.12 and npx already here, `--with chrome-devtools`, everything else
+    current. With the MCP missing the run has work, and the plan lists the write; with it
+    registered there is nothing to do and nothing to list."""
+    stubs, _ = _fake_claude(tmp_path)
+    cli = stub_dir(tmp_path, "clibin", "aisquare")
+    home = tmp_path / "home"
+    home.mkdir()
+    if registered:
+        (home / ".claude.json").write_text(_USER_SCOPE, encoding="utf-8")
+
+    result = sh(
+        "WANT_AGENT=1; CHOSEN_EXTRAS=chrome-devtools; survey; "
+        "INSTALL_TARGET=$PYPI_PACKAGE; CLI_ACTION=current; CLI_VERSION=0.9.0; PIN_VERSION=; "
+        "FORCE=0; UPGRADE_ALL=0; UV_VERSION=0.12.3; WANT_SYSTEM_DEPS=0; WANT_PROJECT=0; "
+        "doctor_amber() { printf brain; }; "
+        "if short_circuit; then echo SC=SHORT; else echo SC=WORK; fi; banner",
+        env={"HOME": str(home), "CLAUDE_CONFIG_DIR": ""},
+        path=f"{stubs}:{cli}:{base_path(tmp_path)}",
+        no_terminal=True,
+    )
+
+    assert "Node 22.12.0" in result.stdout and "Claude Code 2.1.310" in result.stdout
+    added = "~/.claude.json                    ADDED — the chrome-devtools MCP server"
+    if registered:
+        assert "SC=SHORT" in result.stdout, result.stdout
+        assert added not in result.stdout
+    else:
+        assert "SC=WORK" in result.stdout, result.stdout
+        assert added in result.stdout, result.stdout
+
+
 def test_a_run_that_chose_the_extra_registers_the_mcp_once(tmp_path: Path) -> None:
     """Once, with the guide's command, and the summary says how to undo it. A second pass
     in the same run finds it registered and adds nothing."""
@@ -1961,7 +2073,9 @@ def test_a_run_that_chose_the_extra_registers_the_mcp_once(tmp_path: Path) -> No
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("where", ["user-scope", "claude-config-dir", "plugin", "claude-says-so"])
+@pytest.mark.parametrize(
+    "where", ["user-scope", "among-others", "claude-config-dir", "plugin", "claude-says-so"]
+)
 def test_an_mcp_already_registered_is_left_alone_in_one_line(tmp_path: Path, where: str) -> None:
     """In the user config, in CLAUDE_CONFIG_DIR's, or brought by the chrome-devtools-mcp
     plugin, the survey sees it and `claude` is never asked. Laid out so the survey cannot,
@@ -1972,6 +2086,8 @@ def test_an_mcp_already_registered_is_left_alone_in_one_line(tmp_path: Path, whe
     answer, status = "Added stdio MCP server chrome-devtools", 0
     if where == "user-scope":
         (home / ".claude.json").write_text(_USER_SCOPE, encoding="utf-8")
+    elif where == "among-others":
+        (home / ".claude.json").write_text(_USER_SCOPE_AMONG_OTHERS, encoding="utf-8")
     elif where == "claude-config-dir":
         config = tmp_path / "config"
         config.mkdir()
@@ -2007,9 +2123,18 @@ def test_an_mcp_already_registered_is_left_alone_in_one_line(tmp_path: Path, whe
         (_LOCAL_SCOPE, None, False),  # a project's own server is not the user's
         (None, '{"enabledPlugins": {"chrome-devtools-mcp@chrome-devtools-plugins": false}}', False),
         (_USER_SCOPE, None, True),  # in ~/.claude.json while Claude Code reads elsewhere
+        (_SKILL_USAGE, None, False),  # a skill of that name, no server
+        (_ANOTHER_SERVER_THEN_SKILL_USAGE, None, False),
         (None, None, False),
     ],
-    ids=["local-scope-only", "plugin-disabled", "outside-claude-config-dir", "no-config"],
+    ids=[
+        "local-scope-only",
+        "plugin-disabled",
+        "outside-claude-config-dir",
+        "skill-usage-only",
+        "another-server-then-skill-usage",
+        "no-config",
+    ],
 )
 def test_what_claude_code_would_not_load_reads_as_not_registered(
     tmp_path: Path, claude_json: str | None, settings: str | None, in_config_dir: bool

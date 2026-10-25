@@ -2822,6 +2822,35 @@ def test_a_pack_is_the_evidence_first_and_deleted_after(isolated_home: Path) -> 
     assert (brain / "page.md").read_text(encoding="utf-8") == "kept"
 
 
+def test_the_homes_old_pack_does_not_list_the_home(isolated_home: Path) -> None:
+    """Builds before D5 packed the aisquare home as well. That pack is not the owner adding
+    it, as main's ``snapshot.exists()`` held, so the v17 backfill passes over the home's
+    row and the pack still goes (review of #399, m10)."""
+    from aisquare.core.workspace import project_id_for
+
+    home = paths.aisquare_home().resolve()
+    home_id = project_id_for(home)
+    after = (
+        "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES "
+        f"('{home_id}', '{home}', '.aisquare', '[]', '2026-09-01T00:00:00+00:00');\n"
+    )
+    _at_version(16, after=after)
+    pack = _old_pack(home_id)
+
+    with store_session() as store:
+        shown = {p.id for p in store.list_projects()}
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        onboarded = raw.execute(
+            "SELECT onboarded_at FROM project WHERE id = ?", (home_id,)
+        ).fetchone()
+    finally:
+        raw.close()
+    assert onboarded == (None,), "the home's pack adopted nothing"
+    assert home_id not in shown
+    assert not pack.exists()
+
+
 def test_old_packs_go_once_and_nothing_outside_projects_is_followed(
     isolated_home: Path, tmp_path: Path
 ) -> None:
@@ -2860,6 +2889,17 @@ def test_old_packs_go_once_and_nothing_outside_projects_is_followed(
     with store_session():
         pass
     assert again.exists(), "it ran once"
+
+
+def test_a_home_with_no_projects_dir_has_nothing_to_clean_and_says_so(
+    isolated_home: Path,
+) -> None:
+    """A new home has no ``projects/`` and so no pack: done on the first open, so later
+    opens do not look again."""
+    with store_session():
+        pass
+    assert not (paths.aisquare_home() / "projects").exists(), "the premise: nothing there"
+    assert (paths.cache_dir() / "old-packs-removed").exists()
 
 
 @pytest.mark.parametrize("damage", ["looping", "unreadable", "resolve-raises"])

@@ -72,7 +72,8 @@ It refuses to run as root outside a container, uses `sudo` only for the system
 packages and one command at a time, and never edits your shell profile beyond
 what uv and the Claude Code installer do themselves. Exit codes: `0` installed,
 `1` a fatal step failed, `2` installed but a health check is unexpectedly amber,
-or an optional extra you chose did not install.
+or an optional extra you chose did not install: Node or npx for
+`--with chrome-devtools`. Its Claude Code registration only warns.
 
 </details>
 

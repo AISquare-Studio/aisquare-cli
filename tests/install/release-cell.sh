@@ -34,6 +34,15 @@ head1() { printf '\n=== %s ===\n' "$*"; }
 [ -z "${AISQUARE_INSTALL_PACKAGE:-}" ] ||
     fail "this cell grades the RELEASE on PyPI; unset AISQUARE_INSTALL_PACKAGE"
 
+# THIS TREE'S SCRIPT, not the release's. Once main's install.sh hands off to the
+# script attached to the latest release (#402), a run with AISQUARE_INSTALL_PACKAGE
+# unset downloads that one instead, and 0.9.0's still upgrades Node for Repomix, so
+# the Node check below would grade 0.9.0's installer. The variable, not
+# --no-handoff: until #402 merges, parse_args refuses the flag, and nothing reads
+# the variable.
+AISQUARE_INSTALL_NO_HANDOFF=1
+export AISQUARE_INSTALL_NO_HANDOFF
+
 head1 "Debian's own Node and npm, below the 22.12 floor"
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates nodejs npm >/dev/null

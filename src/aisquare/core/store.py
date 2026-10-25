@@ -571,9 +571,13 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
         ")"
     )
     rows = connection.execute(
-        "SELECT id FROM project WHERE onboarded_at IS NULL AND forgotten_at IS NULL"
+        "SELECT id, root FROM project WHERE onboarded_at IS NULL AND forgotten_at IS NULL"
     ).fetchall()
-    with_snapshot = [row[0] for row in rows if _snapshot_on_disk(str(row[0]))]
+    # Never the aisquare home's own row: builds before D5 packed the home too, and that
+    # pack is no sign the owner added it (main's snapshot.exists() said the same).
+    with_snapshot = [
+        row[0] for row in rows if not is_the_home(Path(row[1])) and _snapshot_on_disk(str(row[0]))
+    ]
     for project_id in with_snapshot:
         connection.execute(
             "UPDATE project SET onboarded_at = created_at WHERE id = ? AND onboarded_at IS NULL",
@@ -623,13 +627,21 @@ def _remove_old_packs() -> None:
     deleted stays, and the open goes on. ``RuntimeError`` too: on Python 3.11 and 3.12
     ``Path.resolve()`` raises it for a symlink loop, and a ``projects/`` that points at
     itself made every command a traceback (review of #399).
+
+    Done is recorded only once ``projects/`` was listed, or is not there at all. On
+    3.13 that loop resolves without raising and ``is_dir()`` swallows the ELOOP, so
+    asking ``is_dir()`` first marked a ``projects/`` it never read as done for good.
     """
     marker = paths.cache_dir() / _OLD_PACKS_REMOVED
     try:
         if marker.exists():
             return
         inside = (paths.aisquare_home() / "projects").resolve()
-        for project in inside.iterdir() if inside.is_dir() else ():
+        try:
+            projects = list(inside.iterdir())
+        except FileNotFoundError:
+            projects = []
+        for project in projects:
             pack = project / "snapshot"
             with contextlib.suppress(OSError, RuntimeError):
                 if (

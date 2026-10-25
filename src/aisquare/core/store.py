@@ -537,7 +537,7 @@ def _has_table(connection: sqlite3.Connection, table: str) -> bool:
     return connection.execute(query, (table,)).fetchone() is not None
 
 
-#: The two triggers v38 makes (#113), each ``IF NOT EXISTS``.
+#: The two triggers v39 makes (#113), each ``IF NOT EXISTS``.
 _TEAM_META_TRIGGERS = """
 CREATE TRIGGER IF NOT EXISTS team_meta_insert_time AFTER INSERT ON team_meta BEGIN
  UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
@@ -549,7 +549,7 @@ END;
 
 
 def _date_team_meta_writes(connection: sqlite3.Connection) -> None:
-    """v37 → v38 (#113): the triggers that date every insert and change of a ``team_meta``
+    """v38 → v39 (#113): the triggers that date every insert and change of a ``team_meta``
     row. A trigger cannot be made on a table that is not there, and a store that lacks
     ``team_meta`` still opens, for the doctor to name what it lacks."""
     if _has_table(connection, "team_meta"):
@@ -558,7 +558,7 @@ def _date_team_meta_writes(connection: sqlite3.Connection) -> None:
 
 
 def _redate_team_meta(connection: sqlite3.Connection) -> None:
-    """v38 → v39 (#113): the rows #113's dogfooded v16 left dated 0, dated now."""
+    """v39 → v40 (#113): the rows #113's dogfooded v16 left dated 0, dated now."""
     if _has_table(connection, "team_meta"):
         connection.execute(
             "UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
@@ -571,8 +571,8 @@ _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
     12: _converge_v11_fork,
     25: _index_board_stamps,
     29: _index_task_numbers,
-    37: _date_team_meta_writes,
-    38: _redate_team_meta,
+    38: _date_team_meta_writes,
+    39: _redate_team_meta,
 }
 
 
@@ -746,7 +746,7 @@ def _board_existing_agents(connection: sqlite3.Connection) -> None:
 
 
 def _adopt_claude_code_identity(connection: sqlite3.Connection) -> None:
-    """v36 → v37's backfill (#113): the sessions and fleet agents Claude Code made say so.
+    """v37 → v38's backfill (#113): the sessions and fleet agents Claude Code made say so.
 
     Runs right after ``team_session.native_session_id`` is added (``agent`` is added just
     before it), in the same transaction, and only then (:data:`_BACKFILLS`). A session
@@ -760,12 +760,12 @@ def _adopt_claude_code_identity(connection: sqlite3.Connection) -> None:
 
 
 def _adopt_claude_code_fleet_agents(connection: sqlite3.Connection) -> None:
-    """v36 → v37's backfill (#113): a fleet agent started as ``claude`` is Claude Code's."""
+    """v37 → v38's backfill (#113): a fleet agent started as ``claude`` is Claude Code's."""
     connection.execute("UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude'")
 
 
 def _date_team_meta(connection: sqlite3.Connection) -> None:
-    """v37 → v38's backfill (#113): the ``team_meta`` rows from before the column are
+    """v38 → v39's backfill (#113): the ``team_meta`` rows from before the column are
     dated now, so the launch-metadata cleanup gives them a full retention period."""
     connection.execute("UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER)")
 
@@ -1154,39 +1154,53 @@ CREATE INDEX IF NOT EXISTS usage_turn_session ON usage_turn (session_id, seq);
 # (:func:`_converge_by_presence`) adds the column, the ladder runs v35's ``IF NOT EXISTS``
 # script, and this step finds its columns in place.
 _SCHEMA_V36 = ""
-# v37-v42 (#113): the coding-agent steps. That line stamped them 15-17 while it was in
+# v37, P1 WS-2 (#279): who caused a board event (``team_event.actor``) and its details as
+# JSON (``team_event.meta``), so a manager's own stop wakes nobody and an exit says its
+# status. Both columns are nullable and in :data:`_PRODUCTS`, added only where absent, so a
+# store another line stamped at any version still gains them; a row from before them reads
+# NULL: no actor (the agent's own act, or unknown) and no details.
+#
+# rc/p1-token-diet stamped this step v35, after its own v34 (P0-W1a, now v36): the sync of
+# main 8eb18a8a moved it here, after main's v34 and v35. A store that ran rc/p1 reads v35
+# with P0-W1a's and these columns and neither ``fleet_agent.ended_by`` nor the usage
+# tables: the presence pass adds the column, v35's ``IF NOT EXISTS`` script makes the
+# tables, and v36 and this step find their columns in place.
+_SCHEMA_V37 = ""
+# v38-v43 (#113): the coding-agent steps. That line stamped them 15-17 while it was in
 # flight (the note above _SCHEMA_V15), then 26-29 once it took main's v25, then 33-36
 # once it took 0.8.1's 26-32, then 34-38 once it took 0.8.2's v33 (the persona columns),
 # then 36-41 once it took #274's v34 (``fleet_agent.ended_by``) and v35 (the usage
-# tables); #295 took v36 (the first-message columns) first, so these come after it,
-# renumbered again. Idempotent like every step from v15 on: the columns are in
-# :data:`_PRODUCTS`, their backfills in :data:`_BACKFILLS`, the triggers are ``IF NOT
-# EXISTS`` and the tables and their indexes too. A store #113's line stamped 26-29 ran
+# tables), then 37-42 once it took #295's v36 (the first-message columns); #296 took v37
+# (``team_event.actor`` and ``meta``) first, so these come after it, renumbered again.
+# Idempotent like every step from v15 on: the columns are in :data:`_PRODUCTS`, their
+# backfills in :data:`_BACKFILLS`, the triggers are ``IF NOT EXISTS`` and the tables and
+# their indexes too. A store #113's line stamped 26-29 ran
 # none of 0.8.1's v26-v29 under those numbers, one it stamped 33-36 has no persona
-# columns, one it stamped 34-38 has neither ``ended_by`` nor the usage tables, and one it
-# stamped 36-41 has no first-message columns: the presence pass
+# columns, one it stamped 34-38 has neither ``ended_by`` nor the usage tables, one it
+# stamped 36-41 has no first-message columns, and one it stamped 37-42 has no event actor:
+# the presence pass
 # (:func:`_converge_by_presence`) finds those columns, tables and indexes absent and
 # applies them, with their backfills (task numbers among them), before the ladder goes on
 # from its stamp; and these steps, whose products it holds already, add nothing to it but
-# the v39 repair of rows dated 0, which converges.
+# the v40 repair of rows dated 0, which converges.
 #
-# v37: native coding-agent identity, independent of runtime session IDs.
+# v38: native coding-agent identity, independent of runtime session IDs.
 # ``team_session.agent`` and ``native_session_id`` and ``fleet_agent.agent`` are the
 # whole step, so the script is empty; their backfill
 # (:func:`_adopt_claude_code_identity`) marks the rows Claude Code made.
-_SCHEMA_V37 = ""
-# v38: when each ``team_meta`` row was last written, for the launch-metadata cleanup.
+_SCHEMA_V38 = ""
+# v39: when each ``team_meta`` row was last written, for the launch-metadata cleanup.
 # The column, ``team_meta.updated_at``, is in :data:`_PRODUCTS`, and its backfill
 # (:func:`_date_team_meta`) dates the rows that predate it; the triggers, made in
 # Python where the table is (:func:`_date_team_meta_writes`, in :data:`_PREPARE`), date
 # every later insert and change of value.
-_SCHEMA_V38 = ""
-# v39: #113 stamped 17 for this repair while the native-agent branch was being
+_SCHEMA_V39 = ""
+# v40: #113 stamped 17 for this repair while the native-agent branch was being
 # dogfooded: its v16 stores made before that step's backfill was added hold rows
 # dated 0. An UPDATE of those rows only, where the table is (:func:`_redate_team_meta`):
 # a store that meets it twice converges.
-_SCHEMA_V39 = ""
-# v40: the arrangement of OTHER agents' account slots (Codex's, t3). The slots are
+_SCHEMA_V40 = ""
+# v41: the arrangement of OTHER agents' account slots (Codex's, t3). The slots are
 # directories like Claude Code's (``core.claude_accounts``: one ladder numbers every
 # agent's, so ``slot`` alone is the key), and this table is ``claude_account`` for
 # them, plus the agent: an alias, a rank among that agent's slots, a default PER
@@ -1197,7 +1211,7 @@ _SCHEMA_V39 = ""
 # prune every Codex row it met, on any machine where two builds share the store.
 # Aliases are unique across the two tables by the service (``set_alias`` checks the
 # other agent's before writing); within this one, by the index.
-_SCHEMA_V40 = """
+_SCHEMA_V41 = """
 CREATE TABLE IF NOT EXISTS agent_account (
     slot        INTEGER PRIMARY KEY,
     agent       TEXT NOT NULL,
@@ -1213,14 +1227,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS agent_account_alias ON agent_account (alias)
 CREATE UNIQUE INDEX IF NOT EXISTS agent_account_default ON agent_account (agent)
     WHERE is_default = 1;
 """
-# v41: every window a usage reading has (``claude_usage.windows``, the ``UsageWindow`` list as
+# v42: every window a usage reading has (``claude_usage.windows``, the ``UsageWindow`` list as
 # JSON), so the five-minute cache serves an agent whose windows are not Claude Code's five
 # hours and week (a daily quota per model) what it read. The column is the whole step, so
 # the script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps NULL, which
 # reads as its session and week columns say, as every row did.
-_SCHEMA_V41 = ""
-# v42: ONE priority order over every agent's accounts (owner, PR #113): a rank per slot,
-# whatever agent the slot is (``slot`` alone is the key, as v40 says). The per-agent
+_SCHEMA_V42 = ""
+# v43: ONE priority order over every agent's accounts (owner, PR #113): a rank per slot,
+# whatever agent the slot is (``slot`` alone is the key, as v41 says). The per-agent
 # ``position`` columns stay, and are kept in step with it, for the builds before this step
 # that share the store. A table of its own, not a column on the two registries: an older
 # build reconciles those and would never write a rank for the slots it adds, while a slot
@@ -1228,7 +1242,7 @@ _SCHEMA_V41 = ""
 # first read (``services.claude_accounts._ranked``: the default agent's accounts first,
 # so nothing changes on upgrade) since the default agent is the user's config, not the
 # store's.
-_SCHEMA_V42 = """
+_SCHEMA_V43 = """
 CREATE TABLE IF NOT EXISTS account_rank (
     slot  INTEGER PRIMARY KEY,
     rank  INTEGER NOT NULL
@@ -1278,6 +1292,7 @@ _MIGRATIONS = (
     _SCHEMA_V40,
     _SCHEMA_V41,
     _SCHEMA_V42,
+    _SCHEMA_V43,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1344,20 +1359,21 @@ _PRODUCTS: dict[int, _Products] = {
             ("fleet_agent", "first_prompt_at", "TEXT"),
         )
     ),
-    36: _Products(
+    36: _Products(columns=(("team_event", "actor", "TEXT"), ("team_event", "meta", "TEXT"))),
+    37: _Products(
         columns=(
             ("team_session", "agent", "TEXT"),
             ("team_session", "native_session_id", "TEXT"),
             ("fleet_agent", "agent", "TEXT"),
         )
     ),
-    37: _Products(
+    38: _Products(
         ("team_meta_insert_time", "team_meta_update_time"),
         (("team_meta", "updated_at", "INTEGER NOT NULL DEFAULT 0"),),
     ),
-    39: _Products(("agent_account", "agent_account_alias", "agent_account_default")),
-    40: _Products(columns=(("claude_usage", "windows", "TEXT"),)),
-    41: _Products(("account_rank",)),
+    40: _Products(("agent_account", "agent_account_alias", "agent_account_default")),
+    41: _Products(columns=(("claude_usage", "windows", "TEXT"),)),
+    42: _Products(("account_rank",)),
 }
 
 _PROJECT_COLUMNS = (
@@ -1435,7 +1451,9 @@ _TASK_COLUMNS = (
     "id, project_id, number, key, title, detail, status, role, needs, "
     "claimed_by, claim_expires_at, created_by, created_at, updated_at"
 )
-_EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
+_EVENT_COLUMNS = (
+    "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at, actor, meta"
+)
 _FLEET_AGENT_FIELDS = (
     "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
     "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
@@ -1587,6 +1605,7 @@ class ContextStore(Protocol):
         role: str | None = None,
         status: TaskStatus = "todo",
         prefer: str | None = None,
+        only: str | None = None,
     ) -> TeamTask | None: ...
     def task_statuses(self, project_id: str) -> dict[str, str]: ...
     def adopt_fleet_agent_session(
@@ -1638,10 +1657,17 @@ class ContextStore(Protocol):
         *,
         exclude_session: str | None = None,
         exclude_kinds: Collection[str] = (),
+        exclude_actor: str | None = None,
+        relevant: Relevance | None = None,
         limit: int = 50,
     ) -> list[TeamEvent]: ...
     def recent_events(
-        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+        self,
+        project_id: str,
+        *,
+        exclude_kinds: Collection[str] = (),
+        relevant: Relevance | None = None,
+        limit: int = 10,
     ) -> list[TeamEvent]: ...
     def filtered_events(
         self,
@@ -1766,7 +1792,7 @@ class ContextStore(Protocol):
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None: ...
     def set_claude_account_disabled(self, slot: int, disabled: bool) -> None: ...
     def order_claude_accounts(self, slots: Sequence[int]) -> None: ...
-    # Other agents' account registry (v40): the same arrangement, per agent.
+    # Other agents' account registry (v41): the same arrangement, per agent.
     def agent_accounts(self, agent: str) -> list[ClaudeAccountRecord]: ...
     def upsert_agent_account(
         self, agent: str, slot: int, config_dir: Path
@@ -1776,7 +1802,7 @@ class ContextStore(Protocol):
     def set_agent_account_alias(self, agent: str, slot: int, alias: str | None) -> None: ...
     def set_agent_account_disabled(self, agent: str, slot: int, disabled: bool) -> None: ...
     def order_agent_accounts(self, agent: str, slots: Sequence[int]) -> None: ...
-    # One priority order over every agent's slots (v42).
+    # One priority order over every agent's slots (v43).
     def account_ranks(self) -> dict[int, int]: ...
     def rank_accounts(self, slots: Sequence[int]) -> None: ...
     # Usage readings (v16, #146): the history behind "how fast is this window filling".
@@ -2099,7 +2125,7 @@ def _row_to_usage_sample(row: sqlite3.Row) -> UsageSample:
 
 
 def _usage_windows(raw: str | None) -> tuple[UsageWindow, ...] | None:
-    """A sample's windows as v41 keeps them; ``None`` for a row from before (or one this
+    """A sample's windows as v42 keeps them; ``None`` for a row from before (or one this
     build cannot read), which its session and week columns describe."""
     if raw is None:
         return None
@@ -2139,6 +2165,8 @@ def _row_to_event(row: sqlite3.Row) -> TeamEvent:
         task_id=row["task_id"],
         to_role=row["to_role"],
         created_at=datetime.fromisoformat(row["created_at"]),
+        actor=row["actor"],
+        meta=json.loads(row["meta"]) if row["meta"] else None,
     )
 
 
@@ -2740,10 +2768,10 @@ class SqliteStore:
         """Delete the ``team_meta`` rows keyed by the project or by its sessions.
 
         Inside the caller's transaction, in statements of at most
-        :data:`_META_BATCH` sessions each (seven terms per session: its nudge, its
-        unbriefed mark, its continuation prompt and continuations, its agent events and
-        its launch and fleet sightings): one statement per purge was the shape SQLite
-        refused at 500 sessions.
+        :data:`_META_BATCH` sessions each (its keys, one per :data:`_SESSION_META_KINDS` and
+        its continuation prompt, in one ``IN``, and one glob each for its continuations, its
+        agent events and its launch and fleet sightings): one statement per purge was the
+        shape SQLite refused at 500 sessions.
         """
         removed = self._conn.execute(
             "DELETE FROM team_meta WHERE key IN (?, ?) OR key GLOB ?",
@@ -2763,9 +2791,9 @@ class SqliteStore:
         for start in range(0, len(sessions), _META_BATCH):
             batch = sessions[start : start + _META_BATCH]
             keys = [
-                f"{prefix}:{sid}"
+                f"{kind}:{sid}"
                 for sid in batch
-                for prefix in ("nudge", "unbriefed", "continuation-prompt")
+                for kind in (*_SESSION_META_KINDS, "continuation-prompt")
             ]
             globs = [
                 pattern
@@ -2777,7 +2805,9 @@ class SqliteStore:
                     f"fleet-seen:*:{_glob_escape(sid)}",
                 )
             ]
-            clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
+            # The keys as one IN term, the globs OR'd beside it: one term per key as well
+            # passed SQLite's expression depth (1000) at a full batch of sessions.
+            clauses = [f"key IN ({','.join('?' for _ in keys)})"] + ["key GLOB ?"] * len(globs)
             removed += self._conn.execute(
                 f"DELETE FROM team_meta WHERE {' OR '.join(clauses)}", (*keys, *globs)
             ).rowcount
@@ -3581,8 +3611,12 @@ class SqliteStore:
         role: str | None = None,
         status: TaskStatus = "todo",
         prefer: str | None = None,
+        only: str | None = None,
     ) -> TeamTask | None:
         """The oldest *ready* task in ``status`` a session of ``role`` could pick up.
+
+        ``only`` narrows the pool to that one task id, under the same rules (``task next
+        --task``: a tester spawned for one task takes it and nothing else, #129 a).
 
         Tasks without a role hint are available to every role; tasks with one
         only match sessions of that role (or an unfiltered query). A ``todo``
@@ -3598,6 +3632,9 @@ class SqliteStore:
         if role is not None:
             clauses.append("(role IS NULL OR role = ?)")
             params.append(role)
+        if only is not None:
+            clauses.append("id = ?")
+            params.append(only)
         order = "ORDER BY id"
         if prefer is not None:
             order = "ORDER BY (id = ?) DESC, id"
@@ -4023,17 +4060,9 @@ class SqliteStore:
                 meta_value = {**meta_value, "session_id": event.session_id}
             cursor = self._conn.execute(
                 "INSERT INTO team_event (id, project_id, session_id, kind, text, "
-                "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    event.id,
-                    event.project_id,
-                    event.session_id,
-                    event.kind,
-                    event.text,
-                    event.task_id,
-                    event.to_role,
-                    event.created_at.isoformat(),
-                ),
+                "task_id, to_role, created_at, actor, meta) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                _event_values(event),
             )
             stamped = {**meta_value, "seq": cursor.lastrowid}
             self._conn.execute(
@@ -4052,17 +4081,8 @@ class SqliteStore:
             )
         cursor = self._conn.execute(
             "INSERT INTO team_event (id, project_id, session_id, kind, text, "
-            "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                event.id,
-                event.project_id,
-                event.session_id,
-                event.kind,
-                event.text,
-                event.task_id,
-                event.to_role,
-                event.created_at.isoformat(),
-            ),
+            "task_id, to_role, created_at, actor, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            _event_values(event),
         )
         self._commit()
         return event.model_copy(update={"seq": cursor.lastrowid})
@@ -4164,34 +4184,58 @@ class SqliteStore:
         *,
         exclude_session: str | None = None,
         exclude_kinds: Collection[str] = (),
+        exclude_actor: str | None = None,
+        relevant: Relevance | None = None,
         limit: int = 50,
     ) -> list[TeamEvent]:
         """A cursor page: the OLDEST ``limit`` events past ``seq``, oldest first.
+
+        ``exclude_actor`` leaves out what that session caused, as ``exclude_session`` leaves
+        out what it wrote: a manager's own ``fleet stop`` is written under the stopped
+        agent's session, with the manager as its actor. ``relevant`` keeps only what a
+        ``relevant`` board context reads (:class:`Relevance`).
 
         ``exclude_kinds`` leaves those kinds out INSIDE the query, as
         :meth:`filtered_events` does, so ``limit`` counts rows the caller can use.
         Dropped after the LIMIT, a run of the captain's audit lines filled the whole
         page, and the event behind it was not read at all (review of #240, finding 11).
         """
+        keep, kept = _relevant_clause(relevant)
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
             "WHERE project_id = ? AND seq > ? "
             "AND (session_id IS NULL OR session_id != ?) "
-            f"{_and_not_kinds(exclude_kinds)}ORDER BY seq LIMIT ?",
-            (project_id, seq, exclude_session or "", *exclude_kinds, limit),
+            "AND (actor IS NULL OR actor != ?) "
+            f"{_and_not_kinds(exclude_kinds)}{keep}ORDER BY seq LIMIT ?",
+            (
+                project_id,
+                seq,
+                exclude_session or "",
+                exclude_actor or "",
+                *exclude_kinds,
+                *kept,
+                limit,
+            ),
         ).fetchall()
         return [_row_to_event(row) for row in rows]
 
     def recent_events(
-        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+        self,
+        project_id: str,
+        *,
+        exclude_kinds: Collection[str] = (),
+        relevant: Relevance | None = None,
+        limit: int = 10,
     ) -> list[TeamEvent]:
         """A window: the NEWEST ``limit`` events, oldest first. ``exclude_kinds`` is left
         out inside the query, as in :meth:`events_since`: the window stays ``limit`` long
-        however many of those kinds are newer than the events it shows."""
+        however many of those kinds are newer than the events it shows. ``relevant`` as
+        there."""
+        keep, kept = _relevant_clause(relevant)
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
-            f"WHERE project_id = ? {_and_not_kinds(exclude_kinds)}ORDER BY seq DESC LIMIT ?",
-            (project_id, *exclude_kinds, limit),
+            f"WHERE project_id = ? {_and_not_kinds(exclude_kinds)}{keep}ORDER BY seq DESC LIMIT ?",
+            (project_id, *exclude_kinds, *kept, limit),
         ).fetchall()
         return [_row_to_event(row) for row in reversed(rows)]
 
@@ -5443,7 +5487,7 @@ class SqliteStore:
             )
         self._commit()
 
-    # --- other agents' account registry (v40) ---------------------------------------------------
+    # --- other agents' account registry (v41) ---------------------------------------------------
     #
     # ``claude_account``'s methods above, for the rows of one other agent: the same
     # one-statement writes, the default and the alias refused by the indexes.
@@ -5535,7 +5579,7 @@ class SqliteStore:
             )
         self._commit()
 
-    # --- one priority order over every agent's slots (v42) ----------------------------------
+    # --- one priority order over every agent's slots (v43) ----------------------------------
 
     def account_ranks(self) -> dict[int, int]:
         """Each ranked slot's place in the one order, 1 first."""
@@ -5704,6 +5748,60 @@ def _glob_prefix(ref: str) -> str:
     """
     stripped = _ref_stripped(ref)
     return f"{stripped}*" if stripped else ""
+
+
+def _event_values(event: TeamEvent) -> tuple[object, ...]:
+    """``event``'s values for an ``INSERT INTO team_event`` of every written column."""
+    return (
+        event.id,
+        event.project_id,
+        event.session_id,
+        event.kind,
+        event.text,
+        event.task_id,
+        event.to_role,
+        event.created_at.isoformat(),
+        event.actor,
+        None if event.meta is None else json.dumps(event.meta, sort_keys=True),
+    )
+
+
+_SESSION_META_KINDS: tuple[str, ...] = (
+    "nudge", "unbriefed", "compact", "compact-refused", "compact-armed"
+)  # fmt: skip
+"""The ``team_meta`` keys kept per session as ``<kind>:<session id>``: the manager's nudge
+debounce, the solo session's not-yet-briefed mark (#346), and the quiet compaction's mark,
+its newest refusal and its latest arm (P1 WS-4)."""
+
+
+class Relevance(NamedTuple):
+    """What a ``relevant`` board context keeps (P1 WS-2, #279): events on these tasks,
+    events addressed to these names (a role or a label, any case), and decisions unless
+    ``decisions`` is off: what a ``none`` agent's turn end asks for, the notes addressed to
+    it and nothing else (sync #365)."""
+
+    task_ids: tuple[str, ...] = ()
+    names: tuple[str, ...] = ()
+    decisions: bool = True
+
+
+def _relevant_clause(relevant: Relevance | None) -> tuple[str, list[str]]:
+    """``AND (…) `` keeping only what ``relevant`` keeps, with its parameters; nothing for
+    ``None``. In the query, before the LIMIT: forty irrelevant events must not fill a page
+    the relevant one is behind (review of #240, finding 11's rule)."""
+    if relevant is None:
+        return "", []
+    terms = ["kind = 'decision'"] if relevant.decisions else []
+    params: list[str] = []
+    if relevant.task_ids:
+        terms.append(f"task_id IN ({', '.join('?' * len(relevant.task_ids))})")
+        params += relevant.task_ids
+    if relevant.names:
+        terms.append(f"lower(to_role) IN ({', '.join('?' * len(relevant.names))})")
+        params += [name.strip().lower() for name in relevant.names]
+    if not terms:
+        return "AND 0 ", []  # keeps nothing: no task, no name, no decisions
+    return f"AND ({' OR '.join(terms)}) ", params
 
 
 def _and_not_kinds(kinds: Collection[str]) -> str:

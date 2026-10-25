@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import shutil
 import sqlite3
 import tomllib
@@ -19,13 +20,15 @@ from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core import paths, personas
 from aisquare.core.agent_adapters import claude_code, codex_config, register, unregister
-from aisquare.core.config import AppConfig, save_config
+from aisquare.core.config import FLEET_DENY_TOOLS, REVIEWER_ARGS, AppConfig, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import FleetAgent, LaunchSpec
+from aisquare.services import settings as settings_service
 from aisquare.services.explainability import join_records
 from tests import bundled_personas
 from tests.fake_agent import FakeAgentAdapter
+from tests.role_policy import policy_args
 
 
 @pytest.fixture
@@ -256,7 +259,7 @@ def test_launch_execs_the_agent_with_the_role_in_env(
 
     assert result.exit_code == 0, result.output
     assert spy["binary"] == "/usr/local/bin/claude"
-    assert spy["argv"] == ["claude"]
+    assert spy["argv"] == ["claude", *policy_args("coder")]
     assert spy["env"]["AISQUARE_ROLE"] == "coder"
 
 
@@ -267,7 +270,7 @@ def test_launch_forwards_extra_arguments_to_the_agent(
 
     assert result.exit_code == 0, result.output
     # The role is consumed; everything after it reaches the agent untouched.
-    assert spy["argv"] == ["claude", "--model", "opus", "-p", "go"]
+    assert spy["argv"] == ["claude", *policy_args("runner"), "--model", "opus", "-p", "go"]
     assert spy["env"]["AISQUARE_ROLE"] == "runner"
 
 
@@ -499,7 +502,15 @@ def test_launch_forwards_the_global_output_flags_to_the_agent(
     result = runner.invoke(app, ["launch", "coder", "--verbose", "--profile", "p1", "--json", "-q"])
 
     assert result.exit_code == 0, result.output
-    assert spy["argv"] == ["claude", "--verbose", "--profile", "p1", "--json", "-q"]
+    assert spy["argv"] == [
+        "claude",
+        *policy_args("coder"),
+        "--verbose",
+        "--profile",
+        "p1",
+        "--json",
+        "-q",
+    ]
 
 
 def test_launch_respects_the_master_off_switch(
@@ -601,7 +612,9 @@ def test_launch_survives_a_base_url_the_agent_could_not_parse(
     result = runner.invoke(app, ["launch", "coder"])
 
     assert result.exit_code == 0, result.output
-    assert spy["argv"] == ["claude"], "the launch must be the one you would have got anyway"
+    assert spy["argv"] == ["claude", *policy_args("coder")], (
+        "the launch must be the one you would have got anyway"
+    )
     assert "ANTHROPIC_BASE_URL" not in spy["env"], "a value we refused may not reach the agent"
     assert "ANTHROPIC_CUSTOM_HEADERS" not in spy["env"]
     assert "proxy_url" in result.output and "untraced" in result.output
@@ -857,7 +870,7 @@ def test_launch_does_not_pin_an_id_it_cannot_own(
         _tracing_on(proxy_url)
 
         assert runner.invoke(app, ["launch", "coder", "--continue"]).exit_code == 0
-        assert spy["argv"] == ["claude", "--continue"]
+        assert spy["argv"] == ["claude", *policy_args("coder"), "--continue"]
         assert "X-Pipeline-Id" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"]
         (record,) = _join_seen_by_the_agent(monkeypatch, spy["env"], "the-resumed-session")
         assert record["pipeline_id"] == spy["env"]["AISQUARE_PIPELINE_ID"]
@@ -883,7 +896,7 @@ def test_untraced_launch_is_never_handed_a_session_id(
     result = runner.invoke(app, ["launch", "coder", "--model", "opus"])
 
     assert result.exit_code == 0, result.output
-    assert spy["argv"] == ["claude", "--model", "opus"]
+    assert spy["argv"] == ["claude", *policy_args("coder"), "--model", "opus"]
     assert "untraced" in result.output
 
 
@@ -1005,7 +1018,11 @@ def test_a_role_bound_to_a_session_id_is_not_given_a_second_one(
     assert spy["argv"].count("--session-id") == 1, (
         f"two --session-id flags reached the agent: {spy['argv']}"
     )
-    assert spy["argv"] == ["claude", "--session-id", "bound-id-1234"], spy["argv"]
+    # The role's own flags first (its tool policy), as `launch` composes every agent's
+    # (`agent_launch.prepare_arguments`, #113), then the binding's.
+    assert spy["argv"] == ["claude", *policy_args("coder"), "--session-id", "bound-id-1234"], spy[
+        "argv"
+    ]
     assert "X-Pipeline-Id" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"], "still traced"
 
 
@@ -1050,7 +1067,7 @@ def test_a_role_bound_to_a_resume_is_not_pinned(
         f"pinned an id onto {bound[0]}, which names a session that does not exist "
         f"yet: {spy['argv']}"
     )
-    assert spy["argv"] == ["claude", *bound], spy["argv"]
+    assert spy["argv"] == ["claude", *policy_args("coder"), *bound], spy["argv"]
 
 
 def test_every_role_that_can_take_a_seat_has_a_harness_profile() -> None:
@@ -1109,9 +1126,11 @@ def test_launch_persona_exports_the_name_for_the_session_start_hook(
     # The NAME travels as a variable; the BODY reaches Claude Code's system prompt by
     # file, never as an argument (`ps` shows argv) — the same block the session-start
     # hook briefs, so the two channels cannot disagree (owner decision, gh #210).
-    assert spy["argv"][:2] == ["claude", claude_code.SYSTEM_PROMPT_FLAG]
-    assert len(spy["argv"]) == 3
-    prompt = Path(spy["argv"][2])
+    policy = policy_args("coder")
+    argv = spy["argv"]
+    assert argv[0] == "claude" and argv[-len(policy) :] == policy, argv
+    assert len(argv) == 3 + len(policy)
+    prompt = Path(argv[argv.index(claude_code.SYSTEM_PROMPT_FLAG) + 1])
     briefed = "\n".join(personas.briefing(personas.resolve("skeptic"))) + "\n"
     assert prompt.read_text(encoding="utf-8") == briefed
     assert "skeptic" in prompt.name and prompt.parent.name == "persona-prompts"
@@ -1129,7 +1148,7 @@ def test_launch_persona_system_prompt_is_a_switch_the_hook_channel_ignores(
 
     assert result.exit_code == 0, result.output
     assert spy["env"]["AISQUARE_PERSONA"] == "skeptic", "the hook channel is not the switch's"
-    assert spy["argv"] == ["claude"]
+    assert spy["argv"] == ["claude", *policy_args("coder")]
 
 
 class _NoSeam(FakeAgentAdapter):
@@ -1248,7 +1267,7 @@ def test_launch_persona_with_a_cache_it_cannot_write_launches_on_the_hook_alone(
 
     assert result.exit_code == 0, result.output
     assert spy["env"]["AISQUARE_PERSONA"] == "skeptic", "the hook channel still has it"
-    assert spy["argv"] == ["claude"]
+    assert spy["argv"] == ["claude", *policy_args("coder")]
     said = result.output + (result.stderr if hasattr(result, "stderr") else "")
     assert "system-prompt file could not be written" in said
 
@@ -1262,7 +1281,7 @@ def test_launch_persona_leaves_the_operators_own_system_prompt_flag_alone(
     )
 
     assert result.exit_code == 0, result.output
-    assert spy["argv"] == ["claude", "--append-system-prompt", "mine"]
+    assert spy["argv"] == ["claude", *policy_args("coder"), "--append-system-prompt", "mine"]
 
 
 def test_launch_refuses_an_unknown_persona_listing_the_known_ones(
@@ -1288,3 +1307,77 @@ def test_launch_without_persona_exports_no_persona_variable(
     assert result.exit_code == 0, result.output
     assert spy["env"]["AISQUARE_ROLE"] == "coder"
     assert "AISQUARE_PERSONA" not in spy["env"]
+
+
+# --- the role's tool policy, wherever it starts (#280, #129 f) -------------------------
+
+
+def _one_deny(argv: list[str]) -> set[str]:
+    """The names of the ONE ``--disallowedTools`` token ``argv`` holds."""
+    tokens = [arg for arg in argv if arg.startswith(("--disallowedTools", "--disallowed-tools"))]
+    assert len(tokens) == 1, argv
+    return set(tokens[0].partition("=")[2].split())
+
+
+def test_a_reviewer_launched_by_hand_is_denied_the_tools_that_edit(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """Its deny lived in the fleet's ``extra_args`` alone: ``launch reviewer`` denied nothing."""
+    assert runner.invoke(app, ["launch", "reviewer"]).exit_code == 0
+    assert {"Edit", "Write", "NotebookEdit"} <= _one_deny(spy["argv"])
+
+
+def test_a_reviewer_from_team_spawn_is_denied_the_tools_that_edit(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+    # The binary resolved as every launch resolves it (`agent_launch.resolve`, #113).
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        "aisquare.cli.team.os.execvpe", lambda _file, argv, env: seen.update(argv=argv)
+    )
+    result = runner.invoke(app, ["team", "spawn", "reviewer", "--exec", "--no-probe"])
+    assert result.exit_code == 0, result.output
+    assert {"Edit", "Write", "NotebookEdit"} <= _one_deny(seen["argv"])
+
+
+def test_a_reviewer_restarted_from_a_spec_0_8_2_recorded_gets_one_token(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """A restart replays the spec's arguments, and 0.8.2 recorded its default deny there."""
+    assert runner.invoke(app, ["launch", "reviewer", *REVIEWER_ARGS]).exit_code == 0
+    assert _one_deny(spy["argv"]) == {"Edit", "Write", "NotebookEdit", *FLEET_DENY_TOOLS}
+
+
+def test_allow_tools_gives_edit_back_but_never_against_a_deny_on_the_line(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    settings_service.set_value("fleet.roles.reviewer.allow_tools", "Edit")
+    assert runner.invoke(app, ["launch", "reviewer"]).exit_code == 0
+    denied = _one_deny(spy["argv"])
+    assert "Edit" not in denied and {"Write", "NotebookEdit"} <= denied
+    # `fleet spawn reviewer -- --disallowedTools=Edit` reaches the window's launch so.
+    assert runner.invoke(app, ["launch", "reviewer", "--disallowedTools=Edit"]).exit_code == 0
+    assert "Edit" in _one_deny(spy["argv"])
+
+
+def test_another_agent_gets_no_deny_token_and_the_launch_says_why(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    result = runner.invoke(app, ["launch", "reviewer", "--command", "aider"])
+    assert result.exit_code == 0, result.output
+    assert not any(arg.startswith("--disallowedTools") for arg in spy["argv"])
+    assert "withheld" in result.output and "'aider' is not claude" in result.output
+
+
+def test_a_team_spawn_at_ultracode_keeps_workflow(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`team spawn` resolves the effort itself, so it hands it to the policy (#311)."""
+    monkeypatch.setenv("AISQUARE_EFFORT", "ultracode")
+    result = runner.invoke(app, ["--json", "team", "spawn", "coder", "--no-probe"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert "--effort ultracode" in payload["command"]
+    assert "Workflow" not in payload["denied_tools"]
+    assert "Workflow kept: effort ultracode orchestrates workflows" in payload["notes"]

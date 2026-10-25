@@ -1762,3 +1762,25 @@ def test_the_fleet_server_row_names_an_agents_process_identity_pinned_on_the_ser
 def test_the_fleet_server_row_reaches_the_real_doctor_after_the_fleet_terminal() -> None:
     names = [check.name for check in diagnostics.doctor()]
     assert names.index("fleet terminal") < names.index("fleet server env"), names
+
+
+def test_doctor_names_each_roles_denied_tools_and_skill_listing() -> None:
+    """#280: one ok row per fleet role, the tools its launch denies and its skill listing,
+    so `/context`'s Tools row can be checked against what aisquare passed."""
+    rows = {check.name: check for check in diagnostics._check_role_tools()}
+    assert set(rows) == {f"{role} tools" for role in FleetSettings().roles}
+    assert all(check.status == CheckStatus.ok for check in rows.values())
+    reviewer = rows["reviewer tools"].detail
+    assert "Edit" in reviewer and "NotebookEdit" in reviewer and "Workflow" in reviewer
+    assert rows["manager tools"].detail.endswith("skill listing full")
+    assert rows["coder tools"].detail.endswith("skill listing names")
+    assert "Edit" not in rows["coder tools"].detail
+
+
+def test_doctor_says_a_role_on_another_agent_gets_no_deny_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AISQUARE_BIN_REVIEWER", "aider")
+    (reviewer,) = [c for c in diagnostics._check_role_tools() if c.name == "reviewer tools"]
+    assert reviewer.status == CheckStatus.ok
+    assert reviewer.detail.startswith("no deny token: 'aider' is not claude"), reviewer.detail

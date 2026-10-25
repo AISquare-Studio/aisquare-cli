@@ -49,6 +49,7 @@ from aisquare.core.claude_accounts import (
     INSTALL_COMMAND,
     ClaudeCodeAccounts,
 )
+from aisquare.core.config import FleetSettings
 
 #: ``--permission-mode`` for each approvals intent (``core.config.CLAUDE_PERMISSION_MODES``);
 #: ``never`` is ``bypassPermissions`` with a ``full`` write scope, else ``dontAsk``.
@@ -113,6 +114,28 @@ class ClaudeCodePlugin:
         return agents.claude_plugin_command(verb, config_dir, scope=scope, project=project)
 
 
+#: What ``skill_listing = "names"`` passes Claude Code: every skill description cut to one
+#: character, every name kept. ``skillListingBudgetFraction`` at its smallest (it takes any
+#: fraction above 0) cut the first request by 41 tokens on Claude Code 2.1.309; this, 2,121.
+SKILL_NAMES_SETTINGS = '{"skillListingMaxDescChars": 1}'
+
+
+def _flag_value(args: Sequence[str], flag: str) -> str | None:
+    """The value ``args`` give ``flag`` (``--flag value`` or ``--flag=value``), the last one;
+    ``None`` when it is absent (an empty string when it stands last with no value)."""
+    found: str | None = None
+    for index, arg in enumerate(args):
+        if arg.startswith(f"{flag}="):
+            found = arg.partition("=")[2]
+        elif arg == flag:
+            found = args[index + 1] if index + 1 < len(args) else ""
+    return found
+
+
+def _lowered(value: str | None) -> str | None:
+    return value.strip().lower() if value is not None else None
+
+
 class ClaudeCodeAdapter:
     id = "claude-code"
     label = "Claude Code"
@@ -160,6 +183,7 @@ class ClaudeCodeAdapter:
         # `claude -- "<prompt>"` runs it as the first turn, behind the folder-trust question
         # too (P0-W0, on 2.1.309 and 2.1.223): nothing typed, no Enter to lose (#295).
         positional_prompt=True,
+        compacts_on_command=True,
         vocabulary=Vocabulary(
             env_prefixes=("ANTHROPIC",),
             files=(".claude.json", ".credentials.json"),
@@ -351,6 +375,8 @@ class ClaudeCodeAdapter:
             return AgentEvent(
                 "stop",
                 stop_hook_active=bool(payload.get("stop_hook_active")),
+                message=payload_text(payload, "last_assistant_message"),
+                permission_mode=payload_text(payload, "permission_mode"),
                 transcript_path=transcript,
                 **common,
             )
@@ -515,6 +541,47 @@ class ClaudeCodeAdapter:
         if runs is None or runs.id != self.id:
             return harness.withheld_defaults(role, binary, self.binary)
         return harness.profile_defaults(role, args)
+
+    def tool_policy(
+        self,
+        role: str,
+        *,
+        binary: str,
+        args: Sequence[str],
+        fleet: FleetSettings,
+        effort: str | None = None,
+    ) -> harness.ToolPolicy:
+        """ONE ``--disallowedTools`` token, sorted: the role's deny set
+        (``harness.denied_for``) plus every ``--disallowedTools`` already in ``args``, so
+        what the operator typed (or a fleet ``extra_args``) is never handed back; and for
+        ``skill_listing = "names"``, :data:`SKILL_NAMES_SETTINGS`, unless ``args`` already
+        carry ``--settings``, which is never merged blindly (P1 WS-1, #280). A launch at
+        ultracode effort (``effort``, as ``team spawn`` resolves it, or ``--effort`` in
+        ``args``) keeps ``Workflow``: ultracode IS xhigh plus workflow orchestration, which
+        the default deny would have turned off without a word (review of #311). For a
+        wrapper of another name (``claude2``), which may be another program: withheld,
+        with a note, as :meth:`role_defaults`."""
+        from aisquare.core.agent_adapters import adapter_for_binary
+        from aisquare.core.config import split_denied_tools
+
+        runs = adapter_for_binary(binary)
+        if runs is None or runs.id != self.id:
+            return harness.withheld_policy(role, binary, fleet, why=f"is not {self.binary}")
+        denied, listing = harness.denied_for(role, fleet)
+        notes: list[str] = []
+        efforts = (_lowered(effort), _lowered(_flag_value(args, "--effort")))
+        if "Workflow" in denied and harness.ULTRACODE in efforts:
+            denied.discard("Workflow")
+            notes.append("Workflow kept: effort ultracode orchestrates workflows")
+        denied |= split_denied_tools(args)[0]
+        flags = [f"--disallowedTools={' '.join(sorted(denied))}"] if denied else []
+        if listing == "names" and _flag_value(args, "--settings") is not None:
+            notes.append("skill_listing withheld: --settings already given")
+        elif listing == "names":
+            flags += ["--settings", SKILL_NAMES_SETTINGS]
+        return harness.ToolPolicy(
+            args=flags, notes=notes, denied=sorted(denied), skill_listing=listing, applied=True
+        )
 
     def model_args(self, model: str | None, effort: str | None) -> list[str]:
         self.validate(model, effort)

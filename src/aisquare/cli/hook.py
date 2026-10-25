@@ -221,6 +221,27 @@ def hand_over(
         return
 
 
+@app.command("compact-check", hidden=True)
+def compact_check(
+    session_id: Annotated[str, typer.Argument(help="The manager's session id.")],
+    cursor: Annotated[int, typer.Option("--cursor", help="Its board cursor when its turn ended.")],
+    token: Annotated[str, typer.Option("--token", help="The arm token its Stop wrote.")],
+) -> None:
+    """The detached half of a quiet compaction (no output; started by ``stop``).
+
+    Not a Claude Code hook: ``stop`` starts this in a worker of its own session for a
+    manager whose turn ended quietly (P1 WS-4, #281). It waits, asks every condition again,
+    and types ``/compact`` only into an idle prompt with an empty input box. Silent like
+    every hook; a refusal is kept in ``team_meta``, a compaction that never came is a board
+    line.
+    """
+    try:
+        hooks_service.compact_check(session_id, cursor=cursor, token=token)
+    except Exception as exc:  # nothing else to disrupt: the manager was not touched
+        _cost_of_failing_open("compact-check", exc, cost="the manager was not compacted")
+        return
+
+
 @app.command("notification")
 def notification() -> None:
     """A Claude Code notification (no output): a real prompt rings the bell, an idle notice not.

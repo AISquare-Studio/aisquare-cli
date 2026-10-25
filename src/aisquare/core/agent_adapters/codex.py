@@ -53,6 +53,7 @@ from aisquare.core.agent_adapters.types import (
     store_read_only,
 )
 from aisquare.core.codex_accounts import CodexAccounts, _records_from_end, approvals_reviewer
+from aisquare.core.config import FleetSettings
 from aisquare.core.paths import expand_user
 from aisquare.core.pricing import Price
 
@@ -1037,6 +1038,25 @@ class CodexAdapter:
         in 0.162.1) and its bundled browser plugin, read by ``aisquare doctor``
         (:meth:`browser_tools`), not a flag; Claude Code's ``--chrome`` is not Codex's."""
         return harness.RoleDefaults()
+
+    def tool_policy(
+        self,
+        role: str,
+        *,
+        binary: str,
+        args: Sequence[str],
+        fleet: FleetSettings,
+        effort: str | None = None,
+    ) -> harness.ToolPolicy:
+        """Withheld, with a note: Codex has no tool deny list and no skill-listing setting;
+        what its tools may do is its sandbox's and approvals' (the role's ``permission``,
+        :meth:`permission_args`)."""
+        return harness.withheld_policy(
+            role,
+            binary,
+            fleet,
+            why=f"runs {self.label}, whose tools are its sandbox's and approvals'",
+        )
 
     def model_args(self, model: str | None, effort: str | None) -> list[str]:
         effort = self.reasoning_effort(effort)

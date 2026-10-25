@@ -79,21 +79,50 @@ def first_turn_tokens(path: Path) -> int | None:
     ``ok`` doctor line and a silent spawn for exactly the machine being refused.
     """
     for entry in _head_entries(path):
-        if entry.get("type") != "assistant" or entry.get("isApiErrorMessage") is True:
-            continue
-        message = entry.get("message")
-        if not isinstance(message, dict) or message.get("model") == _SYNTHETIC_MODEL:
-            continue
-        usage = message.get("usage")
-        if not isinstance(usage, dict):
-            continue
-        total = 0
-        for field in _USAGE_FIELDS:
-            value = usage.get(field)
-            if isinstance(value, int) and not isinstance(value, bool):
-                total += value
-        return total
+        tokens = request_tokens(entry)
+        if tokens is not None:
+            return tokens
     return None
+
+
+def request_tokens(entry: dict[str, Any]) -> int | None:
+    """The input size of one ``assistant`` entry's request — ``input_tokens +
+    cache_creation_input_tokens + cache_read_input_tokens`` — or ``None`` for an entry
+    that is no request: another type, no usage, or Claude Code's own synthetic one."""
+    if entry.get("type") != "assistant" or entry.get("isApiErrorMessage") is True:
+        return None
+    message = entry.get("message")
+    if not isinstance(message, dict) or message.get("model") == _SYNTHETIC_MODEL:
+        return None
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    total = 0
+    for field in _USAGE_FIELDS:
+        value = usage.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            total += value
+    return total
+
+
+def latest_context_tokens(path: Path, *, tail_bytes: int = _TAIL_BYTES) -> int | None:
+    """How large the session's context is now: the input size (:func:`request_tokens`) of
+    the LAST request in the transcript. ``None`` when it has none, or cannot be read.
+
+    Read from the tail, which grows (four times over, up to the whole file) while it holds
+    no request: one turn's tool results can outweigh ``tail_bytes``.
+    """
+    size_now = size(path)
+    window = tail_bytes
+    while True:
+        latest: int | None = None
+        for entry in _tail_entries(path, window):
+            tokens = request_tokens(entry)
+            if tokens is not None:
+                latest = tokens
+        if latest is not None or window >= size_now:
+            return latest
+        window *= 4
 
 
 def refusal_count(path: Path, *, tail_bytes: int = _TAIL_BYTES, since: int = 0) -> int:

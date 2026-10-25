@@ -98,7 +98,7 @@ adapter.**
   *App settings ▸ Advanced*'s *user coding agent* is now the **fallback coding agent**:
   the agent when no account is usable (no one signed in, an API key, the accounts
   unreadable). `claude_accounts.choose_any` is the cross-agent pick a hand-over can ask.
-- **Main's reliability train (#295) reaches Codex agents too.** A spawn's first message,
+- **Main's reliability (#295) and token-diet (#296) trains reach Codex agents too.** A spawn's first message,
   a `--task` kickoff included, goes on Codex's command line from the same file Claude
   Code's does, never in the window's command, and Codex's `UserPromptSubmit`
   acknowledges it. One that never starts a turn stays `pending`, not `attention`: Codex's
@@ -111,37 +111,45 @@ adapter.**
   honours `[accounts] prefer`, the limit marks, and a model family's week for that
   family's agents alone. Every line the fleet types still goes in as one paste with its
   Enter 0.2 s later, without its control characters, never over a draft (a Codex pane
-  is typed into only at its empty prompt).
+  is typed into only at its empty prompt). From #296: a role's tool policy is Claude
+  Code's flags (`AgentAdapter.tool_policy`), withheld for a Codex role with a note, since
+  what Codex's tools may do is its sandbox's and approvals'; a role's `board_context`
+  reaches a Codex window and its launch record; the fleet's model ladder gives a Codex
+  spawn its own pins and none of Claude Code's. The quiet-point compaction types Claude
+  Code's `/compact` and is armed only for an agent that `capabilities.compacts_on_command`
+  says takes it, and `metrics ledger` reads Claude Code's transcripts: both are Claude
+  Code's alone for now (open items).
 
 **Upgrading:**
-- The store migrates to schema v42 on first open, from main's v36 (0.8.2's v32 through
-  #274's two steps and #295's one first, and 0.8.0's v25 through 0.8.1's seven steps
-  before those). v33 is the persona columns, v34 `fleet_agent.ended_by`, v35 the
-  token-usage tables and v36 the first message's three columns (see Changed and Fixed);
-  this line's six steps come after them, and only add, but for one repair: v37 adds
-  `team_session.agent`, `team_session.native_session_id` and `fleet_agent.agent` (rows
-  Claude Code made are marked `claude-code`); v38 adds `team_meta.updated_at`, dated by a
-  trigger on every write, for the launch-metadata cleanup; v39 repairs rows dated 0 by
-  stores made from this branch while it was in review; v40 adds the `agent_account`
-  table for Codex account slots, kept apart from `claude_account` so an older build never
-  prunes them; v41 adds `claude_usage.windows`, every window of a usage reading, so the
-  five-minute usage cache serves an agent whose windows are not a five-hour and a weekly
-  one what it read (a reading recorded before reads NULL there, its session and week as
-  they were); v42 adds `account_rank`, the one priority order over every agent's
-  accounts, seeded on the first read with the fallback coding agent's accounts first and
-  each agent's in the order it had, so no launch changes agent on the upgrade (a build
-  before v42 sharing the store keeps each agent's own order, and an account it adds is
-  ranked last). A store a build of this branch took to v40 or v41 before #295 was merged
-  (these steps as v36-v40 or v36-v41) has no first-message columns: its first open here
-  adds them (NULL, "not tracked"), then runs the later steps, which add only what it
-  lacks. One it took to v38 before #274 was merged (these five steps as v34-v38) has
-  neither `ended_by` nor the usage tables nor the first-message columns: its first open
-  here adds them, then runs v39 to v42 again, which add only the one order's table. Main
-  at v36 or v35, 0.8.2, 0.8.1 and 0.8.0 open a v42 store as it is. A store a build of
-  this branch stamped before 0.8.2 was merged (v33-v36 for these steps) has no persona
-  columns; its first open here adds them. One it stamped v26-v29 before 0.8.1 was merged,
-  without 0.8.1's v26-v29, gets those too (task numbers, nicknames, the usage-reading
-  fingerprint and the agents' server start time and board included) before it goes on.
+- The store migrates to schema v43 on first open, from main's v37 (0.8.2's v32 through
+  #274's two steps, #295's one and #296's one first, and 0.8.0's v25 through 0.8.1's seven
+  steps before those). v33 is the persona columns, v34 `fleet_agent.ended_by`, v35 the
+  token-usage tables, v36 the first message's three columns and v37 a board event's
+  `actor` and `meta` (see Changed and Fixed); this line's six steps come after them, and
+  only add, but for one repair: v38 adds `team_session.agent`,
+  `team_session.native_session_id` and `fleet_agent.agent` (rows Claude Code made are
+  marked `claude-code`); v39 adds `team_meta.updated_at`, dated by a trigger on every
+  write, for the launch-metadata cleanup; v40 repairs rows dated 0 by stores made from
+  this branch while it was in review; v41 adds the `agent_account` table for Codex account
+  slots, kept apart from `claude_account` so an older build never prunes them; v42 adds
+  `claude_usage.windows`, every window of a usage reading, so the five-minute usage cache
+  serves an agent whose windows are not a five-hour and a weekly one what it read (a
+  reading recorded before reads NULL there, its session and week as they were); v43 adds
+  `account_rank`, the one priority order over every agent's accounts, seeded on the first
+  read with the fallback coding agent's accounts first and each agent's in the order it
+  had, so no launch changes agent on the upgrade (a build before v43 sharing the store
+  keeps each agent's own order, and an account it adds is ranked last). A store a build of
+  this branch took to v40 or v41 before #295 was merged (these steps as v36-v40 or
+  v36-v41) has neither the first-message columns nor the event actor: its first open here
+  adds them (NULL: "not tracked", no actor), then runs the later steps, which add only what
+  it lacks. One it took to v38 before #274 was merged (these five steps as v34-v38) lacks
+  `ended_by` and the usage tables too: its first open here adds them all, then runs v39 to
+  v43, which add only the one order's table. Main at v37, v36 or v35, 0.8.2, 0.8.1 and
+  0.8.0 open a v43 store as it is. A store a build of this branch stamped before 0.8.2 was
+  merged (v33-v36 for these steps) has no persona columns; its first open here adds them.
+  One it stamped v26-v29 before 0.8.1 was merged, without 0.8.1's v26-v29, gets those too
+  (task numbers, nicknames, the usage-reading fingerprint and the agents' server start
+  time and board included) before it goes on.
 - Codex runs no hook until you trust it. After `agents connect codex`,
   `install.sh --agent codex`, a Codex account's sign-in, or an `aisquare
   upgrade` that changes the hook definition, open `/hooks` in Codex and trust
@@ -297,7 +305,7 @@ adapter.**
   there says so rather than that the pack is opt-in (a pack of it left from before
   is not served, and the next onboard or `init` deletes it). Removing it from the
   fleet hides it again. Every other role, fleet row and board, and the store
-  (schema v42), are the same either way. Four fleet changes that came with it are
+  (schema v43), are the same either way. Four fleet changes that came with it are
   not behind the switch, on or off: a tmux server the fleet starts holds no team
   variable, doctor's `fleet server env` row, the board each delta and wake-up line
   names, and `serve --stdio`'s idle clock (all under Fixed, below).
@@ -773,6 +781,44 @@ adapter.**
   reaches a Codex agent as Ctrl-J, since Codex submits on Shift-Enter, and a
   Claude Code agent as Shift-Enter, or as Ctrl-J on a tmux older than 3.5.
 
+- **`aisquare metrics ledger`: what each agent session spent in tokens, counted
+  live from its transcript.** Beside `metrics tokens` (the usage the hooks record, with
+  its cost), it reads each session's Claude Code transcript and prints one row per
+  session and a total:
+  requests, input (fresh, cache write and cache read), output, the baseline (the
+  first request), peak and mean context, wakes and the ones that took no action,
+  the team-delta blocks with their characters and carried cost, compactions, and
+  tool calls by name. `--json` gives every field; `--role`, `--session` and
+  `--since` narrow it. It prints counts, never text, and streams a transcript of
+  any size a line at a time. This is the ruler the P1 workstreams report their
+  before/after numbers with (`docs/plans/handoff-p1-token-diet.md` §1.7).
+- **One tester per task, and `fleet spawn` runs the model ladder** (#129 a, b).
+  `aisquare task next --task <ref>` returns that task when it is in `--status` and
+  ready, and nothing else. A tester or ui-tester spawned for a task (`fleet spawn tester
+  --task <id>`) verifies that one task and stops after its verdict; the manager spawns one
+  per task at its review, and the validator stays the single final gate. `fleet spawn`
+  runs the role's model ladder, as `team spawn` does: `--model` and `--effort` from the
+  cached probe (never a probe at spawn), recorded so a restart or switch starts the same
+  model, and shown in `fleet ls --json`'s `launch_spec`. Arguments that already name a
+  model or an effort are yours, and another binary gets neither.
+- **A manager starts from its start pack, cites briefs by path, and can be compacted at
+  a quiet point** (#281). At every session start, compactions and restarts included, a
+  manager is given its state file (`~/.aisquare/projects/<id>/manager/state.md`), every
+  open task, unanswered questions, live agents, the wake events waiting for it, and the
+  project's `.aisquare/rules/*.md` by path, in at most 20,000 characters, instead of the
+  plain board and the re-reading that followed; its cycle asks it to keep that file
+  current and to cite scripts and rules by path rather than paste them. `aisquare task
+  add --detail-file <path>` and `--rules testing,git` read a contract from a file and
+  cite rules files by path (a rules file that does not exist refuses the add), and
+  `[team] brief_blocks` (`objective`, `acceptance`, `boundaries`) warns about a contract
+  missing one, or refuses it under `[team] brief_strict = true`. Quiet-point compaction
+  ships off: with `[fleet] quiet_compact_at` set (400000 is a good start), a manager whose
+  turn ends with nothing pending, no question and a fresh state file is sent `/compact`
+  after `quiet_compact_delay` seconds, only into an idle prompt with an empty input box
+  and never while someone types in its pane, at most once per `quiet_compact_cooldown`
+  minutes, and its row reads `waiting` afterwards. Claude Code's own auto and idle
+  compaction are left as they are.
+
 ### Changed
 
 - **App settings shows the bare minimum, and Remote and the Captain live in it** (#41,
@@ -841,9 +887,53 @@ adapter.**
   nothing read it, and `uv run --frozen` failed on every persona path for want of
   `pyyaml`. The `voice` extra had drifted the same way since (the xdist change
   relocked it). A dependency change without its relock now fails CI.
-- Main's four store steps after 0.8.2's v32, the first of the v42 migration under
-  **Upgrading**: v36
-  adds the first message's three columns (under Fixed; a store a pre-release build
+- **A manager wakes for decisions, not news** (#279, #214). A clean exit, a switch, a
+  restart and the manager's own `fleet stop` no longer cost it a turn: they wait past its
+  cursor and ride along with the next wake. An exit still wakes it when it failed, was
+  killed or lost, released a claim, or was a hand-over that did not start, and asq's
+  Stop on an agent that exits cleanly types no nudge into a waiting manager. Every board
+  update an agent reads is one line, `#<seq> <who> <kind>[ #<task>]: <first line>`, with
+  the board named once in the block's header; `aisquare team show <seq>` prints one in
+  full (who wrote it and who caused it, the task, the addressee, its details and the
+  whole text), and the human board (`aisquare board`) keeps full text. `fleet stop --as
+  SESSION` records who stopped an agent, and every `agent_exited` names it (`coder-auth
+  exited (0) — stopped by manager`, `(--force)`) with its status, the claims its end
+  released and `--force` in its details; a stop with no `--as` acts for the fleet window
+  it runs in, else for `user`. `[fleet.roles.<role>] board_context = "all" | "relevant" |
+  "none"` and `fleet spawn --board-context`, kept by `restart` and `switch`, set what of
+  the board an agent reads: `relevant` keeps its own tasks, what is addressed to its role
+  or label, and decisions; `none` gives no recent updates at start and no deltas, and at
+  its turn's end only the notes addressed to it. The reviewer's default is `none`, so it
+  judges a change cold; a manager reads `all`, and doctor says when its key says
+  otherwise. The store moves to schema v37 for the events' `actor` and `meta` columns,
+  added by presence and nullable, so an older row reads as no actor and no details.
+- **Fleet roles launch without eight tools no role uses** (#280). Every tool
+  schema and the skill listing ride every request of every agent, so each role now
+  launches with only what it uses, wherever it starts: `fleet spawn`, `team spawn`
+  and `aisquare launch <role>`. `[fleet] deny_tools` denies Artifact,
+  ArtifactComments, Workflow, ReportFindings, ShareOnboardingGuide,
+  PushNotification, ScheduleWakeup and SendFeedback by default. Each
+  `[fleet.roles.<role>]` table takes `deny_tools`, `allow_tools` (the one way to
+  hand a tool back) and `skill_listing`: `full` for the manager, and `names` for
+  every other role, which keeps every skill name with its description cut. Every
+  `--disallowedTools` on the line is merged into one sorted token. On Claude Code
+  2.1.309, `/context` in a fresh coder read 9.9k tokens where it read 26.9k (tools
+  21.6k → 7.4k, skills 2.5k → 100), and every request of the session carries that.
+  A launch at `ultracode` effort keeps Workflow, which ultracode orchestrates with.
+  `aisquare doctor` has a `<role> tools` row for each role. The config file moves
+  to version 3, once: a reviewer whose `extra_args` are exactly 0.8.2's default
+  loses them, since the deny is the role's own now. Moving back with `aisquare
+  upgrade --version` to 0.8.2 or earlier names each role that release would launch
+  with tools denied here, with the `config set` that keeps them denied there.
+  A reviewer's own `extra_args` no longer drops its Edit/Write deny list either: the
+  deny was the reviewer's default `extra_args`, and a list replaces whole, so setting
+  them launched the reviewer with Edit, Write and NotebookEdit, and `aisquare launch
+  reviewer` and `team spawn reviewer` denied it nothing at all.
+- Main's five store steps after 0.8.2's v32, the first of the v43 migration under
+  **Upgrading**: v37 adds `team_event.actor` and `team_event.meta`, who caused a board
+  event and its details (above; a store the pre-release P1 train stamped v35 with them
+  reaches v37 through the presence pass). v36 adds the first message's three columns
+  (under Fixed; a store a pre-release build
   stamped v34 with them reaches v36 through the presence pass, as #346's does). v35
   adds two tables, `usage_session` and `usage_turn`, for `aisquare metrics tokens`. v34
   adds `fleet_agent.ended_by`, how an agent's row ended (`stopped` on aisquare's word,
@@ -1247,6 +1337,9 @@ adapter.**
 - **The soft-cap warning names a command that works:** `persona import <its folder>
   --condense --force`, with `--project` for a project persona. `--condense` alone
   keeps the persona's name, which the persona itself holds, and was refused.
+- *Superseded on `main` by #346, not in this release:* the P1 train's change to
+  when session start says to read the snapshot skeleton first (#282). `main` no
+  longer points agents at the pack at all, so there is no directive left to change.
 
 - Remote's Interrupt & tell types its line with no Esc into a Codex agent whose
   screen shows its empty prompt with no turn running. It always pressed Esc

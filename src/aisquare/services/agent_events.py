@@ -207,6 +207,8 @@ def _dispatch(
             stop_hook_active=event.stop_hook_active,
             model=event.model,
             effort=event.effort,
+            last_message=event.message,
+            permission_mode=event.permission_mode,
             transcript_path=usage,
             agent=adapter.id,
         )

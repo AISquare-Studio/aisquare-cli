@@ -114,6 +114,21 @@ def delta_enabled() -> bool:
     return _flag_on("AISQUARE_TEAM_DELTA")
 
 
+BOARD_CONTEXT_ENV_VAR = "AISQUARE_BOARD_CONTEXT"
+"""What of the board an agent reads (P1 WS-2, #279): ``all``, ``relevant`` or ``none``.
+``fleet spawn`` sets it on the window from ``[fleet.roles.<role>] board_context`` or
+``--board-context``; ``launch`` and ``team spawn`` honour it from the shell."""
+
+BOARD_CONTEXTS: tuple[str, ...] = ("all", "relevant", "none")
+
+
+def board_context() -> str:
+    """:data:`BOARD_CONTEXT_ENV_VAR`'s value, ``all`` when unset or not one of
+    :data:`BOARD_CONTEXTS` (the board as before #279)."""
+    raw = os.environ.get(BOARD_CONTEXT_ENV_VAR, "").strip().lower()
+    return raw if raw in BOARD_CONTEXTS else "all"
+
+
 def lease_minutes() -> int:
     """Claim-lease length in minutes (``AISQUARE_TEAM_LEASE_MIN``)."""
     raw = os.environ.get("AISQUARE_TEAM_LEASE_MIN", "")

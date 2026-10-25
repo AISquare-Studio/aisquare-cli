@@ -1850,7 +1850,7 @@ def stop(
         if refusal is not None:
             raise refusal
         before = _seq_now(on.id)
-        receipt = fleet.stop(on, label, force=force)
+        receipt = fleet.stop(on, label, force=force, actor="user")  # the owner's word
         exited = _effect_seq(on.id, before, ("agent_exited",), _by_agent(receipt.agent))
         return Outcome(
             {

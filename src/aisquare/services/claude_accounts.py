@@ -272,7 +272,7 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
     slots and dropped for vanished ones, so the table can never describe an
     account that is not there. Each agent's rows keep its own ranking
     (``claude_account``, ``agent_account``), and :func:`_ranked` lays all of them
-    in one order across agents (store v41): ``position`` is the place in it.
+    in one order across agents (store v43): ``position`` is the place in it.
     """
     listed = core.list_accounts()
     arranged: list[ClaudeAccount] = []
@@ -298,7 +298,7 @@ def _ranked(store: ContextStore, arranged: Sequence[ClaudeAccount]) -> list[Clau
     """``arranged`` (each agent's slots in its own order) in the one order across agents.
 
     The ranked slots by their rank, then any slot with none (added by a build before
-    store v41, or just now) after them, each agent's in its own order. A store that has
+    store v43, or just now) after them, each agent's in its own order. A store that has
     ranked nothing yet (one coming from v40 or older) is seeded with the user's coding
     agent's accounts first and every other agent's after, as they were listed, so the
     upgrade changes no launch's agent (owner, PR #113). Written only when it changed.

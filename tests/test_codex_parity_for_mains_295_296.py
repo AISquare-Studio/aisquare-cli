@@ -1,5 +1,5 @@
-"""Codex parity for main's #295 features (SCOPE #113 295), on the fleet's fake tmux and
-Codex's own hook payloads.
+"""Codex parity for main's #295 and #296 features (SCOPE #113 295+296), on the fleet's fake
+tmux and Codex's own hook payloads.
 
 - W1a, the first message: a Codex spawn's first message, a ``--task`` kickoff included, rides
   its command line from the file ``launch`` reads and deletes (``--first-prompt-file``), as
@@ -12,6 +12,10 @@ Codex's own hook payloads.
   pick (``choose_any``): a Codex limit mark keeps the pick off that account until its reset;
   a family's mark keeps it off for that family's agents alone; ``reset-soonest`` takes the
   account whose week resets first, of either agent.
+- #296: WS-1's tool policy is Claude Code's flags, withheld for Codex with a note (its tools
+  are its sandbox's and approvals'); WS-2's board context reaches a Codex window and its
+  launch record; WS-5ab's ladder gives a Codex spawn none of Claude Code's model flags; and
+  WS-4's quiet compaction is never armed from a Codex Stop (``compacts_on_command``).
 """
 
 from __future__ import annotations
@@ -23,7 +27,9 @@ from typing import Any
 
 import pytest
 
+from aisquare.core import harness, orchestrator
 from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.config import FleetSettings
 from aisquare.core.store import store_session
 from aisquare.models import (
     ClaudeAccount,
@@ -34,7 +40,7 @@ from aisquare.models import (
     UsageWindow,
 )
 from aisquare.services import claude_accounts as service
-from aisquare.services import delivery, pane_idle
+from aisquare.services import delivery, pane_idle, quiet_compact
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
@@ -276,3 +282,56 @@ def test_prefer_reset_soonest_takes_the_week_that_resets_first_across_agents(
     pick = service.choose_any()
     assert _slot(pick) == codex.slot and pick.agent == CODEX
     assert any("resets first" in note for note in pick.notes)
+
+
+# --- #296: WS-1 tool policy, WS-2 board context, WS-5ab ladder, WS-4 quiet compaction ----------
+
+
+def test_the_tool_policy_is_withheld_for_codex_with_a_note() -> None:
+    args = ["--sandbox", "read-only"]
+    policy = harness.tool_policy("reviewer", binary="codex", args=args, fleet=FleetSettings())
+
+    assert (policy.args, policy.applied) == ([], False)
+    assert policy.strip(args) == args, "Codex's own flags are its own"
+    (note,) = policy.notes
+    assert "withheld" in note and "runs Codex" in note and "Edit" in note
+
+
+def test_a_codex_reviewer_reads_no_board_and_its_record_keeps_that(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    agent = fleet_service.spawn(project, "reviewer", agent="codex", worktree=False).agent
+
+    env = tmux.spawned[-1]["env"]
+    assert isinstance(env, dict) and env[orchestrator.BOARD_CONTEXT_ENV_VAR] == "none"
+    assert agent.launch_spec is not None and agent.launch_spec.board_context == "none"
+
+
+def test_a_codex_spawn_gets_none_of_claude_codes_ladder(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+
+    command = _command(tmux)
+    assert "--effort" not in command and "--model" not in command, command
+    assert agent.launch_spec is not None and agent.launch_spec.model is None
+
+
+def test_a_codex_stop_never_arms_the_quiet_compaction(
+    codex_agent: tuple[Codex, TeamTask],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    armed: list[str] = []
+    monkeypatch.setattr(quiet_compact, "arm", lambda session_id, **_: armed.append(session_id))
+    codex, _ = codex_agent
+    codex.start(THREAD_ONE)
+    codex.hook("UserPromptSubmit", THREAD_ONE, turn_id="turn-1", prompt="start on it")
+
+    codex.hook("Stop", THREAD_ONE, turn_id="turn-1")
+
+    assert armed == [], "`/compact <instructions>` is Claude Code's (compacts_on_command)"
+    assert get_adapter("claude-code").capabilities.compacts_on_command

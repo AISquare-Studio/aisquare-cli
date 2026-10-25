@@ -181,7 +181,9 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
         # (review of #138).
         agent_id = self.status.agent.id
         self.run_worker(
-            lambda: fleet_service.stop(self.project, label, force=force, agent_id=agent_id),
+            lambda: fleet_service.stop(
+                self.project, label, force=force, agent_id=agent_id, actor="user"
+            ),
             name=STOP_WORKER,
             group=STOP_WORKER,
             thread=True,

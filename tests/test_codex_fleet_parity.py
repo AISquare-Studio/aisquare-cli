@@ -2411,7 +2411,9 @@ def test_a_codex_reviewer_on_the_built_in_config_spawns_without_the_legacy_note(
     no operator chose — a Codex manager read it in its tool output on every spawn."""
     config = load_config()
     reviewer = config.fleet.roles["reviewer"].model_copy(update={"worktree": False})
-    assert reviewer.extra_args == list(REVIEWER_ARGS), "what init writes"
+    # What init writes: since config version 3 the reviewer's deny is the role's own (#280),
+    # not its extra_args, so a Codex reviewer's has nothing of Claude Code's to warn about.
+    assert reviewer.extra_args == [], "what init writes"
     config.fleet.roles["reviewer"] = reviewer
     save_config(config)
 
@@ -2422,7 +2424,9 @@ def test_a_codex_reviewer_on_the_built_in_config_spawns_without_the_legacy_note(
 
     assert not [note for note in [*on_codex.notes, *on_claude.notes] if "Legacy" in note]
     assert REVIEWER_ARGS[0] not in codex, "Claude Code's flag, never Codex's"
-    assert claude.count(REVIEWER_ARGS[0]) == 1, "Claude Code's reviewer keeps it"
+    # Claude Code's reviewer keeps its deny: the role's own, which its window's `launch`
+    # adds (`harness.tool_policy`), so the spawn's command carries none of it.
+    assert REVIEWER_ARGS[0] not in claude
     # The operator's own legacy arguments still say where Codex's go.
     config.fleet.roles["reviewer"] = reviewer.model_copy(
         update={"extra_args": [*REVIEWER_ARGS, "--model", "opus"]}

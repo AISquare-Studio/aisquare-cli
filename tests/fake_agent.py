@@ -72,6 +72,7 @@ from aisquare.core.agent_adapters.types import (
 from aisquare.core.agent_adapters.usage_tally import Tally, carries_context, trace
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice
 from aisquare.core.claude_sharing import SharingError, TrustScope
+from aisquare.core.config import FleetSettings
 from aisquare.core.pricing import Price, RequestTokens
 from aisquare.core.usage import Usage
 from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
@@ -604,6 +605,19 @@ class FakeAgentAdapter:
 
     def role_defaults(self, role: str, *, binary: str, args: Sequence[str]) -> harness.RoleDefaults:
         return harness.RoleDefaults()
+
+    def tool_policy(
+        self,
+        role: str,
+        *,
+        binary: str,
+        args: Sequence[str],
+        fleet: FleetSettings,
+        effort: str | None = None,
+    ) -> harness.ToolPolicy:
+        return harness.withheld_policy(
+            role, binary, fleet, why="runs the fake agent, which has none"
+        )
 
     def model_args(self, model: str | None, effort: str | None) -> list[str]:
         self.validate(model, effort)

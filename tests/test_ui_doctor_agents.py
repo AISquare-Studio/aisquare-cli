@@ -86,6 +86,11 @@ def test_connect_is_one_click_and_the_planned_agents_have_no_button(
             await settle_page(host)
             before = _labels(view)
             button_id = next(key for key, label in before.items() if label == connect_label)
+            # Scrolled into view first, as a person would: a report with more rows (another
+            # train's doctor rows, Windows' own) put the button below the 60-row screen, and
+            # the pilot cannot click what is not shown (OutOfBounds on #296's Windows leg).
+            view.query_one(f"#{button_id}").scroll_visible(animate=False)
+            await settle_page(host)
             await pilot.click(f"#{button_id}")
             await settle_page(host)
             report = str(view.query_one("#doctor-report", Static).render())

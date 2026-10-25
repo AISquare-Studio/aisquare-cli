@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from aisquare.core.agent_adapters.transcripts import PendingTool, TranscriptTail
     from aisquare.core.claude_accounts import FailedTurn, LimitNotice
     from aisquare.core.claude_sharing import TrustScope
+    from aisquare.core.config import FleetSettings
     from aisquare.core.pricing import Price, RequestTokens
     from aisquare.core.usage import Usage
     from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
@@ -336,6 +337,11 @@ class AgentCapabilities:
     model_ladders: bool = False
     """AISquare's role model ladder and its probe choose the model (Claude Code); an
     agent without keeps its native default unless a model is pinned."""
+    compacts_on_command: bool = False
+    """``/compact <instructions>`` typed at its idle prompt compacts the session, and the
+    compaction's ``SessionStart`` (source ``compact``) says it did: what P1 WS-4's quiet-point
+    compaction of a manager types and waits for (``services.quiet_compact``, Claude Code's).
+    An agent without is never compacted from here."""
     positional_prompt: bool = False
     """The first prompt is a positional argument, after ``--`` (Claude Code, Codex): a spawn's
     first message goes on its command line (``services.delivery.first_prompt_way``, through a
@@ -601,6 +607,9 @@ class AgentEvent:
     error: str | None = None
     message: str | None = None
     details: str | None = None
+    permission_mode: str | None = None
+    """The permission mode a ``stop`` ran under, where the agent's hook says (Claude Code's
+    ``permission_mode``): plan mode is no quiet point to compact at (P1 WS-4)."""
     notification_type: str | None = None
 
 
@@ -1284,6 +1293,21 @@ class AgentAdapter(Protocol):
     def role_defaults(self, role: str, *, binary: str, args: Sequence[str]) -> harness.RoleDefaults:
         """The flags ``role`` needs on this agent wherever it starts (the ui-tester's
         browser), less what ``args`` already says, with a note for each it withholds."""
+        ...
+
+    def tool_policy(
+        self,
+        role: str,
+        *,
+        binary: str,
+        args: Sequence[str],
+        fleet: FleetSettings,
+        effort: str | None = None,
+    ) -> harness.ToolPolicy:
+        """How a launch of ``role`` on this agent carries the role's deny set and skill
+        listing (``harness.denied_for``, P1 WS-1, #280): its own flags, every deny already in
+        ``args`` folded into them; or none, with a note (``harness.withheld_policy``), for an
+        agent whose tools its permission decides."""
         ...
 
     def permission_args(

@@ -47,7 +47,7 @@ from aisquare.cli.native_args import NativeForwardingCommand as LaunchCommand
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import experimental, harness, orchestrator, paths, personas
 from aisquare.core.agent_adapters.types import BadEffortError, LaunchPart
-from aisquare.core.config import load_config
+from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
 from aisquare.services import agent_launch, delivery, explainability_ops
@@ -242,6 +242,18 @@ def _persona_system_prompt(
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
     """Replace this process with the agent (indirection so tests can intercept)."""
     os.execve(binary, argv, env)
+
+
+def _fleet() -> FleetSettings:
+    """The ``[fleet]`` settings the role's tool policy reads; the built-in ones, said, when the
+    config cannot be read. A role's safety list is code, so it holds either way."""
+    try:
+        return load_config().fleet
+    except Exception as exc:  # the same fail-open bar as tracing's config read
+        stderr_console().print(
+            f"tool policy: config unreadable ({exc}) — the built-in deny list", style="dim"
+        )
+        return FleetSettings()
 
 
 def _await_fleet_row(*, say: bool = True) -> None:
@@ -596,14 +608,26 @@ def launch(
     defaults = selected.adapter.role_defaults(
         role, binary=resolution.binary, args=[*profile.args, *ctx.args]
     )
-    role_args = defaults.args
-    for note in defaults.notes:
+    # The role's tools and skill listing (`harness.tool_policy`), here as in `team spawn`
+    # and every fleet window (whose `extra_args` arrive in `ctx.args`): its safety list
+    # holds whatever the config says, and every `--disallowedTools` the binding or this
+    # line carries is merged into ONE token beside the role's own flags.
+    policy = harness.tool_policy(
+        role, binary=resolution.binary, args=[*profile.args, *ctx.args], fleet=_fleet()
+    )
+    role_args = [*defaults.args, *policy.args]
+    binding_args, agent_args = policy.strip(profile.args), policy.strip(ctx.args)
+    for note in [*defaults.notes, *policy.notes]:
         # A withheld flag is otherwise invisible: the launch succeeds and the
         # role degrades silently (a ui-tester with no browser reopens every UI
         # task). Same surface and style as the tracing notes below.
         stderr_console().print(f"{role}: {note}", style="dim")
     try:
-        arguments = agent_launch.prepare_arguments(selected, [*role_args, *profile.args], ctx.args)
+        # The binding's and this line's arguments less the `--disallowedTools` the policy
+        # folded into its one token (`ToolPolicy.strip`).
+        arguments = agent_launch.prepare_arguments(
+            selected, [*role_args, *binding_args], agent_args
+        )
         native_model = agent_launch.launch_model_for(selected, role, arguments)
         for message in native_model.notes if native_model else []:
             stderr_console().print(message, markup=False)

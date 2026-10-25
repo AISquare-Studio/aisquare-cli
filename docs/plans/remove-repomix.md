@@ -237,11 +237,14 @@ own any more.
 
 ## Follow-ups
 
-- Drop `--with tiktoken` from `install.sh` (its comment above `install_cli` says why it
-  stays), the cells' run 4, Remote's fallback hint and `docs/install.md`'s by-hand line,
-  and `RELEASE_ERA_AMBER` with it, once a release without those doctor rows is the
-  latest on PyPI: 0.9.0, the release that ships this script, so it can go in the first
-  change after 0.9.0 is on PyPI.
+- Narrow `install.sh`'s `--with tiktoken` (its comment above `install_cli` says why it
+  stays) and `RELEASE_ERA_AMBER` to an install of a version below 0.9.0: gated on the
+  version being installed, never on a date. With 0.9.0 the latest on PyPI, main's
+  script still installs a `--version 0.8.2` pin (0.8.2 has no installer to hand off
+  to), and without `RELEASE_ERA_AMBER` that run on Debian 12's Node 18 exits 2 on
+  `repomix` again (review of #399, cycle 1's MAJOR-1; cycle 6's m15). The lines that
+  install the latest release, the cells' run 4, Remote's fallback hint and
+  `docs/install.md`'s by-hand line, can drop tiktoken once 0.9.0 is the latest.
 - The decks still say session start hands over the project's prompt history; #346 removed
   that line too. Left for the owner, with the generator's templates.
 - `install.sh`'s short-circuit does not look at the project: a current machine set up with

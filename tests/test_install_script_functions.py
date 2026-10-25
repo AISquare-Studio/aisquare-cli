@@ -1840,8 +1840,11 @@ _RELEASE_ROWS = ("brain repomix", "brain snapshot", "brain tiktoken", "brain rep
         "WANT_SYSTEM_DEPS=0",
         "WANT_PROJECT=0; PROJECT_DIR=",
         "WANT_SYSTEM_DEPS=0; WANT_PROJECT=0",
+        # `--version 0.8.2`: 0.8.2 has no installer to hand off to, so this script installs
+        # it, whatever the latest is (review of #399, cycle 6, m15).
+        "PIN_VERSION=0.8.2",
     ],
-    ids=["default", "no-system-deps", "no-project", "no-system-deps-no-project"],
+    ids=["default", "no-system-deps", "no-project", "no-system-deps-no-project", "pinned-0.8.2"],
 )
 def test_the_installed_releases_snapshot_rows_are_expected(
     tmp_path: Path, amber: str, flags: str
@@ -1850,7 +1853,8 @@ def test_the_installed_releases_snapshot_rows_are_expected(
     (amber with a Node below 22, which this script no longer upgrades unasked, or no
     npm), `snapshot` (0.8.2, with no project or no Node to pack with) and `tiktoken`.
     Review of #399, MAJOR 1: `--yes` on Debian 12's own Node 18 exited 2 on `repomix`.
-    They are expected, under every flag, and the summary says why in one line."""
+    They are expected, under every flag and for a pin below 0.9.0 even once 0.9.0 is the
+    latest, and the summary says why in one line."""
     result = _summary_then_handoff(tmp_path, f"{flags or ':'}; DOCTOR_AMBER='{amber}'")
 
     assert "UNEXPECTED=0" in result.stdout, result.stdout

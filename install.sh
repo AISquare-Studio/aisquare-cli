@@ -118,8 +118,10 @@ TRANSIENT_AMBER="claude-account-backoff"
 # Chrome DevTools extra is chosen; `snapshot` in 0.8.2 with no project or no Node
 # to pack with. Neither is a state this run caused or could fix. Measured by the
 # review of #399: `--yes` on Debian 12's own Node 18 exited 2 on `repomix`. The
-# same reasoning keeps `--with tiktoken` above install_cli; drop both once a
-# release without these rows (0.9.0 on) is the latest on PyPI.
+# same reasoning keeps `--with tiktoken` above install_cli. Neither goes by date:
+# with 0.9.0 the latest on PyPI, `--version 0.8.2` still installs a release with
+# these rows through THIS script (0.8.2 has no installer to hand off to). To
+# drop them, gate both on the version being installed: below 0.9.0 only.
 RELEASE_ERA_AMBER="repomix snapshot tiktoken"
 
 # --- options (§3.5) ---------------------------------------------------------
@@ -1329,9 +1331,10 @@ Open a new shell and rerun, or add it by hand:
 # that goes amber without it on a machine with Node, which the Chrome DevTools
 # extra makes.
 # Measured in the container matrix: run 4 upgraded to the release, its doctor
-# called tiktoken unexpected, and the run exited 2. Drop `--with tiktoken` here,
-# with RELEASE_ERA_AMBER and docs/install.md's by-hand line, once a release
-# without that row (0.9.0 on) is the latest on PyPI.
+# called tiktoken unexpected, and the run exited 2. Not to be dropped by date:
+# `--version 0.8.2` installs a release with that row through this script even
+# once 0.9.0 is the latest. Gate it, with RELEASE_ERA_AMBER, on the version
+# being installed (below 0.9.0) instead.
 
 install_cli() {
     _target=$INSTALL_TARGET

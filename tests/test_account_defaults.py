@@ -640,8 +640,11 @@ def test_a_headroom_pick_never_overrides_a_hand_written_config_dir_binding(
 
     # A hand-over still moves the agent: that is what it is for.
     assert service.choose(role="coder", project=work, spread=True).source == "headroom"
-    # The flag and an account binding still win over the hand-written directory.
+    # The flag, a project default and an account binding still win over the hand-written
+    # directory.
     assert service.choose("2", role="coder", project=work).source == "flag"
+    service.set_default("2", project=work)
+    assert service.choose(role="coder", project=work).source == "project default"
     settings_service.bind_role("coder", account="2")
     assert service.choose(role="coder", project=work).source == "role binding"
 

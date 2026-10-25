@@ -453,8 +453,9 @@ fleet still running, and every release now carries its own installer.**
   preferred account and over a headroom pick. That is a change where an older
   build set a machine default, or where headroom picks: either won over such a
   binding, and now the binding does, so that role launches on its own directory
-  after the upgrade. A hand-over still moves it. An old default that is signed out or
-  disabled no longer gets the launch: the next enabled, signed-in account does.
+  after the upgrade. A hand-over still moves it. An old default that is signed
+  out or disabled no longer gets the launch: the next enabled, signed-in account
+  does.
 - **A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and
   the suite on one Linux leg (py3.12), the Linux package job and the other jobs
   bar the ambient legs and the demo. Pushes to `rc/**` and `main`, PRs into

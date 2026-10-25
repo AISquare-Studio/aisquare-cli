@@ -24,8 +24,9 @@ project's default and the machine's default are consulted in that order
 the first enabled, signed-in one in the priority order (#406), so with an account
 signed in a launch runs on one. The exception is a role whose binding sets Claude
 Code's directory itself (``team bind --env``/``--env-file``): it keeps that directory
-unless a flag, an account binding, a project default or a headroom pick names an
-account. With no account signed in, the environment is exactly what it always was.
+unless a flag, an account binding or a project default names an account (neither
+rank 1 nor a headroom pick overrides it, #9). With no account signed in, the
+environment is exactly what it always was.
 One resolver, ``services.claude_accounts.choose``, answers for ``launch`` and
 ``fleet spawn`` alike.
 """

@@ -860,10 +860,15 @@ revokes the session exactly as `aisquare logout` does. A token supplied through
 
 **Claude Code** is below it: a table, one aligned row per account in priority
 order — **↑**/**↓** first, then the slot, its name, who is signed in, the
-five-hour and seven-day windows (a bar and the percent **used**, or why there is
-no reading: `not signed in`, `⚠ token expired`, the reason the usage could not
-be read) with **Log in** beside them when a login is due, when each window
-resets, and the plan last. A value too long for its column ends in `…` (hover it for the whole
+five-hour and seven-day windows (a bar and the percent **used**, or one `!`
+across the two when there is no reading to show) with **Log in** beside them
+when a login is due, when each window resets, and the plan last. Hover the `!`
+for what is wrong and what to do about it: `not signed in` with `fix: press Log
+in …`, `the login Keychain is locked` with `fix: unlock the login keychain …`,
+`could not reach the usage endpoint (URLError)` with `fix: check the network or
+HTTPS_PROXY`. Where nothing done on this machine helps (an HTTP 5xx, an answer
+aisquare cannot read), it says so: `fix: none from here, the next read tries
+again by itself`. A value too long for its column ends in `…` (hover it for the whole
 text); on a narrow page the table scrolls sideways as one, header included.
 Slot **1** is the plain `claude` of your machine (whatever `CLAUDE_CONFIG_DIR`
 was in the shell you started `asq` from, `~/.claude` otherwise). Every other
@@ -878,8 +883,8 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   pane closes by itself. Close the pane without signing in, or press *Cancel
   sign-in*, and the empty slot is discarded.
 - **Log in** on a row does the same for a slot that has no login, or whose
-  token is missing, expired or rejected (slot 1 included) — the usage cells
-  beside it say which. Type `/login` if Claude Code does not prompt you; the pane
+  token is missing, expired or rejected (slot 1 included) — the `!` beside it
+  says which on hover. Type `/login` if Claude Code does not prompt you; the pane
   waits for a *fresh* login, not the stale one on disk, then closes, and the
   row reads its usage again. On a row that reads fine the same button says
   **Log in again**: the same flow, for a fresh login on a working slot, without
@@ -906,11 +911,15 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   (`▮▮▯▯▯ 40% · 12m`) and its tooltip why the newer try read nothing (`reading
   from 12m ago · rate-limited until 14:32 …`); the line above says the try
   failed. A window of that reading that has reset since shows as `reset 1h ago`,
-  never as the old figure. Only an account that was never read shows `—`, and
-  its usage cells say why (`HTTP 503 …`; hover for the whole reason, and for the
-  pace of the session window when there is one). `aisquare accounts usage` and
-  `list --usage` print the same under the table (`account 2: rate-limited until
-  14:32 — logging in again does not clear it; showing the reading from 12m ago`).
+  never as the old figure. Only an account that was never read shows the `!`,
+  whose tooltip says why and the fix (`HTTP 503 …`); a reading's own cell tooltip
+  has the pace of the session window when there is one. `aisquare accounts usage`
+  and `list --usage` print the kept reading's reason under the table (`account 2:
+  rate-limited until 14:32 — logging in again does not clear it; showing the
+  reading from 12m ago`), and an unread account's reason and fix in its row (`the
+  stored token has expired; fix: press Log in, …`). In `--json` such a reading
+  carries `cause` (`token_expired`, `keychain_locked`, `rate_limited`…) and `fix`
+  (`null` where nothing done here helps).
 - **A rate-limited read backs off.** When the endpoint answers HTTP 429 (or 503
   with `Retry-After`), the account is not asked again until the wait it named
   ends — or, when it named none, a minute, doubling with each 429 in a row up to
@@ -924,13 +933,14 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   is not live says `"kept": true`. If you script usage, poll no more often than the cache's five minutes
   (`aisquare accounts usage --json`, without `--refresh`): every surface shares the
   one cached reading. A token the
-  endpoint refuses shows at once (`⚠ token rejected`), and an expired one says
-  so (`⚠ token expired`). Nothing else on the page is affected. On macOS the
+  endpoint refuses shows the `!` at once (`the token was rejected (HTTP 401)` on
+  hover), and so does an expired one (`the stored token has expired`). Nothing
+  else on the page is affected. On macOS the
   token is read from the login Keychain, from the item Claude Code keeps for
   each account (plain and every managed slot), and from `.credentials.json` when
   there is no item. A locked Keychain, or one that refuses aisquare, is said on
-  the row (`the login Keychain is locked — unlock it …`) rather than
-  offered a Log in. It is not asked again by itself (a locked Keychain's unlock
+  the row's `!` (`the login Keychain is locked`, `fix: unlock the login keychain
+  …`) rather than offered a Log in. It is not asked again by itself (a locked Keychain's unlock
   dialog would come back every tick): opening the page, **↻ Refresh usage** or
   a Log in asks it again. A reset reads as a
   distance and a clock time — `resets in 3h 10m (18:00)`, `resets in 2d 4h (Tue

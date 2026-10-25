@@ -245,6 +245,8 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults_and_th
         "accounts": {
             "pick": "headroom",
             "on_limit": "switch",
+            # A hand-over may cross agents once its own are full (task #15 of #113).
+            "cross_agent_handover": True,
             "share_trust": True,
             "share_settings": False,
             "prefer": "priority",  # added by P0-W3 (#277)

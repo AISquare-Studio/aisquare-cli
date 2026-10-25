@@ -907,6 +907,13 @@ class AccountsSettings(BaseModel):
     pick and to a hand-over's. The week is the shared seven-day window's reset, for every
     agent: a family week (Opus, Sonnet) only ever makes an account read fuller.
 
+    ``cross_agent_handover``, on by default, lets a limit's hand-over cross agents once the
+    agent's own other accounts were all read over ``switch_at`` (or it has none): the
+    replacement starts FRESH on the first account of another agent under the line, with a
+    brief of the work (``services.handoff``), since no conversation moves between agents.
+    An own account with room still resumes natively first; off, a hand-over stays on its
+    agent as before.
+
     ``share_trust``, on by default, copies a folder's trust into the account a launch
     runs on when any other account has it, so an agent never waits at Claude Code's
     "trust this folder?" for a folder the human already said yes to on another login.
@@ -922,6 +929,7 @@ class AccountsSettings(BaseModel):
     on_limit: Literal["wait", "switch"] = "switch"
     wait_if_reset_within_minutes: int = Field(default=15, ge=0)
     prefer: Literal["priority", "reset-soonest"] = "priority"
+    cross_agent_handover: bool = True
     share_trust: bool = True
     share_settings: bool = False
 

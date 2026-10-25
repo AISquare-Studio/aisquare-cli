@@ -85,6 +85,11 @@ MIN_NODE_MAJOR=22
 # `brain` is always expected to be amber when this finishes — gbrain is out of
 # scope (§0.4). `expected_amber` adds to it when the run asked for no project.
 EXPECTED_AMBER="brain"
+# Amber for a passing reason that says nothing about the install: an account whose
+# usage reads wait out a rate limit (HTTP 429, or 503 with Retry-After) resume by
+# themselves. Counted as unexpected, a transient limit at install time exited 2 on a
+# good install. Expected in every run, but not part of `expected_amber`'s set.
+TRANSIENT_AMBER="claude-account-backoff"
 
 # --- options (§3.5) ---------------------------------------------------------
 
@@ -1749,7 +1754,7 @@ expected_amber() {
 # tests/test_install_script_is_posix.py now fails on any name assigned in two
 # functions, so the next one is caught rather than read.
 is_expected_amber() {
-    for _want in $(expected_amber); do
+    for _want in $(expected_amber) $TRANSIENT_AMBER; do
         [ "$1" = "$_want" ] && return 0
     done
     return 1
@@ -2112,6 +2117,12 @@ summary() {
             *" brain "*)
                 note "  brain    — gbrain is out of scope for this installer; team"
                 note "             decisions are simply not distilled without it."
+                ;;
+        esac
+        case " $_expected " in
+            *" claude-account-backoff "*)
+                note "  claude-account-backoff — an account's usage reads wait out a rate"
+                note "             limit; they resume by themselves (aisquare doctor says until when)."
                 ;;
         esac
         case " $_expected " in

@@ -647,7 +647,8 @@ def test_the_handshake_goes_through_https_proxy_as_requests_do(
 
     assert tls.https_proxy("127.0.0.1") == proxy
     tls.handshake("127.0.0.1", port=port, timeout=5)
-    assert seen == [f"CONNECT 127.0.0.1:{port} HTTP/1.1"]
+    # The request line's version is http.client's: HTTP/1.0 before Python 3.12, 1.1 since.
+    assert [line.rsplit(" ", 1)[0] for line in seen] == [f"CONNECT 127.0.0.1:{port}"]
 
     monkeypatch.setenv("NO_PROXY", "127.0.0.1")  # the control: bypassed, it goes direct
     assert tls.https_proxy("127.0.0.1") is None

@@ -86,8 +86,13 @@ SIGN_IN_SESSION = "asq-accounts"
 AGENT = "claude-code"
 """The agent name ``aisquare agents`` knows Claude Code by."""
 
-Fetch = Callable[[str, Mapping[str, str], float], tuple[int, bytes]]
-"""``(url, headers, timeout) -> (status, body)``: how :func:`usage` reaches the network."""
+Fetch = Callable[
+    [str, Mapping[str, str], float],
+    tuple[int, bytes] | tuple[int, bytes, Mapping[str, str]],
+]
+"""``(url, headers, timeout) -> (status, body[, headers])``: how :func:`usage` reaches the
+network. The answer's headers are optional, so a fetch that has none to give (a test's
+fake) still works; :func:`_http_get` gives them, for ``Retry-After``."""
 
 
 class AccountsError(RuntimeError):
@@ -786,22 +791,27 @@ def forget_arrangement(slot: int) -> None:
         # The readings too: keyed on the slot alone, they would rate the next
         # occupant's first window against this login's history (third round).
         store.delete_usage_samples(slot)
+        store.set_ui_state(_BACKOFF_KEY.format(slot=slot), None)  # and its wait (F1 of #400)
 
 
 # --- usage ------------------------------------------------------------------------------
 
 
-def _http_get(url: str, headers: Mapping[str, str], timeout: float) -> tuple[int, bytes]:
-    """One GET; an HTTP error status is an answer, not an exception."""
+def _http_get(
+    url: str, headers: Mapping[str, str], timeout: float
+) -> tuple[int, bytes, Mapping[str, str]]:
+    """One GET; an HTTP error status is an answer, not an exception. The answer's headers
+    come back too: a 429's ``Retry-After`` says how long to wait (F1 of #400)."""
     import urllib.error
     import urllib.request
 
     request = urllib.request.Request(url, headers=dict(headers), method="GET")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return int(response.status), bytes(response.read())
+            return int(response.status), bytes(response.read()), dict(response.headers.items())
     except urllib.error.HTTPError as exc:
-        return int(exc.code), bytes(exc.read() or b"")
+        sent = dict(exc.headers.items()) if exc.headers is not None else {}
+        return int(exc.code), bytes(exc.read() or b""), sent
 
 
 def _window(raw: Any) -> tuple[float | None, datetime | None]:
@@ -817,6 +827,30 @@ def _window(raw: Any) -> tuple[float | None, datetime | None]:
             when = None
     value = float(percent) if isinstance(percent, int | float) else None
     return value, when
+
+
+def _retry_after(headers: Mapping[str, str], now: datetime) -> float | None:
+    """The seconds an answer's ``Retry-After`` asks to wait — a number, or an HTTP date —
+    clamped to [1 s, :data:`RETRY_AFTER_MAX_SECONDS`]; ``None`` when it sent none we read."""
+    raw = next((value for key, value in headers.items() if key.lower() == "retry-after"), None)
+    if raw is None or not raw.strip():
+        return None
+    seconds: float | None
+    try:
+        seconds = float(raw.strip())
+    except ValueError:
+        from email.utils import parsedate_to_datetime
+
+        try:
+            when = parsedate_to_datetime(raw.strip())
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - now).total_seconds()
+    if seconds != seconds:  # NaN
+        return None
+    return min(RETRY_AFTER_MAX_SECONDS, max(1.0, seconds))
 
 
 def usage(
@@ -854,10 +888,22 @@ def usage(
         "User-Agent": f"aisquare-cli/{__version__}",
     }
     try:
-        status, body = (fetch or _http_get)(USAGE_URL, headers, USAGE_TIMEOUT_SECONDS)
+        answer = (fetch or _http_get)(USAGE_URL, headers, USAGE_TIMEOUT_SECONDS)
     except OSError as exc:  # URLError, a refused connection, a timeout
         return ClaudeUsage(
             available=False, reason=f"could not reach the usage endpoint ({type(exc).__name__})"
+        )
+    status, body = answer[0], answer[1]
+    answered: Mapping[str, str] = answer[2] if len(answer) == 3 else {}
+    wait = _retry_after(answered, now or _now())
+    if status == 429 or (status == 503 and wait is not None):
+        # Not a login problem: the wait is recorded by `read_usage` (F1 of #400).
+        moment = now or _now()
+        return ClaudeUsage(
+            available=False,
+            reason=f"HTTP {status} from the usage endpoint — rate-limited",
+            rate_limited=True,
+            rate_limited_until=moment + timedelta(seconds=wait) if wait is not None else None,
         )
     if status == 401:
         return ClaudeUsage(
@@ -991,11 +1037,9 @@ def sample_usage(
     The row is the only side effect, and it is best effort: a store that cannot
     be opened costs the trend line, never the reading the caller asked for.
     """
-    result = usage(account, now=now, fetch=fetch)
-    if result.available:
-        with contextlib.suppress(sqlite3.Error), store_session() as store:
-            _record_sample(store, account, result, now)
-    return result
+    # Through `read_usage`, so a slot the endpoint asked to wait is not asked (review of
+    # #408, N5): it records the answered reading the same way.
+    return read_usage([account], now=now, fetch=fetch)[account.slot]
 
 
 def _record_sample(
@@ -1104,6 +1148,180 @@ def describe_trend(trend: UsageTrend | None) -> str:
     return f"≈ {minutes / 60:.1f} h to the limit"
 
 
+# --- backing off a rate-limited read (F1 of #400) ----------------------------------------------
+#
+# A 429 (or a 503 that says when to come back) is the endpoint asking this
+# account's reads to stop for a while. They used to keep coming: the wait was
+# dropped with the headers, failures were remembered only in the process that
+# saw them, and `--refresh` skipped even that, so a script, a manager's loop or
+# a few terminals kept the account rate-limited. Now the wait is recorded per
+# slot in the store (a `ui_state` row, so no schema step), and `read_usage` —
+# the one fetcher every surface reads through — sends nothing for a slot before
+# it ends, whichever process asks, forced or not. The wait is the endpoint's
+# `Retry-After`, or, when it gave none, an exponential default that doubles
+# with each 429 in a row and starts over after a good read. A gated read is
+# answered with the reason and the moment the wait ends; the cache then shows
+# the last good reading beside it (`cached_usage`), and a headroom pick decides
+# by it only while it is fresh (`headroom_choice`).
+
+RETRY_AFTER_MAX_SECONDS = 6 * 3600.0
+"""The longest ``Retry-After`` honoured: a header asking for days is a broken header."""
+USAGE_BACKOFF_FIRST_SECONDS = 60.0
+"""The wait after a 429 that named none: one minute, doubled for each 429 in a row."""
+USAGE_BACKOFF_MAX_SECONDS = 1800.0
+"""Where the doubling stops: half an hour."""
+_BACKOFF_KEY = "usage-backoff:{slot}"
+"""The ``ui_state`` row a slot's wait is recorded in."""
+
+
+@dataclass(frozen=True)
+class UsageBackoff:
+    """One slot's recorded wait: no usage request before ``until``.
+
+    ``attempts`` counts the 429s in a row that led here (the exponential default's
+    exponent); ``since`` is when the latest came back. ``token`` is the fingerprint of the
+    token that was refused: a wait is the login's, not the slot's, so a slot signed into
+    another login since is not held to it (review of #408, N3). ``raw`` is the row as read,
+    for the compare-and-set that clears or replaces it (N2).
+    """
+
+    slot: int
+    until: datetime
+    attempts: int
+    since: datetime
+    token: str | None = None
+    raw: str | None = field(default=None, compare=False)
+
+    def active(self, now: datetime) -> bool:
+        return self.until > now
+
+    def holds(self, token: str | None) -> bool:
+        """Whether this wait is the login holding ``token``'s."""
+        return self.token == token
+
+    @property
+    def reason(self) -> str:
+        return backoff_reason(self.until)
+
+    def reading(self, now: datetime) -> ClaudeUsage:
+        """What a read of this slot answers while the wait runs: nothing, and why."""
+        # Stamped with when the 429 came back, not ``now``: a gated read sends nothing, and
+        # "last try failed just now" said a try was made (review of #408, N1).
+        return ClaudeUsage(
+            available=False,
+            reason=self.reason,
+            rate_limited=True,
+            rate_limited_until=self.until,
+            fetched_at=min(self.since, now),
+        )
+
+    def dump(self) -> str:
+        return json.dumps(
+            {
+                "until": self.until.isoformat(),
+                "attempts": self.attempts,
+                "since": self.since.isoformat(),
+                "token": self.token,
+            }
+        )
+
+    @classmethod
+    def load(cls, slot: int, raw: str | None) -> UsageBackoff | None:
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+            return cls(
+                slot=slot,
+                until=datetime.fromisoformat(data["until"]),
+                attempts=int(data.get("attempts", 1)),
+                since=datetime.fromisoformat(data["since"]),
+                token=data.get("token"),
+                raw=raw,
+            )
+        except (ValueError, TypeError, KeyError):
+            return None  # a row this version cannot read waits for nothing
+
+
+def rate_limited_until_text(until: datetime | None) -> str:
+    """``rate-limited until 14:32`` (local time), or ``rate-limited`` with no time known."""
+    if until is None:
+        return "rate-limited"
+    return f"rate-limited until {until.astimezone().strftime('%H:%M')}"
+
+
+def backoff_reason(until: datetime) -> str:
+    """``rate-limited until 14:32 — logging in again does not clear it``."""
+    return f"{rate_limited_until_text(until)} — logging in again does not clear it"
+
+
+def _next_backoff(
+    slot: int,
+    reading: ClaudeUsage,
+    before: UsageBackoff | None,
+    now: datetime,
+    token: str | None = None,
+) -> UsageBackoff:
+    """The wait a rate-limited answer starts: its ``Retry-After`` (already turned into
+    ``rate_limited_until`` by :func:`usage`), else the doubling default. A 429 long after
+    the last wait ended, or for another login, starts the doubling over."""
+    attempts = 1
+    if (
+        before is not None
+        and before.holds(token)
+        and before.until > now - timedelta(seconds=USAGE_BACKOFF_MAX_SECONDS)
+    ):
+        attempts = before.attempts + 1
+    until = reading.rate_limited_until
+    if until is None or until <= now:
+        seconds = min(
+            USAGE_BACKOFF_MAX_SECONDS, USAGE_BACKOFF_FIRST_SECONDS * 2 ** min(attempts - 1, 16)
+        )
+        until = now + timedelta(seconds=seconds)
+    return UsageBackoff(slot=slot, until=until, attempts=attempts, since=now, token=token)
+
+
+def _record_backoff(store: ContextStore, held: UsageBackoff, seen: UsageBackoff | None) -> None:
+    """Write ``held`` unless the row changed since ``seen`` was read and now holds a longer
+    wait for the same login: a stale write never shortens a newer wait (review of #408, N2)."""
+    key = _BACKOFF_KEY.format(slot=held.slot)
+    expected = seen.raw if seen is not None else None
+    if store.replace_ui_state(key, expected, held.dump()):
+        return
+    current = UsageBackoff.load(held.slot, store.ui_state(key))
+    if current is not None and current.holds(held.token) and current.until >= held.until:
+        return  # another process recorded a wait at least as long: keep it
+    store.replace_ui_state(key, current.raw if current is not None else None, held.dump())
+
+
+def _read_backoffs(store: ContextStore, slots: Iterable[int]) -> dict[int, UsageBackoff]:
+    found: dict[int, UsageBackoff] = {}
+    for slot in slots:
+        held = UsageBackoff.load(slot, store.ui_state(_BACKOFF_KEY.format(slot=slot)))
+        if held is not None:
+            found[slot] = held
+    return found
+
+
+def usage_backoffs(
+    accounts: Sequence[ClaudeAccount], *, now: datetime | None = None
+) -> dict[int, UsageBackoff]:
+    """The waits still running for ``accounts``, by slot: doctor's line, and a test's look.
+    A store that cannot be opened reads as none."""
+    moment = now or _now()
+    try:
+        with store_session() as store:
+            held = _read_backoffs(store, [account.slot for account in accounts])
+    except sqlite3.Error:
+        return {}
+    tokens = {account.slot: _token_fingerprint(account, moment) for account in accounts}
+    return {
+        slot: backoff
+        for slot, backoff in held.items()
+        if backoff.active(moment) and backoff.holds(tokens.get(slot))
+    }
+
+
 def read_usage(
     accounts: Sequence[ClaudeAccount],
     *,
@@ -1124,26 +1342,62 @@ def read_usage(
     concurrent writers on ``context.db``'s one write lock, on the launch path
     (review of #205, fourth round). Best effort, as :func:`sample_usage` is: a
     store that cannot be opened costs the history, never the readings.
+
+    A slot the endpoint asked to wait (:class:`UsageBackoff`, F1 of #400) is not
+    asked before the wait ends — whoever reads, forced or not — and is answered
+    with the reason and ``rate_limited_until``. A rate-limited answer records the
+    wait, a good one clears it, in that same store session.
     """
     if not accounts:
         return {}
+    moment = now or _now()
     readings: dict[int, ClaudeUsage] = {}
-    with ThreadPoolExecutor(max_workers=min(HEADROOM_WORKERS, len(accounts))) as pool:
-        futures = {
-            pool.submit(usage, account, now=now, fetch=fetch): account.slot for account in accounts
-        }
-        for future, slot in futures.items():
-            try:
-                readings[slot] = future.result()
-            except Exception as exc:  # one account's failure must not cost the rest
-                readings[slot] = ClaudeUsage(
-                    available=False, reason=f"usage read failed ({type(exc).__name__})"
-                )
-    answered = [account for account in accounts if readings[account.slot].available]
-    if answered:
+    backoffs: dict[int, UsageBackoff] = {}
+    with contextlib.suppress(sqlite3.Error), store_session() as store:
+        backoffs = _read_backoffs(store, [account.slot for account in accounts])
+    tokens = {account.slot: _token_fingerprint(account, moment) for account in accounts}
+    asked: list[ClaudeAccount] = []
+    for account in accounts:
+        held = backoffs.get(account.slot)
+        if held is not None and held.active(moment) and held.holds(tokens[account.slot]):
+            readings[account.slot] = held.reading(moment)
+        else:
+            asked.append(account)
+    if asked:
+        with ThreadPoolExecutor(max_workers=min(HEADROOM_WORKERS, len(asked))) as pool:
+            futures = {
+                pool.submit(usage, account, now=now, fetch=fetch): account.slot for account in asked
+            }
+            for future, slot in futures.items():
+                try:
+                    readings[slot] = future.result()
+                except Exception as exc:  # one account's failure must not cost the rest
+                    readings[slot] = ClaudeUsage(
+                        available=False, reason=f"usage read failed ({type(exc).__name__})"
+                    )
+    answered = [account for account in asked if readings[account.slot].available]
+    cleared = [account.slot for account in answered if account.slot in backoffs]
+    started = {
+        account.slot: _next_backoff(
+            account.slot,
+            readings[account.slot],
+            backoffs.get(account.slot),
+            moment,
+            tokens[account.slot],
+        )
+        for account in asked
+        if readings[account.slot].rate_limited
+    }
+    for slot, held in started.items():
+        readings[slot] = held.reading(moment)
+    if answered or started or cleared:
         with contextlib.suppress(sqlite3.Error), store_session() as store:
             for account in answered:
                 _record_sample(store, account, readings[account.slot], now)
+            for slot in cleared:  # only the row this round read: never a newer wait (N2)
+                store.replace_ui_state(_BACKOFF_KEY.format(slot=slot), backoffs[slot].raw, None)
+            for slot, held in started.items():
+                _record_backoff(store, held, backoffs.get(slot))
     return readings
 
 
@@ -1172,6 +1426,9 @@ def read_usage(
 
 USAGE_MAX_AGE_SECONDS = 300.0
 """How old a recorded reading may be and still be served instead of a fetch: five minutes."""
+LAST_GOOD_LOOKBACK = timedelta(days=7)
+"""How far back a failed read looks for the last good reading to show: the history's
+whole retention (``core.store._USAGE_RETENTION``)."""
 
 _UNANSWERED: dict[tuple[str, str], ClaudeUsage] = {}
 """Fetches that went out and failed, by (config dir, fingerprint of the token sent): see above."""
@@ -1230,13 +1487,16 @@ def _recorded_usage(
     *,
     since: datetime,
     now: datetime,
+    current: bool = True,
 ) -> dict[int, ClaudeUsage]:
     """Each account's newest reading recorded at or after ``since`` WITH the token it holds
     now (``tokens``, by slot), in one store session.
 
     A reading another token took is not served: a slot signed into another login
-    since would show the last one's figure. Nor is one of whose windows has reset
-    since: the window it describes is over, and the new one starts near 0 %.
+    since would show the last one's figure. Nor, while ``current``, is one of whose
+    windows has reset since: the window it describes is over, and the new one starts
+    near 0 %. ``current=False`` is the last good reading a failed read shows, aged
+    (F1 of #400): an old figure, said to be old, beats ``—``.
     """
     found: dict[int, ClaudeUsage] = {}
     try:
@@ -1251,7 +1511,7 @@ def _recorded_usage(
                     continue
                 newest = taken[-1]
                 resets = (newest.session_resets_at, newest.week_resets_at)
-                if any(when is not None and when <= now for when in resets):
+                if current and any(when is not None and when <= now for when in resets):
                     continue
                 found[account.slot] = ClaudeUsage(
                     available=True,
@@ -1311,7 +1571,14 @@ def _preferred(good: ClaudeUsage | None, failed: ClaudeUsage | None) -> ClaudeUs
         return good  # the latest try read it
     if failed.needs_login:
         return failed
-    return good.model_copy(update={"last_failed_at": failed.fetched_at})
+    return good.model_copy(
+        update={
+            "last_failed_at": failed.fetched_at,
+            "last_failed_reason": failed.reason,
+            "rate_limited": failed.rate_limited,
+            "rate_limited_until": failed.rate_limited_until,
+        }
+    )
 
 
 def cached_usage(
@@ -1355,7 +1622,7 @@ def cached_usage(
     readings = {} if force else _served(accounts, tokens, since=since, now=moment)
     stale = [account for account in accounts if account.slot not in readings]
     if not stale:
-        return {account.slot: readings[account.slot] for account in accounts}
+        return _with_last_good(accounts, readings, tokens, moment)
     with _fetching(stale, seen) as moved:
         if moved and not force:  # another call fetched meanwhile: what it read serves
             readings.update(_served(stale, tokens, since=since, now=moment))
@@ -1364,7 +1631,8 @@ def cached_usage(
         for account in stale:
             reading = fetched[account.slot]
             token = tokens.get(account.slot)
-            if not reading.available:
+            if not reading.available and not reading.rate_limited:
+                # A wait keeps the moment its 429 came back: nothing was tried now (N1).
                 reading = reading.model_copy(update={"fetched_at": moment})
             if token is not None:
                 with _UNANSWERED_LOCK:
@@ -1374,19 +1642,67 @@ def cached_usage(
                     else:
                         _UNANSWERED[key] = reading
             readings[account.slot] = reading
-        # A try that failed, forced or due, against a good reading still in the window:
-        # the same rule as a served read, so the row keeps its figure (_preferred).
-        failed = [
-            account
-            for account in stale
-            if not readings[account.slot].available and account.slot in tokens
-        ]
-        if failed:
-            recorded = _recorded_usage(failed, tokens, since=since, now=moment)
-            for account in failed:
-                answer = _preferred(recorded.get(account.slot), readings[account.slot])
-                readings[account.slot] = answer or readings[account.slot]
-    return {account.slot: readings[account.slot] for account in accounts}
+    return _with_last_good(accounts, readings, tokens, moment)
+
+
+def is_kept(reading: ClaudeUsage) -> bool:
+    """Whether ``reading`` is not a live one: a slot the endpoint asked to wait, or the last
+    good figure a failed read is showing (``last_failed_reason``). Shown, aged; never
+    picked by or counted in the fleet's dot unless fresh (review of #408, MAJ-1)."""
+    return reading.rate_limited or reading.last_failed_reason is not None
+
+
+def _has_reset(reading: ClaudeUsage, now: datetime) -> bool:
+    """Whether either window of ``reading`` has reset by ``now``: the figure is over."""
+    resets = (reading.session_resets_at, reading.week_resets_at)
+    return any(when is not None and when <= now for when in resets)
+
+
+def _without_reset_windows(reading: ClaudeUsage, now: datetime) -> ClaudeUsage:
+    """A kept reading with each window that has reset since emptied: its percentage
+    describes a window that is over, so it is shown as reset (``reset 1h ago``, the reset
+    time kept), never as the old figure with ``resets now`` (review of #408, MAJ-1)."""
+    update: dict[str, Any] = {}
+    for window in ("session", "week"):
+        when = getattr(reading, f"{window}_resets_at")
+        if when is not None and when <= now:
+            update[f"{window}_percent"] = None
+    return reading.model_copy(update=update) if update else reading
+
+
+def _with_last_good(
+    accounts: Sequence[ClaudeAccount],
+    readings: Mapping[int, ClaudeUsage],
+    tokens: Mapping[int, str],
+    moment: datetime,
+) -> dict[int, ClaudeUsage]:
+    """``readings`` in ``accounts``' order, each failed one replaced by the last good reading
+    on record for the token the slot holds, marked with the failure (:func:`_preferred`).
+
+    A try that failed — forced, due, gated by a back-off, or served from this process's
+    memory of one — keeps the row's figure at whatever age (F1 of #400): the reading is
+    shown with how old it is and why the newer try read nothing; ``—`` only when nothing
+    was ever read for this token. A failure that is about the token (``needs_login``) is
+    shown as it is: the figure belongs to a login that no longer reads.
+    """
+    shown = dict(readings)
+    failed = [
+        account
+        for account in accounts
+        if not readings[account.slot].available
+        and not readings[account.slot].needs_login
+        and account.slot in tokens
+    ]
+    if failed:
+        recorded = _recorded_usage(
+            failed, tokens, since=moment - LAST_GOOD_LOOKBACK, now=moment, current=False
+        )
+        for account in failed:
+            answer = _preferred(recorded.get(account.slot), shown[account.slot])
+            if answer is not None and answer.available:
+                answer = _without_reset_windows(answer, moment)
+            shown[account.slot] = answer or shown[account.slot]
+    return {account.slot: shown[account.slot] for account in accounts}
 
 
 def cached_usage_with_trends(
@@ -1514,7 +1830,10 @@ def headroom_level(left: float | None) -> HeadroomLevel:
 
 
 def fleet_headroom(
-    accounts: Sequence[ClaudeAccount], readings: Mapping[int, ClaudeUsage]
+    accounts: Sequence[ClaudeAccount],
+    readings: Mapping[int, ClaudeUsage],
+    *,
+    now: datetime | None = None,
 ) -> HeadroomSummary:
     """How much room the fleet has LEFT, from readings already taken. Pure: no disk, no network.
 
@@ -1536,7 +1855,10 @@ def fleet_headroom(
 
     ``accounts`` are the accounts to summarise (disabled ones are skipped);
     ``readings`` is slot → reading, and an account without one has not been
-    read yet.
+    read yet. A kept reading (:func:`is_kept`: the last good figure a failed read
+    shows) counts only while it is under :data:`USAGE_MAX_AGE_SECONDS` old at
+    ``now``; an older one is not the fleet's room (review of #408, MAJ-1). Its
+    windows that have reset are already empty (``_without_reset_windows``).
     """
     enabled = [account for account in accounts if not account.disabled]
     read = [readings[account.slot] for account in enabled if account.slot in readings]
@@ -1548,10 +1870,13 @@ def fleet_headroom(
     left_by_slot: dict[int, float] = {}
     session_by_slot: dict[int, float] = {}
     taken: list[datetime] = []
+    oldest = (now or _now()) - timedelta(seconds=USAGE_MAX_AGE_SECONDS)
     for account in enabled:
         reading = readings.get(account.slot)
         left = percent_left(reading) if reading is not None else None
         if reading is None or left is None or reading.session_percent is None:
+            continue
+        if is_kept(reading) and (reading.fetched_at is None or reading.fetched_at < oldest):
             continue
         left_by_slot[account.slot] = left
         session_by_slot[account.slot] = reading.session_percent
@@ -1590,7 +1915,7 @@ def read_fleet_headroom(
         if not account.disabled and core.signed_in(account)
     ]
     readings = cached_usage(candidates, max_age=max_age, force=force, now=now, fetch=fetch)
-    return fleet_headroom(candidates, readings)
+    return fleet_headroom(candidates, readings, now=now)
 
 
 _NOTHING_TO_PICK = "headroom: no enabled, signed-in account to pick from"
@@ -1640,6 +1965,12 @@ def headroom_choice(
     still has a least bad answer. An account whose usage cannot be read is
     skipped and named; ``None`` when nothing could be measured, so the
     caller's next rung decides.
+
+    An account the usage endpoint asked to wait (F1 of #400) is not asked
+    again, by a launch or a hand-over: the pick decides by its newest reading
+    recorded in the last :data:`USAGE_MAX_AGE_SECONDS`, and says so, or skips
+    it with a note naming the wait when that reading is older or missing. The
+    cache's older figure, shown on the page with its age, is never picked by.
     """
     skip = set(exclude)
     candidates = [
@@ -1655,8 +1986,73 @@ def headroom_choice(
         return candidates[0], _over_the_line(candidates[0], switch_at, now=now)
     else:
         readings = cached_usage(candidates, max_age=max_age, now=now, fetch=fetch)
-    measured: list[tuple[ClaudeAccount, float]] = []
+    readings = dict(readings)
     notes: list[str] = []
+    # A kept reading — the last good figure a failed read shows (F1 of #400), or a slot the
+    # endpoint asked to wait — is never taken for a live one: the pick decides by it only
+    # while it is inside the pick's own window and neither window has reset since, and
+    # otherwise skips it with a note that says how old it is (review of #408, MAJ-1).
+    # A hand-over reads live, so its failure arrives bare (no kept figure on it): the same
+    # rule applies to the reading on record behind it.
+    kept = [
+        account
+        for account in candidates
+        if is_kept(readings[account.slot])
+        or not (readings[account.slot].available or readings[account.slot].needs_login)
+    ]
+    if kept:
+        moment = now or _now()
+        window = timedelta(seconds=max_age if max_age is not None else USAGE_MAX_AGE_SECONDS)
+        tokens = {
+            account.slot: token
+            for account in kept
+            if (token := _token_fingerprint(account, moment)) is not None
+        }
+        on_record = _recorded_usage(
+            kept, tokens, since=moment - LAST_GOOD_LOOKBACK, now=moment, current=False
+        )
+        for account in kept:
+            reading = readings[account.slot]
+            why = (
+                rate_limited_until_text(reading.rate_limited_until)
+                if reading.rate_limited
+                else reading.last_failed_reason or reading.reason or "the last read failed"
+            )
+            last = on_record.get(account.slot)
+            taken = last.fetched_at if last is not None else None
+            if (
+                last is not None
+                and taken is not None
+                and taken >= moment - window
+                and not (_has_reset(last, moment))
+            ):
+                readings[account.slot] = last
+                notes.append(
+                    f"headroom: {core.label(account)} {why} — picked by its reading from "
+                    f"{describe_age(taken, now=moment)}"
+                )
+                continue
+            if taken is None and not is_kept(reading):
+                continue  # a bare failure with nothing on record: its own reason says it all
+            if taken is None:
+                age = "no reading on record to pick by"
+            elif last is not None and _has_reset(last, moment):
+                age = (
+                    f"its last reading is from {describe_age(taken, now=moment)}, "
+                    "and a window has reset since"
+                )
+            else:
+                age = (
+                    f"its last reading is from {describe_age(taken, now=moment)}, "
+                    "too old to pick by"
+                )
+            readings[account.slot] = ClaudeUsage(
+                available=False,
+                reason=f"{why}; {age}",
+                rate_limited=reading.rate_limited,
+                rate_limited_until=reading.rate_limited_until,
+            )
+    measured: list[tuple[ClaudeAccount, float]] = []
     for account in candidates:
         reading = readings[account.slot]
         percent = headroom_percent(reading)

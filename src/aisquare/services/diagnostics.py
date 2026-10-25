@@ -1347,7 +1347,7 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
         # directory deleted by hand drops none, so `choose` refused every launch in
         # that project while this said nothing (round 3).
         defaults = _claude_account_default_checks() if _arranges_an_account() else []
-        return [*defaults, *_claude_account_limit_checks()]
+        return [*defaults, *_claude_account_limit_checks(), *_claude_account_backoff_checks()]
     statuses = [claude_accounts_service.describe(account) for account in managed]
     parts = [
         f"{status.account.slot} {status.identity.email if status.identity else 'not signed in'}"
@@ -1365,11 +1365,13 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
             ),
             *_claude_account_default_checks(),
             *_claude_account_limit_checks(),
+            *_claude_account_backoff_checks(),
         ]
     return [
         _ok("claude-accounts", detail),
         *_claude_account_default_checks(),
         *_claude_account_limit_checks(),
+        *_claude_account_backoff_checks(),
     ]
 
 
@@ -1734,6 +1736,46 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
                 else "Wait — "
             )
             + "Claude Code continues by itself at the reset",
+        )
+    ]
+
+
+def _claude_account_backoff_checks() -> list[DoctorCheck]:
+    """Accounts whose usage reads are backed off (F1 of #400) — offline, from the store.
+
+    The usage endpoint answered one of them HTTP 429 (or 503 with ``Retry-After``), and
+    no ``aisquare`` process asks it again before the recorded wait ends. One line naming
+    each and until when; nothing when none waits. Gated on ``context.db`` like its
+    siblings: a doctor run creates nothing.
+    """
+    if not paths.db_path().exists():
+        return []
+    try:
+        # The slot directories, read from disk: `list_accounts` reconciles the registry as it
+        # reads, a write a doctor run must not make on a machine that arranged nothing.
+        accounts = [
+            claude_accounts_core.default_account(),
+            *claude_accounts_core.managed_accounts(),
+        ]
+        waiting = claude_accounts_service.usage_backoffs(accounts)
+    except Exception:  # the database line reports a broken store
+        return []
+    if not waiting:
+        return []
+    parts = [
+        f"{claude_accounts_core.label(account)} "
+        f"{claude_accounts_service.rate_limited_until_text(waiting[account.slot].until)}"
+        for account in accounts
+        if account.slot in waiting
+    ]
+    return [
+        _warn(
+            "claude-account-backoff",
+            f"usage reads backed off after HTTP 429 for {len(parts)} account(s): "
+            + " · ".join(parts),
+            "Nothing to do — reads resume by themselves when the wait ends, and the last good "
+            "reading is shown meanwhile. Logging in again does not clear a rate limit; poll "
+            "usage less often (see docs/fleet.md)",
         )
     ]
 

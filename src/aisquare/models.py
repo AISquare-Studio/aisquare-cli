@@ -314,7 +314,19 @@ class ClaudeUsage(BaseModel):
     last_failed_at: datetime | None = None
     """When a later try to read failed without replacing this reading: an unreachable
     endpoint or an HTTP error after it, while it is still within the five-minute cache.
-    The figure stands; the line that says how old it is says the try failed too."""
+    The figure stands; the line that says how old it is says the try failed too. Since
+    F1 of #400 the figure stands whatever its age: a reading on record is shown, with
+    its age and :attr:`last_failed_reason`, rather than ``—``."""
+    last_failed_reason: str | None = None
+    """Why the try at :attr:`last_failed_at` read nothing ("rate-limited until 14:32",
+    "could not reach the usage endpoint …"), shown beside the older figure it kept."""
+    rate_limited: bool = False
+    """The usage endpoint answered HTTP 429 (or 503 with ``Retry-After``) for this account,
+    now or on a try still being waited out: logging in again does not clear it."""
+    rate_limited_until: datetime | None = None
+    """No usage request is sent for this account before then: the endpoint's
+    ``Retry-After``, or an exponential default when it sent none. Recorded on disk, so
+    every ``aisquare`` process, the Accounts page and ``--refresh`` wait it out too."""
 
     @computed_field  # type: ignore[prop-decorator]
     @property

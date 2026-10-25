@@ -30,6 +30,12 @@ machine default, and every release now carries its own installer.**
   its own URL. The default one-liner is unchanged: the copy on `main`, which
   installs the latest release, in the README, `docs/install.md` and the repair
   command `aisquare upgrade` prints. `docs/install.md` shows how to pin.
+- **Accounts: *Log in again* on any signed-in row.** The login column offers the same
+  sign-in flow as *Log in* (as a secondary button) on a row that reads fine, so a fresh
+  login no longer needs `aisquare accounts run <slot>` and `/login` by hand. Its tooltip
+  says it does not clear a rate limit. (F1 of #400.)
+- **`doctor` lists accounts whose usage reads are backed off** (`claude-account-backoff`),
+  and until when. (F1 of #400.)
 - **Exact token usage per session** — `aisquare metrics tokens [--session S]
   [--project P | --all]` (`--json` too). The Stop, StopFailure and SessionEnd hooks
   read only the bytes the session's transcript gained since the last record, plus its
@@ -536,6 +542,31 @@ machine default, and every release now carries its own installer.**
   show it: *App settings ▸ Agent settings* always has an `agent` row (the no-role
   agent's, the dialog's *(none)*), and with tracing configured doctor's auto-mode
   line counts `agent` among the roles on auto mode.
+- **A rate-limited usage read backs off instead of sticking** (F1 of #400). An HTTP 429
+  from the usage endpoint (or a 503 with `Retry-After`) records a wait per account on
+  disk — the endpoint's `Retry-After`, or one minute doubling per 429 in a row up to 30
+  minutes — and no `aisquare` process, the Accounts page, `--refresh`, a headroom pick or
+  a hand-over sends that account a request before it ends. Before, `Retry-After` was
+  dropped, a failure was remembered only in the process that saw it, and `--refresh`
+  asked anyway, so any poller kept the account rate-limited.
+- **A failed usage read keeps the last good numbers.** The row (page and CLI) shows the
+  most recent reading on record for the token, with its age (the page: `40% · 12m` in the
+  session cell) and why the newer try read nothing (the cell's tooltip, or a line under the
+  CLI table: `reading from 12m ago · rate-limited until 14:32`); `—` only when nothing was
+  ever read. A window of that reading that has reset since shows as `reset 1h ago`. Before,
+  a failure older than the five-minute cache showed `—`. A kept reading is never taken for
+  a live one: a headroom pick uses it only inside the pick's own window with neither window
+  reset since, and otherwise skips it with a note giving its age; the fleet's dot ignores
+  one older than five minutes. A wait is the login's: a slot signed into another login is
+  not held to it. `--json` readings carry `rate_limited`, `rate_limited_until` and
+  `last_failed_reason`.
+- **A hand-over whose live usage read fails now picks by a recent reading.** When the live
+  read of an account fails with anything but a 429 or a login problem (the endpoint
+  unreachable, an HTTP 5xx), the automatic hand-over picks by that account's reading if
+  one is at most five minutes old, with neither window reset since, and says so in its
+  note (`account 2 HTTP 500 from the usage endpoint — picked by its reading from 2m ago`).
+  An older reading skips the account with a note giving its age. Before, any failed live
+  read skipped the account.
 - **Restart all brings back the agents that died** (#38). After an outside SIGTERM
   killed every agent of a fleet (exit 143), *Settings ▸ Fleet ▸ Restart all…* and
   `fleet restart --all` listed each one as exited and restarted none: they acted on

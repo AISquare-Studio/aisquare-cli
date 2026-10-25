@@ -811,7 +811,10 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   token is missing, expired or rejected (slot 1 included) — the usage cells
   beside it say which. Type `/login` if Claude Code does not prompt you; the pane
   waits for a *fresh* login, not the stale one on disk, then closes, and the
-  row reads its usage again.
+  row reads its usage again. On a row that reads fine the same button says
+  **Log in again**: the same flow, for a fresh login on a working slot, without
+  `aisquare accounts run <slot>` and `/login` by hand. It does not clear a rate
+  limit (below).
 - **Remove** forgets a slot the CLI owns. Its directory is renamed beside
   itself as `<n>.removed-<stamp>` — the login, the settings and the transcripts
   kept, never listed again, deletable by hand — and the number is free for the
@@ -828,10 +831,27 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   not answer for an account (`never` before the first). An account that needs a
   login counts in neither half; its own row says so. The endpoint is not a
   documented API. A try that fails with nothing to say about the login (the
-  endpoint unreachable, an HTTP 5xx) keeps the account's figure on its row while
-  that figure is under five minutes old, and the line says the try failed. With
-  no such figure, the row's usage cells say why (`HTTP 503 …`; hover for the whole
-  reason, and for the pace of the session window when there is one). A token the
+  endpoint unreachable, an HTTP 5xx, a rate limit) keeps the account's last good
+  figure on its row, whatever its age: the session cell says how old it is
+  (`▮▮▯▯▯ 40% · 12m`) and its tooltip why the newer try read nothing (`reading
+  from 12m ago · rate-limited until 14:32 …`); the line above says the try
+  failed. A window of that reading that has reset since shows as `reset 1h ago`,
+  never as the old figure. Only an account that was never read shows `—`, and
+  its usage cells say why (`HTTP 503 …`; hover for the whole reason, and for the
+  pace of the session window when there is one). `aisquare accounts usage` and
+  `list --usage` print the same under the table (`account 2: rate-limited until
+  14:32 — logging in again does not clear it; showing the reading from 12m ago`).
+- **A rate-limited read backs off.** When the endpoint answers HTTP 429 (or 503
+  with `Retry-After`), the account is not asked again until the wait it named
+  ends — or, when it named none, a minute, doubling with each 429 in a row up to
+  half an hour, and starting over after a good read. The wait is recorded on
+  disk, so every `aisquare` process, the page, **↻ Refresh usage**, `--refresh`,
+  a headroom pick and a hand-over all honour it: no request goes out for that
+  account before it ends. `aisquare doctor` lists the accounts backed off and
+  until when (`claude-account-backoff`). Logging in again does not clear a rate
+  limit. If you script usage, poll no more often than the cache's five minutes
+  (`aisquare accounts usage --json`, without `--refresh`): every surface shares the
+  one cached reading. A token the
   endpoint refuses shows at once (`⚠ token rejected`), and an expired one says
   so (`⚠ token expired`). Nothing else on the page is affected. On macOS the
   token is read from the login Keychain, from the item Claude Code keeps for
@@ -884,6 +904,11 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   left. An account counts as full as the fuller of its two windows, so one
   that has spent its week is not taken for an empty five hours. Usage is the
   same best-effort endpoint as the bars, so an
+  account that is backed off after a 429 is not asked, and an older reading kept
+  on a row after any failed read is never taken for a live one: the pick uses it
+  only if it falls inside the pick's own window with neither window reset since
+  (and says so), else skips it with a note giving its age. The fleet's dot
+  ignores a kept reading older than five minutes. An
   account that does not answer is skipped with a note and, when none answers,
   the machine default decides as before. Each reading is kept: the row's bar
   gains *≈ 40 min to the limit* once two readings of the same window exist.
@@ -966,7 +991,7 @@ aisquare accounts list --usage         # …plus the two windows, percent USED (
 aisquare accounts add                  # a fresh slot; Claude Code opens for the sign-in, then exits
 aisquare accounts run 2                # a plain Claude Code session on account 2
 aisquare accounts run 2 --model opus   # arguments after the slot go to claude
-aisquare accounts usage                # the windows, per signed-in account; --refresh reads now
+aisquare accounts usage                # the windows, per signed-in account; --refresh reads now (a rate-limited account waits out its Retry-After)
 aisquare accounts remove 2             # the directory is kept as 2.removed-<stamp>
 aisquare launch coder --account 2      # a board role on account 2
 aisquare fleet spawn coder --account 2 # a fleet agent on account 2

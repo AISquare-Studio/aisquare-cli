@@ -2383,8 +2383,9 @@ follows it:
 - The codebase snapshot is gone, and `aisquare doctor` loses its `repomix`, `snapshot`
   and `tiktoken` rows. The first command that opens the store deletes the old packs
   under `~/.aisquare/projects/<id>/snapshot/`, once, and nothing else. A `[snapshot]` section
-  in `config.toml` is no longer read: doctor's config row says so, and the next save
-  drops it.
+  in `config.toml` is no longer read, except its `ignore` list, which becomes `[code]
+  ignore` (the symbol index's, part 3): doctor's config row says so, and the next save
+  drops the section and writes that list under `[code]`.
 - **On a shared machine**, a first message on the command line can be read by other
   local users in `ps` while the agent runs. `aisquare config set fleet.first_prompt
   type` keeps it off the command line.
@@ -2465,6 +2466,7 @@ before the step, reads as before. The symbol index is its own SQLite file per pr
 | `[fleet] pane_clipboard` | `off` | Whether a pane program may set your clipboard. |
 | `[watch] interval_seconds` / `github` / `github_every_seconds` / `auto_stop` / `sources` | `60` / `false` / `120` / `true` / `{}` | `aisquare watch`, which nothing starts until you do. |
 | `[code] enabled` / `max_file_kb` | `true` / `1024` | The symbol index behind `aisquare code`. |
+| `[code] ignore` | `[]` | Globs the symbol index leaves out, beside its built-in list; a `[snapshot] ignore` from 0.8.2 is carried here. |
 | `[accounts] share` | `[]` | What every Claude account shares. Nothing until you enable a part. |
 
 **What you will notice.**

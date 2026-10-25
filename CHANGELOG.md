@@ -814,8 +814,10 @@ fleet still running, and every release now carries its own installer.**
     migrations, because a store from 0.6 or older still reads a project's pack as the
     mark of a project you added (#139): such a project stays listed, then its pack goes.
   - **A `config.toml` with `[snapshot]` still loads.** Doctor's config row says the
-    section is no longer read (green), and the next save drops it.
-    `aisquare config get/set snapshot.*` answer `unknown config key`.
+    section is no longer read (green), and the next save drops it. Its `ignore` list
+    is the one part kept: it is read as `[code] ignore`, the symbol index's (Added,
+    above), and written there by that save. `aisquare config get/set snapshot.*`
+    answer `unknown config key`.
   - **tiktoken** counted pack tokens and nothing else, and this build never imports it.
     The one-liner still adds it for now: it can install a release up to 0.8.2, which
     asks for tiktoken in doctor on a machine with Node. An install that has

@@ -71,7 +71,7 @@ aisquare
 │                                (docs/orchestration.md#a-manager-over-a-group)
 ├── code            find <name> [--kind K] [--limit N] · refs <name> [--defs] [--limit N]
 │                   similar <name|path:line> [--limit N] · index [--full] [--status]
-│                   — the project's symbol index (docs/memory.md#symbol-index; [code] enabled, max_file_kb)
+│                   — the project's symbol index (docs/memory.md#symbol-index; [code] enabled, max_file_kb, ignore)
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
 │                                                  [--config-dir DIR]
 ├── accounts        list [--usage] · add · run <slot> [… claude args] · usage [slot]
@@ -169,6 +169,7 @@ list` prints every key. The ones that need more than their name:
 | `accounts.share` | `[]` | what every account shares: `memory`, `skills`, `agents`, `commands`, `claude_md` (`plugins` is experimental); set with `aisquare accounts share --enable` ([fleet](fleet.md)) |
 | `code.enabled` | `true` | build a project's symbol index at `project onboard` and `init` (in the background) and refresh it at session start ([memory](memory.md#symbol-index)) |
 | `code.max_file_kb` | `1024` | a file larger than this is not indexed |
+| `code.ignore` | `[]` | globs the symbol index leaves out, extending its built-in list (comma-separated on the command line); a `[snapshot] ignore` from 0.8.2 is read here and moved at the next save ([memory](memory.md#symbol-index)) |
 | `capture.enabled` | `true` | `false`: the `UserPromptSubmit` hook stores no prompt (`aisquare log` stays empty) and spools none for Explainability. The turn's metrics row (no text), the teammate delta and the CI experiment, if you turned it on, carry on. A config that cannot be read records no prompt either, with one line on stderr. |
 | `fleet.busy_quiet_seconds` | `30` | how long an agent's pane may print nothing while the board says `working` before its screen is checked once: Claude Code idle at its prompt reads `waiting` (*idle (the board said working)*), as after a turn ended with Esc, which fires no hook. A pane that is busy is never captured. |
 | `fleet.max_agents_total` | `0` | live agents across every project, the captain excluded; `0` is no budget ([fleet](fleet.md#capacity)) |

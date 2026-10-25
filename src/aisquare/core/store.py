@@ -4726,7 +4726,10 @@ class SqliteStore:
         The machine default IS rank 1 of the order (#8 on the board), so a flag an
         older build set is folded into the order: that slot goes to the top, the
         others keep their order behind it, renumbered 1..n, and the flag is cleared
-        — so no launch changes account on upgrade. Keyed on the DATA, not on a schema
+        — so a launch that took the old default takes the same account after the
+        upgrade. One does change: a role with a hand-written ``team bind <role> --env
+        CLAUDE_CONFIG_DIR=…`` ran on the old default and now runs on its own directory,
+        since a binding wins over the preferred account. Keyed on the DATA, not on a schema
         version: a store any line carried past whatever version a step would have had
         still holds the flag, and is promoted on its next read all the same. Clearing
         it makes this idempotent, and lets a later reorder stand. One transaction;

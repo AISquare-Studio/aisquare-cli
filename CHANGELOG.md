@@ -387,7 +387,7 @@ default, and every release now carries its own installer.**
   defaults and role bindings are unchanged. A launch line reads `[work ·
   preferred (rank 1)]` where it read `[work · machine default]`. `accounts
   list` / `accounts usage` lose the `*` default mark and the "no default account"
-  hint (the first row is the preferred one), and the account JSON loses
+  hint (the preferred account is the first enabled, signed-in one), and the account JSON loses
   `is_default`. The **Accounts** page loses the ★ column, the *Default* button
   and the status column: **↑**/**↓** are the first columns of each row, before
   `#`, the plan is the last, and why a row has no usage (not signed in, a token
@@ -398,8 +398,11 @@ default, and every release now carries its own installer.**
   retired `is_default` flag is cleared (the column stays, unread). It is keyed on
   the flag, not on a schema version, so a store already carried past any version
   is promoted too, once. No schema step. A machine that never set a default and
-  has accounts signed in now launches on its rank-1 one; a `team bind <role>
-  --env CLAUDE_CONFIG_DIR=…` written by hand still wins over it, as before.
+  has accounts signed in now launches on the first enabled, signed-in one. A
+  `team bind <role> --env CLAUDE_CONFIG_DIR=…` written by hand wins over the
+  preferred account. That is a change where an older build set a machine
+  default: the default won over such a binding, and now the binding does, so that
+  role launches on its own directory after the upgrade.
 - The store migrates to schema v35 on first open, from 0.8.2's v32, in three steps: v35
   adds two tables, `usage_session` and `usage_turn`, for `aisquare metrics tokens`. v34
   adds `fleet_agent.ended_by`, how an agent's row ended (`stopped` on aisquare's word,
@@ -494,7 +497,10 @@ default, and every release now carries its own installer.**
   is hidden while *Pick…* cannot be pressed (the captain's dialog, a hand-off from
   a teammate). `aisquare config get/set fleet.roles.agent.*` now works, so the
   no-role agent's permission mode, worktree and extra args can be set like any
-  role's; another role the config does not have is still an unknown key.
+  role's; another role the config does not have is still an unknown key. Two things
+  show it: *App settings ▸ Agent settings* always has an `agent` row (the no-role
+  agent's, the dialog's *(none)*), and with tracing configured doctor's auto-mode
+  line counts `agent` among the roles on auto mode.
 - **Restart all brings back the agents that died** (#38). After an outside SIGTERM
   killed every agent of a fleet (exit 143), *Settings ▸ Fleet ▸ Restart all…* and
   `fleet restart --all` listed each one as exited and restarted none: they acted on

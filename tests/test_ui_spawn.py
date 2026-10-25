@@ -1833,6 +1833,30 @@ def test_with_no_role_the_empty_persona_says_plain_claude_not_its_role_alone(
     assert with_role == back == "(no persona — the agent runs as its role alone)"  # the control
 
 
+def test_a_role_change_re_describes_the_note_under_the_owners_own_empty_persona(
+    git_project: ProjectInfo,
+) -> None:
+    """The owner's pick is kept across a role change, so nothing re-puts the persona and
+    its note was described only by the role change itself: with *(none)* picked by hand,
+    Role *(none)* still said "runs as its role alone" (review of #405 in #401, n9)."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "persona").value = "careful"
+        await settle(pilot)
+        select(dialog, "persona").value = ""  # the owner's own pick: no persona
+        await settle(pilot)
+        seen: list[Any] = [note(dialog, "#spawn-persona-description")]
+        select(dialog, "role").value = spawn_module.NO_ROLE
+        await settle(pilot)
+        seen += [select(dialog, "persona").value, note(dialog, "#spawn-persona-description")]
+        return seen
+
+    with_role, kept, without = drive(git_project, scenario)
+    assert with_role == "(no persona — the agent runs as its role alone)"  # the control
+    assert kept == "", "the owner's pick stands"
+    assert without == "(plain Claude: no role, no persona)"
+
+
 def test_the_pick_note_shows_only_beside_a_pick_that_presses(
     git_project: ProjectInfo, teammates: list[FleetAgentStatus]
 ) -> None:

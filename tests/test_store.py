@@ -2470,7 +2470,9 @@ def test_claude_account_registry_keeps_unique_aliases_and_a_dense_order(
     second = store.upsert_claude_account(2, Path("/h/.aisquare/claude-accounts/2"))
     assert (first.position, second.position) == (1, 2)  # queued at the end, in order
     assert not first.is_default and not second.is_default and first.alias is None
-    assert not hasattr(store, "set_claude_account_default"), "the flag is retired (v34)"
+    assert not hasattr(store, "set_claude_account_default"), (
+        "the flag is retired (#406): read once, then promoted"
+    )
 
     store.set_claude_account_alias(2, "work")
     with pytest.raises(sqlite3.IntegrityError):

@@ -625,7 +625,8 @@ def set_default(ref: str | None, *, project: ProjectInfo | None = None) -> Claud
         )
     try:
         with store_session() as store:
-            _arranged(store)  # the row must exist before it can be the default
+            # The row must exist before it can be the default.
+            arranged = {each.slot for each in _arranged(store)}
             if project is not None:
                 if account is None:
                     # A delete, which needs no row: registering the directory first
@@ -638,6 +639,10 @@ def set_default(ref: str | None, *, project: ProjectInfo | None = None) -> Claud
                     store.onboard_project(project)
                     store.set_project_setting(project.id, PROJECT_ACCOUNT_KEY, str(account.slot))
             elif account is not None:
+                # order_claude_accounts ignores an unknown slot, so a slot removed since
+                # resolve() would print "moved to rank 1" over an order nothing changed.
+                if account.slot not in arranged:
+                    raise KeyError(account.slot)
                 store.order_claude_accounts([account.slot])
     except KeyError as exc:
         raise NoSuchAccount(_vanished(account)) from exc

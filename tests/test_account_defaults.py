@@ -488,6 +488,29 @@ def test_a_slot_removed_between_the_reconcile_and_the_write_is_a_sentence(
             call()
 
 
+def test_a_machine_default_on_a_slot_removed_after_it_was_resolved_is_refused(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """The real store, not a mocked ``KeyError``: ``order_claude_accounts`` ignores an unknown
+    slot, so a slot removed between ``resolve()`` and the write printed ``✓ … moved to rank
+    1`` over an order it had not changed (review of #406 in #401, n4). The retired
+    ``set_claude_account_default`` raised there."""
+    core.create_account()
+    gone = core.create_account()
+    resolve = service.resolve
+
+    def removed_meanwhile(ref: str) -> Any:
+        account = resolve(ref)
+        shutil.rmtree(gone.config_dir)  # by another process, after the lookup
+        return account
+
+    monkeypatch.setattr(service, "resolve", removed_meanwhile)
+    with pytest.raises(service.NoSuchAccount, match="slot 3 any more"):
+        service.set_default("3")
+    monkeypatch.setattr(service, "resolve", resolve)
+    assert _slots(service.list_accounts()) == [1, 2]  # nothing moved, the slot dropped
+
+
 # --------------------------------------------------------------------------- launch and spawn
 
 
@@ -534,6 +557,7 @@ def test_launch_runs_on_the_machine_default_and_stays_byte_identical_without_one
     assert "[Work laptop]" in spaced.stderr
 
 
+@pytest.mark.parametrize("bound", ["env", "env_files"])
 @pytest.mark.parametrize("pick", ["default", "headroom"], ids=["pick-default", "unreadable-usage"])
 def test_rank_1_never_overrides_a_hand_written_config_dir_binding(
     fake_home: Path,
@@ -542,11 +566,13 @@ def test_rank_1_never_overrides_a_hand_written_config_dir_binding(
     runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
     pick: str,
+    bound: str,
 ) -> None:
     """``team bind coder --env CLAUDE_CONFIG_DIR=/hand/written`` launched there before rank 1
     was the default, and must still: the preferred rung is a silent default, and applying
     slot 1 RESTORES this shell's variables over the binding's (review of #406, M1). With
-    ``pick = "default"``, and with headroom on but no usage readable, which falls to it."""
+    ``pick = "default"``, and with headroom on but no usage readable, which falls to it. The
+    directory bound as a value (``--env``) or read from a file (``--env-file``) alike."""
     config = load_config()
     config.accounts = AccountsSettings(pick=pick)
     save_config(config)
@@ -554,7 +580,12 @@ def test_rank_1_never_overrides_a_hand_written_config_dir_binding(
     core.create_account()
     _signed_in(1)
     _signed_in(2)
-    settings_service.bind_role("coder", env={core.CONFIG_DIR_VAR: "/hand/written"})
+    if bound == "env":
+        settings_service.bind_role("coder", env={core.CONFIG_DIR_VAR: "/hand/written"})
+    else:
+        secret = fake_home / "config-dir.txt"
+        secret.write_text("/hand/written\n", encoding="utf-8")
+        settings_service.bind_role("coder", env_files={core.CONFIG_DIR_VAR: str(secret)})
 
     choice = service.choose(role="coder", project=work)
     assert choice.account is None and choice.source is None  # nothing chose: left as written

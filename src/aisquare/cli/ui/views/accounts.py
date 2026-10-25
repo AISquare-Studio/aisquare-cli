@@ -397,7 +397,6 @@ def _window_cells(
 def account_cells(
     status: ClaudeAccountStatus,
     usage: ClaudeUsage | None,
-    trend: UsageTrend | None = None,
     *,
     now: datetime | None = None,
 ) -> dict[str, Text]:
@@ -786,7 +785,7 @@ class AccountRow(Horizontal, can_focus=True):
 
     def _paint(self) -> None:
         account = self.status.account
-        cells = account_cells(self.status, self.usage, self.trend)
+        cells = account_cells(self.status, self.usage)
         for column in COLUMNS:
             cell = self.cell(column.key)
             cell.update(cells[column.key])

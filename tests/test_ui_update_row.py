@@ -1244,6 +1244,22 @@ def test_an_agent_left_as_it_was_is_named_in_an_information_toast(
     assert (outcome.toast(), warning) in toasts, toasts
 
 
+def test_a_reopen_with_no_record_to_take_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of #301, n2: a hand-over held past ten minutes by a read that hung left the record
+    too old, and the reopen took none and said nothing, so an agent gone in the update stayed
+    down unnamed. It says so, as a warning; an ordinary start says nothing (control)."""
+    monkeypatch.setattr(updates, "reattach_after_update", lambda: None)
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> list[str]:
+        return await _toasts(app)
+
+    reopened = _drive(body, offer=None, after_update=True)
+    ordinary = _drive(body, offer=None)
+
+    assert ui_app.NO_PRESS_TO_TAKE in reopened, reopened
+    assert ui_app.NO_PRESS_TO_TAKE not in ordinary
+
+
 # --- the hidden flags -------------------------------------------------------------------------
 
 _ENTER = "Press Enter to go back to asq "

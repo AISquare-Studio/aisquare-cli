@@ -173,6 +173,12 @@ UPDATE_HAND_OFF = ("upgrade", "--one-click")
 Unpinned, as ``aisquare upgrade`` installs: a pinned receipt would hold every later ``uv tool
 upgrade`` back (review of #301)."""
 
+NO_PRESS_TO_TAKE = (
+    "the update did not leave its record of the running agents, or it was over ten minutes "
+    "old: none was looked at. Restart all brings back any that went"
+)
+"""The reopen's toast when there is no press to take (``updates.reattach_after_update``)."""
+
 
 _DoctorReport = tuple[Path | None, list[DoctorCheck]]
 """What the doctor worker hands back: the scope it ran for, and its checks."""
@@ -2700,7 +2706,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         )
 
     def _reattached(self, event: Worker.StateChanged) -> None:
-        """Say what the reopen found of the agents the press kept, and show the restarts."""
+        """Say what the reopen found of the agents the press kept, and show the restarts.
+
+        No record to take is said too: a hand-over held past ten minutes by a read that hung
+        left the record too old, and the reopen said nothing at all, so an agent gone in the
+        update stayed down unnamed (review of #301, n2)."""
         if event.state is WorkerState.ERROR:
             self.notify(
                 f"could not look at the agents the update kept: {event.worker.error}",
@@ -2711,6 +2721,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         outcome = event.worker.result
         if event.state is not WorkerState.SUCCESS:
+            return
+        if outcome is None:
+            self.notify(
+                NO_PRESS_TO_TAKE,
+                severity="warning",
+                timeout=12,
+                markup=False,
+            )
             return
         if not isinstance(outcome, updates_service.Reattached):
             return

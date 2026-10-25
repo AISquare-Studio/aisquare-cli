@@ -447,6 +447,58 @@ def test_removing_an_account_forgets_its_wait(fake_home: Path) -> None:
 # --------------------------------------------------------------------------- review of #408
 
 
+@pytest.mark.parametrize(("prefer", "picked"), [("priority", 2), ("reset-soonest", 3)])
+def test_the_merged_pick_honours_rank_the_back_off_and_the_family_limit_at_once(
+    fake_home: Path, prefer: str, picked: int
+) -> None:
+    """Merged in #401 for 0.9.0: #406's rank order (rank 1 is the machine default), #408's
+    back-off (a kept reading is never picked by when old) and main's P0-W3 (a limit an
+    account refused for a family is remembered; ``[accounts] prefer``), in one hand-over pick
+    for an Opus agent. Rank 1 is skipped for its Opus mark, rank 2 for its old kept reading;
+    of the two under the line, ``priority`` takes rank 3 and ``reset-soonest`` the one whose
+    week resets first. With nothing to pick, rank 1 is still the machine default."""
+    ranked = [_slot(f"{name}@example.com", f"tok-{name}") for name in ("a", "b", "c", "d")]
+    a, b = ranked[:2]
+
+    def week(percent: float, resets: datetime) -> dict[str, Any]:
+        payload = _payload(percent, week=percent)
+        payload["seven_day"]["resets_at"] = resets.isoformat()
+        return payload
+
+    endpoint = _Endpoint(
+        {
+            "tok-a": _payload(10),
+            "tok-b": _payload(5),
+            "tok-c": week(30, NOW + timedelta(days=5)),
+            "tok-d": week(20, NOW + timedelta(days=1)),
+        }
+    )
+    service.read_usage([b], now=NOW, fetch=endpoint)  # b's last good reading, at NOW
+    endpoint.by_token["tok-b"] = (429, {"Retry-After": "3600"})
+    later = NOW + timedelta(minutes=30)
+    service.read_usage([b], now=later, fetch=endpoint)  # b is backed off from here
+    with store_session() as store:  # a refused an Opus request: remembered until its reset
+        service._write_limit(store, a.slot, "opus", NOW + timedelta(days=2), how="refused")
+
+    choice, notes = service.headroom_choice(
+        ranked,
+        switch_at=90,
+        now=later + timedelta(minutes=1),
+        fetch=endpoint,
+        least_bad=False,
+        family="opus",
+        prefer=prefer,
+    )
+
+    assert choice is not None and choice.slot == ranked[picked].slot, notes
+    said = " | ".join(notes)
+    assert f"{core.label(a)} skipped" in said, "the Opus mark"
+    assert "too old to pick by" in said and core.label(b) in said, "the kept reading"
+    assert "tok-a" not in endpoint.calls, "a marked account is never read"
+    assert endpoint.calls.count("tok-b") == 2, "a backed-off account is not asked again"
+    assert service.preferred_account(ranked) == a, "rank 1 is still the machine default"
+
+
 @pytest.mark.parametrize(
     ("resets_in", "why"),
     [

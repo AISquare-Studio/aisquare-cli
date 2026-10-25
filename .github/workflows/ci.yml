@@ -41,7 +41,7 @@ permissions:
 #   test     each leg's suite in shards: pytest-split (`--splits N --group k`) splits
 #            it by the per-test times in .test_durations (CI's own, from the
 #            shards' notes), and each shard runs on every core (`-n auto`). 4 shards
-#            per Linux leg, 8 on Windows, where the suite takes about three times as
+#            per Linux leg, 10 on Windows, where the suite takes about three times as
 #            long (61 minutes of test time on 4 cores, against 19 on Linux, run
 #            40226083784). The two ambient legs are folded in
 #            (owner decision): py3.11 runs in the proxy-down ambient and py3.13 in
@@ -174,11 +174,13 @@ jobs:
         {"leg": "py3.12", "os": "ubuntu-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 4},
         {"leg": "py3.13-ambient-proxy-up", "os": "ubuntu-latest", "python": "3.13", "captain": "on", "ambient": "proxy-up", "shards": 4},
         {"leg": "py3.12-captain-off", "os": "ubuntu-latest", "python": "3.12", "captain": "off", "ambient": "none", "shards": 4},
-        {"leg": "windows-py3.12", "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 8},
-        {"leg": "windows-py3.12", "shard": 5, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 8},
-        {"leg": "windows-py3.12", "shard": 6, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 8},
-        {"leg": "windows-py3.12", "shard": 7, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 8},
-        {"leg": "windows-py3.12", "shard": 8, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 8}]}') }}
+        {"leg": "windows-py3.12", "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 10},
+        {"leg": "windows-py3.12", "shard": 5, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 10},
+        {"leg": "windows-py3.12", "shard": 6, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 10},
+        {"leg": "windows-py3.12", "shard": 7, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 10},
+        {"leg": "windows-py3.12", "shard": 8, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 10},
+        {"leg": "windows-py3.12", "shard": 9, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 10},
+        {"leg": "windows-py3.12", "shard": 10, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 10}]}') }}
     steps:
       - uses: actions/checkout@v7
 

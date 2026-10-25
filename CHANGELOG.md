@@ -442,7 +442,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   matrix about 14, down from 22 and 64.** The suite is ~13k tests and its time is a
   long tail, so it is split across standard runners rather than sped up: pytest-split
   (now in the `dev` extra) splits each leg by the per-test times in `.test_durations`,
-  measured on CI itself, into 4 jobs per Linux leg and 8 on Windows, each on every core.
+  measured on CI itself, into 4 jobs per Linux leg and 10 on Windows, each on every core.
   Every shard notes what it collected and ran, and a `shards` job fails unless each
   leg's shards ran every collected test exactly once (`tests/shards.py`). The two
   ambient jobs, which ran the suite serially for over an hour, are now the py3.11

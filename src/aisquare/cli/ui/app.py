@@ -78,6 +78,7 @@ from aisquare.cli.ui.receiver import listen_for_ui, stop_listening_for_ui
 from aisquare.cli.ui.remote_control import SWITCHES, RemoteController, ngrok_ends_with
 from aisquare.cli.ui.sidebar import (
     ALIVE_STATES,
+    CAPTAIN_READING,
     HEADROOM_DOT,
     RED,
     SETTINGS_KEY,
@@ -108,13 +109,15 @@ from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, UsageRead, read_session
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
-from aisquare.cli.ui.views.app_settings import AppSettingsView
+from aisquare.cli.ui.views.app_settings import AppSettingsView, UiSettingsChanged
 from aisquare.cli.ui.views.captain import CaptainView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.remote import RemotePanel
+from aisquare.cli.ui.views.settings_captain import CaptainSwitched
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
+from aisquare.cli.ui.views.settings_remote import RemoteChip
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core import clipboard, experimental, paths
 from aisquare.core.console import stderr_console
@@ -137,6 +140,7 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import diagnostics, project_groups
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
+from aisquare.services import settings as settings_service
 
 DoctorRunner = Callable[[], list[DoctorCheck]]
 """What the Doctor page runs: ``diagnostics.doctor`` in production, a stub in tests."""
@@ -271,7 +275,7 @@ class FleetSnapshot:
 
 @dataclass(frozen=True)
 class _FleetRead:
-    """What one read of the fleet found (:func:`_read_fleet`), handed from the thread that
+    """What one read of the fleet found (:func:`_read_frame`), handed from the thread that
     read it to the UI thread that paints it (``FleetApp._paint_fleet``).
 
     ``error`` is why the store could not be read, the rest then empty: the frame on screen
@@ -288,12 +292,16 @@ class _FleetRead:
     error: str | None = None
     taken_at: datetime = field(default_factory=datetime.now)
     home: ProjectInfo | None = None
-    """The captain's home board (T2), read only while the captain is on (:func:`_read_captain`)."""
+    """The captain's home board (T2), read only while the captain is on: in the fleet's own
+    store session (:func:`_read_fleet`), its agents by :func:`_read_captain`."""
     captain: FleetAgentStatus | None = None
     """Its captain's row, when it has one."""
     captain_error: str | None = None
     """Why the home or its captain could not be read: ``FleetApp._captain`` keeps the last
     frame's then."""
+    captain_asked: bool = False
+    """Whether the captain's part was read: the captain was on as the read began. One begun
+    before Settings switched it on found nothing of it, which is not "no captain"."""
 
 
 def _read_frame(
@@ -305,14 +313,16 @@ def _read_frame(
     """One frame of the sidebar, read on the calling thread: the fleet, then the captain's
     home board and row when the captain is on (``experimental.captain``). ``viewed`` and
     ``scope`` as for :func:`_read_fleet`."""
-    read = _read_fleet(show_captured, viewed, scope)
-    return _read_captain(read) if captain else read
+    read = _read_fleet(show_captured, viewed, scope, captain=captain)
+    return replace(_read_captain(read), captain_asked=True) if captain else read
 
 
 def _read_fleet(
     show_captured: bool,
     viewed: Collection[str] | None = None,
     scope: Collection[str] | None = None,
+    *,
+    captain: bool = False,
 ) -> _FleetRead:
     """One frame of the fleet, read on the calling thread: the projects and their groups,
     then their agents. One store session reads them all; ``list_agents_many`` then asks
@@ -323,22 +333,28 @@ def _read_fleet(
 
     ``viewed``: the projects an open view shows, read even when folded away, whose view a
     frame without them would leave to age; ``None`` folds nothing (the first frame, read
-    before the views it reopens). ``scope``: the only projects listed (``ui --project``)."""
+    before the views it reopens). ``scope``: the only projects listed (``ui --project``).
+
+    With ``captain``, the captain's home board is read in the same session, by the id
+    resolved here: :func:`_read_captain` opened a second session and resolved the home
+    again, every tick (review of #272, m5)."""
     home_id = project_id_for(paths.aisquare_home().resolve())
     capturing = project_service.capture_on()
     try:
         with store_session() as store:
-            # The home is captured, never onboarded, so only `a` lists it — and
-            # it is still no project: the captain's section shows its board (T2).
-            # As a card it doubled the captain's row, whose repeated selection
-            # key sent ↓ round a loop above every project, and it offered a
-            # spawn row onto the home board.
+            # The home is hidden by default: captured for the captain, it is still no
+            # project, and `a` does not list it (T2). Onboarded on purpose (`init`,
+            # `project onboard`, `+`), it is one, with its own card (the owner's
+            # decision D5); the captain's row stays in the captain's section and out
+            # of that card, where it doubled the row and its selection key.
             projects = [
                 p
                 for p in store.list_projects(all=show_captured and capturing)
-                if p.id != home_id and (scope is None or p.id in scope)
+                if (p.id != home_id or p.onboarded_at is not None)
+                and (scope is None or p.id in scope)
             ]
             groups = store.project_groups()
+            home = store.get_project(home_id) if captain else None
             folded = set() if viewed is None else _folded(projects, groups) - set(viewed)
             listings = fleet_service.read_listings(store, projects, skip=folded)
             # A manager nudge a draft held back (P0-W2, #276), read in this frame's session.
@@ -352,17 +368,24 @@ def _read_fleet(
     notices: dict[str, str] = {}
     for project_id, failure in many.errors.items():
         # A bug in the fleet path must not take the view down: said, with its class.
-        said = (
-            str(failure)
-            if isinstance(failure, fleet_service.FleetError)
-            else f"{type(failure).__name__}: {failure}"
-        )
-        notices[project_id] = f"agents unavailable — {said}"
+        notices[project_id] = f"agents unavailable — {_why_unread(failure)}"
+    if home_id in agents:  # the captain is the captain section's, never the card's
+        agents[home_id] = [
+            s for s in agents[home_id] if not fleet_service.is_the_captains_row(s.agent)
+        ]
     # The one write a frame makes: a manager nudge a draft held back goes out once its input
     # box is clear (P0-W2, #276); nothing is opened when nothing is owed.
     with contextlib.suppress(Exception):
         fleet_service.send_deferred_nudges(owed)
-    return _FleetRead(capturing, projects, groups, agents, notices, listings.live)
+    return _FleetRead(capturing, projects, groups, agents, notices, listings.live, home=home)
+
+
+def _why_unread(exc: BaseException) -> str:
+    """Why a project's agents could not be read, as a card and the captain's section both
+    say it: a ``FleetError`` already says what failed; anything else is named by its class."""
+    if isinstance(exc, fleet_service.FleetError):
+        return str(exc)
+    return f"{type(exc).__name__}: {exc}"
 
 
 def _folded(projects: list[ProjectInfo], groups: list[ProjectGroup]) -> set[str]:
@@ -373,7 +396,8 @@ def _folded(projects: list[ProjectInfo], groups: list[ProjectGroup]) -> set[str]
 
 
 def _read_captain(read: _FleetRead) -> _FleetRead:
-    """``read`` with the home board and its captain's row, read on the calling thread too.
+    """``read`` with its captain's row, read on the calling thread too, from the home board
+    :func:`_read_fleet` read.
 
     Read without writing anything: the home's id is computed, not registered,
     because this runs on every refresh tick and ``captain_state.home_project()``
@@ -381,22 +405,16 @@ def _read_captain(read: _FleetRead) -> _FleetRead:
     and ``FleetApp._captain`` keeps the last frame's home and row for it. A read that
     found the store unreadable is left as it is: its frame is not painted.
     """
-    if read.error is not None:
+    home = read.home
+    if read.error is not None or home is None:
         return read
     try:
-        with store_session() as store:
-            home = store.get_project(project_id_for(paths.aisquare_home().resolve()))
-        if home is None:
-            return read
         statuses = fleet_service.list_agents(home)
     except Exception as exc:  # a bug in the fleet path must not take the view down
-        # The cards' wording: a FleetError already says what failed.
-        if isinstance(exc, fleet_service.FleetError):
-            reason = str(exc)
-        else:
-            reason = f"{type(exc).__name__}: {exc}"
-        return replace(read, captain_error=f"captain unavailable — {reason}")
-    captain = next((s for s in statuses if s.agent.role == fleet_service.CAPTAIN_ROLE), None)
+        return replace(read, captain_error=f"captain unavailable — {_why_unread(exc)}")
+    # The captain's own row, by how it was launched, as brain.find and the home's card ask
+    # (review of #274, m3): a role declared `captain` in the home is a plain agent.
+    captain = next((s for s in statuses if fleet_service.is_the_captains_row(s.agent)), None)
     return replace(read, home=home, captain=captain)
 
 
@@ -800,8 +818,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         Binding("q", "quit", "quit"),
         Binding("ctrl+q", "quit", "quit", show=False),
         Binding("t", "pick_theme", "theme"),
-        # Off the footer, which must fit 80 columns; the ? screen and the palette list it.
-        Binding("R", "remote_panel", "remote", show=False),
+        # In the footer, where the owner looks for it (#33): it fits 80 columns now that the
+        # sidebar's ↓ and ↑ share one entry. The ? screen and the palette list it too.
+        Binding("R", "remote_panel", "remote"),
         Binding("r", "refresh_now", "refresh"),
         Binding("a", "toggle_captured", "captured", show=False),
         Binding("plus", "add_project", "add project", show=False, key_display="+"),
@@ -884,6 +903,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         (``HeadroomSummary.session_by_slot``): what the agent rows and info lines show. It
         is the slow read's, handed on when it lands — the two-second tick reads no usage."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
+        self.always_show_project_path = settings_service.ui_settings().always_show_project_path
+        """``[ui] always_show_project_path``, read once at the start and again when App
+        settings saves, reloads or resets (``UiSettingsChanged``) — never on the refresh tick,
+        which would read ``config.toml`` every two seconds for a value only that page sets."""
         self.snapshot: FleetSnapshot | None = None
         """The last frame that was read successfully; ``None`` before the first."""
         self.store_error: str | None = None
@@ -931,9 +954,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._undo: list[project_groups.UndoEntry] = []
         """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
         self.captain_on = experimental.captain_enabled()
-        """The experimental captain, read once at the start: off, there is no insignia,
-        captain row or captain view, and no ui receiver is started (:meth:`on_mount`).
-        Turned on while asq runs, it shows at asq's next start (``core.experimental``)."""
+        """The experimental captain, read at the start: off, there is no insignia, captain
+        row or captain view, and no ui receiver is started (:meth:`on_mount`). Settings'
+        *Captain* box switches it while asq runs (:meth:`on_captain_switched`)."""
 
     # --- layout -------------------------------------------------------------------
 
@@ -976,6 +999,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # wait=False here and below: a Remote that stops runs down on a thread of its own,
         # since stopping uvicorn and ngrok froze the fleet UI for seconds (r3 review of #243).
         self.remote.restore(wait=False)
+        # "📡 remote · N devices" under the status line while Remote is on (#33).
+        self.query_one("#others").mount(RemoteChip(self.remote, id="remote-chip"))
         self.set_interval(30.0, self._remote_auto_off)
         self.set_interval(30.0, self.remote.revive_tunnel_if_dead)
         # The captain's ui actions (T4): after the first frame, which they resolve against.
@@ -984,6 +1009,20 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # for actions the receiver then refused one by one (review of #240, F6).
         if self.captain_on:
             listen_for_ui(self)
+
+    async def on_captain_switched(self, event: CaptainSwitched) -> None:
+        """Settings' *Captain* box (#33): all that :attr:`captain_on` gates, at once, with no
+        restart: the insignia and the Captain section, the captain's part of the fleet read
+        (read as each read runs) and the ui receiver."""
+        if event.on == self.captain_on:
+            return
+        self.captain_on = event.on
+        await self.sidebar.set_captain(event.on)
+        if event.on:
+            listen_for_ui(self)
+        else:
+            stop_listening_for_ui(self)
+        self.refresh_data()
 
     # --- what was open (#144) ---------------------------------------------------------
 
@@ -1008,8 +1047,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         kind, _, ident = remembered.partition(":")
         if kind == "agent":
             project_id, _, agent_id = ident.partition("/")
-            if self.snapshot.agent(project_id, agent_id) is not None:
-                self.doctor_scope = self._doctor_scope_of(project_id)
+            restored = self.snapshot.agent(project_id, agent_id)
+            if restored is not None:
+                self.doctor_scope = self._doctor_scope_of(restored.agent)
                 self.post_message(AgentSelected(project_id, agent_id))
                 return False
             if self.snapshot.project(project_id) is not None:
@@ -1205,7 +1245,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def refresh_data(self, *, then: Callable[[], object] | None = None) -> None:
         """Re-read projects and agents OFF the UI thread; :meth:`_fleet_read` paints the frame.
 
-        The read (:func:`_read_fleet`) opens the store and asks ``list_agents`` about
+        The read (:func:`_read_frame`) opens the store and asks ``list_agents`` about
         every project, and that asks tmux: ~11 ms a project, ~44 ms with four, on the
         event loop every two seconds (measured 2026-10-20 on an M4 Pro). Every click,
         scroll or key that landed in that window waited for it — "everything feels
@@ -1335,15 +1375,30 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 )
             return
         home, captain, captain_notice = self._captain(read)
+        # The cards show each board's own agents; the captain's row is the captain section's
+        # alone, never the home's card, which the owner can add as a project (D5). The frame
+        # holds both, so a lookup by the home's id still finds the captain.
+        cards = read.agents
         agents = read.agents
         if home is not None:
-            agents = {**read.agents, home.id: [captain] if captain is not None else []}
+            own = [
+                s
+                for s in read.agents.get(home.id, [])
+                if captain is None or s.agent.id != captain.agent.id
+            ]
+            cards = {**read.agents, home.id: own} if home.id in read.agents else read.agents
+            agents = {**read.agents, home.id: [*([captain] if captain is not None else []), *own]}
         self.store_error = None
         self.snapshot = FleetSnapshot(read.projects, agents, read.notices, read.taken_at, home=home)
         sidebar.show_notice(None)
         sidebar.show_captain(captain, notice=captain_notice)
         sidebar.show_projects(
-            read.projects, agents, notices=read.notices, groups=read.groups, live=read.live
+            read.projects,
+            cards,
+            notices=read.notices,
+            groups=read.groups,
+            live=read.live,
+            always_show_paths=self.always_show_project_path,
         )
         self._feed_open_views(self.snapshot)
         if asked is None or self._accounts_began < asked:
@@ -1363,12 +1418,17 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         resolve against them — and the notice says why where the "starts one"
         line would be: the project cards' rule, for the captain.
         """
-        if read.captain_error is None:
+        if not self.captain_on:  # a read begun before Settings switched the captain off
+            return None, None, None
+        if read.captain_asked and read.captain_error is None:
             return read.home, read.captain, None
         last = self.snapshot
         kept = last.home if last is not None else None
         rows = last.agents.get(kept.id, []) if last is not None and kept is not None else []
-        return kept, next(iter(rows), None), read.captain_error
+        # Not asked: begun before Settings switched the captain on, and the next read asks.
+        # By role: the home, added as a project (D5), holds its own agents beside it.
+        captain = next((r for r in rows if fleet_service.is_the_captains_row(r.agent)), None)
+        return kept, captain, read.captain_error or CAPTAIN_READING
 
     def refresh_accounts(self) -> None:
         """Re-read the Claude accounts OFF the UI thread; the status line and the page follow.
@@ -1778,27 +1838,32 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         view_id = f"agent-{status.agent.id}"
         await self._show(view_id, lambda: self._agent_view(status, view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
-        self.doctor_scope = self._doctor_scope_of(event.project_id)
+        self.doctor_scope = self._doctor_scope_of(status.agent)
         self._remember_selection(f"agent:{event.project_id}/{status.agent.id}")
         self._focus_pane(view_id)
 
-    def _doctor_scope_of(self, project_id: str) -> str | None:
-        """The Doctor's scope for an agent of ``project_id``: its project, or ``None`` (the
-        global checks) for the captain's, whose board is no project (T2). Scoped to the
-        home, the Doctor ran the per-project checks with ``cwd=$AISQUARE_HOME`` and armed
-        their fixes there."""
-        if self.snapshot is not None and self.snapshot.is_home(project_id):
+    def _doctor_scope_of(self, agent: FleetAgent) -> str | None:
+        """The Doctor's scope for ``agent``: its project, or ``None`` (the global checks)
+        for the captain, whose board is no project (T2). Scoped to the home, the Doctor ran
+        the per-project checks with ``cwd=$AISQUARE_HOME`` and armed their fixes there. A
+        home added as a project (D5) holds its own agents too: theirs is that project."""
+        if self._is_the_captain(agent):
             return None
-        return project_id
+        return agent.project_id
+
+    def _is_the_captain(self, agent: FleetAgent) -> bool:
+        """Whether ``agent`` is the captain's row, not merely one on the home's board: the
+        home, added as a project (D5), holds its own agents beside it."""
+        # Off, the frame reads no home (``_read_frame``), so no row is the home's.
+        return (
+            self.snapshot is not None
+            and self.snapshot.is_home(agent.project_id)
+            and fleet_service.is_the_captains_row(agent)
+        )
 
     def _agent_view(self, status: FleetAgentStatus, view_id: str) -> AgentView:
         """The view for one agent's row: the captain's has its own bar (T4)."""
-        if (
-            self.captain_on
-            and self.snapshot is not None
-            and self.snapshot.is_home(status.agent.project_id)
-            and status.agent.role == fleet_service.CAPTAIN_ROLE
-        ):
+        if self._is_the_captain(status.agent):
             return CaptainView(status, usage=self.session_usage, id=view_id)
         return AgentView(status, usage=self.session_usage, id=view_id)
 
@@ -1818,7 +1883,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         snapshot = self.snapshot
         home = snapshot.home if snapshot is not None else None
         rows = snapshot.agents.get(home.id, []) if snapshot is not None and home else []
-        captain = next(iter(rows), None)
+        # By role: the home, added as a project (D5), holds its own agents beside it.
+        captain = next((r for r in rows if fleet_service.is_the_captains_row(r.agent)), None)
         if captain is not None and captain.state in ALIVE_STATES:
             self.post_message(AgentSelected(captain.agent.project_id, captain.agent.id))
             return
@@ -1913,7 +1979,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         view_id = f"agent-{status.agent.id}"
         await self._show(view_id, lambda: self._agent_view(status, view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
-        self.doctor_scope = self._doctor_scope_of(started.project_id)
+        self.doctor_scope = self._doctor_scope_of(status.agent)
         self._remember_selection(f"agent:{started.project_id}/{status.agent.id}")
         self._focus_pane(view_id)
 
@@ -2205,7 +2271,30 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.notify(note, severity="warning", timeout=8, markup=False)
         # Selected off a frame read after the spawn (``refresh_data(then=)``): the read is
         # off the UI thread, and the frame shown has no row for the new agent yet.
-        self.refresh_data(then=lambda: self.post_message(AgentSelected(agent.project_id, agent.id)))
+        here = self.content.current
+        self.refresh_data(then=lambda: self._show_spawned(agent, here))
+
+    def _show_spawned(self, agent: FleetAgent, here: str | None) -> None:
+        """Open the agent a spawn started, off the frame read after it (:meth:`spawn_finished`).
+
+        Not once the user has gone elsewhere: ``here`` is what showed at the spawn, and a
+        read that hung for seconds moved the view and the focus off where they went, as
+        :meth:`_show_restarted` never did (review of #272, m2). A frame without its row
+        says it comes on the next refresh, as a restart's does: that read found the store
+        unreadable, or the captain's read failed on the first frame that would have had
+        its home, and "that agent is no longer listed" was said of an agent that runs
+        (m1, m3).
+        """
+        if self.content.current != here:
+            return  # the user is elsewhere: nothing of theirs moves
+        if self.snapshot is None or self.snapshot.agent(agent.project_id, agent.id) is None:
+            self.notify(
+                f"{agent.label} spawned — its row appears on the next refresh",
+                timeout=5,
+                markup=False,
+            )
+            return
+        self.post_message(AgentSelected(agent.project_id, agent.id))
 
     def on_stop_agent(self, event: StopAgent) -> None:
         """The agent view's Stop button, or ``x`` on the selected row: one question first.
@@ -2254,7 +2343,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         view = self.current_view()
         if not (isinstance(view, AgentView) and view.status.agent.id == agent.id):
             return
-        if self.snapshot is not None and self.snapshot.is_home(agent.project_id):
+        if self._is_the_captain(agent):
             self.content.current = "welcome"
             self.sidebar.select(None)
             self._remember_selection(None)
@@ -2282,8 +2371,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.query_one("#settings-hub", SettingsHubView).focus_first()
 
     async def on_app_settings_selected(self, event: AppSettingsSelected) -> None:
-        """The hub's *App settings*: the machine-wide settings, under *⚙ Settings*."""
+        """The hub's *App settings*: the machine-wide settings, under *⚙ Settings*, on the
+        tab the link names (*Remote control*'s, *Captain*'s)."""
         await self._show("app-settings", lambda: AppSettingsView(id="app-settings"))
+        if event.tab is not None:
+            self.query_one("#app-settings", AppSettingsView).show_tab(event.tab)
         self.sidebar.select(SETTINGS_KEY)
         self._remember_selection("app-settings")
 
@@ -2306,6 +2398,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         self._headroom_due = True
         self.refresh_accounts()
+
+    def on_ui_settings_changed(self, event: UiSettingsChanged) -> None:
+        """App settings saved, reloaded or reset: the sidebar's directory lines follow now."""
+        always = event.ui.always_show_project_path
+        if always != self.always_show_project_path:
+            self.always_show_project_path = always
+            self.sidebar.show_paths(always)
 
     def on_usage_read(self, event: UsageRead) -> None:
         """The Accounts page read usage (a tick, or *↻ Refresh usage*): the dot reads the
@@ -2587,6 +2686,7 @@ def _writing_workers() -> dict[str, str]:
         personas_tab,
         project,
         settings,
+        settings_remote,
         welcome,
     )
 
@@ -2605,6 +2705,7 @@ def _writing_workers() -> dict[str, str]:
         personas_tab.ATTACH_WORKER: "a persona's attachment",
         captain.TELL_WORKER: "a line to the captain",
         captain.VOICE_WORKER: "the captain's speaker switch",
+        settings_remote.TOKEN_WORKER: "Settings ▸ Remote's save of the ngrok token",
         agent.RESTART_WORKER: "an agent's restart",
         fleet_bulk.BULK_WORKER: "Settings ▸ Fleet's restart or stop of every agent",
         explainability.SAVE_WORKER: "Explainability's setup",
@@ -2638,6 +2739,7 @@ def _waited_reads() -> dict[str, str]:
         doctor,
         explainability,
         fleet_bulk,
+        settings_remote,
         welcome,
     )
 
@@ -2665,6 +2767,7 @@ def _waited_reads() -> dict[str, str]:
         persona_dialogs.SKILLS_WORKER: "the Import dialog's skill list",
         captain.BAR_WORKER: "the captain's bar",
         captain.MIC_WORKER: "the captain's microphone check",
+        settings_remote.CHECK_WORKER: "what Remote needs",
     }
 
 

@@ -119,6 +119,54 @@ def _locally_bound(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     return bound
 
 
+def _parameters(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """The names a function takes, a callback among them."""
+    args = node.args
+    named = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
+    return {arg.arg for arg in named if arg is not None}
+
+
+def _enclosing_names(tree: ast.AST) -> dict[ast.AST, frozenset[str]]:
+    """For each function, the parameters and locals of the functions it is nested in: a
+    closure's free variables, as ``answered`` reads its enclosing ``_input``'s callback.
+    Iterative, as :func:`_methods_in_scope` is."""
+    enclosing: dict[ast.AST, frozenset[str]] = {}
+    pending: list[tuple[ast.AST, frozenset[str]]] = [(tree, frozenset())]
+    while pending:
+        node, names = pending.pop()
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                enclosing[child] = names
+                pending.append((child, names | _parameters(child) | _locally_bound(child)))
+            elif isinstance(child, ast.ClassDef):
+                pending.append((child, frozenset()))  # a class body is no enclosing scope
+            else:
+                pending.append((child, names))
+    return enclosing
+
+
+def _is_a_local_callable(func: ast.expr, bound: set[str], aliases: dict[str, str]) -> bool:
+    """``failed(reason)``, where ``failed`` is the caller's own parameter or local, or one
+    of a function it is nested in, calls whatever was handed in, not this project's
+    ``failed``.
+
+    By bare name it borrowed the identity of every project function spelled the same:
+    ``ControlClient._input``'s callback ``failed`` read as ``services.onboarding.failed``,
+    which reaches a config write, and #272's merge with #240 had to rename the parameter
+    (7f7cdf19). What was handed in has its edge where it was handed, as a bound method
+    does (``_call_graph``), so dropping this one loses no path the graph found. Imported
+    names are not locals: ``from x import save_config`` then ``save_config()`` is an edge.
+
+    Still by name, and so still imprecise, a ``self.<name>()`` call: it is an edge to
+    every function named ``<name>``, not to its class's own method (7f7cdf19's other
+    rename, ``TerminalPane._send``). Resolving it needs the graph keyed by qualified
+    name, and this file's rules, and N1/N2 in ``test_remote_names_stay_off_the_hook_graph``,
+    are rules about bare names; over-approximating stays the safe direction there
+    (review of #272, n4).
+    """
+    return isinstance(func, ast.Name) and func.id in bound and func.id not in aliases
+
+
 def _is_method_on_a_local(func: ast.expr, bound: set[str], aliases: dict[str, str]) -> bool:
     """``worker.start()`` is ``threading.Thread.start``, not this project's ``start``.
 
@@ -191,16 +239,20 @@ def _call_graph(roots: list[Path] | None = None) -> tuple[dict[str, Path], dict[
         imported = _import_aliases(tree)
         aliases = {**imported, **_rebinding_aliases(tree, imported)}
         methods_in_scope = _methods_in_scope(tree)
+        enclosing = _enclosing_names(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
             defines[node.name] = module
             bound = _locally_bound(node)
+            local = bound | _parameters(node) | enclosing.get(node, frozenset())
             methods = methods_in_scope.get(node, frozenset())
             for inner in ast.walk(node):
                 if not isinstance(inner, ast.Call):
                     continue
                 if _is_method_on_a_local(inner.func, bound, aliases):
+                    continue
+                if _is_a_local_callable(inner.func, local, aliases):
                     continue
                 name = getattr(inner.func, "id", None) or getattr(inner.func, "attr", None)
                 if name:
@@ -368,6 +420,56 @@ def test_a_method_on_a_local_is_not_a_call_to_a_function_of_the_same_name(
         "the closure must still find both writers"
     )
     assert "spawns_a_worker" not in reaching, "starting a thread is not a config write"
+
+
+def test_a_call_to_a_parameter_is_not_a_call_to_a_function_of_the_same_name(
+    tmp_path: Path,
+) -> None:
+    """``failed()``, a callback the function was handed, is what was handed in.
+
+    By bare name it was every project function called ``failed``: #272's control client
+    took a ``failed`` callback, ``services.onboarding.failed`` reaches a config write, and
+    the merge with #240 renamed the parameter to get the hook-surface guard green
+    (7f7cdf19, review of #272 n4). The edge that matters is where the callable is handed,
+    and a bound method handed there still is one; an imported writer called by its own
+    name still is one too.
+    """
+    module = tmp_path / "callbacks.py"
+    module.write_text(
+        "from aisquare.core.config import save_config\n\n"
+        "def failed(reason: str) -> None:\n"
+        "    save_config(None)\n\n"
+        "def drains(failed) -> None:\n"
+        "    failed('the pipe closed')\n\n"
+        "def drains_by_keyword(*, on_error=None, **handlers) -> None:\n"
+        "    on_error()\n\n"
+        "def drains_later(failed) -> None:\n"
+        "    def answered() -> None:\n"
+        "        failed('no reply')\n"
+        "    answered()\n\n"
+        "def kept(callback) -> None:\n"
+        "    callback()\n"
+        "    save_config(None)\n\n"
+        "class Client:\n"
+        "    def start(self) -> None:\n"
+        "        drains(self.fail)\n\n"
+        "    def fail(self, reason: str) -> None:\n"
+        "        failed(reason)\n",
+        encoding="utf-8",
+    )
+
+    _, calls = _call_graph(roots=[module])
+
+    assert "failed" not in calls["drains"], "a parameter was read as the module's failed()"
+    assert "on_error" not in calls["drains_by_keyword"]
+    assert "failed" not in calls["answered"], "a closure's free variable, as 7f7cdf19's was"
+    reaching = _reaches_a_config_write(calls)
+    assert not {"drains", "drains_later", "answered"} & reaching, (
+        "calling what it was handed is not a config write"
+    )
+    assert {"kept", "fail", "start"} <= reaching, (
+        "narrowing must not lose a writer, or the bound method handed to a drain"
+    )
 
 
 def test_a_field_handed_on_is_not_a_call_and_a_bound_method_still_is(tmp_path: Path) -> None:

@@ -40,6 +40,7 @@ from aisquare.models import (
     PromptRecord,
     SetupReport,
     StatusReport,
+    TokenSummary,
     TurnMetric,
 )
 
@@ -699,6 +700,9 @@ def emit_onboard(report: OnboardReport) -> None:
         typer.echo(report.model_dump_json())
         return
     console = stdout_console()
+    if report.warning is not None:
+        # The one line adding the aisquare home says (D5): a warning, never a refusal.
+        stderr_console().print(f"warning: {report.warning}", style="yellow", markup=False)
     snapshot = report.snapshot
     if report.snapshot_note is not None:
         # Nothing packed: off, a pack that failed and why, or a --refresh that kept
@@ -797,8 +801,59 @@ def emit_metrics_summary(summary: MetricsSummary) -> None:
         )
     if not summary.turns_with_tokens:
         console.print(
-            "note: no token counts recorded — hook payloads do not carry them (they will "
-            "come from Explainability spans), so token savings cannot be read from this yet"
+            "note: no token counts on these turns yet — the Stop hook reads them off the "
+            "transcript; per-session totals: aisquare metrics tokens"
+        )
+
+
+def emit_token_summary(summary: TokenSummary) -> None:
+    """Render ``metrics tokens`` — JSON under ``--json``, a table otherwise."""
+    if get_state().json_output:
+        typer.echo(json.dumps(summary.model_dump(mode="json")))
+        return
+    console = stdout_console()
+    if not summary.sessions:
+        console.print(
+            "No session usage recorded yet — it is read off the transcript at each Stop. "
+            "Connect Claude Code: aisquare agents connect claude-code"
+        )
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("TOKENS", no_wrap=True)
+    table.add_column("VALUE", justify="right")
+    table.add_row("sessions", f"{summary.sessions:,}")
+    table.add_row("turns", f"{summary.turns:,}")
+    table.add_row("API requests", f"{summary.requests:,}")
+    table.add_row("input", f"{summary.input_tokens:,}")
+    table.add_row("cache write", f"{summary.cache_write_tokens:,}")
+    table.add_row("cache read", f"{summary.cache_read_tokens:,}")
+    table.add_row("output", f"{summary.output_tokens:,}")
+    table.add_row("total (raw)", f"{summary.total_tokens:,}")
+    table.add_row("cost-weighted", f"{summary.weighted_tokens:,.0f}")
+    table.add_row("list price", f"${summary.cost_usd:,.2f}")
+    table.add_row("tool calls", f"{summary.tool_calls:,}")
+    table.add_row("tool-result chars", f"{summary.tool_result_chars:,}")
+    table.add_row("aisquare lookups", f"{summary.lookup_calls:,}")
+    table.add_row("injected by aisquare", f"{summary.injected_chars:,} chars")
+    if summary.median_tokens_before_edit is not None:
+        table.add_row(
+            "before first edit (median)",
+            f"{summary.median_tokens_before_edit:,} tok, "
+            f"{summary.median_tool_calls_before_edit} calls",
+        )
+    console.print(table)
+    if summary.tools:
+        top = list(summary.tools.items())[:8]
+        console.print("tools: " + ", ".join(f"{name} {count}" for name, count in top))
+    console.print(
+        "cost-weighted = input + 1.25 x cache write + 0.1 x cache read + output at the "
+        "model's output/input price ratio"
+    )
+    console.print(f"prices as of {summary.prices_as_of}: {summary.prices_source}")
+    if summary.unpriced_models:
+        console.print(
+            f"⚠ {summary.unpriced_tokens:,} tokens on unpriced models "
+            f"({', '.join(summary.unpriced_models)}) are in the raw totals only"
         )
 
 

@@ -68,6 +68,30 @@ dependencies = [
   # The Remote modal's QR (cli/ui/views/remote.py). Pure python, typed, one
   # module; imported lazily by the QR renderer only.
   "segno>=1.6",
+  # Remote control works out of the box (#34; it was the `remote` extra, which
+  # install.sh never installed, so a fresh machine answered Remote with "not
+  # installed"). `asq remote serve` and the fleet UI's Remote
+  # (services/remote_server.py): one local HTTP+WebSocket port that ngrok
+  # exposes to a phone. websockets is uvicorn's WebSocket backend: without it
+  # /ws answers "No supported WebSocket library detected". All three are
+  # imported inside the server's start only, never on the hook path.
+  "starlette>=0.40",
+  "uvicorn>=0.30",
+  "websockets>=12",
+  # Web Push (services/remote_push.py): the RFC 8291 encryption and the RFC 8292
+  # VAPID signature are P-256 ECDH, AES-GCM and ES256, none of which the stdlib
+  # has. A floor, not a pin: every call used is far older.
+  "cryptography>=42",
+  # The ngrok agent, bundled (services/ngrok_sdk.py): the official SDK embeds
+  # it, with no traffic inspector and no local agent API, as a cp310-abi3
+  # wheel for macOS, Linux (x86_64, aarch64) and Windows. 1.5 and later declare
+  # Python >=3.12, so a 3.11 install resolves 1.4, which has every call used
+  # (SessionBuilder, http_endpoint().domain(), listen_and_forward). Imported
+  # when a tunnel starts or a token is checked, never on the hook path.
+  # Only where ngrok ships a wheel, since it publishes no sdist (Windows on Arm
+  # from 1.5, so from Python 3.12): elsewhere Remote starts an ngrok on PATH, as
+  # it always did (ngrok_sdk.bundled_ngrok).
+  "ngrok>=1.4; sys_platform == 'darwin' or (sys_platform == 'win32' and (platform_machine != 'ARM64' or python_version >= '3.12')) or (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64' or platform_machine == 'armv7l'))",
 ]
 
 [project.optional-dependencies]
@@ -134,21 +158,9 @@ voice = [
   "segno>=1.6",
 ]
 remote = [
-  # `asq remote serve` and the fleet UI's Remote modal (services/remote_server.py):
-  # one local HTTP+WebSocket port that ngrok exposes to a phone. starlette and
-  # uvicorn are the SAME two the serve extra already resolves through mcp;
-  # websockets is the ONE addition (uvicorn's WebSocket backend — without it
-  # the /ws stream answers "No supported WebSocket library detected").
-  "starlette>=0.40",
-  "uvicorn>=0.30",
-  "websockets>=12",
-  # Web Push (services/remote_push.py): the RFC 8291 encryption and the RFC 8292
-  # VAPID signature are P-256 ECDH, AES-GCM and ES256, none of which the stdlib
-  # has. Until now it arrived only through mcp -> pyjwt[crypto], declared by
-  # nothing here. Required by this extra; Remote still runs without it, minus
-  # Web Push, and the page says how to get it. A floor, not a pin: every call
-  # used (ECDH, AESGCM, from_encoded_point, decode_dss_signature) is far older.
-  "cryptography>=42",
+  # Kept as a no-op alias for one release, as `tui` is: Remote's dependencies
+  # are core since #34, and `pipx install 'aisquare-cli[remote]'` was the
+  # documented way to get them.
 ]
 code = [
   # `aisquare code`'s TypeScript and JavaScript parsers (core/code_index.py, #285).
@@ -220,15 +232,9 @@ dev = [
   # against the real `messages.parse` signature (the `mcp`/`serve` precedent).
   # Tests never call it: they install a fake `anthropic` module.
   "anthropic>=1",
-  # The remote extra's one addition, so the dev env can run tests/test_remote_server.py
-  # (starlette + uvicorn already arrive through mcp above).
-  "websockets>=12",
   # starlette's TestClient, which the remote server tests drive; mcp 2.x no
-  # longer brings it.
+  # longer brings it. (Remote's own dependencies are core since #34.)
   "httpx>=0.27",
-  # The remote extra's Web Push crypto, so tests/test_remote_push.py runs on the
-  # CI's dev-only install rather than on whatever mcp happens to pull in.
-  "cryptography>=42",
   # tests/test_remote_page.py builds the sdist and the wheel from it, to prove the
   # bundled page ships; without the backend in the env it skipped in every CI job.
   # tests/test_packaging.py builds the wheel too, to assert the bundled personas'

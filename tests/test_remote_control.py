@@ -48,6 +48,7 @@ from aisquare.core import paths
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import read_state, update_state
 from aisquare.services import ngrok_tunnel, remote_server
+from aisquare.services.ngrok_sdk import bundled_ngrok
 from aisquare.services.ngrok_tunnel import (
     API_ON,
     AUTHTOKEN_HINT,
@@ -235,12 +236,15 @@ def test_ngrok_forwards_to_the_one_address_remote_listens_on_never_localhost() -
 # --- the missing binary -------------------------------------------------------------------
 
 
-def test_missing_binary_message_names_the_install_and_the_authtoken() -> None:
+def test_missing_binary_message_says_the_install_is_damaged_and_no_command() -> None:
+    """Only a damaged install has neither the bundled ngrok nor one on PATH (#34): it is told
+    so, never to install ngrok or run ``ngrok config`` by hand."""
     message = missing_binary_message()
     assert message == INSTALL_HINT
-    assert "ngrok is not installed" in message
-    assert "https://ngrok.com/download" in message
-    assert "ngrok config add-authtoken" in message
+    assert "damaged" in message
+    assert not [
+        said for said in ("not installed", "ngrok config", "brew", "snap ") if said in message
+    ]
 
 
 def test_a_tunnel_without_the_binary_reports_instead_of_raising() -> None:
@@ -1019,7 +1023,7 @@ def test_a_tunnel_ngroks_api_started_is_never_the_link_nor_where_a_push_leads(
         link = build_public_url(OURS["url"], server.token)
         assert controller.link_url() == link
         tunnel = controller.tunnel
-        assert tunnel is not None
+        assert isinstance(tunnel, NgrokTunnel)
         deadline = time.monotonic() + 10
         while tunnel.foreign is None and time.monotonic() < deadline:
             time.sleep(0.02)
@@ -1336,7 +1340,7 @@ def test_an_ngrok_that_cannot_read_our_config_runs_as_before_and_the_panel_says_
             arg.startswith("--config=") for arg in second
         )
         tunnel = controller.tunnel
-        assert tunnel is not None
+        assert isinstance(tunnel, NgrokTunnel)
         assert tunnel.api_refused
         assert controller.message is None
         assert controller.status_line() == API_ON.format(addr="127.0.0.1:4040")
@@ -1543,11 +1547,13 @@ def test_an_ngrok_that_cannot_sign_in_with_ours_over_a_version_3_config_runs_as_
         tunnel.stop_tunnel()
 
 
-def test_the_panel_starts_its_ngrok_with_the_api_off() -> None:
+def test_the_panel_starts_its_ngrok_with_the_api_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An ngrok on PATH, which only an install without the bundled SDK starts (#34)."""
     default = inspect.signature(RemoteController).parameters["tunnel_factory"].default
-    assert default is remote_control.ngrok_without_its_api
-    tunnel = remote_control.ngrok_without_its_api(8750)
-    assert tunnel.api_off and tunnel.port == 8750
+    assert default is bundled_ngrok
+    monkeypatch.setitem(sys.modules, "ngrok", None)  # the SDK cannot be imported
+    tunnel = default(8750)
+    assert isinstance(tunnel, NgrokTunnel) and tunnel.api_off and tunnel.port == 8750
 
 
 def test_the_panel_says_why_ngrok_exited_before_it_announced_a_tunnel(tmp_path: Path) -> None:

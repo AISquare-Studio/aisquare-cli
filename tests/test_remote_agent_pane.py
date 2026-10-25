@@ -525,25 +525,6 @@ def test_a_wait_that_ran_out_says_what_was_not_done_only_when_it_is_told() -> No
     )
 
 
-class _RecordedLock:
-    """The agent's real action lock, recording each wait for it: the thread that waited,
-    when, and for how long it was willing to. Two waits of the same lock see one lock."""
-
-    def __init__(self, lock: threading.Lock, waits: list[tuple[str, float, float]]) -> None:
-        self._lock = lock
-        self._waits = waits
-
-    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
-        self._waits.append((threading.current_thread().name, time.monotonic(), timeout))
-        return self._lock.acquire(blocking, timeout)
-
-    def release(self) -> None:
-        self._lock.release()
-
-    def locked(self) -> bool:
-        return self._lock.locked()
-
-
 #: How long any of the bursts below may take at most: a sanity bound only, ten times the
 #: wait. What they pin is HOW the keys wait, asserted as such; the wall-clock bound they
 #: had (the wait + 1 s) went red under load on a fixed build (3.11, 3.15 and 3.28 s, #401).
@@ -558,22 +539,44 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
     read and every socket stalled until their waits ran out (sweep of #243).
 
     Asserted as the mechanism, not a duration: every key waits on the write pool's own
-    threads, never for longer than what is left of its wait since it was tapped, and a read
-    made while every key still waits is answered before any key is."""
+    threads, its wait counted from when its request reached the server, never from when a
+    thread came free, and a read made while every key still waits is answered before any
+    key is. Not from the client's tap either: under load the server takes the taps in
+    late, and a bound on the client's clock went red with a whole wave of keys reaching
+    the server 0.85 s after the last tap (ubuntu py3.13, #401 at 294b68d1)."""
     tmux = _serving(monkeypatch, Tmux(OLDER))
-    waits: list[tuple[str, float, float]] = []
-    real_lock = remote_server.remote_agent_lock
-    monkeypatch.setattr(
-        remote_server,
-        "remote_agent_lock",
-        lambda project_id, label: _RecordedLock(real_lock(project_id, label), waits),
-    )
+    # Each time a key reckons what is left of its wait, before its row is read and again
+    # before the lock: the thread, when, what was left (None: refused), and when the server
+    # stamped its request as arrived. Not the lock's own waits: under load the first wave's
+    # row reads alone outlast the wait, and no key reaches the lock at all.
+    reckoned: list[tuple[str, float, float | None, float | None]] = []
+    wait_left = remote_server._remote_wait_left
+
+    def recorded_wait_left(label: str, wait: float, nothing: str | None) -> float:
+        at, arrived = time.monotonic(), remote_server._WRITE_ARRIVED.get()
+        left: float | None = None
+        try:
+            left = wait_left(label, wait, nothing)
+            return left
+        finally:
+            reckoned.append((threading.current_thread().name, at, left, arrived))
+
+    monkeypatch.setattr(remote_server, "_remote_wait_left", recorded_wait_left)
+    # When each key's thread took it, and the arrival it was told: the first thing a
+    # write thread does is ask the gates again.
+    took: list[tuple[float, float | None]] = []
+    still_allowed = remote_server.RemoteKit.kit_write_still_allowed
+
+    def recorded_still_allowed(kit: remote_server.RemoteKit, device: Any) -> None:
+        took.append((time.monotonic(), remote_server._WRITE_ARRIVED.get()))
+        still_allowed(kit, device)
+
+    monkeypatch.setattr(remote_server.RemoteKit, "kit_write_still_allowed", recorded_still_allowed)
     runtime = make_runtime()
     app = build_app(runtime, sources=_sources(), writes=live_writes(), dist_dir=tmp_path)
     taps = 36  # more than any default pool: min(32, CPUs + 4) threads
     answers: list[tuple[int, float]] = []
-    tapped: list[float] = []
-    action = real_lock(project.id, "coder-1")
+    action = remote_agent_lock(project.id, "coder-1")
     assert action.acquire(blocking=False)
     began = time.monotonic()
     try:
@@ -584,7 +587,6 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
 
             def tap() -> None:
                 sent = time.monotonic()
-                tapped.append(sent)
                 response = client.post(url, json={"agent": "coder-1", "keys": ["Down"]})
                 answers.append((response.status_code, time.monotonic() - sent))
 
@@ -603,20 +605,32 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
     assert answered_before_the_read == 0, (
         f"the read waited behind the keys: {answered_before_the_read} answered first"
     )
-    assert waits, "no key waited for the lock: the recorder went blind"
-    pools = {name.rsplit("_", 1)[0] for name, _, _ in waits}
+    assert len(reckoned) >= taps, "a key was refused without reckoning its wait"
+    pools = {name.rsplit("_", 1)[0] for name, _, _, _ in reckoned}
     assert pools == {"asq-remote-write"}, f"keys waited on {pools}, not the write pool"
-    # Counted from the tap, not from when a thread came free: no key is willing to wait
-    # past its wait after the LAST tap was sent. Half a second covers the request's trip
-    # to the server; a key that counted from its thread waits up to a whole wait more.
-    last_tap = max(tapped)
     wait = remote_server.SEND_KEYS_LOCK_WAIT_SECONDS
+    # Every key reached a thread told when its request arrived, and stamped as it came
+    # in: more taps than the pool has threads, so the keys past the first wave waited for
+    # a thread through most of a wait. A stamp taken when the thread came free reads none.
+    assert len(took) == taps
+    assert all(arrived is not None for _, arrived in took)
+    assert all(arrived is not None for _, _, _, arrived in reckoned)
+    queued = max(at - arrived for at, arrived in took if arrived is not None)
+    assert queued >= wait / 2, (
+        f"no key waited for a thread longer than {queued:.2f} s: arrivals are stamped "
+        "when a thread comes free, not when the request reaches the server"
+    )
+    # Each key is willing to wait only what is left of its wait since it arrived: what
+    # it reckons ends at its arrival plus the wait, with no allowance for the trip to the
+    # server. `at` is read before the server reads its own clock, so at + left can only
+    # fall short of it; the millisecond is float rounding. A key that counted from its
+    # thread (f8328641 reverted) waits up to a whole wait more.
     late = [
-        round(at + timeout - last_tap, 2)
-        for _, at, timeout in waits
-        if at + timeout > last_tap + wait + 0.5
+        round(at + left - (arrived + wait), 3)
+        for _, at, left, arrived in reckoned
+        if left is not None and arrived is not None and at + left > arrived + wait + 0.001
     ]
-    assert not late, f"keys would still wait {late} s past their wait after the last tap"
+    assert not late, f"keys would wait {late} s past their wait since they arrived"
     assert time.monotonic() - began < _BURST_SANITY_SECONDS
 
 

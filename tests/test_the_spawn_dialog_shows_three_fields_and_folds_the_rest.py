@@ -37,6 +37,7 @@ from tests.test_ui_spawn import (
     note,
     open_advanced,
     option_prompts,
+    resized,
     select,
     settle,
     submit,
@@ -129,8 +130,7 @@ def test_advanced_scrolls_on_a_short_terminal_and_the_buttons_stay_in_sight(
         ]
 
     async def short(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
-        await pilot.resize_terminal(SIZE[0], 24)
-        await settle(pilot)
+        await resized(pilot, SIZE[0], 24)
         return await scenario(pilot, host, dialog)
 
     assert drive(git_project, short) == [True, True, True]

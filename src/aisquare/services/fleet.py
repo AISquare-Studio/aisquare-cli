@@ -2509,7 +2509,7 @@ def _with_trust_prompts(
             elif claude_sharing.shows_security_notes(lines):
                 # Its only key is Enter, which a spawn presses (#32, L2): still there, it is
                 # one nobody typed into — a window the human opened first, or a refused key.
-                detail = f"{SECURITY_NOTES} — press Enter in its window"
+                detail = SECURITY_NOTES_DETAIL
                 status = status.model_copy(update={"state": "attention", "detail": detail})
         shown.append(status)
     return shown
@@ -2525,13 +2525,21 @@ def _with_first_prompts(
     (P0-W1a, #122), with the detail that says what to do.
 
     A row whose message is still ``pending`` past ``[fleet] prompt_ack_seconds`` is looked
-    at once: at an idle input box (``screen.box_idle``) nothing is going to take it, so it
-    moves to ``unsent`` and its board says so, once (:func:`_first_prompt_unsent`). A row
-    already ``unsent`` reads ``attention`` with no capture, until a prompt takes the message
-    (``store.mark_prompted``, a human's Enter or a ``tell``). Only a row whose session the
-    board knows is asked: an agent with no hooks never acknowledges anything, and its
-    message would read not taken however its turn went. A row the listing already reads
-    ``attention`` (the trust question) or not live keeps what it says.
+    at once: at an idle input box (``screen.box_idle``), or at Claude Code's first-run
+    Security notes (P0-FU1), nothing is going to take it, so it moves to ``unsent`` and its
+    board says so, once (:func:`_first_prompt_unsent`). A command-line first message waits
+    behind the notes, and its SessionStart has fired, so :func:`_with_trust_prompts`, which
+    asks only a row no hook has spoken for, never looked: it read ``waiting``, silent.
+
+    A row already ``unsent`` reads ``attention`` until a prompt takes the message
+    (``store.mark_prompted``, a human's Enter or a ``tell``), its detail the way on: at the
+    notes, their one key (a ``tell`` typed there is lost), else a ``tell`` or a restart
+    (:func:`unsent_detail`). Which of the two is read off its screen, one capture of a row
+    already stuck for the human, so a human's Enter past the notes turns it to the second.
+    Only a row whose session the board knows is asked: an agent with no hooks never
+    acknowledges anything, and its message would read not taken however its turn went. A
+    row the listing already reads ``attention`` (the trust question) or not live keeps what
+    it says.
     """
     now = _now()
     shown: list[FleetAgentStatus] = []
@@ -2543,14 +2551,19 @@ def _with_first_prompts(
             and status.session is not None
             and status.state in ("waiting", "working")
         )
+        at_notes = False
         if live and delivery.overdue(agent, now, config.prompt_ack_seconds):
-            agent = _unsent_if_idle(agent, status.session, config, addresses)
+            agent, at_notes = _unsent_if_idle(agent, status.session, config, addresses)
+        elif live and agent.first_prompt == "unsent":
+            at_notes = claude_sharing.shows_security_notes(_screen(agent, config, addresses))
         if live and agent.first_prompt == "unsent":
             status = status.model_copy(
                 update={
                     "agent": agent,
                     "state": "attention",
-                    "detail": unsent_detail(project, agent.label),
+                    "detail": SECURITY_NOTES_DETAIL
+                    if at_notes
+                    else unsent_detail(project, agent.label),
                 }
             )
         shown.append(status)
@@ -2565,14 +2578,25 @@ def unsent_detail(project: ProjectInfo, label: str) -> str:
     return f"first prompt not taken — `{tell} …` or `{restart}`"
 
 
+def _screen(
+    agent: FleetAgent, config: FleetSettings, addresses: Mapping[str, _Address] | None
+) -> list[str]:
+    """``agent``'s pane as tmux shows it now; nothing for a screen tmux will not show."""
+    try:
+        return _server_at(_where(agent, config, addresses), config).capture(agent.pane_id).lines
+    except TmuxError:
+        return []
+
+
 def _unsent_if_idle(
     agent: FleetAgent,
     session: TeamSession | None,
     config: FleetSettings,
     addresses: Mapping[str, _Address] | None,
-) -> FleetAgent:
-    """``agent`` as it stands once its overdue first message was looked at: moved to
-    ``unsent`` when its pane shows Claude Code's idle input box, and read again when another
+) -> tuple[FleetAgent, bool]:
+    """``agent`` as it stands once its overdue first message was looked at, and whether its
+    pane shows Claude Code's first-run Security notes: moved to ``unsent`` when the pane
+    shows Claude Code's idle input box or those notes (P0-FU1), and read again when another
     reader moved it first (or a prompt took it meanwhile). A screen that cannot be read
     says nothing, and the row stays ``pending``.
 
@@ -2586,21 +2610,21 @@ def _unsent_if_idle(
     if session is not None and prompted is not None and given is not None and prompted >= given:
         with contextlib.suppress(Exception), store_session() as store:
             store.take_first_prompt(prompted, session_id=session.id, agent_id=agent.id)
-            return store.get_fleet_agent(agent.id) or agent
-        return agent
-    try:
-        server = _server_at(_where(agent, config, addresses), config)
-        lines = server.capture(agent.pane_id).lines
-    except TmuxError:
-        return agent
-    if not screen_reader.box_idle(lines):
-        return agent
-    seconds = f"{config.prompt_ack_seconds:.0f}"
-    if _first_prompt_unsent(agent, f"no turn started on it within {seconds} s"):
-        return agent.model_copy(update={"first_prompt": "unsent"})
+            return store.get_fleet_agent(agent.id) or agent, False
+        return agent, False
+    lines = _screen(agent, config, addresses)
+    at_notes = claude_sharing.shows_security_notes(lines)
+    if at_notes:
+        why = "held at Claude Code's Security notes"
+    elif screen_reader.box_idle(lines):
+        why = f"no turn started on it within {config.prompt_ack_seconds:.0f} s"
+    else:
+        return agent, False
+    if _first_prompt_unsent(agent, why):
+        return agent.model_copy(update={"first_prompt": "unsent"}), at_notes
     with contextlib.suppress(Exception), store_session() as store:
-        return store.get_fleet_agent(agent.id) or agent
-    return agent
+        return store.get_fleet_agent(agent.id) or agent, at_notes
+    return agent, at_notes
 
 
 def _maybe_at_trust_prompt(status: FleetAgentStatus, session: TeamSession | None = None) -> bool:
@@ -4822,6 +4846,8 @@ def _at_input_box(
 
 SECURITY_NOTES = "Claude Code's first-run Security notes screen"
 """How the Security notes screen is named in a note and an ``attention`` detail."""
+SECURITY_NOTES_DETAIL = f"{SECURITY_NOTES} — press Enter in its window"
+"""The ``attention`` detail of an agent at those notes: their one key, in its window."""
 
 
 def _tell(project: ProjectInfo, label: str) -> str:

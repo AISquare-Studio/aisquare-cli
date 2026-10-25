@@ -995,15 +995,24 @@ def test_accounts_usage_renders_the_windows_and_the_reasons(
     _sign_in(third, "three@example.com", expires_in=timedelta(hours=-1))
     monkeypatch.setattr(service, "_http_get", _Fetch())
 
-    result = runner.invoke(app, ["accounts", "usage"])
+    result = runner.invoke(app, ["accounts", "usage"], env={"COLUMNS": "400"})
     assert result.exit_code == 0, result.output
     assert "two@example.com" in result.stdout and "3%" in result.stdout and "7%" in result.stdout
-    assert "expired" in result.stdout
+    # No hover here: the reason, and the fix the Accounts page's '!' shows on hover (#13).
+    assert (
+        "the stored token has expired; fix: press Log in, or open a session on this account "
+        "(aisquare accounts run 3): Claude Code refreshes the token"
+    ) in result.stdout
 
     one = runner.invoke(app, ["--json", "accounts", "usage", "two@example.com"])
     assert one.exit_code == 0, one.output
     [row] = json.loads(one.stdout)
     assert row["account"]["slot"] == 2 and row["usage"]["week_percent"] == 7.0
+    assert row["usage"]["cause"] is None and row["usage"]["fix"] is None  # read: nothing wrong
+    expired = runner.invoke(app, ["--json", "accounts", "usage", "3"])
+    [row] = json.loads(expired.stdout)
+    assert row["usage"]["cause"] == "token_expired" and row["usage"]["needs_login"]
+    assert row["usage"]["fix"].startswith("press Log in")
 
     missing = runner.invoke(app, ["--json", "accounts", "usage", "9"])
     assert missing.exit_code == 1

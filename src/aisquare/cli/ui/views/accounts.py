@@ -11,8 +11,9 @@ docs/plans/claude-accounts.md. Two halves, one page:
 - **Claude Code** — a table (:data:`LAYOUT`), one aligned row per slot that
   ``services.claude_accounts`` knows, in priority order: *↑*/*↓*, the slot, its
   name, who is signed in, the five-hour and seven-day windows (a bar and the
-  percent USED, or why there is no reading) with *Log in* beside them, when each
-  window resets, then the plan.
+  percent USED, or one ``!`` across the two when there is no reading, whose
+  tooltip says why and what to do) with *Log in* beside them, when each window
+  resets, then the plan.
   *Add* makes a fresh slot and opens Claude Code's own login in a tmux window
   rendered right here (a ``TerminalPane``); the view polls the slot's
   directory and, the moment Claude Code has written a login into it, records
@@ -340,21 +341,31 @@ COLUMNS: tuple[Column, ...] = (
 Fixed widths, so a column starts at the same x on every row whatever its values:
 a value too long for its cell ends in ``…`` and never wraps (the whole text is the
 cell's tooltip). The resets columns fit :func:`format_reset`'s longest answer,
-``in 6d 12h (Tue 02:00)``; the usage columns fit ``▮▮▮▮▮ 100%``, the session's also
-``⚠ token rejected`` and a kept reading's age beside its bar, ``▮▮▮▮▮ 100% · 59m`` (F1
-of #400): a session window resets within five hours, and a kept reading's reset window
-reads ``reset``. When there is no
-reading, the usage cells say why — not signed in, a token to renew, the reason the
-usage could not be read — where the bars would be (#8 on the board: there is no
-status column).
+``in 6d 12h (Tue 02:00)``; the usage columns fit ``▮▮▮▮▮ 100%``, the session's also a
+kept reading's age beside its bar, ``▮▮▮▮▮ 100% · 59m`` (F1 of #400): a session window
+resets within five hours, and a kept reading's reset window reads ``reset``. When there
+is no reading, one ``!`` stands across the two usage cells (:data:`PROBLEM_COLUMN`), and
+its tooltip says why and what to do (:func:`problem_tooltip`): a reason cut to 16 cells
+was noise, and ``—`` read as no usage rather than as an error.
 """
 
 MOVE_COLUMNS: tuple[Column, ...] = (Column("up", "↑", 3), Column("down", "↓", 3))
 """The *↑*/*↓* buttons, the first columns of every line: the order IS the arrangement."""
 
+_SESSION, _WEEK = (column for column in COLUMNS if column.key in ("session", "week"))
+
+PROBLEM_COLUMN = Column("problem", "", _SESSION.width + 1 + _WEEK.width)
+"""The one cell a row with no usage to show has in place of its two usage cells, exactly as
+wide as the two and the cell between them: a ``!`` whose tooltip says why and the fix
+(``services.claude_accounts.usage_problem``). Not in :data:`LAYOUT`: the header keeps both."""
+
+PROBLEM_MARK = "!"
+"""What a row with no usage to show reads across its usage cells: why is its tooltip."""
+
 LOGIN_COLUMN = Column("login", "", 14)
-"""*Log in*'s column, beside the usage cells that say why it is there — or *Log in again*,
-the same flow as a secondary action on a row that reads fine (:func:`offers_login_again`)."""
+"""*Log in*'s column, beside the usage (or the ``!`` that says why it is there) — or *Log in
+again*, the same flow as a secondary action on a row that reads fine
+(:func:`offers_login_again`)."""
 
 LAYOUT: tuple[Column, ...] = (
     *MOVE_COLUMNS,
@@ -445,10 +456,11 @@ def account_cells(
     ``▮▯▯▯▯ 12%``, ``▮▮▯▯▯ 40%``, ``in 3h 10m (15:29)``, ``in 6d 12h (Tue 02:00)``, ``max 5x``.
 
     The name is the alias when there is one (``core.label``), so the row reads the way
-    the operator named it. With no reading to show, the session cell says why, worst
-    first — no login, a missing, expired or rejected token, why the usage cannot be
-    read — and the week cell ``—``; the whole reason is the cell's tooltip
-    (:func:`usage_reason`). ``usage`` is ``None`` while a reading is owed (``…``).
+    the operator named it. With no reading to show — no login, a missing, expired or
+    rejected token, why the usage cannot be read (``usage_problem``) — the session cell
+    is :data:`PROBLEM_MARK` and the week cell empty, never a reason or ``—``: the row shows
+    the mark across both (:data:`PROBLEM_COLUMN`), and :func:`problem_tooltip` says why.
+    ``usage`` is ``None`` while a reading is owed (``…``).
     """
     account = status.account
     cells = {column.key: Text() for column in COLUMNS}
@@ -458,37 +470,27 @@ def account_cells(
         cells["email"] = Text(status.identity.email)
         if status.subscription:
             cells["plan"] = Text(status.subscription, style="dim")
-        # No bars for a login whose token is gone, whatever an older reading said.
-        reading = usage if status.signed_in else ClaudeUsage(available=False)
         for window in ("session", "week"):
-            cells[window], cells[f"{window}-resets"] = _window_cells(reading, window, now=now)
-    reason = usage_reason(status, usage)
-    if reason is not None:
-        cells["session"] = reason
-        cells["week"] = Text("—", style="dim")
+            cells[window], cells[f"{window}-resets"] = _window_cells(usage, window, now=now)
+    if accounts_service.usage_problem(status, usage) is not None:
+        # No bars or resets for a login that cannot be read, whatever an older reading said.
+        for key in ("session", "week", "session-resets", "week-resets"):
+            cells[key] = Text()
+        cells["session"] = Text(PROBLEM_MARK, style="bold yellow")
     for text in cells.values():
         text.no_wrap = True
         text.overflow = "ellipsis"
     return cells
 
 
-def usage_reason(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> Text | None:
-    """Why a row shows no usage, worst first — or ``None`` when it shows a reading or ``…``.
-
-    What the status column said before #8 on the board took it away: the usage cells
-    are where the answer is missing, so that is where the reason reads.
-    """
-    if status.identity is None:
-        return Text("not signed in", style="yellow")
-    if not status.signed_in:
-        return Text("⚠ token missing", style="yellow")
-    if status.token_state == "expired":
-        return Text("⚠ token expired", style="yellow")
-    if usage is not None and usage.needs_login:
-        return Text("⚠ token rejected", style="yellow")
-    if usage is not None and not usage.available:
-        return Text(usage.reason or "unavailable", style="dim")
-    return None
+def problem_tooltip(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> str | None:
+    """``the login Keychain is locked`` over ``fix: unlock the login keychain …``: what the
+    row's ``!`` says on hover, from ``usage_problem`` alone — or ``None`` when the row shows
+    a reading or ``…``."""
+    problem = accounts_service.usage_problem(status, usage)
+    if problem is None:
+        return None
+    return f"{problem.reason or 'unavailable'}\n{accounts_service.fix_line(problem)}"
 
 
 def claude_title_text(overview: AccountsOverview) -> Text:
@@ -556,7 +558,8 @@ def _hooks_did_not_install(error: object) -> str:
 def _column_css() -> str:
     """Every column's width, for the header and the rows alike: one rule per column."""
     return "\n".join(
-        f"AccountsTable .col-{column.key} {{ width: {column.width}; }}" for column in LAYOUT
+        f"AccountsTable .col-{column.key} {{ width: {column.width}; }}"
+        for column in (*LAYOUT, PROBLEM_COLUMN)
     )
 
 
@@ -722,6 +725,13 @@ class AccountRow(Horizontal, can_focus=True):
                 continue
             if column.key != "name":
                 yield Static(classes=classes, id=f"account-cell-{column.key}-{self.slot}")
+                if column.key == "week":
+                    problem = Static(
+                        classes=f"cell col-{PROBLEM_COLUMN.key}",
+                        id=f"account-cell-{PROBLEM_COLUMN.key}-{self.slot}",
+                    )
+                    problem.display = False
+                    yield problem
                 continue
             with Horizontal(classes=classes):
                 name = NameCell(id=f"account-name-{self.slot}")
@@ -835,6 +845,14 @@ class AccountRow(Horizontal, can_focus=True):
             if column.key in ("name", "email", "session", "week"):
                 # The whole value, for the cell that cut it short with an ellipsis.
                 cell.tooltip = self._cell_tooltip(column.key, cells[column.key])
+        # No usage to show: one '!' across both usage cells, why and the fix on hover.
+        why = problem_tooltip(self.status, self.usage)
+        problem = self.cell(PROBLEM_COLUMN.key)
+        problem.update(cells["session"] if why is not None else Text())
+        problem.tooltip = why
+        problem.display = why is not None
+        for key in ("session", "week"):
+            self.cell(key).display = why is None
         login = self.query_one(f"#account-login-{self.slot}", Button)
         needed = needs_login(self.status, self.usage)
         login.label = "Log in" if needed else "Log in again"
@@ -860,8 +878,6 @@ class AccountRow(Horizontal, can_focus=True):
             lines = [text.plain] if text.plain else []
             if (kept := kept_tooltip(self.usage)) is not None:
                 lines.append(kept)  # why the bar is an older reading (F1 of #400)
-            if self.usage is not None and self.usage.reason and self.usage.reason != text.plain:
-                lines.append(self.usage.reason)
             pace = accounts_service.describe_trend(self.trend)
             if pace:
                 lines.append(pace)  # where the session window is heading (#146)

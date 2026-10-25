@@ -69,6 +69,7 @@ from aisquare.models import (
     HeadroomLevel,
     HeadroomSummary,
     ProjectInfo,
+    UsageCause,
     UsageSample,
     UsageTrend,
 )
@@ -958,6 +959,131 @@ def _limit_of(payload: Mapping[str, Any], kinds: frozenset[str]) -> float | None
     return max((limit.percent for limit in _limits(payload) if limit.kind in kinds), default=None)
 
 
+# --- why there is no reading, and what to do about it --------------------------------------------
+#
+# Every reading with nothing to show carries a cause (`UsageCause`) and the fix for it,
+# stamped in ONE place, `unreadable_usage`; the fixes are the one table `USAGE_FIXES`. The
+# Accounts page shows the two on hover over its '!', and `accounts usage` beside the
+# reason: neither works out the cause or the fix from the reason's words.
+
+_LOG_IN = "press Log in (in a terminal: aisquare accounts run {slot}, then /login)"
+_REFRESH_TOKEN = (
+    "press Log in, or open a session on this account (aisquare accounts run {slot}): "
+    "Claude Code refreshes the token"
+)
+_THEN_REFRESH = "then ↻ Refresh usage (or --refresh)"
+
+USAGE_FIXES: dict[UsageCause, str | None] = {
+    UsageCause.not_signed_in: _LOG_IN,
+    UsageCause.token_missing: _LOG_IN,
+    UsageCause.token_expired: _REFRESH_TOKEN,
+    UsageCause.token_rejected: _REFRESH_TOKEN,
+    UsageCause.keychain_locked: (
+        f"unlock the login keychain (Keychain Access, or log out and back in), {_THEN_REFRESH}"
+    ),
+    UsageCause.keychain_refused: f"allow aisquare in Keychain Access, {_THEN_REFRESH}",
+    UsageCause.keychain_timeout: (
+        f"answer the Keychain's prompt if one is waiting, {_THEN_REFRESH}"
+    ),
+    # A Keychain that would not say is not asked again by itself (core.read_keychain).
+    UsageCause.keychain_failed: "↻ Refresh usage (or --refresh) asks the Keychain again",
+    UsageCause.rate_limited: "none needed, reads resume {at}by themselves",
+    UsageCause.unreachable: "check the network or HTTPS_PROXY",
+    # #403's tls.BUNDLE_FIX and tls.CERT_HINT, word for word.
+    UsageCause.tls_bundle: (
+        "point SSL_CERT_FILE / SSL_CERT_DIR at a readable PEM bundle, or unset them"
+    ),
+    UsageCause.tls_cert: (
+        "set SSL_CERT_FILE to your CA bundle if a proxy re-signs HTTPS, "
+        "or see `aisquare doctor --live`"
+    ),
+    UsageCause.http_error: None,
+    UsageCause.bad_answer: None,
+    UsageCause.read_failed: None,
+}
+"""What to do about each cause, ``{slot}`` and ``{at}`` filled in by :func:`usage_fix`; ``None``
+where nothing done on this machine helps, which :data:`NO_FIX` says."""
+
+NO_FIX = "fix: none from here, the next read tries again by itself"
+"""What :func:`fix_line` says for a cause with no fix (:data:`USAGE_FIXES`)."""
+
+
+def usage_fix(
+    cause: UsageCause, *, slot: int | None = None, until: datetime | None = None
+) -> str | None:
+    """What to do about ``cause`` on slot ``slot`` (:data:`USAGE_FIXES`): ``until`` is a rate
+    limit's end, ``reads resume at 14:32 by themselves``."""
+    fix = USAGE_FIXES[cause]
+    if fix is None:
+        return None
+    at = f"at {until.astimezone().strftime('%H:%M')} " if until is not None else ""
+    return fix.format(slot="<slot>" if slot is None else slot, at=at)
+
+
+def unreadable_usage(
+    cause: UsageCause, reason: str, *, slot: int | None = None, **fields: Any
+) -> ClaudeUsage:
+    """A reading with nothing to show: ``reason`` says what is wrong, and ``cause`` and its
+    fix (:func:`usage_fix`) are stamped here, the one place they are."""
+    until = fields.get("rate_limited_until")
+    return ClaudeUsage(
+        available=False,
+        reason=reason,
+        cause=cause,
+        fix=usage_fix(cause, slot=slot, until=until),
+        **fields,
+    )
+
+
+def fix_line(reading: ClaudeUsage) -> str:
+    """``fix: press Log in …``, or :data:`NO_FIX` for a reading whose cause has none."""
+    return f"fix: {reading.fix}" if reading.fix else NO_FIX
+
+
+def explain_usage(reading: ClaudeUsage) -> str:
+    """``the stored token has expired; fix: press Log in …``: the reason and its fix in one
+    line, for a surface with no hover (``accounts list --usage``, ``accounts usage``)."""
+    return f"{reading.reason or 'unavailable'}; {fix_line(reading)}"
+
+
+_EXPIRED = "the stored token has expired"
+_REJECTED = "the token was rejected (HTTP 401)"
+_KEYCHAIN_CAUSES: dict[core.KeychainProblem, tuple[UsageCause, str | None]] = {
+    "locked": (UsageCause.keychain_locked, core.KEYCHAIN_LOCKED_REASON),
+    "refused": (UsageCause.keychain_refused, core.KEYCHAIN_REFUSED_REASON),
+    "timeout": (UsageCause.keychain_timeout, None),
+    "failed": (UsageCause.keychain_failed, None),
+}
+"""A Keychain's kind of refusal as a reading's cause, and its reason when the core's words
+carry a fix of their own (``None``: its words stand)."""
+
+
+def _no_login_reason() -> str:
+    if core.keychain_platform():
+        return "no login in the Keychain or a credentials file — not signed in"
+    return "no credentials file — not signed in"
+
+
+def usage_problem(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> ClaudeUsage | None:
+    """Why a row has no usage to show, worst first — or ``None`` when it shows a reading
+    (a kept one too: F1 of #400) or one is still owed.
+
+    No login, then a token gone or expired, all read from ``status`` without a request;
+    then the reading's own cause (a 401, a locked Keychain, the endpoint). The page's
+    '!' and its tooltip, and ``accounts usage``, are drawn from it alone.
+    """
+    slot = status.account.slot
+    if status.identity is None:
+        return unreadable_usage(UsageCause.not_signed_in, "not signed in", slot=slot)
+    if not status.signed_in:
+        return unreadable_usage(UsageCause.token_missing, _no_login_reason(), slot=slot)
+    if status.token_state == "expired":
+        return unreadable_usage(UsageCause.token_expired, _EXPIRED, slot=slot, needs_login=True)
+    if reading is not None and not reading.available:
+        return reading
+    return None
+
+
 def usage(
     account: ClaudeAccount, *, now: datetime | None = None, fetch: Fetch | None = None
 ) -> ClaudeUsage:
@@ -976,22 +1102,16 @@ def usage(
     module never does. A Keychain that would not show the token says why
     (locked, refused), and asks for no log-in. No reason ever carries the token.
     """
+    slot = account.slot
     login = core.stored_login(account)
     creds = login.credentials
     if creds is None:
-        if login.unreadable is not None:
-            reason = login.unreadable
-        elif core.keychain_platform():
-            reason = "no login in the Keychain or a credentials file — not signed in"
-        else:
-            reason = "no credentials file — not signed in"
-        return ClaudeUsage(available=False, reason=reason)
+        if login.unreadable is None:
+            return unreadable_usage(UsageCause.token_missing, _no_login_reason(), slot=slot)
+        cause, said = _KEYCHAIN_CAUSES[login.problem or "failed"]
+        return unreadable_usage(cause, said or login.unreadable, slot=slot)
     if creds.expired(now):
-        return ClaudeUsage(
-            available=False,
-            reason="the stored token has expired — open a session on this account to refresh it",
-            needs_login=True,
-        )
+        return unreadable_usage(UsageCause.token_expired, _EXPIRED, slot=slot, needs_login=True)
     headers = {
         "Authorization": f"Bearer {creds.access_token}",
         "anthropic-beta": OAUTH_BETA,
@@ -1001,8 +1121,10 @@ def usage(
     try:
         answer = (fetch or _http_get)(USAGE_URL, headers, USAGE_TIMEOUT_SECONDS)
     except OSError as exc:  # URLError, a refused connection, a timeout
-        return ClaudeUsage(
-            available=False, reason=f"could not reach the usage endpoint ({type(exc).__name__})"
+        return unreadable_usage(
+            UsageCause.unreachable,
+            f"could not reach the usage endpoint ({type(exc).__name__})",
+            slot=slot,
         )
     status, body = answer[0], answer[1]
     answered: Mapping[str, str] = answer[2] if len(answer) == 3 else {}
@@ -1010,33 +1132,34 @@ def usage(
     if status == 429 or (status == 503 and wait is not None):
         # Not a login problem: the wait is recorded by `read_usage` (F1 of #400).
         moment = now or _now()
-        return ClaudeUsage(
-            available=False,
-            reason=f"HTTP {status} from the usage endpoint — rate-limited",
+        return unreadable_usage(
+            UsageCause.rate_limited,
+            f"HTTP {status} from the usage endpoint — rate-limited",
+            slot=slot,
             rate_limited=True,
             rate_limited_until=moment + timedelta(seconds=wait) if wait is not None else None,
         )
     if status == 401:
-        return ClaudeUsage(
-            available=False,
-            reason="the token was rejected — open a session on this account to refresh it",
-            needs_login=True,
-        )
+        return unreadable_usage(UsageCause.token_rejected, _REJECTED, slot=slot, needs_login=True)
     if status != 200:
-        return ClaudeUsage(available=False, reason=f"HTTP {status} from the usage endpoint")
+        return unreadable_usage(
+            UsageCause.http_error, f"HTTP {status} from the usage endpoint", slot=slot
+        )
     try:
         payload: Any = json.loads(body)
     except ValueError:
-        return ClaudeUsage(available=False, reason="the usage endpoint did not answer with JSON")
+        return unreadable_usage(
+            UsageCause.bad_answer, "the usage endpoint did not answer with JSON", slot=slot
+        )
     if not isinstance(payload, dict):
-        return ClaudeUsage(
-            available=False, reason="the usage endpoint answered in an unknown shape"
+        return unreadable_usage(
+            UsageCause.bad_answer, "the usage endpoint answered in an unknown shape", slot=slot
         )
     session_percent, session_resets = _window(payload.get("five_hour"))
     week_percent, week_resets = _window(payload.get("seven_day"))
     if session_percent is None and week_percent is None:
-        return ClaudeUsage(
-            available=False, reason="the usage endpoint answered without the two windows"
+        return unreadable_usage(
+            UsageCause.bad_answer, "the usage endpoint answered without the two windows", slot=slot
         )
     family_percent, family_resets = _family_weeks(payload)
     return ClaudeUsage(
@@ -1378,9 +1501,10 @@ class UsageBackoff:
         """What a read of this slot answers while the wait runs: nothing, and why."""
         # Stamped with when the 429 came back, not ``now``: a gated read sends nothing, and
         # "last try failed just now" said a try was made (review of #408, N1).
-        return ClaudeUsage(
-            available=False,
-            reason=self.reason,
+        return unreadable_usage(
+            UsageCause.rate_limited,
+            self.reason,
+            slot=self.slot,
             rate_limited=True,
             rate_limited_until=self.until,
             fetched_at=min(self.since, now),
@@ -1582,8 +1706,10 @@ def read_usage(
                 try:
                     readings[slot] = future.result()
                 except Exception as exc:  # one account's failure must not cost the rest
-                    readings[slot] = ClaudeUsage(
-                        available=False, reason=f"usage read failed ({type(exc).__name__})"
+                    readings[slot] = unreadable_usage(
+                        UsageCause.read_failed,
+                        f"usage read failed ({type(exc).__name__})",
+                        slot=slot,
                     )
     answered = [account for account in asked if readings[account.slot].available]
     cleared = [account.slot for account in answered if account.slot in backoffs]
@@ -2437,6 +2563,8 @@ def headroom_choice(
             readings[account.slot] = ClaudeUsage(
                 available=False,
                 reason=f"{why}; {age}",
+                cause=reading.cause,
+                fix=reading.fix,
                 rate_limited=reading.rate_limited,
                 rate_limited_until=reading.rate_limited_until,
             )

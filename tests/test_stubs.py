@@ -89,6 +89,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("hook", "user-prompt-submit"),
     ("hook", "stop-failure"),
     ("hook", "hand-over"),
+    ("hook", "compact-check"),
     ("hook", "session-end"),
     ("hook", "stop"),
     ("hook", "notification"),
@@ -103,6 +104,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "distill",
             "prune",
             "verify",
+            "show",
             "signal",
             "signals",
             "spawn",
@@ -184,7 +186,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "settings",
         )
     ),
-    *(("metrics", command) for command in ("show", "list", "tokens")),
+    *(("metrics", command) for command in ("show", "list", "tokens", "ledger")),
     *(
         ("persona", command)
         for command in (

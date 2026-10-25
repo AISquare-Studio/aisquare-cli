@@ -98,7 +98,7 @@ def _codex_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> 
     refused = _sandbox_refused(binary, tmp_path)
     if refused is not None:
         pytest.skip(f"Codex's sandbox cannot start a command on this host: {refused}")
-    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp"))
+    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp")).resolve()
     store, native_home, workspace = outside / "h", outside / "c", outside / "w"
     native_home.mkdir()
     workspace.mkdir()

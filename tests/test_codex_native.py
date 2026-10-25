@@ -29,6 +29,7 @@ import httpx
 import pytest
 
 from aisquare.core import agents, launch_seal, outbox, selfcli
+from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.agent_adapters import codex_config, get_adapter
 from aisquare.core.agent_adapters.types import screen_of, store_dir, store_read_only
 from aisquare.core.config import load_config, save_config
@@ -40,6 +41,21 @@ from tests.remote_kit_helpers import base, make_client, make_runtime, unlock
 
 #: The real install check, before the suite's stand-in (``tests/conftest.py``).
 REAL_INSTALL_PATHS = store_broker.install_paths
+
+
+#: A ``touch`` the sandbox refused, as each libc words it: GNU coreutils' ``touch: cannot
+#: touch 'x': Read-only file system`` (or ``Permission denied``), BSD's ``touch: x:
+#: Operation not permitted`` under macOS's Seatbelt (SMOKE9 item 10 of #113).
+_REFUSED_TOUCH = re.compile(
+    r"^touch: (?:cannot touch '(?P<gnu>[^'\n]*)'|(?P<bsd>[^\n]*?)): "
+    r"(?:Read-only file system|Permission denied|Operation not permitted)$",
+    re.MULTILINE,
+)
+
+
+def refused_touches(output: str) -> list[str]:
+    """The path of every ``touch`` in ``output`` the sandbox refused, in order."""
+    return [match["gnu"] or match["bsd"] for match in _REFUSED_TOUCH.finditer(output)]
 
 
 def _user_texts(request: dict[str, Any]) -> list[str]:
@@ -789,7 +805,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
     refused = _sandbox_refused(binary, tmp_path)
     if refused is not None:
         pytest.skip(f"Codex's sandbox cannot start a command on this host: {refused}")
-    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp"))
+    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp")).resolve()
     store, native_home = outside / "h", outside / "c"
     native_home.mkdir()
     workspace = tmp_path / "workspace"
@@ -1064,8 +1080,9 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             assert fleet.tell(project, label, probe).delivered
             until(lambda: answered(seen), 30, "the probe ran", pane)
             # Refused, each: "Read-only file system", or "Permission denied" where the
-            # path did not exist and the sandbox left its read-only empty file there.
-            assert outputs()[-1].count("cannot touch") == 6, outputs()[-1]
+            # path did not exist and the sandbox left its read-only empty file there (GNU);
+            # "Operation not permitted" under macOS's Seatbelt (BSD touch).
+            assert len(refused_touches(outputs()[-1])) == 6, outputs()[-1]
             # The record a replay takes the coder's launch from is still its spawn's.
             recorded = launch_seal.read(coder.id)
             assert isinstance(recorded, launch_seal.LaunchRecord) and recorded.binary == "codex"
@@ -1131,7 +1148,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             ).agent
             until(lambda: answered(seen), 40, "the reviewer's note ran", reviewer.pane_id)
             assert "shared (note)" in outputs()[-1], outputs()[-1]
-            assert "Read-only file system" in outputs()[-1]
+            assert [Path(p).name for p in refused_touches(outputs()[-1])] == ["edited"]
             assert not (workspace / "edited").exists()
 
             # The sandbox writes nothing in the store (review r9 of #113: the broker): from
@@ -1170,7 +1187,11 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             replaced = fleet.restart(project, reviewer.label)
             command = replaced.started.launch_spec.command if replaced.started.launch_spec else []
             assert replaced.resumed, replaced.notes
-            assert flag not in command and "/tmp/x" not in command and "--account" not in command
+            assert flag not in command and "/tmp/x" not in command
+            # Its record has no slot: the plain home, named (SMOKE9 F1), never the rewritten 7.
+            plain_slot = str(claude_accounts_core.kind("codex").plain_slot)
+            accounts = [command[i + 1] for i, arg in enumerate(command) if arg == "--account"]
+            assert accounts in ([], [plain_slot]), command
             at = command.index("resume")
             assert command[at : at + 2] == ["resume", recorded_thread], "the recorded thread"
             assert command[command.index("launch") + 1] == "reviewer", "the recorded role"
@@ -2058,7 +2079,7 @@ def test_real_codex_fleet_from_before_launch_records_and_rows_its_sandbox_rewrot
     refused = _sandbox_refused(binary, tmp_path)
     if refused is not None:
         pytest.skip(f"Codex's sandbox cannot start a command on this host: {refused}")
-    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp"))
+    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp")).resolve()
     store, native_home = outside / "h", outside / "c"
     native_home.mkdir()
     workspace = tmp_path / "workspace"
@@ -2244,7 +2265,7 @@ def test_real_codex_under_a_hub_in_a_worktree_reaches_its_board_and_leaves_no_pl
     refused = _sandbox_refused(binary, tmp_path)
     if refused is not None:
         pytest.skip(f"Codex's sandbox cannot start a command on this host: {refused}")
-    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp"))
+    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp")).resolve()
     store, native_home, hub = outside / "h", outside / "c", outside / "hub"
     native_home.mkdir()
     hub.mkdir()
@@ -2393,7 +2414,7 @@ def test_real_codex_under_a_hub_in_a_worktree_reaches_its_board_and_leaves_no_pl
             assert own.resolve() == (worktree.parent / "tester-ro").resolve()
             until(lambda: len(outputs()) > seen, 60, "the read-only seat's note ran")
             assert "shared (note): from read-only" in outputs()[-1], outputs()[-1]
-            assert "cannot touch 'ro-probe'" in outputs()[-1], outputs()[-1]
+            assert "ro-probe" in refused_touches(outputs()[-1]), outputs()[-1]
             assert noted(project.id, "from read-only")
             assert not (own / "ro-probe").exists() and not (workspace / "ro-probe").exists()
             # A sandboxed launch from inside the aisquare it would run unsandboxed (finding 2).
@@ -2432,7 +2453,7 @@ def test_real_codex_in_a_direnv_project_keeps_its_pythonpath_and_aisquare_import
     refused = _sandbox_refused(binary, tmp_path)
     if refused is not None:
         pytest.skip(f"Codex's sandbox cannot start a command on this host: {refused}")
-    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp"))
+    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp")).resolve()
     store, native_home, marks = outside / "h", outside / "c", outside / "marks"
     native_home.mkdir()
     marks.mkdir()
@@ -2530,7 +2551,7 @@ def test_real_fleet_refuses_a_codex_agent_given_a_directory_inside_the_aisquare_
     aisquare``): the spawn is refused before any window, naming the directory."""
     binary = shutil.which("codex")
     assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
-    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp"))
+    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp")).resolve()
     store, native_home, workspace = outside / "h", outside / "c", outside / "w"
     native_home.mkdir()
     workspace.mkdir()
@@ -2649,7 +2670,7 @@ def test_real_codex_approval_and_question_are_answered_from_the_remote_page(
     refused = _sandbox_refused(binary, tmp_path)
     if refused is not None:
         pytest.skip(f"Codex's sandbox cannot start a command on this host: {refused}")
-    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp"))
+    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp")).resolve()
     store, native_home, workspace = outside / "h", outside / "c", outside / "w"
     native_home.mkdir()
     workspace.mkdir()

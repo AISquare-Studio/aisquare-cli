@@ -439,7 +439,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **CI runs each leg's suite in shards: a sub-PR's CI takes about 8 minutes, the full
-  matrix about 14, down from 22 and 64.** The suite is ~13k tests and its time is a
+  matrix about 9, down from 22 and 64.** The suite is ~13k tests and its time is a
   long tail, so it is split across standard runners rather than sped up: pytest-split
   (now in the `dev` extra) splits each leg by the per-test times in `.test_durations`,
   measured on CI itself, into 4 jobs per Linux leg and 10 on Windows, each on every core.
@@ -453,7 +453,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   new `ci-ok` job passes only when every other job did: one check name for branch
   protection, whatever the shards. Sharding found a test that passed only after a
   neighbour had left `insights`' cached config with shipping on; it now configures
-  shipping itself, and the suite resets that cache for every test.
+  shipping itself, and the suite resets that cache for every test. Two tests that a slow
+  Windows runner failed every time once sharding placed them beside heavier tests no
+  longer depend on its speed: the snapshot test runs git on the suite's unhurried budget,
+  as `test_ci_snapshot` does, and the stop-toast test records the toast as it is raised
+  rather than reading it off the screen after its 6 seconds.
 - **App settings shows the bare minimum, and Remote and the Captain live in it** (#41,
   the owner's placement): a third tab, *Remote*, is Remote control, with Turn on/off,
   the ngrok token field when one is needed and the link, QR and password while on in

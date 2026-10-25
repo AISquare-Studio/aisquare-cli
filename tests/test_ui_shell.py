@@ -3634,6 +3634,18 @@ def test_a_successful_stop_toasts_the_ended_row_re_reads_and_leaves_its_view(
 
     async def go(pilot: Pilot[None]) -> tuple[list[str], int, str | None]:
         app = fleet_app(pilot)
+        # What the app toasts, recorded as it is raised. The toast lives 6 s on screen and
+        # this test takes 9-11 s on windows-latest: a runner slow enough that the settle
+        # below outlasted it read no toast at all, three CI attempts of three in one shard
+        # (run 40241701340). The claim is that the stop is toasted, not how long it stays.
+        notify = app.notify
+
+        def recorded(message: str, **kwargs: Any) -> None:
+            toasts.append(message)
+            notify(message, **kwargs)
+
+        toasts: list[str] = []
+        monkeypatch.setattr(app, "notify", recorded)
         await open_stop_dialog(pilot, app, "agt_a_coder-auth")
         before = len(reads)
         await pilot.click("#stop-confirm")
@@ -3642,7 +3654,6 @@ def test_a_successful_stop_toasts_the_ended_row_re_reads_and_leaves_its_view(
         await pilot.pause()
         # Every toast, not the first: the scripted pane has no tmux behind it and
         # raises its own "(pane gone)" here, which is the harness, not the claim.
-        toasts = [toast.render().plain for toast in app.screen.query(Toast)]
         return toasts, len(reads) - before, app.content.current
 
     toasts, re_reads, current = drive(go, notifications=True)

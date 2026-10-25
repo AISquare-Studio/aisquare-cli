@@ -53,13 +53,14 @@ permissions:
 #   ci-ok    passes only when every job above did: the one check for branch
 #            protection to require, whatever the number of legs or shards.
 #
-# Measured after, on 7776eaea: a sub-PR's slowest job ended 8.2 minutes after its
-# run started, against 22 (run 40230232483: the 4 shards 4.6-8.1); the full
-# matrix's at 14.3, against 64 (run 40230136547: Linux shards 4.5-7.0, Windows
-# 7.1-9.8 and one at 14.2). pytest-split's shards are even, each within 7% of the
-# others by the last run's times; what spreads them is the runners, 0.6 to 1.4
-# times as fast as each other within one run (Windows' 14.2 ran 1.41 times slower
-# than its tests' last run).
+# Measured after: a sub-PR's slowest job ended 8.2 minutes after its run started,
+# against 22 (run 40230232483: its 4 shards 4.6-8.1); the full matrix's at 8.7,
+# against 64 (run 40241701340 on a530036f: Linux shards 5.0-8.6, Windows 6.8-8.7).
+# pytest-split's shards are even, each within about 5% of the others by the last
+# run's times; what spreads them is the runners, 0.6 to 1.8 times as fast as each
+# other within one run. Windows has 10 shards so that a runner 1.8 times slower
+# than usual still finishes in about 12.5 minutes: at 8, one took 16.2 (run
+# 40240227553).
 #
 # Every job has a timeout of about twice its usual time, so a hung shard fails in
 # minutes, not at GitHub's six hours. Installs are uv's, not pip's, compiled as
@@ -142,8 +143,8 @@ jobs:
   test:
     name: test (${{ matrix.leg }}, shard ${{ matrix.shard }}/${{ matrix.shards }})
     runs-on: ${{ matrix.os }}
-    # About twice a shard's time on a slow runner: 6-8 minutes on Linux, 7-10 on
-    # Windows, whose runners vary more (one took 14.2, run 40230136547). A test past
+    # About twice a shard's time on a slow runner: 5-9 minutes on Linux, 7-9 on
+    # Windows, whose runners vary more (1.8 times, run 40240227553). A test past
     # pyproject's faulthandler_timeout prints every thread's stack first, and
     # --durations names each shard's slowest tests.
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 25 || 15 }}

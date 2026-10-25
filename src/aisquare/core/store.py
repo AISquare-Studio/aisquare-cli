@@ -4738,15 +4738,25 @@ class SqliteStore:
             "SELECT slot FROM claude_account WHERE is_default = 1 LIMIT 1"
         ).fetchone()
         if row is None:
-            return None
+            return None  # the common case: one read, no transaction, no lock
         promoted = int(row[0])
-        current = [record.slot for record in self.claude_accounts()]
+        # Clear the flag FIRST: the UPDATE takes the write lock, and only the one that
+        # still finds the flag goes on. Reading the order before it, a promote racing a
+        # promote-then-reorder wrote its stale order over the reorder (review of #406,
+        # the lost update); a second promoter now finds no flag and writes nothing.
+        cleared = self._conn.execute(
+            "UPDATE claude_account SET is_default = 0 WHERE slot = ? AND is_default = 1",
+            (promoted,),
+        )
+        if cleared.rowcount != 1:
+            self._conn.rollback()
+            return None
+        current = [record.slot for record in self.claude_accounts()]  # under the lock
         order = [promoted, *(slot for slot in current if slot != promoted)]
         for position, slot in enumerate(order, start=1):
             self._conn.execute(
                 "UPDATE claude_account SET position = ? WHERE slot = ?", (position, slot)
             )
-        self._conn.execute("UPDATE claude_account SET is_default = 0 WHERE is_default = 1")
         self._conn.commit()
         return promoted
 

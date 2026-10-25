@@ -6,6 +6,7 @@ import sqlite3
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -837,7 +838,6 @@ def test_the_close_turn_compare_and_set_loses_to_a_stop_that_landed_first() -> N
     green. Here the other Stop lands between this call's SELECT and its UPDATE,
     on the same connection, so the guard alone decides the outcome."""
     from datetime import UTC, datetime, timedelta
-    from typing import Any
 
     from aisquare.models import TurnMetric
 
@@ -2534,6 +2534,60 @@ def test_the_retired_default_flag_moves_its_slot_to_rank_1_once_whatever_the_ver
         assert [r.slot for r in store.claude_accounts()] == [4, 3, 1, 2]
     finally:
         store.close()
+
+
+def test_a_promote_that_lost_the_race_leaves_a_concurrent_reorder_standing() -> None:
+    """The reviewer's interleave (review of #406, the lost update): B promotes and then
+    moves slot 3 to the top between A's flag check and A's write. A read the order before
+    taking the write lock, and wrote its stale order over B's move. Now A clears the flag
+    under the lock first, finds it gone, and writes nothing."""
+    _at_version(
+        SCHEMA_VERSION,
+        after="""
+        INSERT INTO claude_account (slot, config_dir, position, is_default, created_at)
+        VALUES (4, '/h/.aisquare/claude-accounts/4', 1, 0, '2026-09-01T00:00:00+00:00'),
+               (2, '/h/.aisquare/claude-accounts/2', 2, 1, '2026-09-01T00:00:00+00:00'),
+               (3, '/h/.aisquare/claude-accounts/3', 3, 0, '2026-09-01T00:00:00+00:00'),
+               (1, '/h/.claude', 4, 0, '2026-09-01T00:00:00+00:00');
+        """,
+    )
+    a, b = open_store(), open_store()
+
+    class Interleaved:
+        """A's connection: B runs right after A's flag check, as in the repro."""
+
+        def __init__(self, real: sqlite3.Connection) -> None:
+            self.real = real
+
+        def execute(self, sql: str, *args: Any) -> sqlite3.Cursor:
+            cursor = self.real.execute(sql, *args)
+            if "WHERE is_default = 1 LIMIT 1" in sql:
+                assert b.promote_retired_claude_account_default() == 2
+                b.order_claude_accounts([3])  # B moved 3 to the top
+                assert [(r.slot, r.position) for r in b.claude_accounts()] == [
+                    (3, 1),
+                    (2, 2),
+                    (4, 3),
+                    (1, 4),
+                ]
+            return cursor
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.real, name)
+
+    try:
+        a._conn = Interleaved(a._conn)  # type: ignore[attr-defined]
+        assert a.promote_retired_claude_account_default() is None  # lost the race: no write
+        a._conn = a._conn.real  # type: ignore[attr-defined]
+        assert [(r.slot, r.position) for r in a.claude_accounts()] == [
+            (3, 1),
+            (2, 2),
+            (4, 3),
+            (1, 4),
+        ], "B's move of slot 3 stands"
+    finally:
+        a.close()
+        b.close()
 
 
 def test_with_no_flag_set_the_order_is_left_as_it_was(store: ContextStore) -> None:

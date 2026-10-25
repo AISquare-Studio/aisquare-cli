@@ -56,7 +56,7 @@ from aisquare.services.install_route import Facts, InstallRoute, LatestRelease
 from aisquare.services.lifecycle import UpgradePlan
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
 from tests.rendered import plain
-from tests.test_lifecycle_upgrade import Machine, Tool, machine, tool  # noqa: F401
+from tests.test_lifecycle_upgrade import Machine, Tool, _hooked, _record, machine, tool  # noqa: F401
 from tests.test_release_check import _state
 from tests.test_ui_doctor_handoff import Terminal, terminal  # noqa: F401
 from tests.test_ui_shell import Script, no_real_tmux, script, seed, shown, status  # noqa: F401
@@ -1267,6 +1267,36 @@ def test_a_reopen_that_cannot_start_says_what_the_run_did(
     assert "stopped on an error" not in result.stderr
     assert terminal.prompts == [] and terminal.reopened == [["ui", "--after-update"]]
     assert _state(updates.PRESSED_KEY) is None, "no record left behind"
+
+
+def test_a_reopen_that_cannot_start_after_hooks_failed_says_the_update_is_done(
+    runner: CliRunner,
+    tool: Tool,  # noqa: F811
+    machine: Machine,  # noqa: F811
+    terminal: Terminal,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #301, n5: the install worked, a hook site then failed to re-connect (exit 1),
+    and the exec into asq failed. The run installed the update, so that is what is said, as
+    after a clean install; it said "asq could not be opened again" alone."""
+    _record(_hooked(tmp_path / "claude", tool.script))
+    machine.connect_exit = 1
+    updates.record_press([])
+
+    def cannot(args: list[str]) -> None:
+        terminal.reopened.append(list(args))
+        raise OSError(8, "Exec format error")
+
+    monkeypatch.setattr(selfcli, "exec_self", cannot)
+
+    result = runner.invoke(cli_app, ["upgrade", "--one-click"])
+
+    assert result.exit_code == 1, result.output
+    assert len(machine.installs) == 1, "control: the update was installed"
+    assert "✓ aisquare 0.9.1 (was 0.9.0)" in result.stdout
+    said = "✗ the update is done, but asq could not be opened again ([Errno 8] Exec format error)"
+    assert said in result.stderr, result.stderr
 
 
 def test_one_click_with_nothing_newer_reopens_at_once(

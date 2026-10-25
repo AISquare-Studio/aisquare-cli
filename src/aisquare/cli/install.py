@@ -289,6 +289,14 @@ def _by_hand(version: str | None) -> str:
     )
 
 
+class _HooksFailed(typer.Exit):
+    """Exit 1 after an install that worked, whose hooks then failed to re-connect: the update is
+    done, which a reopen that cannot start says (review of #301, n5)."""
+
+    def __init__(self) -> None:
+        super().__init__(1)
+
+
 #: What ``upgrade --one-click`` opens asq as: the asq that reattaches the agents the press
 #: recorded (``services.updates``), and says how that went.
 ONE_CLICK_REOPEN = ("ui", "--after-update")
@@ -475,7 +483,8 @@ def upgrade(
         )
     except typer.Exit as exc:
         if exc.exit_code:
-            _reopen(True, one_click=True, failed=True, started=started)
+            installed = isinstance(exc, _HooksFailed)
+            _reopen(True, one_click=True, failed=True, installed=installed, started=started)
         raise
     except KeyboardInterrupt:
         stderr_console().print(
@@ -617,7 +626,7 @@ def _upgrade(
         )
     _emit_report(report)
     if any(not hook.ok for hook in report.hooks):
-        raise typer.Exit(1)
+        raise _HooksFailed()
     _reopen(reopen, one_click=one_click, installed=True, started=started)
 
 

@@ -388,15 +388,24 @@ def test_a_codex_rollout_cut_inside_its_newest_response_says_cut_and_names_no_to
 # --- defect 1(a): the hand-over's question names the agent -------------------------------------
 
 
-def test_a_limited_codex_agent_counts_no_claude_account_as_somewhere_to_go(
-    isolated_home: Path, project: ProjectInfo
+@pytest.mark.parametrize("crossing", [False, True], ids=["switch-off", "across-agents"])
+def test_a_limited_codex_agent_counts_a_claude_account_only_as_the_hook_does(
+    isolated_home: Path, project: ProjectInfo, crossing: bool
 ) -> None:
     """Defect 1(a) of the SCOPE note: the scan asked ``somewhere_to_hand_over(leaving)`` with
     no agent, where the limit's hook asks it with the row's (``hooks.py``). With Claude Code
     accounts signed in and no other Codex one, the hook hands nothing over, while the scan
     counted the Claude accounts and held the limit's push 90 s for a hand-over that never
-    came. The live sources ask with the row's agent now, as the hook does."""
+    came. The live sources ask with the row's agent now, as the hook does. With ``[accounts]
+    cross_agent_handover`` on (task #15) the hook hands over across agents, to Claude Code
+    (installed: the suite's stand-in), and the scan holds the push for that, as it asks the
+    hook's own question (``handoff.somewhere_across``)."""
+    from aisquare.core.config import load_config, save_config
     from aisquare.services import claude_accounts as accounts_service
+
+    config = load_config()
+    config.accounts.cross_agent_handover = crossing
+    save_config(config)
 
     codex_slot = accounts_core.create_account("codex")
     (codex_slot.config_dir / "auth.json").write_text(
@@ -435,7 +444,10 @@ def test_a_limited_codex_agent_counts_no_claude_account_as_somewhere_to_go(
         hands_over=sources.hands_over,
     )
     assert card.kind == "limited"
-    assert card.push_after == card.since, "no Codex account to go to: pushed at once"
+    if crossing:
+        assert card.push_after > card.since, "a Claude Code account to cross to: held"
+    else:
+        assert card.push_after == card.since, "no Codex account to go to: pushed at once"
 
 
 # --- the Transcript tab ------------------------------------------------------------------------

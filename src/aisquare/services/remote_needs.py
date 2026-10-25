@@ -3936,10 +3936,15 @@ def _needs_hands_over_kept(leaving: int | None, agent: str | None) -> bool:
     ``accounts_settings`` never could: an ``OSError`` listing the slot directories was the
     project's failed read, a 503 on every action there (review of #259, round 14). A
     question that raises is a yes, as an unreadable registry is: the hand-over's worker
-    says on the board why it switched nothing, and the push waits for it.
+    says on the board why it switched nothing, and the push waits for it. An account of
+    another installed agent counts as the hook counts it (``handoff.somewhere_across``,
+    with ``[accounts] cross_agent_handover`` on), so the push waits for a hand-over that
+    crosses agents too.
     """
     from aisquare.core import claude_accounts as claude_accounts_core
+    from aisquare.core.agent_adapters import DEFAULT_AGENT
     from aisquare.services import claude_accounts as claude_accounts_service
+    from aisquare.services import handoff
 
     key = (str(claude_accounts_core.accounts_root()), leaving, agent)
     now = time.monotonic()
@@ -3948,7 +3953,9 @@ def _needs_hands_over_kept(leaving: int | None, agent: str | None) -> bool:
     if kept is not None and now - kept[0] < _NEEDS_HANDS_OVER_KEPT:
         return kept[1]
     try:
-        answer = claude_accounts_service.somewhere_to_hand_over(leaving, agent=agent)
+        answer = claude_accounts_service.somewhere_to_hand_over(
+            leaving, agent=agent
+        ) or handoff.somewhere_across(leaving, agent or DEFAULT_AGENT)
     except Exception as exc:
         log.debug("remote: whether slot %s can be handed over is not known: %s", leaving, exc)
         answer = True

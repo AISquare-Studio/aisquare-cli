@@ -27,6 +27,7 @@ from rich.console import Console
 
 from aisquare.cli.common import USAGE_ERROR, fail, refuse_conflicting_scope
 from aisquare.cli.native_args import NativeForwardingCommand
+from aisquare.core.claude_accounts import agent_label
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
@@ -441,9 +442,20 @@ def switch(
         str | None,
         typer.Option(
             "--to",
-            help="Account to move it to: a slot, alias or email. Default: the account with "
-            "the most headroom that is not the one it is on.",
+            help="Account to move it to: a slot, alias or email, of its own agent or another "
+            "(which it then runs). Default: its own agent's account with the most headroom "
+            "that is not the one it is on; once every one is full, another agent's "
+            "([accounts] cross_agent_handover).",
             metavar="ACCOUNT",
+        ),
+    ] = None,
+    to_agent: Annotated[
+        str | None,
+        typer.Option(
+            "--agent",
+            help="Coding agent to move it onto (claude-code, codex, …). No conversation moves "
+            "between agents: it starts fresh there with a hand-off brief of its work.",
+            metavar="AGENT",
         ),
     ] = None,
     fresh: Annotated[
@@ -478,6 +490,10 @@ def switch(
     with `--as <its session>` when the usage-limit hand-over could not
     (`handover_failed`). An agent that hand-over moved minutes ago is refused
     without --force: one switch per limit.
+
+    Onto another agent (`--agent`, or `--to` one of its accounts) the conversation does
+    not move, the work does: the replacement starts fresh there with a hand-off brief of
+    its task, claims, board entries, tree and the newest of its conversation.
     """
     target = _project(project)
     try:
@@ -485,6 +501,7 @@ def switch(
             target,
             label,
             to=to,
+            to_agent=to_agent,
             fresh=fresh,
             reason=reason,
             spawned_by=as_session or "user",
@@ -501,6 +518,8 @@ def switch(
                     "started": receipt.started.model_dump(mode="json"),
                     "from_slot": receipt.from_slot,
                     "to_slot": receipt.to_slot,
+                    "from_agent": receipt.from_agent,
+                    "to_agent": receipt.to_agent,
                     "resumed": receipt.resumed,
                     "prompt_typed": fleet_service.prompt_typed_json(receipt.prompt_typed),
                     "prompt_delivery": receipt.prompt_delivery,
@@ -521,7 +540,14 @@ def switch(
         if receipt.from_slot is not None
         else "its shell's claude"
     )
-    target_name = f"{slot_label(receipt.to_slot, labels)} (slot {receipt.to_slot})"
+    target_name = (
+        f"{slot_label(receipt.to_slot, labels)} (slot {receipt.to_slot})"
+        if receipt.to_slot is not None
+        else "its plain home"
+    )
+    if receipt.crossed and receipt.from_agent and receipt.to_agent:
+        origin = f"{agent_label(receipt.from_agent)} {origin}"
+        target_name = f"{agent_label(receipt.to_agent)} {target_name}"
     console.print(
         f"✓ {label}: moved from {origin} to {target_name} — {receipt.how} "
         f"({receipt.started.pane_id} in {receipt.tmux_session})",

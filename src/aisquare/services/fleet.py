@@ -134,6 +134,7 @@ from aisquare.services import (
     auto_mode,
     delivery,
     explainability_ops,
+    handoff,
     install_route,
     pane_idle,
 )
@@ -342,7 +343,8 @@ class SwitchReceipt:
     stopped: FleetAgent
     started: FleetAgent
     from_slot: int | None
-    to_slot: int
+    to_slot: int | None
+    """The account it moved to; ``None`` only onto another agent run on its plain home."""
     resumed: bool
     """True when the replacement resumed the old session's transcript; False when it
     started fresh with a hand-off prompt built from the board."""
@@ -368,11 +370,21 @@ class SwitchReceipt:
     caller gave (``[fleet] prompt_ack_seconds`` from the CLI): ``False`` is still pending,
     which a listing reads ``attention`` once that wait is past at an idle input box;
     ``None`` when there was none, or nothing could say."""
+    from_agent: str | None = None
+    """The agent it ran (an adapter id)."""
+    to_agent: str | None = None
+    """The agent its replacement runs: another than :attr:`from_agent` for a hand-off across
+    agents, which starts fresh with a brief of the work (``services.handoff``)."""
+
+    @property
+    def crossed(self) -> bool:
+        """Whether it moved onto another agent."""
+        return self.to_agent is not None and self.to_agent != self.from_agent
 
     @property
     def how(self) -> str:
         """How the replacement began, in the words of the board's ``switched`` line."""
-        return _how_started(self.resumed, typed=self.prompt_typed)
+        return _how_started(self.resumed, typed=self.prompt_typed, brief=self.crossed)
 
 
 @dataclass(frozen=True)
@@ -10166,6 +10178,7 @@ def switch(
     label: str,
     *,
     to: str | None = None,
+    to_agent: str | None = None,
     fresh: bool = False,
     reason: str | None = None,
     spawned_by: str = "user",
@@ -10233,6 +10246,18 @@ def switch(
     closed — is refused before the agent is stopped, as :func:`restart`
     refuses it.
 
+    ACROSS AGENTS (task #15): ``to_agent`` names another agent to move it onto, and ``to``
+    may name an account of another agent, which brings its agent; without either, a
+    hand-over whose own agent has no account under the line, each of them read
+    (``handoff.own_accounts_full``), goes to the first account of another installed agent
+    under it, by the one priority order (``handoff.pick_across``), while ``[accounts]
+    cross_agent_handover`` is on. No conversation moves between agents, so that
+    replacement starts FRESH on the other agent, its first message the hand-off brief of
+    the work (``services.handoff``: the source's transcript as its own reader renders it,
+    the board and the tree), its claims moved onto it as a fresh hand-over's are, and its
+    launch record names its agent, so its restart and Fork keep it. An own account with
+    room still comes first, and resumes natively.
+
     ``agent_id`` pins the row, as for :func:`stop` and :func:`restart`: the
     phone's Switch means the agent it showed, and a manager's switch or the
     automatic hand-over runs in another process, which can hand the label to
@@ -10289,15 +10314,18 @@ def switch(
     adapter = recorded_adapter(kind)
     # The accounts service decides, as for every launch
     # (tests/test_one_account_resolver.py): `--to` is the flag rung; without it
-    # headroom decides first, with the account the agent is leaving excluded.
+    # headroom decides first, with the account the agent is leaving excluded. The agent
+    # the replacement runs comes with it (`_handover_target`): the row's own, unless
+    # `--agent` or `--to` names another, or every own account is full (task #15).
     try:
-        choice = claude_accounts_service.choose_for_handover(
+        choice, onto = _handover_target(
             to,
+            to_agent,
+            kind=kind,
             role=record.role,
             project=project,
-            exclude=() if current is None else (current,),
+            current=current,
             automatic=automatic,
-            agent=kind,
             # The family is AISquare's model ladder's (``capabilities.model_ladders``): the
             # session's model names one only for an agent whose models it picks (#277).
             family=(
@@ -10309,7 +10337,10 @@ def switch(
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc
     notes.extend(choice.notes)
-    if choice.account is None:
+    crossing = handoff.crosses(record, onto)
+    # Onto another agent by hand, no account of it is no refusal: it runs where a plain
+    # spawn of it runs (an agent with no slots, or none signed in here).
+    if choice.account is None and not (crossing and not automatic):
         where = f" (it is on slot {current})" if current is not None else ""
         # With the notes, every one: what each rung skipped and why is the only
         # account of how nothing was found (fourth round). The automatic refusal
@@ -10329,24 +10360,44 @@ def switch(
             f"the reset{said}"
         )
     target = choice.account
-    if current is not None and target.slot == current:
-        raise FleetError(
-            f"{label!r} already runs on {claude_accounts_core.label(target)} (slot {target.slot})"
+    if crossing:
+        # No conversation moves between agents: the replacement starts fresh on `onto` with
+        # a brief of the work (`services.handoff`), and every refusal its start would give
+        # is given now, before anything is stopped.
+        if experimental.captain_role(record.role):
+            raise FleetError(
+                f"the captain keeps its agent on a hand-over — {label!r} was not stopped"
+            )
+        _refuse_a_cross_agent_start(
+            project,
+            record,
+            onto,
+            home=target.config_dir if target is not None else None,
+            branch=agent.branch,
         )
-    if (
-        adapter is not None
-        and not adapter.capabilities.resumes_across_homes
-        and not fresh
-        and not _same_home(record, target)
-    ):
-        # Its thread lives under the old home (a Codex rollout under its CODEX_HOME): no
-        # session on another home resumes it. One on the same home does.
         fresh = True
-        notes.append(
-            f"{claude_accounts_core.agent_label(kind)} cannot resume a thread under another "
-            "account's home — the replacement starts fresh with a hand-off prompt"
-        )
-    _refuse_a_replay_that_cannot_start(project, record, target.config_dir, branch=agent.branch)
+        notes.append(_crossing_note(kind, onto))
+    else:
+        assert target is not None  # refused above
+        if current is not None and target.slot == current:
+            raise FleetError(
+                f"{label!r} already runs on {claude_accounts_core.label(target)} "
+                f"(slot {target.slot})"
+            )
+        if (
+            adapter is not None
+            and not adapter.capabilities.resumes_across_homes
+            and not fresh
+            and not _same_home(record, target)
+        ):
+            # Its thread lives under the old home (a Codex rollout under its CODEX_HOME): no
+            # session on another home resumes it. One on the same home does.
+            fresh = True
+            notes.append(
+                f"{claude_accounts_core.agent_label(kind)} cannot resume a thread under "
+                "another account's home — the replacement starts fresh with a hand-off prompt"
+            )
+        _refuse_a_replay_that_cannot_start(project, record, target.config_dir, branch=agent.branch)
     if before_stop is not None:
         before_stop()
     # A hand-over whether it resumes or not: the agent is coming back, so its
@@ -10397,6 +10448,21 @@ def switch(
     if handed_over.dismissed is not None:
         notes.append(f"it was stopped with {handed_over.dismissed}")
     whose = claude_accounts_core.kind(kind).noun
+    if crossing:
+        # The brief names the agent it ran on; the account is nothing the target can use.
+        moved = (
+            f"it stopped on {reason or 'a usage limit'}"
+            if reason is not None or automatic
+            else "the operator moved it to another agent (`fleet switch`)"
+        )
+    else:
+        moved = (
+            f"it stopped on {reason or 'a usage limit'} under another {whose} account"
+            if reason is not None or automatic
+            # A manual switch with no reason given was the operator's move, not a
+            # limit's (SMOKE5 of #113).
+            else f"the operator moved it from another {whose} account (`fleet switch`)"
+        )
     try:
         receipt, resumed, more = _respawn(
             project,
@@ -10404,17 +10470,11 @@ def switch(
             session,
             task,
             recent,
-            account=str(target.slot),
+            account=str(target.slot) if target is not None else None,
             fresh=fresh,
             # What a FRESH replacement is told it takes over from: the account move is
             # the one thing it cannot read off the board.
-            reason=(
-                f"it stopped on {reason or 'a usage limit'} under another {whose} account"
-                if reason is not None or automatic
-                # A manual switch with no reason given was the operator's move, not a
-                # limit's (SMOKE5 of #113).
-                else f"the operator moved it from another {whose} account (`fleet switch`)"
-            ),
+            reason=moved,
             resume_prompt=_resume_prompt(stopped, reason, automatic=automatic),
             takes_over=True,
             spawned_by=spawned_by,
@@ -10422,6 +10482,7 @@ def switch(
             onboard=not automatic,
             board_and_hub=board_and_hub,
             ack_wait=ack_wait,
+            onto=onto if crossing else None,
         )
     except Exception:
         if handed_over.withheld:
@@ -10436,8 +10497,16 @@ def switch(
         from_name = (
             f"{labels[current]} (slot {current})" if current in labels else f"slot {current}"
         )
+    to_name = (
+        f"{claude_accounts_core.label(target)} (slot {target.slot})"
+        if target is not None
+        else "its plain home"
+    )
+    if crossing:
+        from_name = f"{claude_accounts_core.agent_label(kind)} {from_name}"
+        to_name = f"{claude_accounts_core.agent_label(onto)} {to_name}"
     typed = receipt.prompt_typed or "no"
-    how = _how_started(resumed, typed=typed)
+    how = _how_started(resumed, typed=typed, brief=crossing)
     why = f" ({reason})" if reason else ""
     # The suppression is entered FIRST: a store that cannot be opened is the courtesy
     # lost too, never a moved agent reported as not moved (review of #205, fourth round).
@@ -10446,15 +10515,14 @@ def switch(
             store,
             _board_of_row(receipt.agent),
             "switched",
-            f"{label} moved from {from_name} to {claude_accounts_core.label(target)} "
-            f"(slot {target.slot}){why} — {how}",
+            f"{label} moved from {from_name} to {to_name}{why} — {how}",
             session_id=receipt.agent.session_id,
         )
     return SwitchReceipt(
         stopped=stopped,
         started=receipt.agent,
         from_slot=current,
-        to_slot=target.slot,
+        to_slot=target.slot if target is not None else None,
         resumed=resumed,
         tmux_session=receipt.tmux_session,
         notes=notes,
@@ -10462,7 +10530,139 @@ def switch(
         prompt_typed=typed,
         prompt_delivery=receipt.prompt_delivery,
         prompt_acked=receipt.prompt_acked,
+        from_agent=kind,
+        to_agent=onto,
     )
+
+
+def _handover_target(
+    to: str | None,
+    agent: str | None,
+    *,
+    kind: str,
+    role: str,
+    project: ProjectInfo,
+    current: int | None,
+    automatic: bool,
+    family: str | None = None,
+) -> tuple[claude_accounts_service.AccountChoice, str]:
+    """The account a hand-over of ``kind``'s agent goes to, and the agent it runs there.
+
+    ``agent`` (``--agent``) is the agent to run, and ``to`` (``--to``) its account; ``to``
+    alone names an account of the row's own agent first, else of the one agent whose it
+    is. Neither, the row's own agent's accounts with room come first, its native resume,
+    and only when every one of them was read over the line (or it has none) does a
+    hand-over cross agents (``handoff.pick_across``), while ``[accounts]
+    cross_agent_handover`` is on; else today's answer: the automatic hand-over refuses, a
+    manual switch takes the least-bad own account, or the ladder. Every account is the
+    resolver's (tests/test_one_account_resolver.py). ``family`` is the session's model
+    family (#277): it weighs ``kind``'s own accounts alone, as another agent starts on a
+    model of its own."""
+    exclude = () if current is None else (current,)
+
+    def among(
+        explicit: str | None, whose: str, *, strict: bool
+    ) -> claude_accounts_service.AccountChoice:
+        return claude_accounts_service.choose_for_handover(
+            explicit,
+            role=role,
+            project=project,
+            exclude=exclude,
+            automatic=strict,
+            agent=whose,
+            family=family if whose == kind else None,
+        )
+
+    if agent is not None:
+        try:
+            whose = get_adapter(agent).id
+        except ValueError as exc:
+            raise FleetError(str(exc)) from exc
+        return among(to, whose, strict=automatic), whose
+    if to is not None:
+        try:
+            return among(to, kind, strict=automatic), kind
+        except claude_accounts_service.WrongAgent:
+            for other in claude_accounts_core.account_agents():
+                if other == kind:
+                    continue
+                with suppress(claude_accounts_service.WrongAgent):
+                    return among(to, other, strict=automatic), other
+            raise
+    if experimental.captain_role(role) or not handoff.crossing_on():
+        return among(None, kind, strict=automatic), kind
+    first = among(None, kind, strict=True)
+    if first.account is not None:
+        return first, kind
+    across: list[str] = []
+    if handoff.own_accounts_full(kind, current, family=family):
+        pick = handoff.pick_across(kind, current)
+        if pick.account is not None and pick.agent is not None:
+            chosen = claude_accounts_service.AccountChoice(
+                pick.account, "headroom", [*first.notes, *pick.notes]
+            )
+            return chosen, pick.agent
+        across = list(pick.notes)
+    if automatic:
+        return claude_accounts_service.AccountChoice(None, None, [*first.notes, *across]), kind
+    later = among(None, kind, strict=False)
+    notes = [*later.notes, *across]
+    return claude_accounts_service.AccountChoice(later.account, later.source, notes), kind
+
+
+def _crossing_note(source: str, target: str) -> str:
+    """What a hand-off across agents says on its receipt."""
+    named = claude_accounts_core.agent_label
+    return (
+        f"no conversation moves from {named(source)} to {named(target)}: the replacement "
+        f"starts fresh on {named(target)} with a hand-off brief of the work (its task, its "
+        "claims, the board, the tree and the newest of its conversation)"
+    )
+
+
+def _refuse_a_cross_agent_start(
+    project: ProjectInfo,
+    record: launch_seal.LaunchRecord,
+    onto: str,
+    *,
+    home: Path | None,
+    branch: str | None,
+    role: str | None = None,
+) -> None:
+    """Raise now what starting ``record``'s role (or ``role``) fresh on ``onto`` would
+    refuse — BEFORE its agent is stopped, as :func:`_refuse_a_replay_that_cannot_start`
+    asks a replay's: the binary the role resolves for that agent and whether it is
+    installed, a sandbox that may
+    write an aisquare its hooks or broker run (under ``home``, the account it starts on),
+    a bound file it cannot read, a tree that is gone with no branch, a freed socket."""
+    label = record.label or ""
+    runs_as = role or record.role
+    try:
+        selected = agent_launch.resolve(runs_as, agent=onto, cwd=project.root)
+    except ValueError as exc:
+        raise FleetError(f"{exc} — nothing was stopped") from exc
+    if agent_launch.executable(selected) is None:
+        raise FleetError(
+            f"{selected.binary.binary!r} is not on your PATH (chosen by: "
+            f"{selected.binary.source}) — install {selected.adapter.label}, or change the "
+            "role's binding; nothing was stopped"
+        )
+    if selected.adapter.capabilities.sandboxes_tools:
+        flags, _ = permission_flags(selected.adapter, runs_as, label, role_settings(runs_as))
+        _refuse_an_install_the_sandbox_writes(
+            [selected.binary.binary, *flags],
+            Path(record.cwd),
+            selected.adapter,
+            home or selected.config_dir,
+            _window_path(None, selected.profile.env),
+        )
+    _refuse_an_env_file_it_cannot_read(runs_as)
+    tree = Path(record.cwd)
+    if record.worktree and not tree.exists():
+        _branch_of_a_gone_tree(project.root, tree, branch)
+    config = settings()
+    srv = server(config)
+    _refuse_a_freed_socket(srv, config, srv.listener())
 
 
 def _respawn(
@@ -10487,6 +10687,7 @@ def _respawn(
     ack_wait: float = 0.0,
     team_line: str | None = None,
     replaces: str | None = None,
+    onto: str | None = None,
 ) -> tuple[SpawnReceipt, bool, list[str]]:
     """Start ``agent`` again — same label, role, task and worktree — resuming when it can.
 
@@ -10515,6 +10716,11 @@ def _respawn(
     the one the agent was on, whatever its task or the codename says now
     (``spawn(own_worktree=…)``). ``board_and_hub`` is the board it reads and its window's
     hub, asked before the stop (:func:`_board_and_hub`). ``replaces`` is :func:`spawn`'s.
+
+    ``onto`` is another agent to start it on (a hand-off across agents, task #15): no
+    conversation moves between agents, so it starts fresh, its first message the hand-off
+    brief (:func:`_brief_prompt`), and as today's config launches the role on that agent,
+    since the recorded launch was the other agent's.
     """
     notes: list[str] = []
     # Read again after the stop, which can outlast its agent's last hook: the replay
@@ -10525,12 +10731,29 @@ def _respawn(
         # names it (rule 3), and a hand-off prompt naming it set the replacement on
         # finished work.
         task = None
+    crossing = onto is not None and handoff.crosses(record, onto)
     resume: ResumeSpec | None = None
-    if not fresh:
+    if not fresh and not crossing:
         resume, why_not = _resumable(record, recorded_adapter(record.agent))
         if why_not is not None:
             notes.append(f"{why_not} — the replacement starts fresh with a hand-off prompt")
-    prompt = resume_prompt if resume is not None else _handoff_prompt(agent, task, recent, reason)
+    prompt: str | None
+    if crossing and onto is not None:
+        prompt = _brief_prompt(
+            agent,
+            record,
+            onto,
+            notes,
+            session=session if takes_over else None,
+            task=task,
+            recent=recent,
+            reason=reason,
+            board=board_and_hub[0],
+        )
+    else:
+        prompt = (
+            resume_prompt if resume is not None else _handoff_prompt(agent, task, recent, reason)
+        )
     if team_line is not None:
         # Resumed, one line as its prompt is (`_resume_prompt`); fresh, a line of its own.
         prompt = (
@@ -10542,7 +10765,7 @@ def _respawn(
     # tsk_01m3ns5a736s): the recorded launch was the old role's, so it is replayed only
     # for the same role, and the new one launches as today's config says for it, still
     # the recorded agent's (its session is the one resumed).
-    replay = role is None or role == record.role
+    replay = (role is None or role == record.role) and not crossing
     spec = record.spec if replay else None
     chosen = _persona_for_replay(project, agent, notes, role=role) if persona is None else persona
     began_as = _seam_persona(record)
@@ -10578,12 +10801,13 @@ def _respawn(
         # The agent the record names, never today's resolution of the role: a `--agent
         # codex --bin <wrapper>` row came back with Claude Code's flags, and a role bound
         # to another agent since refused only after the original was stopped (r1 of #113).
-        agent=record.agent,
+        # Across agents, the one it was handed off onto, which its new record then names.
+        agent=onto if crossing else record.agent,
         # The agent whose own hook reported the session, whatever its binary is called,
         # resumed or `--fresh`: evidence of what KIND of program a recorded binary that
         # left the PATH was, which only consents to today's resolution (the read-only
         # config's) taking its place, its arguments the recorded ones.
-        family=record.session.agent if record.session is not None else None,
+        family=record.session.agent if record.session is not None and not crossing else None,
         takes_over=session.id if takes_over and resume is None and session is not None else None,
         # The captain's own folder (its brain, under the home) is replayed, as its launch
         # record holds it; every other non-worktree agent starts at its project's root, as
@@ -11162,11 +11386,20 @@ class RestartReceipt:
     claims not released, the hand-over mark not taken back, the replacement's first line
     not typed (and why), its claims not moved. Each is in ``notes`` too, among the ones
     every restart has (the account ladder's, the launch replayed)."""
+    from_agent: str | None = None
+    to_agent: str | None = None
+    """The agent the replacement runs: another than :attr:`from_agent` for a take-over onto
+    another agent, which starts fresh with the hand-off brief."""
+
+    @property
+    def crossed(self) -> bool:
+        """Whether the replacement runs another agent."""
+        return self.to_agent is not None and self.to_agent != self.from_agent
 
     @property
     def how(self) -> str:
         """How the replacement began, in the words of the board's ``restarted`` line."""
-        return _how_started(self.resumed, typed=self.prompt_typed)
+        return _how_started(self.resumed, typed=self.prompt_typed, brief=self.crossed)
 
 
 def restart(
@@ -11184,6 +11417,7 @@ def restart(
     before_stop: Callable[[], None] | None = None,
     ack_wait: float = 0.0,
     team: Sequence[FleetAgentStatus] | None = None,
+    to_agent: str | None = None,
 ) -> RestartReceipt:
     """Start an agent again under its own label — the **Restart** of #138.
 
@@ -11227,6 +11461,11 @@ def restart(
     ``role``, ``account`` and ``persona`` are a take-over's changes (the Spawn dialog's
     *Take over*, :func:`hand_off`); ``None`` keeps the row's, and an account of
     :data:`THIS_SHELL_ACCOUNT` runs where a plain spawn with no ``--account`` runs.
+    ``to_agent`` is a take-over onto another agent (task #15): no conversation moves
+    between agents, so the replacement starts fresh there with the hand-off brief
+    (``services.handoff``), on ``account`` of that agent or where its ladder puts it, and
+    as today's config launches the role on it; with it, no ``permission_mode``, which
+    would be in the other agent's words.
     Another role launches as today's config says for it, since the recorded launch was
     the old role's; a persona of ``""`` is none. Each is checked with the rest, before
     anything is stopped, and so is what ``spawn`` asks of another role: a second manager
@@ -11293,9 +11532,21 @@ def restart(
     # slot, which the resolver refused as "not a Claude Code account" for want of it.
     replays = recorded_adapter(record.agent)
     runs_as = role or record.role
+    onto = _crossing_to(record, to_agent, label)
+    if onto is not None and permission_mode is not None:
+        raise FleetError(
+            f"cannot restart {label!r} onto {claude_accounts_core.agent_label(onto)} with a "
+            "permission mode: it starts as the role's config launches it there — nothing was "
+            "stopped"
+        )
     try:
         _require_role(runs_as)
-        if runs_as == record.role:
+        if onto is not None:
+            if runs_as == record.role:
+                _refuse_a_replay_spawn_refuses(project, agent, record.role)
+            else:
+                _refuse_a_take_over_that_would_move(project, agent, runs_as)
+        elif runs_as == record.role:
             _refuse_a_replay_spawn_refuses(project, agent, record.role)
             _refuse_a_replay_that_cannot_start(
                 current, record, permission_mode=permission_mode, branch=agent.branch
@@ -11313,7 +11564,22 @@ def restart(
             _chosen_persona(project, runs_as, persona, role_settings(runs_as, settings()), [])
         whose = replays.id if replays is not None else claude_accounts_core.AGENT
         choice = claude_accounts_service.AccountChoice(account=None, source=None)
-        if replays is None or replays.accounts is not None:
+        if onto is not None:
+            # The record's slot is the other agent's: the account asked for, else the ladder
+            # of the agent it starts on.
+            if get_adapter(onto).accounts is not None:
+                choice = claude_accounts_service.choose(
+                    _account_wanted(account, None), role=runs_as, project=project, agent=onto
+                )
+            _refuse_a_cross_agent_start(
+                project,
+                record,
+                onto,
+                home=choice.account.config_dir if choice.account is not None else None,
+                branch=agent.branch,
+                role=runs_as,
+            )
+        elif replays is None or replays.accounts is not None:
             choice = _replacement_account(account, slot, role=runs_as, project=project, whose=whose)
     except (FleetError, claude_accounts_service.NoSuchAccount) as exc:
         raise FleetError(f"cannot restart {label!r}: {exc}") from exc
@@ -11321,7 +11587,10 @@ def restart(
     # The ladder's notes travel with the slot it chose; with none chosen, `spawn`
     # asks the same ladder and gives them itself.
     notes = [f"accounts: {note}" for note in choice.notes] if account is not None else []
-    if (
+    if onto is not None:
+        fresh = True
+        notes.append(_crossing_note(record.agent, onto))
+    elif (
         replays is not None
         and not replays.capabilities.resumes_across_homes
         and not fresh
@@ -11451,6 +11720,7 @@ def restart(
             # (last delta review, m3). Not a hand-over, whose own stop writes `stopped`, nor
             # a row stopped already, which this restart was asked to bring back.
             replaces=agent.id if handed_over is None and agent.ended_by != "stopped" else None,
+            onto=onto,
         )
     except Exception:
         if handed_over is not None and handed_over.withheld:
@@ -11464,7 +11734,8 @@ def restart(
         raise
     notes.extend(more)
     typed = receipt.prompt_typed or "no"
-    how = _how_started(resumed, typed=typed)
+    how = _how_started(resumed, typed=typed, brief=onto is not None)
+    onto_named = f" onto {claude_accounts_core.agent_label(onto)}" if onto is not None else ""
     # The suppression is entered FIRST, as in `switch`: a store that cannot be opened
     # costs the courtesy, never a restarted agent reported as not restarted.
     with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
@@ -11472,7 +11743,7 @@ def restart(
             store,
             _board_of_row(receipt.agent),
             "restarted",
-            f"{label} restarted — {how}",
+            f"{label} restarted{onto_named} — {how}",
             session_id=receipt.agent.session_id,
         )
     return RestartReceipt(
@@ -11486,7 +11757,27 @@ def restart(
         prompt_delivery=receipt.prompt_delivery,
         prompt_acked=receipt.prompt_acked,
         failures=[*failures, *receipt.failures],
+        from_agent=record.agent,
+        to_agent=onto or record.agent,
     )
+
+
+def _crossing_to(record: launch_seal.LaunchRecord, to_agent: str | None, label: str) -> str | None:
+    """The agent a take-over or a fork of ``record``'s row starts on when it is another than
+    the record's (``to_agent``, the Spawn dialog's Agent), as its adapter names it; ``None``
+    for the record's own. Refused for an agent this install does not know, and for the
+    captain, which keeps its agent."""
+    if to_agent is None:
+        return None
+    try:
+        onto = get_adapter(to_agent).id
+    except ValueError as exc:
+        raise FleetError(f"{exc} — nothing was done") from exc
+    if not handoff.crosses(record, onto):
+        return None
+    if experimental.captain_role(record.role):
+        raise FleetError(f"the captain keeps its agent — {label!r} was not touched")
+    return onto
 
 
 def _refuse_a_permission_the_agent_cannot_take(
@@ -11579,6 +11870,7 @@ def hand_off(
     size: tuple[int, int] | None = None,
     spawned_by: str = "user",
     agent_id: str | None = None,
+    to_agent: str | None = None,
 ) -> HandoffReceipt:
     """Start an agent from teammate ``source``: the Spawn dialog's *Hand off from*.
 
@@ -11601,7 +11893,11 @@ def hand_off(
 
     ``role``, ``account`` and ``persona`` are the dialog's changes, ``None`` keeping the
     source's; a persona of ``""`` is none, and an account of :data:`THIS_SHELL_ACCOUNT`
-    runs where a plain spawn with no ``--account`` runs. ``label`` and ``prompt`` are a
+    runs where a plain spawn with no ``--account`` runs. ``to_agent`` is the dialog's Agent
+    when it names another agent than the source's (task #15): no conversation moves between
+    agents, so a fork or a take-over onto it starts fresh with the hand-off brief of the
+    source's work (``services.handoff``), on ``account`` of that agent or where its ladder
+    puts it, launched as today's config launches the role there. ``label`` and ``prompt`` are a
     fork's own: a take-over keeps the source's label, and continues its work.
 
     ``agent_id`` names the source's ROW, for a caller that means one teammate rather than
@@ -11640,6 +11936,7 @@ def hand_off(
             size=size,
             spawned_by=spawned_by,
             agent_id=agent.id,
+            to_agent=to_agent,
         )
         started = SpawnReceipt(
             agent=restarted.started,
@@ -11661,12 +11958,16 @@ def hand_off(
     # its launch, its tree, and the session its own hook reported, never the row's columns.
     record = _launch_record(project, agent, "fork")
     forks = recorded_adapter(record.agent)
+    onto = _crossing_to(record, to_agent, source)
     runs_as = role or record.role
-    replay = runs_as == record.role
+    replay = runs_as == record.role and onto is None
     slot = record.account_slot
-    wanted = _account_wanted(account, slot)
+    # Onto another agent the source's slot is no account of it: the one asked, else its ladder.
+    wanted = _account_wanted(account, slot if onto is None else None)
     resume: ResumeSpec | None = None
-    if not fresh:
+    if onto is not None:
+        notes.append(_crossing_note(record.agent, onto))
+    elif not fresh:
         resume, wanted = _forkable(
             project,
             record,
@@ -11679,7 +11980,23 @@ def hand_off(
     own = is_git_project(project.root)
     if not own:
         notes.append(f"not a git repository — the fork works in {project.root}, beside {source}")
-    first = _fork_prompt(agent, task, recent, resumed=resume is not None)
+    first = (
+        _fork_prompt(agent, task, recent, resumed=resume is not None)
+        if onto is None
+        else _brief_prompt(
+            agent,
+            record,
+            onto,
+            notes,
+            session=None,
+            task=task,
+            recent=recent,
+            reason=None,
+            board=_board_of_row(agent),
+            label=label,
+            fork=True,
+        )
+    )
     if prompt and prompt.strip():
         # A resumed fork's first message stays one line (see :func:`_fork_prompt`).
         extra = " ".join(prompt.split()) if resume is not None else prompt.strip()
@@ -11703,14 +12020,20 @@ def hand_off(
         persona=(
             _persona_for_replay(project, agent, notes, role=runs_as) if persona is None else persona
         ),
-        agent=record.agent,
-        family=record.session.agent if record.session is not None else None,
+        agent=onto or record.agent,
+        family=record.session.agent if record.session is not None and onto is None else None,
         start_point=_fork_point(project, agent, Path(record.cwd), notes) if own else None,
         fork=True,
         kickoff=False,  # its own first line names the source and the task
     )
     resumed = resume is not None
-    how = "resumed its session as a fork" if resumed else "started fresh"
+    how = (
+        "resumed its session as a fork"
+        if resumed
+        else f"started fresh on {claude_accounts_core.agent_label(onto)} with a hand-off brief"
+        if onto is not None
+        else "started fresh"
+    )
     with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
         _team()._emit(
             store,
@@ -12027,7 +12350,7 @@ def _abandon_handover(stopped: FleetAgent) -> None:
     )
 
 
-def _how_started(resumed: bool, *, typed: Typed) -> str:
+def _how_started(resumed: bool, *, typed: Typed, brief: bool = False) -> str:
     """How a replacement began, for the board's ``switched`` and ``restarted`` lines.
 
     And for every surface that reports the receipt (``RestartReceipt.how``,
@@ -12046,11 +12369,15 @@ def _how_started(resumed: bool, *, typed: Typed) -> str:
     A line pasted at its prompt whose Enter was refused, or one tmux did not answer in time
     with, is not "NOT typed": the human, or the manager reading the board, sent it again,
     beside the first copy (review of #259, round 11, 2/13).
+
+    ``brief`` is a start on another agent, whose first message is the hand-off brief
+    (``services.handoff``).
     """
-    line = "the line telling it to continue" if resumed else "its hand-off prompt"
+    given = "its hand-off brief" if brief else "its hand-off prompt"
+    line = "the line telling it to continue" if resumed else given
     began = "resumed its session" if resumed else "started fresh"
     if typed == "yes":
-        return began if resumed else "started fresh with a hand-off prompt"
+        return began if resumed else f"started fresh with a {given.removeprefix('its ')}"
     if typed == "unsent":
         return f"{began}, but {line} waits unsent at its prompt: press Enter in its pane"
     if typed == "maybe":
@@ -12159,6 +12486,57 @@ def _handoff_prompt(
         "where the previous session left off and do not redo work that is already committed."
     )
     return "\n".join(lines)
+
+
+def _brief_prompt(
+    source: FleetAgent,
+    record: launch_seal.LaunchRecord,
+    onto: str,
+    notes: list[str],
+    *,
+    session: TeamSession | None,
+    task: TeamTask | None,
+    recent: list[TeamEvent],
+    reason: str | None,
+    board: str,
+    label: str | None = None,
+    fork: bool = False,
+) -> str:
+    """The first message of an agent started on ``onto`` from ``source``'s work: the hand-off
+    brief (``services.handoff``), kept whole under the aisquare home, which ``notes`` names.
+
+    ``session`` is the source's whose claims the new row takes over (a hand-over's), ``None``
+    for a start that takes none (a fork, the restart of an agent that ended), and ``label``
+    a fork's own."""
+    claims: list[TeamTask] = []
+    if session is not None:
+        with suppress(Exception), store_session() as store:
+            claims = [
+                held
+                for held in store.team_tasks(board, status="doing")
+                if held.claimed_by == session.id
+            ]
+    brief = handoff.write(
+        handoff.build(
+            label=label or source.label,
+            source=source,
+            record=record,
+            target_agent=onto,
+            reason=reason,
+            task=task,
+            recent=recent,
+            claims=claims,
+            fork=fork,
+        )
+    )
+    if brief.path is None:
+        notes.append(
+            f"the hand-off brief could not be kept under {handoff.brief_dir()} — its first "
+            "message carries it alone"
+        )
+    else:
+        notes.append(f"hand-off brief: {brief.path}")
+    return handoff.prompt(brief)
 
 
 # --- every agent at once: ``fleet restart|stop --all`` and Settings ▸ Fleet ---------

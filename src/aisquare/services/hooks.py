@@ -528,12 +528,17 @@ def _plan_hand_over(
     # (`recorded_adapter`): asked of every agent's accounts, a signed-in Codex one started a
     # worker that could only refuse (review r16 of #113, 3/8).
     from aisquare.core.agent_adapters import DEFAULT_AGENT
+    from aisquare.services import handoff  # lazy: only a limit reads it, never every hook
 
     whose = agent.agent or DEFAULT_AGENT
     # One account: `wait`, with no board note on every limit that it is. A registry
-    # that cannot be read is no answer, and goes on to the worker, which says so.
+    # that cannot be read is no answer, and goes on to the worker, which says so. An
+    # account of another installed agent is one to go to while `cross_agent_handover`
+    # is on: the worker crosses once every own account is read full (task #15).
     return _HandOverPlan(
-        agent, go=claude_accounts_service.somewhere_to_hand_over(leaving, agent=whose)
+        agent,
+        go=claude_accounts_service.somewhere_to_hand_over(leaving, agent=whose)
+        or handoff.somewhere_across(leaving, whose),
     )
 
 

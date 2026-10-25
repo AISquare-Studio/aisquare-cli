@@ -1487,7 +1487,10 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     the one way out is a hand-over to another account: the ``aisquare fleet switch
     <label>`` the manager is told to run. Headroom picks the account among that agent's
     own (``fleet.switch``: a Codex agent moves between Codex accounts) unless ``to`` names
-    one. There is no ``force`` (SPEC §9.3).
+    one. There is no ``force`` (SPEC §9.3). Once every one of its own agent's accounts is
+    full, the switch may cross to another agent's (``[accounts] cross_agent_handover``),
+    which starts it fresh there with a hand-off brief (``services.handoff``); the answer's
+    ``from_agent`` and ``to_agent`` say so.
 
     ``fleet.switch`` gets the pin (``agent_id``), as ``fleet.stop`` and
     ``fleet.restart`` do. The manager's switch and the automatic hand-over run in
@@ -1550,6 +1553,8 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         "started": receipt.started.model_dump(mode="json"),
         "from_slot": receipt.from_slot,
         "to_slot": receipt.to_slot,
+        "from_agent": receipt.from_agent,
+        "to_agent": receipt.to_agent,
         "resumed": receipt.resumed,
         "prompt_typed": fleet_service.prompt_typed_json(receipt.prompt_typed),
         "prompt_delivery": receipt.prompt_delivery,
@@ -1561,8 +1566,11 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         "project": target.id,
     }
     from_slot = "-" if receipt.from_slot is None else str(receipt.from_slot)
+    to_slot = "-" if receipt.to_slot is None else str(receipt.to_slot)
+    # Onto another agent (task #15), the audit line names both: the slot alone hides it.
+    crossed = f" agent={receipt.from_agent}->{receipt.to_agent}" if receipt.crossed else ""
     summary = (
-        f"switch {label}@{target.id} slot={from_slot}->{receipt.to_slot} "
+        f"switch {label}@{target.id} slot={from_slot}->{to_slot}{crossed} "
         f"dismissed={action_yes_no(guard.dismissed is True)} "
         f"resumed={action_yes_no(receipt.resumed)} started={receipt.started.id}{said}"
     )

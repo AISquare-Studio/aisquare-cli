@@ -302,38 +302,44 @@ def other_agents(
     )
 
 
-def own_accounts_full(agent: str, leaving: int | None) -> bool:
-    """Whether every other enabled, signed-in account of ``agent`` was read and is over
-    ``switch_at`` (or there is none): what lets a hand-over cross to another agent. An
-    account whose usage cannot be read is not full, so it keeps the hand-over on its agent
-    (a fresh Codex slot with no rollout yet reads nothing). Read from the readings a
-    hand-over's own pick just took (the minute-deep cache), so no account is asked twice."""
+def own_accounts_full(agent: str, leaving: int | None, *, family: str | None = None) -> bool:
+    """Whether every other enabled, signed-in account of ``agent`` is full (or there is
+    none): what lets a hand-over cross to another agent. Full is a limit mark still in
+    force for the session's model ``family`` (the refusal memory, #277), or a reading over
+    ``switch_at`` (with that family's week). An account whose usage cannot be read is not
+    full, so it keeps the hand-over on its agent (a fresh Codex slot with no rollout yet
+    reads nothing). Read from the readings a hand-over's own pick just took (the
+    minute-deep cache), so no account is asked twice, and a marked one is not asked."""
     switch_at = claude_accounts_service.accounts_settings().switch_at
     try:
-        candidates = [
+        marks = claude_accounts_service.limit_marks()
+        unmarked = [
             account
             for account in claude_accounts_service.list_accounts()
             if account.agent == agent
             and not account.disabled
             and account.slot != leaving
             and claude_accounts_core.signed_in(account)
+            and not any(mark.blocks(family) for mark in marks.get(account.slot, []))
         ]
         readings = (
             claude_accounts_service.cached_usage(
-                candidates, max_age=claude_accounts_service.PICK_MAX_AGE_SECONDS
+                unmarked, max_age=claude_accounts_service.PICK_MAX_AGE_SECONDS
             )
-            if candidates
+            if unmarked
             else {}
         )
     except Exception:
         # Slots that cannot be listed, or a reading that raised: no evidence the agent is
         # full, so the hand-over stays on it and its own pick says what it could not read.
         return False
-    if not candidates:
-        return True
-    for account in candidates:
+    for account in unmarked:
         reading = readings.get(account.slot)
-        used = claude_accounts_service.headroom_percent(reading) if reading is not None else None
+        used = (
+            claude_accounts_service.headroom_percent(reading, family)
+            if reading is not None
+            else None
+        )
         if used is None or used < switch_at:
             return False
     return True

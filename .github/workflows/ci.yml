@@ -62,9 +62,9 @@ permissions:
 # than its tests' last run).
 #
 # Every job has a timeout of about twice its usual time, so a hung shard fails in
-# minutes, not at GitHub's six hours. Installs are uv's, not pip's: about 1 s
-# against 13 on Linux and 21 against 50 on Windows (run 40226083784 against
-# 40218362245). ci/constraints.txt still pins ruff and mypy.
+# minutes, not at GitHub's six hours. Installs are uv's, not pip's, compiled as
+# pip compiles them: about 4 s against 13 on Linux and 20-28 against 50 on Windows
+# (run 40232807941 against 40218362245). ci/constraints.txt still pins ruff and mypy.
 #
 # LEAN CI FOR A TRAIN'S SUB-PRS (owner decision 2026-10-23). A pull request into
 # rc/** — one workstream of a release train — runs lint, the py3.12 leg (captain

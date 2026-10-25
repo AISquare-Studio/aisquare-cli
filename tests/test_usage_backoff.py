@@ -731,6 +731,45 @@ def test_replacing_an_unreadable_wait_row_never_shortens_a_longer_one_written_me
         assert real(store, key) == longer.dump(), "the longer wait stands"
 
 
+def test_a_cached_read_keeps_the_family_weeks_the_live_one_saw(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tester's pass on #401, (a): a reading served from the store had no family weeks
+    (the history has no columns for them), so ``accounts usage`` without ``--refresh``, nearly
+    every read while asq runs, showed none, a spent Opus week included. They are kept with
+    the sample they came with, and served with it; another sample of the slot is not given
+    them."""
+    work = _slot("work@example.com", "tok-work")
+    payload = _payload(40, week=30)
+    for family, used, days in (("opus", 100, 1), ("sonnet", 45, 3)):
+        resets = (NOW + timedelta(days=days)).isoformat()
+        payload[f"seven_day_{family}"] = {"utilization": used, "resets_at": resets}
+    endpoint = _Endpoint({"tok-work": payload})
+    live = service.cached_usage([work], now=NOW, fetch=endpoint)[work.slot]
+    assert live.family_week_percent == {"opus": 100.0, "sonnet": 45.0}, "control: read live"
+
+    _new_process()
+    cached = service.cached_usage([work], now=NOW + timedelta(minutes=2), fetch=endpoint)
+    assert len(endpoint.calls) == 1, "served from the store"
+    assert cached[work.slot].family_week_percent == {"opus": 100.0, "sonnet": 45.0}
+    assert cached[work.slot].family_week_resets_at["opus"] == NOW + timedelta(days=1)
+
+    monkeypatch.setattr(service, "_http_get", endpoint)
+    _at(monkeypatch, NOW + timedelta(minutes=3))
+    _new_process()
+    shown = runner.invoke(app, ["accounts", "usage"])
+    assert shown.exit_code == 0, shown.output
+    flat = " ".join(shown.stdout.split())  # the table wraps a long cell over its lines
+    assert "opus 100%" in flat and "sonnet 45%" in flat, shown.stdout
+    assert len(endpoint.calls) == 1, "still the stored reading"
+
+    plain = _payload(20, week=10)  # a newer sample with no family week: none carried over
+    endpoint.by_token["tok-work"] = plain
+    _new_process()
+    later = service.cached_usage([work], now=NOW + timedelta(minutes=10), fetch=endpoint)
+    assert later[work.slot].family_week_percent == {}
+
+
 def _new_token(account: Any, token: str) -> None:
     """An OAuth refresh, or a *Log in again* to the same account: a new token, the same login."""
     creds = core.credentials_path(account)

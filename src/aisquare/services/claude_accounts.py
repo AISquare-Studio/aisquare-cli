@@ -799,6 +799,7 @@ def forget_arrangement(slot: int) -> None:
         # occupant's first window against this login's history (third round).
         store.delete_usage_samples(slot)
         store.set_ui_state(_BACKOFF_KEY.format(slot=slot), None)  # and its wait (F1 of #400)
+        store.set_ui_state(_FAMILY_KEY.format(slot=slot), None)  # and its family weeks
 
 
 # --- usage ------------------------------------------------------------------------------
@@ -1149,26 +1150,75 @@ def sample_usage(
     return read_usage([account], now=now, fetch=fetch)[account.slot]
 
 
+_FAMILY_KEY = "usage-family:{slot}"
+"""The ``ui_state`` row that holds a slot's newest reading's per-family weeks, which the usage
+history has no columns for (:func:`_record_sample`, :func:`_with_family_weeks`)."""
+
+
 def _record_sample(
     store: ContextStore, account: ClaudeAccount, result: ClaudeUsage, now: datetime | None
 ) -> None:
     """The reading's row — and a limit mark for each family week it reads spent, which the
     row has no column for: a launch picks from the cache, and without the mark it would put
-    an Opus agent on an account whose Opus week a live reading saw spent (#277)."""
+    an Opus agent on an account whose Opus week a live reading saw spent (#277).
+
+    The family weeks themselves go in one ``ui_state`` row per slot, stamped with the
+    sample they came with (:data:`_FAMILY_KEY`, no schema step). Served from the store, a
+    reading had none, so ``accounts usage`` without ``--refresh``, nearly every read while
+    asq runs, showed no family week, a spent one included (tester's pass on #401, (a))."""
     for family, percent in result.family_week_percent.items():
         resets = result.family_week_resets_at.get(family)
         if percent >= 100 and resets is not None:
             _write_limit(store, account.slot, family, resets, how="read", now=now)
-    store.add_usage_sample(
-        UsageSample(
-            slot=account.slot,
-            fetched_at=result.fetched_at or now or _now(),
-            session_percent=result.session_percent,
-            session_resets_at=result.session_resets_at,
-            week_percent=result.week_percent,
-            week_resets_at=result.week_resets_at,
-            token_fingerprint=_token_fingerprint(account),
+    sample = UsageSample(
+        slot=account.slot,
+        fetched_at=result.fetched_at or now or _now(),
+        session_percent=result.session_percent,
+        session_resets_at=result.session_resets_at,
+        week_percent=result.week_percent,
+        week_resets_at=result.week_resets_at,
+        token_fingerprint=_token_fingerprint(account),
+    )
+    store.add_usage_sample(sample)
+    families = None
+    if result.family_week_percent or result.family_week_resets_at:
+        families = json.dumps(
+            {
+                "fetched_at": sample.fetched_at.isoformat(),
+                "token": sample.token_fingerprint,
+                "percent": result.family_week_percent,
+                "resets": {
+                    family: when.isoformat()
+                    for family, when in result.family_week_resets_at.items()
+                },
+            }
         )
+    store.set_ui_state(_FAMILY_KEY.format(slot=account.slot), families)
+
+
+def _with_family_weeks(
+    store: ContextStore, slot: int, sample: UsageSample, reading: ClaudeUsage
+) -> ClaudeUsage:
+    """``reading`` (built from ``sample``) with the family weeks recorded with that very
+    sample (:data:`_FAMILY_KEY`); as it was when the row is another sample's, or unreadable."""
+    raw = store.ui_state(_FAMILY_KEY.format(slot=slot))
+    if not raw:
+        return reading
+    try:
+        data = json.loads(raw)
+        if (
+            datetime.fromisoformat(data["fetched_at"]) != sample.fetched_at
+            or data.get("token") != sample.token_fingerprint
+        ):
+            return reading
+        percent = {str(family): float(value) for family, value in data["percent"].items()}
+        resets = {
+            str(family): datetime.fromisoformat(when) for family, when in data["resets"].items()
+        }
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return reading
+    return reading.model_copy(
+        update={"family_week_percent": percent, "family_week_resets_at": resets}
     )
 
 
@@ -1667,13 +1717,18 @@ def _recorded_usage(
                 resets = (newest.session_resets_at, newest.week_resets_at)
                 if current and any(when is not None and when <= now for when in resets):
                     continue
-                found[account.slot] = ClaudeUsage(
-                    available=True,
-                    session_percent=newest.session_percent,
-                    session_resets_at=newest.session_resets_at,
-                    week_percent=newest.week_percent,
-                    week_resets_at=newest.week_resets_at,
-                    fetched_at=newest.fetched_at,
+                found[account.slot] = _with_family_weeks(
+                    store,
+                    account.slot,
+                    newest,
+                    ClaudeUsage(
+                        available=True,
+                        session_percent=newest.session_percent,
+                        session_resets_at=newest.session_resets_at,
+                        week_percent=newest.week_percent,
+                        week_resets_at=newest.week_resets_at,
+                        fetched_at=newest.fetched_at,
+                    ),
                 )
     except sqlite3.Error:
         return {}
@@ -1838,6 +1893,17 @@ def _without_reset_windows(reading: ClaudeUsage, now: datetime) -> ClaudeUsage:
         when = getattr(reading, f"{window}_resets_at")
         if when is not None and when <= now:
             update[f"{window}_percent"] = None
+    over = {
+        family
+        for family, when in reading.family_week_resets_at.items()
+        if when <= now and family in reading.family_week_percent
+    }
+    if over:  # a family week that has reset since: its figure goes the same way
+        update["family_week_percent"] = {
+            family: percent
+            for family, percent in reading.family_week_percent.items()
+            if family not in over
+        }
     return reading.model_copy(update=update) if update else reading
 
 

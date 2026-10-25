@@ -558,6 +558,46 @@ def test_a_wait_is_the_logins_not_the_slots(fake_home: Path) -> None:
     assert service.usage_backoffs([work], now=NOW + timedelta(minutes=1)) == {}
 
 
+def test_a_reading_recorded_just_after_anothers_429_is_kept_for_the_whole_wait(
+    fake_home: Path,
+) -> None:
+    """Review of #408, MAJOR-1: process A's read is answered 429 with an hour to wait; process
+    B's request, sent before A's wait was on disk, is answered 200 a second later and
+    recorded. Forty minutes on, still inside the wait, that reading was served as live: no
+    age, no wait, and the fleet's dot counted it. It is kept, with its age and its wait."""
+    work = _slot("work@example.com", "tok-work")
+    endpoint = _Endpoint({"tok-work": (429, {"Retry-After": "3600"})})
+    limited_at = NOW
+    service.read_usage([work], now=limited_at, fetch=endpoint)  # A's 429: the wait is on disk
+    taken = limited_at + timedelta(seconds=1)
+    with store_session() as store:  # B's 200, recorded after it
+        service._record_sample(
+            store,
+            work,
+            ClaudeUsage(
+                available=True,
+                session_percent=10,
+                session_resets_at=limited_at + timedelta(hours=4),
+                week_percent=5,
+                week_resets_at=limited_at + timedelta(days=5),
+                fetched_at=taken,
+            ),
+            taken,
+        )
+    _new_process()
+    later = limited_at + timedelta(minutes=40)
+
+    shown = service.cached_usage([work], now=later, fetch=endpoint)[work.slot]
+    dot = service.read_fleet_headroom([work], now=later, fetch=endpoint)
+
+    assert shown.available and shown.session_percent == 10 and shown.fetched_at == taken
+    assert service.is_kept(shown), "never served as live"
+    assert shown.rate_limited and shown.rate_limited_until == limited_at + timedelta(hours=1)
+    assert shown.last_failed_reason is not None and "rate-limited until" in shown.last_failed_reason
+    assert (dot.level, dot.usable) == ("empty", 0), "the dot does not count a 40-minute-old figure"
+    assert endpoint.calls == ["tok-work"], "nothing sent during the wait"
+
+
 def test_sample_usage_honours_the_wait(fake_home: Path) -> None:
     """N5: ``sample_usage`` is public; it goes through the gate like every other read."""
     work = _slot("work@example.com", "tok-work")

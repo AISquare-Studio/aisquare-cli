@@ -1562,11 +1562,17 @@ def _preferred(good: ClaudeUsage | None, failed: ClaudeUsage | None) -> ClaudeUs
     answer: applied to the plain read alone, a forced refresh that failed showed the
     failure, and the next plain read showed the figure with no word of it (review of
     #261, m4, reopened).
+
+    A wait (``rate_limited``) marks the figure whatever order the two came in: a gated read
+    is stamped with the moment its 429 came back, so a reading another process recorded
+    just after that was served as live for the whole wait, with no age and no wait, and the
+    fleet's dot counted it (review of #408, MAJOR-1).
     """
     if failed is None or good is None:
         return good or failed
-    if failed.fetched_at is None or (
-        good.fetched_at is not None and failed.fetched_at <= good.fetched_at
+    if not failed.rate_limited and (
+        failed.fetched_at is None
+        or (good.fetched_at is not None and failed.fetched_at <= good.fetched_at)
     ):
         return good  # the latest try read it
     if failed.needs_login:

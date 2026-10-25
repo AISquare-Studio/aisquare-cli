@@ -1690,7 +1690,7 @@ def is_kept(reading: ClaudeUsage) -> bool:
     """Whether ``reading`` is not a live one: a slot the endpoint asked to wait, or the last
     good figure a failed read is showing (``last_failed_reason``). Shown, aged; never
     picked by or counted in the fleet's dot unless fresh (review of #408, MAJ-1)."""
-    return reading.rate_limited or reading.last_failed_reason is not None
+    return reading.kept
 
 
 def _has_reset(reading: ClaudeUsage, now: datetime) -> bool:

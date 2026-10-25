@@ -330,6 +330,15 @@ class ClaudeUsage(BaseModel):
 
     @computed_field  # type: ignore[prop-decorator]
     @property
+    def kept(self) -> bool:
+        """Not a live reading: the endpoint asked to wait (:attr:`rate_limited`), or a failed
+        read is showing the last good figure (:attr:`last_failed_reason`). Shown with its age;
+        never counted as live. In ``--json`` so a reader need not work it out from the two
+        (review of #408, n3)."""
+        return self.rate_limited or self.last_failed_reason is not None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
     def session_used_percent(self) -> float | None:
         """The five-hour window: percent USED (0-100) — ``session_percent``, named for it."""
         return self.session_percent

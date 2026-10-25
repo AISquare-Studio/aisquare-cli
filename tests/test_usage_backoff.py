@@ -119,6 +119,8 @@ def test_refresh_during_a_wait_sends_nothing_and_says_how_old_the_figure_is(
     endpoint = _Endpoint({"tok-work": _payload(40)})
     monkeypatch.setattr(service, "_http_get", endpoint)
     assert runner.invoke(app, ["accounts", "usage"]).exit_code == 0
+    live = json.loads(runner.invoke(app, ["--json", "accounts", "usage"]).stdout)
+    assert [row["usage"]["kept"] for row in live if row["account"]["slot"] == 2] == [False]
 
     endpoint.by_token["tok-work"] = (429, {"Retry-After": "900"})
     _at(monkeypatch, NOW + timedelta(minutes=12))
@@ -139,6 +141,7 @@ def test_refresh_during_a_wait_sends_nothing_and_says_how_old_the_figure_is(
     shown = runner.invoke(app, ["--json", "accounts", "usage", "--refresh"])
     rows = {row["account"]["slot"]: row for row in json.loads(shown.stdout)}
     usage = rows[2]["usage"]
+    assert usage["kept"] is True, "review of #408, n3: said, not left to be worked out"
     assert usage["rate_limited"] is True and usage["session_used_percent"] == 40
     assert usage["rate_limited_until"] is not None and len(endpoint.calls) == calls
 

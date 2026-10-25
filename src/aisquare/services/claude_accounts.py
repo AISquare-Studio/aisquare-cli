@@ -50,7 +50,7 @@ from typing import Any, Literal
 
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing as sharing
-from aisquare.core import paths
+from aisquare.core import paths, tls
 from aisquare.core.config import AccountsSettings, FleetSettings, load_config
 from aisquare.core.harness import MODEL_FAMILIES, model_family
 from aisquare.core.names import name_key
@@ -815,7 +815,7 @@ def _http_get(
 
     request = urllib.request.Request(url, headers=dict(headers), method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with tls.urlopen(request, timeout=timeout) as response:
             return int(response.status), bytes(response.read()), dict(response.headers.items())
     except urllib.error.HTTPError as exc:
         sent = dict(exc.headers.items()) if exc.headers is not None else {}
@@ -995,6 +995,16 @@ def usage(
     try:
         answer = (fetch or _http_get)(USAGE_URL, headers, USAGE_TIMEOUT_SECONDS)
     except OSError as exc:  # URLError, a refused connection, a timeout
+        if isinstance(exc, tls.CABundleError):
+            return ClaudeUsage(
+                available=False,
+                reason=f"TLS: the CA bundle could not be loaded — {tls.BUNDLE_FIX}",
+            )
+        if tls.cert_failure(exc):
+            return ClaudeUsage(
+                available=False,
+                reason=f"TLS certificate could not be verified — {tls.CERT_HINT}",
+            )
         return ClaudeUsage(
             available=False, reason=f"could not reach the usage endpoint ({type(exc).__name__})"
         )
@@ -1197,10 +1207,15 @@ def _record_sample(
 
 
 def _with_family_weeks(
-    store: ContextStore, slot: int, sample: UsageSample, reading: ClaudeUsage
+    store: ContextStore, slot: int, sample: UsageSample, reading: ClaudeUsage, now: datetime
 ) -> ClaudeUsage:
     """``reading`` (built from ``sample``) with the family weeks recorded with that very
-    sample (:data:`_FAMILY_KEY`); as it was when the row is another sample's, or unreadable."""
+    sample (:data:`_FAMILY_KEY`); as it was when the row is another sample's, or unreadable.
+
+    A family week whose reset has passed by ``now`` comes back without its figure, its reset
+    time kept, as :func:`_without_reset_windows` empties a kept reading's: given back whole,
+    a pick read the old figure for the cache's window after the reset, skipped the account
+    as "its opus week is spent" and ranked it on it (review of #401, m2)."""
     raw = store.ui_state(_FAMILY_KEY.format(slot=slot))
     if not raw:
         return reading
@@ -1217,6 +1232,8 @@ def _with_family_weeks(
         }
     except (ValueError, TypeError, KeyError, AttributeError):
         return reading
+    over = {family for family, when in resets.items() if when <= now}
+    percent = {family: used for family, used in percent.items() if family not in over}
     return reading.model_copy(
         update={"family_week_percent": percent, "family_week_resets_at": resets}
     )
@@ -1729,6 +1746,7 @@ def _recorded_usage(
                         week_resets_at=newest.week_resets_at,
                         fetched_at=newest.fetched_at,
                     ),
+                    now,
                 )
     except sqlite3.Error:
         return {}
@@ -1879,8 +1897,13 @@ def is_kept(reading: ClaudeUsage) -> bool:
 
 
 def _has_reset(reading: ClaudeUsage, now: datetime) -> bool:
-    """Whether either window of ``reading`` has reset by ``now``: the figure is over."""
-    resets = (reading.session_resets_at, reading.week_resets_at)
+    """Whether any window of ``reading`` has reset by ``now``, a family week included (review
+    of #401, m2): the figure is over."""
+    resets = (
+        reading.session_resets_at,
+        reading.week_resets_at,
+        *reading.family_week_resets_at.values(),
+    )
     return any(when is not None and when <= now for when in resets)
 
 

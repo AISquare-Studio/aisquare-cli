@@ -1093,7 +1093,20 @@ CREATE INDEX IF NOT EXISTS usage_turn_session ON usage_turn (session_id, seq);
 # (:func:`_converge_by_presence`) adds the column, the ladder runs v35's ``IF NOT EXISTS``
 # script, and this step finds its columns in place.
 _SCHEMA_V36 = ""
-# v37 (docs/plans/evidence-gate.md, part 2): work briefs. One row per brief, its
+
+# v37, P1 WS-2 (#279): who caused a board event (``team_event.actor``) and its details as
+# JSON (``team_event.meta``), so a manager's own stop wakes nobody and an exit says its
+# status. Both columns are nullable and in :data:`_PRODUCTS`, added only where absent, so a
+# store another line stamped at any version still gains them; a row from before them reads
+# NULL: no actor (the agent's own act, or unknown) and no details.
+#
+# rc/p1-token-diet stamped this step v35, after its own v34 (P0-W1a, now v36): the sync of
+# main 8eb18a8a moved it here, after main's v34 and v35. A store that ran rc/p1 reads v35
+# with P0-W1a's and these columns and neither ``fleet_agent.ended_by`` nor the usage
+# tables: the presence pass adds the column, v35's ``IF NOT EXISTS`` script makes the
+# tables, and v36 and this step find their columns in place.
+_SCHEMA_V37 = ""
+# v38 (docs/plans/evidence-gate.md, part 2): work briefs. One row per brief, its
 # requirements, links, evidence and corrections as one JSON document, so every write
 # compares ``revision`` and replaces the document whole (:meth:`SqliteStore.save_brief`).
 # Named ``brief``, not ``work_brief``: #136's builds stamped their own v15 for a
@@ -1102,15 +1115,15 @@ _SCHEMA_V36 = ""
 # rows are left where they are, unread. The script creates the table and its index,
 # both in :data:`_PRODUCTS`.
 #
-# The stack of #300, #306 and #341 stamped this step v34 on its own branches, beside
-# #38's v34 and #346's v35 here, and v36 once main reached v35; P0-W1a's v36 above moved
-# it here. A store that ran those branches reads v34 with ``brief`` and no
-# ``fleet_agent.ended_by``: the presence pass (:func:`_converge_by_presence`) adds the
-# column before v35, which creates the usage tables. One that ran their v36 reads v36
-# with ``brief`` and without P0-W1a's columns, which the presence pass adds before this
-# step. Either way this step then finds ``brief`` and its index in place: every
-# statement is ``IF NOT EXISTS``.
-_SCHEMA_V37 = """
+# #306 and #341 stamped this step v34 on their own branches, beside #38's v34 and #346's
+# v35 here, and v36 once they merged main's v35. #417 stamped it v37, after P0-W1a's v36,
+# and P1 WS-2's v37 above moved it here. A store that ran any of them reads v34, v36 or
+# v37 with ``brief``, and lacks what a step under its stamp adds: ``fleet_agent.ended_by``
+# (v34), P0-W1a's columns (v36) or P1 WS-2's (v37). The presence pass
+# (:func:`_converge_by_presence`) adds those, the ladder runs the steps above the stamp,
+# and this step then finds ``brief`` and its index in place: every statement is
+# ``IF NOT EXISTS``.
+_SCHEMA_V38 = """
 CREATE TABLE IF NOT EXISTS brief (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -1161,6 +1174,7 @@ _MIGRATIONS = (
     _SCHEMA_V35,
     _SCHEMA_V36,
     _SCHEMA_V37,
+    _SCHEMA_V38,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1227,7 +1241,8 @@ _PRODUCTS: dict[int, _Products] = {
             ("fleet_agent", "first_prompt_at", "TEXT"),
         )
     ),
-    36: _Products(("brief", "brief_number")),
+    36: _Products(columns=(("team_event", "actor", "TEXT"), ("team_event", "meta", "TEXT"))),
+    37: _Products(("brief", "brief_number")),
 }
 
 _PROJECT_COLUMNS = (
@@ -1304,7 +1319,9 @@ _TASK_COLUMNS = (
     "id, project_id, number, key, title, detail, status, role, needs, "
     "claimed_by, claim_expires_at, created_by, created_at, updated_at"
 )
-_EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
+_EVENT_COLUMNS = (
+    "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at, actor, meta"
+)
 _FLEET_AGENT_FIELDS = (
     "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
     "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
@@ -1450,6 +1467,7 @@ class ContextStore(Protocol):
         role: str | None = None,
         status: TaskStatus = "todo",
         prefer: str | None = None,
+        only: str | None = None,
     ) -> TeamTask | None: ...
     def task_statuses(self, project_id: str) -> dict[str, str]: ...
     def adopt_fleet_agent_session(
@@ -1515,10 +1533,17 @@ class ContextStore(Protocol):
         *,
         exclude_session: str | None = None,
         exclude_kinds: Collection[str] = (),
+        exclude_actor: str | None = None,
+        relevant: Relevance | None = None,
         limit: int = 50,
     ) -> list[TeamEvent]: ...
     def recent_events(
-        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+        self,
+        project_id: str,
+        *,
+        exclude_kinds: Collection[str] = (),
+        relevant: Relevance | None = None,
+        limit: int = 10,
     ) -> list[TeamEvent]: ...
     def filtered_events(
         self,
@@ -1999,6 +2024,8 @@ def _row_to_event(row: sqlite3.Row) -> TeamEvent:
         task_id=row["task_id"],
         to_role=row["to_role"],
         created_at=datetime.fromisoformat(row["created_at"]),
+        actor=row["actor"],
+        meta=json.loads(row["meta"]) if row["meta"] else None,
     )
 
 
@@ -2540,9 +2567,9 @@ class SqliteStore:
         """Delete the ``team_meta`` rows keyed by the project or by its sessions.
 
         Inside the caller's transaction, in statements of at most
-        :data:`_META_BATCH` sessions each (three terms per session: its nudge, its
-        unbriefed mark and its continuations): one statement per purge was the shape
-        SQLite refused at 500 sessions.
+        :data:`_META_BATCH` sessions each (one term per :data:`_SESSION_META_KINDS` and
+        one for its continuations): one statement per purge was the shape SQLite refused at
+        500 sessions.
         """
         removed = self._conn.execute(
             "DELETE FROM team_meta WHERE key = ? OR key GLOB ?",
@@ -2550,7 +2577,7 @@ class SqliteStore:
         ).rowcount
         for start in range(0, len(sessions), _META_BATCH):
             batch = sessions[start : start + _META_BATCH]
-            keys = [f"nudge:{sid}" for sid in batch] + [f"unbriefed:{sid}" for sid in batch]
+            keys = [f"{kind}:{sid}" for sid in batch for kind in _SESSION_META_KINDS]
             globs = [f"continuations:{_glob_escape(sid)}:*" for sid in batch]
             clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
             removed += self._conn.execute(
@@ -3234,8 +3261,12 @@ class SqliteStore:
         role: str | None = None,
         status: TaskStatus = "todo",
         prefer: str | None = None,
+        only: str | None = None,
     ) -> TeamTask | None:
         """The oldest *ready* task in ``status`` a session of ``role`` could pick up.
+
+        ``only`` narrows the pool to that one task id, under the same rules (``task next
+        --task``: a tester spawned for one task takes it and nothing else, #129 a).
 
         Tasks without a role hint are available to every role; tasks with one
         only match sessions of that role (or an unfiltered query). A ``todo``
@@ -3251,6 +3282,9 @@ class SqliteStore:
         if role is not None:
             clauses.append("(role IS NULL OR role = ?)")
             params.append(role)
+        if only is not None:
+            clauses.append("id = ?")
+            params.append(only)
         order = "ORDER BY id"
         if prefer is not None:
             order = "ORDER BY (id = ?) DESC, id"
@@ -3565,17 +3599,9 @@ class SqliteStore:
             for event, meta_key, meta_value in writes:
                 cursor = self._conn.execute(
                     "INSERT INTO team_event (id, project_id, session_id, kind, text, "
-                    "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        event.id,
-                        event.project_id,
-                        event.session_id,
-                        event.kind,
-                        event.text,
-                        event.task_id,
-                        event.to_role,
-                        event.created_at.isoformat(),
-                    ),
+                    "task_id, to_role, created_at, actor, meta) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    _event_values(event),
                 )
                 stamped = {**meta_value, "seq": cursor.lastrowid}
                 self._conn.execute(
@@ -3784,17 +3810,8 @@ class SqliteStore:
     def add_team_event(self, event: TeamEvent) -> TeamEvent:
         cursor = self._conn.execute(
             "INSERT INTO team_event (id, project_id, session_id, kind, text, "
-            "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                event.id,
-                event.project_id,
-                event.session_id,
-                event.kind,
-                event.text,
-                event.task_id,
-                event.to_role,
-                event.created_at.isoformat(),
-            ),
+            "task_id, to_role, created_at, actor, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            _event_values(event),
         )
         self._conn.commit()
         return event.model_copy(update={"seq": cursor.lastrowid})
@@ -3891,34 +3908,58 @@ class SqliteStore:
         *,
         exclude_session: str | None = None,
         exclude_kinds: Collection[str] = (),
+        exclude_actor: str | None = None,
+        relevant: Relevance | None = None,
         limit: int = 50,
     ) -> list[TeamEvent]:
         """A cursor page: the OLDEST ``limit`` events past ``seq``, oldest first.
+
+        ``exclude_actor`` leaves out what that session caused, as ``exclude_session`` leaves
+        out what it wrote: a manager's own ``fleet stop`` is written under the stopped
+        agent's session, with the manager as its actor. ``relevant`` keeps only what a
+        ``relevant`` board context reads (:class:`Relevance`).
 
         ``exclude_kinds`` leaves those kinds out INSIDE the query, as
         :meth:`filtered_events` does, so ``limit`` counts rows the caller can use.
         Dropped after the LIMIT, a run of the captain's audit lines filled the whole
         page, and the event behind it was not read at all (review of #240, finding 11).
         """
+        keep, kept = _relevant_clause(relevant)
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
             "WHERE project_id = ? AND seq > ? "
             "AND (session_id IS NULL OR session_id != ?) "
-            f"{_and_not_kinds(exclude_kinds)}ORDER BY seq LIMIT ?",
-            (project_id, seq, exclude_session or "", *exclude_kinds, limit),
+            "AND (actor IS NULL OR actor != ?) "
+            f"{_and_not_kinds(exclude_kinds)}{keep}ORDER BY seq LIMIT ?",
+            (
+                project_id,
+                seq,
+                exclude_session or "",
+                exclude_actor or "",
+                *exclude_kinds,
+                *kept,
+                limit,
+            ),
         ).fetchall()
         return [_row_to_event(row) for row in rows]
 
     def recent_events(
-        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+        self,
+        project_id: str,
+        *,
+        exclude_kinds: Collection[str] = (),
+        relevant: Relevance | None = None,
+        limit: int = 10,
     ) -> list[TeamEvent]:
         """A window: the NEWEST ``limit`` events, oldest first. ``exclude_kinds`` is left
         out inside the query, as in :meth:`events_since`: the window stays ``limit`` long
-        however many of those kinds are newer than the events it shows."""
+        however many of those kinds are newer than the events it shows. ``relevant`` as
+        there."""
+        keep, kept = _relevant_clause(relevant)
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
-            f"WHERE project_id = ? {_and_not_kinds(exclude_kinds)}ORDER BY seq DESC LIMIT ?",
-            (project_id, *exclude_kinds, limit),
+            f"WHERE project_id = ? {_and_not_kinds(exclude_kinds)}{keep}ORDER BY seq DESC LIMIT ?",
+            (project_id, *exclude_kinds, *kept, limit),
         ).fetchall()
         return [_row_to_event(row) for row in reversed(rows)]
 
@@ -5350,6 +5391,60 @@ def _glob_prefix(ref: str) -> str:
     """
     stripped = _ref_stripped(ref)
     return f"{stripped}*" if stripped else ""
+
+
+def _event_values(event: TeamEvent) -> tuple[object, ...]:
+    """``event``'s values for an ``INSERT INTO team_event`` of every written column."""
+    return (
+        event.id,
+        event.project_id,
+        event.session_id,
+        event.kind,
+        event.text,
+        event.task_id,
+        event.to_role,
+        event.created_at.isoformat(),
+        event.actor,
+        None if event.meta is None else json.dumps(event.meta, sort_keys=True),
+    )
+
+
+_SESSION_META_KINDS: tuple[str, ...] = (
+    "nudge", "unbriefed", "compact", "compact-refused", "compact-armed"
+)  # fmt: skip
+"""The ``team_meta`` keys kept per session as ``<kind>:<session id>``: the manager's nudge
+debounce, the solo session's not-yet-briefed mark (#346), and the quiet compaction's mark,
+its newest refusal and its latest arm (P1 WS-4)."""
+
+
+class Relevance(NamedTuple):
+    """What a ``relevant`` board context keeps (P1 WS-2, #279): events on these tasks,
+    events addressed to these names (a role or a label, any case), and decisions unless
+    ``decisions`` is off: what a ``none`` agent's turn end asks for, the notes addressed to
+    it and nothing else (sync #365)."""
+
+    task_ids: tuple[str, ...] = ()
+    names: tuple[str, ...] = ()
+    decisions: bool = True
+
+
+def _relevant_clause(relevant: Relevance | None) -> tuple[str, list[str]]:
+    """``AND (…) `` keeping only what ``relevant`` keeps, with its parameters; nothing for
+    ``None``. In the query, before the LIMIT: forty irrelevant events must not fill a page
+    the relevant one is behind (review of #240, finding 11's rule)."""
+    if relevant is None:
+        return "", []
+    terms = ["kind = 'decision'"] if relevant.decisions else []
+    params: list[str] = []
+    if relevant.task_ids:
+        terms.append(f"task_id IN ({', '.join('?' * len(relevant.task_ids))})")
+        params += relevant.task_ids
+    if relevant.names:
+        terms.append(f"lower(to_role) IN ({', '.join('?' * len(relevant.names))})")
+        params += [name.strip().lower() for name in relevant.names]
+    if not terms:
+        return "AND 0 ", []  # keeps nothing: no task, no name, no decisions
+    return f"AND ({' OR '.join(terms)}) ", params
 
 
 def _and_not_kinds(kinds: Collection[str]) -> str:

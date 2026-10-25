@@ -35,7 +35,7 @@ from aisquare.core.injection import build_block, claude_md_files, without_loaded
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
 from aisquare.models import FleetAgent, ProjectInfo, TeamSession
-from aisquare.services import auto_mode, ci_augment
+from aisquare.services import auto_mode, ci_augment, quiet_compact
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import metrics as metrics_service
@@ -227,6 +227,8 @@ def turn_stopped(
     *,
     session_id: str | None = None,
     stop_hook_active: bool = False,
+    last_message: str | None = None,
+    permission_mode: str | None = None,
     transcript_path: str | None = None,
 ) -> team_service.StopDecision | None:
     """Mark the session as waiting for input, and close this turn's metrics row.
@@ -234,6 +236,10 @@ def turn_stopped(
     A manager with fresh board decisions gets a :class:`~aisquare.services.team.StopDecision`
     back instead, which the hook prints so Claude Code keeps its turn going
     (docs/plans/fleet-tui.md §7.3). Everyone else: ``None``, as before.
+
+    A manager left waiting arms the quiet compaction (P1 WS-4, #281) with its turn's last
+    message and permission mode: :func:`quiet_compact.arm` refuses a question or plan mode
+    itself, and otherwise starts its worker. Off by default; never costs the turn its row.
 
     The turn's token usage is read off ``transcript_path`` from where the last
     record stopped, and lands on the row ``close_turn`` closed.
@@ -256,7 +262,21 @@ def turn_stopped(
     # Last, and it swallows its own errors too: auto-mode refusals in the
     # transcript's tail put the row in attention with one board line (#150).
     auto_mode.record_refusals(session_id)
+    if decision is None:
+        with contextlib.suppress(Exception):  # an optimisation may never cost a Stop
+            quiet_compact.arm(
+                session_id,
+                last_message=last_message,
+                permission_mode=permission_mode,
+                detach=_detach,
+            )
     return decision
+
+
+def compact_check(session_id: str, *, cursor: int, token: str) -> str:
+    """The quiet compaction's worker (``aisquare hook compact-check``): see
+    :func:`quiet_compact.check`."""
+    return quiet_compact.check(session_id, cursor, token)
 
 
 def needs_attention(

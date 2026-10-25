@@ -40,6 +40,8 @@ SCRIPT = Path(os.environ.get("AISQUARE_TEST_INSTALL_SH") or REPO / "install.sh")
 CELL = REPO / "tests/install/cell.sh"
 CELL_NONROOT = REPO / "tests/install/cell-nonroot.sh"
 MATRIX = REPO / "tests/install/matrix.sh"
+#: The hand-off's end-to-end check, run by install.yml's `handoff` job.
+HANDOFF = REPO / "tests/install/handoff.sh"
 #: The Claude Code plugin's hook launcher: Claude Code runs it with `sh`, which is
 #: dash on Debian and Ubuntu, so it is held to the same rules.
 PLUGIN_HOOK = REPO / "plugins/claude-code/scripts/aisquare-hook"
@@ -52,7 +54,7 @@ PLUGIN_HOOK = REPO / "plugins/claude-code/scripts/aisquare-hook"
 #: the tree was checked by nothing at all. Anything added to tests/install/ must
 #: be added here; the test below asserts that, so the next omission fails
 #: instead of going unnoticed.
-POSIX_SCRIPTS = (SCRIPT, CELL, CELL_NONROOT, MATRIX, PLUGIN_HOOK)
+POSIX_SCRIPTS = (SCRIPT, CELL, CELL_NONROOT, MATRIX, HANDOFF, PLUGIN_HOOK)
 
 
 @pytest.fixture(scope="module")
@@ -409,7 +411,9 @@ def test_the_truncation_guard_can_actually_fail(source: str) -> None:
     )
 
 
-@pytest.mark.parametrize("flag", ["--dry-run", "--yes", "--offline", "--help", "--no-agent"])
+@pytest.mark.parametrize(
+    "flag", ["--dry-run", "--yes", "--offline", "--help", "--no-agent", "--no-handoff"]
+)
 def test_the_documented_flags_are_parsed(source: str, flag: str) -> None:
     """Each flag §3.5 documents has a branch in `parse_args`.
 

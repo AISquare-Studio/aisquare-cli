@@ -110,13 +110,18 @@ def announce(tunnel: FakeTunnel, url: str = PUBLIC) -> None:
 
 async def opened(pilot: Pilot[None]) -> RemoteSection:
     """Open Settings as a click on *⚙ Settings* does, then its *Remote control* link; App
-    settings' Remote tab, where it lands (#41)."""
+    settings' Remote tab, where it lands (#41).
+
+    Activated and pressed, each once its target is there, not clicked: under load a click
+    came before the hub could be hit-tested, and ``#hub-remote`` was not found (the local
+    gate at cc8d5e0c, and 2 in 3 alone beside it)."""
     app = pilot.app
     assert isinstance(app, FleetApp)
-    await pilot.click(app.query_one(SettingsRow))
+    app.query_one(SettingsRow).activate()  # what a click on the row calls
+    await until(pilot, lambda: bool(app.screen.query("#hub-remote")), what="the settings hub")
+    app.screen.query_one("#hub-remote", Button).press()
     await settle_page(app)
-    await pilot.click("#hub-remote")
-    await settle_page(app)
+    await until(pilot, lambda: bool(app.query(RemoteSection)), what="the Remote tab")
     return app.query_one(RemoteSection)
 
 

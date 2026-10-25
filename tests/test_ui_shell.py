@@ -2986,9 +2986,13 @@ def test_a_fleet_read_that_hangs_labels_the_frame_kept_once_it_has_waited_long_e
     and nothing raised to label the frame (review of #272). Before the read moved off
     the UI thread the whole UI froze, which was worse but obvious. Once a read has been
     in flight :data:`~aisquare.cli.ui.app.FLEET_STALE_AFTER`, a tick says the frame shown
-    is an old one; the read's own frame takes the notice away."""
+    is an old one; the read's own frame takes the notice away.
+
+    The bound is a minute and the read's start is moved back past it, not a 0.3 s bound
+    raced in real time: under load the "before" tick came after 0.3 s and was labelled
+    (the local gate at cc8d5e0c, and 1 in 3 alone)."""
     seed(tmp_path, ("prj_a", "alpha", None))
-    monkeypatch.setattr(app_mod, "FLEET_STALE_AFTER", 0.3)
+    monkeypatch.setattr(app_mod, "FLEET_STALE_AFTER", 60.0)
     hold, asked, gate = threading.Event(), threading.Event(), threading.Event()
 
     def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
@@ -3010,7 +3014,7 @@ def test_a_fleet_read_that_hangs_labels_the_frame_kept_once_it_has_waited_long_e
             app.refresh_data()  # a tick before the bound: nothing to say yet
             await pilot.pause()
             early = bool(notice.display)
-            await asyncio.sleep(0.4)
+            app._fleet_since -= 61.0  # the read has now been in flight past the bound
             app.refresh_data()  # a tick after it
             await pilot.pause()
             late = shown(notice) if notice.display else ""
@@ -3321,6 +3325,7 @@ class StopRecorder:
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         self.calls.append((project.id, label, force, agent_id))
         if self.refuse is not None:
@@ -3579,6 +3584,7 @@ def test_a_successful_stop_toasts_the_ended_row_re_reads_and_leaves_its_view(
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         stopped.append(True)
         return fleet_service.StopReceipt(ended(live.agent), [])
@@ -3805,6 +3811,7 @@ def test_the_app_stays_live_while_a_stop_is_in_flight(
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         entered.set()
         if not release.wait(10):
@@ -3855,6 +3862,7 @@ def test_a_refusal_re_reads_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         raise fleet_service.FleetError("tmux did not answer, so its row is left live")
 

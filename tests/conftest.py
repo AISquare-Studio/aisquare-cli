@@ -212,6 +212,9 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_ROLE",
     # Exported by `launch --persona`; a fleet agent running the suite has one.
     "AISQUARE_PERSONA",
+    # Exported on every fleet window since P1 WS-2 (#279): a reviewer running the suite
+    # reads the board as `none`, and every delta test read nothing.
+    "AISQUARE_BOARD_CONTEXT",
     # Read off the ambient env by `services/mcp_server.py` to attribute remote
     # calls — same family as the two above, and missed for the same reason.
     "AISQUARE_SERVE_CLIENT",
@@ -940,6 +943,40 @@ def no_pypi(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
 
     monkeypatch.setattr(install_route, "fetch_latest", offline)
     return asked
+
+
+TLS_CLOSED = "the suite makes no TLS handshake off this machine"
+"""What :func:`no_tls_probe` answers for a handshake to any host but this machine's own."""
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+@pytest.fixture(autouse=True)
+def no_tls_probe(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Never shake hands with a real host from a test; answer as a refused connection does.
+
+    ``core.tls.handshake`` is ``doctor --live``'s ``tls`` row (#403): a verified handshake to
+    api.anthropic.com. Every test that ran ``doctor --live`` sent a TCP connect and a TLS
+    ClientHello there, eight of them, and waited out the 10 s timeout where a firewall drops
+    rather than refuses (REVIEW-403, MAJOR-1). Refused, the row warns "could not reach", as
+    an offline machine's does. A handshake to this machine (a test's own TLS server) runs
+    for real; a test of the row puts its own stand-in over this one. Each refused host is
+    kept, for a probe.
+    """
+    from aisquare.core import tls
+
+    real = tls.handshake
+    refused: list[str] = []
+
+    def handshake(host: str, *, port: int = 443, timeout: float = 10.0) -> None:
+        if host in _LOOPBACK_HOSTS:
+            real(host, port=port, timeout=timeout)
+            return
+        refused.append(host)
+        raise ConnectionRefusedError(TLS_CLOSED)
+
+    monkeypatch.setattr(tls, "handshake", handshake)
+    return refused
 
 
 @pytest.fixture(autouse=True)

@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import experimental, harness, orchestrator, paths
+from aisquare.core import experimental, harness, orchestrator, paths, tls
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import load_config
@@ -168,10 +168,12 @@ def doctor(
         # fleet terminal row (#147) can warn too, about a running server's kept
         # prefix, so it waits here with them rather than beside tmux.
         _check_browser_tools(cwd),
+        *_check_role_tools(),
         _check_fleet_terminal(),
         # Beside the fleet terminal row, which reads the same running server (fix 4 of the
         # fleet-board card): it can warn, so it waits with the other late rows.
         _check_fleet_server_env(cwd=cwd),
+        *_check_manager_board_context(),
         *_experiment_checks(),
         # Only while the experimental captain is off: one ok row saying how to turn it
         # on. On, doctor is as it was before the switch.
@@ -183,6 +185,9 @@ def doctor(
         # Only when a fleet role runs `auto` behind a configured proxy (#150);
         # offline — config, the store, the head of a few transcripts.
         *_optional(auto_mode.doctor_check()),
+        # One TLS handshake, nothing sent, so --live only. Before the headroom row,
+        # whose every reading fails the same way when this one does.
+        *_live_only(live, _check_tls),
         # Leaves the machine (one usage request per account), so --live only (#146).
         *_live_only(live, _claude_account_headroom_check),
         # One balance request per destination workspace (#143), so --live only.
@@ -1840,6 +1845,52 @@ def _claude_account_backoff_checks() -> list[DoctorCheck]:
     ]
 
 
+#: Where the usage reads (and the Claude Code they stand beside) go.
+_TLS_PROBE_HOST = "api.anthropic.com"
+
+
+def _check_tls() -> DoctorCheck:
+    """``--live`` only: a verified handshake to :data:`_TLS_PROBE_HOST` through ``core.tls``.
+
+    The row a python.org Python on macOS needed: there every usage read said
+    "could not reach the usage endpoint" while curl worked, because the
+    interpreter's own CA paths were empty. It names the trust source in use, so
+    a failure here says which store refused the certificate.
+    """
+    try:
+        source = tls.trust_source()
+    except tls.CABundleError as exc:
+        return _fail("tls", f"the CA bundle could not be loaded: {exc}", tls.BUNDLE_FIX)
+    except OSError as exc:  # the OS store or certifi refused to build: rare, never a crash
+        return _fail("tls", f"the TLS context could not be built: {exc}", tls.CERT_FIX)
+    proxy = tls.https_proxy(_TLS_PROBE_HOST)
+    via = ""
+    try:
+        if proxy:  # host:port only: a proxy URL may carry credentials, which no row prints
+            where, port, _user, _password = tls.proxy_endpoint(proxy)
+            via = f" through the proxy {where}:{port}"
+        tls.handshake(_TLS_PROBE_HOST)
+    except tls.ProxyURLError as exc:
+        # A malformed HTTPS_PROXY took the whole of doctor --live down (review of #403, m2).
+        return _warn("tls", f"{exc}; nothing was dialled", tls.PROXY_FIX)
+    except OSError as exc:
+        if tls.cert_failure(exc):
+            # The env bundle is already what refused it: point at the bundle, not at
+            # SSL_CERT_FILE as a remedy (review of #403, n4).
+            fix = tls.BUNDLE_FIX if source == tls.SOURCE_ENV else tls.CERT_FIX
+            return _fail(
+                "tls",
+                f"{_TLS_PROBE_HOST}'s certificate did not verify against {source}: {exc}",
+                fix,
+            )
+        return _warn(
+            "tls",
+            f"could not reach {_TLS_PROBE_HOST}{via} to check TLS ({type(exc).__name__}: {exc})",
+            "check the network or proxy; usage reads need https://api.anthropic.com",
+        )
+    return _ok("tls", f"{_TLS_PROBE_HOST}{via} verified against {source}")
+
+
 def _claude_account_headroom_check() -> DoctorCheck | None:
     """``--live`` only: every enabled, signed-in account's windows, against ``switch_at``.
 
@@ -2172,6 +2223,28 @@ def _check_tmux(server: tmux_core.TmuxServer | None = None) -> DoctorCheck:
         # Failing open costs this line its verdict, not the operator anything
         # else: the fleet re-checks tmux on its first spawn and says so then.
         return _ok(name, f"not evaluated ({exc}) — the fleet checks again on its first spawn")
+
+
+def _check_manager_board_context() -> list[DoctorCheck]:
+    """A warn row when ``[fleet.roles.manager] board_context`` is not ``all``, else none.
+
+    The board is the manager's job: a spawn gives it ``all`` whatever the key says, and
+    says so in its notes (P1 WS-2, #279). This is where the key's own reader hears it.
+    """
+    try:
+        manager = load_config().fleet.roles.get("manager")
+    except Exception:  # an unreadable config has its own row
+        return []
+    if manager is None or manager.board_context == "all":
+        return []
+    return [
+        _warn(
+            "manager board context",
+            f"fleet.roles.manager.board_context = {manager.board_context!r} is ignored: "
+            "a manager reads the whole board",
+            "aisquare config set fleet.roles.manager.board_context all",
+        )
+    ]
 
 
 def _check_fleet_terminal(
@@ -2734,6 +2807,34 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
         "`claude mcp add -s user chrome-devtools npx chrome-devtools-mcp`, or install the "
         "Claude in Chrome extension (claude.ai/chrome)",
     )
+
+
+def _check_role_tools() -> list[DoctorCheck]:
+    """``<role> tools``: one row per fleet role, the tools it launches without and its skill
+    listing, as ``harness.tool_policy`` gives them to a launch that asks nothing itself (#280).
+
+    Ok, always: the rows say what each role's prefix carries, and nothing in them is a
+    defect. Not a warning for a name Claude Code does not have either, because Claude Code
+    does not say: 2.1.309 starts with ``--disallowedTools=NoSuchTool`` silently, so a
+    typo in ``deny_tools`` denies nothing, which is what the row shows. A role bound to
+    another agent gets no deny token, and its row says why.
+    """
+    try:
+        fleet = load_config().fleet
+    except Exception:  # `_check_config` reports the config; this row is about roles
+        return []
+    rows: list[DoctorCheck] = []
+    for role in fleet.roles:
+        binary = harness.resolve_binary(role).binary
+        policy = harness.tool_policy(role, binary=binary, args=[], fleet=fleet)
+        listing = f"skill listing {policy.skill_listing}"
+        if not policy.applied:
+            reason = f"{os.path.basename(binary)!r} is not {harness.DEFAULT_AGENT_BINARY}"
+            rows.append(_ok(f"{role} tools", f"no deny token: {reason}; {listing}"))
+            continue
+        denied = ", ".join(policy.denied) if policy.denied else "nothing"
+        rows.append(_ok(f"{role} tools", f"denies {denied}; {listing}"))
+    return rows
 
 
 def _short_path(path: PurePath, home: PurePath | None = None) -> str:

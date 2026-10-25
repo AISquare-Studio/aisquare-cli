@@ -212,7 +212,13 @@ IDENTITY_ENV_VARS = (*TRACING_ENV_VARS, *MARKER_ENV_VARS)
 #: started pinned every window opened there by hand to that board. The switches
 #: (``AISQUARE_TEAM``, ``AISQUARE_TEAM_DELTA``) are not here: a shell that sets one
 #: has made a choice for its whole fleet.
-TEAM_ENV_VARS = ("AISQUARE_TEAM_HUB", "AISQUARE_FLEET_AGENT", "AISQUARE_ROLE", "AISQUARE_PERSONA")
+TEAM_ENV_VARS = (
+    "AISQUARE_TEAM_HUB",
+    "AISQUARE_FLEET_AGENT",
+    "AISQUARE_ROLE",
+    "AISQUARE_PERSONA",
+    "AISQUARE_BOARD_CONTEXT",
+)
 
 TRACED = "traced"
 EXCLUDED = "excluded"

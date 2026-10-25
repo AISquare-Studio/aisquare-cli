@@ -54,10 +54,17 @@ PYPI_JSON_URL="https://pypi.org/pypi/aisquare-cli/json"
 #: so setting this also turns the version comparison off — see `resolve`.
 INSTALL_TARGET=${AISQUARE_INSTALL_PACKAGE:-$PYPI_PACKAGE}
 UV_INSTALLER_URL="https://astral.sh/uv/install.sh"
+#: A newline. The doctor's amber row names are listed one per line, because a
+#: name can hold spaces (`manager board context`): see `doctor_amber`.
+NL='
+'
 CLAUDE_INSTALLER_URL="https://claude.ai/install.sh"
 FNM_INSTALLER_URL="https://fnm.vercel.app/install"
 NODESOURCE_DEB_URL="https://deb.nodesource.com/setup_NODEMAJOR.x"
 NODESOURCE_RPM_URL="https://rpm.nodesource.com/setup_NODEMAJOR.x"
+#: Where every release since 0.9.0 attaches its stamped install.sh (see
+#: `hand_off`, scripts/stamp_installers.py and .github/workflows/installers.yml).
+RELEASES_URL="https://github.com/AISquare-Studio/aisquare-cli/releases"
 
 DEFAULT_PYTHON="3.13"
 # The highest version CI actually tests (.github/workflows/ci.yml is 3.11–3.13).
@@ -113,6 +120,7 @@ VERBOSE=0
 UPGRADE_ALL=0
 OFFLINE=0
 FORCE=0
+NO_HANDOFF=${AISQUARE_INSTALL_NO_HANDOFF:-0}
 
 # --- state the steps fill in ------------------------------------------------
 
@@ -271,6 +279,23 @@ fetch() {
     fi
 }
 
+# stdout <- URL within 30 seconds, over HTTPS only, or fail. For the small
+# answers wanted before anything is installed (a release's install.sh, PyPI's
+# latest version), never for an installer that can rightly take minutes.
+#
+# wget gets `-t 1` because GNU wget tries 20 times by default and -T limits
+# each read, not the whole download. It has no HTTPS-only switch to match
+# curl's `--proto`: GNU's --https-only covers recursive downloads alone, and
+# BusyBox has none. And no -q, so the HTTP status it reports stays on stderr
+# for `release_checked` to read.
+fetch_quick() {
+    if [ "$HAVE_CURL" = 1 ]; then
+        curl -fsSL --proto =https --proto-redir =https --connect-timeout 5 --max-time 30 "$1"
+    else
+        wget -t 1 -T 30 -O- "$1"
+    fi
+}
+
 # Download to a private temporary file, or fail. Echoes the path on success.
 #
 # `mktemp` and not `"$TMPDIR/name-$$"`: `$$` is a small guessable number and
@@ -425,6 +450,212 @@ version_lt() {
         _field=$((_field + 1))
     done
     return 1
+}
+
+# ---------------------------------------------------------------------------
+#  0  hand_off — main's copy runs the release's own installer
+# ---------------------------------------------------------------------------
+
+# MAIN'S COPY RUNS THE RELEASE'S OWN install.sh, and carries on itself only when
+# it cannot. This file installs the latest release from PyPI, but the copy on
+# `main` has main's steps and checks, and those can be ahead of that release:
+# #399 dropped `--with tiktoken` here while the latest release's doctor still
+# had a tiktoken row, and every install-matrix cell went amber. A release's own
+# copy is stamped (STAMPED_VERSION) and matches the package it installs, so an
+# UNSTAMPED copy downloads it, from releases/latest/download or, for
+# --version V, from vV's, and runs it with the same arguments.
+#
+# Whatever goes wrong is one quiet line and this script carrying on, never an
+# error: no network, a timeout, a 404 (a release before 0.9.0 has no installer
+# attached, and a new release has none until its installers job runs), or a
+# download that fails a check in `release_checked`. Not tried at all for a
+# stamped copy (a release never hands off), for a second hop
+# (AISQUARE_INSTALL_HANDED_OFF), with --no-handoff or AISQUARE_INSTALL_NO_HANDOFF=1,
+# with AISQUARE_INSTALL_PACKAGE (CI testing THIS tree must run this tree's
+# script), or with --offline (the checks need GitHub and PyPI).
+#
+# A CHILD, NOT `exec`, so the download can be removed: an exec'd release script
+# (0.9.0's included) does not know to delete itself. The traps remove it when
+# the run is interrupted too. Neither script reads stdin — the release's prompts
+# go through /dev/tty like this one's — and under `curl … | sh` this shell has
+# read its whole text before it gets here, because `main` is called on the last
+# line. tests/test_install_script_handoff.py holds all of it.
+HANDOFF_FILE=""
+HANDOFF_VERSION=""
+HANDOFF_WHY=""
+
+hand_off() {
+    # Read once and unset at once, so nothing this run starts inherits it: asq,
+    # the tmux server and every agent would carry it, and the one-liner run
+    # later from an agent's pane would never hand off. Its value is the path of
+    # the script a hand-off ran, so it stops that script ($0) and nothing that
+    # merely inherited it from a release that does not unset it (0.9.0).
+    _ho_from=${AISQUARE_INSTALL_HANDED_OFF:-}
+    unset AISQUARE_INSTALL_HANDED_OFF
+    # The latest version main's copy read from PyPI to check this script's stamp, so a
+    # hand-off that installs unpinned does not ask PyPI twice. Read and unset as the
+    # guard is, and taken only from a hand-off to this very script, and as a version.
+    _ho_latest=${AISQUARE_INSTALL_PYPI_LATEST:-}
+    unset AISQUARE_INSTALL_PYPI_LATEST
+    if [ -n "$_ho_from" ] && [ "$_ho_from" = "$0" ]; then
+        case "$_ho_latest" in
+            "" | [!0-9]* | *[!0-9A-Za-z.]*) ;;
+            *)
+                PYPI_LATEST=$_ho_latest
+                PYPI_ASKED=1
+                ;;
+        esac
+    fi
+    [ -z "$STAMPED_VERSION" ] || return 0
+    if [ -n "$_ho_from" ] && [ "$_ho_from" = "$0" ]; then
+        debug "hand-off: this script is the one handed off to; not hopping again"
+        return 0
+    fi
+    if [ "$NO_HANDOFF" = 1 ] || [ "$OFFLINE" = 1 ] || [ "$INSTALL_TARGET" != "$PYPI_PACKAGE" ]; then
+        debug "hand-off: off (--no-handoff, --offline or AISQUARE_INSTALL_PACKAGE)"
+        return 0
+    fi
+    have curl && HAVE_CURL=1
+    have wget && HAVE_WGET=1
+    # No downloader at all: `preflight` refuses that next, in its own words.
+    [ "$HAVE_CURL" = 1 ] || [ "$HAVE_WGET" = 1 ] || return 0
+
+    if ! HANDOFF_FILE=$(mktemp "${TMPDIR:-/tmp}/aisquare-release-XXXXXX"); then
+        note "using this installer (no temporary file for the release's)"
+        return 0
+    fi
+    trap 'rm -f "$HANDOFF_FILE"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    # No version named: the release's script installs unpinned, as this copy would.
+    # Left to its stamp, every plain one-liner install was pinned to the release
+    # (aisquare-cli==V), and `uv tool upgrade` never moved it again. `--version
+    # latest` is the stamped script's way out of its pin, passed as an ARGUMENT,
+    # last so it is the one parse_args keeps, and before release_checked so the
+    # release must know it like any option given. Not an exported
+    # AISQUARE_INSTALL_VERSION=: that reached asq, the tmux server and every agent
+    # through the release's `exec asq`, and a release's own installer run later
+    # from those shells installed the latest instead of its version (review of
+    # #401, m4). A `latest` or a --version V named goes as given, and
+    # AISQUARE_INSTALL_VERSION=V still pins from the environment.
+    [ -n "$PIN_VERSION" ] || set -- "$@" --version latest
+    if release_checked "$@"; then
+        note "using the v$HANDOFF_VERSION installer"
+        AISQUARE_INSTALL_HANDED_OFF=$HANDOFF_FILE
+        export AISQUARE_INSTALL_HANDED_OFF
+        if [ -z "$PIN_VERSION" ] || [ "$PIN_VERSION" = latest ]; then
+            # Unpinned, it needs PyPI's latest: the answer this copy already read.
+            AISQUARE_INSTALL_PYPI_LATEST=$PYPI_LATEST
+            export AISQUARE_INSTALL_PYPI_LATEST
+        fi
+        # From here a signal is the release's script's to handle, and the run
+        # ends with its status, whether it died of the signal or survived it.
+        # A no-op trap, not an ignore: an ignored signal would be inherited.
+        # So a TERM sent to this shell ALONE (not its group) is swallowed and
+        # the release's script runs on; forwarding it is not worth the code.
+        trap : HUP INT TERM
+        _ho_rc=0
+        sh "$HANDOFF_FILE" "$@" || _ho_rc=$?
+        exit "$_ho_rc"
+    fi
+    note "using this installer ($HANDOFF_WHY)"
+    rm -f "$HANDOFF_FILE"
+    trap - EXIT HUP INT TERM
+}
+
+# Download the release's install.sh into HANDOFF_FILE and check it. True when it
+# can run, with HANDOFF_VERSION set; false with HANDOFF_WHY saying why not.
+release_checked() {
+    _rc_want=$PIN_VERSION
+    [ "$_rc_want" = latest ] && _rc_want=""
+    if [ -n "$_rc_want" ]; then
+        # A release version and nothing else goes into the URL.
+        case "$_rc_want" in
+            [!0-9]* | *[!0-9A-Za-z.]*)
+                HANDOFF_WHY="$_rc_want is not a release version"
+                return 1
+                ;;
+        esac
+        _rc_url="$RELEASES_URL/download/v$_rc_want/install.sh"
+        _rc_release="v$_rc_want"
+    else
+        _rc_url="$RELEASES_URL/latest/download/install.sh"
+        _rc_release="the latest release"
+    fi
+    debug "hand-off: fetching $_rc_url"
+    _rc_status=0
+    _rc_said=$(fetch_quick "$_rc_url" 2>&1 >"$HANDOFF_FILE") || _rc_status=$?
+    if [ "$_rc_status" != 0 ]; then
+        # The downloader's own words carry the HTTP status: curl's "error: 404",
+        # GNU wget's "ERROR 404", BusyBox wget's "HTTP/1.1 404". Any other HTTP
+        # error is curl's 22 and GNU wget's 8; BusyBox says 1 for everything.
+        case "$_rc_said" in
+            *" 404"*) HANDOFF_WHY="$_rc_release has no installer attached" ;;
+            *)
+                case "$_rc_status" in
+                    22 | 8) HANDOFF_WHY="GitHub answered with an error for $_rc_release's installer" ;;
+                    28) HANDOFF_WHY="GitHub did not answer in time" ;;
+                    *) HANDOFF_WHY="could not download $_rc_release's installer" ;;
+                esac
+                ;;
+        esac
+        return 1
+    fi
+
+    # A POSIX sh script that parses, and not an error page or half a file.
+    if [ "$(head -n 1 "$HANDOFF_FILE")" != "#!/bin/sh" ] || ! sh -n "$HANDOFF_FILE" 2>/dev/null; then
+        HANDOFF_WHY="$_rc_release's installer is not a POSIX sh script"
+        return 1
+    fi
+    HANDOFF_VERSION=$(sed -n 's/^STAMPED_VERSION="\([^"]*\)"$/\1/p' "$HANDOFF_FILE" | head -n 1)
+    if [ -z "$HANDOFF_VERSION" ]; then
+        HANDOFF_WHY="$_rc_release's installer carries no release stamp"
+        return 1
+    fi
+    # The release installs the version it was stamped with, so that is the one
+    # that has to be wanted: the pin, or else what PyPI calls the latest. PyPI is
+    # asked only now, once the download has passed every other check, and
+    # `resolve` reuses the answer if this script carries on.
+    if [ -z "$_rc_want" ]; then
+        ask_pypi
+        _rc_want=$PYPI_LATEST
+        if [ -z "$_rc_want" ]; then
+            HANDOFF_WHY="could not read the latest version from PyPI to check v$HANDOFF_VERSION against"
+            return 1
+        fi
+    fi
+    if [ "$HANDOFF_VERSION" != "$_rc_want" ]; then
+        HANDOFF_WHY="$_rc_release's installer is stamped $HANDOFF_VERSION, not $_rc_want"
+        return 1
+    fi
+    # An option only main's copy knows would make the release's exit 64, after
+    # the point where this one could still have carried on. So each option
+    # given must be a branch of the release's parse_args, written as this file
+    # writes them (shfmt-indented with spaces): `--no-agent)`, `-y | --yes)`,
+    # and `--project=*)` for the `--project=DIR` spelling.
+    for _rc_arg in "$@"; do
+        case "$_rc_arg" in
+            -*) ;;
+            *) continue ;;
+        esac
+        _rc_flag=${_rc_arg%%=*}
+        _rc_branch=$_rc_flag
+        [ "$_rc_flag" = "$_rc_arg" ] || _rc_branch="$_rc_flag=[*]"
+        case "$_rc_flag" in
+            *[!A-Za-z0-9-]*) _rc_known=0 ;;
+            *)
+                _rc_known=0
+                grep -Eq -e "^ *([^)]*[|] *)?$_rc_branch( *[|][^)]*)?[)]" "$HANDOFF_FILE" &&
+                    _rc_known=1
+                ;;
+        esac
+        if [ "$_rc_known" = 0 ]; then
+            HANDOFF_WHY="the v$HANDOFF_VERSION installer has no $_rc_flag option"
+            return 1
+        fi
+    done
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -656,19 +887,33 @@ _report() {
 # and its failure mode is handled — an empty answer means "could not determine",
 # which is reported and never treated as "behind".
 latest_version() {
+    # Downloaded once, within `fetch_quick`'s 30 seconds: a PyPI that does not
+    # answer in time is "could not determine", the same as one that is down.
+    _lv_json=$(fetch_quick "$PYPI_JSON_URL" 2>/dev/null) || return 0
     if have python3; then
         # Preferred when a Python exists: no parsing of JSON by regex at all.
-        fetch "$PYPI_JSON_URL" 2>/dev/null | python3 -c \
+        printf '%s' "$_lv_json" | python3 -c \
             'import json,sys
 try:
     sys.stdout.write(json.load(sys.stdin)["info"]["version"])
 except Exception:
     pass' 2>/dev/null && return 0
     fi
-    fetch "$PYPI_JSON_URL" 2>/dev/null |
+    printf '%s' "$_lv_json" |
         tr ',' '\n' |
         sed -n 's/^"version":"\([^"]*\)".*/\1/p' |
         head -1
+}
+
+# PyPI's latest aisquare-cli, asked at most once a run: `release_checked` asks
+# before `resolve` does, and a run that falls back must not ask twice.
+PYPI_LATEST=""
+PYPI_ASKED=0
+
+ask_pypi() {
+    [ "$PYPI_ASKED" = 0 ] || return 0
+    PYPI_ASKED=1
+    PYPI_LATEST=$(latest_version 2>/dev/null || true)
 }
 
 resolve() {
@@ -696,7 +941,8 @@ resolve() {
         LATEST_VERSION=""
         note "--offline: not asking PyPI what is current"
     else
-        LATEST_VERSION=$(latest_version 2>/dev/null || true)
+        ask_pypi
+        LATEST_VERSION=$PYPI_LATEST
         if [ -z "$LATEST_VERSION" ]; then
             # Reported, never fatal, and never silently read as "behind".
             warn "could not read the latest $PYPI_PACKAGE version from PyPI — proceeding without a comparison"
@@ -832,9 +1078,13 @@ short_circuit() {
     # broken machine is worse than one that never ran." An unanswerable doctor
     # is a reason to do the work, not to skip it.
     _amber=$(doctor_amber 2>/dev/null) || return 1
+    _sc_ifs=$IFS
+    IFS=$NL
     for _amber_check in $_amber; do
+        IFS=$_sc_ifs
         is_expected_amber "$_amber_check" || return 1
     done
+    IFS=$_sc_ifs
 
     say ""
     say "${C_BOLD}aisquare $CLI_VERSION is already the latest.${C_RESET}"
@@ -850,30 +1100,22 @@ short_circuit() {
     # — so `--no-project` on such a machine read "everything ok except snapshot
     # (gbrain is out of scope)", blaming a check that was fine.
     _why=""
-    case " $_amber " in
-        *" brain "*) _why="gbrain is out of scope" ;;
-    esac
-    case " $_amber " in
-        *" claude-code "*)
-            [ -n "$_why" ] && _why="$_why; "
-            _why="${_why}Claude Code left alone (--no-agent)"
-            ;;
-    esac
-    case " $_amber " in
-        *" snapshot "*)
-            [ -n "$_why" ] && _why="$_why; "
-            _why="${_why}no project registered"
-            ;;
-    esac
-    case " $_amber " in
-        *" tmux "* | *" gh "* | *" repomix "*)
-            [ -n "$_why" ] && _why="$_why; "
-            _why="${_why}system deps skipped"
-            ;;
-    esac
+    listed "$_amber" brain && _why="gbrain is out of scope"
+    if listed "$_amber" claude-code; then
+        [ -n "$_why" ] && _why="$_why; "
+        _why="${_why}Claude Code left alone (--no-agent)"
+    fi
+    if listed "$_amber" snapshot; then
+        [ -n "$_why" ] && _why="$_why; "
+        _why="${_why}no project registered"
+    fi
+    if listed "$_amber" tmux || listed "$_amber" gh || listed "$_amber" repomix; then
+        [ -n "$_why" ] && _why="$_why; "
+        _why="${_why}system deps skipped"
+    fi
     [ -n "$_why" ] || _why="all expected"
     if [ -n "$_amber" ]; then
-        note "doctor: everything ok except $_amber ($_why)"
+        note "doctor: everything ok except $(listed_words "$_amber") ($_why)"
     else
         note "doctor: every check ok"
     fi
@@ -1760,6 +2002,22 @@ is_expected_amber() {
     return 1
 }
 
+# True when $2 is a whole line of the list $1. The doctor's amber names are
+# listed one per line, never split on spaces: P1's `manager board context` row,
+# word-split, was three unexpected rows named in pieces (review of #401, n16).
+listed() {
+    case "$NL$1$NL" in
+        *"$NL$2$NL"*) return 0 ;;
+    esac
+    return 1
+}
+
+# The list $1, one name per line, as one line for a note: the names joined by
+# spaces.
+listed_words() {
+    printf '%s' "$1" | tr '\n' ' ' | sed 's/^ *//; s/ *$//'
+}
+
 # `aisquare --json doctor` as this script judges it: every check as this folder
 # answers it, except claude-code, which is asked from `/`. One check per line, the
 # `tr '{' '\n'` form every reader below splits a payload into anyway.
@@ -1876,9 +2134,7 @@ doctor_amber() {
         sed -n \
             -e 's/.*"name": *"\([^"]*\)".*"status": *"warn".*/\1/p' \
             -e 's/.*"name": *"\([^"]*\)".*"status": *"fail".*/\1/p' |
-        sort |
-        tr '\n' ' ' |
-        sed 's/  */ /g; s/^ //; s/ $//'
+        sort
 }
 
 # How many checks the payload claims to hold, so a parse that silently dropped
@@ -1914,7 +2170,7 @@ run_doctor() {
     fi
 
     DOCTOR_AMBER=$(doctor_amber "$DOCTOR_RAW" || true)
-    note "doctor: $_total checks, $(printf '%s' "$DOCTOR_AMBER" | wc -w | tr -d ' ') not ok"
+    note "doctor: $_total checks, $(printf '%s' "$DOCTOR_AMBER" | grep -c . || true) not ok"
 }
 
 # ---------------------------------------------------------------------------
@@ -2073,22 +2329,28 @@ summary() {
         return 0
     fi
 
+    # Each list one name per line, as DOCTOR_AMBER is (`listed`), and each loop
+    # over one splits on newlines only, back to the default IFS inside.
     _expected=""
     _actionable=""
     _unexpected=""
+    _su_ifs=$IFS
+    IFS=$NL
     for _check in $DOCTOR_AMBER; do
+        IFS=$_su_ifs
         if is_expected_amber "$_check"; then
-            _expected="$_expected $_check"
+            _expected="$_expected$NL$_check"
             continue
         fi
         _fix=$(_actionable_fix "$_check")
         if [ -n "$_fix" ]; then
-            _actionable="$_actionable $_check"
+            _actionable="$_actionable$NL$_check"
         else
-            _unexpected="$_unexpected $_check"
+            _unexpected="$_unexpected$NL$_check"
             UNEXPECTED=$((UNEXPECTED + 1))
         fi
     done
+    IFS=$_su_ifs
     # A Node this run was asked for and could not put on PATH. `aisquare doctor`
     # reads no Node at all as codebase snapshots OFF -- optional, since the memory
     # route never needs it -- so no row above can tell "chose the memory route"
@@ -2097,76 +2359,66 @@ summary() {
     # repomix row went amber for it. A Node that is too old, or a packer without a
     # Node, still turns the repomix row amber, which the loop above has counted.
     if [ "$WANT_SYSTEM_DEPS" = 1 ] && ! have node; then
-        case " $_unexpected " in
-            *" repomix "*) ;;
-            *)
-                _unexpected="$_unexpected node"
-                UNEXPECTED=$((UNEXPECTED + 1))
-                ;;
-        esac
+        if ! listed "$_unexpected" repomix; then
+            _unexpected="$_unexpected${NL}node"
+            UNEXPECTED=$((UNEXPECTED + 1))
+        fi
     fi
 
     if [ -n "$_expected" ]; then
         say ""
-        note "expected:$_expected"
+        note "expected: $(listed_words "$_expected")"
         # Each line explained only if it is actually there. `brain` was printed
         # unconditionally, which is wrong on a machine that HAS gbrain: the
         # macOS runner reported brain green with snapshot amber, and the summary
         # would have explained a check that was fine.
-        case " $_expected " in
-            *" brain "*)
-                note "  brain    — gbrain is out of scope for this installer; team"
-                note "             decisions are simply not distilled without it."
-                ;;
-        esac
-        case " $_expected " in
-            *" claude-account-backoff "*)
-                note "  claude-account-backoff — an account's usage reads wait out a rate"
-                note "             limit; they resume by themselves (aisquare doctor says until when)."
-                ;;
-        esac
-        case " $_expected " in
-            *" claude-code "*)
-                # Information, not an instruction: under --no-agent no state of
-                # Claude Code is this run's to change, so the doctor's fix is not
-                # printed. Asked in this folder (doctor_json), so the doctor run
-                # here shows the same row.
-                _cc_said=$(_json_text "$(_doctor_detail claude-code)")
-                if [ -n "$_cc_said" ]; then
-                    note "  claude-code — left alone by --no-agent; aisquare doctor here says:"
-                    note "             $_cc_said"
-                else
-                    # A detail that could not be read off the payload (a `{` in a
-                    # path splits it): named where it can be read in full.
-                    note "  claude-code — left alone by --no-agent; aisquare doctor here shows its state."
-                fi
-                ;;
-        esac
-        case " $_expected " in
-            *" snapshot "*)
-                # NOT "run project onboard": there is no project to onboard.
-                # Advice that cannot work is worse than no advice.
-                note "  snapshot — no project is registered yet. From a git repo, run:"
-                note "             aisquare init"
-                ;;
-        esac
-        case " $_expected " in
-            *" tmux "* | *" gh "* | *" repomix "*)
-                # Named as a group, because --no-system-deps skipped them
-                # together and explaining each separately would read as three
-                # problems rather than one deliberate choice.
-                note "  tmux/gh/repomix — skipped by --no-system-deps. The CLI works;"
-                note "             the fleet UI needs tmux, PRs need gh, snapshots need Node."
-                ;;
-        esac
+        if listed "$_expected" brain; then
+            note "  brain    — gbrain is out of scope for this installer; team"
+            note "             decisions are simply not distilled without it."
+        fi
+        if listed "$_expected" claude-account-backoff; then
+            note "  claude-account-backoff — an account's usage reads wait out a rate"
+            note "             limit; they resume by themselves (aisquare doctor says until when)."
+        fi
+        if listed "$_expected" claude-code; then
+            # Information, not an instruction: under --no-agent no state of
+            # Claude Code is this run's to change, so the doctor's fix is not
+            # printed. Asked in this folder (doctor_json), so the doctor run
+            # here shows the same row.
+            _cc_said=$(_json_text "$(_doctor_detail claude-code)")
+            if [ -n "$_cc_said" ]; then
+                note "  claude-code — left alone by --no-agent; aisquare doctor here says:"
+                note "             $_cc_said"
+            else
+                # A detail that could not be read off the payload (a `{` in a
+                # path splits it): named where it can be read in full.
+                note "  claude-code — left alone by --no-agent; aisquare doctor here shows its state."
+            fi
+        fi
+        if listed "$_expected" snapshot; then
+            # NOT "run project onboard": there is no project to onboard.
+            # Advice that cannot work is worse than no advice.
+            note "  snapshot — no project is registered yet. From a git repo, run:"
+            note "             aisquare init"
+        fi
+        if listed "$_expected" tmux || listed "$_expected" gh || listed "$_expected" repomix; then
+            # Named as a group, because --no-system-deps skipped them
+            # together and explaining each separately would read as three
+            # problems rather than one deliberate choice.
+            note "  tmux/gh/repomix — skipped by --no-system-deps. The CLI works;"
+            note "             the fleet UI needs tmux, PRs need gh, snapshots need Node."
+        fi
     fi
 
     if [ -n "$_actionable" ]; then
         say ""
         say "Two minutes of your own, and these go green:"
+        IFS=$NL
         for _check in $_actionable; do
+            IFS=$_su_ifs
             printf '  %s — %s\n' "$_check" "$(_actionable_fix "$_check")"
         done
+        IFS=$_su_ifs
     fi
 
     if [ -n "$_unexpected" ]; then
@@ -2183,19 +2435,24 @@ summary() {
         # it read green while the run said otherwise (review of #257).
         _from_doctor=""
         _cc_detail=""
+        IFS=$NL
         for _check in $_unexpected; do
+            IFS=$_su_ifs
             case "$_check" in
                 node) ;;
                 claude-code)
                     _cc_detail=$(_json_text "$(_doctor_detail claude-code)")
-                    [ -n "$_cc_detail" ] || _from_doctor="$_from_doctor $_check"
+                    [ -n "$_cc_detail" ] || _from_doctor="$_from_doctor$NL$_check"
                     ;;
-                *) _from_doctor="$_from_doctor $_check" ;;
+                *) _from_doctor="$_from_doctor$NL$_check" ;;
             esac
         done
+        IFS=$NL
         for _check in $_from_doctor; do
+            IFS=$_su_ifs
             printf '  %s\n' "$_check"
         done
+        IFS=$_su_ifs
         if [ -n "$_from_doctor" ]; then
             note "the full detail and a fix for each: aisquare doctor"
         fi
@@ -2206,10 +2463,10 @@ summary() {
                 printf '    → %s\n' "$_cc_fix"
             fi
         fi
-        case " $_unexpected " in
+        case "$_unexpected$NL" in
             # Its own line, with its own remedy: doctor only says snapshots are
             # off, which is true and names no failure.
-            *" node "*) printf '  node — Node %s+ did not install, so codebase snapshots are off (nodejs.org, or fnm)\n' "$MIN_NODE_MAJOR" ;;
+            *"${NL}node$NL"*) printf '  node — Node %s+ did not install, so codebase snapshots are off (nodejs.org, or fnm)\n' "$MIN_NODE_MAJOR" ;;
         esac
     fi
 
@@ -2294,7 +2551,9 @@ Options
       --version V      Pin aisquare-cli to V, or `latest` (default: latest, or
                        the release a release asset was downloaded from).
       --python V       Interpreter uv resolves for the tool env (default: 3.13).
-      --offline        Do not ask PyPI what the latest version is.
+      --offline        Do not ask PyPI what the latest version is (and do not
+                       hand off, below).
+      --no-handoff     Run this copy of the script, not the release's own.
       --upgrade-all    Also move uv itself and the system packages.
       --force          Reinstall aisquare-cli even when the version matches.
       --dry-run        Print every command; run none.
@@ -2308,8 +2567,17 @@ Environment
   AISQUARE_INSTALL_PACKAGE=P     install P instead of aisquare-cli — a wheel,
                                 sdist or project directory. For testing this
                                 script against a local build; turns the PyPI
-                                version comparison off.
+                                version comparison and the hand-off off.
+  AISQUARE_INSTALL_NO_HANDOFF=1 same as --no-handoff
   NO_COLOR=1                    no ANSI colour
+
+Which installer runs
+  The copy of this script on main hands off to the latest release's own
+  install.sh, or to release V's with --version V, so the steps and checks are
+  the ones that release was tested with. It runs itself instead when that
+  copy cannot be downloaded or checked, or with --no-handoff, --offline or
+  AISQUARE_INSTALL_PACKAGE, and says which in one line. A release's own copy
+  never hands off.
 
 Exit codes
   0  installed (or nothing to do), with nothing unexpected
@@ -2349,6 +2617,7 @@ parse_args() {
                 ;;
             --python=*) PYTHON_VERSION=${1#--python=} ;;
             --offline) OFFLINE=1 ;;
+            --no-handoff) NO_HANDOFF=1 ;;
             --upgrade-all) UPGRADE_ALL=1 ;;
             --force) FORCE=1 ;;
             --dry-run) DRY_RUN=1 ;;
@@ -2411,6 +2680,7 @@ choose_project() {
 
 main() {
     parse_args "$@"
+    hand_off "$@"
     preflight
     detect_os
     pkg_manager

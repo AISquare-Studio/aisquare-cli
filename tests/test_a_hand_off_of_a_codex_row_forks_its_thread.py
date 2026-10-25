@@ -22,6 +22,7 @@ from typer.testing import CliRunner
 
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.models import ProjectInfo, TeamTask
+from aisquare.services import claude_accounts as service
 from aisquare.services import fleet as fleet_service
 from tests import test_codex_account_switch as switch_suite
 from tests import test_codex_fleet_parity as codex_suite
@@ -105,6 +106,27 @@ def test_a_fork_of_a_codex_row_onto_another_account_starts_fresh_and_says_so(
     native = _native(_command(tmux))
     assert "fork" not in native and "resume" not in native
     assert receipt.started.agent.account_slot == other.slot
+
+
+def test_a_fork_of_a_codex_row_on_no_account_forks_its_thread_past_a_managed_default(
+    codex_agent: tuple[Codex, TeamTask], tmux: FakeTmux
+) -> None:
+    """r20 of #113, F1's sibling: a source whose record has no slot ran under the plain home.
+    Forked with no account asked, it asked the ladder, whose managed Codex default moved the
+    fork off the home its thread is in, and it started fresh ("cannot fork a thread under
+    another account's home"). It asks for the plain slot by name now, as its restart does."""
+    codex, _ = codex_agent
+    _started(codex)
+    assert codex.agent.account_slot is None
+    managed = accounts_core.create_account("codex")
+    service.set_default(str(managed.slot))
+
+    receipt = fleet_service.hand_off(codex.project, codex.agent.label)
+
+    assert (receipt.mode, receipt.resumed) == ("fork", True), receipt.notes
+    assert _at(_native(_command(tmux)), "fork", THREAD_ONE)
+    plain = accounts_core.default_account(agent="codex").slot
+    assert receipt.started.agent.account_slot == plain
 
 
 def test_a_take_over_of_a_codex_row_resumes_its_thread_through_its_resume(

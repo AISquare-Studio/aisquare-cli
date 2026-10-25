@@ -11304,7 +11304,15 @@ def hand_off(
     wanted = _account_wanted(account, slot)
     resume: ResumeSpec | None = None
     if not fresh:
-        resume, wanted = _forkable(project, record, forks, runs_as, wanted, notes)
+        resume, wanted = _forkable(
+            project,
+            record,
+            forks,
+            runs_as,
+            wanted,
+            notes,
+            plain_home=account is None and slot is None,
+        )
     own = is_git_project(project.root)
     if not own:
         notes.append(f"not a git repository — the fork works in {project.root}, beside {source}")
@@ -11364,6 +11372,8 @@ def _forkable(
     role: str,
     wanted: str | None,
     notes: list[str],
+    *,
+    plain_home: bool = False,
 ) -> tuple[ResumeSpec | None, str | None]:
     """What a hand-off's Fork resumes of the session ``record`` holds, on ``forks``, its agent
     — or ``None`` with why on ``notes``, the new agent then starting fresh from the board —
@@ -11376,7 +11386,11 @@ def _forkable(
     whose sessions live in their home (``resumes_across_homes`` false: a Codex thread is a
     rollout under its ``CODEX_HOME``) forks only onto that home: asked onto another
     account's, it starts fresh with a hand-off prompt, as ``switch`` does, and the account
-    resolved here is the one the spawn gets, so the two cannot differ."""
+    resolved here is the one the spawn gets, so the two cannot differ. A source whose record
+    has no slot, forked with no account asked (``plain_home``), ran under the plain home: the
+    fork asks for the agent's plain slot by name, as its restart does
+    (:func:`_replacement_account`; r20 of #113), never the ladder, whose default would move
+    it off the thread it forks."""
     named = forks.label if forks is not None else record.agent
     found, why = _resumable(record, forks)
     if forks is None or found is None:
@@ -11390,8 +11404,12 @@ def _forkable(
         return None, wanted
     if not forks.capabilities.resumes_across_homes and forks.accounts is not None:
         try:
-            choice = claude_accounts_service.choose(
-                wanted, role=role, project=project, agent=forks.id
+            choice = (
+                _replacement_account(None, None, role=role, project=project, whose=forks.id)
+                if plain_home
+                else claude_accounts_service.choose(
+                    wanted, role=role, project=project, agent=forks.id
+                )
             )
         except claude_accounts_service.NoSuchAccount as exc:
             raise FleetError(str(exc)) from exc

@@ -48,6 +48,7 @@ a path and a server's reason are DATA (CONTRIBUTING: no markup in data).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import math
 import threading
@@ -697,7 +698,7 @@ class AccountRow(Horizontal, can_focus=True):
         self.status = status
         self.usage: ClaudeUsage | None = None
         self.trend: UsageTrend | None = None
-        self._wait_timer: Timer | None = None
+        self._wait_ends: asyncio.TimerHandle | None = None
         self.first = True
         self.last = True
         self.openings = 0
@@ -832,16 +833,32 @@ class AccountRow(Horizontal, can_focus=True):
 
     def _repaint_when_the_wait_ends(self) -> None:
         """Paint again the moment the shown rate limit ends: the page re-reads once a
-        minute, and until then the tooltip kept the wait it was painted with."""
-        if self._wait_timer is not None:
-            self._wait_timer.stop()
-            self._wait_timer = None
+        minute, and until then the tooltip kept the wait it was painted with.
+
+        The loop's own timer, not a Textual one (as the release dialog's deadline is): on
+        Windows a pending Textual timer holds a thread of asyncio's default executor for
+        its whole interval, and a wait runs up to 30 min, or 6 h with a Retry-After. Two
+        rows in a wait starved every other timer in asq, toasts and the page's re-read
+        included, and quitting waited for the waits (review of #401, MAJOR-1).
+        """
+        self._forget_the_wait()
         usage = self.usage
         if usage is None or not usage.rate_limited or usage.rate_limited_until is None:
             return
         left = (usage.rate_limited_until - accounts_service._now()).total_seconds()
         if left > 0:
-            self._wait_timer = self.set_timer(left + 0.05, self._paint)
+            # Posted to the row, so the repaint runs on its message queue like any other.
+            self._wait_ends = asyncio.get_running_loop().call_later(
+                left + 0.05, self.call_later, self._paint
+            )
+
+    def _forget_the_wait(self) -> None:
+        if self._wait_ends is not None:
+            self._wait_ends.cancel()
+            self._wait_ends = None
+
+    def on_unmount(self) -> None:
+        self._forget_the_wait()
 
     def cell(self, key: str) -> Static:
         """The cell of column ``key`` (``name`` is the label the field covers while open)."""

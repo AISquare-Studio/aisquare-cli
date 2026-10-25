@@ -132,7 +132,7 @@ def _window_cell(percent: float | None, resets_at: datetime | None, *, now: date
         return f"reset {accounts_service.describe_age(resets_at, now=moment)}"
     cell = _percent(percent)
     if resets_at is not None:
-        cell += f" · resets {format_reset(resets_at, now=now)}"
+        cell += f" · resets {format_reset(resets_at, now=moment)}"
     return cell
 
 

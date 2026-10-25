@@ -1641,6 +1641,9 @@ def test_accounts_usage_and_list_usage_read_every_account_in_one_round_with_labe
         return real(accounts, **kwargs)
 
     monkeypatch.setattr(service, "read_usage", spy)
+    # One clock for a reset (the cell measures it against the service's clock, not the wall
+    # clock), so it reads "resets in 3h (15:00)", not "now": wide enough not to wrap a row.
+    monkeypatch.setenv("COLUMNS", "200")
 
     usage = runner.invoke(app, ["accounts", "usage"])
     assert usage.exit_code == 0, usage.output

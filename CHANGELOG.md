@@ -529,6 +529,13 @@ machine default, and every release now carries its own installer.**
   one older than five minutes. A wait is the login's: a slot signed into another login is
   not held to it. `--json` readings carry `rate_limited`, `rate_limited_until` and
   `last_failed_reason`.
+- **A hand-over whose live usage read fails now picks by a recent reading.** When the live
+  read of an account fails with anything but a 429 or a login problem (the endpoint
+  unreachable, an HTTP 5xx), the automatic hand-over picks by that account's reading if
+  one is at most five minutes old, with neither window reset since, and says so in its
+  note (`account 2 HTTP 500 from the usage endpoint — picked by its reading from 2m ago`).
+  An older reading skips the account with a note giving its age. Before, any failed live
+  read skipped the account.
 - **Restart all brings back the agents that died** (#38). After an outside SIGTERM
   killed every agent of a fleet (exit 143), *Settings ▸ Fleet ▸ Restart all…* and
   `fleet restart --all` listed each one as exited and restarted none: they acted on

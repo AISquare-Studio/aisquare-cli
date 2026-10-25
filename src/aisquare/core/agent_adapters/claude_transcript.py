@@ -48,6 +48,7 @@ from aisquare.core.agent_adapters.transcripts import (
     wrap,
 )
 from aisquare.core.agent_adapters.types import AnswerKey, AnswerKind, CallAsk, UsageScan
+from aisquare.core.ledger import SessionLedger
 
 SPEAKER = "claude"
 
@@ -152,6 +153,24 @@ class ClaudeTranscript:
         from aisquare.core.agent_adapters import claude_usage
 
         return claude_usage.usage(file, state)
+
+    def ledger(
+        self, file: Path, *, since: datetime | None, until: datetime | None
+    ) -> SessionLedger:
+        """Main's token ledger reader (:mod:`claude_ledger`)."""
+        from aisquare.core.agent_adapters import claude_ledger
+
+        return claude_ledger.read(file, since=since, until=until)
+
+    def context_tokens(self, file: Path) -> int | None:
+        from aisquare.core.agent_adapters import claude_ledger
+
+        return claude_ledger.context_tokens(file)
+
+    def compacted_since(self, file: Path, since: datetime) -> bool:
+        from aisquare.core.agent_adapters import claude_ledger
+
+        return claude_ledger.compacted_since(file, since)
 
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         return last_reply(file, since=since)

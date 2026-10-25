@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from aisquare.core import agents, harness
+from aisquare.core import agents, harness, ledger
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.agent_adapters.lasting import fetches_aisquare, runs_aisquare
 from aisquare.core.agent_adapters.transcripts import (
@@ -73,6 +73,7 @@ from aisquare.core.agent_adapters.usage_tally import Tally, carries_context, tra
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice
 from aisquare.core.claude_sharing import SharingError, TrustScope
 from aisquare.core.config import FleetSettings
+from aisquare.core.ledger import SessionLedger
 from aisquare.core.pricing import Price, RequestTokens
 from aisquare.core.usage import Usage
 from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
@@ -241,6 +242,47 @@ class FakeTranscript:
                 found.injected_chars += len(text)
                 trace(found, "aisquare context in its brief")
         return tally.scan(found)
+
+    def ledger(
+        self, file: Path, *, since: datetime | None, until: datetime | None
+    ) -> SessionLedger:
+        """Its records as the ledger counts them: a ``billed`` one a request, a ``run`` or a
+        ``pick`` a tool call, a ``brief`` the deltas it carries, a ``compacted`` one a
+        compaction (the agent's own words for each)."""
+        row = SessionLedger(session_id="", role="", transcript_found=True)
+        window = ledger.Window(row)
+        for record in ledger.entries(file, row):
+            if not ledger.within(record, since, until):
+                continue
+            kind = record.get("kind")
+            if kind == "billed":
+                fresh, reused = _tokens(record, "fresh"), _tokens(record, "reused")
+                if row.baseline is None:
+                    row.baseline = fresh + reused
+                window.request(fresh, 0, reused, _tokens(record, "out"))
+            elif kind in ("run", "pick"):
+                window.tool(str(record.get("tool", "tool")) if kind == "run" else "pick",
+                            board_read=False)  # fmt: skip
+            elif kind == "brief":
+                window.deltas(str(record.get("text", "")))
+            elif kind == "compacted":
+                window.compacted("unknown")
+        return window.finish()
+
+    def context_tokens(self, file: Path) -> int | None:
+        row = SessionLedger(session_id="", role="")
+        latest: int | None = None
+        for record in ledger.entries(file, row):
+            if record.get("kind") == "billed":
+                latest = _tokens(record, "fresh") + _tokens(record, "reused")
+        return latest
+
+    def compacted_since(self, file: Path, since: datetime) -> bool:
+        row = SessionLedger(session_id="", role="")
+        return any(
+            record.get("kind") == "compacted" and (ledger.stamped(record) or since) >= since
+            for record in ledger.entries(file, row)
+        )
 
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         # What it said since the newest thing it heard; a run or a pick answers with no words.
@@ -605,6 +647,9 @@ class FakeAgentAdapter:
 
     def role_defaults(self, role: str, *, binary: str, args: Sequence[str]) -> harness.RoleDefaults:
         return harness.RoleDefaults()
+
+    def first_prompts_since(self, home: Path, cwd: Path, since: datetime) -> list[str] | None:
+        return None
 
     def tool_policy(
         self,

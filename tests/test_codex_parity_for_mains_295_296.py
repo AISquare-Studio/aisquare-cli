@@ -15,7 +15,7 @@ tmux and Codex's own hook payloads.
 - #296: WS-1's tool policy is Claude Code's flags, withheld for Codex with a note (its tools
   are its sandbox's and approvals'); WS-2's board context reaches a Codex window and its
   launch record; WS-5ab's ladder gives a Codex spawn none of Claude Code's model flags; and
-  WS-4's quiet compaction is never armed from a Codex Stop (``compacts_on_command``).
+  WS-4's quiet compaction arms from a Codex Stop and types Codex's bare ``/compact``.
 """
 
 from __future__ import annotations
@@ -321,10 +321,12 @@ def test_a_codex_spawn_gets_none_of_claude_codes_ladder(
     assert agent.launch_spec is not None and agent.launch_spec.model is None
 
 
-def test_a_codex_stop_never_arms_the_quiet_compaction(
+def test_a_codex_stop_arms_the_quiet_compaction_as_claude_codes_does(
     codex_agent: tuple[Codex, TeamTask],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Codex has a command that compacts it (``capabilities.compact``, measured in #17), so
+    its manager's Stop arms the worker as Claude Code's does; what it types is bare."""
     armed: list[str] = []
     monkeypatch.setattr(quiet_compact, "arm", lambda session_id, **_: armed.append(session_id))
     codex, _ = codex_agent
@@ -333,5 +335,8 @@ def test_a_codex_stop_never_arms_the_quiet_compaction(
 
     codex.hook("Stop", THREAD_ONE, turn_id="turn-1")
 
-    assert armed == [], "`/compact <instructions>` is Claude Code's (compacts_on_command)"
-    assert get_adapter("claude-code").capabilities.compacts_on_command
+    assert armed == [codex.board_id(THREAD_ONE)]
+    command = get_adapter("codex").capabilities.compact
+    assert command is not None and quiet_compact.compact_line(command) == "/compact"
+    claude = get_adapter("claude-code").capabilities.compact
+    assert claude is not None and quiet_compact.compact_line(claude) == quiet_compact.COMPACT_LINE

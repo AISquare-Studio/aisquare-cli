@@ -32,7 +32,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from aisquare.core import agents, harness
+from aisquare.core import agents, harness, ledger
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.agent_adapters.lasting import fetches_aisquare, runs_aisquare
 from aisquare.core.agent_adapters.transcripts import (
@@ -86,6 +86,7 @@ from aisquare.core.agent_adapters.usage_tally import Tally, is_lookup_command
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice
 from aisquare.core.claude_sharing import SharingError, TrustScope
 from aisquare.core.config import FleetSettings
+from aisquare.core.ledger import SessionLedger
 from aisquare.core.pricing import Price, RequestTokens
 from aisquare.core.shell_line import command_line
 from aisquare.core.usage import Usage
@@ -325,6 +326,43 @@ class GeminiShapedTranscript:
                     found, name, str(call.get("id")), edits=name in EDIT_TOOLS, lookup=lookup
                 )
         return tally.scan(found)
+
+    def ledger(
+        self, file: Path, *, since: datetime | None, until: datetime | None
+    ) -> SessionLedger:
+        """Its ``gemini`` records as the ledger counts them: ``tokens`` a request (``cached``
+        apart from the rest of ``input``), each call a tool call, a shell command that only
+        reads the board a board read."""
+        row = SessionLedger(session_id="", role="", transcript_found=True)
+        window = ledger.Window(row)
+        for record in ledger.entries(file, row):
+            if record.get("type") != "gemini" or not ledger.within(record, since, until):
+                continue
+            raw = record.get("tokens")
+            if isinstance(raw, dict):
+                cached = _count(raw, "cached")
+                fresh = max(0, _count(raw, "input") - cached) + _count(raw, "tool")
+                if row.baseline is None:
+                    row.baseline = fresh + cached
+                window.request(fresh, 0, cached, _count(raw, "output") + _count(raw, "thoughts"))
+            for call in _calls(record):
+                args = call.get("args")
+                command = args.get("command") if isinstance(args, dict) else None
+                read = isinstance(command, str) and ledger.is_board_read(command)
+                window.tool(str(call.get("name", "tool")), board_read=read)
+        return window.finish()
+
+    def context_tokens(self, file: Path) -> int | None:
+        row = SessionLedger(session_id="", role="")
+        latest: int | None = None
+        for record in ledger.entries(file, row):
+            raw = record.get("tokens") if record.get("type") == "gemini" else None
+            if isinstance(raw, dict):
+                latest = _count(raw, "input") + _count(raw, "tool")
+        return latest
+
+    def compacted_since(self, file: Path, since: datetime) -> bool:
+        return False  # no compaction record of its own
 
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         said: list[str] = []
@@ -763,6 +801,9 @@ class GeminiShapedAdapter:
 
     def role_defaults(self, role: str, *, binary: str, args: Sequence[str]) -> harness.RoleDefaults:
         return harness.RoleDefaults()
+
+    def first_prompts_since(self, home: Path, cwd: Path, since: datetime) -> list[str] | None:
+        return None
 
     def tool_policy(
         self,

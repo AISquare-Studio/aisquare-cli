@@ -15,9 +15,12 @@ Two halves, like the usage-limit hand-over:
 - :func:`check`, that worker. It waits ``[fleet] quiet_compact_delay`` seconds, asks every
   condition again (:func:`refusal`), asks the pane (``fleet.quiet_prompt_refusal``: its
   agent idle at its prompt, the input box empty), leaves the mark
-  (``team.write_quiet_mark``) and types :data:`COMPACT_LINE` through the first message's
+  (``team.write_quiet_mark``) and types its agent's compaction line (:func:`compact_line`:
+  Claude Code's ``/compact`` with instructions, Codex's bare) through the first message's
   verified delivery. The compaction's own SessionStart acknowledges the mark and puts the
-  row back to ``waiting`` (``team._take_quiet_compaction``); no acknowledgement within
+  row back to ``waiting`` (``team._take_quiet_compaction``), or, for an agent whose
+  compaction fires no hook (Codex), its transcript's record of it does
+  (``AgentTranscript.compacted_since``); no acknowledgement within
   :data:`ACK_WAIT` is one human-only board line, and no retry before the cooldown.
 
 ``[fleet] quiet_compact_at = 0`` (the default) is off: nothing is armed. Claude Code's own
@@ -34,18 +37,32 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aisquare.core import paths, selfcli, transcripts
+from aisquare.core import paths, selfcli
+from aisquare.core.agent_adapters import recorded_adapter
+from aisquare.core.agent_adapters.types import AgentTranscript, CompactCommand
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import FleetAgent, TeamSession
 from aisquare.services import team as team_service
 
-COMPACT_LINE = (
-    "/compact Keep the goal, decisions and why, every open task by #number with owner and "
+COMPACT_INSTRUCTIONS = (
+    "Keep the goal, decisions and why, every open task by #number with owner and "
     "state, live agents by label with their task, unanswered questions, and the state file "
     "path. Drop tool output, board updates already acted on, and file contents."
 )
-"""What is typed: Claude Code's ``/compact`` with the instructions its summary keeps."""
+"""What the summary keeps, for an agent whose command takes instructions."""
+COMPACT_LINE = f"/compact {COMPACT_INSTRUCTIONS}"
+"""What is typed into Claude Code: its ``/compact`` with the instructions its summary keeps
+(:func:`compact_line`)."""
+
+
+def compact_line(command: CompactCommand) -> str:
+    """The line that compacts an agent's session (``capabilities.compact``): its command, with
+    :data:`COMPACT_INSTRUCTIONS` where it takes them (Claude Code's), bare where text after
+    it would run as a prompt instead (Codex's)."""
+    return f"{command.line} {COMPACT_INSTRUCTIONS}" if command.instructions else command.line
+
+
 RESUME_LINE = "Read the start pack above; if nothing needs you, stop."
 """Typed after an acknowledged compaction under ``[fleet] quiet_compact_resume``."""
 ACK_WAIT = 120.0
@@ -123,6 +140,13 @@ def arm(
     return None
 
 
+def _reader(session: TeamSession | None) -> AgentTranscript | None:
+    """The transcript reader of ``session``'s agent (Claude Code's for a session that never
+    said), or ``None``."""
+    adapter = recorded_adapter(session.agent if session is not None else None)
+    return adapter.transcript_reader if adapter is not None else None
+
+
 def _state_age(path: Path) -> datetime | None:
     try:
         return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
@@ -150,7 +174,8 @@ def refusal(
 
     Still ``waiting`` (not working, limited, mid-hand-over or needing the human); its
     cursor where it was when its turn ended; no wake-class event past it; a context of at
-    least ``quiet_compact_at`` tokens (its transcript's last request); no quiet compaction
+    least ``quiet_compact_at`` tokens (its transcript's last request, as its agent's reader
+    reads it: ``AgentTranscript.context_tokens``); no quiet compaction
     within the cooldown; and a state file written within ``quiet_compact_state_max_age``
     minutes and after the last decision it was woken for.
     """
@@ -165,9 +190,10 @@ def refusal(
     ):
         if team_service.wake_class(event, session) == "wake":
             return f"a {event.kind} is pending (#{event.seq})"
+    reader = _reader(session)
     size = (
-        transcripts.latest_context_tokens(Path(session.transcript_path))
-        if session.transcript_path
+        reader.context_tokens(Path(session.transcript_path))
+        if reader is not None and session.transcript_path
         else None
     )
     if size is None:
@@ -221,18 +247,37 @@ def check(session_id: str, cursor: int, token: str) -> str:
         if why is not None:
             return _refuse(store, session_id, why)
         assert session is not None and agent is not None  # refusal() said so
+        adapter = recorded_adapter(agent.agent)
+        command = adapter.capabilities.compact if adapter is not None else None
+        if command is None:
+            return _refuse(store, session_id, "its agent has no command that compacts it")
         why = fleet_service.quiet_prompt_refusal(agent)
         if why is not None:
             return _refuse(store, session_id, why)
         typed_at = _now()
         team_service.write_quiet_mark(store, session_id, team_service.QuietMark(typed_at, None))
 
+    reader = _reader(session)
+    transcript = Path(session.transcript_path) if session.transcript_path else None
+
     def acked() -> bool:
+        """The compaction's ``SessionStart`` acknowledged the mark (Claude Code's), or the
+        transcript records a compaction since it was typed (an agent whose compaction fires
+        no hook: Codex's ``compacted`` record), which acknowledges it here."""
         with store_session() as store:
             mark = team_service.read_quiet_mark(store, session_id)
-        return mark is not None and mark.typed_at == typed_at and mark.acked_at is not None
+            if mark is None or mark.typed_at != typed_at:
+                return False
+            if mark.acked_at is not None:
+                return True
+            if reader is None or transcript is None:
+                return False
+            if not reader.compacted_since(transcript, typed_at):
+                return False
+            team_service.write_quiet_mark(store, session_id, mark._replace(acked_at=_now()))
+            return True
 
-    done = fleet_service.type_line(agent, COMPACT_LINE, acked=acked)
+    done = fleet_service.type_line(agent, compact_line(command), acked=acked)
     if done.told.typed != "yes":
         told = done.told
         said = told.how if isinstance(told, TellResult) else f"{told.what}: {told.typed}"

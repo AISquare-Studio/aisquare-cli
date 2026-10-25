@@ -9,6 +9,7 @@ import sys
 import tomllib
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
+from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -21,6 +22,7 @@ from aisquare.core.agent_adapters.types import (
     AgentScreen,
     AgentTranscript,
     BadEffortError,
+    CompactCommand,
     EventKind,
     ForkArgs,
     HookSpec,
@@ -604,6 +606,9 @@ class CodexAdapter:
         limits_in_transcript=True,
         native_telemetry=True,
         positional_prompt=True,
+        # A bare `/compact` at its idle prompt compacts (a `compacted` rollout record, no
+        # hook); `/compact <text>` runs as a prompt instead (measured on 0.164.0, #17).
+        compact=CompactCommand("/compact", instructions=False),
         one_press_exits=frozenset({"C-c", "C-d"}),
         first_context_file_only=True,
         sandbox_permissions=True,
@@ -1038,6 +1043,14 @@ class CodexAdapter:
         in 0.162.1) and its bundled browser plugin, read by ``aisquare doctor``
         (:meth:`browser_tools`), not a flag; Claude Code's ``--chrome`` is not Codex's."""
         return harness.RoleDefaults()
+
+    def first_prompts_since(self, home: Path, cwd: Path, since: datetime) -> list[str] | None:
+        """Its rollouts' ``user`` messages (``codex_transcript.prompts_since``): Codex fires its
+        first hook only with its first prompt, and none at all with its hooks untrusted, so
+        its rollout is what says a first message ran."""
+        from aisquare.core.agent_adapters.codex_transcript import prompts_since
+
+        return prompts_since(home, cwd, since)
 
     def tool_policy(
         self,

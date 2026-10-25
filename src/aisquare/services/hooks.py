@@ -336,10 +336,10 @@ def turn_stopped(
     auto_mode.record_refusals(session_id)
     from aisquare.core.agent_adapters import recorded_adapter
 
-    # Only an agent `/compact <instructions>` compacts, whose compaction's SessionStart
-    # acknowledges it (`capabilities.compacts_on_command`): what the quiet compaction types.
+    # Only an agent with a command that compacts it (`capabilities.compact`): what the quiet
+    # compaction types.
     kind = recorded_adapter(agent)
-    if decision is None and kind is not None and kind.capabilities.compacts_on_command:
+    if decision is None and kind is not None and kind.capabilities.compact is not None:
         with contextlib.suppress(Exception):  # an optimisation may never cost a Stop
             quiet_compact.arm(
                 session_id,

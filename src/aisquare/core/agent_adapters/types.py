@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from aisquare.core.claude_accounts import FailedTurn, LimitNotice
     from aisquare.core.claude_sharing import TrustScope
     from aisquare.core.config import FleetSettings
+    from aisquare.core.ledger import SessionLedger
     from aisquare.core.pricing import Price, RequestTokens
     from aisquare.core.usage import Usage
     from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
@@ -230,6 +231,18 @@ class Vocabulary:
 
 
 @dataclass(frozen=True)
+class CompactCommand:
+    """How an agent's session is compacted from its prompt (``capabilities.compact``)."""
+
+    line: str
+    """What is typed: Claude Code's and Codex's ``/compact``."""
+    instructions: bool
+    """Whether text after it is read as what the summary keeps (Claude Code's). Codex runs
+    ``/compact <text>`` as a prompt, a turn and no compaction, so it is typed bare (measured
+    on 0.164.0)."""
+
+
+@dataclass(frozen=True)
 class AgentCapabilities:
     """What one agent does differently, as flags the shared services read instead of its id.
 
@@ -337,11 +350,12 @@ class AgentCapabilities:
     model_ladders: bool = False
     """AISquare's role model ladder and its probe choose the model (Claude Code); an
     agent without keeps its native default unless a model is pinned."""
-    compacts_on_command: bool = False
-    """``/compact <instructions>`` typed at its idle prompt compacts the session, and the
-    compaction's ``SessionStart`` (source ``compact``) says it did: what P1 WS-4's quiet-point
-    compaction of a manager types and waits for (``services.quiet_compact``, Claude Code's).
-    An agent without is never compacted from here."""
+    compact: CompactCommand | None = None
+    """The command that compacts the session when typed at its idle prompt
+    (:class:`CompactCommand`): what P1 WS-4's quiet-point compaction of a manager types
+    (``services.quiet_compact``), its acknowledgement the compaction's ``SessionStart``
+    (source ``compact``) or, where none fires, the transcript
+    (``AgentTranscript.compacted_since``). An agent without is never compacted from here."""
     positional_prompt: bool = False
     """The first prompt is a positional argument, after ``--`` (Claude Code, Codex): a spawn's
     first message goes on its command line (``services.delivery.first_prompt_way``, through a
@@ -1013,6 +1027,26 @@ class AgentTranscript(Protocol):
         raises: a file that cannot be read, or a record it cannot, reads as nothing."""
         ...
 
+    def ledger(
+        self, file: Path, *, since: datetime | None, until: datetime | None
+    ) -> SessionLedger:
+        """The token ledger's counts of the transcript ``file`` (``core.ledger``: requests and
+        their input split, the baseline, context sizes, wakes, deltas, compactions and tool
+        calls), from what was written in ``[since, until]``: what ``metrics ledger`` prints
+        for a session of this agent (#296's WS-0). Never raises; a line it cannot parse is
+        counted as skipped."""
+        ...
+
+    def context_tokens(self, file: Path) -> int | None:
+        """How large the session's context is now (the last request's input), or ``None``
+        when the transcript holds no request: what the quiet-point compaction weighs."""
+        ...
+
+    def compacted_since(self, file: Path, since: datetime) -> bool:
+        """Whether the transcript says the session was compacted at or after ``since``: the
+        quiet-point compaction's acknowledgement for an agent whose compaction fires no hook."""
+        ...
+
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         """The agent's words since the transcript's newest prompt of the human's: every
         message of the turn that answers it, in order, joined by newlines (a call's own
@@ -1293,6 +1327,15 @@ class AgentAdapter(Protocol):
     def role_defaults(self, role: str, *, binary: str, args: Sequence[str]) -> harness.RoleDefaults:
         """The flags ``role`` needs on this agent wherever it starts (the ui-tester's
         browser), less what ``args`` already says, with a note for each it withholds."""
+        ...
+
+    def first_prompts_since(self, home: Path, cwd: Path, since: datetime) -> list[str] | None:
+        """The prompts the agent's sessions under ``home`` started in ``cwd`` since ``since``
+        ran, as typed, from its own record of them (Codex's rollouts), whether or not its hooks
+        ran: what settles a first message no session has spoken for (``services.fleet``,
+        #113's #17). ``None`` for an agent whose hooks always say it (Claude Code's
+        ``SessionStart`` fires at rest, before its first prompt), or that keeps no such
+        record."""
         ...
 
     def tool_policy(

@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -19,6 +20,7 @@ from aisquare.core.agent_adapters.types import (
     AgentScreen,
     AgentTranscript,
     BadEffortError,
+    CompactCommand,
     EventKind,
     ForkArgs,
     HookSpec,
@@ -183,7 +185,7 @@ class ClaudeCodeAdapter:
         # `claude -- "<prompt>"` runs it as the first turn, behind the folder-trust question
         # too (P0-W0, on 2.1.309 and 2.1.223): nothing typed, no Enter to lose (#295).
         positional_prompt=True,
-        compacts_on_command=True,
+        compact=CompactCommand("/compact", instructions=True),
         vocabulary=Vocabulary(
             env_prefixes=("ANTHROPIC",),
             files=(".claude.json", ".credentials.json"),
@@ -541,6 +543,11 @@ class ClaudeCodeAdapter:
         if runs is None or runs.id != self.id:
             return harness.withheld_defaults(role, binary, self.binary)
         return harness.profile_defaults(role, args)
+
+    def first_prompts_since(self, home: Path, cwd: Path, since: datetime) -> list[str] | None:
+        """None: its ``SessionStart`` fires at rest, before its first prompt, so its hooks say
+        whether a first message ran (``store.mark_prompted``)."""
+        return None
 
     def tool_policy(
         self,

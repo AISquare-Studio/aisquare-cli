@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -3503,15 +3505,18 @@ def _with_first_prompts(
     shown: list[FleetAgentStatus] = []
     for status in statuses:
         agent = status.agent
-        live = (
-            agent.ended_at is None
-            and not status.held
-            and status.session is not None
-            and status.state in ("waiting", "working")
+        running = (
+            agent.ended_at is None and not status.held and status.state in ("waiting", "working")
         )
+        live = running and status.session is not None
         pane = panes.get(agent.id)
         at_notes = False
-        if live and pane is not None and delivery.overdue(agent, now, config.prompt_ack_seconds):
+        if running and status.session is None and pane is not None:
+            # No session yet: an agent whose start comes with its first prompt (Codex's)
+            # has none until a prompt runs, so its own record of the prompts it ran decides.
+            agent = _first_prompt_off_its_transcript(agent, pane, config, now)
+            live = agent.first_prompt == "unsent"
+        elif live and pane is not None and delivery.overdue(agent, now, config.prompt_ack_seconds):
             agent, at_notes = _unsent_if_idle(agent, status.session, config, pane)
         elif live and pane is not None and agent.first_prompt == "unsent":
             at_notes = claude_sharing.shows_security_notes(_first_prompt_screen(pane))
@@ -3527,6 +3532,76 @@ def _with_first_prompts(
             )
         shown.append(status)
     return shown
+
+
+FIRST_PROMPT_META = "first-prompt:"
+"""``team_meta`` key prefix, before an agent id, of what a spawn's first message was given as:
+``{"digest", "home", "cwd"}``, for :func:`_first_prompt_off_its_transcript`."""
+
+
+def _first_prompt_digest(text: str) -> str:
+    return hashlib.sha256(" ".join(text.split()).encode()).hexdigest()
+
+
+def _note_first_prompt(agent_id: str, text: str, home: Path, cwd: Path) -> None:
+    """Keep what a spawn's first message was given as, never its text: its digest, and the
+    home and folder its agent records its sessions under. Never raises."""
+    value = {"digest": _first_prompt_digest(text), "home": str(home), "cwd": str(cwd)}
+    with contextlib.suppress(Exception), store_session() as store:
+        store.set_meta(f"{FIRST_PROMPT_META}{agent_id}", json.dumps(value))
+
+
+def _first_prompt_off_its_transcript(
+    agent: FleetAgent, pane: PlacedPane, config: FleetSettings, now: datetime
+) -> FleetAgent:
+    """``agent``, its pending first message settled by its agent's own record of the prompts
+    it ran (``AgentAdapter.first_prompts_since``: Codex's rollouts), for a row no session has
+    spoken for: Codex fires its first hook only with its first prompt, and with its hooks not
+    trusted fires none, so the board alone never knew whether the message ran (#113's #17).
+
+    Taken (a prompt that reads as the message, by digest: :func:`_note_first_prompt`): the
+    row reads ``acked``. Not there past ``[fleet] prompt_ack_seconds``, with the agent idle at
+    its prompt as its own screen reads it: ``unsent``, said on the board once, as Claude
+    Code's (:func:`_first_prompt_unsent`). An agent whose adapter keeps no such record, a row
+    given no message, or one that cannot be read: as it was."""
+    if agent.first_prompt not in ("pending", "unsent"):
+        return agent
+    adapter = recorded_adapter(agent.agent)
+    try:
+        with store_session() as store:
+            raw = store.get_meta(f"{FIRST_PROMPT_META}{agent.id}")
+        given = json.loads(raw) if raw else None
+        since = agent.first_prompt_at
+        if adapter is None or not isinstance(given, dict) or since is None:
+            return agent
+        ran = adapter.first_prompts_since(
+            Path(given["home"]), Path(given["cwd"]), since - timedelta(seconds=10)
+        )
+    except Exception:
+        return agent
+    if ran is None:
+        return agent
+    if given["digest"] in {_first_prompt_digest(text) for text in ran}:
+        with contextlib.suppress(Exception), store_session() as store:
+            store.take_first_prompt(now, session_id="", agent_id=agent.id)
+            store.delete_meta(f"{FIRST_PROMPT_META}{agent.id}")
+            return store.get_fleet_agent(agent.id) or agent
+        return agent
+    if agent.first_prompt != "pending" or not delivery.overdue(
+        agent, now, config.prompt_ack_seconds
+    ):
+        return agent
+    if not pane_screen.ready(agent, _first_prompt_screen(pane)):
+        return agent
+    why = (
+        f"no turn started on it within {config.prompt_ack_seconds:.0f} s, and its "
+        f"{adapter.label} sessions hold no such prompt"
+    )
+    if _first_prompt_unsent(agent, why):
+        return agent.model_copy(update={"first_prompt": "unsent"})
+    with contextlib.suppress(Exception), store_session() as store:
+        return store.get_fleet_agent(agent.id) or agent
+    return agent
 
 
 def unsent_detail(project: ProjectInfo, label: str) -> str:
@@ -5129,6 +5204,11 @@ def spawn(
     done: list[str] = []
     typed: Typed | None = None
     acked: bool | None = None
+    if first is not None:
+        # What a session-less row's first message is settled by (`_first_prompt_off_its_
+        # transcript`): its digest, and the home and folder its agent records sessions under.
+        home = choice.account.config_dir if choice.account is not None else selected.config_dir
+        _note_first_prompt(stored.id, first, home, stored.cwd)
     if first is not None and way == "argv":
         typed = "yes"  # handed over with the launch: nothing to type, no Enter to lose
     elif first is not None:

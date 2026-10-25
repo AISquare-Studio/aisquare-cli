@@ -485,9 +485,11 @@ back when it ends on something the next turn end can decide from the cache alone
 
 BEFORE_LIMIT_SETTLE_SECONDS = 5.0
 """How long after the turn end a before-limit move waits before its checks: past the start-up
-of the hook a prompt queued at the turn end runs (``UserPromptSubmit``, a process of its own,
-1.4 to 1.9 s under load on #423's tester's machine), so the board and the transcript both say
-whether that prompt began a turn before anything is marked or stopped."""
+of the hook a prompt typed at the turn end runs (``UserPromptSubmit``, a process of its own,
+1.4 to 1.9 s under load on #423's tester's machine), so its ``prompted_at`` is on the board
+before anything is marked or stopped. A prompt typed later still is the pane's to show
+(``after_mark``): while its hook runs, Claude Code draws its spinner over an input box that
+is not idle."""
 
 _sleep = time.sleep
 """The settle's wait (:data:`BEFORE_LIMIT_SETTLE_SECONDS`), a name of its own for a test to
@@ -509,7 +511,7 @@ the account reads under the line, those windows have reset, or the agent runs el
 class _TurnEnd:
     """The turn end a before-limit look started from: when, and how long the transcript was.
     Anything the agent began after it — a prompt stamped (``prompted_at``), a record written
-    (``transcript.activity_since``) — means it is no longer at that safe point."""
+    (``transcripts.activity_since``) — means it is no longer at that safe point."""
 
     at: datetime
     transcript: Path | None
@@ -551,9 +553,11 @@ class _TurnEnd:
 
     def begun_since(self, session: TeamSession) -> bool:
         """Whether ``session`` began a turn after this turn end, or is about to: its prompt
-        stamped since, or its transcript grown by a prompt, a notice or the agent's own words,
-        or a message queued and not yet taken. A transcript that cannot be read cannot say it
-        has not: it has."""
+        stamped since (``UserPromptSubmit``), or its transcript grown by a prompt, a notice, a
+        queued message taken or the agent's own words, or a message queued and not yet taken.
+        A typed prompt reaches the transcript only once its hook has passed, so for one the
+        stamp comes first; a queued message or a task's notice is on disk at once. No
+        transcript or offset to read cannot say it has not: it has."""
         if session.prompted_at is not None and session.prompted_at > self.at:
             return True
         if self.transcript is None or self.offset is None:
@@ -860,9 +864,9 @@ class _StartedATurn(Exception):
 
 def _still_waiting(session_id: str, turn_end: _TurnEnd) -> Callable[[], None]:
     """``fleet.switch``'s ``before_stop`` for a move before the limit, asked once the turn end
-    has settled (:data:`BEFORE_LIMIT_SETTLE_SECONDS`): the agent still waits at its prompt, has
-    begun nothing since ``turn_end`` (:meth:`_TurnEnd.begun_since`: the board's stamp, and the
-    transcript, which shows a prompt before its hook stamps the board) and left no background
+    has settled (:data:`BEFORE_LIMIT_SETTLE_SECONDS`): the agent is still one ``before_limit``
+    may move — waiting at its prompt, no pause, no pin (:func:`_before_limit_agent`) — has
+    begun nothing since ``turn_end`` (:meth:`_TurnEnd.begun_since`) and left no background
     work, or :class:`_StartedATurn` refuses before anything is marked or stopped."""
 
     def check() -> None:
@@ -878,27 +882,47 @@ def _still_waiting(session_id: str, turn_end: _TurnEnd) -> Callable[[], None]:
 
 
 def _still_idle_after_mark(session_id: str, turn_end: _TurnEnd) -> Callable[[], None]:
-    """``fleet.switch``'s ``after_mark``: the same, asked again once the hand-over mark is on,
-    so a prompt that lands between ``before_stop`` and the mark is not cut short — the mark
-    hides its ``working`` (``touch_session`` keeps ``switching``), not its ``prompted_at`` nor
-    its transcript record — and what the pane shows: Claude Code's input box idle with no
-    spinner (``pane_idle.box_idle_now``, which fails closed)."""
+    """``fleet.switch``'s ``after_mark``: asked once the hand-over mark is on, the last check
+    before the ``/exit``. The mark hides a turn's ``working`` (``touch_session`` keeps
+    ``switching``), not its ``prompted_at`` nor its transcript records, so those are asked
+    again; and then THE PANE, which is what closes the window a prompt typed after the settle
+    leaves: its record reaches the transcript only once its ``UserPromptSubmit`` hook has
+    passed, and its stamp only once that hook's process has started, but from the moment it
+    is submitted Claude Code draws its spinner (``· Nucleating… (running UserPromptSubmit hook
+    · 1s)``), and the input box is not idle (:func:`_pane_shows`). Only Claude Code idle at its
+    prompt passes; a capture that fails or a dialog refuses too, without saying a turn began."""
 
     def check() -> None:
-        from aisquare.services import fleet as fleet_service  # lazy, as in `hand_over`
-        from aisquare.services import pane_idle
-
         with store_session() as store:
             session = store.get_session(session_id)
             agent = store.fleet_agent_for_session(session_id)
         if session is None or agent is None or turn_end.begun_since(session):
             raise _StartedATurn(session_id, prompted=True)
-        if not pane_idle.box_idle_now(fleet_service.server_of(agent), agent.pane_id):
-            raise _StartedATurn(session_id, prompted=True)
+        shown = _pane_shows(agent)
+        if shown != "idle":
+            raise _StartedATurn(session_id, prompted=shown == "busy")
         if _background_work(_transcript_of(session, None), agent.created_at):
             raise _StartedATurn(session_id)
 
     return check
+
+
+def _pane_shows(agent: FleetAgent) -> str:
+    """``idle``: Claude Code's input box drawn and idle at its prompt. ``busy``: the box drawn
+    under a spinner or ``esc to interrupt`` — a turn, a prompt's hook included. ``unknown``: no
+    capture, a dialog, no box; one look, which fails closed to anything but ``idle``."""
+    from aisquare.core import claude_screen
+    from aisquare.services import fleet as fleet_service  # lazy, as in `hand_over`
+
+    try:
+        lines = fleet_service.server_of(agent).capture(agent.pane_id).lines
+    except Exception:
+        return "unknown"
+    if claude_screen.box_idle(lines):
+        return "idle"
+    return (
+        "busy" if claude_screen.input_box_at(claude_screen.tail(lines)) is not None else "unknown"
+    )
 
 
 def hand_over(

@@ -1070,16 +1070,20 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   The board says `switched … (before limit)` and the replacement is told it moved
   before its usage limit. It never happens mid-turn: an agent that is working, asking for
   permission or kept going by a note is left alone, and so is one whose turn left background
-  work running — a `run_in_background` command or a background subagent with no completion
-  notice in its transcript yet, which the `/exit` of a move would kill — until that work has
-  reported, and one with a message queued during its turn, which starts the next turn as
-  this one ends. The move waits five seconds after the turn end, past the start-up of the
-  hook a just-submitted prompt runs; then, before the stop and again once the agent is
-  marked as being moved, it checks that nothing began since the turn end — no prompt
-  stamped on the board, no prompt, notice or reply in the transcript (Claude Code writes a
-  prompt there as it is submitted, before its hook stamps the board) — that the pane shows
-  Claude Code idle at its prompt, and that no background work has started; if anything
-  has, the agent is left alone and its next turn end asks again. The manager and the
+  work running, which the `/exit` of a move would kill — a background command, a `Monitor`,
+  a background subagent or a skill forked in the background whose final notice (the one
+  with a status; a Monitor's events have none) is not in its transcript yet, until that
+  work has reported (a `TaskStop` of it, or a Monitor's own timeout, ends it too) — and one
+  with a message queued during its turn, which starts the next turn as this one ends. The
+  move waits five seconds after the turn end, past the start-up of the hook a just-typed
+  prompt runs, so that prompt is stamped on the board; then, before the stop and again once
+  the agent is marked as being moved, it checks that nothing began since the turn end — no
+  prompt stamped on the board, and no queued message taken, notice or reply in the
+  transcript — and that the pane shows Claude Code idle at its prompt, and no background
+  work. The pane is what catches a prompt typed in the last moment: Claude Code shows its
+  spinner from the moment a prompt is submitted, while its hook runs and before the prompt
+  reaches the board or the transcript. If anything has begun, the agent is left alone and
+  its next turn end asks again. The manager and the
   captain are never moved before a limit (a limit still moves them). Nothing moves when the
   windows over the line reset within `wait_if_reset_within_minutes`, when no other account
   is under the line (the agent goes on where it is, and nobody is woken), for an agent put

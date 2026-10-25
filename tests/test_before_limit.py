@@ -33,7 +33,6 @@ from aisquare.models import FleetAgent, LaunchSpec, ProjectInfo, TeamSession
 from aisquare.services import claude_accounts as service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import hooks as hooks_service
-from aisquare.services import pane_idle
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from tests.test_claude_accounts import NOW
@@ -91,7 +90,7 @@ def switched(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         return SimpleNamespace(failures=[])
 
     monkeypatch.setattr(fleet_service, "switch", switch)
-    monkeypatch.setattr(pane_idle, "box_idle_now", lambda server, pane_id: True)
+    monkeypatch.setattr(hooks_service, "_pane_shows", lambda agent: "idle")
     return calls
 
 
@@ -204,14 +203,25 @@ def _stamp(at: datetime | None = None) -> str:
     return (at or datetime.now(tz=UTC)).isoformat().replace("+00:00", "Z")
 
 
+_RESULTS: dict[str, Any] = {
+    "bash": lambda task: {"stdout": "", "stderr": "", "backgroundTaskId": task},
+    "subagent": lambda task: {"isAsync": True, "status": "async_launched", "agentId": task},
+    "monitor": lambda task: {"taskId": task, "timeoutMs": 1800000, "persistent": False},
+    "forked skill": lambda task: {
+        "status": "forked",
+        "background": True,
+        "agentId": task,
+        "result": "Running in the background as @code-review",
+    },
+}
+"""Each background kind's ``toolUseResult``, as this machine's transcripts hold them (Claude
+Code 2.1.304 to 2.1.310; review of #423, round 2)."""
+
+
 def _launch(project: ProjectInfo, kind: str, task: str, *, at: datetime | None = None) -> None:
-    """A background launch in the transcript, as Claude Code 2.1.310 writes one."""
-    if kind == "bash":
-        result: dict[str, Any] = {"stdout": "", "stderr": "", "backgroundTaskId": task}
-        text = f"Command running in background with ID: {task}."
-    else:
-        result = {"isAsync": True, "status": "async_launched", "agentId": task}
-        text = f"Async agent launched successfully.\nagentId: {task}"
+    """A background launch in the transcript, as Claude Code writes one (:data:`_RESULTS`)."""
+    result = _RESULTS[kind](task)
+    text = f"Running in the background: {task}."
     _write(
         _transcript(project),
         {
@@ -226,9 +236,11 @@ def _launch(project: ProjectInfo, kind: str, task: str, *, at: datetime | None =
     )
 
 
-def _completes(project: ProjectInfo, task: str) -> None:
-    """Its ``<task-notification>``, queued and taken as Claude Code queues and takes one."""
-    notice = f"<task-notification>\n<task-id>{task}</task-id>\n<status>completed</status>"
+def _completes(project: ProjectInfo, task: str, *, status: str | None = "completed") -> None:
+    """Its ``<task-notification>``, queued and taken as Claude Code queues and takes one: the
+    final one with a ``<status>``, a Monitor's event without (``status=None``)."""
+    said = f"\n<status>{status}</status>" if status else "\n<event>a line matched</event>"
+    notice = f"<task-notification>\n<task-id>{task}</task-id>{said}"
     _write(
         _transcript(project),
         {
@@ -241,17 +253,23 @@ def _completes(project: ProjectInfo, task: str) -> None:
     )
 
 
-def _prompt(project: ProjectInfo, text: str = "and the docs too") -> None:
-    """A prompt's record, which Claude Code writes when it is submitted, before its
-    ``UserPromptSubmit`` hook has stamped the board."""
+def _taken(project: ProjectInfo, text: str = "and the docs too") -> None:
+    """A message queued and taken after the turn end — a task's notice, or a prompt in ``-p``
+    — whose ``enqueue`` and ``dequeue`` Claude Code writes at once, before any hook runs. A
+    typed prompt's own record comes only once its ``UserPromptSubmit`` hook has passed."""
     _write(
         _transcript(project),
-        {
-            "type": "user",
-            "timestamp": _stamp(),
-            "origin": {"kind": "human"},
-            "message": {"role": "user", "content": text},
-        },
+        {"type": "queue-operation", "operation": "enqueue", "timestamp": _stamp(), "content": text},
+        {"type": "queue-operation", "operation": "dequeue", "timestamp": _stamp()},
+    )
+
+
+def _turn_end_record(project: ProjectInfo) -> None:
+    """What Claude Code writes once a turn's Stop hooks have run."""
+    _write(
+        _transcript(project),
+        {"type": "system", "subtype": "stop_hook_summary", "timestamp": _stamp()},
+        {"type": "system", "subtype": "turn_duration", "timestamp": _stamp()},
     )
 
 
@@ -610,7 +628,7 @@ def test_an_agent_that_is_not_waiting_at_its_prompt_is_never_moved(
     assert started == [] and switched == [] and endpoint.calls == []
 
 
-@pytest.mark.parametrize("kind", ["bash", "subagent"])
+@pytest.mark.parametrize("kind", sorted(_RESULTS))
 def test_background_work_a_turn_left_running_is_no_safe_point_until_it_reports(
     fake_home: Path,
     work: ProjectInfo,
@@ -619,12 +637,13 @@ def test_background_work_a_turn_left_running_is_no_safe_point_until_it_reports(
     started: list[list[str]],
     kind: str,
 ) -> None:
-    """M1 of #423's review: a turn can end with a ``run_in_background`` Bash or a background
-    subagent still running, in the agent's own process; the ``/exit`` of a move kills it, and
-    the resumed conversation waits on a notice that never comes. Until the transcript shows
-    its ``<task-notification>``, no turn end looks (and spends no cool-down); after it, the
-    next one does. A launch from before the row started — another process's, resumed — is
-    not running work."""
+    """M1 of #423's review, every kind (R2-M1): a turn can end with a background Bash, a
+    ``Monitor``, a background subagent or a forked skill still running, in the agent's own
+    process; the ``/exit`` of a move kills it, and the resumed conversation waits on a notice
+    that never comes. Until the transcript shows its final ``<task-notification>`` — the one
+    with a ``<status>``: a Monitor's events carry none — no turn end looks (and spends no
+    cool-down); after it, the next one does. A launch from before the row started — another
+    process's, resumed — is not running work."""
     endpoint = _accounts(monkeypatch, work=_payload(92), home=_payload(10))
     _settings(before_limit="switch")
     agent = _agent(work)
@@ -633,9 +652,11 @@ def test_background_work_a_turn_left_running_is_no_safe_point_until_it_reports(
 
     _stop(runner, work)
     _notify(runner, work, "idle_prompt", "Claude is waiting for your input")
+    _completes(work, "bk1", status=None)  # an event, as a Monitor sends: it runs on
+    _stop(runner, work)
     assert started == [] and _cool_down(work) is None
 
-    _completes(work, "bk1")
+    _completes(work, "bk1", status="stopped" if kind == "monitor" else "completed")
     _launch(work, kind, "bk0", at=agent.created_at - timedelta(minutes=1))  # a resumed one's
     _stop(runner, work)
     assert started == [_worker()]
@@ -707,7 +728,7 @@ def test_a_prompt_that_lands_after_the_first_check_is_caught_after_the_mark(
         raise AssertionError("cut a turn short")
 
     monkeypatch.setattr(fleet_service, "switch", switch)
-    monkeypatch.setattr(pane_idle, "box_idle_now", lambda server, pane_id: True)
+    monkeypatch.setattr(hooks_service, "_pane_shows", lambda agent: "idle")
     _stop(runner, work)
     _work(runner)
 
@@ -715,21 +736,27 @@ def test_a_prompt_that_lands_after_the_first_check_is_caught_after_the_mark(
     assert _state() == "working"  # the turn the mark hid, said
     assert nudged == [] and _cool_down(work) is None
 
-    # The pane is the other witness: a spinner where the box should be idle refuses too.
-    _agent(work)
+    # The pane is what closes the window a prompt typed after the settle leaves: its stamp
+    # and its record come only once its hook has started and passed, but its spinner shows
+    # from the moment it is submitted. A turn on screen refuses, and is said; a pane that
+    # cannot be read (a failed capture, a dialog) refuses too, and says nothing of a turn.
     reached: list[str] = []
 
-    def busy_pane(project: ProjectInfo, label: str, **kwargs: Any) -> Any:
+    def at_the_pane(project: ProjectInfo, label: str, **kwargs: Any) -> Any:
         kwargs["before_stop"]()
         reached.append(label)
         kwargs["after_mark"]()
         raise AssertionError("stopped a pane that is not idle")
 
-    monkeypatch.setattr(fleet_service, "switch", busy_pane)
-    monkeypatch.setattr(pane_idle, "box_idle_now", lambda server, pane_id: False)
-    _stop(runner, work)
-    _work(runner)
-    assert reached == [LABEL] and nudged == [] and _cool_down(work) is None
+    monkeypatch.setattr(fleet_service, "switch", at_the_pane)
+    for shown, state in (("busy", "working"), ("unknown", "waiting")):
+        _agent(work)
+        monkeypatch.setattr(hooks_service, "_pane_shows", lambda agent, shown=shown: shown)
+        _stop(runner, work)
+        _work(runner)
+        assert _state() == state, shown
+        assert nudged == [] and _cool_down(work) is None
+    assert reached == [LABEL, LABEL]
 
 
 def test_a_turn_begun_before_the_worker_reads_the_row_is_left_alone(
@@ -757,7 +784,7 @@ def test_a_turn_begun_before_the_worker_reads_the_row_is_left_alone(
     assert len(started) == 2
 
 
-@pytest.mark.parametrize("seen", ["transcript", "board"])
+@pytest.mark.parametrize("seen", ["queued and taken", "prompt stamped"])
 def test_a_prompt_queued_at_the_turn_end_is_not_cut_by_the_move(
     fake_home: Path,
     work: ProjectInfo,
@@ -767,21 +794,22 @@ def test_a_prompt_queued_at_the_turn_end_is_not_cut_by_the_move(
     nudged: list[str],
     seen: str,
 ) -> None:
-    """#423's tester, scenario 1 (2 of 2): a message queued during the turn is submitted as
-    the Stop hook returns, and its ``UserPromptSubmit`` hook, a process of its own, stamps
-    the board 0.3 to 1.9 s later. Read in that gap, the board said ``waiting`` and the move
-    typed ``/exit`` into the new turn. The move now waits for the turn end to settle and
-    asks what the board cannot hide: the transcript, where Claude Code writes the prompt when
-    it is submitted, and ``prompted_at`` against the turn end, not against what the worker
-    read. Either one refuses: no ``/exit``, nobody woken, the cool-down given back."""
+    """#423's tester, scenario 1 (2 of 2): a message submitted as the Stop hook returns has
+    its ``UserPromptSubmit`` hook, a process of its own, stamp the board 0.3 to 1.9 s later.
+    Read in that gap, the board said ``waiting`` and the move typed ``/exit`` into the new
+    turn. The move now waits for the turn end to settle, then asks against the turn end
+    itself: a message queued and taken since (its ``enqueue`` and ``dequeue`` are on disk at
+    once, before any hook), or ``prompted_at`` later than the turn end, though the state still
+    says ``waiting``. Either refuses: no ``/exit``, nobody woken, the cool-down given back. (A
+    typed prompt later still is the pane's to show: the test after this one's.)"""
     endpoint = _accounts(monkeypatch, work=_payload(92), home=_payload(10))
     _settings(before_limit="switch")
     _agent(work)
     _on_record(endpoint)
     _stop(runner, work)
     assert len(started) == 1
-    if seen == "transcript":
-        _prompt(work)  # submitted; its hook has not run yet, so the board still says waiting
+    if seen == "queued and taken":
+        _taken(work)  # its hook has not run yet, so the board still says waiting
         assert _state() == "waiting"
     else:
         with store_session() as store:  # its hook stamped the prompt, as the heartbeat does
@@ -1234,3 +1262,226 @@ def test_a_failing_check_costs_the_early_move_and_never_the_turn_end(
     assert "will not show this session as waiting" not in done.stderr
     assert _state() == "waiting"
     assert started == []
+
+
+# --------------------------------------------------------------------------- the transcript's rules
+
+
+def _scan(tmp_path: Path, *records: dict[str, Any]) -> Path:
+    path = tmp_path / "scan.jsonl"
+    path.unlink(missing_ok=True)
+    _write(path, *records)
+    return path
+
+
+def _result(result: dict[str, Any], at: datetime | None = None) -> dict[str, Any]:
+    return {
+        "type": "user",
+        "timestamp": _stamp(at),
+        "message": {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]},
+        "toolUseResult": result,
+    }
+
+
+def _notice(task: str, status: str | None) -> dict[str, Any]:
+    said = f"<status>{status}</status>" if status else "<event>[a line matched]</event>"
+    return {
+        "type": "queue-operation",
+        "operation": "enqueue",
+        "content": f"<task-notification>\n<task-id>{task}</task-id>\n{said}",
+    }
+
+
+def test_a_monitor_runs_until_its_final_notice_a_task_stop_or_its_timeout(tmp_path: Path) -> None:
+    """R2-M1: a ``Monitor`` sends events with no ``<status>`` (1,057 on this machine, 256
+    monitors more than one) before its final one, which ends it; so does ``TaskStop``, its call
+    or its result, and its own ``timeoutMs``, unless ``persistent``."""
+    now = datetime.now(tz=UTC)
+    launch = _result({"taskId": "mon1", "timeoutMs": 1800000, "persistent": False})
+
+    def running(*more: dict[str, Any], at: datetime = now) -> list[str]:
+        return transcripts.background_running(_scan(tmp_path, launch, *more), now=at)
+
+    assert running() == ["mon1"]
+    assert running(_notice("mon1", None), _notice("mon1", None)) == ["mon1"]
+    assert running(_notice("mon1", None), _notice("mon1", "stopped")) == []
+    assert running(_result({"message": "Successfully stopped task: mon1", "task_id": "mon1"})) == []
+    stop_call = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "name": "TaskStop", "input": {"task_id": "mon1"}}],
+        },
+    }
+    assert running(stop_call) == []
+    assert running(at=now + timedelta(minutes=31)) == []  # its timeout, not reported
+    forever = _result({"taskId": "mon2", "timeoutMs": 1800000, "persistent": True})
+    assert transcripts.background_running(
+        _scan(tmp_path, forever), now=now + timedelta(hours=5)
+    ) == ["mon2"]
+
+
+def test_only_the_foreground_shapes_with_an_id_are_not_background_work(tmp_path: Path) -> None:
+    """R2-M1: the rules are every kind this machine's 563 transcripts hold, and a shape they do
+    not know that carries an id FAILS CLOSED, running until it reports. The two foreground
+    results that carry an id run no more: a subagent that answered inline, and a skill
+    forked in the foreground."""
+
+    def running(result: dict[str, Any]) -> list[str]:
+        return transcripts.background_running(_scan(tmp_path, _result(result)))
+
+    for kind in _RESULTS:
+        assert running(_RESULTS[kind]("t1")) == ["t1"], kind
+    assert running({"status": "completed", "agentId": "a1", "content": []}) == []
+    assert running({"status": "forked", "agentId": "a2", "result": "done"}) == []
+    assert running({"agentId": "a3", "status": "running"}) == ["a3"]  # a status not known
+    assert running({"shellId": "s1"}) == ["s1"]  # an older or newer id key
+
+
+def test_an_unmatched_enqueue_does_not_hold_every_later_turn_end(
+    fake_home: Path,
+    work: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[list[str]],
+) -> None:
+    """R2-M2: counted over the whole file, one enqueue never matched — in 16 real sessions,
+    the same notice queued twice and taken once — read as a message pending at every turn end
+    after it, a restart's included, and the agent was never moved. The count starts again at
+    each turn end the queue lived through (``stop_hook_summary``, written after the Stop
+    hooks), so a message queued during THIS turn still reads pending at its Stop."""
+    endpoint = _accounts(monkeypatch, work=_payload(92), home=_payload(10))
+    _settings(before_limit="switch")
+    _agent(work)
+    _on_record(endpoint)
+    twice = _notice("bzb1umtm0", "completed")
+    taken = {"type": "queue-operation", "operation": "dequeue", "timestamp": _stamp()}
+    _write(_transcript(work), twice, twice, taken)  # queued twice, taken once
+    _turn_end_record(work)  # and a turn end after it
+
+    _stop(runner, work)
+    assert started == [_worker()]
+
+    _forget_the_cool_down(work)
+    _write(_transcript(work), _notice("late1", "completed"))  # queued during this turn
+    _stop(runner, work)
+    assert len(started) == 1
+
+
+def test_an_account_over_the_line_with_the_others_unread_is_worth_a_look(
+    fake_home: Path,
+    work: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[list[str]],
+) -> None:
+    """R2-m2: the hook's usual case — the agent's account on record over the line, and the
+    others not read in five minutes. Only a read can say whether they have room, and that is
+    the worker's: the hook starts it, reading nothing."""
+    endpoint = _accounts(monkeypatch, work=_payload(92), home=_payload(10))
+    _settings(before_limit="switch")
+    _agent(work)
+    [work_slot] = [a for a in service.list_accounts() if a.slot == 2]
+    service.cached_usage([work_slot])
+    endpoint.calls.clear()
+
+    _stop(runner, work)
+
+    assert started == [_worker()] and endpoint.calls == []
+
+
+def test_what_cannot_be_read_counts_as_a_turn_and_as_background_work(
+    fake_home: Path,
+    work: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[list[str]],
+    tmp_path: Path,
+) -> None:
+    """R2-m2: every way a transcript cannot answer FAILS CLOSED — no transcript, no length to
+    compare, a file shorter than the turn end's length (rewritten), one that cannot be read —
+    so a missing file never lets a move through with background work running."""
+    now = datetime.now(tz=UTC)
+    agent = _agent(work)
+    with store_session() as store:
+        session = store.get_session(SESSION)
+    assert session is not None
+    gone = tmp_path / "gone.jsonl"
+    assert hooks_service._TurnEnd(now, None, None).begun_since(session)
+    assert hooks_service._TurnEnd(now, _transcript(work), None).begun_since(session)
+    assert hooks_service._TurnEnd(now, gone, 0).begun_since(session)
+    size = _transcript(work).stat().st_size
+    assert not hooks_service._TurnEnd(now, _transcript(work), size).begun_since(session)
+    assert transcripts.activity_since(_transcript(work), size + 1)
+    assert hooks_service._background_work(None, agent.created_at)
+    assert hooks_service._background_work(gone, agent.created_at)
+    assert not hooks_service._background_work(_transcript(work), agent.created_at)
+
+    endpoint = _accounts(monkeypatch, work=_payload(92), home=_payload(10))
+    _settings(before_limit="switch")
+    _on_record(endpoint)
+    _transcript(work).unlink()  # neither the hook's path nor the board's is on disk
+    _stop(runner, work)
+    assert started == []
+
+
+@pytest.mark.parametrize("change", ["fleet pause", "a pin"])
+def test_a_pause_or_a_pin_set_while_the_move_settles_stops_it(
+    fake_home: Path,
+    work: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[list[str]],
+    nudged: list[str],
+    change: str,
+) -> None:
+    """R2-m2: ``before_stop`` asks every guard again, not only the turn's: a ``fleet pause``
+    or a binding to an account set during the five seconds of the settle stops the move."""
+    endpoint = _accounts(monkeypatch, work=_payload(92), home=_payload(10))
+    _settings(before_limit="switch")
+    _agent(work)
+    _on_record(endpoint)
+    _stop(runner, work)
+    exited: list[str] = []
+
+    def switch(project: ProjectInfo, label: str, **kwargs: Any) -> Any:
+        if change == "fleet pause":
+            with store_session() as store:
+                team_service.set_signals_in(store, [(work.id, harness.PAUSE_SIGNAL)], "on")
+        else:
+            settings_service.bind_role("coder", account="2")
+        kwargs["before_stop"]()
+        exited.append(label)
+        raise AssertionError("moved after the guard changed")
+
+    monkeypatch.setattr(fleet_service, "switch", switch)
+    _work(runner)
+
+    assert exited == [] and nudged == []
+
+
+def test_two_workers_that_both_would_warn_post_one_line(
+    fake_home: Path,
+    work: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[list[str]],
+) -> None:
+    """The warned row is written compare-and-set before the line: a second worker that read it
+    unwritten says nothing."""
+    endpoint = _accounts(monkeypatch, work=_payload(92), home=_payload(10))
+    _settings(before_limit="warn")
+    _agent(work)
+    _on_record(endpoint)
+    monkeypatch.setattr(hooks_service, "_warned", lambda raw, slot: False)  # both read it unset
+    real = hooks_service._warn
+
+    def stale(found: Any, line: Any, target: Any, settings: Any, warned: str | None) -> None:
+        real(found, line, target, settings, None)
+
+    monkeypatch.setattr(hooks_service, "_warn", stale)
+    _work(runner)
+    _work(runner)
+
+    lines = [text for kind, text in _events(work) if kind == team_service.BEFORE_LIMIT_KIND]
+    assert len(lines) == 1

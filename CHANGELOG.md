@@ -40,13 +40,15 @@ fleet still running, and every release now carries its own installer.**
 - **Move an agent before its account runs out** (F2 of #400): `[accounts] before_limit`,
   `off` by default for this release. With `switch`, a fleet agent whose account reads at or
   over `switch_at` is handed to an account under the line at its next turn end or idle
-  notice, never mid-turn, and never while its turn left a `run_in_background` command or a
-  background subagent running (read off its transcript), which an `/exit` would kill, or
-  with a message queued for its next turn. The move waits five seconds after the turn end,
-  then, before the stop and again once the agent is marked as being moved, checks that
-  nothing began since (the board's prompt stamp, and the transcript, where a prompt shows
-  before its hook stamps the board) and that the pane is idle, and leaves the agent alone
-  if not. The manager and the captain are not moved before a limit. The board says
+  notice, never mid-turn, and never while its turn left background work running (a
+  background command, a `Monitor`, a background subagent or forked skill, read off its
+  transcript until its final notice), which an `/exit` would kill, or with a message queued
+  for its next turn. The move waits five seconds after the turn end, then, before the stop
+  and again once the agent is marked as being moved, checks that nothing began since (the
+  board's prompt stamp, a queued message or notice taken in the transcript) and that the
+  pane shows Claude Code idle at its prompt — the check that catches a prompt typed in the
+  last moment, whose spinner shows before it reaches the board or the transcript — and
+  leaves the agent alone if not. The manager and the captain are not moved before a limit. The board says
   `switched … (before limit)`, and the manager is woken only if the move fails.
   `warn` puts one `before_limit` line on the board per crossing of the line (for you; it
   reaches no agent's prompt). No move when the windows over the line reset within

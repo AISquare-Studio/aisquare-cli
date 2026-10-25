@@ -95,7 +95,8 @@ py3.13 in proxy-up (a configured home, the explainability variables set, the pro
 port free or answering); `ci.yml` says why. A new test gets the average time until
 `.test_durations` is refreshed from a full run's notes:
 `gh run download <run> -p 'shard-*' -D notes`, then
-`python -m tests.shards durations notes py3.12 > .test_durations`.
+`python -m tests.shards durations notes py3.11-ambient-proxy-down py3.12 py3.13-ambient-proxy-up > .test_durations`
+(the three captain-on Linux legs; one file splits Windows about as well as its own would).
 
 **A pull request into a release train (`rc/**`) runs lean CI**: lint, the suite on
 one Linux leg (Python 3.12, captain on) in its shards, the shard check, the Linux

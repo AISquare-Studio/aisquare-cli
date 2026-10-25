@@ -907,7 +907,16 @@ def test_a_ci_failure_does_not_cost_the_prompt_its_spool(
     """Spooling the prompt is an observer of the job; it must not sit downstream
     of the job. With `record_prompt` behind the CI call and inside the same
     `try`, a raise in the CI path — `metric()` is a bare pydantic construction —
-    silently dropped the prompt from the Explainability spool."""
+    silently dropped the prompt from the Explainability spool.
+
+    Shipping is configured HERE. It was not, and the test passed only after one of
+    those above had left ``insights``' once-per-process config cached with shipping
+    on: alone, or in a CI shard without them, the spool was empty for want of it."""
+    config = AppConfig()
+    config.explainability.ship = True
+    config.explainability.gateway_url = "https://gateway.example"
+    save_config(config)
+    insights.reset_cache()
 
     def boom(*_a: object, **_k: object) -> object:
         raise RuntimeError("the CI path exploded")

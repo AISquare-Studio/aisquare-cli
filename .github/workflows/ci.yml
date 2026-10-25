@@ -39,9 +39,11 @@ permissions:
 #   lint     ruff check, ruff format --check, mypy and `uv lock --check`, once. They
 #            ran on every leg, and mypy checks python_version 3.11 whatever runs it.
 #   test     each leg's suite in shards: pytest-split (`--splits N --group k`) splits
-#            it by the per-test times in .test_durations, and each shard runs on
-#            every core (`-n auto`). 4 shards per Linux leg, 6 on Windows, where a
-#            test costs about 2.5 times as much. The two ambient legs are folded in
+#            it by the per-test times in .test_durations (CI's own, from the
+#            shards' notes), and each shard runs on every core (`-n auto`). 4 shards
+#            per Linux leg, 7 on Windows, where the suite takes about three times as
+#            long (61 minutes of test time on 4 cores, against 19 on Linux, run
+#            40226083784). The two ambient legs are folded in
 #            (owner decision): py3.11 runs in the proxy-down ambient and py3.13 in
 #            proxy-up, sharded and parallel like the rest, so the full matrix runs
 #            the suite 5 times rather than 7.
@@ -52,8 +54,9 @@ permissions:
 #            protection to require, whatever the number of legs or shards.
 #
 # Every job has a timeout of about twice its usual time, so a hung shard fails in
-# minutes, not at GitHub's six hours. Installs are uv's, not pip's (the Install
-# steps say by how much); ci/constraints.txt still pins ruff and mypy.
+# minutes, not at GitHub's six hours. Installs are uv's, not pip's: about 1 s
+# against 13 on Linux and 21 against 50 on Windows (run 40226083784 against
+# 40218362245). ci/constraints.txt still pins ruff and mypy.
 #
 # LEAN CI FOR A TRAIN'S SUB-PRS (owner decision 2026-10-23). A pull request into
 # rc/** — one workstream of a release train — runs lint, the py3.12 leg (captain
@@ -160,9 +163,10 @@ jobs:
         {"leg": "py3.12", "os": "ubuntu-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 4},
         {"leg": "py3.13-ambient-proxy-up", "os": "ubuntu-latest", "python": "3.13", "captain": "on", "ambient": "proxy-up", "shards": 4},
         {"leg": "py3.12-captain-off", "os": "ubuntu-latest", "python": "3.12", "captain": "off", "ambient": "none", "shards": 4},
-        {"leg": "windows-py3.12", "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 6},
-        {"leg": "windows-py3.12", "shard": 5, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 6},
-        {"leg": "windows-py3.12", "shard": 6, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 6}]}') }}
+        {"leg": "windows-py3.12", "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 7},
+        {"leg": "windows-py3.12", "shard": 5, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 7},
+        {"leg": "windows-py3.12", "shard": 6, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 7},
+        {"leg": "windows-py3.12", "shard": 7, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 7}]}') }}
     steps:
       - uses: actions/checkout@v7
 

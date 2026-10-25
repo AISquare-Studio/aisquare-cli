@@ -24,7 +24,6 @@ a runner with nothing installed, and the plugin imports pytest only when it is b
 from __future__ import annotations
 
 import json
-import os
 import platform
 import re
 import sys
@@ -57,29 +56,32 @@ def add_option(parser: pytest.Parser) -> None:
     )
 
 
-def _worker() -> bool:
-    return "PYTEST_XDIST_WORKER" in os.environ
-
-
-def plugin(path: Path) -> object:
+def plugin(path: Path, config: pytest.Config) -> object:
     """The plugin that writes ``path`` once collection, and the split, are done.
 
     And, at the end of the run, what each test took (setup, call and teardown, as
     pytest-split's ``--store-durations`` counts it), from the process that sees every
     report: xdist's controller, which hands no test to itself, or a run without xdist.
+
+    Which process this is comes from ``config.workerinput``, which xdist gives its
+    workers, and never from ``PYTEST_XDIST_WORKER``: a pytest that a test starts
+    inherits that variable from the worker running the test (measured, on every
+    leg), and would take itself for a worker.
     """
     import pytest
+
+    worker: str | None = getattr(config, "workerinput", {}).get("workerid")
 
     class Manifest:
         def __init__(self) -> None:
             self.took: dict[str, float] = {}
 
         def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
-            if not _worker():
+            if worker is None:
                 self.took[report.nodeid] = self.took.get(report.nodeid, 0.0) + report.duration
 
         def pytest_sessionfinish(self) -> None:
-            if not _worker():
+            if worker is None:
                 durations = path.with_name(f"{path.stem}.durations.json")
                 durations.parent.mkdir(parents=True, exist_ok=True)
                 durations.write_text(json.dumps(self.took, sort_keys=True), encoding="utf-8")
@@ -92,7 +94,7 @@ def plugin(path: Path) -> object:
             yield
             # Every xdist worker collects the whole suite and splits it the same way;
             # one of them writes. No worker at all (`-n 0`) is the same run, unsplit.
-            if os.environ.get("PYTEST_XDIST_WORKER", "gw0") == "gw0":
+            if worker in (None, "gw0"):
                 write(
                     path,
                     splits=config.getoption("splits", None),

@@ -26,7 +26,7 @@ from typer.testing import CliRunner
 
 import aisquare
 from aisquare.core import agents as agent_core
-from aisquare.core import experimental
+from aisquare.core import experimental, insights
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
 from aisquare.services import ci_client
@@ -514,8 +514,11 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("AISQUARE_API_URL", "http://127.0.0.1:9")
     # The experiment settings are read once per process (ci_client._settings is
     # lru_cached, like core.insights._config), so a cached read from the previous
-    # test's HOME would outlive the home it came from.
+    # test's HOME would outlive the home it came from. So is the insights config,
+    # and a test that never turned shipping on passed only after one that had, in the
+    # same process: green in a whole run, red alone or in a CI shard without it.
     ci_client.reset_cache()
+    insights.reset_cache()
     # Cached once per process (core.agents.current_install), and tests change what it
     # reads: the interpreter (sys.executable) and the distribution's RECORD on sys.path.
     agent_core.current_install.cache_clear()
@@ -1025,7 +1028,7 @@ def pytest_configure(config: pytest.Config) -> None:
     # leg's shards ran its suite exactly once (tests/shards.py).
     manifest = config.getoption(shards.OPTION)
     if manifest:
-        config.pluginmanager.register(shards.plugin(Path(manifest)), "shard-manifest")
+        config.pluginmanager.register(shards.plugin(Path(manifest), config), "shard-manifest")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

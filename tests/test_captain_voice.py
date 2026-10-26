@@ -72,12 +72,24 @@ class StepClock:
 
     def __init__(self) -> None:
         self.now = 1000.0
+        self.reads = 0
+        """How often the server has read it: the window's timer reads it on each pass, so a test
+        that moved it waits for the reads that follow to know the timer has looked."""
 
     def __call__(self) -> float:
+        self.reads += 1
         return self.now
 
     def step(self, seconds: float) -> None:
         self.now += seconds
+
+    def looked(self, times: int = 2, *, seconds: float = 10.0) -> None:
+        """Wait until the server has read the clock ``times`` more times than it had."""
+        wanted = self.reads + times
+        deadline = time.monotonic() + seconds
+        while self.reads < wanted and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert self.reads >= wanted, "the server never read the clock again"
 
 
 class Deliveries:
@@ -928,7 +940,13 @@ def test_listen_in_the_window_the_next_utterance_shows_live() -> None:
 def test_a_request_begun_inside_the_window_is_delivered_though_its_final_lands_after_it() -> None:
     """S1: the window a bare 'Captain' opens is for the NEXT request, judged when it BEGAN. A
     request still being spoken when the window's seconds run out was dropped after its words
-    showed live."""
+    showed live.
+
+    Both halves are pinned on a clock the test moves, which stays past the window for the whole
+    of the request: the window's timer does not close it while the request is being spoken (no
+    ``awake`` frame comes between the words and the end of the audio), and the request is
+    judged by when it began, not by the clock at its final (delivered, and its final not
+    dropped for want of the wake word)."""
     clock = StepClock()  # the request begins inside the window because the test says it does
     harness = Harness(
         canned=["Captain", "find me this"],
@@ -949,25 +967,22 @@ def test_a_request_begun_inside_the_window_is_delivered_though_its_final_lands_a
             live = _until(connection, "stt")
             assert not live["final"] and live["text"] == "find me this"
             clock.step(0.6)  # … and is still being spoken when the window's time is up
-            time.sleep(0.6)  # long enough for the window's own timer to look, and not close it
-            # Back inside the window for the end of the request: the audio's end is known to the
-            # segmenter's thread a moment before the loop sends its final, and a timer looking
-            # in that moment, with the window out of time, closes it a frame ahead of the words
-            # (5 runs of 150 under load; the request is delivered either way). What this test
-            # pins is that the window did not close WHILE the request was being spoken.
-            clock.step(-0.6)
-            _say(connection)
+            clock.looked(2)  # the window's timer has looked at the clock, twice, and held
+            # Every frame the server sent so far is read, up to its answer to a frame it does
+            # not know: an ``awake`` among them is the window closed while the request is spoken.
+            connection.send_text(json.dumps({"t": "probe"}))
+            until_probe: list[dict[str, Any]] = []
+            while not until_probe or until_probe[-1]["t"] != "error":
+                until_probe.append(json.loads(_text(connection)))
+            assert not [f for f in until_probe if f["t"] == "awake"], until_probe
+            _say(connection)  # the request ends, with the window still out of time
             frames: list[dict[str, Any]] = []
             while not frames or frames[-1]["t"] != "reply":
                 frames.append(json.loads(_text(connection)))
+    finals = [f for f in frames if f["t"] == "stt" and f["final"]]
+    assert [f["text"] for f in finals] == ["find me this"], "its final was dropped for no wake word"
     assert frames[-1]["text"] == "done"
     assert harness.deliveries.texts == ["find me this"]
-    order = [
-        f["t"] if f["t"] != "stt" or not f["final"] else "final"
-        for f in frames
-        if f["t"] in ("awake", "reply") or (f["t"] == "stt" and f["final"])
-    ]
-    assert order.index("final") < order.index("awake"), f"the window closed mid-request: {order}"
 
 
 def test_meeting_speech_with_the_captain_mid_sentence_never_shows_on_the_page() -> None:

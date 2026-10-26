@@ -2824,14 +2824,28 @@ class LockedServer(FakeServer):
         super()._write_remote_json()
 
 
-def test_the_panels_controls_write_remote_json_on_a_thread_of_their_own() -> None:
+@pytest.fixture
+def locked_server() -> Iterator[LockedServer]:
+    """A :class:`LockedServer`, its lock let go at teardown whatever the test did: a test that
+    failed before it freed the lock left every write queued behind it waiting out its minute,
+    and the pytest process with them (five of them: five minutes after a red)."""
+    server = LockedServer()
+    try:
+        yield server
+    finally:
+        server.free.set()
+
+
+def test_the_panels_controls_write_remote_json_on_a_thread_of_their_own(
+    locked_server: LockedServer,
+) -> None:
     """The write switch, the Auto-off picker, Regenerate, Revoke and the start's deadline each
     wrote ``remote.json`` on the caller's thread, Textual's in the fleet UI, waiting for the
     file's lock: two seconds a press while another process held it, the fleet UI frozen for
     them (sweep of #243). Each returns at once now, shows what it asked at once, says it is
     saving while the write waits, and lands, in the order asked, once the lock is free."""
     clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
-    server = LockedServer()
+    server = locked_server
     server.devices = [{"id": "dev_0000000a", "ua": "iPhone", "first_seen": "t0", "last_seen": "t1"}]
     tunnels: list[FakeTunnel] = []
 
@@ -2901,10 +2915,12 @@ def test_the_panels_controls_write_remote_json_on_a_thread_of_their_own() -> Non
     controller.turn_off()
 
 
-def test_turning_off_while_a_starts_deadline_waits_leaves_nothing_of_that_start() -> None:
+def test_turning_off_while_a_starts_deadline_waits_leaves_nothing_of_that_start(
+    locked_server: LockedServer,
+) -> None:
     """A Remote turned off before its start's deadline was written: the stopping waits for that
     write, then clears it, and nothing else of the start follows: no ngrok, no saved on."""
-    server = LockedServer()
+    server = locked_server
     tunnels: list[FakeTunnel] = []
 
     def factory(port: int) -> FakeTunnel:
@@ -2923,12 +2939,14 @@ def test_turning_off_while_a_starts_deadline_waits_leaves_nothing_of_that_start(
     assert read_state()["remote_enabled"] is False
 
 
-def test_a_remote_still_starting_as_the_ui_quits_is_saved_as_on_for_the_next_start() -> None:
+def test_a_remote_still_starting_as_the_ui_quits_is_saved_as_on_for_the_next_start(
+    locked_server: LockedServer,
+) -> None:
     """A start saves its switch only once its deadline is written, on the thread that drives
     the controller: a fleet UI that quit before then (a press, then q, while another process
     held remote.json's lock) took no more steps, and the Remote the human turned on did not
     come back at the next start."""
-    server = LockedServer()
+    server = locked_server
     controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
     dropped: list[Callable[[], None]] = []
     controller.call_back = dropped.append  # the UI is gone: what it was handed never runs

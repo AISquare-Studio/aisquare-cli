@@ -8,6 +8,7 @@ place, and the whole path to never costing a session anything when it fails.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from aisquare.core import paths
 from aisquare.core.store import store_session
 from aisquare.services import hooks as hooks_service
 from aisquare.services import metrics as metrics_service
+from tests.budgets import budget
 
 pytestmark = pytest.mark.usefixtures("project_capture")
 
@@ -310,14 +312,25 @@ def test_the_stop_hooks_recording_has_no_lock_wait_in_it(
     and a full rescan of it about 7.5 ms, so time cannot tell one from a slow runner
     (the byte test above holds that). A bound on it was red for runner stalls alone:
     p95 3375.5 ms for twenty Stops on windows-latest (CI run 40251283541), a hundred
-    times the 33.7 ms the same runner measured in run 40039412881."""
+    times the 33.7 ms the same runner measured in run 40039412881.
+
+    What the old bound (p95 under 0.5 s) caught besides a lock wait is a recording that is
+    SLOW, and that is kept as far as a stall cannot reach it: the twenty Stops may take 10 s
+    of this process's own CPU in all (``process_time``, which a runner that was stalled,
+    a lock waited for or a ``sleep`` do not spend), 0.5 s each against the 1.45 ms. A
+    recording that merely sleeps or waits on something other than the store's lock is not
+    caught by anything here, as it was not meant to be by the lock's name."""
     monkeypatch.setenv("AISQUARE_DB_BUSY_MS", "1")
     transcript = tmp_path / f"{SESSION}.jsonl"
     _big_transcript(transcript)
-    assert metrics_service.record_usage(SESSION, str(transcript), tmp_path, trigger="stop")
+    first = metrics_service.record_usage(SESSION, str(transcript), tmp_path, trigger="stop")
+    assert first is not None, "the first Stop recorded nothing: see log/metrics.log"
+    cpu = time.process_time()
     for n in range(20):
         _append(transcript, _assistant(f"m{n}", "Read"), _assistant(f"m{n}", "Read"))
         turn = metrics_service.record_usage(SESSION, str(transcript), tmp_path, trigger="stop")
         assert turn is not None, f"Stop {n} recorded nothing: it waited on the store's lock"
+    spent = time.process_time() - cpu
+    assert spent < budget(10.0), f"twenty Stops took {spent:.1f} s of CPU"
     with store_session() as store:
         assert len(store.turn_usages(SESSION)) == 21

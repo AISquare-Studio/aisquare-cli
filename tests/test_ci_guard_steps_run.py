@@ -17,8 +17,10 @@ the pin on the step.
   collision of the SDK's import name with ours is a fact about one directory on disk, and
   Windows is where overwriting a file another process holds open answers differently.
 
-The two shell steps are RUN, as the runner runs them (``bash -eo pipefail``), against a
-stand-in ``aisquare``, ``python`` and ``pytest`` on PATH: a text pin passes ``true ||``,
+The two shell steps are RUN, as the runner runs them (a step with no ``shell:`` key under
+``bash -e``, one with ``shell: bash`` under ``bash -eo pipefail``, one with ``shell: bash {0}``
+under plain ``bash``: the step's own key is read, :func:`_bash_flags`), against a stand-in
+``aisquare``, ``python`` and ``pytest`` on PATH: a text pin passes ``true ||``,
 ``trap '' EXIT`` and a ``kill`` of the wrong variable, and what these steps do is the point.
 The package steps are pinned as the YAML says them, as the lint steps are
 (``tests/test_ci_is_lean_for_sub_prs.py``).
@@ -43,10 +45,18 @@ import pytest
 
 from tests.ci_matrix import ROOT, choose, workflow
 
-_RUNS_BASH = pytest.mark.skipif(
-    sys.platform == "win32" or shutil.which("bash") is None,
-    reason="runs a step's own bash script, as it runs on ubuntu-latest",
-)
+
+def _no_bash_reason() -> str | None:
+    """Why these tests cannot run here, said as it is: they run a step's own bash script, as it
+    runs on ubuntu-latest, where there is bash and a POSIX shell for the stand-ins."""
+    if sys.platform == "win32":
+        return "SKIPPED, NOT RUN: the stand-ins are POSIX shell scripts (windows-latest has none)"
+    if shutil.which("bash") is None:
+        return "SKIPPED, NOT RUN: bash is not on PATH (ubuntu-latest has it, and runs these)"
+    return None
+
+
+_RUNS_BASH = pytest.mark.skipif(_no_bash_reason() is not None, reason=_no_bash_reason() or "")
 
 _EXPRESSION = re.compile(r"\$\{\{\s*([A-Za-z_.]+)\s*\}\}")
 
@@ -165,6 +175,20 @@ def _gone(pid: int, *, within: float = 15.0) -> bool:
     return True
 
 
+def _bash_flags(step: dict[str, Any]) -> list[str]:
+    """How the runner starts ``step``'s script: ``bash -e {0}`` with no ``shell:`` key,
+    ``bash --noprofile --norc -eo pipefail {0}`` for ``shell: bash``, ``bash {0}`` for
+    ``shell: bash {0}`` (which drops the ``-e``). Any other shell is not run here, and says so."""
+    shell = step.get("shell")
+    if shell is None:
+        return ["-e"]
+    if shell == "bash":
+        return ["--noprofile", "--norc", "-eo", "pipefail"]
+    if shell == "bash {0}":
+        return []
+    pytest.fail(f"{step.get('name')}: shell {shell!r} is not one this test runs the step under")
+
+
 class Ambient:
     """The stand-ins on PATH, and the way to run one of ``test``'s steps against them."""
 
@@ -188,6 +212,16 @@ class Ambient:
         )
         (self.bin / "pytest").write_text(_FAKE_PYTEST, encoding="utf-8")
         (self.bin / "pytest").chmod(0o755)
+        # The step's `mktemp -d` is made under the test's own TMPDIR, whichever mktemp the
+        # machine has: BSD's (macOS) ignores TMPDIR when given no template, and left an empty
+        # tmp.* in the developer's temp folder for each of the eight Configure cases.
+        real = shutil.which("mktemp")
+        if real is not None:
+            self._tool(
+                "mktemp",
+                f'if [ "$#" = 1 ] && [ "$1" = "-d" ]; then\n'
+                f'  exec "{real}" -d "${{TMPDIR:-/tmp}}/tmp.XXXXXXXXXX"\nfi\nexec "{real}" "$@"',
+            )
 
     def _tool(self, name: str, body: str) -> None:
         path = self.bin / name
@@ -205,7 +239,8 @@ class Ambient:
         return json.dumps(found)
 
     def run(self, step: dict[str, Any], *, ambient: str, status: str) -> tuple[int, str]:
-        """``step``'s script under ``bash -eo pipefail`` and its output.
+        """``step``'s script under the bash the runner starts it with (:func:`_bash_flags`), and
+        its output.
 
         The output goes to a FILE, not a pipe: a process the step leaves running holds a
         pipe open, and reading it would then wait on that process rather than on the step.
@@ -227,6 +262,7 @@ class Ambient:
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "AMBIENT": ambient,
             "RUNNER_TEMP": str(temp),
+            "TMPDIR": str(temp),  # the step's `mktemp -d` is made here, and goes with the test
             "AISQUARE_HOME": str(temp / "aisquare-home"),
             "CLAUDE_CONFIG_DIR": str(temp / "claude-config"),
             "CLAUDE_CODE_TMPDIR": str(temp / "claude-tmp"),
@@ -238,7 +274,7 @@ class Ambient:
         log = self.root / "step.log"
         with log.open("wb") as out:
             done = subprocess.run(
-                ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+                ["bash", *_bash_flags(step), "-c", script],
                 cwd=ROOT,
                 env=env,
                 stdin=subprocess.DEVNULL,

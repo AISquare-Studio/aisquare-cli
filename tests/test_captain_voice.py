@@ -967,7 +967,10 @@ def test_a_request_begun_inside_the_window_is_delivered_though_its_final_lands_a
             live = _until(connection, "stt")
             assert not live["final"] and live["text"] == "find me this"
             clock.step(0.6)  # … and is still being spoken when the window's time is up
-            clock.looked(2)  # the window's timer has looked at the clock, twice, and held
+            # The window's timer has looked at the clock twenty-five times (poll_s is 0.02: half a
+            # second) and held: one that held a few passes and then closed is no better than one
+            # that never held.
+            clock.looked(25)
             # Every frame the server sent so far is read, up to its answer to a frame it does
             # not know: an ``awake`` among them is the window closed while the request is spoken.
             connection.send_text(json.dumps({"t": "probe"}))

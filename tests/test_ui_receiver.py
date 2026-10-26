@@ -1005,9 +1005,16 @@ def test_quit_does_not_wait_out_a_client_that_says_nothing(
     """The wait a quit must not sit out is made a minute long, so that sitting it out and
     not doing so differ by a hundred times what a loaded runner costs a thread to wake
     (0.72 s against a bound of 0.25 s, from a wait of 0.5 s, on one). The receiver is
-    waited for until it holds the client's line open, not for a tenth of a second."""
+    waited for until it holds the client's line open, not for a tenth of a second.
+
+    The quit's own join is lengthened to 30 s, too: at its 1 s it gives up on a thread
+    that has not ended and the quit moves on, so a time taken could not tell a quit that
+    woke the read from one that sat it out. Held for the thread, the receiver is gone
+    right after the quit exactly when the quit woke the read, and one that sat it out
+    is still there, however slow the runner."""
     fleet(tmp_path, script)
     monkeypatch.setattr(receiver, "READ_S", 60.0)
+    monkeypatch.setattr(receiver, "JOIN_S", 30.0)
     waiting = threading.Event()
     read_line = receiver._read_line
 
@@ -1017,8 +1024,9 @@ def test_quit_does_not_wait_out_a_client_that_says_nothing(
 
     monkeypatch.setattr(receiver, "_read_line", noted_read_line)
 
-    async def body(pilot: Pilot[None]) -> tuple[float, dict[str, Any]]:
+    async def body(pilot: Pilot[None]) -> dict[str, Any]:
         app = fleet_app(pilot)
+        listening = receiver_of(app)
         with _unix_socket() as silent:
             silent.settimeout(5)
             silent.connect(str(ui_path))
@@ -1026,13 +1034,16 @@ def test_quit_does_not_wait_out_a_client_that_says_nothing(
             began = time.monotonic()
             receiver.stop_listening_for_ui(app)
             took = time.monotonic() - began
+            # Before the client reads: a quit that sat out the read has no answer for it, and
+            # the client's own timeout would end the test before this said why.
+            assert not listening.alive, (
+                f"quit left the receiver in the read of a line that never came ({took:.1f}s)"
+            )
             with silent.makefile("rb") as stream:
-                told = json.loads(stream.readline(64 * 1024))
-        return took, told
+                told: dict[str, Any] = json.loads(stream.readline(64 * 1024))
+        return told
 
-    took, told = drive(body)
-    assert took < receiver.READ_S / 2, f"quit waited {took:.2f}s for a line that never came"
-    assert told == {"ok": False, "said": "asq is quitting"}
+    assert drive(body) == {"ok": False, "said": "asq is quitting"}
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux blocks a connect to a full backlog")

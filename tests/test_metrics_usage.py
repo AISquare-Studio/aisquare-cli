@@ -315,22 +315,27 @@ def test_the_stop_hooks_recording_has_no_lock_wait_in_it(
     times the 33.7 ms the same runner measured in run 40039412881.
 
     What the old bound (p95 under 0.5 s) caught besides a lock wait is a recording that is
-    SLOW, and that is kept as far as a stall cannot reach it: the twenty Stops may take 10 s
+    SLOW, and that is kept in two parts a stall cannot reach. The twenty Stops may take 10 s
     of this process's own CPU in all (``process_time``, which a runner that was stalled,
-    a lock waited for or a ``sleep`` do not spend), 0.5 s each against the 1.45 ms. A
-    recording that merely sleeps or waits on something other than the store's lock is not
-    caught by anything here, as it was not meant to be by the lock's name."""
+    a lock waited for or a ``sleep`` do not spend), 0.5 s each against the 1.45 ms. And the
+    FASTEST of the twenty, by the wall clock, must take under a quarter second: a stall
+    lands on some of the Stops, not on all twenty of them, where a ``sleep`` or a wait
+    on anything but the store's lock is in every one, and so in the fastest."""
     monkeypatch.setenv("AISQUARE_DB_BUSY_MS", "1")
     transcript = tmp_path / f"{SESSION}.jsonl"
     _big_transcript(transcript)
     first = metrics_service.record_usage(SESSION, str(transcript), tmp_path, trigger="stop")
     assert first is not None, "the first Stop recorded nothing: see log/metrics.log"
     cpu = time.process_time()
+    took: list[float] = []
     for n in range(20):
         _append(transcript, _assistant(f"m{n}", "Read"), _assistant(f"m{n}", "Read"))
+        began = time.perf_counter()
         turn = metrics_service.record_usage(SESSION, str(transcript), tmp_path, trigger="stop")
+        took.append(time.perf_counter() - began)
         assert turn is not None, f"Stop {n} recorded nothing: it waited on the store's lock"
     spent = time.process_time() - cpu
     assert spent < budget(10.0), f"twenty Stops took {spent:.1f} s of CPU"
+    assert min(took) < budget(0.25), f"even the fastest of twenty Stops took {min(took):.3f} s"
     with store_session() as store:
         assert len(store.turn_usages(SESSION)) == 21

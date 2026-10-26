@@ -105,8 +105,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (caveat, command, answer, each the last one's child: no quoted text, board note or
   summary can make it, and an unanswered command is none). The value is its args, else its
   answer (`Set model to …`, `Set effort level to …`); the picker's `Default (recommended)`
-  forgets the model pick; a choice "for this session only" runs on in that agent and is no
-  pick; leaving a picker (`Kept model as …`, `Cancelled`) sets nothing. Read as Claude Code
+  forgets the model pick; the 2.1.311 picker's `… with `xhigh` effort` sets the effort too;
+  a choice "for this session only", ultracode for the session included, runs on in that
+  agent and is no pick; leaving a picker (`Kept model as …`, `Cancelled`) sets nothing.
+  Known limit: a `/model` typed mid-turn is recorded nowhere by Claude Code 2.1.311, so it is
+  no pick and a restart starts the agent's previous model; change the model at the prompt. Read as Claude Code
   2.1.310 and 2.1.311 word it: an answer in other words writes no pick (explicit args still
   count), says so once on stderr, and doctor shows it (`fleet model pick`). Nothing else is
   evidence: a model or effort that merely differs from the last turn's, as a custom

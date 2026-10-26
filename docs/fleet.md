@@ -228,10 +228,15 @@ Code writes for a local command (its caveat, the command, its answer, each the l
 child), which no text can make, so a typed prompt, a board note or a compaction summary
 that quotes one counts for nothing, and a command Claude Code never answered for nothing
 either. The value is the command's: what you typed after it, else what Claude Code
-answered (`Set model to `Opus 5.5`` is `claude-opus-5-5`; `Set effort level to high`). The
-picker's `Default (recommended)` forgets the model pick: the account's default from then on.
-A choice "for this session only" runs on in that agent and is no pick. Opening a picker to
-look and leaving it (`Kept model as …`, `Cancelled`) sets nothing. **Nothing else is
+answered (`Set model to `Opus 5.5`` is `claude-opus-5-5`; the 2.1.311 picker's `… with
+`xhigh` effort` sets the effort too; `Set effort level to high`). The picker's `Default
+(recommended)` forgets the model pick: the account's default from then on. A choice "for
+this session only" runs on in that agent and is no pick, and so does ultracode switched on
+or off for the session (`Ultracode on (this session only)`). Opening a picker to look and
+leaving it (`Kept model as …`, `Cancelled`) sets nothing. **Change the model at the prompt,
+not mid-turn**: a `/model` typed while a turn runs switches the agent but Claude Code
+2.1.311 writes no record of it, so it is no pick and a restart starts the model the agent
+had before (a known limit; aisquare guesses nothing from the replies). **Nothing else is
 evidence**: a model or an effort that merely differs from the last turn's, as a custom
 command's or a skill's `model:` or `effort:` frontmatter makes it for ONE turn, writes no
 pick and moves nothing, whoever typed it. The reader knows Claude Code 2.1.310's and

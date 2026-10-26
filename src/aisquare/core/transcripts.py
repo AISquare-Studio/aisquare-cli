@@ -167,7 +167,10 @@ def latest_model(path: Path, *, tail_bytes: int = _TAIL_BYTES) -> str | None:
 #   ``local_command``, the answer the command's child;
 # - a custom command or a skill opens a turn: ``<command-message>quick</command-message>
 #   <command-name>/quick</command-name> …``, then its expansion (``isMeta``);
-# - a typed prompt is the text itself.
+# - a typed prompt is the text itself, a long paste in it ``<pasted_content id=…>…
+#   </pasted_content id=…>`` (2.1.311);
+# - a ``/model`` typed while a turn runs switches the model and writes NO record (2.1.311):
+#   a known limit, no pick (seq 3654 (5)).
 #
 # Text can quote all of this (a typed prompt, a Stop hook's feedback, which is how a board
 # note reaches an agent, a compaction summary) but cannot make the frame: no typed text is
@@ -293,8 +296,10 @@ def _frame_step(
     stripped = text.strip()
     if stripped.startswith(("<command-message>", "/")):
         return "command"
-    if stripped and not stripped.startswith(("[Request interrupted", "<")):
-        return "plain"
+    if stripped.startswith("<pasted_content") or (
+        stripped and not stripped.startswith(("[Request interrupted", "<"))
+    ):
+        return "plain"  # a typed prompt, one opening with a paste (2.1.311) included
     return None
 
 

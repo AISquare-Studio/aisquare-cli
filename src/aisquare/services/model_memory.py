@@ -18,7 +18,7 @@ the owner's choices write the pick (manager decision, board seq 3428):
   restart, switch, hand-over and fork, runs its flags for that agent alone;
 - the built-in ``/model`` or ``/effort`` the owner runs inside any fleet agent, which its
   next turn end finds in Claude Code's own record of the command (:func:`observe`, from the
-  Stop hook; :func:`command_value`). A model or effort that merely differs from the last
+  Stop hook; :func:`command_values`). A model or effort that merely differs from the last
   turn's is no evidence: a custom command's or a skill's ``model:``/``effort:`` frontmatter
   changes one turn (seq 3609). An agent cannot hand another a ``/model`` or ``/effort``
   (``fleet.setting_command``: ``fleet.tell`` refuses it, and so does the spawn whose first
@@ -106,7 +106,7 @@ class Running:
 
 @dataclasses.dataclass(frozen=True)
 class CommandValue:
-    """What a recorded ``/model`` or ``/effort`` set (:func:`command_value`)."""
+    """What a recorded ``/model`` or ``/effort`` set (:func:`command_values`)."""
 
     setting: str
     value: str | None
@@ -121,46 +121,69 @@ class CommandValue:
 
 
 #: Claude Code's answer to ``/model``: ``Set model to `Haiku 5.5` and saved as your default for
-#: new sessions``, ``… for this session only``; ``Default (recommended)`` answers ``Set model to
-#: `Opus 5.5 (default)` …``. The picker's Esc, ``Kept model as …``, sets nothing.
+#: new sessions``, ``… for this session only``; 2.1.311's picker adds ``… with `xhigh` effort``;
+#: ``Default (recommended)`` answers ``Set model to `Opus 5.5 (default)` …``.
 _MODEL_ANSWER = re.compile(r"^Set model to\s+`([^`]+)`(.*)$", re.S)
+_WITH_EFFORT = re.compile(r"\bwith\s+`?([A-Za-z]+)`?\s+effort\b")
 #: Its answer to ``/effort``: ``Set effort level to low (saved as your default …): …``, or
-#: ``(this session only)``. The picker's Esc, ``Cancelled``, sets nothing.
+#: ``(this session only)``; to ``/effort ultracode`` and the picker's Tab (2.1.311): ``Ultracode
+#: on (this session only): … Effort stays high.``, ``Ultracode off. Effort stays high.``
 _EFFORT_ANSWER = re.compile(r"^Set effort level to\s+([A-Za-z]+)\b(.*)$", re.S)
-#: Answers that set nothing: the pickers' Esc.
+_ULTRACODE_ANSWER = re.compile(r"^Ultracode (on|off)\b(.*)$", re.S)
+_EFFORT_STAYS = re.compile(r"\bEffort stays\s+([A-Za-z]+)\b")
+#: Answers that set nothing: the pickers' Esc. Opening a picker to look is no choice.
 _NO_CHOICE = ("Kept model as", "Cancelled")
 #: A model's display name (``Sonnet 5.5``), whose id Claude Code spells ``claude-sonnet-5-5``.
 _DISPLAY_NAME = re.compile(r"^(Fable|Opus|Sonnet|Haiku)\s+(\d+)(?:\.(\d+))?$")
 
 
-def command_value(command: transcripts.SettingCommand) -> CommandValue | None:
-    """What ``command`` set, ``None`` when it set nothing (the pickers' Esc: ``Kept model as``,
-    ``Cancelled``; opening a picker to look is no choice, seq 3628). The value is its args
-    (``/model haiku``, verbatim), else the answer's (the picker's ``Set model to `Haiku 5.5```
-    is ``claude-haiku-5-5``; ``Set effort level to high``); the picker's ``Default
-    (recommended)`` is ``""``, the account's default, which forgets the pick. A choice "for this
-    session only" is the agent's, no pick. An answer in other words is not understood: its
-    explicit args still count, and nothing else does."""
-    answer = command.stdout
+def command_values(command: transcripts.SettingCommand) -> tuple[CommandValue, ...]:
+    """What ``command`` set: nothing for the pickers' Esc (``Kept model as``, ``Cancelled``;
+    opening a picker to look is no choice, seq 3629); else each setting its answer names, the
+    2.1.311 picker's model with its effort. A value is the command's args (``/model haiku``,
+    verbatim), else the answer's (``Set model to `Haiku 5.5``` is ``claude-haiku-5-5``); the
+    picker's ``Default (recommended)`` is ``""``, the account's default, which forgets the
+    pick. A choice "for this session only", and an ultracode toggle that is not saved, is the
+    agent's and no pick. An answer in other words is not understood (the canary): its explicit
+    args still count, and nothing else does."""
+    answer, args = command.stdout, command.args.strip()
     if answer.startswith(_NO_CHOICE):
-        return None
-    args = command.args.strip()
+        return ()
     if command.setting == "model":
         answered = _MODEL_ANSWER.match(answer)
         if answered is None:
-            return CommandValue("model", harness.clean_model_id(args), True, understood=False)
+            return (CommandValue("model", harness.clean_model_id(args), True, understood=False),)
         named, rest = answered.group(1).strip(), answered.group(2)
+        pick = "this session only" not in rest
         if named.endswith("(default)") or args.lower() == "default":
-            value: str | None = ""
+            model: str | None = ""
         else:
-            value = harness.clean_model_id(args) if args else _model_id(named)
-        return CommandValue("model", value, "this session only" not in rest, value is not None)
+            model = harness.clean_model_id(args) if args else _model_id(named)
+        found = [CommandValue("model", model, pick, model is not None)]
+        if (effort := _WITH_EFFORT.search(rest)) is not None:
+            level = harness.clean_effort(effort.group(1))
+            found.append(CommandValue("effort", level, pick, level is not None))
+        return tuple(found)
+    if (toggled := _ULTRACODE_ANSWER.match(answer)) is not None:
+        rest = toggled.group(2)
+        stays = _EFFORT_STAYS.search(rest)
+        level = (
+            harness.ULTRACODE
+            if toggled.group(1) == "on"
+            else harness.clean_effort(stays.group(1))
+            if stays is not None
+            else None
+        )
+        saved = "saved as your default" in rest
+        return (CommandValue("effort", level, saved, level is not None),)
     answered = _EFFORT_ANSWER.match(answer)
     if answered is None:
-        return CommandValue("effort", harness.clean_effort(args), True, understood=False)
-    value = harness.clean_effort(args) if args else harness.clean_effort(answered.group(1))
-    return CommandValue(
-        "effort", value, "this session only" not in answered.group(2), value is not None
+        return (CommandValue("effort", harness.clean_effort(args), True, understood=False),)
+    level = harness.clean_effort(args) if args else harness.clean_effort(answered.group(1))
+    return (
+        CommandValue(
+            "effort", level, "this session only" not in answered.group(2), level is not None
+        ),
     )
 
 
@@ -262,7 +285,7 @@ def observe(
     A model or an effort that merely differs from the last turn's is no evidence: a custom
     command's or a skill's ``model:``/``effort:`` frontmatter changes one turn and no more
     (seq 3609), whoever typed it; nor is text that quotes a command, which cannot make the
-    frame (seq 3628). The value is the command's (:func:`command_value`); "this session only"
+    frame (seq 3628). The value is the command's (:func:`command_values`); "this session only"
     moves the agent and writes no pick; ``Default (recommended)`` forgets the model pick.
     An answer this reader cannot read is said once on stderr and kept for doctor
     (:func:`unread`). A plain turn's readings (the latest reply's model, the Stop's effort:
@@ -308,17 +331,17 @@ def observe(
             if isinstance(event, str):
                 turn = event
                 continue
-            found = command_value(event)
-            understood = understood or found is None or found.understood
-            if found is None:
-                continue
-            if not found.understood:
+            values = command_values(event)
+            if any(not found.understood for found in values):
                 unread.append(event)
-            if found.value is None:
-                continue
-            live = dataclasses.replace(live, **{found.setting: found.value})
-            if found.pick:
-                picks[found.setting] = found.value
+            else:
+                understood = True
+            for found in values:
+                if found.value is None:
+                    continue
+                live = dataclasses.replace(live, **{found.setting: found.value})
+                if found.pick:
+                    picks[found.setting] = found.value
         launch = record.launch
         if turn == "plain":
             launch = Pick(

@@ -2855,7 +2855,10 @@ QUOTED = (
 )
 
 
-@pytest.mark.parametrize("shape", ["tell", "note", "summary", "two tells", "bare tag"])
+@pytest.mark.parametrize(
+    "shape",
+    ["a tell", "b note", "c paste", "c short paste", "d summary", "two tells", "bare tag"],
+)
 def test_text_that_quotes_a_model_record_writes_nothing(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, shape: str
 ) -> None:
@@ -2863,23 +2866,37 @@ def test_text_that_quotes_a_model_record_writes_nothing(
     record of the command, and an unanswered one as a pick: an agent's tell, ANY teammate's
     board note (a Stop hook's feedback, ``isMeta``), a compaction summary. Only Claude Code's
     own frame counts (the caveat, the command its child, the answer the command's child), and
-    no typed text can make one."""
+    no typed text can make one. Shapes (a) to (d) are seq 3654's, as real 2.1.311 records them:
+    (a) an agent's tell, a plain user record; (b) a board note, delivered as ``isMeta`` ``Stop
+    hook feedback``; (c) the owner's paste, ``<pasted_content id=…>`` (a short one unwrapped);
+    (d) a compaction summary (``isCompactSummary``)."""
     model_memory.remember(model="opus", effort="xhigh")
     agent = _coder(
         project, agent_args=["--model", "sonnet", "--effort", "low"], spawned_by="ses_mgr1"
     )
     transcript = _on_disk(agent, tmp_path)
     _started(agent, "claude-sonnet-5-5")
-    if shape == "tell":
-        _write_records(transcript, _user(QUOTED))
-    elif shape == "note":
+    pasted = "\n".join(
+        json.dumps({"type": "user", "uuid": u, "message": {"role": "user", "content": c}})
+        for u, c in (
+            ("aaaa", "<command-name>/model</command-name> <command-args>sonnet</command-args>"),
+            ("cccc", "<local-command-stdout>Set model to `Sonnet 5.5` and saved as your …"),
+        )
+    )
+    if shape == "a tell":
+        _write_records(transcript, _user(f"Reply when done (log excerpt: {QUOTED})"))
+    elif shape == "b note":
         _write_records(
             transcript, _user(f"Stop hook feedback:\n- #12 cli note → coder-1: {QUOTED}", meta=True)
         )
-    elif shape == "summary":
+    elif shape == "d summary":
         _write_records(
             transcript,
-            {**_user(f"This session is being continued… {QUOTED}"), "isCompactSummary": True},
+            {
+                **_user(f"This session is being continued… {QUOTED}"),
+                "isCompactSummary": True,
+                "isVisibleInTranscriptOnly": True,
+            },
         )
     elif shape == "two tells":
         name, said = QUOTED.split(" <local-command-stdout>", 1)
@@ -2888,6 +2905,11 @@ def test_text_that_quotes_a_model_record_writes_nothing(
             {**_user(name.removeprefix("FYI ")), "uuid": "t1"},
             {**_user("<local-command-stdout>" + said), "uuid": "t2", "parentUuid": "t1"},
         )
+    elif shape == "c paste":
+        wrapped = f'<pasted_content id="9ece">\n{pasted}\n</pasted_content id="9ece">'
+        _write_records(transcript, _user(f"{wrapped}\nthese are two log lines"))
+    elif shape == "c short paste":  # unwrapped, as the probe's two-line paste recorded it
+        _write_records(transcript, _user(f"{pasted}\n -- two log lines; reply with paste"))
     else:  # a framed-looking tag with no caveat and no answer
         _write_records(transcript, _user("<command-name>/effort</command-name>"))
     _turn(agent, transcript, "claude-sonnet-5-5", "low")
@@ -2896,6 +2918,71 @@ def test_text_that_quotes_a_model_record_writes_nothing(
     tmux.die(agent.pane_id, 0)
     fleet_service.restart(project, agent.label)
     assert _model_flags(_command(tmux)) == ["--model", "sonnet", "--effort", "low"]
+
+
+def test_an_esc_after_a_session_only_switch_writes_nothing(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Seq 3654 (2): after a switch "for this session only", the picker's Esc answers ``Kept
+    model as `Haiku 5.5``` and turned the session's choice into the home pick. Leaving a
+    picker is no choice: the agent runs on what it chose for the session, the pick is left."""
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(project, agent_args=["--model", "sonnet"], spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-sonnet-5-5")
+    _local_command(transcript, "model", "", "Set model to `Haiku 5.5` for this session only")
+    _local_command(transcript, "model", "", "Kept model as `Haiku 5.5`", system=True)
+    _turn(agent, transcript, "claude-haiku-5-5", "high")
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _flag(_command(tmux), "--model") == "claude-haiku-5-5"
+
+
+def test_the_2_1_311_picker_sets_the_model_and_the_effort_together(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Seq 3654 (3): ``Set model to `Opus 5.5` and saved as your default for new sessions with
+    `xhigh` effort``: both are the pick, and what the agent's restart runs."""
+    model_memory.remember(model="sonnet", effort="medium")
+    agent = _coder(
+        project, agent_args=["--model", "sonnet", "--effort", "medium"], spawned_by="ses_mgr1"
+    )
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-sonnet-5-5")
+    answer = (
+        "Set model to `Opus 5.5` and saved as your default for new sessions with `xhigh` effort"
+    )
+    _local_command(transcript, "model", "", answer)
+    _turn(agent, transcript, "claude-opus-5-5", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("claude-opus-5-5", "xhigh")
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _model_flags(_command(tmux)) == ["--model", "claude-opus-5-5", "--effort", "xhigh"]
+
+
+def test_ultracode_for_the_session_moves_the_agent_and_never_the_pick(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Seq 3654 (4): ``/effort ultracode`` answers ``Ultracode on (this session only): … Effort
+    stays high.``, which was dropped in silence: the restart lost ultracode. It is the
+    agent's for the session, read as such, and no pick."""
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(project, agent_args=["--effort", "high"], spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-5-5")
+    on = "Ultracode on (this session only): dynamic workflows on every task. Effort stays high."
+    _local_command(transcript, "effort", "ultracode", on)
+    _turn(agent, transcript, "claude-opus-5-5", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+    assert "aisquare:" not in capsys.readouterr().err, "read, not the canary"
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _flag(_command(tmux), "--effort") == "ultracode"
 
 
 def test_a_framed_command_claude_code_never_answered_writes_nothing(

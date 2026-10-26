@@ -510,46 +510,94 @@ def test_only_claude_codes_own_frame_is_a_command_on_2_1_310() -> None:
     assert str(answers[6]).startswith("Set effort level to medium (this session only)")
 
 
+def _values(setting: str, args: str, answer: str) -> tuple[model_memory.CommandValue, ...]:
+    return model_memory.command_values(transcripts.SettingCommand(setting, args, answer, "2.1.311"))
+
+
 def test_a_commands_value_comes_from_its_args_else_what_claude_code_answered() -> None:
-    """Round 6 decisions (seq 3628): ``Kept model as`` (the picker's Esc) sets nothing, nor
-    does ``Cancelled``; ``Default (recommended)`` forgets the model (``""``: the account's
+    """Round 6 decisions (seq 3628, 3629): ``Kept model as`` (the picker's Esc) sets nothing,
+    nor does ``Cancelled``; ``Default (recommended)`` forgets the model (``""``: the account's
     default from then on); "this session only" moves the agent and is no pick."""
-    value = model_memory.command_value
+    value = model_memory.CommandValue
+    assert _values("model", "haiku", SET.format("Haiku 5.5")) == (value("model", "haiku", True),)
+    assert _values("model", "", SET.format("Sonnet 5.5")) == (
+        value("model", "claude-sonnet-5-5", True),
+    )
+    assert _values("model", "", SET.format("Opus 5.5 (default)")) == (value("model", "", True),)
+    assert _values("model", "", "Kept model as `Opus 5.5 (default)`") == ()
+    assert _values("model", "", "Kept model as `Fable 5.1`") == ()
+    assert _values("effort", "", "Cancelled") == ()
+    assert _values("model", "", "Set model to `Sonnet 5.5` for this session only") == (
+        value("model", "claude-sonnet-5-5", False),
+    )
+    assert _values("effort", "", "Set effort level to medium (this session only): Balanced") == (
+        value("effort", "medium", False),
+    )
+    assert _values("effort", "low", "Set effort level to low (saved as your default for new …") == (
+        value("effort", "low", True),
+    )
 
-    def command(setting: str, args: str, answer: str) -> transcripts.SettingCommand:
-        return transcripts.SettingCommand(setting, args, answer, "2.1.311")
 
-    assert value(command("model", "haiku", SET.format("Haiku 5.5"))) == model_memory.CommandValue(
-        "model", "haiku", True
+def test_the_2_1_311_answers_set_what_they_say() -> None:
+    """Seq 3654 (3) and (4): the 2.1.311 picker sets the effort with the model (``… with
+    `xhigh` effort``), and ``/effort ultracode`` and the picker's Tab answer ``Ultracode on
+    (this session only)`` / ``Ultracode off. Effort stays high.``, each a choice for the
+    session: the agent runs it, the pick is left."""
+    value = model_memory.CommandValue
+    saved = SET.format("Opus 5.5") + " with `xhigh` effort"
+    assert _values("model", "", saved) == (
+        value("model", "claude-opus-5-5", True),
+        value("effort", "xhigh", True),
     )
-    assert value(command("model", "", SET.format("Sonnet 5.5"))) == model_memory.CommandValue(
-        "model", "claude-sonnet-5-5", True
+    session = "Set model to `Sonnet 5.5` for this session only with `high` effort"
+    assert _values("model", "", session) == (
+        value("model", "claude-sonnet-5-5", False),
+        value("effort", "high", False),
     )
-    assert value(command("model", "", SET.format("Opus 5.5 (default)"))) == (
-        model_memory.CommandValue("model", "", True)
+    on = "Ultracode on (this session only): dynamic workflows on every task. Effort stays high."
+    assert _values("effort", "ultracode", on) == (value("effort", "ultracode", False),)
+    assert _values("effort", "", "Ultracode off. Effort stays high.") == (
+        value("effort", "high", False),
     )
-    assert value(command("model", "", "Kept model as `Opus 5.5 (default)`")) is None
-    assert value(command("model", "", "Kept model as `Fable 5.1`")) is None
-    assert value(command("effort", "", "Cancelled")) is None
-    assert value(
-        command("model", "", "Set model to `Sonnet 5.5` for this session only")
-    ) == model_memory.CommandValue("model", "claude-sonnet-5-5", False)
-    assert value(
-        command("effort", "", "Set effort level to medium (this session only): Balanced")
-    ) == model_memory.CommandValue("effort", "medium", False)
-    assert value(
-        command("effort", "low", "Set effort level to low (saved as your default for new …")
-    ) == model_memory.CommandValue("effort", "low", True)
+
+
+def test_the_2_1_311_picker_answers_are_read_off_its_own_records() -> None:
+    """``tests/fixtures/claude_code/model_picker_2.1.311.jsonl``: real 2.1.311 records of the
+    picker saved with an effort, session-only with one and then Esc, ``/effort ultracode``,
+    the picker's Tab, ``/effort high``, and a paste of two lines of a ``/model`` record,
+    which is a typed prompt and no command."""
+    events = _events("model_picker_2.1.311.jsonl")
+    assert [event for event in events if isinstance(event, str)] == ["plain", "plain", "plain"]
+    found = [
+        model_memory.command_values(transcripts.SettingCommand(*event, None))
+        for event in events
+        if not isinstance(event, str)
+    ]
+    value = model_memory.CommandValue
+    assert found == [
+        (),  # Kept
+        (value("model", "claude-opus-5-5", True), value("effort", "xhigh", True)),
+        (value("model", "claude-sonnet-5-5", False), value("effort", "high", False)),
+        (),  # Kept, after a session-only switch: still nothing
+        (value("effort", "ultracode", False),),
+        (value("effort", "high", False),),
+        (value("effort", "high", True),),
+    ]
 
 
 def test_an_answer_this_version_cannot_read_is_said_and_explicit_args_still_count() -> None:
-    """Round 6 minor 3: a reworded answer must not fail silently. It is unread
+    """Round 6 minor 3, seq 3654 (4): a reworded answer must not fail silently. It is unread
     (``understood=False``: the canary), and only the command's own args are a value."""
-    value = model_memory.command_value
-    reworded = transcripts.SettingCommand("model", "haiku", "Model set to Haiku 5.5", "2.2.0")
-    assert value(reworded) == model_memory.CommandValue("model", "haiku", True, understood=False)
-    bare = transcripts.SettingCommand("model", "", "Model set to Haiku 5.5", "2.2.0")
-    assert value(bare) == model_memory.CommandValue("model", None, True, understood=False)
+    value = model_memory.CommandValue
+    assert _values("model", "haiku", "Model set to Haiku 5.5") == (
+        value("model", "haiku", True, understood=False),
+    )
+    assert _values("model", "", "Model set to Haiku 5.5") == (
+        value("model", None, True, understood=False),
+    )
+    assert _values("effort", "", "Turbo mode engaged") == (
+        value("effort", None, True, understood=False),
+    )
 
 
 def _framed(path: Path, *records: dict[str, object]) -> None:
@@ -579,6 +627,20 @@ def test_a_prompt_that_mentions_a_tool_result_is_a_prompt(tmp_path: Path) -> Non
     """Round 6 minor 6: the tool-result filter skipped every line that said ``tool_result``."""
     path = tmp_path / "t.jsonl"
     prompt = {"role": "user", "content": "why is the tool_result empty?"}
+    _framed(path, {"type": "user", "uuid": "p1", "message": prompt})
+    scan = transcripts.commands_since(path, 0)
+    assert scan is not None and scan.events == ("plain",)
+
+
+def test_a_prompt_that_opens_with_a_paste_is_a_plain_prompt(tmp_path: Path) -> None:
+    """2.1.311 records a long paste as ``<pasted_content id=…>…</pasted_content id=…>`` at the
+    prompt's start: the owner's typed prompt, a plain turn, whatever it quotes (seq 3654 c)."""
+    path = tmp_path / "t.jsonl"
+    quoted = "<command-name>/model</command-name><command-args>sonnet</command-args>"
+    prompt = {
+        "role": "user",
+        "content": f'<pasted_content id="9ece">\n{quoted}\n</pasted_content id="9ece">\nlook',
+    }
     _framed(path, {"type": "user", "uuid": "p1", "message": prompt})
     scan = transcripts.commands_since(path, 0)
     assert scan is not None and scan.events == ("plain",)

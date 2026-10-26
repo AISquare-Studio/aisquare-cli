@@ -663,7 +663,7 @@ def default(
     A launch resolves them top-down: ``--account`` on the command line, then the
     role's binding, then the project's default, then the machine's; with no
     account signed in it runs on whatever binary of the default agent (``claude``, or
-    ``codex`` under ``[agents] default``) the shell already has.
+    ``codex`` once ``agents.default`` is codex) the shell already has.
 
     A project's default is per agent: an account sets its own agent's, and
     ``--clear --project`` clears Claude Code's unless ``--agent codex`` says

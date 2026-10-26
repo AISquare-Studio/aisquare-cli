@@ -44,7 +44,9 @@ from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.tmux import TmuxError, TmuxServer, TmuxUnavailable
 from aisquare.models import (
     FleetAgent,
+    FreshPlan,
     FreshReport,
+    FreshUnpushed,
     ProjectInfo,
     TeamEvent,
     TeamSession,
@@ -210,7 +212,8 @@ def stops(monkeypatch: pytest.MonkeyPatch) -> Stops:
                         created_at=datetime.now(tz=UTC),
                     )
                 )
-        return fleet_service.ShutdownReport(stopped=live)
+        killed, faked.sessions = faked.sessions, []  # its sessions go with the stop
+        return fleet_service.ShutdownReport(stopped=live, sessions_killed=killed)
 
     def shutdown_plan(project: ProjectInfo, **_: Any) -> fleet_service.ShutdownPlan:
         return fleet_service.ShutdownPlan(sessions=list(faked.sessions))
@@ -817,13 +820,23 @@ def test_an_incomplete_reset_prints_its_partial_report_under_json(
 
 
 def _sessions_standing(monkeypatch: pytest.MonkeyPatch, *sessions: str) -> None:
-    """The project's tmux sessions as the plan and its read-only listing see them."""
-    monkeypatch.setattr(fleet_service, "project_sessions", lambda *_: list(sessions))
+    """The project's tmux sessions as the plan and its read-only listing see them: standing
+    until a stop has run that left none standing (``_stop`` returned), as a real one takes
+    them down, then gone, so the strict read after the stop confirms them down."""
+    standing = list(sessions)
+    monkeypatch.setattr(fleet_service, "project_sessions", lambda *_: list(standing))
     monkeypatch.setattr(
         fleet_service,
         "shutdown_plan",
-        lambda *_, **__: fleet_service.ShutdownPlan(sessions=list(sessions)),
+        lambda *_, **__: fleet_service.ShutdownPlan(sessions=list(standing)),
     )
+    real_stop = fresh_service._stop
+
+    def stop(*args: Any, **kwargs: Any) -> None:
+        real_stop(*args, **kwargs)  # raises for a stop that left anything standing
+        standing.clear()
+
+    monkeypatch.setattr(fresh_service, "_stop", stop)
 
 
 def test_m1_a_confirmed_discard_covers_only_the_work_it_listed(
@@ -1312,3 +1325,186 @@ def test_a_commit_made_while_the_dialog_was_open_is_refused_with_nothing_stopped
     with store_session() as store:
         assert [row.label for row in store.fleet_agents(alpha.id, live_only=True)] == ["coder-2"]
     assert spawned == []
+
+
+# --- review round 4 on #429 (#5) -----------------------------------------------------------
+
+
+def _stray_session(tmp_path: Path) -> tuple[ProjectInfo, TmuxServer, str, int]:
+    """Alpha with no live row, and its session standing with the process a row recorded as
+    died left running in it, on the test's own tmux server."""
+    alpha = _add(tmp_path / "alpha", "alpha-x")
+    srv = fleet_service.server()
+    session = fleet_service.session_name("alpha-x")
+    srv.run("new-session", "-d", "-s", session, "-n", "coder-1", "sleep 600")
+    pane, pid = srv.run(
+        "list-panes", "-s", "-t", f"={session}", "-F", "#{pane_id} #{pane_pid}"
+    ).split()
+    with store_session() as store:
+        row = store.upsert_fleet_agent(
+            _agent(alpha, "coder-1", pane_id=pane, tmux_socket=fleet_service.settings().tmux_socket)
+        )
+        store.end_fleet_agent(row.id, exit_status=None, ended_by="died")
+    return alpha, srv, session, int(pid)
+
+
+def _denied(self: TmuxServer, name: str) -> bool:
+    raise TmuxError("error connecting to /private/tmp/tmux-501/asq (Permission denied)")
+
+
+_NEEDS_TMUX = pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("tmux") is None, reason="tmux is not installed"
+)
+
+
+@_NEEDS_TMUX
+def test_n2_a_session_tmux_stops_answering_for_during_the_stop_is_never_said_to_have_ended(
+    tmp_path: Path,
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N2 (round 4), path 1: has-session stops answering between the plan and the stop's
+    kill phase, which passes over a session it asked just in case. "Neither killed nor
+    failed" was read as gone: the report said the session ended, and the reset went on
+    beside it and its running process. The strict read after the stop decides: it stands,
+    or cannot be told of, so nothing is removed and the board stays."""
+    alpha, srv, session, stray = _stray_session(tmp_path)
+    real_shutdown = fleet_service.shutdown
+    real_ask = TmuxServer.has_session_or_raise
+
+    def shutdown(project: ProjectInfo, **kwargs: Any) -> fleet_service.ShutdownReport:
+        monkeypatch.setattr(TmuxServer, "has_session_or_raise", _denied)
+        try:
+            return real_shutdown(project, **kwargs)
+        finally:
+            monkeypatch.setattr(TmuxServer, "has_session_or_raise", real_ask)
+
+    monkeypatch.setattr(fleet_service, "shutdown", shutdown)
+    tasks = len(_rows(alpha.id)["team_task"])
+
+    with pytest.raises(fresh_service.FreshIncomplete) as stopped:
+        fresh_service.start_fresh(alpha)
+
+    assert f"tmux session asq:{session} still stands" in str(stopped.value)
+    assert "aisquare fleet shutdown --project alpha-x" in str(stopped.value)
+    assert stopped.value.report.sessions_gone == []
+    assert srv.has_session(session) and _alive(stray)
+    assert len(_rows(alpha.id)["team_task"]) == tasks and spawned == []
+
+
+@_NEEDS_TMUX
+def test_n2_a_session_the_plans_just_in_case_ask_misses_is_still_stopped(
+    tmp_path: Path,
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N2 (round 4), path 2: has-session answers the strict listing, then fails for the
+    plan's just-in-case ask, which passes over it: the plan listed none, no stop ran, and the
+    reset went on over the session and its process. The stop runs for what the strict read
+    saw, and the strict read after it decides; here tmux cannot answer it, so nothing is
+    removed."""
+    alpha, srv, session, stray = _stray_session(tmp_path)
+    real_ask = TmuxServer.has_session_or_raise
+    asks: list[str] = []
+
+    def flaky(self: TmuxServer, name: str) -> bool:
+        asks.append(name)
+        if len(asks) == 1:  # the strict listing's ask answers…
+            return real_ask(self, name)
+        return _denied(self, name)  # …and every one after it fails
+
+    monkeypatch.setattr(TmuxServer, "has_session_or_raise", flaky)
+    stopped: list[str] = []
+
+    def shutdown(project: ProjectInfo, **_: Any) -> fleet_service.ShutdownReport:
+        stopped.append(project.id)
+        return fleet_service.ShutdownReport()  # its kill phase passed over the session too
+
+    monkeypatch.setattr(fleet_service, "shutdown", shutdown)
+    tasks = len(_rows(alpha.id)["team_task"])
+
+    with pytest.raises(fresh_service.FreshIncomplete) as incomplete:
+        fresh_service.start_fresh(alpha)
+
+    assert stopped == [alpha.id], "the stop ran for the session the strict read saw"
+    assert f"tmux could not say whether {session} stands" in str(incomplete.value)
+    monkeypatch.setattr(TmuxServer, "has_session_or_raise", real_ask)
+    assert srv.has_session(session) and _alive(stray)
+    assert len(_rows(alpha.id)["team_task"]) == tasks and spawned == []
+
+
+def test_a_session_standing_with_nothing_stopped_refuses_with_nothing_touched(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The strict read runs when no stop ran too: a session that came up after the plan read
+    none is a refusal, before anything is touched."""
+    alpha, _, _, _ = two
+    reads: list[int] = []
+
+    def sessions(*_: Any) -> list[str]:
+        reads.append(1)
+        return [] if len(reads) == 1 else ["asq:asq-alpha-x"]
+
+    monkeypatch.setattr(fleet_service, "project_sessions", sessions)
+    before = _rows(alpha.id)
+
+    with pytest.raises(fresh_service.FreshRefused) as refused:
+        fresh_service.start_fresh(alpha)
+
+    assert refused.value.code == "fleet_error"
+    assert "tmux session asq:asq-alpha-x still stands" in str(refused.value)
+    assert _rows(alpha.id) == before and spawned == []
+
+
+def test_the_brief_line_is_built_from_the_fields_not_parsed_from_the_path() -> None:
+    """Nit: the brief form re-parsed the long one on ": ", and a path may hold ": "."""
+    item = FreshUnpushed(path=Path("/work/a: b/coder-1"), commits=2, uncommitted=True)
+
+    assert fresh_service.unpushed_brief(item) == (
+        "coder-1: 2 commits on no remote, uncommitted changes"
+    )
+
+
+def test_work_found_before_the_stop_tells_a_terminal_user_to_run_it_again(
+    runner: CliRunner,
+    unpushed: tuple[ProjectInfo, Path, str],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    stops: Stops,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tips are judged before the stop now, so the refusal a terminal user who passed
+    --discard-unpushed and confirmed the list most often meets is this one, and it still
+    told them to "pass --discard-unpushed". Like the one after the stop, it says to run it
+    again and confirm the new list, and nothing is stopped."""
+    alpha, tree, _ = unpushed
+    with store_session() as store:
+        store.upsert_fleet_agent(_agent(alpha, "coder-2"))  # still at work
+    real_plan = fresh_service.plan
+    plans: list[int] = []
+
+    def plan(project: ProjectInfo, **kwargs: Any) -> FreshPlan:
+        plans.append(1)
+        if len(plans) == 2:  # the run's own plan, after the terminal's yes to the first
+            (tree / "more.txt").write_text("committed meanwhile\n", encoding="utf-8")
+            _git("add", "more.txt", cwd=tree)
+            _git("commit", "-q", "-m", "more", cwd=tree)
+        return real_plan(project, **kwargs)
+
+    monkeypatch.setattr(fresh_service, "plan", plan)
+    monkeypatch.setattr("aisquare.cli.project._stdin_is_a_terminal", lambda: True)
+
+    result = runner.invoke(
+        app, ["project", "fresh", "-P", "alpha-x", "--discard-unpushed"], input="y\ny\n"
+    )
+
+    assert result.exit_code == 2, result.output
+    said = " ".join(result.output.split())
+    assert "run it again to see and confirm the new list" in said
+    assert "2 commits on no remote" in said and "pass --discard-unpushed" not in said
+    assert stops.asked == [], "nothing was stopped"
+    without = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--yes"])
+    assert "pass --discard-unpushed" in " ".join(without.output.split()), (
+        "without the flag, the flag is still what to pass"
+    )

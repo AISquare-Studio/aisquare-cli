@@ -151,6 +151,9 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fresh.py", "_held_now"): (
         "the project being started fresh, whose agents started again after its stop"
     ),
+    ("services/fresh.py", "_confirm_down"): (
+        "the project being started fresh, whose tmux session still stands, or cannot be asked"
+    ),
     ("services/fresh.py", "found_after_stop"): (
         "the project whose plan found the work, the one being started fresh, whose fleet the "
         "stop left stopped"

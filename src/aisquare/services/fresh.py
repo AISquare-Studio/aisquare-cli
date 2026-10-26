@@ -146,8 +146,10 @@ def start_fresh(
         raise FreshRefused(unpushed_refusal(planned), code="unpushed_work", plan=planned)
     project = planned.project
     report = FreshReport(project=project, planned=planned.counts)
-    if planned.live_agents or planned.sessions:
-        _stop(project, report, actor=actor, planned=planned.sessions)
+    stopped = bool(planned.live_agents or planned.sessions)
+    if stopped:
+        _stop(project, report, actor=actor)
+    _confirm_down(project, report, planned.sessions, stopped=stopped)
     try:
         found, trees, tips = _held_now(project, report, branches=branches)
         if _uncovered(found, discard):
@@ -201,9 +203,7 @@ def start_fresh(
     return report
 
 
-def _stop(
-    project: ProjectInfo, report: FreshReport, *, actor: str, planned: Sequence[str] = ()
-) -> None:
+def _stop(project: ProjectInfo, report: FreshReport, *, actor: str) -> None:
     """Stop the project's fleet as ``fleet shutdown`` does, onto ``report``, and raise
     :class:`FreshIncomplete` unless it is wholly down: a row left live, a session tmux would
     not kill, or a project the shutdown could not confirm down. Read on ``failed`` alone, a
@@ -223,15 +223,6 @@ def _stop(
         raise FreshRefused(f"can't start fresh: {exc}", code="fleet_error") from exc
     report.stopped = _stopped(down)
     report.sessions_killed = list(down.sessions_killed)
-    # Ended with its last window: a session the plan listed that the stop neither killed nor
-    # failed on is gone, whether or not the sweep was told to note it absent (it notes only
-    # one a row lived on). Read off ``sessions_killed`` alone, the common case said nothing.
-    failed = {entry.split(" (", 1)[0] for entry in down.sessions_failed}
-    report.sessions_gone = [
-        session
-        for session in dict.fromkeys([*down.sessions_absent, *planned])
-        if session not in report.sessions_killed and session not in failed
-    ]
     report.sessions_failed = list(down.sessions_failed)
     if not (down.failed or down.sessions_failed or project.id in down.incomplete_projects):
         return
@@ -245,6 +236,44 @@ def _stop(
         "know are not running), then start fresh again",
         report,
     )
+
+
+def _confirm_down(
+    project: ProjectInfo, report: FreshReport, planned: Sequence[str], *, stopped: bool
+) -> None:
+    """Go on only once tmux confirms the project has no session standing, asked strictly
+    (``project_sessions``), after the stop and when none ran; then record as gone each
+    session the plan listed that the stop did not kill (``sessions_gone``).
+
+    Inferred from the stop's report ("neither killed nor failed" read as gone), a session
+    the kill phase passed over, asked just in case and failing to answer, was said to have
+    ended while it stood with its process; and a plan whose just-in-case ask failed listed
+    none, no stop ran, and the reset went on over it (review of #429, round 4, N2). A session
+    standing, or one tmux cannot say of, is :class:`FreshIncomplete` once the fleet was
+    stopped, :class:`FreshRefused` when nothing was, with nothing removed either way."""
+    standing = fleet_service.project_sessions(project)
+    if standing == []:
+        report.sessions_gone = [
+            session for session in planned if session not in report.sessions_killed
+        ]
+        return
+    if standing is None:
+        what = (
+            f"tmux could not say whether {fleet_service.session_name(project.codename or '')} "
+            "stands"
+        )
+    else:
+        what = f"tmux session {', '.join(standing)} still stands"
+    shutdown = project_service.fleet_command("shutdown", project)
+    said = (
+        f"{project_service.display_name(project)}'s fleet is not down — {what}. Nothing was "
+        f"removed and the board was not cleared: take it down with {shutdown}, then start "
+        "fresh again"
+    )
+    if stopped:
+        report.sessions_failed = list(dict.fromkeys([*report.sessions_failed, *(standing or [])]))
+        raise FreshIncomplete(said, report)
+    raise FreshRefused(f"can't start fresh: {said}", code="fleet_error")
 
 
 def _held_now(
@@ -334,7 +363,7 @@ def unpushed_brief(item: FreshUnpushed) -> str:
     """``fleet/x/coder-1: 2 commits on no remote, uncommitted changes``: :func:`unpushed_line`
     named by its branch, or its tree's folder when detached, without the path."""
     name = item.branch or (item.path.name if item.path is not None else "?")
-    return f"{name}: {unpushed_line(item).split(': ', 1)[-1]}"
+    return f"{name}: {_held_words(item)}"
 
 
 def unpushed_line(item: FreshUnpushed) -> str:
@@ -344,12 +373,18 @@ def unpushed_line(item: FreshUnpushed) -> str:
         where = f"branch {item.branch}"
     else:
         where = f"{item.path} on {item.branch}" if item.branch else f"{item.path} (detached)"
+    return f"{where}: {_held_words(item)}"
+
+
+def _held_words(item: FreshUnpushed) -> str:
+    """``2 commits on no remote, uncommitted changes``: what ``item`` holds, from its fields
+    (a path may hold ": ", so its line is never parsed back)."""
     what = []
     if item.commits:
         what.append(f"{item.commits} commit{'s' if item.commits != 1 else ''} on no remote")
     if item.uncommitted:
         what.append("uncommitted changes")
-    return f"{where}: {', '.join(what)}"
+    return ", ".join(what)
 
 
 DISCARD_FLAG = "pass --discard-unpushed to throw it away"
@@ -456,7 +491,9 @@ def _sessions(project: ProjectInfo, *, live: bool) -> list[str]:
     if not live and not standing:
         return []
     try:
-        return fleet_service.shutdown_plan(project).sessions
+        # With the strict read's sessions too: the plan asks one no live row lived on only
+        # just in case, and passes over a failure to ask it (review of #429, round 4).
+        return list(dict.fromkeys([*standing, *fleet_service.shutdown_plan(project).sessions]))
     except fleet_service.InsideTheFleet as exc:
         raise FreshRefused(
             f"can't start fresh from inside the fleet's own tmux server: stopping "

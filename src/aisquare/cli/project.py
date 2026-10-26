@@ -479,7 +479,12 @@ def fresh(
             ack_wait=fleet_service.settings().prompt_ack_seconds,
         )
     except fresh_service.FreshRefused as exc:
-        fail(str(exc), error=exc.code, ref=target.id, detail=str(exc), exit_code=2)
+        said = str(exc)
+        if exc.code == "unpushed_work" and exc.plan is not None and discard_unpushed:
+            # Work found since the list confirmed at the terminal, before anything was
+            # stopped: the flag they passed, named again, would only ask about the same list.
+            said = fresh_service.unpushed_refusal(exc.plan, way=fresh_service.RUN_AGAIN)
+        fail(said, error=exc.code, ref=target.id, detail=said, exit_code=2)
     except fresh_service.FreshIncomplete as exc:
         said = str(exc)
         if exc.plan is not None and discard_unpushed:

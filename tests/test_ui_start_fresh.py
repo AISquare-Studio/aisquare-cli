@@ -690,7 +690,8 @@ def test_the_toast_says_the_tmux_session_ended_with_its_last_window(
             )
         )
     session = "asq:asq-amber-otter"
-    monkeypatch.setattr(fleet_service, "project_sessions", lambda *_: [session])
+    standing = [session]
+    monkeypatch.setattr(fleet_service, "project_sessions", lambda *_: list(standing))
     monkeypatch.setattr(
         fleet_service,
         "shutdown_plan",
@@ -700,6 +701,7 @@ def test_the_toast_says_the_tmux_session_ended_with_its_last_window(
     def shutdown(project: ProjectInfo, **_: Any) -> fleet_service.ShutdownReport:
         with store_session() as store:  # its window closed, and the session with it
             store.end_fleet_agent(live.id, exit_status=0, ended_by="stopped")
+        standing.clear()
         return fleet_service.ShutdownReport(
             stopped=[live], sessions_absent=[session] if noted else []
         )

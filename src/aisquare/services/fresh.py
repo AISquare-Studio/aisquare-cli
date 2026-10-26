@@ -16,7 +16,9 @@ codename), the onboarding snapshot, the accounts, the captain, and every other p
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Literal
 
 from aisquare.core import orchestrator
 from aisquare.core.store import ContextStore, is_the_home, store_session
@@ -27,9 +29,10 @@ from aisquare.services import project as project_service
 
 class FreshRefused(Exception):
     """Start fresh will not run, and nothing was touched. ``code`` says why, for ``--json``:
-    ``not_onboarded``, ``the_home``, ``inside_fleet_agent``, ``project_busy`` (another
-    project's fleet reads its board), ``fleet_error`` (the fleet or git could not be asked),
-    ``unpushed_work`` (with the ``plan`` that found it)."""
+    ``not_onboarded``, ``the_home``, ``inside_fleet_agent``, ``inside_fleet`` (asked from
+    inside the fleet's tmux server, whose sessions the stop would kill), ``project_busy``
+    (another project's fleet reads its board), ``fleet_error`` (the fleet or git could not
+    be asked), ``unpushed_work`` (with the ``plan`` that found it)."""
 
     def __init__(self, message: str, *, code: str, plan: FreshPlan | None = None) -> None:
         super().__init__(message)
@@ -38,12 +41,22 @@ class FreshRefused(Exception):
 
 
 class FreshIncomplete(Exception):
-    """Start fresh stopped part-way, and nothing on the board was cleared: an agent stood
-    after the stop, or one was started since. ``report`` says what was done before it."""
+    """Start fresh stopped part-way, and nothing on the board was cleared: an agent or a
+    tmux session stood after the stop, work nobody agreed to discard was found once it had
+    run (with the ``plan`` that found it), or a later step failed. ``report`` says what was
+    done before it."""
 
-    def __init__(self, message: str, report: FreshReport) -> None:
+    def __init__(self, message: str, report: FreshReport, *, plan: FreshPlan | None = None) -> None:
         super().__init__(message)
         self.report = report
+        self.plan = plan
+
+
+Discard = Sequence[FreshUnpushed] | Literal["all"]
+"""What :func:`start_fresh` may throw away of the work found nowhere else: the items someone
+confirmed (``ConfirmDiscard``'s list, the CLI's at a terminal), each at the tip it was shown
+at; ``"all"``, whatever the run finds (``project fresh --yes --discard-unpushed``, said
+explicitly, off a terminal); or nothing."""
 
 
 def plan(
@@ -98,70 +111,83 @@ def start_fresh(
     memory: bool = False,
     prompts: bool = False,
     branches: bool = False,
-    discard_unpushed: bool = False,
+    discard: Discard = (),
     actor: str = "user",
     ack_wait: float = 0.0,
 ) -> FreshReport:
     """Clear ``project``'s board and fleet, and start it a fresh manager.
 
-    Planned again first (:func:`plan`, whose refusals are this one's), and refused while
-    any tree or branch it would remove holds work found nowhere else, unless
-    ``discard_unpushed``. Then, in this order, so that a step that fails leaves what a run
-    again can finish: the live agents stopped and the project's tmux sessions killed
-    (``fleet shutdown``'s path, whenever either is there: claims released, ``agent_exited``
-    said), the agents' worktrees removed
-    (``--force`` only when discarding), with ``branches`` the fleet branches deleted, the
-    rows cleared in one transaction (``store.reset_project``), and a manager spawned as
-    ``fleet spawn manager`` spawns one, a new session id and the only one on the board.
+    Planned again first (:func:`plan`, whose refusals are this one's), and refused while any
+    tree or branch it would remove holds work found nowhere else that ``discard`` does not
+    cover (:func:`_uncovered`): a confirmed list covers each item at the tip it was shown
+    at, and no uncommitted change it did not show. Then, in this order, so that a step that
+    fails leaves what a run again can finish: the live agents stopped and the project's tmux
+    sessions killed (``fleet shutdown``'s path, whenever either is there: claims released,
+    ``agent_exited`` said); what the trees and branches hold asked again, now that nothing
+    runs there, and refused as before; the agents' worktrees removed (``--force`` only for
+    work it may discard), with ``branches`` the fleet branches deleted, the rows cleared in
+    one transaction (``store.reset_project``), and a manager spawned as ``fleet spawn
+    manager`` spawns one, a new session id and the only one on the board.
 
-    :class:`FreshIncomplete` when an agent still stands after the stop, or a spawn started
-    one before the rows went: nothing on the board is cleared then. A manager the fleet
-    refuses to start is said on the report (``manager_error``), the board clear all the same.
-    ``actor`` is who asked, on each ``agent_exited``; ``ack_wait`` is the spawn's.
+    :class:`FreshIncomplete`, with the report so far and nothing on the board cleared, when
+    the stop left an agent or a session standing (no tree is removed then, nor a manager
+    started beside the old session), when work nobody agreed to discard is found after the
+    stop, or when a later step fails (a store that will not take the write lock). A
+    manager the fleet refuses to start is said on the report (``manager_error``), the board
+    clear all the same. ``actor`` is who asked, on each ``agent_exited``; ``ack_wait`` is
+    the spawn's.
     """
     planned = plan(project, memory=memory, prompts=prompts, branches=branches)
-    if planned.unpushed and not discard_unpushed:
+    # Its places only, while agents run: a busy one's next commit is no refusal yet, and is
+    # judged by its tip once the stop has ended it.
+    if _uncovered(planned.unpushed, discard, tips=False):
         raise FreshRefused(unpushed_refusal(planned), code="unpushed_work", plan=planned)
     project = planned.project
-    report = FreshReport(project=project, planned=planned.counts, discarded=planned.unpushed)
+    report = FreshReport(project=project, planned=planned.counts)
     if planned.live_agents or planned.sessions:
-        try:
-            down = fleet_service.shutdown(project, actor=actor)
-        except fleet_service.FleetInterrupted as exc:
-            report.stopped = _stopped(exc.report)
-            raise FreshIncomplete(
-                f"interrupted while stopping {project_service.display_name(project)}'s "
-                "fleet — nothing on the board was cleared",
-                report,
-            ) from None
-        except fleet_service.FleetError as exc:
-            raise FreshRefused(f"can't start fresh: {exc}", code="fleet_error") from exc
-        report.stopped = _stopped(down)
-        if down.failed:
-            standing = "; ".join(f"{row.agent.label}: {row.reason}" for row in down.failed)
-            raise FreshIncomplete(
-                f"{len(down.failed)} agent(s) were left live, so nothing on the board was "
-                f"cleared — {standing}. Once they are down, start fresh again",
-                report,
+        _stop(project, report, actor=actor)
+    try:
+        found, trees, tips = _held_now(project, branches=branches)
+        if _uncovered(found, discard):
+            later = planned.model_copy(
+                update={"unpushed": found, "worktrees": trees, "fleet_branches": tips}
             )
-    report.worktrees_removed, kept = fleet_service.remove_fleet_trees(
-        project, planned.worktrees, force=discard_unpushed
-    )
-    report.kept += kept
-    if branches:
-        report.branches_deleted, kept = fleet_service.delete_fleet_branches(
-            project, planned.fleet_branches
+            raise FreshIncomplete(
+                f"{unpushed_refusal(later)} — found once its fleet was stopped: nothing was "
+                "removed and the board was not cleared",
+                report,
+                plan=later,
+            )
+        report.worktrees_removed, kept = fleet_service.remove_fleet_trees(
+            project, trees, force=bool(found)
         )
         report.kept += kept
-    with store_session() as store:
-        try:
-            tables = store.reset_project(project.id, memory=memory, prompts=prompts)
-        except ValueError as exc:
-            raise FreshIncomplete(
-                f"{exc}, started since its fleet was stopped — nothing on the board was "
-                "cleared. Stop it, then start fresh again",
-                report,
-            ) from exc
+        if branches:
+            report.branches_deleted, kept = fleet_service.delete_fleet_branches(project, tips)
+            report.kept += kept
+        report.discarded = [
+            item
+            for item in found
+            if item.path in report.worktrees_removed
+            or (item.path is None and item.branch in report.branches_deleted)
+        ]
+        with store_session() as store:
+            tables = store.reset_project(project.id, memory=memory, prompts=prompts, apply=True)
+    except (FreshIncomplete, FreshRefused):
+        raise
+    except ValueError as exc:  # reset_project: an agent live again
+        raise FreshIncomplete(
+            f"{exc}, started since its fleet was stopped — the board was not cleared. Stop "
+            f"it ({project_service.fleet_command('shutdown', project)}), then start fresh "
+            "again",
+            report,
+        ) from exc
+    except Exception as exc:  # a store that will not take the write lock, a git that hung
+        raise FreshIncomplete(
+            f"stopped part-way ({type(exc).__name__}: {exc}) — the board was not cleared; "
+            "start fresh again",
+            report,
+        ) from exc
     report.cleared = _counts(
         tables,
         worktrees=len(report.worktrees_removed),
@@ -171,9 +197,82 @@ def start_fresh(
         receipt = fleet_service.spawn(project, "manager", spawned_by=actor, ack_wait=ack_wait)
     except fleet_service.FleetError as exc:
         report.manager_error = str(exc)
+    except Exception as exc:  # the board is clear: the report is owed whatever the spawn hit
+        report.manager_error = f"{type(exc).__name__}: {exc}"
     else:
         report.manager = receipt.agent
     return report
+
+
+def _stop(project: ProjectInfo, report: FreshReport, *, actor: str) -> None:
+    """Stop the project's fleet as ``fleet shutdown`` does, onto ``report``, and raise
+    :class:`FreshIncomplete` unless it is wholly down: a row left live, a session tmux would
+    not kill, or a project the shutdown could not confirm down. Read on ``failed`` alone, a
+    session tmux would not kill was passed over, and the trees went, the board was cleared
+    and a manager started beside the session (review of #429, M3)."""
+    name = project_service.display_name(project)
+    try:
+        down = fleet_service.shutdown(project, actor=actor)
+    except fleet_service.FleetInterrupted as exc:
+        report.stopped = _stopped(exc.report)
+        report.sessions_killed = list(exc.report.sessions_killed)
+        raise FreshIncomplete(
+            f"interrupted while stopping {name}'s fleet — the board was not cleared", report
+        ) from None
+    except fleet_service.FleetError as exc:
+        raise FreshRefused(f"can't start fresh: {exc}", code="fleet_error") from exc
+    report.stopped = _stopped(down)
+    report.sessions_killed = list(down.sessions_killed)
+    report.sessions_failed = list(down.sessions_failed)
+    if not (down.failed or down.sessions_failed or project.id in down.incomplete_projects):
+        return
+    standing = [f"{row.agent.label} ({row.reason})" for row in down.failed]
+    standing += [f"tmux session {session}" for session in down.sessions_failed]
+    what = "; ".join(standing) or "the stop could not confirm it down"
+    shutdown = project_service.fleet_command("shutdown", project)
+    raise FreshIncomplete(
+        f"{name}'s fleet is not down — {what}. Nothing was removed and the board was not "
+        f"cleared: take it down with {shutdown} (whose --forget ends the rows of agents you "
+        "know are not running), then start fresh again",
+        report,
+    )
+
+
+def _held_now(
+    project: ProjectInfo, *, branches: bool
+) -> tuple[list[FreshUnpushed], list[Path], dict[str, str]]:
+    """What the project's trees and (with ``branches``) its fleet branches hold that no
+    remote has, read again once its fleet is stopped, when nothing runs there to add to it:
+    the work found, the trees, and the branches' tips. Read from the rows as they are now,
+    so a tree an agent started since the plan is asked about too."""
+    with store_session() as store:
+        rows = store.fleet_agents(project.id)
+    trees = fleet_service.fleet_trees(project, rows)
+    tips = fleet_service.fleet_branch_tips(project, rows) if branches else {}
+    return fleet_service.unpushed_work(project, trees, tips), trees, tips
+
+
+def _uncovered(
+    found: Sequence[FreshUnpushed], discard: Discard, *, tips: bool = True
+) -> list[FreshUnpushed]:
+    """What of ``found`` ``discard`` does not let go: everything when it is empty, nothing
+    when it is ``"all"``, else each item it does not name at the same tree and branch (and,
+    with ``tips``, the same tip: no commit made since it was shown), and each with
+    uncommitted changes where the one it named had none. A blanket yes to a list someone saw
+    threw away work written after they saw it (review of #429, M1)."""
+    if discard == "all":
+        return []
+
+    def place(item: FreshUnpushed) -> tuple[Path | None, str | None, str | None]:
+        return item.path, item.branch, item.tip if tips else None
+
+    allowed = {place(item): item for item in discard}
+    return [
+        item
+        for item in found
+        if (shown := allowed.get(place(item))) is None
+        or (item.uncommitted and not shown.uncommitted)
+    ]
 
 
 def count_words(counts: FreshCounts) -> list[str]:
@@ -195,12 +294,13 @@ def count_words(counts: FreshCounts) -> list[str]:
 
 
 def cleared_words(report: FreshReport) -> list[str]:
-    """:func:`count_words` of what ``report`` cleared, its events with how many of them the
-    stop itself wrote (``FreshReport.stop_events``): the plan counted the rest, so a plan of
-    7 and a run that cleared 11 read ``11 notes and events (4 written by the stop)``."""
+    """:func:`count_words` of what ``report`` cleared, its events with how many of them were
+    written during the reset (``FreshReport.stop_events``: the stop's own, and what an agent
+    posted before it was stopped): the plan counted the rest, so a plan of 7 and a run that
+    cleared 11 read ``11 notes and events (4 written during the reset)``."""
     words = count_words(report.cleared)
     if extra := report.stop_events():
-        words[1] += f" ({extra} written by the stop)"  # [1]: the events, never None
+        words[1] += f" ({extra} written during the reset)"  # [1]: the events, never None
     return words
 
 
@@ -263,11 +363,27 @@ def _refuse(store: ContextStore, project: ProjectInfo) -> ProjectInfo:
 
 def _sessions(project: ProjectInfo, *, live: bool) -> list[str]:
     """``<socket>:<session>`` for each of the project's tmux sessions the stop kills, as
-    ``fleet shutdown``'s plan lists them, refusing as it refuses (:class:`FleetError`). With
-    no live row and no usable tmux here, none: nothing could be killed, and nothing is said
-    to run."""
+    ``fleet shutdown``'s plan lists them, refusing as it refuses (:class:`FleetError`).
+
+    Asked of the plan only when there is something to stop: a live row, or a session of
+    the project's standing (:func:`fleet_service.project_sessions`, read without the plan's
+    guards). The plan refuses any caller inside the fleet's own tmux server, and asked
+    always, it refused a project with nothing to stop from another project's pane (review
+    of #429, m1). With something to stop it is refused there still, in this command's words:
+    the stop kills sessions on the server the caller runs in. With no live row and no usable
+    tmux here, none: nothing could be killed, and nothing is said to run."""
+    if not live and not fleet_service.project_sessions(project):
+        return []
     try:
         return fleet_service.shutdown_plan(project).sessions
+    except fleet_service.InsideTheFleet as exc:
+        raise FreshRefused(
+            f"can't start fresh from inside the fleet's own tmux server: stopping "
+            f"{project_service.display_name(project)}'s fleet kills sessions on the server "
+            "this pane runs in, before anything could be reported. Run it from the UI (asq) "
+            "or from a terminal outside the fleet",
+            code="inside_fleet",
+        ) from exc
     except fleet_service.FleetUnavailable:
         if live:
             raise

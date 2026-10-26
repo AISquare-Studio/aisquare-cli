@@ -14,29 +14,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   session is killed whenever it stands, a live row or none, so a dead pane or a process
   whose row says it died goes with it; each agent's worktree is removed, and the
   project's tasks, notes and events, sessions, signals and fleet rows are deleted, so the
-  next task is #1 again. Its context entries, prompt log and turn
-  metrics and its local `fleet/<codename>/…` branches stay unless `--memory`,
-  `--prompts` or `--branches` says otherwise; the checkout, every other branch, the
-  registration and its settings, the onboarding snapshot, the captain and every other
-  project are never touched. A worktree or branch that holds uncommitted changes or
-  commits no remote has refuses the reset, naming each tree, its branch and the commit
-  count, unless `--discard-unpushed`. It prints the plan with its counts and asks at a
-  terminal (a second time before discarding); `--dry-run` prints the plan and changes
-  nothing, off a terminal it is a dry run unless `--yes`, and `--json` prints the plan,
-  or with `--yes` the counts it planned and the counts it cleared: the stop writes an
-  `agent_exited` for each agent it stops, which goes too and is said apart ("11 notes and
-  events (4 written by the stop)"). A reset that stops part-way (an agent left live)
-  clears nothing on the board and, under `--json`, prints its partial report under the
-  error. It is refused from inside one of the project's
-  own fleet agents, and, as `project forget` is, while another project's fleet agents
-  read its board. The service behind it (`services.fresh`: `plan`, then `start_fresh`)
-  is what the UI's Start fresh… calls. In `asq`, **↺ Start fresh…** is on a project
-  card's menu (just above *Remove from fleet…*) and on the project's *Settings* tab:
-  one dialog shows the plan's counts and that a new blank manager starts, with
-  *Project memory*, *Prompt log & metrics* and *Fleet git branches* off by default;
-  unpushed work is listed in a second dialog (*Discard and start fresh*), a refused
-  plan says why and cannot be confirmed, and the reset runs off the UI thread and
-  ends in a toast of what was cleared.
+  next task is #1 again. Its context entries, prompt log and turn metrics and its local
+  `fleet/<codename>/…` branches stay unless `--memory`, `--prompts` or `--branches` says
+  otherwise; the checkout, every other branch, the registration and its settings, the
+  onboarding snapshot, the captain and every other project are never touched.
+  A worktree or branch that holds uncommitted changes or commits no remote has refuses
+  the reset, naming each tree, its branch and the commit count, unless
+  `--discard-unpushed`; a count git cannot give refuses it too, never reading as pushed.
+  At a terminal the discard covers what the plan listed and you confirmed, at the tips
+  it showed, and work found since (asked again once the fleet is stopped) refuses it;
+  with `--yes`, the flag covers whatever the run finds. It prints the plan with its
+  counts and asks at a terminal (a second time before discarding); `--dry-run` prints
+  the plan and changes nothing, off a terminal it is a dry run unless `--yes`, and
+  `--json` prints the plan, or with `--yes` the counts it planned and the counts it
+  cleared: the stop writes an `agent_exited` for each agent it stops, which goes too and
+  is said apart ("11 notes and events (4 written during the reset)"), as is the tmux
+  session it killed. A reset that stops part-way (an agent or a tmux session left
+  standing, work found nobody agreed to discard, a store that would not take the lock)
+  removes no tree, clears nothing on the board, starts no manager, names the next step
+  (`fleet shutdown`) and, under `--json`, prints its partial report under the error. It
+  is refused from inside one of the project's own fleet agents, from inside the fleet's
+  tmux server when it has something to stop, and, as `project forget` is, while another
+  project's fleet agents read its board. The service behind it (`services.fresh`:
+  `plan`, then `start_fresh`) is what the UI's Start fresh… calls. In `asq`, **↺ Start
+  fresh…** is on a project card's menu (just above *Remove from fleet…*) and on the
+  project's *Settings* tab: one dialog shows the plan's counts and that a new blank
+  manager starts, with *Project memory*, *Prompt log & metrics* and *Fleet git branches*
+  off by default; unpushed work is listed in a second dialog (*Discard and start
+  fresh*), and work found after it opens brings the dialog back on what was found; a
+  refused plan says why and cannot be confirmed; one run a project at a time, off the
+  UI thread, ending in a toast of what was cleared, with the project's open boards read
+  again from their start.
 - **Exact token usage per session** — `aisquare metrics tokens [--session S]
   [--project P | --all]` (`--json` too). The Stop, StopFailure and SessionEnd hooks
   read only the bytes the session's transcript gained since the last record, plus its

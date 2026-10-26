@@ -12,8 +12,11 @@ fresh* stays greyed. Cancel has the focus, and Escape cancels.
 When the plan finds work no remote has in a tree or branch it would remove,
 :class:`ConfirmDiscard` lists each one and asks again; cancelling there goes back to the
 first dialog, nothing done. The answer is a :class:`FreshChoice`, which the shell
-(``FleetApp``) runs ``services.fresh.start_fresh`` with in a thread worker: the run plans
-again before it acts, and refuses work found since that nobody agreed to discard.
+(``FleetApp``) runs ``services.fresh.start_fresh`` with in a thread worker. A discard
+confirmed there covers the items listed, at the tips they were listed at, and nothing else:
+the run plans again before it acts and once its fleet is stopped, and refuses work found
+since that nobody agreed to discard; the shell then opens the dialog again, on what it
+found (review of #429, M1).
 """
 
 from __future__ import annotations
@@ -79,14 +82,15 @@ class StartFresh(Message):
 
 @dataclass(frozen=True)
 class FreshChoice:
-    """What :class:`ConfirmFresh` was confirmed with: ``start_fresh``'s extras, and whether
-    the unpushed work it listed may go."""
+    """What :class:`ConfirmFresh` was confirmed with: ``start_fresh``'s extras, and the
+    unpushed work :class:`ConfirmDiscard` listed and was told may go (``start_fresh``'s
+    ``discard``), at the tips it listed."""
 
     project_id: str
     memory: bool = False
     prompts: bool = False
     branches: bool = False
-    discard_unpushed: bool = False
+    discard: tuple[FreshUnpushed, ...] = ()
 
 
 def narrowed(plan: FreshPlan, *, memory: bool, prompts: bool, branches: bool) -> FreshPlan:
@@ -175,9 +179,12 @@ class ConfirmFresh(ModalScreen[FreshChoice | None]):
     """
     BINDINGS: ClassVar = [("escape", "cancel_fresh", "cancel")]
 
-    def __init__(self, project: ProjectInfo) -> None:
+    def __init__(self, project: ProjectInfo, ticked: FreshChoice | None = None) -> None:
         super().__init__()
         self.project = project
+        self.ticked = ticked
+        """The extras ticked when it opens: a run refused for work found since reopens it
+        as it was confirmed."""
         self.plan: FreshPlan | None = None
         """What the dialog read when it opened, every extra counted."""
         self.refused: str | None = None
@@ -198,7 +205,7 @@ class ConfirmFresh(ModalScreen[FreshChoice | None]):
                 yield Static(Text("reading the project…", style="dim"), id="fresh-plan")
             with Vertical(id="fresh-extras"):
                 for checkbox, label in EXTRAS:
-                    yield Checkbox(label, False, id=checkbox)
+                    yield Checkbox(label, self._opens_ticked(checkbox), id=checkbox)
             with Horizontal(id="fresh-buttons"):
                 yield GuardedButton(
                     "Start fresh", id="fresh-confirm", variant="error", disabled=True
@@ -286,7 +293,7 @@ class ConfirmFresh(ModalScreen[FreshChoice | None]):
                         memory=memory,
                         prompts=prompts,
                         branches=branches,
-                        discard_unpushed=True,
+                        discard=tuple(plan.unpushed),
                     )
                 )
 
@@ -296,6 +303,19 @@ class ConfirmFresh(ModalScreen[FreshChoice | None]):
     def _cancel(self, event: Button.Pressed) -> None:
         event.stop()
         self.dismiss(None)
+
+    def _opens_ticked(self, checkbox: str) -> bool:
+        """Whether ``checkbox`` opens ticked: as :attr:`ticked` had it, else off."""
+        if self.ticked is None:
+            return False
+        extras = dict(
+            zip(
+                (box for box, _ in EXTRAS),
+                (self.ticked.memory, self.ticked.prompts, self.ticked.branches),
+                strict=True,
+            )
+        )
+        return extras[checkbox]
 
     def action_cancel_fresh(self) -> None:
         self.dismiss(None)

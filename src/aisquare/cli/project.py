@@ -400,7 +400,9 @@ def fresh(
         typer.Option(
             "--discard-unpushed",
             help="Throw away what its agents' worktrees and branches hold that no remote has; "
-            "without it such work refuses the reset.",
+            "without it such work refuses the reset. At a terminal only what the plan listed "
+            "and you confirmed goes (anything found since refuses); with --yes, whatever the "
+            "run finds.",
         ),
     ] = False,
     yes: Annotated[
@@ -460,13 +462,18 @@ def fresh(
             return
     from aisquare.services import fleet as fleet_service  # lazy: the fleet is heavy to import
 
+    # Asked at a terminal, the yes covers the list it was asked about, at the tips it showed;
+    # with --yes nothing was shown, and the flag is the whole of the consent.
+    discard: fresh_service.Discard = ()
+    if discard_unpushed:
+        discard = "all" if yes else list(planned.unpushed)
     try:
         report = fresh_service.start_fresh(
             planned.project,
             memory=memory,
             prompts=prompts,
             branches=branches,
-            discard_unpushed=discard_unpushed,
+            discard=discard,
             actor=fleet_service.acting_as(),
             ack_wait=fleet_service.settings().prompt_ack_seconds,
         )
@@ -476,8 +483,15 @@ def fresh(
         if get_state().json_output:
             # The partial report too, under the error: what was stopped and removed before
             # it stood still, which a script cannot read off a bare error object.
-            payload = {"error": "fresh_incomplete", "ref": target.id, "detail": str(exc)}
-            typer.echo(json.dumps({**payload, "report": exc.report.model_dump(mode="json")}))
+            payload: dict[str, object] = {
+                "error": "fresh_incomplete",
+                "ref": target.id,
+                "detail": str(exc),
+                "report": exc.report.model_dump(mode="json"),
+            }
+            if exc.plan is not None:  # work found once the fleet was stopped: what it is
+                payload["plan"] = exc.plan.model_dump(mode="json")
+            typer.echo(json.dumps(payload))
             raise typer.Exit(code=1) from None
         _emit_fresh(exc.report)
         fail(str(exc), error="fresh_incomplete", ref=target.id)
@@ -552,6 +566,10 @@ def _emit_fresh(report: FreshReport) -> None:
         console.print(f"✓ started {name} fresh — cleared {cleared}", markup=False)
     if report.stopped:
         console.print(f"  stopped: {', '.join(report.stopped)}", markup=False)
+    if report.sessions_killed:
+        console.print(f"  killed tmux session {', '.join(report.sessions_killed)}", markup=False)
+    for session in report.sessions_failed:
+        console.print(f"  ⚠ tmux would not kill {session}", markup=False)
     for item in report.discarded:
         console.print(f"  ⚠ threw away {fresh_service.unpushed_line(item)}", markup=False)
     for kept in report.kept:

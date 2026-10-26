@@ -40,7 +40,7 @@ from aisquare.core import paths
 from aisquare.core.entries import new_entry
 from aisquare.core.ids import new_agent_id, new_event_id, new_task_id
 from aisquare.core.orchestrator import FLEET_AGENT_ENV_VAR, team_project
-from aisquare.core.store import store_session
+from aisquare.core.store import SqliteStore, store_session
 from aisquare.models import (
     FleetAgent,
     FreshReport,
@@ -215,6 +215,7 @@ def stops(monkeypatch: pytest.MonkeyPatch) -> Stops:
         return fleet_service.ShutdownPlan(sessions=list(faked.sessions))
 
     monkeypatch.setattr(fleet_service, "shutdown_plan", shutdown_plan)
+    monkeypatch.setattr(fleet_service, "project_sessions", lambda *_: list(faked.sessions))
     monkeypatch.setattr(fleet_service, "shutdown", shutdown)
     return faked
 
@@ -345,7 +346,7 @@ def test_an_agent_left_live_by_the_stop_clears_nothing(
         ),
     )
 
-    with pytest.raises(fresh_service.FreshIncomplete, match="coder-1: its pane is still alive"):
+    with pytest.raises(fresh_service.FreshIncomplete, match=r"coder-1 \(its pane is still alive\)"):
         fresh_service.start_fresh(alpha)
 
     assert _rows(alpha.id) == before and spawned == []
@@ -359,7 +360,7 @@ def test_the_store_refuses_a_reset_while_a_fleet_row_is_live(
         store.upsert_fleet_agent(_agent(alpha, "coder-1"))
         before = store.reset_project(alpha.id, apply=False)
         with pytest.raises(ValueError, match="coder-1"):
-            store.reset_project(alpha.id)
+            store.reset_project(alpha.id, apply=True)
         assert store.reset_project(alpha.id, apply=False) == before
 
 
@@ -765,7 +766,7 @@ def test_the_plans_counts_are_the_reports_and_the_stops_own_events_are_said_apar
                 store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
     said = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--yes"])
     assert said.exit_code == 0, said.output
-    assert "1 note or event (1 written by the stop)" in " ".join(said.output.split())
+    assert "1 note or event (1 written during the reset)" in " ".join(said.output.split())
 
 
 def test_an_incomplete_reset_prints_its_partial_report_under_json(
@@ -792,7 +793,245 @@ def test_an_incomplete_reset_prints_its_partial_report_under_json(
     assert result.exit_code == 1, result.output
     said = json.loads(result.stdout)
     assert said["error"] == "fresh_incomplete" and said["ref"] == alpha.id
-    assert "coder-1: its pane is still alive" in said["detail"]
+    assert "coder-1 (its pane is still alive)" in said["detail"]
     assert said["report"]["stopped"] == ["coder-2"]
     assert said["report"]["cleared"]["tasks"] == 0 and said["report"]["manager"] is None
     assert len(_rows(alpha.id)["team_task"]) == 3, "nothing on the board was cleared"
+
+
+# --- review round 1 on #429 (#4) -----------------------------------------------------------
+
+
+def _sessions_standing(monkeypatch: pytest.MonkeyPatch, *sessions: str) -> None:
+    """The project's tmux sessions as the plan and its read-only listing see them."""
+    monkeypatch.setattr(fleet_service, "project_sessions", lambda *_: list(sessions))
+    monkeypatch.setattr(
+        fleet_service,
+        "shutdown_plan",
+        lambda *_, **__: fleet_service.ShutdownPlan(sessions=list(sessions)),
+    )
+
+
+def test_m1_a_confirmed_discard_covers_only_the_work_it_listed(
+    tmp_path: Path,
+    unpushed: tuple[ProjectInfo, Path, str],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+) -> None:
+    """M1: confirming a discard said yes to a list, and the run threw away whatever its own
+    later plan found: work written after the dialog opened went unseen. A confirmed list
+    covers what it named, and the run refuses the rest, with the plan that found it."""
+    alpha, tree, _ = unpushed
+    clean = tmp_path / "trees" / "coder-2"
+    _git("worktree", "add", "-q", "-b", "fleet/alpha-x/coder-2", str(clean), cwd=alpha.root)
+    with store_session() as store:
+        row = store.upsert_fleet_agent(_agent(alpha, "coder-2", cwd=clean, worktree=True))
+        store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
+    shown = fresh_service.plan(alpha)  # what ConfirmDiscard, or the CLI at a terminal, shows
+    assert [item.path for item in shown.unpushed] == [tree]
+    (clean / "new-work.txt").write_text("written after the dialog opened\n", encoding="utf-8")
+    before = _rows(alpha.id)
+
+    with pytest.raises(fresh_service.FreshRefused) as refused:
+        fresh_service.start_fresh(alpha, discard=shown.unpushed)
+
+    assert refused.value.code == "unpushed_work" and f"{clean} on fleet/alpha-x/coder-2" in str(
+        refused.value
+    )
+    assert (clean / "new-work.txt").exists() and tree.exists()
+    assert _rows(alpha.id) == before and spawned == []
+    assert refused.value.plan is not None
+    report = fresh_service.start_fresh(alpha, discard=refused.value.plan.unpushed)
+    assert {item.path for item in report.discarded} == {tree, clean} and not clean.exists()
+
+
+def test_m1_a_commit_made_before_the_stop_ended_its_agent_is_judged_after_it(
+    unpushed: tuple[ProjectInfo, Path, str],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M1: agents run until the stop, so the check that counts is after it. A commit an
+    agent made while the dialog was open moves its tip past the one confirmed: the run stops
+    the fleet, removes nothing, clears nothing, and hands back the plan of what it found."""
+    alpha, tree, _ = unpushed
+    shown = fresh_service.plan(alpha)
+    _sessions_standing(monkeypatch, "asq:asq-alpha-x")
+
+    def shutdown(project: ProjectInfo, **_: Any) -> fleet_service.ShutdownReport:
+        (tree / "late.txt").write_text("the agent's last word\n", encoding="utf-8")
+        _git("add", "late.txt", cwd=tree)
+        _git("commit", "-q", "-m", "late", cwd=tree)
+        return fleet_service.ShutdownReport(sessions_killed=["asq:asq-alpha-x"])
+
+    monkeypatch.setattr(fleet_service, "shutdown", shutdown)
+    before = _rows(alpha.id)
+
+    with pytest.raises(fresh_service.FreshIncomplete) as stopped:
+        fresh_service.start_fresh(alpha, discard=shown.unpushed)
+
+    assert stopped.value.plan is not None
+    assert [item.commits for item in stopped.value.plan.unpushed] == [2]
+    assert "found once its fleet was stopped" in str(stopped.value)
+    assert (tree / "late.txt").exists() and _rows(alpha.id) == before and spawned == []
+
+
+def test_m2_a_dangling_origin_head_does_not_read_unpushed_commits_as_pushed(
+    unpushed: tuple[ProjectInfo, Path, str], spawned: list[tuple[str, str, dict[str, Any]]]
+) -> None:
+    """M2: origin renamed master to main and a prune took origin/master, but origin/HEAD
+    still names it. Counted against it, every rev-list failed and read as 0: --branches
+    deleted a commit no remote had, unasked. The count fails closed."""
+    alpha, tree, branch = unpushed
+    _git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master", cwd=alpha.root)
+
+    planned = fresh_service.plan(alpha, branches=True)
+
+    assert [(item.path, item.branch, item.commits) for item in planned.unpushed] == [
+        (tree, branch, 1)
+    ]
+    with pytest.raises(fresh_service.FreshRefused, match="1 commit on no remote"):
+        fresh_service.start_fresh(alpha, branches=True)
+    assert branch in _branches(alpha.root) and tree.exists() and spawned == []
+
+
+def test_m3_a_session_tmux_would_not_kill_clears_nothing_and_starts_no_manager(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M3: read on ``failed`` alone, a session tmux would not kill was passed over: the trees
+    went, the board was cleared and a manager started beside the old session. The reset
+    stops there, says which session stands and what to run, and reports the sessions."""
+    alpha, _, _, _ = two
+    _sessions_standing(monkeypatch, "asq:asq-alpha-x")
+    monkeypatch.setattr(
+        fleet_service,
+        "shutdown",
+        lambda *_, **__: fleet_service.ShutdownReport(
+            sessions_failed=["asq:asq-alpha-x"], incomplete_projects=[alpha.id]
+        ),
+    )
+    before = _rows(alpha.id)
+
+    with pytest.raises(fresh_service.FreshIncomplete) as stopped:
+        fresh_service.start_fresh(alpha)
+
+    said = str(stopped.value)
+    assert "tmux session asq:asq-alpha-x" in said and "the board was not cleared" in said
+    # The next step is fleet shutdown's, which takes --forget; project fresh does not.
+    assert "aisquare fleet shutdown --project alpha-x (whose --forget" in said
+    assert stopped.value.report.sessions_failed == ["asq:asq-alpha-x"]
+    assert _rows(alpha.id) == before and spawned == []
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("tmux") is None, reason="tmux is not installed"
+)
+def test_m1_a_project_with_nothing_to_stop_is_not_refused_inside_the_fleet_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m1: the plan asked ``fleet shutdown``'s plan always, whose guard refuses any caller
+    inside the fleet's tmux server, here beta's pane, though alpha had nothing to stop. It is
+    asked only when there is something to stop, and then refused in this command's words."""
+    alpha = _add(tmp_path / "alpha", "alpha-x")
+    srv = fleet_service.server()
+    srv.run("new-session", "-d", "-s", "asq-other-project", "sleep 600")  # beta's manager
+    monkeypatch.setenv("TMUX", f"{srv.socket_path()},{os.getpid()},0")
+
+    assert fresh_service.plan(alpha).sessions == []
+
+    srv.run("new-session", "-d", "-s", fleet_service.session_name("alpha-x"), "sleep 600")
+    with pytest.raises(fresh_service.FreshRefused) as refused:
+        fresh_service.plan(alpha)
+    assert refused.value.code == "inside_fleet"
+    assert "can't start fresh from inside the fleet's own tmux server" in str(refused.value)
+    assert "fleet shutdown is running" not in str(refused.value)
+
+
+def test_m2_a_store_that_fails_after_the_stop_keeps_the_partial_report(
+    runner: CliRunner,
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    stops: Stops,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """m2: past the stop only FleetError and ValueError were mapped; a store locked past its
+    busy timeout took the report with it (agents stopped, trees removed). Any failure after
+    the stop is a FreshIncomplete with the report so far."""
+    alpha, _, _, _ = two
+    with store_session() as store:
+        store.upsert_fleet_agent(_agent(alpha, "coder-1"))
+    real = SqliteStore.reset_project
+
+    def locked(self: SqliteStore, project_id: str, **kwargs: Any) -> dict[str, int]:
+        if kwargs.get("apply"):
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, project_id, **kwargs)
+
+    monkeypatch.setattr(SqliteStore, "reset_project", locked)
+
+    result = runner.invoke(app, ["--json", "project", "fresh", "-P", "alpha-x", "--yes"])
+
+    assert result.exit_code == 1, result.output
+    said = json.loads(result.stdout)
+    assert said["error"] == "fresh_incomplete"
+    assert "OperationalError: database is locked" in said["detail"]
+    assert said["report"]["stopped"] == ["coder-1"]
+    assert len(_rows(alpha.id)["team_task"]) == 3 and spawned == []
+
+
+def test_m3_discarded_names_only_what_went(
+    unpushed: tuple[ProjectInfo, Path, str], spawned: list[tuple[str, str, dict[str, Any]]]
+) -> None:
+    """m3: ``discarded`` listed everything the plan found, so a tree git then kept (a locked
+    one, which ``remove --force`` refuses) read both "threw away" and "kept"."""
+    alpha, tree, _ = unpushed
+    _git("worktree", "lock", str(tree), cwd=alpha.root)
+    shown = fresh_service.plan(alpha)
+
+    report = fresh_service.start_fresh(alpha, discard=shown.unpushed)
+
+    assert report.discarded == [] and [kept.path for kept in report.kept] == [tree]
+    assert tree.exists()
+
+
+def test_reset_project_without_apply_deletes_nothing(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+) -> None:
+    """Nit: a destructive method whose read-only mode sat behind a flag that defaulted to
+    deleting; a dropped ``apply=False`` deleted. ``apply`` has no default."""
+    alpha, _, _, _ = two
+    before = _rows(alpha.id)
+    with store_session() as store, pytest.raises(TypeError):
+        store.reset_project(alpha.id)  # type: ignore[call-arg]
+    assert _rows(alpha.id) == before
+
+
+def test_the_success_report_says_the_tmux_session_was_killed(
+    runner: CliRunner,
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """tester-fresh-fix: the report never said the tmux session went."""
+    _sessions_standing(monkeypatch, "asq:asq-alpha-x")
+    monkeypatch.setattr(
+        fleet_service,
+        "shutdown",
+        lambda *_, **__: fleet_service.ShutdownReport(sessions_killed=["asq:asq-alpha-x"]),
+    )
+
+    result = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "killed tmux session asq:asq-alpha-x" in result.output
+
+
+def test_m2_a_count_git_will_not_give_is_never_read_as_none(
+    unpushed: tuple[ProjectInfo, Path, str],
+) -> None:
+    """M2, the other half: whatever makes git refuse the count (here a tip it does not
+    have), a failed count was 0 commits, pushed. It raises, and the plan refuses."""
+    alpha, _, _ = unpushed
+
+    with pytest.raises(fleet_service.FleetError, match="could not count the commits"):
+        fleet_service.unpushed_work(alpha, [], {"fleet/alpha-x/gone": "0" * 40})

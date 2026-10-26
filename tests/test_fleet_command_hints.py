@@ -142,6 +142,12 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("cli/fleet.py", "_emit_shutdown"): _TARGET,
     ("cli/fleet.py", "attach"): _TARGET,
     ("cli/project.py", "_emit_fresh"): _TARGET,
+    ("services/fresh.py", "start_fresh"): (
+        "the project being started fresh, as its plan read it from the store"
+    ),
+    ("services/fresh.py", "_stop"): (
+        "the project being started fresh, whose fleet the stop left standing"
+    ),
     ("cli/ui/app.py", "FleetApp._project_freshened"): (
         "the project the Start fresh report is about, the one its dialog was opened on"
     ),

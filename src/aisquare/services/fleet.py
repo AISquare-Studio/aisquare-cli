@@ -229,6 +229,12 @@ class FleetUnavailable(FleetError):
     has to know before it acts; the command is to be tried again."""
 
 
+class InsideTheFleet(FleetError):
+    """A shutdown asked from inside the fleet's own tmux server (:func:`_refuse_from_inside`):
+    killing its sessions would kill the asking pane before it could report. Its own class so
+    a caller that is not ``fleet shutdown`` (``project fresh``) can say it in its own words."""
+
+
 class NoSuchProject(FleetError):
     """The project reference matched nothing (or several things — said in the message)."""
 
@@ -2078,17 +2084,28 @@ def unpushed_work(
     holds work found nowhere else: a tree with changes not committed, or a tree or a branch
     no tree has out with commits neither the default branch nor any remote-tracking branch
     has (reap's rule, :func:`_why_kept`). A tree git cannot read is said to hold uncommitted
-    work: nothing there is known to be safe. Raises :class:`FleetError` when git cannot be
-    run."""
+    work: nothing there is known to be safe. Each carries the tip it was judged at, which a
+    confirmed discard is checked against (``services.fresh``).
+
+    It fails closed. The default branch is the one a rev-list can read: ``origin/HEAD`` can
+    name a ref a prune took (``master`` renamed ``main``), and against it every count failed
+    and read as none, so ``--branches`` deleted a commit no remote had, unasked (review of
+    #429, M2). Then the local ``main`` or ``master``, else the remotes alone, which reads
+    more commits as unpushed, never fewer; a count git still will not give raises
+    :class:`FleetError`, as a git that cannot be run does."""
     if not trees and not branches:
         return []
     root = project.root
-    default = _default_branch(root)
+    default = _countable_default(root)
 
     def alone(rev: str) -> int:
         # Asked in the root, where `default` is the checkout's: in a tree, HEAD is the tree's.
-        counted = _git(root, "rev-list", "--count", rev, "--not", default, "--remotes", "--")
-        return int(counted.stdout.strip() or 0) if counted.returncode == 0 else 0
+        against = [default] if default is not None else []
+        counted = _git(root, "rev-list", "--count", rev, "--not", *against, "--remotes", "--")
+        if counted.returncode != 0:
+            why = counted.stderr.strip() or f"exit {counted.returncode}"
+            raise FleetError(f"git could not count the commits of {rev} on no remote: {why}")
+        return int(counted.stdout.strip() or 0)
 
     found: list[FreshUnpushed] = []
     out: set[str] = set()
@@ -2098,15 +2115,49 @@ def unpushed_work(
         if branch is not None:
             out.add(branch)
         head = _git(tree, "rev-parse", "--verify", "--quiet", "HEAD")
-        commits = alone(head.stdout.strip()) if head.returncode == 0 and head.stdout else 0
+        tip = head.stdout.strip() if head.returncode == 0 else ""
+        commits = alone(tip) if tip else 0  # no HEAD: an unborn branch, nothing committed
         dirty = status.returncode != 0 or bool(status.stdout.strip())
         if commits or dirty:
             found.append(
-                FreshUnpushed(path=tree, branch=branch, commits=commits, uncommitted=dirty)
+                FreshUnpushed(
+                    path=tree, branch=branch, tip=tip or None, commits=commits, uncommitted=dirty
+                )
             )
     for branch, tip in branches.items():
         if branch not in out and (commits := alone(tip)):
-            found.append(FreshUnpushed(branch=branch, commits=commits))
+            found.append(FreshUnpushed(branch=branch, tip=tip, commits=commits))
+    return found
+
+
+def _countable_default(root: Path) -> str | None:
+    """The default branch (:func:`_default_branch`) when git can read it as a commit, else
+    the local ``main`` or ``master``, else ``None``: what :func:`unpushed_work` counts a
+    commit as safe on, besides the remotes."""
+    for name in dict.fromkeys((_default_branch(root), "main", "master")):
+        if _git(root, "rev-parse", "--verify", "--quiet", f"{name}^{{commit}}").returncode == 0:
+            return name
+    return None
+
+
+def project_sessions(project: ProjectInfo) -> list[str]:
+    """``<socket>:<session>`` for each of ``project``'s tmux sessions standing now, where a
+    scoped ``fleet shutdown`` looks for them (:func:`_fleet_sessions`): read-only, and with
+    none of its guards, so a caller can tell there is nothing to stop before it asks
+    :func:`shutdown_plan`, which refuses from inside the fleet's own server whatever it
+    would stop (review of #429, m1). A server that cannot be asked, or no usable tmux, holds
+    none."""
+    if not project.codename:
+        return []
+    config = settings()
+    targets = _shutdown_targets(project)
+    found: list[str] = []
+    for socket in _shutdown_sockets(targets, config):
+        srv = _server_at(socket, config)
+        for name, _, _ in _fleet_sessions(srv, targets, socket=socket, config=config, every=False):
+            with suppress(TmuxError, OSError):
+                if srv.has_session(name):
+                    found.append(f"{socket}:{name}")
     return found
 
 
@@ -6887,7 +6938,7 @@ def _refuse_from_inside(sockets: Sequence[_Address], config: FleetSettings) -> N
         with suppress(TmuxUnavailable, OSError):
             path = _server_at(socket, config).socket_path()
         if path is not None and _same_socket(path, here):
-            raise FleetError(
+            raise InsideTheFleet(
                 f"fleet shutdown is running INSIDE the fleet's own tmux server ({socket}) — "
                 "killing its sessions would kill this pane before it could report anything. "
                 "Nothing was touched: detach (your tmux prefix, then `d`) or open a terminal "

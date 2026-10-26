@@ -87,6 +87,7 @@ def alpha(tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch) -> Pr
     monkeypatch.setattr(
         fleet_service, "shutdown_plan", lambda *_, **__: fleet_service.ShutdownPlan()
     )
+    monkeypatch.setattr(fleet_service, "project_sessions", lambda *_, **__: [])
     (tmp_path / "alpha").mkdir()
     (project,) = seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
     with store_session() as store:
@@ -273,9 +274,7 @@ def test_confirm_applies_with_the_extras_chosen_and_says_what_was_cleared(
         return await _toasts(app)
 
     toasts = drive(go, notifications=True)
-    assert applied == [
-        {"memory": True, "prompts": False, "branches": False, "discard_unpushed": False}
-    ]
+    assert applied == [{"memory": True, "prompts": False, "branches": False, "discard": ()}]
     assert "✓ alpha started fresh — cleared 2 tasks, 1 note or event" in toasts, toasts
     assert "1 context entry; a new manager started (session sess-new)" in toasts, toasts
     assert "manager manager" not in toasts
@@ -349,8 +348,13 @@ def test_unpushed_work_asks_again_and_cancelling_there_applies_nothing(
     assert "fleet/amber-otter/old — 1 commit on no remote · uncommitted: no — no worktree" in str(
         seen["rows"]
     )
-    assert applied == [
-        {"memory": False, "prompts": False, "branches": True, "discard_unpushed": True}
+    # The discard covers the two places the dialog listed, at the tips it listed, and no more.
+    assert [{k: v for k, v in call.items() if k != "discard"} for call in applied] == [
+        {"memory": False, "prompts": False, "branches": True}
+    ]
+    assert [(item.branch, item.commits) for item in applied[0]["discard"]] == [
+        ("fleet/amber-otter/coder-1", 2),
+        ("fleet/amber-otter/old", 1),
     ]
     assert _board("prj_a") != before
 
@@ -553,16 +557,23 @@ def test_a_late_unpushed_refusal_says_what_to_do_in_the_ui(
 
     monkeypatch.setattr(fresh_service, "start_fresh", refuse)
 
-    async def go(pilot: Pilot[None]) -> str:
+    async def go(pilot: Pilot[None]) -> tuple[str, str, list[bool]]:
         app = fleet_app(pilot)
         dialog = await _open_from_menu(pilot)
         await settle(app)
+        await _tick(pilot, dialog, "fresh-prompts")
         dialog.query_one("#fresh-confirm", Button).press()
-        return await _toasts(app)
+        toasts = await _toasts(app)
+        await settle(app)
+        again = app.screen
+        ticked = [box.value for box in again.query(Checkbox)]
+        return toasts, type(again).__name__, ticked
 
-    toasts = drive(go, notifications=True)
-    assert "open Start fresh… again and confirm the discard" in toasts, toasts
+    toasts, again, ticked = drive(go, notifications=True)
+    assert "confirm the discard in Start fresh…, open again on it" in toasts, toasts
     assert "fleet/x/c" in toasts and "--discard-unpushed" not in toasts
+    # The dialog opens again on what the run found, ticked as the run was asked.
+    assert again == "ConfirmFresh" and ticked == [False, True, False]
 
 
 def test_start_fresh_is_refused_while_a_run_of_it_is_going(

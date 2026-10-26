@@ -1294,6 +1294,9 @@ class FreshUnpushed(BaseModel):
     """The worktree; ``None`` for a branch no tree has out."""
     branch: str | None = None
     """The branch the tree is on (``None`` on a detached HEAD), or the branch itself."""
+    tip: str | None = None
+    """The commit it was judged at: the tree's HEAD, or the branch's tip. A discard someone
+    confirmed covers this tip, and no commit made after it."""
     commits: int = 0
     """Commits on no remote-tracking branch and not on the default branch."""
     uncommitted: bool = False
@@ -1361,22 +1364,28 @@ class FreshReport(BaseModel):
     """What the run's own plan counted, before anything was stopped."""
     cleared: FreshCounts = Field(default_factory=FreshCounts)
     """What it deleted: past :attr:`planned` by what was written after the plan was read,
-    the stop's own ``agent_exited`` and released claims (and anything posted meanwhile),
-    which go with the board too (:meth:`stop_events`)."""
+    during the reset: the stop's own ``agent_exited`` and released claims, and anything an
+    agent posted before it was stopped, which go with the board too (:meth:`stop_events`)."""
     stopped: list[str] = Field(default_factory=list)
     """Labels of the agents it stopped (or recorded gone) before clearing."""
+    sessions_killed: list[str] = Field(default_factory=list)
+    """``<socket>:<session>`` for each of the project's tmux sessions the stop killed."""
+    sessions_failed: list[str] = Field(default_factory=list)
+    """The sessions tmux would not kill, with why: a reset with any is incomplete."""
     worktrees_removed: list[Path] = Field(default_factory=list)
     branches_deleted: list[str] = Field(default_factory=list)
     kept: list[FreshKept] = Field(default_factory=list)
     """Trees and branches it could not remove; their rows went all the same."""
     discarded: list[FreshUnpushed] = Field(default_factory=list)
-    """The unpushed work ``--discard-unpushed`` let it throw away."""
+    """The unpushed work it threw away, as asked: only what went (a tree removed, a branch
+    deleted), never what it was let discard and then kept."""
     manager: FleetAgent | None = None
     """The fresh manager it started; ``None`` when the spawn was refused."""
     manager_error: str | None = None
     """Why the fresh manager did not start: the board is clear all the same."""
 
     def stop_events(self) -> int:
-        """The board events cleared that the plan did not count: written after it was read,
-        the stop's own (an ``agent_exited`` a stopped agent, a released claim's note)."""
+        """The board events cleared that the plan did not count: written during the reset,
+        after the plan was read (the stop's ``agent_exited`` and released claims, and what
+        an agent posted before it was stopped)."""
         return max(0, self.cleared.events - self.planned.events)

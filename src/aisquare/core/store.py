@@ -1403,7 +1403,7 @@ class ContextStore(Protocol):
     def forget_project(self, project_id: str) -> None: ...
     def purge_project(self, project_id: str) -> dict[str, int]: ...
     def reset_project(
-        self, project_id: str, *, memory: bool = False, prompts: bool = False, apply: bool = True
+        self, project_id: str, *, memory: bool = False, prompts: bool = False, apply: bool
     ) -> dict[str, int]: ...
     def project_activity(self) -> dict[str, str]: ...
     def add_prompt(
@@ -2538,10 +2538,11 @@ class SqliteStore:
         return removed
 
     def reset_project(
-        self, project_id: str, *, memory: bool = False, prompts: bool = False, apply: bool = True
+        self, project_id: str, *, memory: bool = False, prompts: bool = False, apply: bool
     ) -> dict[str, int]:
         """Empty the project's board and fleet rows in one transaction ("Start fresh"), and
         say what each table gave up; with ``apply`` off, count them and change nothing.
+        ``apply`` has no default: a call that left it out deleted (review of #429).
 
         The board is its ``team_task``, ``team_event`` and ``team_session`` rows, and in
         ``team_meta`` its signals (``signal/<id>/*``) and the keys of the sessions that go

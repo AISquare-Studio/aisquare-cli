@@ -140,6 +140,7 @@ from aisquare.models import (
     DoctorCheck,
     FleetAgent,
     FleetAgentStatus,
+    FreshPlan,
     FreshReport,
     HeadroomSummary,
     ProjectForgetReport,
@@ -188,8 +189,9 @@ PROJECT_REMOVE_WORKER = "project-remove"
 PROJECT_FRESH_WORKER = "project-fresh"
 """The thread worker *Start fresh…* clears a project's board and fleet on (``project fresh``),
 one a project at a time (:func:`_fresh_group`)."""
-UNPUSHED_IN_THE_UI = "open Start fresh… again and confirm the discard"
-"""How the UI lets work found nowhere else go, where the CLI's refusal names its flag."""
+UNPUSHED_IN_THE_UI = "confirm the discard in Start fresh…, open again on it"
+"""How the UI lets work found nowhere else go, where the CLI's refusal names its flag: the
+dialog opens again on what the run found (``FleetApp._project_freshened``)."""
 
 
 def _fresh_group(project_id: str) -> str:
@@ -976,6 +978,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         are never listed, whatever ``show_captured`` says, and ``a`` is no key."""
         self._undo: list[project_groups.UndoEntry] = []
         """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
+        self._fresh_choices: dict[str, FreshChoice] = {}
+        """Each project's last confirmed Start fresh, by id: what a reopened dialog ticks."""
+        self._fresh_asked: dict[str, FreshChoice] = {}
+        """The Start fresh dialogs to open with a run's extras ticked, by project id, once."""
         self.captain_on = experimental.captain_enabled()
         """The experimental captain, read at the start: off, there is no insignia, captain
         row or captain view, and no ui receiver is started (:meth:`on_mount`). Settings'
@@ -2203,7 +2209,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             if choice is not None:
                 self._start_fresh(choice)
 
-        self.push_screen(ConfirmFresh(project), chosen)
+        self.push_screen(ConfirmFresh(project, self._fresh_asked.pop(project.id, None)), chosen)
 
     def _start_fresh(self, choice: FreshChoice) -> None:
         """*Start fresh…*, confirmed: ``services.fresh.start_fresh``, off the UI thread. It
@@ -2216,13 +2222,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if self._fresh_running(project):
             return
         target = project
+        self._fresh_choices[target.id] = choice
         self.run_worker(
             lambda: fresh_service.start_fresh(
                 target,
                 memory=choice.memory,
                 prompts=choice.prompts,
                 branches=choice.branches,
-                discard_unpushed=choice.discard_unpushed,
+                discard=choice.discard,
             ),
             name=PROJECT_FRESH_WORKER,
             group=_fresh_group(target.id),
@@ -2257,6 +2264,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             cleared = ", ".join(fresh_service.cleared_words(result))
             session = (result.manager.session_id or "")[:8] if result.manager else ""
             manager = f"; a new manager started (session {session})" if result.manager else ""
+            if result.sessions_killed:
+                manager = f"; its tmux session was killed{manager}"
             self.notify(
                 f"✓ {name} started fresh — cleared {cleared}{manager}", timeout=10, markup=False
             )
@@ -2278,10 +2287,15 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         elif event.state is WorkerState.ERROR:
             error = event.worker.error
             known = (fresh_service.FreshRefused, fresh_service.FreshIncomplete)
-            if isinstance(error, fresh_service.FreshRefused) and error.plan is not None:
-                # Work found since the dialog read its plan: the CLI's flag means nothing
-                # here (tester-fresh-ui at 8b66e535).
-                said = fresh_service.unpushed_refusal(error.plan, way=UNPUSHED_IN_THE_UI)
+            found = getattr(error, "plan", None) if isinstance(error, known) else None
+            if isinstance(found, FreshPlan):
+                # Work found since the dialog read its plan, which nobody agreed to discard:
+                # the CLI's flag means nothing here (tester-fresh-ui at 8b66e535), and the
+                # dialog opens again on it (review of #429, M1).
+                said = fresh_service.unpushed_refusal(found, way=UNPUSHED_IN_THE_UI)
+                if isinstance(error, fresh_service.FreshIncomplete):
+                    said += " — its fleet is stopped; nothing was removed or cleared"
+                self._ask_again(found.project.id)
             elif isinstance(error, known):
                 said = str(error)
             else:
@@ -2289,6 +2303,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.notify(said, title="not started fresh", severity="error", timeout=12, markup=False)
             if isinstance(error, fresh_service.FreshIncomplete):
                 self.refresh_data()  # its agents were stopped: the sidebar says so
+
+    def _ask_again(self, project_id: str) -> None:
+        """Open Start fresh… again for ``project_id``, its extras ticked as the run's were,
+        once the run that found work nobody agreed to discard has ended."""
+        choice = self._fresh_choices.get(project_id)
+        if choice is not None:
+            self._fresh_asked[project_id] = choice
+        self.call_after_refresh(self.post_message, StartFresh(project_id))
 
     def _read_boards(self, project_id: str) -> None:
         """Every open board of the project, hidden ones too, starts over

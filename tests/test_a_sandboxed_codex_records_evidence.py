@@ -379,6 +379,8 @@ def test_a_report_holding_a_link_a_pipe_or_another_file_is_refused(
     tree: Path,
     tmp_path: Path,
 ) -> None:
+    if sys.platform == "win32":  # mypy narrows on this, not on the skipif that keeps it off
+        pytest.skip("no FIFOs on Windows")
     _, task = _linked()
     forged = _forge(running, task)
     target = running / store_broker.REPORTS / forged

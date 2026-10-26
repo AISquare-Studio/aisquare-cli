@@ -235,6 +235,8 @@ def test_a_transcript_that_is_a_pipe_is_not_opened_for_a_writer_that_may_never_c
     tmp_path: Path,
     reads: list[Path],
 ) -> None:
+    if sys.platform == "win32":  # mypy narrows on this, not on the skipif that keeps it off
+        pytest.skip("a named pipe is a POSIX file")
     pipe = tmp_path / "t.jsonl"
     os.mkfifo(pipe)
     assert stat.S_ISFIFO(pipe.stat().st_mode)

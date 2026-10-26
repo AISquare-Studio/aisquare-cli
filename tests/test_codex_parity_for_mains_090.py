@@ -34,6 +34,7 @@ from aisquare.models import FleetAgent, ProjectInfo, TeamTask
 from aisquare.services import agent_launch, autostop, delivery, hooks, remote_needs, updates
 from aisquare.services import fleet as fleet_service
 from aisquare.services import watch as watch_service
+from tests.install_flags import DRY
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
 from tests.test_codex_fleet_parity import (  # noqa: F401 - fixtures, by name
     DRAFT,
@@ -53,7 +54,6 @@ from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     tmux,
 )
 from tests.test_install_script_handoff import (  # noqa: F401 - fixture, by name
-    DRY,
     STAMP,
     Machine,
     machine,

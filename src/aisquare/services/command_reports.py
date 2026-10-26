@@ -63,6 +63,10 @@ _ARGV_LIMIT = 32_768
 #: source.json holds the two per-file maps. A checkout too large for this keeps only the
 #: combined fingerprints, and its report says so (``source_files_saved``).
 _SOURCE_JSON_LIMIT = 32 * 1024 * 1024
+#: ``os.open`` flags a POSIX file system has and Windows has not (the broker itself runs on
+#: POSIX only, :func:`_read_sandboxed`); 0 there, so a read still opens and checks the file.
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 # Complete terminal sequences; their presence makes output pass through unchanged.
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
 _PROGRESS = re.compile(r"^(?:[^\r\n]*test[^\r\n]*\.py\s+)?[.sfxXFE]+\s*\[\s*\d+%\]\s*$")
@@ -1042,7 +1046,7 @@ def _read_member(directory: int, name: str, limit: int, uid: int) -> bytes:
     """One file of a sandbox's report, read by name in the directory already opened: never
     through a link, never blocking on a FIFO, owner-only, a regular file, at most ``limit``."""
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        fd = os.open(name, os.O_RDONLY | _NOFOLLOW | _NONBLOCK, dir_fd=directory)
     except OSError as exc:
         raise SandboxReportError(f"{name} cannot be opened ({exc.strerror})") from None
     with os.fdopen(fd, "rb") as handle:
@@ -1183,7 +1187,7 @@ def _seal(report_id: str) -> str:
     reports, seals = _broker_command()
     digest = _digest(_read_sandboxed(reports, report_id))
     try:
-        fd = os.open(seals / report_id, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        fd = os.open(seals / report_id, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600)
     except FileExistsError:
         raise SandboxReportError(f"report {report_id[:12]} is sealed already") from None
     except OSError as exc:
@@ -1195,7 +1199,7 @@ def _seal(report_id: str) -> str:
 
 def _sealed(seals: Path, report_id: str) -> str | None:
     try:
-        fd = os.open(seals / report_id, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(seals / report_id, os.O_RDONLY | _NOFOLLOW | _NONBLOCK)
     except OSError:
         return None
     with os.fdopen(fd, "rb") as handle:

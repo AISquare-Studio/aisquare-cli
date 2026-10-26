@@ -254,6 +254,8 @@ def _status(mode: int, uid: int) -> os.stat_result:
 
 
 def test_a_file_must_belong_to_the_user_the_broker_runs_as_and_be_theirs_alone() -> None:
+    if sys.platform == "win32":  # mypy narrows on this, not on the skipif that keeps it off
+        pytest.skip("no user ids on Windows")
     me = os.getuid()
     reports._owner_only(_status(stat.S_IFREG | 0o600, me), me, "stdout.bin")
     reports._owner_only(_status(stat.S_IFDIR | 0o700, me), me, "the report's directory")

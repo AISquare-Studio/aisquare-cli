@@ -449,7 +449,7 @@ def switch(
             help="Account to move it to: a slot, alias or email, of its own agent or another "
             "(which it then runs). Default: its own agent's account with the most headroom "
             "that is not the one it is on; once every one is full, another agent's "
-            "([accounts] cross_agent_handover).",
+            "(`\\[accounts] cross_agent_handover`).",
             metavar="ACCOUNT",
         ),
     ] = None,

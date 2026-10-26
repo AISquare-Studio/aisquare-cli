@@ -202,8 +202,8 @@ CROSS_AGENT_TIP = (
     "When every account of an agent is full, hand its work to another agent's account "
     "instead of waiting. A conversation cannot move between agents, so the other agent "
     "starts fresh with a brief of the work: the task, the board, the tree and the newest of "
-    "the conversation, which goes to that agent's vendor (Anthropic or OpenAI), with "
-    "credentials scrubbed out first ([redaction] level). Off: a hand-over stays on its agent."
+    "the conversation, which goes to that agent's vendor, with credentials scrubbed out "
+    "first ([redaction] level). Off: a hand-over stays on its agent."
 )
 
 FALLBACK_AGENT_TIP = (

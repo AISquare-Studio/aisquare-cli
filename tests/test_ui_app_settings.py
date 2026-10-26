@@ -456,7 +456,7 @@ def test_the_hand_off_across_agents_switch_says_the_conversation_goes_to_the_oth
 
     assert text == "hand off across agents"
     assert switch_tip == label_tip == CROSS_AGENT_TIP
-    for said in ("conversation", "vendor", "Anthropic or OpenAI", "scrubbed", "Off:"):
+    for said in ("conversation", "that agent's vendor", "scrubbed", "Off:"):
         assert said in CROSS_AGENT_TIP
 
 

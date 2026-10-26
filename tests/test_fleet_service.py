@@ -2196,23 +2196,99 @@ def test_the_dialogs_pick_is_remembered_and_a_blank_one_is_the_accounts_default(
     assert model_memory.remembered() == model_memory.Pick()
 
 
-def _captured(
-    monkeypatch: pytest.MonkeyPatch, agent: FleetAgent, transcript: Path, model: str, effort: str
-) -> None:
-    """The capture a turn end makes after the owner's ``/model`` inside ``agent``: its reply
-    names the new model in the transcript, its Stop hook's ``CLAUDE_EFFORT`` the effort."""
+def _write_records(transcript: Path, *records: dict[str, object]) -> None:
     with transcript.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"type": "assistant", "message": {"model": model}}) + "\n")
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+
+
+def _user(text: str, *, meta: bool = False) -> dict[str, object]:
+    record: dict[str, object] = {"type": "user", "message": {"role": "user", "content": text}}
+    if meta:
+        record["isMeta"] = True
+    return record
+
+
+def _local_command(
+    transcript: Path, setting: str, args: str, stdout: str, *, system: bool = False
+) -> None:
+    """A built-in ``/model`` or ``/effort`` the owner typed, as Claude Code 2.1.310 records it
+    (``tests/fixtures/claude_code/model_commands_2.1.310.jsonl``): its caveat, its name and
+    args, and its answer; the picker's Esc as ``system`` ``local_command`` records."""
+    name = (
+        f"<command-name>/{setting}</command-name>\n            <command-message>{setting}"
+        f"</command-message>\n            <command-args>{args}</command-args>"
+    )
+    answer = f"<local-command-stdout>{stdout}</local-command-stdout>"
+    if system:
+        _write_records(
+            transcript,
+            {"type": "system", "subtype": "local_command", "content": name},
+            {"type": "system", "subtype": "local_command", "content": answer},
+        )
+        return
+    caveat = "<local-command-caveat>The command below was run directly in Claude Code…"
+    _write_records(transcript, _user(caveat, meta=True), _user(name), _user(answer))
+
+
+def _turn(
+    agent: FleetAgent,
+    transcript: Path,
+    model: str,
+    effort: str | None,
+    *,
+    prompt: str = "carry on",
+) -> None:
+    """One plain turn (``prompt``, a reply from ``model``) and its Stop at ``effort``."""
+    _write_records(
+        transcript,
+        *([_user(prompt)] if prompt else []),
+        {"type": "assistant", "message": {"role": "assistant", "model": model, "content": []}},
+    )
     assert agent.session_id is not None
     model_memory.observe(agent.session_id, str(transcript), effort=effort, agent_id=agent.id)
 
 
+def _command_turn(
+    agent: FleetAgent, transcript: Path, name: str, model: str, effort: str | None
+) -> None:
+    """A turn a custom slash command (or a skill) opens, replied from ``model`` at ``effort``:
+    its frontmatter's override, for that turn alone (seq 3609)."""
+    prompt = (
+        f"<command-message>{name}</command-message>\n<command-name>/{name}</command-name>\n"
+        "<command-args>fix the lint</command-args>"
+    )
+    _write_records(transcript, _user(prompt), _user("Answer briefly: fix the lint", meta=True))
+    _turn(agent, transcript, model, effort, prompt="")
+
+
+def _captured(
+    monkeypatch: pytest.MonkeyPatch, agent: FleetAgent, transcript: Path, model: str, effort: str
+) -> None:
+    """The owner's ``/model <model>`` and ``/effort <effort>`` inside ``agent``, recorded as
+    Claude Code records them, then a turn on them and its Stop."""
+    saved = "and saved as your default for new sessions"
+    _local_command(transcript, "model", model, f"Set model to `{model}` {saved}")
+    _local_command(
+        transcript,
+        "effort",
+        effort,
+        f"Set effort level to {effort} (saved as your default for new sessions): …",
+    )
+    _turn(agent, transcript, model, effort)
+
+
 def _started(agent: FleetAgent, model: str) -> None:
     """The agent's session start as its hook reports it: the model its launch resolved to
-    (``opus`` runs ``claude-opus-5-5``). No effort: Claude Code's SessionStart reports none
-    (seq 3513); its first Stop does."""
+    (``opus`` runs ``claude-opus-5-5``) and its transcript, from where its commands are read.
+    No effort: Claude Code's SessionStart reports none (seq 3513)."""
     assert agent.session_id is not None
-    model_memory.started(agent.session_id, model=model, agent_id=agent.id)
+    with store_session() as store:
+        session = store.get_session(agent.session_id)
+    transcript = session.transcript_path if session is not None else None
+    model_memory.started(
+        agent.session_id, model=model, transcript_path=transcript, agent_id=agent.id
+    )
 
 
 def test_a_restart_and_a_switch_start_what_the_agent_runs_now(
@@ -2236,6 +2312,7 @@ def test_a_restart_and_a_switch_start_what_the_agent_runs_now(
     transcript = tmp_path / f"{agent.session_id}.jsonl"
     transcript.write_text('{"type":"user"}\n', encoding="utf-8")
     _with_transcript(agent, transcript)
+    _started(agent, "claude-opus-5-5")
     _captured(monkeypatch, agent, transcript, "claude-fable-5-1", "max")
     assert model_memory.remembered() == model_memory.Pick("claude-fable-5-1", "max")
 
@@ -2247,6 +2324,7 @@ def test_a_restart_and_a_switch_start_what_the_agent_runs_now(
     assert spec is not None and (spec.model, spec.effort) == ("claude-fable-5-1", "max")
     assert _model_flags(spec.extra_args) == [], "the launch-time pick is not replayed beside it"
 
+    _started(restarted, "claude-fable-5-1")  # its own session start, resumed
     _captured(monkeypatch, restarted, transcript, "claude-sonnet-5-5", "low")
     picked = model_memory.remembered()
     switched = fleet_service.switch(project, restarted.label, to="3").started
@@ -2324,7 +2402,7 @@ def test_a_restart_and_a_switch_keep_what_an_agent_with_no_pick_ran(
     agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
     transcript = _on_disk(agent, tmp_path)
     _started(agent, "claude-opus-5-5")
-    _captured(monkeypatch, agent, transcript, "claude-opus-5-5", "high")
+    _turn(agent, transcript, "claude-opus-5-5", "high")
     assert model_memory.remembered() == model_memory.Pick()
 
     tmux.die(agent.pane_id, 0)
@@ -2348,15 +2426,37 @@ def test_a_mode_alias_is_kept_by_its_turns_and_its_restart(
     agent = _coder(project, agent_args=["--model", "opusplan"])
     transcript = _on_disk(agent, tmp_path)
     _started(agent, "claude-opus-5-5")
-    _captured(monkeypatch, agent, transcript, "claude-sonnet-5-5", "high")
-    _captured(monkeypatch, agent, transcript, "claude-opus-5-5", "high")
+    _turn(agent, transcript, "claude-sonnet-5-5", "high")
+    _turn(agent, transcript, "claude-opus-5-5", "high")
     assert model_memory.remembered().model == "opusplan"
 
     tmux.die(agent.pane_id, 0)
     restarted = fleet_service.restart(project, agent.label).started
     assert _flag(_command(tmux), "--model") == "opusplan"
+    _started(restarted, "claude-opus-5-5")  # its own session start, resumed
     _captured(monkeypatch, restarted, transcript, "claude-fable-5-1", "high")
     assert model_memory.remembered().model == "claude-fable-5-1", "a /model off opusplan is one"
+
+
+def _the_captain(project: ProjectInfo, monkeypatch: pytest.MonkeyPatch) -> str:
+    """The captain's own call path: the captain on, and this process its live row's (as its
+    MCP server runs inside its window); the row's id."""
+    monkeypatch.setenv("AISQUARE_EXPERIMENTAL_CAPTAIN", "1")
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_thecaptain",
+                project_id=project.id,
+                label="captain",
+                role=fleet_service.CAPTAIN_ROLE,
+                pane_id="%77",
+                session_id="ses_captain",
+                cwd=project.root,
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+    monkeypatch.setenv(FLEET_AGENT_ENV_VAR, "agt_thecaptain")
+    return "agt_thecaptain"
 
 
 def test_a_spawn_an_agent_makes_never_writes_the_owners_pick(
@@ -2375,6 +2475,7 @@ def test_a_spawn_an_agent_makes_never_writes_the_owners_pick(
     assert _model_flags(_command(tmux)) == ["--model", "sonnet", "--effort", "low"]
     assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
 
+    _the_captain(project, monkeypatch)
     _coder(project, agent_args=["--model", "fable"], spawned_by=fleet_service.CAPTAIN_ROLE)
     assert model_memory.remembered() == model_memory.Pick("fable", "xhigh")
     monkeypatch.delenv(FLEET_AGENT_ENV_VAR)
@@ -2541,10 +2642,16 @@ def test_an_agents_spawn_cannot_open_with_a_setting_command(
 
 @pytest.mark.parametrize("spawned_by", ["user", fleet_service.CAPTAIN_ROLE])
 def test_the_owners_and_the_captains_spawn_may_open_with_a_setting_command(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, spawned_by: str
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    spawned_by: str,
 ) -> None:
     """The owner's own words, as the dialog's First prompt or a shell's ``--prompt``, and the
-    captain typing what the owner said, are the owner's choice."""
+    captain typing what the owner said (from its own call path), are the owner's choice."""
+    if spawned_by == fleet_service.CAPTAIN_ROLE:
+        _the_captain(project, monkeypatch)
     agent = _coder(project, prompt="/effort max", spawned_by=spawned_by)
     assert agent.first_prompt == "pending"
 
@@ -2556,22 +2663,7 @@ def test_the_owner_and_the_captain_may_tell_an_agent_a_model_command(
     _board_session(agent, "waiting")
     tmux.set_command(agent.pane_id, "claude")
     assert fleet_service.tell(project, agent.label, "/model haiku").delivered
-
-    now = datetime.now(tz=UTC)
-    with store_session() as store:
-        store.upsert_fleet_agent(
-            FleetAgent(
-                id="agt_thecaptain",
-                project_id=project.id,
-                label="captain",
-                role=fleet_service.CAPTAIN_ROLE,
-                pane_id="%77",
-                session_id="ses_captain",
-                cwd=project.root,
-                created_at=now,
-            )
-        )
-    monkeypatch.setenv(FLEET_AGENT_ENV_VAR, "agt_thecaptain")
+    _the_captain(project, monkeypatch)
     fleet_service.tell(project, agent.label, "/model fable", sender="ses_captain")
 
 
@@ -2618,6 +2710,191 @@ def test_a_hand_over_starts_what_the_agent_runs_now_and_leaves_the_pick(
     assert moved.to_slot == 3
     assert _model_flags(_command(tmux)) == ["--model", "claude-fable-5-1", "--effort", "max"]
     assert model_memory.remembered() == model_memory.Pick("sonnet", "low")
+
+
+@pytest.mark.parametrize("frontmatter", ["model", "effort"])
+@pytest.mark.parametrize("route", ["tell", "spawn", "owner"])
+def test_a_custom_commands_frontmatter_is_one_turns_and_never_the_pick(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    route: str,
+    frontmatter: str,
+) -> None:
+    """Round 4 reopen (seq 3609, 1): a custom slash command or a skill with ``model:`` or
+    ``effort:`` frontmatter overrides ONE turn (``/quick``, ``model: haiku``, replies as haiku,
+    and the next turn is back), and the drift was read as a ``/model``: an agent's tell, an
+    agent's spawn prompt and the owner's own ``/quick`` wrote the pick, and the turn after
+    one wrote the agent's own flags. Only a recorded ``/model`` or ``/effort`` is a pick now,
+    and only it moves what a restart runs."""
+    model_memory.remember(model="claude-opus-4-5", effort="xhigh")
+    flags = ["--model", "sonnet", "--effort", "medium"]
+    prompt = "/quick add a test" if route == "spawn" else None
+    agent = _coder(project, agent_args=flags, spawned_by="ses_mgr1", prompt=prompt)
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-sonnet-5-5")
+    if route != "spawn":
+        with store_session() as store:
+            assert agent.session_id is not None
+            store.touch_session(agent.session_id, state="waiting")
+        tmux.set_command(agent.pane_id, "claude")
+        sender = "ses_mgr1" if route == "tell" else None
+        told = fleet_service.tell(project, agent.label, "/quick fix the lint", sender=sender)
+        assert told.delivered, "no setting command: typed, as any message is"
+    override = (
+        ("claude-haiku-5-5", "medium") if frontmatter == "model" else ("claude-sonnet-5-5", "low")
+    )
+    _command_turn(agent, transcript, "quick", *override)
+    _turn(agent, transcript, "claude-sonnet-5-5", "medium")
+    assert model_memory.remembered() == model_memory.Pick("claude-opus-4-5", "xhigh")
+
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _model_flags(_command(tmux)) == flags, "what it was launched on, not one turn's"
+
+
+def test_a_recorded_model_or_effort_command_is_the_pick_and_what_a_restart_runs(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """The positive evidence (seq 3609): Claude Code's own record of ``/model`` and
+    ``/effort``, the value from its args, else its answer (the picker: ``Set model to
+    `Haiku 5.5```, ``Kept model as `Opus 5.5```), the shapes of
+    ``tests/fixtures/claude_code/model_commands_2.1.310.jsonl``."""
+    model_memory.remember(model="sonnet", effort="low")
+    agent = _coder(
+        project, agent_args=["--model", "sonnet", "--effort", "medium"], spawned_by="ses_mgr1"
+    )
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-sonnet-5-5")
+    saved = "and saved as your default for new sessions"
+    _local_command(transcript, "model", "haiku", f"Set model to `Haiku 5.5` {saved}")
+    _turn(agent, transcript, "claude-haiku-5-5", "medium")
+    assert model_memory.remembered() == model_memory.Pick("haiku", "low")
+    _local_command(
+        transcript,
+        "effort",
+        "",
+        "Set effort level to max (saved as your default for new sessions): …",
+    )
+    _turn(agent, transcript, "claude-haiku-5-5", "max")
+    assert model_memory.remembered() == model_memory.Pick("haiku", "max")
+    _local_command(transcript, "model", "", "Kept model as `Opus 5.5`", system=True)
+    _turn(agent, transcript, "claude-opus-5-5", "max")
+    assert model_memory.remembered() == model_memory.Pick("claude-opus-5-5", "max")
+
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _model_flags(_command(tmux)) == ["--model", "claude-opus-5-5", "--effort", "max"]
+
+
+def test_a_session_only_choice_moves_the_agent_and_never_the_pick(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """The picker's ``s``: "for this session only" says it is no default, so it is no pick;
+    the agent runs it, and its restart keeps it."""
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(project, agent_args=["--model", "opus"], spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-5-5")
+    _local_command(transcript, "model", "", "Set model to `Sonnet 5.5` for this session only")
+    _local_command(
+        transcript, "effort", "", "Set effort level to medium (this session only): Balanced …"
+    )
+    _turn(agent, transcript, "claude-sonnet-5-5", "medium")
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _model_flags(_command(tmux)) == ["--model", "claude-sonnet-5-5", "--effort", "medium"]
+
+
+def test_a_command_whose_value_is_unnamed_takes_the_next_plain_turns_reading(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """``Set model to `Default (recommended)``` names no model: the next PLAIN turn's reading
+    does, never a turn another slash command opened, nor the turn after one."""
+    agent = _coder(project, agent_args=["--model", "sonnet"], spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-sonnet-5-5")
+    _local_command(
+        transcript,
+        "model",
+        "",
+        "Set model to `Default (recommended)` and saved as your default for new sessions",
+    )
+    _command_turn(agent, transcript, "quick", "claude-haiku-5-5", "high")
+    _turn(agent, transcript, "claude-opus-5-5", "high")  # the turn after a command
+    assert model_memory.remembered() == model_memory.Pick()
+    _turn(agent, transcript, "claude-opus-5-5", "high")
+    assert model_memory.remembered() == model_memory.Pick("claude-opus-5-5", None)
+
+
+@pytest.mark.parametrize("captain_on", [False, True])
+def test_the_captain_is_trusted_from_its_own_row_alone_never_an_as_string(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    captain_on: bool,
+) -> None:
+    """Round 4 reopen (seq 3609, 2): ``fleet spawn --as captain`` from any agent's shell read as
+    the owner, the captain on or off, and wrote the pick. The captain is trusted only from
+    its own call path: the captain on, and the caller's fleet row the captain's."""
+    _settings(monkeypatch, max_agents_per_project=10)
+    monkeypatch.setenv("AISQUARE_EXPERIMENTAL_CAPTAIN", "1" if captain_on else "0")
+    model_memory.remember(model="opus", effort="xhigh")
+    tester = _coder(project, label="tester-1")
+    monkeypatch.setenv(FLEET_AGENT_ENV_VAR, tester.id)
+    _coder(project, agent_args=["--model", "fable", "--effort", "low"], spawned_by="captain")
+    with pytest.raises(fleet_service.FleetError, match="cannot open with /effort"):
+        _coder(project, prompt="/effort max", spawned_by="captain")
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_thecaptain",
+                project_id=project.id,
+                label="captain",
+                role=fleet_service.CAPTAIN_ROLE,
+                pane_id="%77",
+                session_id="ses_captain",
+                cwd=project.root,
+                created_at=now,
+            )
+        )
+    monkeypatch.setenv(FLEET_AGENT_ENV_VAR, "agt_thecaptain")
+    _coder(project, agent_args=["--model", "fable", "--effort", "low"], spawned_by="captain")
+    expected = (
+        model_memory.Pick("fable", "low") if captain_on else model_memory.Pick("opus", "xhigh")
+    )
+    assert model_memory.remembered() == expected
+
+
+@pytest.mark.parametrize("lead", ["\ufeff", "\u200b", "\u2060 "])
+def test_a_format_character_before_a_setting_command_hides_nothing(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, lead: str
+) -> None:
+    """Round 4 reopen (seq 3609, minor): Claude Code 2.1.311 ran a BOM-led ``/effort low``."""
+    assert fleet_service.setting_command(f"{lead}/effort low") == "/effort"
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+    with pytest.raises(fleet_service.FleetError, match="cannot type /effort"):
+        fleet_service.tell(project, agent.label, f"{lead}/effort max", sender="ses_mgr1")
+
+
+def test_an_agents_spawn_for_a_task_may_carry_a_command_after_its_kickoff(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Round 4 reopen (seq 3609, minor): with a task, the first message opens with the
+    kickoff, so a ``/model`` inside the prompt is no command Claude Code runs."""
+    task = _add_task(project, "Ship auth")
+    agent = _coder(project, task_id=task.id, prompt="/model fable", spawned_by="ses_mgr1")
+    [line] = _first_lines(tmux, agent.pane_id)
+    assert fleet_service.setting_command(line) is None and "/model fable" in line
 
 
 def test_another_binary_gets_no_model_flag(

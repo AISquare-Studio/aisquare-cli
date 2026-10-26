@@ -142,14 +142,6 @@ def same_reading(one: str, other: str) -> bool:
 #: reply of either is no ``/model`` (#16, seq 3428 c).
 MODE_ALIASES: dict[str, frozenset[str]] = {"opusplan": frozenset({"opus", "sonnet"})}
 
-#: The alias for the account's own default model: as good as no ``--model`` at all.
-DEFAULT_MODEL_ALIAS = "default"
-
-
-def is_mode_alias(model: str | None) -> bool:
-    """Whether ``model`` is one of :data:`MODE_ALIASES` (``opusplan[1m]`` included)."""
-    return model is not None and _MODEL_SUFFIX.sub("", model.strip().lower()) in MODE_ALIASES
-
 
 def runs_under(alias: str | None, reading: str) -> bool:
     """Whether ``reading`` is a model the mode alias ``alias`` runs (``opusplan``: an opus or
@@ -158,28 +150,6 @@ def runs_under(alias: str | None, reading: str) -> bool:
         return False
     families = MODE_ALIASES.get(_MODEL_SUFFIX.sub("", alias.strip().lower()))
     return families is not None and model_family(reading) in families
-
-
-def ran_another(reading: str, flag: str | None) -> bool:
-    """Whether ``reading``, the model a session reported with nothing read before it, is
-    another model than the launch's ``--model`` ``flag`` started.
-
-    Never for no flag (or ``default``): what it ran is the account's own default, which only
-    Claude Code knows. For a mode alias, a reading of a family it does not run
-    (:func:`runs_under`). For a family's alias
-    (``opus``), only a reading of another family: the id the alias resolved to is not known
-    before the session says, so a same-family id is taken for it (the session's start
-    reports it, and a ``/model`` after that is read against that report). For an id, any
-    other id (:func:`same_reading`).
-    """
-    if flag is None or flag.strip().lower() == DEFAULT_MODEL_ALIAS:
-        return False
-    if is_mode_alias(flag):
-        return not runs_under(flag, reading)
-    bare = _MODEL_SUFFIX.sub("", flag.strip().lower())
-    if bare in MODEL_FAMILIES:
-        return model_family(reading) != bare
-    return not same_reading(reading, flag)
 
 
 def same_effort(one: str | None, other: str | None) -> bool:

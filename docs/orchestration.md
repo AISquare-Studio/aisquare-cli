@@ -116,11 +116,15 @@ its own: a `--model` or `--effort` in the spawn's arguments, then the role's set
 (`[fleet.roles.<role>] extra_args`, its binding's `--arg`), then your last pick, and with
 none no flag, so Claude Code runs the account's own saved default. The pick is one per
 home, for every role and persona, and only your choices write it: a spawn of yours that
-names one (asq, your shell) and a `/model` inside any running fleet agent (read at its next turn end, its own session's alone). A spawn an agent makes
-and a role's settings never do. A restart, a switch and a hand-over keep what the agent
-was actually running, the account default included, and change no pick. 0.9.0 passed the ladder's top
-rung here, which started every manager on Fable at high effort over the default you saved
-with `/model` (fixed in 0.9.1). See [docs/fleet.md, The roles](fleet.md#the-roles).
+names one (asq, your shell), and a built-in `/model` or `/effort` you run inside any fleet
+agent, as Claude Code records the command (read at its next turn end, its own session's
+alone). A model that merely changes for a turn, as a custom command's `model:` frontmatter
+makes it, is no pick. A spawn an agent makes and a role's settings never write it. A
+restart, a switch and a hand-over start what the agent runs, its launch's values as a
+recorded `/model` or `/effort` alone moved them, the account default included, and change
+no pick. 0.9.0 passed the ladder's top rung here, which started every manager on Fable at
+high effort over the default you saved with `/model` (fixed in 0.9.1). See
+[docs/fleet.md, The roles](fleet.md#the-roles).
 
 Sessions report their model back to the board, which flags any session
 running off its role's ladder (`⚠ off-ladder`), unless it runs a model you

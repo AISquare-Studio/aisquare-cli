@@ -100,28 +100,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   you chose them. Your last pick is one per home, for every role and persona, kept in the
   home's store, and only your choices write it: a spawn of yours that names one (asq's
   dialog or your shell; a cleared dialog field forgets it, and over a role's own pin runs
-  the pin; an empty `--model ""` is refused) and a `/model` inside any running fleet agent,
-  which its Stop hook reads from the transcript's last reply and the payload's
-  `effort.level`, else `CLAUDE_EFFORT` (one tail read, fail-open; the agent's own session
-  only, never a `claude -p` run from its shell). An effort is read at a Stop alone: a fleet
-  window starts its agent without the `CLAUDE_EFFORT` the tmux server inherited, and with no
-  `--effort` the first turn's end is the baseline, so an effort changed inside an agent's
-  very first turn is not remembered. A spawn an agent makes (`--as`, or from its shell) runs
-  its flags for that agent alone. An agent may not hand another a `/model` or `/effort` (a
-  message that opens with one, after spaces or line breaks): its `fleet tell` is refused in
-  favour of the new `fleet restart <label> --model … --effort …`, which runs that agent alone
-  on them, and its spawn whose `--prompt` opens with one is refused before anything starts,
-  in favour of the spawn's own flags. An alias is only the id it resolved to, as the session's start
-  reports it, so a `/model` within its family counts; an `opusplan` agent's opus and sonnet
-  replies never do. A role's settings win for that role and never write the pick. A
-  restart, a switch, a hand-over and a fork as the same role keep what the agent was
-  actually running, the account default included, on any account, over the recorded flag
+  the pin; an empty `--model ""` is refused), and the built-in `/model` or `/effort` you run
+  in any fleet agent, which its Stop hook finds in Claude Code's own record of the command
+  (its args, else its answer: `Set model to …`, `Kept model as …`, `Set effort level to …`;
+  a choice "for this session only" runs on in that agent and is no pick). Nothing else is
+  evidence: a model or effort that merely differs from the last turn's, as a custom
+  command's or a skill's `model:`/`effort:` frontmatter makes it for one turn, writes no
+  pick and is never replayed. Only the agent's own session counts, never a `claude -p` run
+  from its shell, and a fleet window starts its agent without the `CLAUDE_EFFORT` the tmux
+  server inherited. A spawn an agent makes (`--as`, or from its shell, `--as captain`
+  included: the captain is trusted from its own call path alone) runs its flags for that
+  agent alone. An agent may not hand another a `/model` or `/effort` (a message that opens
+  with one, after spaces, line breaks or invisible format characters): its `fleet tell` is
+  refused in favour of the new `fleet restart <label> --model … --effort …`, which runs that
+  agent alone on them, and its spawn whose first message would open with one is refused
+  before anything starts, in favour of the spawn's own flags. A role's settings win for that
+  role and never write the pick. A restart, a switch, a hand-over and a fork as the same
+  role start what the agent runs: its launch's values as a recorded `/model` or `/effort`
+  alone moved them, the account default included, on any account, over the recorded flag
   and a binding's pin (a fork as another role runs that role's settings, else the pick);
   none changes the pick. A spawn's own `--model` or `--effort` replaces the same flag in the
   role's `extra_args` and binding instead of passing it twice, and `aisquare launch` drops a
   binding's flag that its own line names. The `⚠ off-ladder` chip stands down for a session
   on a model you chose for it (the pick, its spawn's args, its role's settings). Agents
-  spawned by 0.9.0 keep the rung they recorded until they run another model.
+  spawned by 0.9.0 keep the rung they recorded until a `/model` moves them.
 - **The Spawn dialog's Account field says what a spawn with no account runs on**
   (#12 on the board). With rank 1 the default (#406), the field still opened on
   `(this shell's)`, which read as if the spawn skipped the accounts while it ran

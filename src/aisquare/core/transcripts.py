@@ -24,6 +24,7 @@ an entry of its own in place of the reply — ``"model": "<synthetic>"``,
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from collections.abc import Iterator
@@ -150,6 +151,141 @@ def latest_model(path: Path, *, tail_bytes: int = _TAIL_BYTES) -> str | None:
         if isinstance(model, str) and model and model != _SYNTHETIC_MODEL:
             latest = model
     return latest
+
+
+# --- the owner's /model and /effort, as Claude Code records them (#16, seq 3609) --------
+#
+# What Claude Code 2.1.310 writes (``tests/fixtures/claude_code/model_commands_2.1.310.jsonl``,
+# probed on a scratch config dir):
+#
+# - a built-in ``/model`` or ``/effort`` runs locally, starts no turn, and is recorded as its
+#   caveat (``isMeta``), then ``<command-name>/model</command-name> <command-message>model
+#   </command-message> <command-args>haiku</command-args>``, then its answer,
+#   ``<local-command-stdout>Set model to `Haiku 5.5` and saved as your default for new
+#   sessions</local-command-stdout>``, as ``user`` records; the picker's Esc as ``system``
+#   records of subtype ``local_command`` (``Kept model as `Opus 5.5```);
+# - a custom command or a skill is a turn's prompt: ``<command-message>quick</command-message>
+#   <command-name>/quick</command-name> <command-args>…</command-args>``, then its expansion
+#   (``isMeta``), and no answer of its own;
+# - a typed prompt is the text itself.
+
+#: The settings a built-in command changes and the pick keeps.
+SETTINGS = ("model", "effort")
+
+_COMMAND_NAME = re.compile(r"<command-name>/([^<\s]+)</command-name>")
+_COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
+_COMMAND_STDOUT = re.compile(r"<local-command-stdout>(.*?)</local-command-stdout>", re.S)
+
+
+@dataclasses.dataclass(frozen=True)
+class SettingCommand:
+    """A built-in ``/model`` or ``/effort`` run in the session, as Claude Code records it."""
+
+    setting: str
+    """``model`` or ``effort``."""
+    args: str
+    """What was typed after it (``""`` for the picker)."""
+    stdout: str | None
+    """What Claude Code answered (``Set model to …``, ``Cancelled``); ``None``: none recorded."""
+
+
+@dataclasses.dataclass(frozen=True)
+class CommandScan:
+    """What :func:`commands_since` read: each built-in ``/model`` and ``/effort``, and each
+    turn's prompt as ``"plain"`` or ``"command"`` (a custom command or a skill opened it), in
+    the order written, and the offset the next read starts at."""
+
+    events: tuple[SettingCommand | str, ...]
+    end: int
+
+
+def commands_since(path: Path, offset: int) -> CommandScan | None:
+    """The settings commands and turn prompts written to ``path`` since ``offset`` (a file
+    that is shorter than that is read from its start); ``None`` when it cannot be read.
+
+    Read once, forward: each Stop reads what the session wrote since the last, line by line,
+    and parses only the lines that can be a prompt or a command (no tool result, no reply).
+    A command whose answer is not written yet, and a line still being written, are left for
+    the next read.
+    """
+    events: list[SettingCommand | str] = []
+    held: tuple[str, str, int] | None = None  # a command's name and args, and where it began
+
+    def resolve(as_prompt: bool) -> None:
+        nonlocal held
+        if held is None:
+            return
+        name, args, _ = held
+        if name in SETTINGS:
+            events.append(SettingCommand(name, args, None))
+        elif as_prompt:
+            events.append("command")
+        held = None
+
+    try:
+        with path.open("rb") as handle:
+            size = handle.seek(0, 2)
+            position = offset if 0 <= offset <= size else 0
+            handle.seek(position)
+            end = position
+            for raw in handle:
+                if not raw.endswith(b"\n"):
+                    break  # still being written: the next read takes it whole
+                begins, end = end, end + len(raw)
+                if b"tool_result" in raw or (b'"user"' not in raw and b"local_command" not in raw):
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                text, meta = _record_text(entry)
+                if text is None:
+                    continue
+                if (named := _COMMAND_NAME.search(text)) is not None:
+                    resolve(as_prompt=True)
+                    args = _COMMAND_ARGS.search(text)
+                    held = (named.group(1), args.group(1).strip() if args else "", begins)
+                elif (answer := _COMMAND_STDOUT.search(text)) is not None:
+                    if held is not None and held[0] in SETTINGS:
+                        events.append(SettingCommand(held[0], held[1], answer.group(1).strip()))
+                    held = None  # another local command's answer: no turn of its own
+                elif meta:
+                    if not text.startswith("<local-command-caveat>"):
+                        resolve(as_prompt=True)  # a command's expansion: it opened a turn
+                elif _is_typed_prompt(text):
+                    resolve(as_prompt=True)
+                    events.append("plain")
+    except OSError:
+        return None
+    if held is not None:
+        end = held[2]  # its answer or expansion is still to come: read it again then
+    return CommandScan(tuple(events), end)
+
+
+def _record_text(entry: dict[str, Any]) -> tuple[str | None, bool]:
+    """A ``user`` record's text, or a ``system`` ``local_command`` record's, with whether it
+    is ``isMeta``; ``None`` for any other record."""
+    if entry.get("isSidechain") is True:
+        return None, False
+    if entry.get("type") == "system":
+        content = entry.get("content") if entry.get("subtype") == "local_command" else None
+        return (content if isinstance(content, str) else None), False
+    if entry.get("type") != "user":
+        return None, False
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, list):
+        if any(isinstance(block, dict) and block.get("type") != "text" for block in content):
+            return None, False
+        content = "".join(block.get("text", "") for block in content if isinstance(block, dict))
+    return (content if isinstance(content, str) else None), entry.get("isMeta") is True
+
+
+def _is_typed_prompt(text: str) -> bool:
+    """Whether a ``user`` record's text is a typed prompt: not empty, and none of Claude
+    Code's own records (an interruption, a shell command's ``<bash-…>``)."""
+    stripped = text.strip()
+    return bool(stripped) and not stripped.startswith(("[Request interrupted", "<bash-"))
 
 
 def refusal_count(path: Path, *, tail_bytes: int = _TAIL_BYTES, since: int = 0) -> int:

@@ -37,6 +37,7 @@ import shutil
 import sqlite3
 import subprocess
 import time
+import unicodedata
 import uuid
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import suppress
@@ -3289,7 +3290,9 @@ def spawn(
     _require_role(role)
     # Before anything starts: an agent's spawn may not hand its agent a /model or /effort
     # as its first message (#16, seq 3581). A replay's and a hand-off's open with our own words.
-    _refuse_an_agents_opening_command(project, role, prompt, spawned_by)
+    _refuse_an_agents_opening_command(
+        project, role, prompt, spawned_by, kickoff_first=task_id is not None and kickoff
+    )
     if experimental.captain_role(role) and not _is_home_project(project):
         raise FleetError(
             "the captain lives on the home board, one per home — `aisquare captain` starts "
@@ -6143,8 +6146,14 @@ _SETTING_COMMAND = re.compile(r"^\s*/(model|effort)(\s|$)")
 
 
 def setting_command(text: str | None) -> str | None:
-    """The setting command ``text`` opens with (``/model`` or ``/effort``), else ``None``."""
-    found = _SETTING_COMMAND.match(text) if text else None
+    """The setting command ``text`` opens with (``/model`` or ``/effort``), else ``None``.
+    Unicode format characters (category Cf: a BOM, a zero-width space…) are no text to
+    Claude Code, which ran a BOM-led ``/effort low`` (2.1.311, seq 3609): they are dropped
+    first."""
+    if not text:
+        return None
+    visible = "".join(char for char in text if unicodedata.category(char) != "Cf")
+    found = _SETTING_COMMAND.match(visible)
     return f"/{found.group(1)}" if found is not None else None
 
 
@@ -6163,12 +6172,8 @@ def _refuse_an_agents_setting_command(
     own = orchestrator.env_fleet_agent()
     if sender is None and own is None:
         return
-    with store_session() as store:
-        row = store.get_fleet_agent(own) if own else None
-        if row is None and sender:
-            row = store.fleet_agent_for_session(sender)
-    if row is not None and row.role == CAPTAIN_ROLE:
-        return
+    if own is not None and _the_captains_row(own):
+        return  # the captain types what the owner said; never trusted from `--as` (seq 3609)
     flag = command.replace("/", "--")
     raise FleetError(
         f"an agent cannot type {command} into {label}: there it becomes the owner's pick, which "
@@ -6178,23 +6183,23 @@ def _refuse_an_agents_setting_command(
 
 
 def _refuse_an_agents_opening_command(
-    project: ProjectInfo, role: str, prompt: str | None, spawned_by: str
+    project: ProjectInfo, role: str, prompt: str | None, spawned_by: str, *, kickoff_first: bool
 ) -> None:
     """Refuse an agent's spawn whose first message opens with ``/model`` or ``/effort`` (seq
-    3581, 2): with no task, that message is the prompt as given, Claude Code runs the command,
-    and the new agent's next Stop reads it as the owner's choice. Asked before anything
-    starts. The owner's spawn (:func:`_the_owners_spawn`: asq, the owner's shell, the captain
-    on the owner's words) goes through; an agent's is pointed at its own ``--model`` /
-    ``--effort``, which run for that agent alone."""
-    command = setting_command(prompt)
+    3581, 2): Claude Code runs it, and the new agent's next Stop reads it as the owner's.
+    The first message is the prompt as given, unless a task's kickoff comes first
+    (``kickoff_first``), when no command opens it (seq 3609, minor). Asked before anything
+    starts. The owner's spawn (:func:`_the_owners_spawn`) goes through; an agent's is
+    pointed at its own ``--model`` / ``--effort``, which run for that agent alone."""
+    command = None if kickoff_first else setting_command(prompt)
     if command is None or _the_owners_spawn(spawned_by):
         return
     flag = command.replace("/", "--")
     raise FleetError(
-        f"a spawn an agent makes cannot open with {command}: in the new agent it becomes the "
-        "owner's pick, which every later spawn runs (#16) — give the spawn its own flag, for "
-        f"that agent alone: `{project_service.fleet_command('spawn', project, role)} {flag} "
-        "<value>`"
+        f"a spawn an agent makes cannot open with {command}: its first message would run it in "
+        "the new agent, where it becomes the owner's pick, which every later spawn runs (#16) — "
+        f"give the spawn its own flag, for that agent alone: "
+        f"`{project_service.fleet_command('spawn', project, role)} {flag} <value>`"
     )
 
 
@@ -6336,39 +6341,46 @@ def _model_choice(
 
 
 def _moved(name: str, now: str | None, launched: str | None, then: str | None) -> bool:
-    """Whether a replay starts ``now``, what the agent runs (its ``name``, model or effort),
-    in place of the recorded flag ``then``: whenever it is known, and is not what that flag
-    already runs. That is ``launched`` (what its session reported the launch ran), else what
-    the flag would run (:func:`harness.ran_another`); for a mode alias, any model it runs
-    (``opusplan``). With no flag, ``now`` is what the agent ran, the account's default it
-    started on included, and is kept on any account it moves to (manager decision, seq 3428
-    a)."""
+    """Whether a replay starts ``now``, what the agent runs (its ``name``, model or effort:
+    its launch's, as a recorded ``/model`` or ``/effort`` alone moved it,
+    ``model_memory.replay_from``), in place of the recorded flag ``then``. With no flag,
+    whenever it is known: what the agent ran, the account's default it started on included,
+    kept on any account it moves to (manager decision, seq 3428 a). With a flag, when a
+    command moved it off what the launch ran (``launched``); else the flag stays, an alias
+    (``opus``) and a mode alias (``opusplan``) as written."""
     if now is None:
         return False
-    if then is None:
+    if then is None or launched is None:
         return True
-    if name == "model":
-        if harness.runs_under(then, now):
-            return False
-        return (
-            not harness.same_reading(now, launched) if launched else harness.ran_another(now, then)
-        )
-    if launched is not None:
-        return not harness.same_effort(now, launched)
-    return not harness.same_effort(now, then)
+    same = harness.same_reading if name == "model" else harness.same_effort
+    return not same(now, launched)
 
 
 def _the_owners_spawn(spawned_by: str) -> bool:
     """Whether a spawn is the owner's choice, whose model and effort are the next pick
     (manager decision, seq 3428 b): the owner's shell or asq (``user``, from no fleet agent's
-    environment), or the captain acting on the owner's words (``spawned_by="captain"``;
-    its spawn takes no model today, ``captain.actions.spawn``, so this writes nothing yet).
-    A spawn an agent makes (``fleet spawn … --as <session>``, or run from a fleet agent's own
-    shell, which inherits its ``AISQUARE_FLEET_AGENT``, the captain's included) runs its
+    environment), or the captain acting on the owner's words, from its own call path alone
+    (:func:`_the_captains_row`; its spawn takes no model today, ``captain.actions.spawn``).
+    A spawn an agent makes (``fleet spawn … --as <session>``, ``--as captain`` included, or
+    run from a fleet agent's own shell, which inherits its ``AISQUARE_FLEET_AGENT``) runs its
     flags for that one agent."""
-    if spawned_by == CAPTAIN_ROLE:
-        return True
-    return spawned_by == "user" and orchestrator.env_fleet_agent() is None
+    own = orchestrator.env_fleet_agent()
+    if own is None:
+        return spawned_by == "user"
+    # In a fleet agent's environment the captain's own call path alone is the owner's: never
+    # an `--as captain` any agent can type (seq 3609, 2).
+    return _the_captains_row(own)
+
+
+def _the_captains_row(agent_id: str) -> bool:
+    """Whether ``agent_id`` (a process's ``AISQUARE_FLEET_AGENT``) is the live captain's own row,
+    with the captain on: the one caller in a fleet agent's environment that acts on the
+    owner's words (seq 3609, 2). Never decided by a name a caller passes."""
+    if not experimental.captain_enabled():
+        return False
+    with store_session() as store:
+        row = store.get_fleet_agent(agent_id)
+    return row is not None and row.ended_at is None and row.role == CAPTAIN_ROLE
 
 
 def _running(agent: FleetAgent, session: TeamSession | None) -> model_memory.Running | None:

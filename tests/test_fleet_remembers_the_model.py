@@ -56,6 +56,35 @@ def _reply(model: str, **extra: Any) -> dict[str, Any]:
     return {"type": "assistant", "message": {"model": model, "content": []}, **extra}
 
 
+def _prompt(text: str = "carry on") -> dict[str, Any]:
+    return {"type": "user", "message": {"role": "user", "content": text}}
+
+
+def _typed(project: ProjectInfo, setting: str, args: str, stdout: str) -> None:
+    """The owner's built-in ``/model`` or ``/effort``, as Claude Code 2.1.310 records it
+    (``tests/fixtures/claude_code/model_commands_2.1.310.jsonl``)."""
+    caveat = "<local-command-caveat>The command below was run directly in Claude Code…"
+    name = (
+        f"<command-name>/{setting}</command-name>\n            <command-message>{setting}"
+        f"</command-message>\n            <command-args>{args}</command-args>"
+    )
+    _write(
+        _transcript(project),
+        {"type": "user", "isMeta": True, "message": {"role": "user", "content": caveat}},
+        {"type": "user", "message": {"role": "user", "content": name}},
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": f"<local-command-stdout>{stdout}</local-command-stdout>",
+            },
+        },
+    )
+
+
+SAVED = "and saved as your default for new sessions"
+
+
 def _manager(
     project: ProjectInfo,
     *,
@@ -121,15 +150,17 @@ def _session(project: ProjectInfo) -> TeamSession:
 def test_a_model_command_in_any_fleet_agent_is_what_the_next_spawn_runs(
     work: ProjectInfo, monkeypatch: pytest.MonkeyPatch, role: str
 ) -> None:
-    """The agent started on fable (its session start's model), and its first turn ended at
-    high (the first Stop's effort, the baseline: seq 3513); the owner's ``/model`` moved it
-    to opus at xhigh. Its next turn end reads that, keeps it on its session (a restart starts
-    it) and as the owner's pick, whatever the agent's role (``agent`` is the plain one)."""
+    """The agent started on fable at high; the owner's ``/model`` and ``/effort``, which
+    Claude Code records, moved it to opus at xhigh. Its next turn end reads them, the pick
+    every later spawn runs and what a restart runs, whatever the agent's role (``agent`` is
+    the plain one)."""
     _manager(work, role=role, effort=None)
-    _write(_transcript(work), _reply("claude-fable-5-1"))
+    _write(_transcript(work), _prompt(), _reply("claude-fable-5-1"))
     _stop(work, monkeypatch, effort="high")
     assert model_memory.remembered() == model_memory.Pick()
-    _write(_transcript(work), _reply("claude-opus-5-5"))
+    _typed(work, "model", "claude-opus-5-5", f"Set model to `Opus 5.5` {SAVED}")
+    _typed(work, "effort", "xhigh", "Set effort level to xhigh (saved as your default …): …")
+    _write(_transcript(work), _prompt(), _reply("claude-opus-5-5"))
     _stop(work, monkeypatch, effort="xhigh")
     assert model_memory.remembered() == model_memory.Pick("claude-opus-5-5", "xhigh")
     session = _session(work)
@@ -139,11 +170,10 @@ def test_a_model_command_in_any_fleet_agent_is_what_the_next_spawn_runs(
 def test_the_payloads_own_effort_is_read_before_the_environments(
     work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Claude Code reports ultracode as xhigh in ``CLAUDE_EFFORT``; its payload names it."""
+    """Claude Code reports ultracode as xhigh in ``CLAUDE_EFFORT``; its payload names it. A
+    Stop's effort is a reading (the board's, a launch's baseline), never a pick by itself."""
     _manager(work, effort=None)
-    _write(_transcript(work), _reply("claude-fable-5-1"))
-    _stop(work, monkeypatch, effort="high")  # the first Stop: the baseline
-    _write(_transcript(work), _reply("claude-fable-5-1"))
+    _write(_transcript(work), _prompt(), _reply("claude-fable-5-1"))
     monkeypatch.setenv(FLEET_AGENT_ENV_VAR, AGENT)
     monkeypatch.setenv("CLAUDE_EFFORT", "xhigh")
     payload = {
@@ -154,7 +184,8 @@ def test_the_payloads_own_effort_is_read_before_the_environments(
     }
     done = CliRunner().invoke(app, ["hook", "stop"], input=json.dumps(payload))
     assert done.exit_code == 0, done.output
-    assert model_memory.remembered() == model_memory.Pick(None, "ultracode")
+    assert _session(work).effort == "ultracode"
+    assert model_memory.remembered() == model_memory.Pick()
 
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt", "no reply"])
@@ -213,29 +244,27 @@ def test_the_first_reading_of_an_agent_launched_with_no_pick_is_its_accounts_def
     """Nothing said what it ran before this turn: what the transcript names is the account's
     own default, no owner's pick, and is only kept on the session for the next reading."""
     _manager(work, model=None, effort=None)
-    _write(_transcript(work), _reply("claude-opus-5-5"))
+    _write(_transcript(work), _prompt(), _reply("claude-opus-5-5"))
     _stop(work, monkeypatch, effort="high")
     assert model_memory.remembered() == model_memory.Pick()
     assert (_session(work).model, _session(work).effort) == ("claude-opus-5-5", "high")
 
-    _write(_transcript(work), _reply("claude-fable-5-1"))  # and now a `/model`
+    _typed(work, "model", "claude-fable-5-1", f"Set model to `Fable 5.1` {SAVED}")
+    _typed(work, "effort", "max", "Set effort level to max (saved as your default …): …")
+    _write(_transcript(work), _prompt(), _reply("claude-fable-5-1"))
     _stop(work, monkeypatch, effort="max")
     assert model_memory.remembered() == model_memory.Pick("claude-fable-5-1", "max")
 
 
 def test_an_alias_is_only_the_id_it_resolved_to() -> None:
     """Seq 3424 (1): ``opus`` was ANY opus id. Two readings are one model only when they
-    name the same id; the first reading after a launch is the launch's own unless it is of
-    another family than an alias, or another id than an id."""
+    name the same id, a ``[1m]`` suffix aside; ``opusplan`` runs both opus and sonnet."""
     from aisquare.core import harness
 
     assert harness.same_reading("claude-opus-5-5", "claude-opus-5-5[1m]")
     assert not harness.same_reading("claude-opus-5-5", "claude-opus-4-5")
-    assert not harness.ran_another("claude-opus-5-5", "opus")
-    assert harness.ran_another("claude-fable-5-1", "opus")
-    assert harness.ran_another("claude-opus-4-5", "claude-opus-5-5")
-    assert not harness.ran_another("claude-opus-5-5", None), "no flag: the account's own"
-    assert not harness.ran_another("claude-sonnet-5-5", "opusplan"), "a mode alias runs both"
+    assert harness.runs_under("opusplan", "claude-sonnet-5-5")
+    assert not harness.runs_under("opusplan", "claude-fable-5-1")
     assert harness.same_effort("ultracode", "xhigh") and not harness.same_effort("high", "max")
 
 
@@ -279,7 +308,8 @@ def test_a_model_command_within_the_launch_aliases_family_is_a_pick(
         source="startup",
         model="claude-opus-5-5",
     )
-    _write(_transcript(work), _reply("claude-opus-4-5"))
+    _typed(work, "model", "claude-opus-4-5", f"Set model to `Opus 4.5` {SAVED}")
+    _write(_transcript(work), _prompt(), _reply("claude-opus-4-5"))
     _hook("stop", work, monkeypatch, effort="xhigh")
     assert model_memory.remembered() == model_memory.Pick("claude-opus-4-5", None)
 
@@ -316,13 +346,13 @@ def test_an_inherited_claude_effort_is_never_the_owners_effort(
     assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
 
 
-def test_with_no_effort_flag_the_first_stop_is_the_baseline_and_a_later_change_a_pick(
+def test_an_effort_drift_is_never_a_pick_and_a_recorded_effort_is_even_in_the_first_turn(
     work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Seq 3513 (ii): with no ``--effort``, what the agent runs is known at its first Stop
-    alone, so that reading is the baseline and only a later change is the owner's
-    ``/effort``. (A change inside the very first turn is not remembered: the gap the docs
-    name.)"""
+    """Seq 3513 and 3609: a Stop's effort says what the turn ran, which a command's
+    ``effort:`` frontmatter changes for one turn; only Claude Code's record of ``/effort`` is
+    the owner's. So no drift is a pick, and a recorded ``/effort`` is, in the very first
+    turn too (no first-turn gap, as there was while a drift was the evidence)."""
     _manager(work, model=None, effort=None)
     monkeypatch.setenv("AISQUARE_ROLE", "manager")
     _hook(
@@ -333,12 +363,13 @@ def test_with_no_effort_flag_the_first_stop_is_the_baseline_and_a_later_change_a
         source="startup",
         model="claude-fable-5-1",
     )
-    _write(_transcript(work), _reply("claude-fable-5-1"))
-    _hook("stop", work, monkeypatch, effort="high")
-    assert model_memory.remembered() == model_memory.Pick()
-    _write(_transcript(work), _reply("claude-fable-5-1"))
+    _typed(work, "effort", "low", "Set effort level to low (saved as your default …): …")
+    _write(_transcript(work), _prompt(), _reply("claude-fable-5-1"))
+    _hook("stop", work, monkeypatch, effort="low")
+    assert model_memory.remembered() == model_memory.Pick(None, "low")
+    _write(_transcript(work), _prompt(), _reply("claude-fable-5-1"))
     _hook("stop", work, monkeypatch, effort="max")
-    assert model_memory.remembered() == model_memory.Pick(None, "max")
+    assert model_memory.remembered() == model_memory.Pick(None, "low"), "a drift"
 
 
 def test_a_nested_claude_in_a_fleet_agents_shell_never_writes_the_pick(
@@ -419,6 +450,82 @@ def test_one_value_is_kept_apart_from_the_other_and_a_blank_forgets_it() -> None
     assert model_memory.remembered() == model_memory.Pick(None, "max")
     model_memory.remember(model="opus; rm -rf /", effort="extreme")
     assert model_memory.remembered() == model_memory.Pick(None, "max"), "not a model"
+
+
+FIXTURE = Path(__file__).parent / "fixtures" / "claude_code" / "model_commands_2.1.310.jsonl"
+"""What real Claude Code 2.1.310 recorded (round 4 reopen, seq 3609; probed on a scratch
+config dir): plain turns; ``/quick`` (a command with ``model: haiku``, replied as haiku),
+``/deep`` (``effort: low``) and ``/peff`` (a skill with ``effort: low``); ``/model haiku``,
+``/effort low`` twice, the ``/model`` picker saved and session-only, ``/model sonnet`` twice,
+``/model claude-opus-5-5``, the ``/effort`` picker saved, session-only and cancelled, and the
+``/model`` picker's Esc (``Kept model as``, a ``system`` ``local_command`` record). Trimmed to
+the fields the reader takes; every content string as written."""
+
+
+def _setting(setting: str, args: str, stdout: str) -> tuple[str, str, str]:
+    return (setting, args, stdout)
+
+
+def test_the_commands_claude_code_2_1_310_records_are_read_in_order() -> None:
+    scan = transcripts.commands_since(FIXTURE, 0)
+    assert scan is not None and scan.end == FIXTURE.stat().st_size
+    seen = [
+        event if isinstance(event, str) else (event.setting, event.args, event.stdout or "")
+        for event in scan.events
+    ]
+    saved = "and saved as your default for new sessions"
+    low = "Set effort level to low (saved as your default for new sessions): Quick, "
+    assert [event if isinstance(event, str) else event[:2] for event in seen] == [
+        "plain", "command", "plain", "command", "command", "plain",
+        ("model", "haiku"), ("effort", "low"), ("effort", "low"),
+        "plain",
+        ("model", ""), ("model", ""), ("model", "sonnet"), ("model", "sonnet"),
+        ("model", "claude-opus-5-5"), ("effort", ""), ("effort", ""), ("effort", ""),
+        ("model", ""),
+        "plain",
+    ]  # fmt: skip
+    commands = [event for event in seen if not isinstance(event, str)]
+    assert commands[0][2] == f"Set model to `Haiku 5.5` {saved}"
+    assert commands[1][2].startswith(low)
+    assert commands[4][2] == "Set model to `Sonnet 5.5` for this session only"
+    assert commands[10][2] == "Cancelled"
+    assert commands[11][2] == "Kept model as `Opus 5.5`"
+    # A read from where the last one ended sees nothing again.
+    again = transcripts.commands_since(FIXTURE, scan.end)
+    assert again is not None and again.events == ()
+
+
+def test_a_commands_value_comes_from_its_args_else_what_claude_code_answered() -> None:
+    scan = transcripts.commands_since(FIXTURE, 0)
+    assert scan is not None
+    values = [
+        model_memory.command_value(event)
+        for event in scan.events
+        if isinstance(event, transcripts.SettingCommand)
+    ]
+    pick, live = True, False
+    assert values == [
+        model_memory.CommandValue("model", "haiku", pick),
+        model_memory.CommandValue("effort", "low", pick),
+        model_memory.CommandValue("effort", "low", pick),
+        model_memory.CommandValue("model", "claude-haiku-5-5", pick),  # the picker, saved
+        model_memory.CommandValue("model", "claude-sonnet-5-5", live),  # this session only
+        model_memory.CommandValue("model", "sonnet", pick),
+        model_memory.CommandValue("model", "sonnet", pick),
+        model_memory.CommandValue("model", "claude-opus-5-5", pick),
+        model_memory.CommandValue("effort", "high", pick),
+        model_memory.CommandValue("effort", "medium", live),
+        None,  # Cancelled
+        model_memory.CommandValue("model", "claude-opus-5-5", pick),  # Kept model as
+    ]
+    unnamed = transcripts.SettingCommand(
+        "model",
+        "",
+        "Set model to `Default (recommended)` and saved as your default for new sessions",
+    )
+    assert model_memory.command_value(unnamed) == model_memory.CommandValue("model", None, pick)
+    refused = transcripts.SettingCommand("model", "nope", "Invalid model: nope")
+    assert model_memory.command_value(refused) is None
 
 
 def test_the_latest_reply_is_read_off_the_tail(tmp_path: Path) -> None:

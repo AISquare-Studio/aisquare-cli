@@ -222,41 +222,39 @@ forget your pick.
 **Your last pick is one per home**, for every role and persona alike. Only your own choices
 write it: a spawn of yours that names one (from asq's dialog or your own shell; a cleared
 dialog field forgets it, unless the role's settings pin that flag, whose pin then runs and
-whose blank says so) and a `/model` inside any running fleet agent, the captain's
-included (the captain's spawns take no model), which its next turn end
-reads: the model off its transcript's last reply, the effort off the Stop hook payload's
-`effort.level`, else its `CLAUDE_EFFORT` (a session start reports no effort, and a fleet
-window starts its agent without the `CLAUDE_EFFORT` it would inherit from whoever started
-the tmux server). A spawn an agent makes (`fleet spawn … --as
-<session>`, or from a fleet agent's own shell, such as a manager's) runs its flags for that
-one agent and leaves your pick alone. Nor may an agent hand another a `/model` or
-`/effort` as a message (anywhere a message opens with one, after spaces or line breaks):
-its `fleet tell` is refused and pointed at `fleet restart <label> --model/--effort`, which
-runs that agent alone on it and is no pick either, and its spawn with such a `--prompt` is
-refused before anything starts and pointed at the spawn's own `--model`/`--effort`. Yours
-and the captain's go through. A model reading
-is a `/model` when it names another id than the session's last one (its start's, or the
-previous turn's); an effort reading, when it differs from the previous turn's, or before
-any from the launch's own `--effort`. So with no `--effort` the first turn's end is the
-baseline: an effort changed inside the very first turn of such an agent is not
-remembered, and a later change is. An alias is only the id it resolved to, so `/model claude-opus-4-5` in
-an agent launched with `--model opus` (which runs `claude-opus-5-5`) is one. An agent
-launched on `opusplan` runs opus and sonnet by mode, so a reply of either says nothing of
-a pick, and one of another family does.
-Only the agent's own session counts: a `claude -p` run from its shell is not the agent. A
-role's settings are that role's alone and never write the pick. A restart, a `fleet
-switch`, a hand-over and a fork as the same role keep the model and effort the agent was
-actually running (a fork as another role is a new spawn of that role: its settings, else
-your pick),
-the account default it started on included, on whatever account it moves to: that wins
-over the recorded flag and over a binding's pin too (`aisquare launch` drops the
-binding's flag beside it), and the recorded flag stays only where it already runs that
-model (an alias and the id it resolved to, `opusplan` and its two). None of them changes
-your pick. Any model or effort Claude Code takes is kept
-as written (`fable`, `claude-opus-5-5`, `opus[1m]`, `opusplan`; `low` to `max`,
-`ultracode`); another binary gets neither flag. `fleet ls --json` shows the flags a spawn
-added in each agent's `launch_spec` (`model`, `effort`) and its `command`. The board's `⚠
-off-ladder` chip stands down for a session on a model you chose for it: your pick, its
+whose blank says so), and the built-in `/model` or `/effort` you run inside any fleet agent,
+which its next turn end finds in Claude Code's own record of the command (its name, its
+args, its answer: `Set model to …`, `Kept model as …`, `Set effort level to …`). The value
+is the command's: what you typed after it, else what Claude Code answered (the picker's
+`Opus 5.5` is `claude-opus-5-5`), else, when that names no model, the next plain turn's. A
+choice "for this session only" runs on in that agent and is no pick. **Nothing else is
+evidence**: a model or an effort that merely differs from the last turn's, as a custom
+command's or a skill's `model:` or `effort:` frontmatter makes it for ONE turn, writes no
+pick and moves nothing, whoever typed it. The captain writes the pick only from its own
+call path (the captain on, its own row; its spawns take no model), never from an `--as
+captain` an agent typed. A spawn an agent makes (`fleet spawn … --as <session>`, or from a
+fleet agent's own shell, such as a manager's) runs its flags for that one agent and leaves
+your pick alone. Nor may an agent hand another a `/model` or `/effort` as a message (one
+that opens with it, after spaces, line breaks or invisible format characters): its `fleet
+tell` is refused and pointed at `fleet restart <label> --model/--effort`, which runs that
+agent alone on it and is no pick either, and its spawn whose first message would open with
+one is refused before anything starts and pointed at the spawn's own `--model`/`--effort`
+(with a task, the first message opens with its kickoff, and goes through). Yours and the
+captain's go through. Only the agent's own session counts: a `claude -p` run from its shell
+is not the agent. A role's settings are that role's alone and never write the pick.
+
+A restart, a `fleet switch`, a hand-over and a fork as the same role start what the agent
+runs: its launch's model and effort (what its session start reported, its own `--effort`,
+else its first plain turn's), as a recorded `/model` or `/effort` alone moved them, the
+account default it started on included, on whatever account it moves to. That wins over
+the recorded flag and over a binding's pin too (`aisquare launch` drops the binding's flag
+beside it), and the recorded flag stays where nothing moved it (an alias like `opus` and a
+mode alias like `opusplan` as written). A fork as another role is a new spawn of that role:
+its settings, else your pick. None of them changes your pick. Any model or effort Claude
+Code takes is kept as written (`fable`, `claude-opus-5-5`, `opus[1m]`, `opusplan`; `low` to
+`max`, `ultracode`); another binary gets neither flag. `fleet ls --json` shows the flags a
+spawn added in each agent's `launch_spec` (`model`, `effort`) and its `command`. The board's
+`⚠ off-ladder` chip stands down for a session on a model you chose for it: your pick, its
 spawn's args or its role's settings.
 
 **One tester per task.** The manager spawns a tester for each task that reaches review:

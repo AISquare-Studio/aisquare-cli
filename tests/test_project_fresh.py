@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import sqlite3
 import sys
 import time
@@ -689,13 +690,17 @@ def test_a_dead_pane_and_a_stray_process_go_and_only_the_new_managers_window_sta
     session = fleet_service.session_name("alpha-x")
     srv.run("new-session", "-d", "-s", session, "-n", "coder-1", "sleep 600")
     srv.run("set-option", "-g", "remain-on-exit", "on")
-    srv.run("new-window", "-d", "-t", f"={session}:", "-n", "manager", "sh -c 'exit 3'")
+    # The manager's window runs until the panes are listed, then is killed: a command that
+    # ended first left a dead pane with no #{pane_pid}, and the listing below came short of a
+    # field under load (tester-fresh-fix: 4 of 12 concurrent runs).
+    srv.run("new-window", "-d", "-t", f"={session}:", "-n", "manager", "sleep 600")
     panes: dict[str, tuple[str, int]] = {}
     for line in srv.run(
         "list-panes", "-s", "-t", f"={session}", "-F", "#{window_name} #{pane_id} #{pane_pid}"
     ).splitlines():
         name, pane, pid = line.split()
         panes[name] = (pane, int(pid))
+    os.kill(panes["manager"][1], signal.SIGTERM)
     deadline = time.monotonic() + 10
     while srv.run("display", "-p", "-t", panes["manager"][0], "#{pane_dead}").strip() != "1":
         assert time.monotonic() < deadline, "the manager's pane never died"

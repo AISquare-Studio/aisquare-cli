@@ -179,6 +179,14 @@ once its streams and metadata are fully written; a run in progress lives in a
 it is over an hour old; a run whose `asq exec` is still alive is never removed. On
 Windows, where that cannot be asked, a directory over a day old is removed.
 
+In an agent that sandboxes its tools (Codex), whose sandbox cannot write the aisquare
+home, `asq exec` runs in the sandbox and saves its report in the agent's own launch
+directory (`$AISQUARE_HOME/broker/<launch>/reports`), which goes with the agent. The
+agent's broker seals the report when the run ends, and `asq brief evidence --report` copies
+it into `reports/` above once it has checked it, so the evidence cites a report no sandbox
+can change ([the broker's whitelist](coding-agents.md#the-brokers-whitelist)). `asq reports
+list` and `show` there read that directory.
+
 Each run keeps the first 1 MiB of each stream (`--max-output-bytes` raises it to 16
 MiB). Truncation is marked with the observed and kept byte counts, and what was past
 the limit cannot be recovered.

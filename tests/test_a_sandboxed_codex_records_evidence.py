@@ -93,8 +93,13 @@ def _through_broker(running: Path, argv: list[str]) -> dict[str, object]:  # noq
 
 
 def _answered(running: Path, argv: list[str]) -> tuple[int, str]:  # noqa: F811
+    """What the broker made of ``argv``: its status and everything it printed. A refusal is a
+    line, never a crash (Rich prints a traceback with the source lines around the failure, and
+    so shows the very words a test looks for)."""
     answer = store_broker.ask(running, argv)
-    return int(str(answer["code"])), str(answer["stdout"]) + str(answer["stderr"])
+    text = str(answer["stdout"]) + str(answer["stderr"])
+    assert "Traceback" not in text, text
+    return int(str(answer["code"])), text
 
 
 def _py(code: str) -> list[str]:
@@ -438,6 +443,7 @@ def test_a_report_the_home_holds_already_is_not_copied_over(
     picks cannot replace a report the home keeps."""
     brief, task = _linked()
     report_id, directory = _saved(running, task)
+    (running / store_broker.SEALS / report_id).unlink()  # the sandbox's copy is not even sealed
     home = Path(os.environ["AISQUARE_HOME"]) / "reports" / report_id
     shutil.copytree(directory, home)
     (home / "stdout.bin").write_bytes(b"the home's own\n")
@@ -483,3 +489,47 @@ def test_an_artifact_outside_the_launchs_tree_is_not_read(
     code, text = record(inside)
     assert code == 0 and "recorded R1 pass [manual]" in text, text
     assert "kept: this" not in text
+
+
+def test_a_report_whose_json_names_another_report_is_refused(
+    running: Path,  # noqa: F811
+    tree: Path,
+) -> None:
+    _, task = _linked()
+    report_id, directory = _saved(running, task)
+    other = running / store_broker.REPORTS / ("ee" * 16)
+    shutil.copytree(directory, other)  # a copy of a report, under a name that is not its own
+
+    code, text = _answered(running, ["reports", "seal", "ee" * 16])
+
+    assert code == 1 and "its report.json names another report" in text, text
+    assert report_id != "ee" * 16
+
+
+def test_every_report_the_broker_refuses_leaves_a_record_in_its_log(
+    running: Path,  # noqa: F811
+    tree: Path,
+) -> None:
+    """Whoever asks why a sandboxed agent's evidence did not land reads it in the brokers'
+    log: the report, whether the seal or the adoption refused it, and why."""
+    from aisquare.core import paths
+
+    brief, task = _linked()
+    report_id, directory = _saved(running, task)
+    (directory / "stdout.bin").write_bytes(b"X" + (directory / "stdout.bin").read_bytes()[1:])
+    forged = _forge(running, task, source_root="/etc")
+
+    assert _record(running, brief, task, report_id)[0] == 1
+    assert _answered(running, ["reports", "seal", forged])[0] == 1
+
+    log = (paths.log_dir() / store_broker.LOG_NAME).read_text(encoding="utf-8").splitlines()
+    lines = [line for line in log if " report: " in line]
+    assert any(
+        f"the adoption of report {report_id[:12]} refused" in line
+        and "changed after its run" in line
+        for line in lines
+    ), lines
+    assert any(
+        f"the seal of report {forged[:12]} refused" in line and "it fingerprinted" in line
+        for line in lines
+    ), lines

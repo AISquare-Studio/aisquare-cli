@@ -1409,6 +1409,179 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             _remove_home(outside)
 
 
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_reads_the_code_index_and_records_evidence_from_its_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task #21 of #113 on the real Codex with only loopback: SCOPE 090 rows 9 and 14.
+
+    A fleet coder, sandboxed (the store read-only to it), runs ``aisquare code find`` through
+    its launch's broker; is refused ``task done`` on a task a work brief links; runs ``asq
+    exec`` IN its sandbox, which saves its report in the launch's own ``reports/``; records it
+    with ``brief evidence --report`` (the broker adopts it); and ``task done`` passes. It
+    cannot write the launch's seals, and a report it changes after the run is refused.
+    """
+    from aisquare.services import briefs
+
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    refused = _sandbox_refused(binary, tmp_path)
+    if refused is not None:
+        pytest.skip(f"Codex's sandbox cannot start a command on this host: {refused}")
+    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp")).resolve()
+    store, native_home = outside / "h", outside / "c"
+    native_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for args in (
+        ["init", "-q"],
+        ["config", "user.email", "t@t.invalid"],
+        ["config", "user.name", "t"],
+    ):
+        subprocess.run(["git", "-C", str(workspace), *args], check=True, capture_output=True)
+    (workspace / "app.py").write_text("def answer():\n    return 42\n")
+    subprocess.run(["git", "-C", str(workspace), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(workspace), "commit", "-q", "-m", "one"], check=True, capture_output=True
+    )
+    cli = shlex.join(selfcli.argv_for([]))
+    with ThreadingHTTPServer(("127.0.0.1", 0), _Scripted) as server:
+        server.requests = []  # type: ignore[attr-defined]
+        requests: list[dict[str, Any]] = server.requests  # type: ignore[attr-defined]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        (native_home / "config.toml").write_text(
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+            "requires_openai_auth = false\n"
+            f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n',
+            encoding="utf-8",
+        )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.delenv("TMPDIR", raising=False)
+        monkeypatch.setenv("AISQUARE_HOME", str(store))
+        monkeypatch.setenv("CODEX_HOME", str(native_home))
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
+        agents.install_hooks("codex", native_home)
+        config = load_config()
+        config.fleet.tmux_socket = f"asq-codex-evidence-{os.getpid()}"
+        save_config(config)
+        project = team.activate(workspace)
+        for kept in store_read_only(store_dir()):
+            kept.parent.mkdir(parents=True, exist_ok=True)
+        (store / "codex-accounts").mkdir(exist_ok=True)
+
+        def outputs() -> list[str]:
+            """Each command's output, oldest first: every request replays the history."""
+            found: dict[str, str] = {}
+            for request in list(requests):
+                for item in request.get("input", []):
+                    if item.get("type") == "function_call_output":
+                        found.setdefault(str(item.get("call_id")), str(item.get("output")))
+            return list(found.values())
+
+        srv = fleet.server(config.fleet)
+        try:
+
+            def until(check: Any, seconds: float, what: str, pane: str) -> None:
+                deadline = time.monotonic() + seconds
+                while not check():
+                    if time.monotonic() >= deadline:
+                        shown = srv.run("capture-pane", "-p", "-t", pane)
+                        raise AssertionError(f"{what}:\n{shown}\n{outputs()[-2:]}")
+                    time.sleep(0.2)
+
+            codex_screen = screen_of(get_adapter("codex"))
+
+            def at_rest(agent: Any) -> bool:
+                rows = srv.run("capture-pane", "-p", "-t", agent.pane_id).splitlines()
+                facts = srv.pane_facts(agent.pane_id)
+                output = None if facts is None else facts.last_output
+                quiet = output is not None and datetime.now(UTC) - output > timedelta(seconds=2)
+                return (
+                    fleet.status_of(agent).state == "waiting" and codex_screen.ready(rows) and quiet
+                )
+
+            brief = briefs.create("Answer", ["answer() is 42"], cwd=workspace)
+            task, _ = team.add_task("Build the answer", role="coder", cwd=workspace)
+            briefs.link(brief.id, task.id, [r.id for r in brief.requirements], cwd=workspace)
+            seen = len(outputs())
+            coder = fleet.spawn(
+                project,
+                "coder",
+                agent="codex",
+                worktree=False,
+                prompt=f"RUN {cli} --json code find answer",
+                agent_args=["--dangerously-bypass-hook-trust", "--no-alt-screen"],
+            ).agent
+            pane = coder.pane_id
+            until(lambda: len(outputs()) > seen, 60, "code find ran", pane)
+            assert '"name": "answer"' in outputs()[-1], outputs()[-1]
+            until(lambda: at_rest(coder), 20, "waiting, at rest", pane)
+            row = fleet.status_of(coder).session
+            assert row is not None
+            mine = row.id[:8]
+
+            def sandboxed(command: str, what: str) -> str:
+                until(lambda: at_rest(coder), 30, "waiting, at rest", pane)
+                before = len(outputs())
+                assert fleet.tell(project, coder.label, f"RUN {command}").delivered
+                until(lambda: len(outputs()) > before, 90, what, pane)
+                return outputs()[-1]
+
+            assert "claimed" in sandboxed(f"{cli} task claim {task.id} --as {mine}", "the claim")
+            gated = sandboxed(f"{cli} task done {task.id} --as {mine}", "done, refused")
+            assert "R1" in gated and "missing" in gated, gated
+            ran = sandboxed(
+                f"{cli} exec --project {project.id} --task {task.id} -- echo checked", "exec"
+            )
+            found = re.findall(r"asq report ([0-9a-f]{32})", ran)
+            assert found and "checked" in ran and "not sealed" not in ran, ran
+            report_id = found[-1]
+            [launch] = [d for d in (store / store_broker.DIR_NAME).iterdir() if d.is_dir()]
+            assert (launch / store_broker.REPORTS / report_id).is_dir(), "saved in the sandbox"
+            assert (launch / store_broker.SEALS / report_id).is_file(), "sealed by the broker"
+            assert not (store / "reports" / report_id).exists(), "the home's reports are not its"
+            evidence = (
+                f"{cli} brief evidence {brief.id} R1 --task {task.id} --verdict pass "
+                f"--summary ran --report {report_id} --as {mine}"
+            )
+            assert "recorded R1 pass [report]" in sandboxed(evidence, "evidence")
+            assert (store / "reports" / report_id).is_dir(), "adopted into the home"
+            assert "done" in sandboxed(f"{cli} task done {task.id} --as {mine}", "done")
+            assert team.show_task(task.id).status == "done"
+
+            # The sandbox writes no seal, and a report it changes after its run is refused.
+            forged = sandboxed(f"touch {launch / store_broker.SEALS / 'forged'}", "a forged seal")
+            assert [Path(p).name for p in refused_touches(forged)] == ["forged"], forged
+            second = sandboxed(
+                f"{cli} exec --project {project.id} --task {task.id} -- echo again", "second exec"
+            )
+            again = re.findall(r"asq report ([0-9a-f]{32})", second)[-1]
+            sandboxed(
+                f"sh -c 'echo X >> {launch / store_broker.REPORTS / again / 'stdout.bin'}'", "edit"
+            )
+            refused_edit = sandboxed(
+                f"{cli} brief evidence {brief.id} R1 --task {task.id} --verdict pass "
+                f"--summary again --report {again} --as {mine}",
+                "evidence on a changed report",
+            )
+            assert "changed after its run" in refused_edit or "is not the" in refused_edit, (
+                refused_edit
+            )
+        finally:
+            if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
+                srv.run("kill-server")
+            server.shutdown()
+            thread.join(timeout=2)
+            _remove_home(outside)
+
+
 class _AtItsLimit(BaseHTTPRequestHandler):
     """A loopback Responses provider for an account at its usage limit. A turn whose last
     user line starts ``LIMIT`` is answered as the ChatGPT backend answered a team plan at its

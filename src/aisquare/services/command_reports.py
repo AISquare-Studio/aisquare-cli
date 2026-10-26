@@ -1157,7 +1157,25 @@ def _check_sandboxed(report_id: str, files: Mapping[str, bytes]) -> CommandRepor
     return report
 
 
+def _refusal_logged(what: str, report_id: str, exc: SandboxReportError) -> None:
+    """Leave a record of a sandbox's report refused (the brokers' log), for whoever reads why a
+    sandboxed agent's evidence did not land; the sandbox's own message says it too."""
+    from aisquare.services import store_broker
+
+    store_broker.record_refusal("report", f"{what} of report {report_id[:12]} refused: {exc}")
+
+
 def seal_sandboxed(report_id: str) -> str:
+    """Record what the sandbox's report ``report_id`` holds now (:func:`_seal`); a refusal is
+    logged."""
+    try:
+        return _seal(report_id)
+    except SandboxReportError as exc:
+        _refusal_logged("the seal", report_id, exc)
+        raise
+
+
+def _seal(report_id: str) -> str:
     """Record what the sandbox's report ``report_id`` holds now, once, where the sandbox
     cannot write (the launch's ``seals/``); its digest. The broker runs this for ``reports
     seal`` when a sandboxed ``asq exec`` ends. :class:`SandboxReportError` for a report that
@@ -1188,6 +1206,15 @@ def _sealed(seals: Path, report_id: str) -> str | None:
 
 
 def adopt_sandboxed(report_id: str) -> bool:
+    """:func:`_adopt` the sandbox's report ``report_id``; a refusal is logged."""
+    try:
+        return _adopt(report_id)
+    except SandboxReportError as exc:
+        _refusal_logged("the adoption", report_id, exc)
+        raise
+
+
+def _adopt(report_id: str) -> bool:
     """Copy the sandbox's report ``report_id`` into the home's ``reports/``, so evidence can
     cite it; ``True`` when it did. ``False`` when there is nothing to do: not a command the
     agent's broker runs, or the home holds the report already.

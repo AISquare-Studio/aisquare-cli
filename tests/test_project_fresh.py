@@ -1811,3 +1811,58 @@ def test_a_withheld_manager_names_its_spawn_once(
     assert result.exit_code == 1, result.output
     assert "remove it first — start one: aisquare fleet spawn --project alpha-x manager" in said
     assert said.count("fleet spawn") == 1
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0, reason="POSIX permissions, and not as root"
+)
+def test_a_brain_part_of_which_cannot_be_deleted_is_reported_kept_not_cleared(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+) -> None:
+    """tester-fresh-final's repro at 85209fb3: ``chmod 000`` on a folder inside the brain,
+    then a reset with --memory reported "1 project brain" cleared and exited 0, while the
+    files sat in ``projects/<id>/.brain-cleared-<pid>-<hex>/`` that nothing named. Nothing is
+    moved aside now; what could not go is named on the report, and none is counted cleared."""
+    alpha, _, _, _ = two
+    home = _brain(alpha)
+    locked = home / ".gbrain" / "brain.pglite" / "base"
+    locked.mkdir()
+    (locked / "1").write_text("a page of the database\n", encoding="utf-8")
+    locked.chmod(0)
+    try:
+        report = fresh_service.start_fresh(alpha, memory=True)
+    finally:
+        locked.chmod(0o755)
+
+    assert report.cleared.brain == 0
+    assert [kept.path for kept in report.kept] == [home]
+    assert report.kept[0].reason.endswith(f"left in {home}: .gbrain")
+    assert (locked / "1").exists()
+    assert not list(home.parent.glob(".brain-cleared-*"))
+
+
+def test_a_symlinked_folder_is_kept_with_a_reason_a_person_can_read(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    tmp_path: Path,
+) -> None:
+    """tester-fresh-final: ``rmtree`` refuses a symbolic link with an ``OSError`` that has no
+    errno, and its kept reason read ``[Errno None] None: PosixPath(…)``. The link is left, its
+    target untouched, and the reason says why; as it is the manager's state, no manager."""
+    alpha, _, _, _ = two
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "state.md").write_text("Goal: someone else's\n", encoding="utf-8")
+    manager = paths.manager_state_file(alpha.id).parent
+    manager.parent.mkdir(parents=True, exist_ok=True)
+    manager.symlink_to(elsewhere, target_is_directory=True)
+
+    report = fresh_service.start_fresh(alpha)
+
+    assert [(kept.path, kept.reason) for kept in report.kept] == [
+        (manager, "could not be removed: it is a symbolic link, not followed")
+    ]
+    assert "Errno" not in report.kept[0].reason
+    assert (elsewhere / "state.md").exists() and manager.is_symlink()
+    assert report.manager is None and spawned == []

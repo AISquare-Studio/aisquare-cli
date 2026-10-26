@@ -184,6 +184,8 @@ def clear(project_id: str) -> bool:
     no brain and makes a new, empty one. An entry that cannot be removed raises the
     ``OSError``, naming every entry left behind."""
     home = brain_home(project_id)
+    if home.is_symlink():  # what it points at is not this project's to empty
+        raise OSError(f"{home} is a symbolic link, not followed")
     if not held_content(project_id):
         return False
     with ExitStack() as stack:
@@ -205,8 +207,11 @@ def clear(project_id: str) -> bool:
                 left.append(entry.name)
                 failure = failure or exc
         if failure is not None:
-            why = failure.strerror or str(failure)
-            raise OSError(failure.errno, f"{why}; left in {home}: {', '.join(left)}")
+            said = failure.strerror or next(
+                (arg for arg in failure.args if isinstance(arg, str) and arg),
+                type(failure).__name__,
+            )
+            raise OSError(failure.errno, f"{said}; left in {home}: {', '.join(left)}")
     return True
 
 

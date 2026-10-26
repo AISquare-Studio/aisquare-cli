@@ -602,6 +602,16 @@ def _on_disk(project_id: str, *, memory: bool) -> dict[str, int | None]:
     }
 
 
+def _why(exc: OSError) -> str:
+    """What the system said of a path it would not remove, readably: its ``strerror``, else
+    the words the error was raised with. ``str()`` of an ``OSError`` with no errno, as
+    ``rmtree`` raises for a symbolic link, read ``[Errno None] None: '<path>'``."""
+    if exc.strerror:
+        return exc.strerror
+    said = next((arg for arg in exc.args if isinstance(arg, str) and arg), None)
+    return said or type(exc).__name__
+
+
 def _clear_on_disk(
     project: ProjectInfo, report: FreshReport, *, memory: bool
 ) -> tuple[dict[str, int | None], str | None]:
@@ -618,15 +628,16 @@ def _clear_on_disk(
         ("evidence", _evidence_root(project.id)),
         ("manager_state", _manager_dir(project.id)),
     ):
-        if not root.exists():
+        if not root.exists() and not root.is_symlink():
             continue
         try:
+            if root.is_symlink():  # its target is not ours to delete, nor the link to guess at
+                raise OSError("it is a symbolic link, not followed")
             shutil.rmtree(root)
         except OSError as exc:
-            reason = f"could not be removed: {exc.strerror or exc}"
-            report.kept.append(FreshKept(path=root, reason=reason))
+            report.kept.append(FreshKept(path=root, reason=f"could not be removed: {_why(exc)}"))
             if key == "manager_state":
-                stale = f"{root}: {exc.strerror or exc}"
+                stale = f"{root}: {_why(exc)}"
             continue
         gone[key] = counted[key]
     if memory:
@@ -644,7 +655,7 @@ def _clear_on_disk(
             report.kept.append(
                 FreshKept(
                     path=brain.brain_home(project.id),
-                    reason=f"could not be removed: {exc.strerror or exc}",
+                    reason=f"could not be removed: {_why(exc)}",
                 )
             )
     return gone, stale

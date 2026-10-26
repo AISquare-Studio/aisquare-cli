@@ -2349,6 +2349,8 @@ def test_the_guide_names_every_member_of_the_protocol() -> None:
         "FolderTrust",
         "LaunchPart",
         "PermissionArgs",
+        "SharedMemory",
+        "SharePart",
         "SessionFlags",
         "Vocabulary",
         "PriceTable",

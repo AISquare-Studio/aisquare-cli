@@ -70,6 +70,8 @@ from aisquare.core.agent_adapters.types import (
     PermissionIntent,
     PriceTable,
     SandboxWrites,
+    SharedMemory,
+    SharePart,
     SkillDirs,
     TelemetryReader,
     UsageScan,
@@ -521,6 +523,13 @@ class GeminiShapedAccounts:
     relogin = "/auth"
     sign_out = "inside Gemini (/auth)"
     shares_settings = False
+    # Its config dir is a ``.gemini`` in each slot's home: a folder of skills and one context
+    # file, linked the way every agent's are (``core.account_sharing``); no memory to merge.
+    share_parts: tuple[SharePart, ...] = (
+        SharePart("skills", "skills"),
+        SharePart("context", "GEMINI.md", is_dir=False),
+    )
+    memory: SharedMemory | None = None
     trust = GeminiShapedTrust()
 
     def sign_in_args(self) -> tuple[str, ...]:

@@ -1748,6 +1748,66 @@ answer's headers are optional, so a fetch with none to give still works; they ca
 429's ``Retry-After``."""
 
 
+@dataclass(frozen=True)
+class SharePart:
+    """One thing an agent's accounts can have in common (``[accounts] share`` names it,
+    ``aisquare accounts share --enable`` turns it on): :attr:`name`, where it sits in the
+    agent's config dir, and how the accounts come to share it."""
+
+    name: str
+    """What the operator writes: ``skills``, ``claude_md``, ``agents_md``. A name two agents
+    both declare is one switch for both, each into its own entry."""
+    entry: str = ""
+    """Its entry in the agent's config dir (``AgentAccounts.config_dir`` of a home): a folder
+    or a file. ``""`` for a merged part, which is no entry of one dir."""
+    is_dir: bool = True
+    """Whether :attr:`entry` is a folder (made empty in the plain home when it has none, so
+    every account follows what is added there later) or a file (refused when the plain home
+    has none: an empty one would hide the account's own)."""
+    how: Literal["link", "merge"] = "link"
+    """``link``: each managed account's entry becomes a link to the plain home's, its own
+    kept beside it as ``<entry>.own-<stamp>`` until the part is turned off. ``merge``: the
+    accounts' own copies are merged into one place once, and :attr:`AgentAccounts.memory`
+    points every launch at it (nothing is linked)."""
+    experimental: bool = False
+    """The part can carry what is one account's alone (a login, a plugin store): said in the
+    help, never on by default."""
+
+
+class SharedMemory(Protocol):
+    """How an agent's accounts share its auto-memory, the one ``merge`` part
+    (:attr:`SharePart.how`): one directory per project, merged from every account the first
+    time the part is turned on and handed to every launch (``AgentAccounts.memory``)."""
+
+    root_name: str
+    """The folder under the aisquare home that keeps the shared copies (``claude-shared``)."""
+    override: str
+    """The operator's own way of setting it that wins over this one, in the words the
+    stand-down line uses (``its own --settings``)."""
+
+    def key(self, cwd: Path) -> str:
+        """The key the agent files a folder's memory under."""
+        ...
+
+    def projects(self, account: ClaudeAccount) -> Mapping[str, Path]:
+        """The memory directories ``account`` holds, by project key, those that exist."""
+        ...
+
+    def apply(
+        self, args: Sequence[str], operator_args: Sequence[str], directory: Path
+    ) -> list[str] | None:
+        """``args`` (a launch's own, the role's) with the agent's auto-memory pointed at
+        ``directory``, merged into the arguments it already sets that way; ``None`` when
+        ``operator_args`` (the operator's line: a binding's, a fleet's, what was typed) set it
+        already, which wins (:attr:`override`)."""
+        ...
+
+    def warnings(self, account: ClaudeAccount) -> list[str]:
+        """What is wrong with ``account``'s memory as it stands (the doctor row's words), or
+        ``[]``."""
+        ...
+
+
 class AgentAccounts(Protocol):
     agent: str
     home_env: str
@@ -1788,6 +1848,14 @@ class AgentAccounts(Protocol):
     """``[accounts] share_settings`` links a managed slot's settings to its plain home's
     (Claude Code's ``settings.json``, ``services.claude_accounts.share_settings``); ``False``
     for an agent whose settings are each slot's own (Codex's)."""
+    share_parts: tuple[SharePart, ...]
+    """What its accounts can share (``[accounts] share``, ``aisquare accounts share``): each
+    part's name, its entry in the agent's config dir and whether it is linked or merged
+    (:class:`SharePart`). Claude Code's are memory, skills, agents, commands, ``CLAUDE.md``
+    and plugins; Codex's ``AGENTS.md`` and skills. ``()`` for an agent that shares none."""
+    memory: SharedMemory | None
+    """How its ``merge`` part is shared (:class:`SharedMemory`), or ``None`` for an agent
+    with no such part. Read for the launch, never by name."""
 
     def sign_in_args(self) -> tuple[str, ...]:
         """Arguments to the agent's binary that start its own sign-in in a slot's env.

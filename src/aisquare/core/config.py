@@ -1004,12 +1004,14 @@ class AccountsSettings(BaseModel):
     ``share_settings``, off by default, keeps every managed account's ``settings.json``
     a link to the plain claude's. Both: ``core.claude_sharing``.
 
-    ``share`` (P2-W7, #198), empty by default, names what every account has in common:
-    ``memory`` (one auto-memory directory per project under
-    ``~/.aisquare/claude-shared/memory``, passed to each launch as ``--settings``),
-    ``skills``, ``agents``, ``commands`` and ``claude_md`` (each managed slot's entry a
-    link to the plain claude's, its own kept beside it), and ``plugins`` (experimental).
-    ``aisquare accounts share`` turns parts on and off; a launch links a slot made since.
+    ``share`` (P2-W7, #198), empty by default, names what every account has in common, by
+    the parts each agent declares (``AgentAccounts.share_parts``): for Claude Code ``memory``
+    (one auto-memory directory per project under ``~/.aisquare/claude-shared/memory``,
+    passed to each launch), ``skills``, ``agents``, ``commands`` and ``claude_md``, and
+    ``plugins`` (experimental); for Codex ``agents_md`` and ``skills``. A linked part makes
+    each managed slot's entry a link to the plain home's, its own kept beside it. A name an
+    agent does not declare does nothing for it. ``aisquare accounts share`` turns parts on
+    and off; a launch links a slot made since.
 
     Read from the config file alone, like ``[fleet]``: there is no
     ``AISQUARE_ACCOUNTS_*`` variable, for the same reason that section gives.
@@ -1023,9 +1025,7 @@ class AccountsSettings(BaseModel):
     cross_agent_handover: bool = True
     share_trust: bool = True
     share_settings: bool = False
-    share: list[Literal["memory", "skills", "agents", "commands", "claude_md", "plugins"]] = Field(
-        default_factory=list
-    )
+    share: list[str] = Field(default_factory=list)
 
 
 class UpdatesSettings(BaseModel):

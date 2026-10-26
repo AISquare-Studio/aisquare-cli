@@ -1171,18 +1171,20 @@ def settings(
         raise typer.Exit(1)
 
 
-def _parts(value: str | None, flag: str) -> list[claude_sharing.SharePart]:
-    """``memory,skills`` as parts, or a usage error naming the ones that exist."""
+def _parts(value: str | None, flag: str) -> list[str]:
+    """``memory,skills`` as parts, or a usage error naming the ones that exist: every part any
+    agent's accounts share (``AgentAccounts.share_parts``), in the order they are declared."""
+    known = accounts_service.share_part_names()
     if value is None:
         return []
     asked = [part.strip() for part in value.split(",") if part.strip()]
-    unknown = [part for part in asked if part not in claude_sharing.SHARE_PARTS]
+    unknown = [part for part in asked if part not in known]
     if unknown or not asked:
         raise typer.BadParameter(
-            f"{', '.join(unknown) or '(none)'} — parts are {', '.join(claude_sharing.SHARE_PARTS)}",
+            f"{', '.join(unknown) or '(none)'} — parts are {', '.join(known)}",
             param_hint=flag,
         )
-    return [part for part in claude_sharing.SHARE_PARTS if part in asked]
+    return [part for part in known if part in asked]
 
 
 _PART_WORDS = {
@@ -1206,7 +1208,7 @@ def share(
         str | None,
         typer.Option(
             "--enable",
-            help=f"Parts to share, comma-separated: {', '.join(claude_sharing.SHARE_PARTS)}.",
+            help="Parts to share, comma-separated (`--status` shows each account's).",
             metavar="PARTS",
         ),
     ] = None,
@@ -1220,14 +1222,16 @@ def share(
         bool, typer.Option("--status", help="What every account holds; change nothing.")
     ] = False,
 ) -> None:
-    """What every Claude account has in common: memory, skills, agents, commands, CLAUDE.md.
+    """What every account of an agent has in common, by the parts its agent declares.
 
-    `memory` gives every launch one auto-memory directory per project, under
+    Claude Code: memory, skills, agents, commands, claude_md and plugins. Codex: agents_md
+    and skills. `memory` gives every launch one auto-memory directory per project, under
     ~/.aisquare/claude-shared/memory (merged from every account the first time). The
-    others make each managed account's entry a link to the plain claude's, its own kept
-    beside it as <entry>.own-<stamp> until --disable puts it back. `plugins` is
-    experimental: MCP logins and the plugin store are per account. Transcripts are
-    never shared: a session moved to another account resumes by its path.
+    others make each managed account's entry a link to the plain home's, its own kept
+    beside it as <entry>.own-<stamp> until --disable puts it back. A part an agent does not
+    declare is skipped for it. `plugins` is experimental: MCP logins and the plugin store
+    are per account. Transcripts are never shared: a session moved to another account
+    resumes by its path.
     """
     on = _parts(enable, "--enable")
     off = _parts(disable, "--disable")
@@ -1242,12 +1246,16 @@ def share(
     held = accounts_service.share_status() if status or not (on or off) else []
     knobs = accounts_service.accounts_settings()
     failed = any(change.outcome == "failed" for change in changes)
+    try:
+        memory_dir: str | None = str(accounts_service.shared_memory_root())
+    except ValueError:  # no agent here has a part that is merged
+        memory_dir = None
     if get_state().json_output:
         typer.echo(
             json.dumps(
                 {
                     "share": list(knobs.share),
-                    "memory_dir": str(accounts_service.shared_memory_root()),
+                    "memory_dir": memory_dir,
                     "changes": [change.as_json() for change in changes],
                     "status": [change.as_json() for change in held],
                 }

@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import json
 import os
 import re
 import sqlite3
@@ -169,35 +168,30 @@ def _with_shared_memory(
     binary: str, role_args: Sequence[str], operator_args: Sequence[str]
 ) -> list[str]:
     """``role_args`` with ``[accounts] share = ["memory"]``'s shared auto-memory directory for
-    this folder in their ``--settings`` (P2-W7, #198). Claude Code only.
-
-    ONE ``--settings`` for every key aisquare sets: the role's skill listing (P1 WS-1,
-    ``harness.tool_policy``) and the memory directory merge into one JSON. Two flags are not
-    two settings: Claude Code reads one, and the memory stood down on the role's own flag,
-    so a coder or a tester shared no memory at all (sync #367). An ``--settings`` the
-    operator's line carries (``operator_args``: a binding's ``--arg``, a fleet
-    ``extra_args``, what was typed) still wins, as each feature says; the memory's
+    this folder, as the launch's agent takes it (P2-W7, #198): its accounts slot's
+    ``memory.apply``, which merges it into whatever the role's arguments already set that
+    way (Claude Code's one ``--settings``). An agent with no such part gets ``role_args`` as
+    they were. What the operator's line carries (``operator_args``: a binding's ``--arg``, a
+    fleet ``extra_args``, what was typed) still wins, as each feature says; the memory's
     stand-down is said in one dim line.
     """
-    out = list(role_args)
-    wanted = claude_accounts_service.memory_settings_args(Path.cwd())
-    if not wanted:
-        return out
-    if any(arg == "--settings" or arg.startswith("--settings=") for arg in operator_args):
+    runs = adapter_for_binary(binary)
+    memory = runs.accounts.memory if runs is not None and runs.accounts is not None else None
+    directory = (
+        claude_accounts_service.shared_memory_directory(runs.id, Path.cwd())
+        if memory is not None and runs is not None
+        else None
+    )
+    if memory is None or directory is None:
+        return list(role_args)
+    applied = memory.apply(role_args, operator_args, directory)
+    if applied is None:
         stderr_console().print(
-            "accounts: memory is not shared into this launch — its own --settings wins",
+            f"accounts: memory is not shared into this launch — {memory.override} wins",
             style="dim",
         )
-        return out
-    runs = adapter_for_binary(binary)
-    if runs is None or runs.accounts is None or not runs.accounts.shares_settings:
-        return out  # `autoMemoryDirectory` is Claude Code's settings key (SCOPE #113 090: W7)
-    memory = json.loads(wanted[1])
-    for index, arg in enumerate(out[:-1]):
-        if arg == "--settings":
-            out[index + 1] = json.dumps({**json.loads(out[index + 1]), **memory})
-            return out
-    return [*out, *wanted]
+        return list(role_args)
+    return applied
 
 
 def _persona_system_prompt(

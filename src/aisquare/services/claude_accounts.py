@@ -63,7 +63,7 @@ from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing as sharing
 from aisquare.core import paths, tls
 from aisquare.core.agent_adapters import get_adapter
-from aisquare.core.agent_adapters.types import FolderTrust, trusted_by
+from aisquare.core.agent_adapters.types import FolderTrust, SharePart, trusted_by
 from aisquare.core.config import AccountsSettings, FleetSettings, load_config, save_config
 from aisquare.core.names import name_key
 from aisquare.core.spawn import untraced_env
@@ -3858,7 +3858,12 @@ def unshare_settings() -> tuple[Path, list[SettingsChange]]:
     return source, changes
 
 
-# --- [accounts] share: memory, skills, agents, commands, CLAUDE.md, plugins (P2-W7) -------
+# --- [accounts] share: what an agent's accounts have in common (P2-W7; its adapter's parts) --
+#
+# Which parts an agent shares is its adapter's (``AgentAccounts.share_parts``: Claude Code's
+# memory, skills, agents, commands, CLAUDE.md and plugins; Codex's AGENTS.md and skills); that
+# a linked part is linked, and a merged one merged, is the same for every agent
+# (``core.account_sharing``). One switch names a part, and applies to every agent that has it.
 
 
 @dataclass(frozen=True)
@@ -3866,7 +3871,7 @@ class PartChange:
     """What ``accounts share`` did to one part on one account, or what it holds there."""
 
     account: ClaudeAccount
-    part: sharing.SharePart
+    part: str
     outcome: Literal[
         "linked",
         "already",
@@ -3893,138 +3898,191 @@ class PartChange:
         }
 
 
-def shared_memory_root() -> Path:
+def share_part_names() -> list[str]:
+    """Every part any agent with accounts shares, by name, each once, in the order the
+    agents are registered and declare them."""
+    return list(
+        dict.fromkeys(
+            part.name for agent in core.account_agents() for part in core.kind(agent).share_parts
+        )
+    )
+
+
+def _part_of(agent: str, name: str) -> SharePart | None:
+    return next((part for part in core.kind(agent).share_parts if part.name == name), None)
+
+
+def entry_dir(account: ClaudeAccount) -> Path:
+    """The folder ``account``'s agent keeps its entries in (``AgentAccounts.config_dir``)."""
+    return core.kind(account.agent).config_dir(account.config_dir)
+
+
+def plain_entry_dir(agent: str) -> Path:
+    """The same, for the plain home of ``agent``: what its managed accounts link to."""
+    return core.kind(agent).config_dir(core.default_account(agent=agent).config_dir)
+
+
+def _memory_agent() -> str | None:
+    """The agent whose accounts share a merged part, if any (one: Claude Code's)."""
+    return next((a for a in core.account_agents() if core.kind(a).memory is not None), None)
+
+
+def shared_memory_root(agent: str | None = None) -> Path:
     """Where ``memory`` keeps each project's auto memory: under the aisquare home, outside
     every ``.claude`` path on purpose (anthropics/claude-code#98044: since 2.1.280 every
-    auto-memory write prompts when it lands under a linked ``.claude`` directory)."""
-    return paths.aisquare_home() / "claude-shared" / "memory"
+    auto-memory write prompts when it lands under a linked ``.claude`` directory).
+    ``agent`` defaults to the one that has such a part."""
+    whose = agent or _memory_agent()
+    memory = core.kind(whose).memory if whose is not None else None
+    if memory is None:
+        raise ValueError("no agent here shares its memory")
+    return paths.aisquare_home() / memory.root_name / "memory"
 
 
-def memory_settings_args(cwd: Path) -> list[str]:
-    """``--settings`` pointing Claude Code's auto memory at the shared directory for the
-    project in ``cwd``, when ``[accounts] share`` names ``memory``; else nothing.
-
-    ``autoMemoryDirectory`` is read from any settings scope, ``--settings`` included
-    (Claude Code, Memory). Every launch gets it, the plain claude's too, so all of them
-    read and write one directory per project."""
+def shared_memory_directory(agent: str, cwd: Path) -> Path | None:
+    """The directory ``[accounts] share = ["memory"]`` gives a launch of ``agent`` in ``cwd``
+    for its auto memory, or ``None`` (the part is off, or ``agent`` has no such part). Every
+    launch gets it, the plain home's too, so all of them read and write one directory per
+    project; the launch hands it over by ``AgentAccounts.memory.apply``."""
     try:
-        if "memory" not in accounts_settings().share:
-            return []
+        memory = core.kind(agent).memory if agent in core.account_agents() else None
+        if memory is None:
+            return None
+        merged = next(p.name for p in core.kind(agent).share_parts if p.how == "merge")
+        if merged not in accounts_settings().share:
+            return None
+        return shared_memory_root(agent) / memory.key(cwd)
     except Exception:  # an unreadable config shares nothing
-        return []
-    directory = shared_memory_root() / sharing.memory_key(cwd)
-    return ["--settings", json.dumps({"autoMemoryDirectory": str(directory)})]
+        return None
 
 
 def share_status() -> list[PartChange]:
-    """What every account holds for every part: the linked parts per managed slot, and
-    ``memory`` as on (``shared``) or off (``none``) for the machine."""
+    """What every account holds for every part its agent shares: the linked parts per
+    managed slot, and a merged part (``memory``) as on (``shared``) or off (``none``) for
+    the machine."""
     knobs = accounts_settings()
-    source = core.default_account().config_dir
     held: list[PartChange] = []
     for account in list_accounts():
-        for part in sharing.SHARE_PARTS:
-            if part == "memory":
-                held.append(
-                    PartChange(account, part, "shared" if "memory" in knobs.share else "none")
+        for part in core.kind(account.agent).share_parts:
+            if part.how == "merge":
+                state: PartChange = PartChange(
+                    account, part.name, "shared" if part.name in knobs.share else "none"
                 )
             elif account.managed:
-                held.append(
-                    PartChange(account, part, sharing.part_state(account.config_dir, part, source))
+                state = PartChange(
+                    account,
+                    part.name,
+                    sharing.part_state(entry_dir(account), part, plain_entry_dir(account.agent)),
                 )
+            else:
+                continue
+            held.append(state)
     return held
 
 
-def enable_share(
-    parts: Sequence[sharing.SharePart], *, now: datetime | None = None
-) -> list[PartChange]:
-    """Turn ``parts`` on: write them into ``[accounts] share`` and apply them now.
+def enable_share(parts: Sequence[str], *, now: datetime | None = None) -> list[PartChange]:
+    """Turn ``parts`` on: write them into ``[accounts] share`` and apply them now, to every
+    agent that has them.
 
     Linked parts link every managed slot's entry (its own kept beside it); one linked
     anywhere else is refused and left as it is. ``memory`` merges every account's
     ``projects/<key>/memory/`` into the shared directory the first time it is turned on
     (nothing overwritten; a file that differs is kept as ``<name>.slot<N>.md``).
-    Idempotent: a part already on changes nothing.
+    Idempotent: a part already on changes nothing. A part no agent here shares is a
+    ``ValueError``.
     """
+    unknown = [name for name in parts if name not in share_part_names()]
+    if unknown:
+        raise ValueError(f"no account here shares {', '.join(unknown)}")
     config = load_config()
-    first_memory = "memory" in parts and "memory" not in config.accounts.share
+    fresh = [name for name in parts if name not in config.accounts.share]
     config.accounts.share = list(dict.fromkeys([*config.accounts.share, *parts]))
     save_config(config)
     moment = now or _now()
-    source = core.default_account().config_dir
     changes: list[PartChange] = []
-    for part in parts:
-        if part == "memory":
-            changes += _merge_memory() if first_memory else []
-            continue
-        for account in list_accounts():
-            if account.managed:
-                changes.append(_link_part(account, part, source, moment))
+    for name in parts:
+        for agent in core.account_agents():
+            part = _part_of(agent, name)
+            if part is None:
+                continue
+            if part.how == "merge":
+                changes += _merge_memory(agent) if name in fresh else []
+                continue
+            for account in _agent_accounts(agent):
+                if account.managed:
+                    changes.append(_link_part(account, part, plain_entry_dir(agent), moment))
     return changes
 
 
-def disable_share(parts: Sequence[sharing.SharePart]) -> list[PartChange]:
+def disable_share(parts: Sequence[str]) -> list[PartChange]:
     """Turn ``parts`` off: out of ``[accounts] share``, and every linked entry back to the
     slot's own copy (the one :func:`enable_share` kept), exactly as it was. ``memory``
     stops being passed to launches; the shared directory stays where it is."""
     config = load_config()
     config.accounts.share = [part for part in config.accounts.share if part not in parts]
     save_config(config)
-    source = core.default_account().config_dir
     changes: list[PartChange] = []
-    for part in parts:
-        if part == "memory":
-            continue
-        for account in list_accounts():
-            if not account.managed:
+    for name in parts:
+        for agent in core.account_agents():
+            part = _part_of(agent, name)
+            if part is None or part.how == "merge":
                 continue
-            was = sharing.part_state(account.config_dir, part, source)
-            if was != "shared":  # nothing of ours to undo: say what it holds
-                changes.append(PartChange(account, part, was))
-                continue
-            try:
-                restored = sharing.unlink_part(account.config_dir, part, source)
-            except OSError as exc:
-                changes.append(PartChange(account, part, "failed", exc.strerror or str(exc)))
-                continue
-            if restored is not None:
-                changes.append(PartChange(account, part, "restored", restored.name))
-            else:
-                changes.append(PartChange(account, part, "unlinked"))
+            source = plain_entry_dir(agent)
+            for account in _agent_accounts(agent):
+                if not account.managed:
+                    continue
+                here = entry_dir(account)
+                was = sharing.part_state(here, part, source)
+                if was != "shared":  # nothing of ours to undo: say what it holds
+                    changes.append(PartChange(account, name, was))
+                    continue
+                try:
+                    restored = sharing.unlink_part(here, part, source)
+                except OSError as exc:
+                    changes.append(PartChange(account, name, "failed", exc.strerror or str(exc)))
+                    continue
+                if restored is not None:
+                    changes.append(PartChange(account, name, "restored", restored.name))
+                else:
+                    changes.append(PartChange(account, name, "unlinked"))
     return changes
 
 
 def _link_part(
-    account: ClaudeAccount, part: sharing.SharePart, source: Path, now: datetime
+    account: ClaudeAccount, part: SharePart | str, source: Path, now: datetime
 ) -> PartChange:
-    if sharing.part_state(account.config_dir, part, source) == "shared":
-        return PartChange(account, part, "already")
+    """Link ``account``'s entry for ``part`` (a part of its agent's, or its name) to the plain
+    home's ``source``; what happened."""
+    found = _part_of(account.agent, part) if isinstance(part, str) else part
+    name = part if isinstance(part, str) else part.name
+    if found is None:
+        return PartChange(account, name, "refused", f"{core.label(account)} shares no {name}")
+    here = entry_dir(account)
+    if sharing.part_state(here, found, source) == "shared":
+        return PartChange(account, name, "already")
     try:
-        kept = sharing.link_part(account.config_dir, part, source, now=now)
+        kept = sharing.link_part(here, found, source, now=now)
     except sharing.SharingError as exc:
-        return PartChange(account, part, "refused", str(exc))
+        return PartChange(account, name, "refused", str(exc))
     except OSError as exc:
-        return PartChange(account, part, "failed", exc.strerror or str(exc))
-    return PartChange(account, part, "linked", kept.name if kept is not None else None)
+        return PartChange(account, name, "failed", exc.strerror or str(exc))
+    return PartChange(account, name, "linked", kept.name if kept is not None else None)
 
 
-def _merge_memory() -> list[PartChange]:
+def _merge_memory(agent: str) -> list[PartChange]:
     """Every account's per-project memory into the shared root, once (:func:`enable_share`)."""
-    root = shared_memory_root()
+    memory = core.kind(agent).memory
+    if memory is None:
+        return []
+    root = shared_memory_root(agent)
     changes: list[PartChange] = []
-    accounts = list_accounts()
-    keys = sorted(
-        {
-            memory.parent.name
-            for account in accounts
-            for memory in (account.config_dir / "projects").glob("*/memory")
-            if memory.is_dir()
-        }
-    )
-    for key in keys:
+    accounts = _agent_accounts(agent)
+    held = {account.slot: memory.projects(account) for account in accounts}
+    for key in sorted({key for projects in held.values() for key in projects}):
         sources = [
-            (f"slot{account.slot}", account.config_dir / "projects" / key / "memory")
+            (f"slot{account.slot}", held[account.slot][key])
             for account in accounts
+            if key in held[account.slot]
         ]
         by_label = {f"slot{account.slot}": account for account in accounts}
         for label, note in sharing.merge_memory(sources, root / key):
@@ -4036,17 +4094,21 @@ def _share_parts_into(target: ClaudeAccount) -> list[str]:
     """``[accounts] share`` at a launch: link the parts ``target`` does not have yet (a slot
     made after they were turned on), saying what changed or why it could not."""
     knobs = accounts_settings()
-    linked = [part for part in knobs.share if part in sharing.LINKED_PARTS]
+    linked = [
+        part
+        for part in core.kind(target.agent).share_parts
+        if part.how == "link" and part.name in knobs.share
+    ]
     if not linked or not target.managed:
         return []
-    source = core.default_account().config_dir
     notes: list[str] = []
     for part in linked:
-        change = _link_part(target, part, source, _now())
+        change = _link_part(target, part, plain_entry_dir(target.agent), _now())
         name = core.label(target)
         if change.outcome == "linked":
             kept = f" (its own kept as {change.detail})" if change.detail else ""
-            notes.append(SharedNote(f"{name} now shares the plain claude's {part}{kept}"))
+            plain = core.kind(target.agent).plain_label
+            notes.append(SharedNote(f"{name} now shares the {plain}'s {part.name}{kept}"))
         elif change.outcome in ("refused", "failed"):
-            notes.append(f"{part} is not shared into {name}: {change.detail}")
+            notes.append(f"{part.name} is not shared into {name}: {change.detail}")
     return notes

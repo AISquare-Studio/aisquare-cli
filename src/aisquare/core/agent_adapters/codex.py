@@ -16,6 +16,7 @@ from typing import Any
 
 from aisquare.core import harness
 from aisquare.core.agent_adapters import codex_config
+from aisquare.core.agent_adapters.codex_shared import SHARE_PARTS
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     AgentEvent,
@@ -561,7 +562,7 @@ class CodexAdapter:
     #: as Enter), ctrl+J inserts the newline. Esc interrupts a turn and shift+tab cycles
     #: Default/Plan mode, as their names are sent.
     key_spellings: Mapping[str, str] = MappingProxyType({"S-Enter": "C-j"})
-    accounts = CodexAccounts()
+    accounts = CodexAccounts(SHARE_PARTS)
     plugin = CodexPlugin()
     screen: AgentScreen | None = AgentScreen(
         idle_prompt_mark=IDLE_PROMPT_MARK,

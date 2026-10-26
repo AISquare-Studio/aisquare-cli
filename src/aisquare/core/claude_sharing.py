@@ -46,10 +46,13 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from aisquare.core import atomic
 from aisquare.models import ClaudeAccount
+
+if TYPE_CHECKING:
+    from aisquare.core.agent_adapters.types import SharePart
 
 TRUST_KEY = "hasTrustDialogAccepted"
 
@@ -520,27 +523,10 @@ def unlink_settings(account: ClaudeAccount, source: Path) -> bool:
 
 
 # --- skills, agents, commands, CLAUDE.md, plugins: one copy, linked (P2-W7, #198) ---------
-
-SharePart = Literal["memory", "skills", "agents", "commands", "claude_md", "plugins"]
-SHARE_PARTS: tuple[SharePart, ...] = (
-    "memory",
-    "skills",
-    "agents",
-    "commands",
-    "claude_md",
-    "plugins",
-)
-"""What ``[accounts] share`` can name. ``plugins`` is experimental: MCP auth and the plugin
-store are per directory, so a linked ``plugins/`` can carry a login one slot made."""
-
-LINKED_PARTS: dict[SharePart, tuple[str, bool]] = {
-    "skills": ("skills", True),
-    "agents": ("agents", True),
-    "commands": ("commands", True),
-    "claude_md": ("CLAUDE.md", False),
-    "plugins": ("plugins", True),
-}
-"""A linked part's entry in a config directory, and whether it is a directory."""
+#
+# What an agent shares is its adapter's (``SharePart``, ``AgentAccounts.share_parts``); linking
+# one is every agent's, so these take the part itself (Claude Code's, by name, for the callers
+# that spell it).
 
 PartState = Literal["shared", "own", "none", "elsewhere"]
 
@@ -549,13 +535,30 @@ PartState = Literal["shared", "own", "none", "elsewhere"]
 _platform: Callable[[], str] = lambda: os.name  # noqa: E731
 
 
-def part_entry(config_dir: Path, part: SharePart) -> Path:
-    return config_dir / LINKED_PARTS[part][0]
+def _part(part: SharePart | str) -> SharePart:
+    """``part`` as the adapter declares it: a name is Claude Code's (``AgentAccounts.
+    share_parts``, ``agent_adapters.claude_shared``), as the operator writes it."""
+    if not isinstance(part, str):
+        return part
+    from aisquare.core.agent_adapters import get_adapter
+    from aisquare.core.claude_accounts import AGENT
+
+    accounts = get_adapter(AGENT).accounts
+    found = next((p for p in (accounts.share_parts if accounts else ()) if p.name == part), None)
+    if found is None:
+        raise SharingError(f"Claude Code shares no part called {part}")
+    return found
 
 
-def part_state(config_dir: Path, part: SharePart, source_dir: Path) -> PartState:
-    """``shared`` when the entry links to the plain claude's, ``elsewhere`` when it links to
-    anything else, ``own`` when it is a real file or directory, ``none`` when absent."""
+def part_entry(config_dir: Path, part: SharePart | str) -> Path:
+    return config_dir / _part(part).entry
+
+
+def part_state(config_dir: Path, part: SharePart | str, source_dir: Path) -> PartState:
+    """``shared`` when the entry links to the plain home's, ``elsewhere`` when it links to
+    anything else, ``own`` when it is a real file or directory, ``none`` when absent. Any
+    agent's part (:class:`~aisquare.core.agent_adapters.types.SharePart`); a name is Claude
+    Code's."""
     entry = part_entry(config_dir, part)
     if _is_link(entry):
         same = os.path.realpath(entry) == os.path.realpath(part_entry(source_dir, part))
@@ -580,8 +583,10 @@ def _is_link(path: Path) -> bool:
     return bool(is_junction is not None and is_junction(path))
 
 
-def link_part(config_dir: Path, part: SharePart, source_dir: Path, *, now: datetime) -> Path | None:
-    """Make ``config_dir``'s entry for ``part`` the plain claude's; the copy of its own kept.
+def link_part(
+    config_dir: Path, part: SharePart | str, source_dir: Path, *, now: datetime
+) -> Path | None:
+    """Make ``config_dir``'s entry for ``part`` the plain home's; the copy of its own kept.
 
     Move-then-link: the slot's own file or directory is RENAMED beside itself as
     ``<entry>.own-<UTC stamp>`` (never written over: ``-2``, ``-3`` on), then the link
@@ -601,7 +606,7 @@ def link_part(config_dir: Path, part: SharePart, source_dir: Path, *, now: datet
         raise SharingError(
             f"its {entry.name} links to {_written_target(entry)} — not ours to replace"
         )
-    is_dir = LINKED_PARTS[part][1]
+    is_dir = _part(part).is_dir
     if is_dir:
         source.mkdir(parents=True, exist_ok=True)
         if state == "own" and entry.is_dir():
@@ -610,7 +615,7 @@ def link_part(config_dir: Path, part: SharePart, source_dir: Path, *, now: datet
             # it (review of #360). Its own stays kept beside it as well.
             _seed(entry, source)
     elif not source.is_file():
-        raise SharingError(f"the plain claude has no {source.name} to share")
+        raise SharingError(f"the plain home has no {source.name} to share")
     kept: Path | None = None
     if state == "own":
         kept = _free_beside(entry, f"{entry.name}.own-{now:%Y%m%dT%H%M%SZ}")
@@ -636,7 +641,7 @@ def _seed(own: Path, shared: Path) -> None:
             shutil.copy2(item, target, follow_symlinks=False)
 
 
-def unlink_part(config_dir: Path, part: SharePart, source_dir: Path) -> Path | None:
+def unlink_part(config_dir: Path, part: SharePart | str, source_dir: Path) -> Path | None:
     """Undo :func:`link_part`: remove the link and put the newest kept copy back; the copy
     restored, or ``None`` when the slot had none of its own (or was not linked)."""
     entry = part_entry(config_dir, part)

@@ -46,7 +46,7 @@ import os
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aisquare.core import paths
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice, LoginUnreadable
@@ -59,6 +59,9 @@ from aisquare.models import (
     ClaudeUsage,
     UsageWindow,
 )
+
+if TYPE_CHECKING:
+    from aisquare.core.agent_adapters.types import SharedMemory, SharePart
 
 AGENT = "codex"
 HOME_VAR = "CODEX_HOME"
@@ -615,6 +618,11 @@ class CodexAccounts:
     relogin = ""
     sign_out = "with `codex logout`"
     shares_settings = False
+    memory: SharedMemory | None = None  # no Codex setting points its memory anywhere
+
+    def __init__(self, share_parts: tuple[SharePart, ...] = ()) -> None:
+        # What it shares is its adapter's to say (``agent_adapters.codex_shared``), handed in.
+        self.share_parts = share_parts
 
     def sign_in_args(self) -> tuple[str, ...]:
         # Codex's own browser (or device-code) sign-in; it writes auth.json and exits.

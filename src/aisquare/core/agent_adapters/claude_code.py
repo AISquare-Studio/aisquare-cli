@@ -14,6 +14,7 @@ from aisquare.core.agent_adapters.claude_screen import (
     modal_showing,
     prompt_showing,
 )
+from aisquare.core.agent_adapters.claude_shared import SHARE_PARTS, ClaudeSharedMemory
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     AgentEvent,
@@ -161,7 +162,7 @@ class ClaudeCodeAdapter:
     #: Every key means what tmux names it: shift+tab cycles the permission mode, alt+p
     #: switches the model, shift+enter is a newline (``C-j`` on a tmux too old for it).
     key_spellings: Mapping[str, str] = MappingProxyType({})
-    accounts = ClaudeCodeAccounts()
+    accounts = ClaudeCodeAccounts(SHARE_PARTS, ClaudeSharedMemory())
     plugin = ClaudeCodePlugin()
     screen: AgentScreen | None = AgentScreen(
         start_dialog_mark="Enter to confirm",

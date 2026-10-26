@@ -58,6 +58,8 @@ from aisquare.core.agent_adapters.types import (
     PriceTable,
     SandboxWrites,
     ScreenPrompt,
+    SharedMemory,
+    SharePart,
     SkillDirs,
     TelemetryReader,
     UsageScan,
@@ -382,6 +384,31 @@ class FakeTrust:
         return written
 
 
+class FakeMemory:
+    """Its notes: ``projects/<folder name>/notes`` in each slot, pointed at one directory by
+    ``--notes <dir>`` (a flag the operator's own line wins over)."""
+
+    root_name = "fake-agent-shared"
+    override = "its own --notes"
+
+    def key(self, cwd: Path) -> str:
+        return cwd.name
+
+    def projects(self, account: ClaudeAccount) -> Mapping[str, Path]:
+        root = account.config_dir / "projects"
+        return {p.name: p / "notes" for p in sorted(root.glob("*")) if (p / "notes").is_dir()}
+
+    def apply(
+        self, args: Sequence[str], operator_args: Sequence[str], directory: Path
+    ) -> list[str] | None:
+        if "--notes" in operator_args:
+            return None
+        return [*args, "--notes", str(directory)]
+
+    def warnings(self, account: ClaudeAccount) -> list[str]:
+        return []
+
+
 class FakeAccounts:
     """Its numbered login slots: ``login.json`` (``{"user": email, "token": …}``) in the
     home, signed in by ``fakeagent auth``, read offline, with no usage it can tell."""
@@ -400,6 +427,12 @@ class FakeAccounts:
     relogin = ""
     sign_out = "with `fakeagent logout`"
     shares_settings = False
+    # A folder linked like every agent's, and a part merged, which the fake takes by `--notes`.
+    share_parts: tuple[SharePart, ...] = (
+        SharePart("rules", "rules.d"),
+        SharePart("scratch", how="merge"),
+    )
+    memory: SharedMemory | None = FakeMemory()
     trust = FakeTrust()
 
     def sign_in_args(self) -> tuple[str, ...]:

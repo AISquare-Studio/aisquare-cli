@@ -1529,7 +1529,7 @@ def _agent_accounts_checks(agent: str) -> list[DoctorCheck]:
             ),
             *rest,
         ]
-    return [_ok(name, detail), *rest]
+    return [_ok(name, detail), *_optional(_accounts_sharing_check(agent, managed)), *rest]
 
 
 def _arranges_an_agent_account(agent: str) -> bool:
@@ -1577,36 +1577,45 @@ def _role_agents(bindings: Mapping[str, str]) -> dict[str, str]:
 
 
 def _claude_accounts_sharing_check(managed: Sequence[ClaudeAccount]) -> DoctorCheck | None:
-    """``claude-accounts sharing`` (P2-W7, #198): what ``[accounts] share`` gives each slot.
+    """:func:`_accounts_sharing_check` for Claude Code's accounts (``claude-accounts
+    sharing``)."""
+    return _accounts_sharing_check(claude_accounts_core.AGENT, managed)
+
+
+def _accounts_sharing_check(agent: str, managed: Sequence[ClaudeAccount]) -> DoctorCheck | None:
+    """``<accounts> sharing`` (P2-W7, #198): what ``[accounts] share`` gives each of
+    ``agent``'s slots, of the parts its adapter declares (``claude-accounts sharing``,
+    ``codex-accounts sharing``).
 
     Warns on a part that is on but a slot does not share (linked elsewhere, a broken
-    link, or its own entry still there), and on a slot whose ``projects/`` is a symlink:
-    since Claude Code 2.1.280 every auto-memory write there asks for approval that no
-    allow rule, hook or auto mode can give (anthropics/claude-code#98044), and a shared
-    ``projects/`` is swept by the shortest ``cleanupPeriodDays``. ``None`` when nothing
-    is shared and no ``projects/`` is linked. Read-only.
+    link, or its own entry still there), and on whatever its memory says is wrong with a
+    slot (Claude Code's: a symlinked ``projects/``, where since 2.1.280 every auto-memory
+    write asks for approval that no allow rule, hook or auto mode can give, anthropics/
+    claude-code#98044, and a shared ``projects/`` is swept by the shortest
+    ``cleanupPeriodDays``). ``None`` when none of its parts is on and nothing is wrong.
+    Read-only.
     """
-    name = "claude-accounts sharing"
+    kind = claude_accounts_core.kind(agent)
+    name = f"{kind.dir_name} sharing"
     try:
         knobs = claude_accounts_service.accounts_settings()
-        source = claude_accounts_core.default_account().config_dir
-        linked_dirs = [
-            account for account in managed if os.path.islink(account.config_dir / "projects")
-        ]
-        if not knobs.share and not linked_dirs:
-            return None
+        source = claude_accounts_service.plain_entry_dir(agent)
+        declared = {part.name: part for part in kind.share_parts}
+        on = [part for part in knobs.share if part in declared]
         problems: list[str] = []
-        for account in linked_dirs:
-            problems.append(
-                f"slot {account.slot}'s projects/ is a symlink: every auto-memory write asks "
-                "for approval (Claude Code 2.1.280+)"
-            )
-        for part in knobs.share:
-            if part not in claude_sharing.LINKED_PARTS:
+        if kind.memory is not None:
+            for account in managed:
+                problems += kind.memory.warnings(account)
+        if not on and not problems:
+            return None
+        for part_name in on:
+            part = declared[part_name]
+            if part.how != "link":
                 continue
             for account in managed:
-                state = claude_sharing.part_state(account.config_dir, part, source)
-                entry = claude_sharing.part_entry(account.config_dir, part)
+                here = claude_accounts_service.entry_dir(account)
+                state = claude_sharing.part_state(here, part, source)
+                entry = claude_sharing.part_entry(here, part)
                 if state == "shared" and not entry.exists():
                     problems.append(f"slot {account.slot}'s {entry.name} is a broken link")
                 elif state == "elsewhere":
@@ -1615,18 +1624,20 @@ def _claude_accounts_sharing_check(managed: Sequence[ClaudeAccount]) -> DoctorCh
                     problems.append(f"slot {account.slot}'s {entry.name} is its own")
                 elif state == "none":
                     problems.append(f"slot {account.slot} has no {entry.name} linked yet")
+        merged = next((part.name for part in kind.share_parts if part.how == "merge"), None)
         memory = (
-            f"; memory in {claude_accounts_service.shared_memory_root()}"
-            if "memory" in knobs.share
+            f"; {merged} in {claude_accounts_service.shared_memory_root(agent)}"
+            if merged in on
             else ""
         )
-        detail = f"sharing {', '.join(knobs.share) or 'nothing'}{memory}"
+        detail = f"sharing {', '.join(on) or 'nothing'}{memory}"
         if problems:
             return _warn(
                 name,
                 f"{detail} — " + "; ".join(problems),
                 "aisquare accounts share --enable <parts> links what is missing; a link "
-                "elsewhere or a symlinked projects/ is yours to undo (keep transcripts apart)",
+                "elsewhere is yours to undo"
+                + (" (keep transcripts apart)" if kind.memory is not None else ""),
             )
         return _ok(name, detail)
     except Exception as exc:  # diagnostics must never crash

@@ -1162,3 +1162,116 @@ def test_an_agent_that_declares_no_compact_command_is_never_compacted_from_here(
     assert armed == [], "its Stop arms nothing"
     assert typed == [] and mark is None, "nothing was typed, no mark left"
     assert said == "its agent has no command that compacts it"
+
+
+def test_its_accounts_share_what_it_declares_through_the_code_every_agent_shares(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``AgentAccounts.share_parts`` (#113's #22): this agent's ``.gemini`` holds a ``skills``
+    folder and a ``GEMINI.md``, declared in its adapter alone. ``accounts share`` links each
+    managed slot's entry to the plain home's, the slot's own kept beside it, ``unshare`` gives
+    it back, a launch links a slot made later, and the doctor names its own row: all the
+    shared code, which knows no agent's name."""
+    from datetime import UTC, datetime
+
+    from aisquare.services import claude_accounts as service
+    from aisquare.services import diagnostics
+
+    adapter = GeminiShapedAdapter()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        plain = _home(adapter)  # its plain `.gemini`
+        (plain / "skills" / "shared").mkdir(parents=True)
+        (plain / "GEMINI.md").write_text("plain context\n", encoding="utf-8")
+        first, second = _signed_in_slot(adapter), _signed_in_slot(adapter)
+        first_own = adapter.accounts.config_dir(first.config_dir)
+        first_own.mkdir(parents=True, exist_ok=True)
+        (first_own / "GEMINI.md").write_text("first's own\n", encoding="utf-8")
+        now = datetime(2026, 10, 26, 12, 0, tzinfo=UTC)
+
+        changes = service.enable_share(["skills", "context"], now=now)
+
+        got = {(c.account.slot, c.part): (c.outcome, c.detail) for c in changes}
+        assert got == {
+            (first.slot, "skills"): ("linked", None),
+            (second.slot, "skills"): ("linked", None),
+            (first.slot, "context"): ("linked", "GEMINI.md.own-20261026T120000Z"),
+            (second.slot, "context"): ("linked", None),
+        }
+        for slot in (first, second):
+            there = adapter.accounts.config_dir(slot.config_dir)
+            assert (there / "GEMINI.md").read_text(encoding="utf-8") == "plain context\n"
+            assert (there / "skills").resolve() == (plain / "skills").resolve()
+        assert (first_own / "GEMINI.md.own-20261026T120000Z").read_text() == "first's own\n"
+
+        third = _signed_in_slot(adapter)
+        notes = service.share_for_launch(account=third)
+        assert any("now shares the plain gemini's skills" in note for note in notes), notes
+
+        row = diagnostics._accounts_sharing_check(
+            adapter.id, accounts_core.managed_accounts(adapter.id)
+        )
+        assert row is not None and row.name == "gemini-shaped-accounts sharing"
+        assert row.status.value == "ok" and row.detail == "sharing skills, context"
+
+        service.disable_share(["skills", "context"])
+        assert (first_own / "GEMINI.md").read_text(encoding="utf-8") == "first's own\n"
+        assert not (first_own / "skills").exists()
+    finally:
+        unregister(adapter.id)
+
+
+def test_a_merged_part_is_merged_once_and_handed_to_a_launch_by_its_agents_own_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other kind of part (``how="merge"``): the fake agent's ``scratch`` notes. Merged from
+    every slot into one directory the first time it is turned on (a file that differs kept
+    under the slot's name), and handed to a launch by the agent's own flag (``--notes``), which
+    the operator's own line wins over, said in one dim line."""
+    from aisquare.cli import launch as launch_cli
+    from aisquare.services import claude_accounts as service
+
+    adapter = FakeAgentAdapter()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        first, second = (accounts_core.create_account(adapter.id) for _ in range(2))
+        for slot, text in ((first, "from one\n"), (second, "from two\n")):
+            notes = slot.config_dir / "projects" / "demo" / "notes"
+            notes.mkdir(parents=True)
+            (notes / "a.md").write_text(text, encoding="utf-8")
+            (notes / f"{slot.slot}.md").write_text(text, encoding="utf-8")
+
+        changes = service.enable_share(["scratch"])
+
+        root = service.shared_memory_root(adapter.id) / "demo"
+        assert (root / "a.md").read_text(encoding="utf-8") == "from one\n"
+        assert (root / f"a.slot{second.slot}.md").read_text(encoding="utf-8") == "from two\n"
+        assert (root / f"{first.slot}.md").exists() and (root / f"{second.slot}.md").exists()
+        assert [c.outcome for c in changes] == ["merged"]
+        assert service.enable_share(["scratch"]) == [], "only the first enable merges"
+
+        where = Path.cwd().name
+        directory = service.shared_memory_directory(adapter.id, Path.cwd())
+        assert directory == service.shared_memory_root(adapter.id) / where
+        assert launch_cli._with_shared_memory(adapter.binary, ["--model", "m"], []) == [
+            "--model",
+            "m",
+            "--notes",
+            str(directory),
+        ]
+        assert launch_cli._with_shared_memory(
+            adapter.binary, ["--model", "m"], ["--notes", "elsewhere"]
+        ) == ["--model", "m"], "the operator's own wins"
+        assert service.shared_memory_directory("claude-code", Path.cwd()) is None, (
+            "another agent's merged part is off: its launch gets nothing"
+        )
+
+        service.disable_share(["scratch"])
+        assert launch_cli._with_shared_memory(adapter.binary, ["--model", "m"], []) == [
+            "--model",
+            "m",
+        ]
+    finally:
+        unregister(adapter.id)

@@ -94,7 +94,12 @@ from aisquare.core.version import __version__
 from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage, session_and_week
 
 if TYPE_CHECKING:
-    from aisquare.core.agent_adapters.types import AgentAccounts, UsageFetch
+    from aisquare.core.agent_adapters.types import (
+        AgentAccounts,
+        SharedMemory,
+        SharePart,
+        UsageFetch,
+    )
 
 AGENT = "claude-code"
 """The adapter id of Claude Code, whose slots this module has always kept."""
@@ -1637,6 +1642,14 @@ class ClaudeCodeAccounts:
     relogin = "/login"
     sign_out = "inside Claude Code (/logout)"
     shares_settings = True
+
+    def __init__(
+        self, share_parts: tuple[SharePart, ...] = (), memory: SharedMemory | None = None
+    ) -> None:
+        # What it shares is its adapter's to say (``agent_adapters.claude_shared``), handed
+        # in: that package imports this module.
+        self.share_parts = share_parts
+        self.memory = memory
 
     def sign_in_args(self) -> tuple[str, ...]:
         # No non-interactive login: a first session in the slot runs Claude Code's own.

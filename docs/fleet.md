@@ -1380,6 +1380,16 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   did not make, or a `projects/` that is a symlink. A session is attributed to
   the account its fleet row launched it on, whatever its transcript's path says.
 
+  Which parts an agent shares is its adapter's, so `aisquare accounts share` works
+  for **Codex** slots too: `agents_md` (`AGENTS.md`) and `skills` (`$CODEX_HOME/skills`)
+  are linked into each managed Codex slot from the plain `~/.codex`'s, its own kept
+  beside it as above, and `aisquare doctor` has a `codex-accounts sharing` line of its
+  own. `skills` is one switch for both agents, each into its own folder; a part
+  an agent does not have (`claude_md`, `memory` for Codex) does nothing for it. Codex
+  reads no `prompts` folder (checked on 0.162.1 and 0.164.0), so there is no such part,
+  and it keeps no memory setting to point at one directory. Codex writes its bundled
+  `.system` skills into a linked `skills`, which is the plain home's.
+
 Nothing on this page writes into Claude Code's login: the email and plan
 are read from what Claude Code recorded, and a token is never refreshed by the
 CLI. Claude Code refreshes it on the account's next session. What the
@@ -2843,7 +2853,7 @@ before the step, reads as before. The symbol index is its own SQLite file per pr
 | `[watch] interval_seconds` / `github` / `github_every_seconds` / `auto_stop` / `sources` | `60` / `false` / `120` / `true` / `{}` | `aisquare watch`, which nothing starts until you do. |
 | `[code] enabled` / `max_file_kb` | `true` / `1024` | The symbol index behind `aisquare code`. |
 | `[code] ignore` | `[]` | Globs the symbol index leaves out, beside its built-in list; a `[snapshot] ignore` from 0.8.2 is carried here. |
-| `[accounts] share` | `[]` | What every Claude account shares. Nothing until you enable a part. |
+| `[accounts] share` | `[]` | What every account shares, by the parts its agent declares (Claude Code's memory, skills, agents, commands, CLAUDE.md, plugins; Codex's AGENTS.md and skills). Nothing until you enable a part. |
 
 **What you will notice.**
 

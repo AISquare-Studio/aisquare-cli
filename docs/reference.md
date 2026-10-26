@@ -199,7 +199,7 @@ list` prints every key. The ones that need more than their name:
 | `accounts.wait_if_reset_within_minutes` | `15` | with `switch`, wait instead when the limit lifts this soon |
 | `accounts.share_trust` | `true` | copy a folder's trust into the account a launch runs on |
 | `accounts.share_settings` | `false` | keep every managed account's `settings.json` a link to the plain claude's |
-| `accounts.share` | `[]` | what every account shares: `memory`, `skills`, `agents`, `commands`, `claude_md` (`plugins` is experimental); set with `aisquare accounts share --enable` ([fleet](fleet.md)) |
+| `accounts.share` | `[]` | what every account shares, by the parts each agent declares: Claude Code's `memory`, `skills`, `agents`, `commands`, `claude_md` (`plugins` is experimental), Codex's `agents_md` and `skills`; set with `aisquare accounts share --enable` ([fleet](fleet.md)) |
 | `code.enabled` | `true` | build a project's symbol index at `project onboard` and `init` (in the background) and refresh it at session start ([memory](memory.md#symbol-index)) |
 | `code.max_file_kb` | `1024` | a file larger than this is not indexed |
 | `code.ignore` | `[]` | globs the symbol index leaves out, extending its built-in list (comma-separated on the command line); a `[snapshot] ignore` from 0.8.2 is read here and moved at the next save ([memory](memory.md#symbol-index)) |

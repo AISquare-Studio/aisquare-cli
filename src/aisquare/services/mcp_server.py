@@ -35,6 +35,7 @@ aisquare-cli[serve]``); the CLI imports it lazily and explains if missing.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import logging
 import os
@@ -816,6 +817,40 @@ async def _serve_stdio_until_idle(
         tg.cancel_scope.cancel()  # EOF: stop the watchdog, exit normally
 
 
+def keep_the_protocol_pipe_to_ourselves() -> bool:
+    """Read the protocol from a private copy of stdin and point stdin itself at the null device.
+
+    A stdio server's stdin is its protocol pipe: the client writes requests into it and the
+    server's reader blocks on it for as long as the server lives. A child that inherits it can
+    read the client's bytes, and on Windows a process started with a pipe handle that another
+    thread is blocked reading synchronously can wait on it as it starts (every C runtime asks the
+    type of its standard handles), so a tool that runs ``git`` never answers. Which children a
+    tool starts, now or after the next edit, is not something to audit site by site: after this,
+    none has the pipe to inherit.
+
+    ``os.dup`` makes the private copy non-inheritable, ``os.dup2`` puts the null device on fd 0
+    (inheritable, as a standard stream is) and, on Windows, the C runtime sets the standard input
+    handle with it, which is what ``Popen(stdin=None)`` hands a child. ``sys.stdin`` becomes a
+    reader of the private copy, so the transport, which takes ``sys.stdin.buffer``, is unchanged.
+
+    ``False``, and nothing touched, when ``sys.stdin`` is not this process's own (a test's
+    stand-in, a caller's pipe) or fd 0 is not there to take.
+    """
+    if sys.stdin is None or sys.stdin is not sys.__stdin__:
+        return False
+    try:
+        private = os.dup(0)
+        null = os.open(os.devnull, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        os.dup2(null, 0)
+    finally:
+        os.close(null)
+    sys.stdin = io.TextIOWrapper(os.fdopen(private, "rb"), encoding="utf-8", errors="replace")
+    return True
+
+
 def run_stdio(
     *,
     close_after: int = DEFAULT_CLOSE_AFTER,
@@ -833,6 +868,7 @@ def run_stdio(
     ``command`` is how the idle notice on stderr names the process.
     """
     global _stdio
+    keep_the_protocol_pipe_to_ourselves()  # before anything is built or started
     if server is None:
         _stdio = True  # before the build: its instructions ask whose server this is
     served = server if server is not None else build_server()

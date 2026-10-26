@@ -29,6 +29,8 @@ Two layers, each tested:
 from __future__ import annotations
 
 import contextlib
+import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -47,6 +49,83 @@ from tests import fakebin
 from tests.projects import add_project
 
 pytestmark = pytest.mark.usefixtures("project_capture")
+
+
+# --- the server keeps its protocol pipe to itself ----------------------------------------------
+
+#: A process that is a stdio server as far as its stdin goes: it swaps the pipe away, then starts
+#: a child on ``stdin=None``, as a tool's ``git`` is started, and says what each end reads.
+SERVER = textwrap.dedent(
+    """
+    import faulthandler, json, subprocess, sys
+
+    from aisquare.services import mcp_server
+
+    faulthandler.dump_traceback_later(90, exit=True)  # never a test that waits for ever
+    swapped = mcp_server.keep_the_protocol_pipe_to_ourselves()
+    try:
+        child = subprocess.run(
+            [sys.executable, "-c", "import sys; sys.stdout.write(repr(sys.stdin.buffer.read()))"],
+            capture_output=True, text=True, timeout=30,
+        )
+        child_read = child.stdout
+    except subprocess.TimeoutExpired:
+        child_read = "TIMEOUT: the child held the protocol pipe"
+    print(json.dumps({
+        "swapped": swapped,
+        "child_read": child_read,
+        "own_read": sys.stdin.readline(),
+    }))
+    """
+)
+
+
+def test_a_child_started_on_stdin_reads_end_of_file_while_the_server_still_gets_its_bytes(
+    tmp_path: Path,
+) -> None:
+    """The pipe stays open until the report is in (nothing closes it before the child has read):
+    a child that held it would wait for a byte that never comes, and its answer is the timeout."""
+    script = tmp_path / "server.py"
+    script.write_text(SERVER, encoding="utf-8")
+    process = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdin is not None and process.stdout is not None
+    try:
+        process.stdin.write('{"jsonrpc": "2.0", "id": 1, "method": "initialize"}\n')
+        process.stdin.flush()
+        out = process.stdout.readline()  # printed once the child has read, with the pipe open
+        process.stdin.close()
+        _, err = process.communicate(timeout=120)
+    finally:
+        process.kill()
+        process.wait()
+    assert process.returncode == 0, err
+    report = json.loads(out)
+    assert report == {
+        "swapped": True,
+        "child_read": "b''",
+        "own_read": '{"jsonrpc": "2.0", "id": 1, "method": "initialize"}\n',
+    }, report
+
+
+def test_a_stdin_that_is_not_the_process_own_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A test's stand-in, or a pipe a caller swapped in, is not the protocol pipe of a process
+    that was started as a server: nothing of fd 0 is touched."""
+    import io
+
+    before = os.fstat(0)
+    stand_in = io.StringIO("")
+    monkeypatch.setattr(sys, "stdin", stand_in)
+    assert mcp_server.keep_the_protocol_pipe_to_ourselves() is False
+    assert sys.stdin is stand_in
+    assert os.fstat(0).st_ino == before.st_ino
 
 
 # --- every spawn a tool reaches names its stdin ------------------------------------------------

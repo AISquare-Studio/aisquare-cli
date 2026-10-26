@@ -193,9 +193,12 @@ CODEX_ACTION=""  # install | update | current
 
 CHOSEN_EXTRAS="" # named with --with, or said yes to at their prompt
 # The Chrome DevTools MCP in Claude Code's config: registered | absent (survey),
-# or skipped once register_devtools_mcp has said why it did not register it.
+# or skipped once register_devtools_mcp has said why it did not register it. And in
+# Codex's, the same words.
 DEVTOOLS_MCP=""
+DEVTOOLS_MCP_CODEX=""
 DEVTOOLS_MCP_ADDED=0 # 1 when this run registered it, so the summary says how to undo it
+DEVTOOLS_MCP_CODEX_ADDED=0
 
 INSTALLED_LIST=""
 UPGRADED_LIST=""
@@ -301,6 +304,13 @@ agents_connected_shown() {
     else
         printf "claude-code's"
     fi
+}
+
+# Where `codex mcp add` writes: config.toml in CODEX_HOME, or in ~/.codex (measured with
+# Codex 0.164.0, which has one global scope).
+codex_config_toml() {
+    _cc_dir=${CODEX_HOME:-$HOME/.codex}
+    printf '%s' "${_cc_dir%/}/config.toml"
 }
 
 # Where `claude mcp add --scope user` writes: ~/.claude.json, or .claude.json in
@@ -941,6 +951,8 @@ survey() {
     have node && NODE_VERSION=$(version_of_node || true)
     DEVTOOLS_MCP=absent
     devtools_mcp_registered && DEVTOOLS_MCP=registered
+    DEVTOOLS_MCP_CODEX=absent
+    devtools_mcp_codex_registered && DEVTOOLS_MCP_CODEX=registered
 
     _report uv "$UV_VERSION"
     _report aisquare "$CLI_VERSION"
@@ -954,10 +966,21 @@ survey() {
     _report gh "$GH_VERSION"
     _report git "$GIT_VERSION"
     _report Node "$NODE_VERSION"
-    if [ "$DEVTOOLS_MCP" = registered ]; then
-        note "Chrome DevTools MCP — registered with Claude Code"
-    else
-        note "Chrome DevTools MCP — not registered"
+    # Claude Code's, and --no-agent's (which sets neither up); a run for Codex alone has
+    # only Codex's to report.
+    if wants_claude || ! wants_codex; then
+        if [ "$DEVTOOLS_MCP" = registered ]; then
+            note "Chrome DevTools MCP — registered with Claude Code"
+        else
+            note "Chrome DevTools MCP — not registered"
+        fi
+    fi
+    if wants_codex; then
+        if [ "$DEVTOOLS_MCP_CODEX" = registered ]; then
+            note "Chrome DevTools MCP — registered with Codex"
+        else
+            note "Chrome DevTools MCP — not registered with Codex"
+        fi
     fi
 }
 
@@ -1353,21 +1376,31 @@ banner() {
     if wants_codex; then
         note "$(printf '%-33s %s' "$(codex_home_shown)/hooks.json" "MERGED — aisquare's hook groups only")"
     fi
-    # register_devtools_mcp's one write, for a run that can make it: the extra
-    # chosen or still to be asked about, the MCP not there, and not --no-agent.
-    if [ "$WANT_AGENT" = 1 ] && [ "$DEVTOOLS_MCP" = absent ]; then
-        _bn_mcp="ADDED — the $DEVTOOLS_MCP_NAME MCP server (user scope)"
-        if extra_chosen chrome-devtools; then
-            note "$(printf '%-33s %s' "$(shown_path "$(claude_json)")" "$_bn_mcp")"
-        elif extras_are_asked; then
-            note "$(printf '%-33s %s' "$(shown_path "$(claude_json)")" "$_bn_mcp, if you choose it below")"
-        fi
+    # register_devtools_mcp's writes, for a run that can make them: the extra chosen
+    # or still to be asked about, the MCP not there, and not --no-agent. One file per
+    # agent the run sets up.
+    if wants_claude && [ "$DEVTOOLS_MCP" = absent ]; then
+        _banner_devtools_write "$(claude_json)" "user scope"
+    fi
+    if wants_codex && [ "$DEVTOOLS_MCP_CODEX" = absent ]; then
+        _banner_devtools_write "$(codex_config_toml)" "global"
     fi
     say ""
 
     if [ "$DRY_RUN" = 1 ]; then
         say "${C_BOLD}--dry-run: printing commands, running none.${C_RESET}"
         say ""
+    fi
+}
+
+# One "Written to" line for the Chrome DevTools MCP: $1 is the agent's file, $2 the scope
+# its own command words (Claude Code's user scope, Codex's global config).
+_banner_devtools_write() {
+    _bd_mcp="ADDED — the $DEVTOOLS_MCP_NAME MCP server ($2)"
+    if extra_chosen chrome-devtools; then
+        note "$(printf '%-33s %s' "$(shown_path "$1")" "$_bd_mcp")"
+    elif extras_are_asked; then
+        note "$(printf '%-33s %s' "$(shown_path "$1")" "$_bd_mcp, if you choose it below")"
     fi
 }
 
@@ -1879,12 +1912,31 @@ extra_call() {
     esac
 }
 
-# --- chrome-devtools: Node, then the MCP registered with Claude Code --------
+# --- chrome-devtools: Node, then the MCP registered with each agent ---------
+
+# The agents the MCP is registered with, as the plan names them: the ones this run sets up.
+devtools_mcp_agents_shown() {
+    if wants_claude && wants_codex; then
+        printf 'Claude Code and Codex'
+    elif wants_codex; then
+        printf 'Codex'
+    else
+        printf 'Claude Code'
+    fi
+}
+
+# True when a run that sets an agent up still has the MCP to register with one it sets up:
+# the survey found it absent from that agent's config. Not for an agent --agent left out.
+devtools_mcp_pending() {
+    wants_claude && [ "$DEVTOOLS_MCP" = absent ] && return 0
+    wants_codex && [ "$DEVTOOLS_MCP_CODEX" = absent ] && return 0
+    return 1
+}
 
 extra_chrome_devtools_line() {
     if [ "$WANT_AGENT" = 1 ]; then
-        printf 'the Chrome DevTools MCP for browser tools: Node %s.%s+, registered with Claude Code' \
-            "$MIN_NODE_MAJOR" "$MIN_NODE_MINOR"
+        printf 'the Chrome DevTools MCP for browser tools: Node %s.%s+, registered with %s' \
+            "$MIN_NODE_MAJOR" "$MIN_NODE_MINOR" "$(devtools_mcp_agents_shown)"
     else
         printf 'the Chrome DevTools MCP for browser tools: Node %s.%s+ (--no-agent: not registered with Claude Code)' \
             "$MIN_NODE_MAJOR" "$MIN_NODE_MINOR"
@@ -1892,19 +1944,19 @@ extra_chrome_devtools_line() {
 }
 
 # Nothing to do: Node at the floor with the npx that starts the MCP, and the MCP
-# registered, not this run's to register (--no-agent), or already answered for by
-# register_devtools_mcp, whose failure only warns. npx is part of it because on
+# registered with every agent this run sets up, not this run's to register (--no-agent),
+# or already answered for by register_devtools_mcp, whose failure only warns. npx is part of it because on
 # Arch, Alpine and Debian's own nodejs npm is a package of its own: a Node 22
 # with no npx was otherwise "current", short-circuited past _ensure_npx, and a
 # failed npm install was never reported (review of #399).
 extra_chrome_devtools_current() {
     _node_ok || return 1
     have npx || return 1
-    [ "$WANT_AGENT" = 0 ] || [ "$DEVTOOLS_MCP" != absent ]
+    ! devtools_mcp_pending
 }
 
-# The Node half. The MCP half is register_devtools_mcp, after install_claude, so
-# a Claude Code this run installs is there to take it.
+# The Node half. The MCP half is register_devtools_mcp, after install_agent, so
+# an agent this run installs is there to take it.
 install_chrome_devtools() { install_node; }
 
 # True when Claude Code already has the Chrome DevTools MCP: a user-scope server
@@ -1934,6 +1986,21 @@ devtools_mcp_registered() {
 
 devtools_mcp_add_shown() {
     printf 'claude mcp add %s --scope user npx %s' "$DEVTOOLS_MCP_NAME" "$DEVTOOLS_MCP_PACKAGE"
+}
+
+# True when Codex's config.toml already has the Chrome DevTools MCP: a [mcp_servers.NAME]
+# table (or a sub-table of it, a hand-written env), or anything that runs the package under
+# another name, by the same reading as devtools_mcp_registered's. Read from the file, as
+# `codex mcp add` writes it; and the survey is not optional here: measured with Codex 0.164.0,
+# `codex mcp add` of a name it has REPLACES that table without a word, so an operator's own
+# entry (its env, its cwd) would be overwritten. A commented line is not a server.
+devtools_mcp_codex_registered() {
+    grep -v '^ *#' "$(codex_config_toml)" 2>/dev/null |
+        grep -q -E -e "^\[mcp_servers\.\"?$DEVTOOLS_MCP_NAME\"?[].]" -e '[/"]chrome-devtools-mcp[@"/]'
+}
+
+devtools_mcp_codex_add_shown() {
+    printf 'codex mcp add %s -- npx %s' "$DEVTOOLS_MCP_NAME" "$DEVTOOLS_MCP_PACKAGE"
 }
 
 # Node is the Chrome DevTools extra's first half: the MCP is started with
@@ -2203,37 +2270,53 @@ install_claude() {
     fi
 }
 
-# The Chrome DevTools extra's second half: `claude mcp add` at user scope, as the
-# package's own guide gives it, for a run that chose the extra and nothing else.
-# Each reason not to is one line. A failure warns and never fails the install:
-# browser tools are optional, and doctor's browser tools row is green either way.
-# `claude mcp add` refuses a name it already has, so its answer is the check
-# behind the survey's, and nothing is ever registered twice.
+# The Chrome DevTools extra's second half: each agent's own command, at user scope, as
+# the package's own guide gives it (`claude mcp add`; Codex's `codex mcp add`), for a run
+# that chose the extra and nothing else, with every agent the run sets up. Each reason not
+# to is one line. A failure warns and never fails the install: browser tools are optional,
+# and doctor's browser tools row is green either way. The agents' own commands are the
+# adapters' (`AgentAdapter.mcp_registration`), which tests/test_mcp_registration.py holds
+# these to.
 register_devtools_mcp() {
     extra_chosen chrome-devtools || return 0
     if [ "$WANT_AGENT" = 0 ]; then
         note "Chrome DevTools MCP not registered: --no-agent leaves Claude Code alone. To add it: $(devtools_mcp_add_shown)"
         return 0
     fi
+    wants_claude && register_devtools_mcp_claude
+    wants_codex && register_devtools_mcp_codex
+    return 0
+}
+
+# The guards every agent's registration shares, before its own command: $1 begins each note
+# and $2 is the command a dry run shows. Returns 1 once it has said why the add must not run
+# now: a dry run, no Node at the floor (install_node has warned, and the summary names the
+# extra), or no npx (_ensure_npx has).
+_devtools_mcp_unready() {
+    if [ "$DRY_RUN" = 1 ]; then
+        printf '  %swould run:%s %s\n' "$C_DIM" "$C_RESET" "$2"
+        return 1
+    fi
+    if ! _node_ok; then
+        note "$1 there is no Node $MIN_NODE_MAJOR.$MIN_NODE_MINOR+ to start it"
+        return 1
+    fi
+    if ! have npx; then
+        note "$1 there is no npx to start it"
+        return 1
+    fi
+    return 0
+}
+
+# Claude Code's. `claude mcp add` refuses a name it already has, so its answer is the check
+# behind the survey's, and nothing is ever registered twice.
+register_devtools_mcp_claude() {
     if [ "$DEVTOOLS_MCP" = registered ]; then
         note "Chrome DevTools MCP — already registered with Claude Code, left as it is"
         return 0
     fi
     DEVTOOLS_MCP=skipped
-    if [ "$DRY_RUN" = 1 ]; then
-        printf '  %swould run:%s %s\n' "$C_DIM" "$C_RESET" "$(devtools_mcp_add_shown)"
-        return 0
-    fi
-    if ! _node_ok; then
-        # install_node has warned, and the summary names the extra.
-        note "Chrome DevTools MCP not registered: there is no Node $MIN_NODE_MAJOR.$MIN_NODE_MINOR+ to start it"
-        return 0
-    fi
-    if ! have npx; then
-        # _ensure_npx has warned, and the summary names the extra.
-        note "Chrome DevTools MCP not registered: there is no npx to start it"
-        return 0
-    fi
+    _devtools_mcp_unready "Chrome DevTools MCP not registered:" "$(devtools_mcp_add_shown)" || return 0
     if ! have claude; then
         note "Chrome DevTools MCP not registered: Claude Code is not installed. Once it is: $(devtools_mcp_add_shown)"
         return 0
@@ -2254,6 +2337,30 @@ register_devtools_mcp() {
     esac
     warn "could not register the Chrome DevTools MCP: $(printf '%s\n' "$_rd_out" | first_line)
          Browser tools are optional; everything else works. To add it: $(devtools_mcp_add_shown)"
+}
+
+# Codex's. Its `mcp add` replaces a name it has instead of refusing it, so the survey's
+# answer is the only check, and what it found is left as the operator wrote it.
+register_devtools_mcp_codex() {
+    if [ "$DEVTOOLS_MCP_CODEX" = registered ]; then
+        note "Chrome DevTools MCP — already registered with Codex, left as it is"
+        return 0
+    fi
+    DEVTOOLS_MCP_CODEX=skipped
+    _devtools_mcp_unready "Chrome DevTools MCP not registered with Codex:" "$(devtools_mcp_codex_add_shown)" || return 0
+    if ! have codex; then
+        note "Chrome DevTools MCP not registered with Codex: Codex is not installed. Once it is: $(devtools_mcp_codex_add_shown)"
+        return 0
+    fi
+    step "Registering the Chrome DevTools MCP with Codex ($(shown_path "$(codex_config_toml)"))"
+    if _rd_out=$(codex mcp add "$DEVTOOLS_MCP_NAME" -- npx "$DEVTOOLS_MCP_PACKAGE" </dev/null 2>&1); then
+        DEVTOOLS_MCP_CODEX=registered
+        DEVTOOLS_MCP_CODEX_ADDED=1
+        good "Chrome DevTools MCP registered with Codex: npx $DEVTOOLS_MCP_PACKAGE"
+        return 0
+    fi
+    warn "could not register the Chrome DevTools MCP with Codex: $(printf '%s\n' "$_rd_out" | first_line)
+         Browser tools are optional; everything else works. To add it: $(devtools_mcp_codex_add_shown)"
 }
 
 # Codex, by the route its own docs give (CODEX_INSTALLER_URL), only when it is absent;
@@ -2792,6 +2899,8 @@ summary() {
     [ -n "$SKIPPED_LIST" ] && note "already current:$SKIPPED_LIST"
     [ "$DEVTOOLS_MCP_ADDED" = 1 ] &&
         note "registered: the $DEVTOOLS_MCP_NAME MCP with Claude Code — to undo: claude mcp remove -s user $DEVTOOLS_MCP_NAME"
+    [ "$DEVTOOLS_MCP_CODEX_ADDED" = 1 ] &&
+        note "registered: the $DEVTOOLS_MCP_NAME MCP with Codex — to undo: codex mcp remove $DEVTOOLS_MCP_NAME"
 
     if [ "$DRY_RUN" = 1 ]; then
         say ""
@@ -3028,8 +3137,10 @@ Options
                        package manager and sudo.
       --with EXTRA     Install an optional extra without asking. One for now:
                        chrome-devtools (Node 22.12+, and the Chrome DevTools
-                       MCP registered with Claude Code at user scope; undo
-                       with: claude mcp remove -s user chrome-devtools).
+                       MCP registered with each agent the run sets up: Claude
+                       Code at user scope, Codex in its config.toml; undo with:
+                       claude mcp remove -s user chrome-devtools, or
+                       codex mcp remove chrome-devtools).
                        Without it each extra is asked about, defaulting to
                        no; --yes asks nothing.
       --project DIR    Register DIR as the project (default: $PWD if a git repo).
@@ -3070,7 +3181,7 @@ Exit codes
   1  a fatal step failed — uv, or aisquare-cli itself
   2  installed, but a check is amber for a reason this script did not expect,
      or an optional extra you chose did not install: Node or npx for
-     --with chrome-devtools. Its Claude Code registration only warns.
+     --with chrome-devtools. Its registration with an agent only warns.
 
 Not installed, on purpose: gbrain (out of scope), explainability tracing (off
 unless asked for), and any credential — `claude`, `codex` and `gh auth login` do

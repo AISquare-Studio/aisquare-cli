@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1655,7 +1656,7 @@ def test_a_row_name_with_spaces_is_one_row(tmp_path: Path) -> None:
 def test_exit_2_is_documented_for_an_extra_that_did_not_install(tmp_path: Path) -> None:
     """The run exits 2 for an extra it was asked for and could not install, with no check
     amber (review of #257), and only for what it installs: a failed registration with
-    Claude Code warns and exits 0, the owner's call (review of #399, n7)."""
+    an agent warns and exits 0, the owner's call (review of #399, n7)."""
     usage = sh("usage", path=base_path(tmp_path)).stdout
     exit_codes = " ".join(usage.split("Exit codes", 1)[1].split("\n\n", 1)[0].split())
     page = " ".join((REPO / "docs" / "install.md").read_text(encoding="utf-8").split())
@@ -1663,7 +1664,7 @@ def test_exit_2_is_documented_for_an_extra_that_did_not_install(tmp_path: Path) 
     assert "a fatal step failed" in exit_codes, "control: this is the exit-code section"
     said = (
         "or an optional extra you chose did not install: Node or npx for {}--with "
-        "chrome-devtools{}. Its Claude Code registration only warns."
+        "chrome-devtools{}. Its registration with an agent only warns."
     )
     assert said.format("", "") in exit_codes, exit_codes
     assert "unexpectedly amber, " + said.format("`", "`") in page
@@ -2438,6 +2439,425 @@ def test_a_node_without_npx_is_not_registered_and_the_extra_did_not_install(
     assert _NODE_FAILED in result.stdout
     assert "WARNINGS=1 UNEXPECTED=1" in result.stdout
     assert result.returncode == 2
+
+
+# ---------------------------------------------------------------------------
+# the Chrome DevTools MCP with Codex — `codex mcp add`, in CODEX_HOME's config.toml
+# ---------------------------------------------------------------------------
+
+#: What `register_devtools_mcp_codex` runs. Measured with Codex 0.164.0: it writes a
+#: `[mcp_servers.chrome-devtools]` table (command "npx", args ["chrome-devtools-mcp@latest"])
+#: into CODEX_HOME/config.toml and exits 0, also for a name it has, which it REPLACES.
+_CODEX_MCP_ADD = "mcp add chrome-devtools -- npx chrome-devtools-mcp@latest"
+_CODEX_MCP_UNDO = "to undo: codex mcp remove chrome-devtools"
+
+#: `config.toml` as `codex mcp add` wrote it.
+_CODEX_TABLE = """[mcp_servers.chrome-devtools]
+command = "npx"
+args = ["chrome-devtools-mcp@latest"]
+"""
+_CODEX_AMONG_OTHERS = """model = "gpt-6"
+
+[mcp_servers.github]
+url = "https://example.invalid/mcp"
+
+[mcp_servers.chrome-devtools]
+command = "npx"
+args = ["chrome-devtools-mcp@latest"]
+
+[mcp_servers.chrome-devtools.env]
+CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS = "1"
+"""
+#: An operator's own, with an env `codex mcp add` would overwrite: left alone.
+_CODEX_ENV_ONLY = """[mcp_servers.chrome-devtools.env]
+CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS = "1"
+"""
+_CODEX_QUOTED_NAME = """[mcp_servers."chrome-devtools"]
+command = "npx"
+args = ["chrome-devtools-mcp@latest"]
+"""
+_CODEX_NAMED_OTHERWISE = """[mcp_servers.devtools]
+command = "npx"
+args = ["-y", "chrome-devtools-mcp@latest"]
+"""
+_CODEX_SCOPED_FORK = """[mcp_servers.devtools]
+command = "npx"
+args = ["@acme/chrome-devtools-mcp@1.2.0"]
+"""
+_CODEX_BY_PATH = """[mcp_servers.devtools]
+command = "node"
+args = ["/opt/chrome-devtools-mcp/build/src/index.js"]
+"""
+#: Not it: a lookalike package, a commented-out table, another server, a model's name.
+_CODEX_LOOKALIKE = """[mcp_servers.docs]
+command = "npx"
+args = ["chrome-devtools-mcp-docs"]
+"""
+_CODEX_COMMENTED = """# [mcp_servers.chrome-devtools]
+#   args = ["chrome-devtools-mcp@latest"]
+  # command = "npx chrome-devtools-mcp"
+model = "gpt-6"
+"""
+_CODEX_ANOTHER_SERVER = """[mcp_servers.github]
+url = "https://example.invalid/mcp"
+"""
+
+#: The layouts both the survey (shell) and the adapter (Python) read as registered, and as not.
+CODEX_REGISTERED = {
+    "table": _CODEX_TABLE,
+    "among-others": _CODEX_AMONG_OTHERS,
+    "env-only": _CODEX_ENV_ONLY,
+    "quoted-name": _CODEX_QUOTED_NAME,
+    "named-otherwise": _CODEX_NAMED_OTHERWISE,
+    "scoped-fork": _CODEX_SCOPED_FORK,
+    "by-path": _CODEX_BY_PATH,
+}
+CODEX_NOT_REGISTERED = {
+    "lookalike-package": _CODEX_LOOKALIKE,
+    "commented-out": _CODEX_COMMENTED,
+    "another-server": _CODEX_ANOTHER_SERVER,
+}
+
+
+def _fake_codex(
+    tmp_path: Path, *, answer: str = "Added global MCP server 'chrome-devtools'.", status: int = 0
+) -> tuple[Path, Path]:
+    """A `codex` that logs each call and answers anything but --version as told, beside the
+    `node` and `npx` the registration needs. Returns its directory and its log."""
+    log = tmp_path / "codex.log"
+    stubs = tmp_path / "codexbin"
+    stubs.mkdir(exist_ok=True)
+    for name, body in (
+        (
+            "codex",
+            f'printf "%s\\n" "$*" >>"{log}"\n'
+            'case "$1" in --version) echo "codex-cli 0.164.0"; exit 0 ;; esac\n'
+            f"printf '%s\\n' \"{answer}\"\nexit {status}",
+        ),
+        ("node", 'echo "v22.12.0"'),
+        ("npx", "exit 0"),
+    ):
+        script = stubs / name
+        script.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        script.chmod(0o755)
+    return stubs, log
+
+
+def _register_with(
+    tmp_path: Path,
+    wants: str,
+    assignments: str = "",
+    *,
+    path: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """`_register` for the agents ``wants`` names: ``claude``, ``codex`` or both."""
+    environment = {"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": "", "CODEX_HOME": ""}
+    environment.update(env or {})
+    claude = 1 if "claude" in wants else 0
+    codex = 1 if "codex" in wants else 0
+    return sh(
+        f"DRY_RUN=0; WANT_AGENT=1; WANT_CLAUDE={claude}; WANT_CODEX={codex}; WANT_PROJECT=1; "
+        "PROJECT_DIR=/p; DOCTOR_AMBER=brain; CHOSEN_EXTRAS=chrome-devtools; survey; "
+        f"{assignments or ':'}; register_devtools_mcp; summary; "
+        'echo "WARNINGS=$WARNINGS UNEXPECTED=$UNEXPECTED"; handoff',
+        env=environment,
+        path=path,
+        no_terminal=True,
+    )
+
+
+def test_a_codex_run_that_chose_the_extra_registers_the_mcp_with_codex_alone(
+    tmp_path: Path,
+) -> None:
+    """Once, by Codex's own command, and the summary says how to undo it. Claude Code is not
+    this run's agent, so it is neither asked nor reported: before, the same run said "Claude
+    Code is not installed" and registered nothing."""
+    stubs, log = _fake_codex(tmp_path)
+
+    result = _register_with(
+        tmp_path, "codex", "register_devtools_mcp", path=f"{stubs}:{base_path(tmp_path)}"
+    )
+
+    assert _mcp_adds(log) == [_CODEX_MCP_ADD]
+    assert "Chrome DevTools MCP — not registered with Codex" in result.stdout, "the survey"
+    assert "Registering the Chrome DevTools MCP with Codex (~/.codex/config.toml)" in result.stdout
+    assert "✓ Chrome DevTools MCP registered with Codex: npx chrome-devtools-mcp@latest" in (
+        result.stdout
+    )
+    assert "already registered with Codex, left as it is" in result.stdout, "the second pass"
+    assert f"registered: the chrome-devtools MCP with Codex — {_CODEX_MCP_UNDO}" in result.stdout
+    assert "claude mcp" not in result.stdout and "Claude Code is not installed" not in result.stdout
+    assert "WARNINGS=0 UNEXPECTED=0" in result.stdout
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_a_run_for_both_agents_registers_the_mcp_with_each(tmp_path: Path) -> None:
+    claude_stubs, claude_log = _fake_claude(tmp_path)
+    codex_stubs, codex_log = _fake_codex(tmp_path)
+
+    result = _register_with(
+        tmp_path,
+        "claude codex",
+        path=f"{claude_stubs}:{codex_stubs}:{base_path(tmp_path)}",
+    )
+
+    assert _mcp_adds(claude_log) == [_MCP_ADD]
+    assert _mcp_adds(codex_log) == [_CODEX_MCP_ADD]
+    assert f"registered: the chrome-devtools MCP with Claude Code — {_MCP_UNDO}" in result.stdout
+    assert f"registered: the chrome-devtools MCP with Codex — {_CODEX_MCP_UNDO}" in result.stdout
+    assert "WARNINGS=0 UNEXPECTED=0" in result.stdout
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("where", [*CODEX_REGISTERED, "codex-home"])
+def test_an_mcp_codex_already_has_is_left_as_the_operator_wrote_it(
+    tmp_path: Path, where: str
+) -> None:
+    """`codex mcp add` of a name it has replaces the table without a word, so the survey is
+    the only check: an entry of that name (in any layout), or one that runs the package
+    under another name, and `codex` is never asked."""
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    env: dict[str, str] = {}
+    if where == "codex-home":
+        config = tmp_path / "elsewhere"
+        config.mkdir()
+        (config / "config.toml").write_text(_CODEX_TABLE, encoding="utf-8")
+        env["CODEX_HOME"] = str(config)
+    else:
+        (home / ".codex" / "config.toml").write_text(CODEX_REGISTERED[where], encoding="utf-8")
+    stubs, log = _fake_codex(tmp_path)
+
+    result = _register_with(tmp_path, "codex", path=f"{stubs}:{base_path(tmp_path)}", env=env)
+
+    said = [line for line in result.stdout.splitlines() if "Chrome DevTools MCP" in line]
+    assert said[-1].strip() == (
+        "Chrome DevTools MCP — already registered with Codex, left as it is"
+    ), result.stdout
+    assert "Chrome DevTools MCP — registered with Codex" in result.stdout, "the survey"
+    assert _mcp_adds(log) == []
+    assert _CODEX_MCP_UNDO not in result.stdout, "nothing this run registered is undone"
+    assert "WARNINGS=0 UNEXPECTED=0" in result.stdout
+    assert result.returncode == 0
+
+
+@pytest.mark.parametrize("config", CODEX_NOT_REGISTERED.values(), ids=list(CODEX_NOT_REGISTERED))
+def test_what_codex_would_not_start_reads_as_not_registered(tmp_path: Path, config: str) -> None:
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "config.toml").write_text(config, encoding="utf-8")
+
+    result = sh(
+        "survey; if devtools_mcp_codex_registered; then echo REGISTERED; else echo ABSENT; fi",
+        env={"HOME": str(home), "CODEX_HOME": ""},
+        path=base_path(tmp_path),
+    )
+
+    assert result.stdout.splitlines()[-1] == "ABSENT", result.stdout
+
+
+def test_without_codex_the_mcp_is_skipped_in_one_line(tmp_path: Path) -> None:
+    stubs, _ = _fake_codex(tmp_path)
+    (stubs / "codex").unlink()
+
+    result = _register_with(tmp_path, "codex", path=f"{stubs}:{base_path(tmp_path)}")
+
+    said = [line.strip() for line in result.stdout.splitlines() if "MCP" in line]
+    assert said[-1] == (
+        "Chrome DevTools MCP not registered with Codex: Codex is not installed. Once it is: "
+        "codex mcp add chrome-devtools -- npx chrome-devtools-mcp@latest"
+    ), result.stdout
+    assert "WARNINGS=0 UNEXPECTED=0" in result.stdout
+    assert result.returncode == 0
+
+
+def test_a_failed_registration_with_codex_warns_and_never_fails_the_install(
+    tmp_path: Path,
+) -> None:
+    stubs, log = _fake_codex(tmp_path, answer="Error: config.toml is read-only", status=1)
+
+    result = _register_with(tmp_path, "codex", path=f"{stubs}:{base_path(tmp_path)}")
+
+    warning = " ".join(result.stderr.split())
+    assert _mcp_adds(log) == [_CODEX_MCP_ADD]
+    assert (
+        "could not register the Chrome DevTools MCP with Codex: Error: config.toml is read-only"
+        in warning
+    )
+    assert f"To add it: codex {_CODEX_MCP_ADD}" in warning
+    assert _CODEX_MCP_UNDO not in result.stdout and "did not install" not in result.stdout
+    assert "WARNINGS=1 UNEXPECTED=0" in result.stdout
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("assignments", "says"),
+    [
+        ("CHOSEN_EXTRAS=", None),
+        ("WANT_AGENT=0", "Chrome DevTools MCP not registered: --no-agent leaves Claude Code alone"),
+        ("DRY_RUN=1", f"would run: codex {_CODEX_MCP_ADD}"),
+        (
+            "NODE_VERSION=",
+            "Chrome DevTools MCP not registered with Codex: there is no Node 22.12+ to start it",
+        ),
+        ("NODE_VERSION=22.11.0", "there is no Node 22.12+ to start it"),
+    ],
+    ids=["not-chosen", "no-agent", "dry-run", "no-node", "old-node"],
+)
+def test_codex_is_asked_to_register_only_for_a_run_that_chose_it_and_can(
+    tmp_path: Path, assignments: str, says: str | None
+) -> None:
+    stubs, log = _fake_codex(tmp_path)
+
+    result = _register_with(tmp_path, "codex", assignments, path=f"{stubs}:{base_path(tmp_path)}")
+
+    assert _mcp_adds(log) == [], result.stdout
+    if says is None:
+        assert "Chrome DevTools MCP —" in result.stdout, "control: the survey ran"
+        assert "registered:" not in result.stdout and "MCP not registered" not in result.stdout
+    else:
+        assert says in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("registered", [False, True], ids=["mcp-absent", "mcp-registered"])
+def test_the_survey_decides_whether_a_codex_run_still_has_its_registration_to_do(
+    tmp_path: Path, registered: bool
+) -> None:
+    """Through the real survey, for a run that sets up Codex alone: a Claude Code config
+    with no MCP in it must not make the extra pending, and the plan lists Codex's file."""
+    stubs, _ = _fake_codex(tmp_path)
+    cli = stub_dir(tmp_path, "clibin", "aisquare")
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    if registered:
+        (home / ".codex" / "config.toml").write_text(_CODEX_TABLE, encoding="utf-8")
+
+    result = sh(
+        "WANT_AGENT=1; WANT_CLAUDE=0; WANT_CODEX=1; CHOSEN_EXTRAS=chrome-devtools; survey; "
+        "CLI_ACTION=current; CLI_VERSION=0.9.0; UV_VERSION=0.12.3; WANT_SYSTEM_DEPS=0; "
+        "WANT_PROJECT=0; CODEX_ACTION=current; "
+        "if extra_call current chrome-devtools; then echo EXTRA=CURRENT; else echo EXTRA=PENDING; "
+        "fi; banner",
+        env={"HOME": str(home), "CLAUDE_CONFIG_DIR": "", "CODEX_HOME": ""},
+        path=f"{stubs}:{cli}:{base_path(tmp_path)}",
+        no_terminal=True,
+    )
+
+    added = f"{'~/.codex/config.toml':<33} ADDED — the chrome-devtools MCP server (global)"
+    if registered:
+        assert "EXTRA=CURRENT" in result.stdout, result.stdout
+        assert added not in result.stdout and "Chrome DevTools MCP for" not in result.stdout
+    else:
+        assert "EXTRA=PENDING" in result.stdout, result.stdout
+        assert added in result.stdout, result.stdout
+        assert ".claude.json" not in result.stdout
+        assert "registered with Codex (--with chrome-devtools)" in result.stdout
+
+
+def test_the_plan_names_the_agents_the_mcp_is_registered_with(tmp_path: Path) -> None:
+    npx = stub_dir(tmp_path, "npxbin", "npx")
+
+    def line(assignments: str) -> str:
+        return sh(
+            f"{assignments}; extra_chrome_devtools_line",
+            env={"HOME": str(tmp_path)},
+            path=f"{npx}:{base_path(tmp_path)}",
+        ).stdout
+
+    assert line("WANT_AGENT=1") == (
+        "the Chrome DevTools MCP for browser tools: Node 22.12+, registered with Claude Code"
+    )
+    assert line("WANT_AGENT=1; WANT_CLAUDE=0; WANT_CODEX=1").endswith("registered with Codex")
+    assert line("WANT_AGENT=1; WANT_CODEX=1").endswith("registered with Claude Code and Codex")
+    assert line("WANT_AGENT=0").endswith("(--no-agent: not registered with Claude Code)")
+
+
+def test_install_sh_runs_the_commands_each_adapter_declares(tmp_path: Path) -> None:
+    """The adapters declare how their agent registers and unregisters an MCP server
+    (`AgentAdapter.mcp_registration`); install.sh runs before aisquare is installed, so it
+    spells the same commands in shell. Neither side moves alone."""
+    from aisquare.core.agent_adapters import get_adapter
+    from aisquare.core.agent_adapters.mcp_servers import DEVTOOLS_COMMAND, DEVTOOLS_NAME
+
+    shown = sh(
+        "devtools_mcp_add_shown; echo; devtools_mcp_codex_add_shown; echo",
+        path=base_path(tmp_path),
+    ).stdout.splitlines()
+    for agent, line, undo in (
+        ("claude-code", shown[0], _MCP_UNDO),
+        ("codex", shown[1], _CODEX_MCP_UNDO),
+    ):
+        adapter = get_adapter(agent)
+        registration = adapter.mcp_registration
+        assert registration is not None
+        add = shlex.join([adapter.binary, *registration.add_args(DEVTOOLS_NAME, DEVTOOLS_COMMAND)])
+        remove = shlex.join([adapter.binary, *registration.remove_args(DEVTOOLS_NAME)])
+        assert line == add, agent
+        assert undo == f"to undo: {remove}", agent
+
+
+def test_the_survey_and_the_adapter_read_a_codex_config_alike(tmp_path: Path) -> None:
+    """The shell survey and `CodexMcp.registered` answer the same for every layout above."""
+    from aisquare.core.agent_adapters import get_adapter
+    from aisquare.core.agent_adapters.mcp_servers import DEVTOOLS_NAME, DEVTOOLS_PACKAGE
+
+    registration = get_adapter("codex").mcp_registration
+    assert registration is not None
+    for name, config in {**CODEX_REGISTERED, **CODEX_NOT_REGISTERED}.items():
+        home = tmp_path / name
+        home.mkdir()
+        (home / "config.toml").write_text(config, encoding="utf-8")
+        shell = sh(
+            "if devtools_mcp_codex_registered; then echo REGISTERED; else echo ABSENT; fi",
+            env={"HOME": str(tmp_path), "CODEX_HOME": str(home)},
+            path=base_path(tmp_path),
+        ).stdout.strip()
+
+        python = registration.registered(home, DEVTOOLS_NAME, DEVTOOLS_PACKAGE)
+
+        assert (shell == "REGISTERED") is python is (name in CODEX_REGISTERED), name
+
+
+def test_the_survey_and_the_adapter_read_a_claude_config_alike(tmp_path: Path) -> None:
+    """Likewise for Claude Code: `.claude.json` and `settings.json` in the dir
+    CLAUDE_CONFIG_DIR names, read by the shell survey and by `ClaudeCodeMcp.registered`."""
+    from aisquare.core.agent_adapters import get_adapter
+    from aisquare.core.agent_adapters.mcp_servers import DEVTOOLS_NAME, DEVTOOLS_PACKAGE
+
+    registration = get_adapter("claude-code").mcp_registration
+    assert registration is not None
+    plugin = '{"enabledPlugins": {"chrome-devtools-mcp@chrome-devtools-plugins": true}}'
+    cases: dict[str, tuple[str | None, str | None, bool]] = {
+        "user-scope": (_USER_SCOPE, None, True),
+        "among-others": (_USER_SCOPE_AMONG_OTHERS, None, True),
+        "named-otherwise": (_NAMED_OTHERWISE, None, True),
+        "by-path": (_BY_PATH, None, True),
+        "scoped-fork": (_SCOPED_FORK, None, True),
+        "plugin": (None, plugin, True),
+        "local-scope-only": (_LOCAL_SCOPE, None, False),
+        "skill-usage-only": (_SKILL_USAGE, None, False),
+        "another-server-then-skill-usage": (_ANOTHER_SERVER_THEN_SKILL_USAGE, None, False),
+        "lookalike-package": (_LOOKALIKE_PACKAGE, None, False),
+        "lookalike-paths": (_LOOKALIKE_PATHS, None, False),
+        "no-config": (None, None, False),
+    }
+    for name, (claude_json, settings, expected) in cases.items():
+        home = tmp_path / name
+        home.mkdir()
+        if claude_json is not None:
+            (home / ".claude.json").write_text(claude_json, encoding="utf-8")
+        if settings is not None:
+            (home / "settings.json").write_text(settings, encoding="utf-8")
+        shell = sh(
+            "if devtools_mcp_registered; then echo REGISTERED; else echo ABSENT; fi",
+            env={"HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(home)},
+            path=base_path(tmp_path),
+        ).stdout.strip()
+
+        python = registration.registered(home, DEVTOOLS_NAME, DEVTOOLS_PACKAGE)
+
+        assert (shell == "REGISTERED") is python is expected, name
 
 
 def test_the_mcp_is_registered_after_claude_code_is_installed(source_text: str) -> None:

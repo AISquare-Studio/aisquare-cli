@@ -212,8 +212,13 @@ def _http(
     json_body: Any | None = None,
     headers: dict[str, str] | None = None,
     timeout: float = HTTP_TIMEOUT_SECONDS,
+    follow_redirects: bool = True,
 ) -> HttpResult:
     """One request. HTTP error statuses come back as results; transport errors raise.
+
+    ``follow_redirects=False`` is for a request that carries a bearer token to an endpoint
+    that must answer where it is asked (:func:`post_json`): a redirect is then a result
+    (``status`` 3xx), never followed, so the token cannot be sent on to another origin.
 
     The provider's own endpoints take form bodies (RFC 8628); the API behind the
     session takes JSON — ``json_body`` is for those (#142), and the two are
@@ -242,7 +247,12 @@ def _http(
     from urllib.error import HTTPError, URLError
     from urllib.request import Request
 
-    from aisquare.core.tls import urlopen
+    from aisquare.core import tls
+
+    def urlopen(request: Any, *, timeout: float) -> Any:
+        if follow_redirects:
+            return tls.urlopen(request, timeout=timeout)
+        return tls.urlopen_without_redirects(request, timeout=timeout)
 
     if form is not None and json_body is not None:
         raise ValueError("a request has one body shape: form or JSON, not both")
@@ -627,12 +637,16 @@ def post_json(
 ) -> HttpResult:
     """POST ``body`` as JSON to ``url``, as ``token``'s bearer when one is given and anonymously
     when not: for an endpoint that takes both (the usage-sharing one, ``services.usage_share``).
+    **No redirect is followed**: a 3xx comes back as the result it is, and the token goes to
+    ``url`` and nowhere else.
 
     The caller resolves ``url`` (``resolve_api_url``, which refuses plain http away from
     loopback) and decides whether ``token`` may go there; error statuses are results, and a
     transport error is ``IamError("unreachable")``, as for every call here."""
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    return _http("POST", url, json_body=body, headers=headers, timeout=timeout)
+    return _http(
+        "POST", url, json_body=body, headers=headers, timeout=timeout, follow_redirects=False
+    )
 
 
 # --------------------------------------------------------------------------- calling the API

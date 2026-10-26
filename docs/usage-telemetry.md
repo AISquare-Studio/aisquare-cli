@@ -2,15 +2,17 @@
 
 aisquare can send AISquare **anonymous daily counts of how it is used**, so that the people who
 build it know what to improve. It is **off by default**. Nothing leaves your machine until you
-turn it on, you can see exactly what would be sent first, and you can turn it off with one click.
+turn it on, you can see what would be sent first, and you can turn it off with one click.
 
 Turn it on or off, either way:
 
 - the one-time question the UI asks after you have set up a project, or the button at the top of
   *Settings ▸ Usage & stats* (*Turn sharing on* / *Turn sharing off*, and *What's shared*);
 - `aisquare metrics share on`, `aisquare metrics share off`, `aisquare metrics share status`;
-- see the exact body the next shipment sends: `aisquare metrics share preview`
-  (with sharing off it is a sample of your last 31 days).
+- see the body of the next shipment: `aisquare metrics share preview`. With sharing on it is
+  exactly that body (built by the same code, the transcripts read first). With sharing off it is
+  captioned as what it is: a **sample** of your last 31 days with placeholder ids, to show the
+  shape; the days before you turn sharing on are never sent.
 
 ## What we collect
 
@@ -66,8 +68,11 @@ long that takes; nothing is lost and nothing is given up on.
 ## Switching it off
 
 `aisquare metrics share off` (or the button) turns it off at once, deletes what was kept about what
-was sent, and sends **one** notice that you opted out (only if anything was ever sent). Nothing is
-sent after it until you turn sharing on again. These force it off whatever the switch says, and
+was sent, and sends **one** notice that you opted out (only if anything was ever sent). A shipment
+already under way is stopped: it looks at the switch again before every request, so at most the
+request that is already out finishes (5 seconds at most), and nothing it would have recorded is
+written after the deletion. Nothing is sent after the notice until you turn sharing on again. Saying
+*off* is also the answer to the one-time question, which is not asked afterwards. These force it off whatever the switch says, and
 suppress the question: `DO_NOT_TRACK=1`, `AISQUARE_NO_TELEMETRY=1`, and any `CI` run.
 `aisquare metrics share reset-id` gives the installation a new id and salt.
 
@@ -79,10 +84,11 @@ holds the rules (forced off, the state, the backoff), and the local figures it i
 
 ---
 
-# CLI usage telemetry — wire contract v1 (aisquare-cli ⇄ AISquare-Studio-BE)
+# CLI usage telemetry — wire contract v1.1 (aisquare-cli ⇄ AISquare-Studio-BE)
 
 The contract both ends implement (the endpoint is AISquare-Studio-BE's task #3). A change to it
-is agreed by both first.
+is agreed by both first. **v1.1** is v1 with the amendments of the team board (seq 3631), marked
+*(v1.1)* below; the `schema_version` of the body stays `1`.
 
 ## Principles
 - Local stats are always recorded and shown; NOTHING leaves the machine unless
@@ -90,8 +96,8 @@ is agreed by both first.
   forces off and suppresses the consent prompt; so does CI (`CI` env set).
 - Repos are shared ONLY as a salted hash + coarse traits. Never names, paths,
   remote URLs, emails, prompts, file names, command arguments or any text.
-- Consent: one-time TUI dialog after onboarding (Share / No thanks / See exactly
-  what's sent) + one-click toggle on Settings ▸ Usage & stats +
+- Consent: one-time TUI dialog after onboarding (Share / No thanks / See what
+  would be sent) + one-click toggle on Settings ▸ Usage & stats +
   `aisquare metrics share on|off|status|preview`.
 
 ## Endpoint
@@ -108,6 +114,10 @@ Auth is OPTIONAL:
   CLI retries once without the header if it ever gets a 401.
 
 Throttle: per-IP named rate (env-backed, default 120/hour). Body cap 256 KB.
+
+Redirects *(v1.1)*: the endpoint answers where it is asked. The CLI **never follows a redirect**
+on this POST (so the bearer token cannot reach another origin); a 3xx is a retryable failure, and
+the CLI posts to the path **with** its trailing slash.
 
 ## Request body (schema_version 1)
 ```json
@@ -148,14 +158,19 @@ Throttle: per-IP named rate (env-backed, default 120/hour). Body cap 256 KB.
 Field rules:
 - `install_id`: random uuid4 minted at first opt-in, stored in CLI state; NOT
   derived from hardware/user. Kept across opt-out/in unless the user resets it.
-- `date` is the user's LOCAL calendar day; `tz_offset_minutes` its offset.
+- `date` is the user's LOCAL calendar day; `tz_offset_minutes` its offset. *(v1.1)* Any integer
+  in [-840, 840]: west of UTC is negative, and is not an error.
 - `active` = at least one CLI command, TUI launch or agent turn that day. DAU on
   the BE = distinct `install_id` with `active=true` for a date.
 - `tokens.total` = input + cache_write + cache_read + output and MUST equal what
   `aisquare metrics tokens` / the local dashboard report for the same day.
 - `accounts.by_type` keys = Claude subscription type as the CLI reads it
-  (`core/claude_accounts.py` subscription_type: pro/max/team/enterprise/…; "api"
-  for API-key accounts; "unknown" otherwise). No emails, aliases or slot ids.
+  (`core/claude_accounts.py` subscription_type; "api" for API-key accounts; "unknown"
+  otherwise). No emails, aliases or slot ids. *(v1.1)* A closed set: `pro`, `max`, `team`,
+  `enterprise`, `api`, `unknown`, `other`. The CLI maps anything else to `other` (counts summed);
+  the BE stores a key it does not know under `other` and never answers 400 for it.
+- `models` keys *(v1.1)*: the CLI sends only ids matching `^claude-[a-z0-9.-]{1,60}$`; every other
+  model name is summed under the key `other`. (A model name is text from a transcript.)
 - `repo_hash` = first 16 hex of HMAC-SHA256(key = per-install random salt kept
   in CLI state, msg = normalised git remote URL, else the repo root path).
   Per-install salt ⇒ the same repo is NOT correlatable across users.
@@ -179,9 +194,19 @@ Field rules:
 - Responses: `200 {"accepted_days": <int>, "linked": <bool>}`;
   `400 {"errors": …}` on validation (unknown schema_version, caps exceeded,
   date outside [today−400d, today+1d], negative numbers); `429` throttled.
+  *(v1.1)* "Negative numbers → 400" covers token, cost and count fields only; `tz_offset_minutes`
+  may be any integer in [-840, 840]. The 200 body is **exactly** those two keys (`accepted_days`
+  an integer, `linked` a boolean); the CLI treats any other 200 body as a retryable failure and
+  does not mark the days as sent.
 - Unknown extra keys inside a day are ignored (forward-compatible), not 400.
 
 ## What the client does that the contract leaves open
+- A shipment is acknowledged **only** by a 200 whose body is the contract's reply: an object with
+  `accepted_days` an integer of at least 1 and `linked` a boolean (extra keys are ignored). An
+  empty object, an error with a 200, a gateway's page, a string or 0 for `accepted_days`, a missing
+  `linked` — none of it is an answer of the endpoint; the days stay unsent and go next time.
+- The CLI checks the switch before every request of a shipment and again before it records the
+  answer, so `share off` stops a shipment under way (see *Switching it off*).
 - `signed_in` is the sign-in's state when the batch is built, for every day in it.
 - `install_method`: `brew` (Homebrew), `pipx`, `uv` (uvx), `script` (the one-line installer's
   uv tool), `pip` (a virtual environment or system pip), `unknown` (a checkout).

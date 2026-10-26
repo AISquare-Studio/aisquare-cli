@@ -12,12 +12,14 @@ sends the first shipment at once; turning it off purges what was kept and sends 
 notice. Both run off the UI thread (:data:`SHARE_WORKER`).
 
 **The question** (:class:`ConsentDialog`) is asked once, by the shell, after onboarding and only
-where nothing forces sharing off: *Share anonymous usage* / *No thanks* / *See exactly what's
-sent*. *No thanks* has the focus; Escape is *No thanks*. Either answer is recorded, and it is
-not asked again.
+where nothing forces sharing off: *Share anonymous usage* / *No thanks* / *See what would be
+sent*. *No thanks* has the focus; Escape is *No thanks*. Either answer is recorded, and it is not
+asked again; so is an explicit *Turn sharing off* elsewhere.
 
 **What is sent** (:class:`PreviewDialog`) is the body the next shipment would post, built by the
-same function that builds it, shown as the JSON it is. Looking sends nothing.
+same function that builds it (the transcripts read first, as a shipment reads them), shown as the
+JSON it is. While sharing is off it is captioned as what it is, a SAMPLE of the last 31 days with
+placeholder ids: nothing before the day sharing is turned on is ever sent. Looking sends nothing.
 
 ``sharing`` (:class:`Sharing`) is how the widgets reach the service; tests hand them a fake.
 """
@@ -53,6 +55,15 @@ ABOUT = (
     "Counts only: tokens, sessions, which commands and pages you use, and a salted hash per "
     "repository. Never names, paths, remotes, prompts or arguments. Off by default."
 )
+ABOUT_PREVIEW = (
+    "Exactly what the next shipment would send, built by the code that builds it. Looking sends "
+    "nothing. Repositories are salted hashes."
+)
+ABOUT_SAMPLE = (
+    "Sharing is off, so this is a SAMPLE: your last 31 days, with placeholder ids, to show what "
+    "would be sent. Nothing is sent while sharing is off, and once it is on only days from then "
+    "on are sent. Repositories are salted hashes."
+)
 CONSENT_TEXT = (
     "Share anonymous usage with AISquare?\n\n"
     "It tells us how aisquare is used, so we can make it better: daily counts of tokens, "
@@ -60,7 +71,8 @@ CONSENT_TEXT = (
     "coarse traits per repository (its host, main language, size).\n\n"
     "We never collect repository names, paths or remotes, prompts, file names, emails, account "
     "aliases or command arguments. If you are signed in to AISquare, it is linked to your "
-    "account; if not, it is anonymous. Turn it off at any time: Settings ▸ Usage & stats, or "
+    "account; if not, it is anonymous. Only days from the moment you say yes are sent, nothing "
+    "from before. Turn it off at any time: Settings ▸ Usage & stats, or "
     "`aisquare metrics share off`."
 )
 
@@ -86,6 +98,8 @@ class Sharing:
     ship_due: Callable[[], ShipReport] = usage_share.ship
     """Send if one is due (the shell's tick)."""
     preview: Callable[[], str] = usage_share.preview
+    is_sample: Callable[[], bool] = usage_share.is_sample
+    """Whether the preview is a SAMPLE (sharing never on) and not the next POST."""
     consent_due: Callable[[], bool] = usage_share.consent_due
     answer: Callable[[bool], ShipReport | None] = _answer_the_sharing_question
 
@@ -237,17 +251,13 @@ class PreviewDialog(ModalScreen[None]):
         self._sharing = sharing or Sharing()
         self.body: str | None = None
         """The JSON as built; ``None`` while it is being built."""
+        self.sample: bool | None = None
+        """Whether it is a sample (sharing never on) and not the next shipment's body."""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="preview-box"):
             yield Static(Text("What is shared"), id="preview-title")
-            yield Static(
-                Text(
-                    "Exactly what the next shipment would send, built by the code that builds "
-                    "it. Looking sends nothing. Repositories are salted hashes."
-                ),
-                id="preview-about",
-            )
+            yield Static(Text("Building what would be sent…", style="dim"), id="preview-about")
             with VerticalScroll(id="preview-scroll"):
                 yield Static(Text("building…", style="dim"), id="preview-body")
             with Horizontal(id="preview-buttons"):
@@ -255,7 +265,11 @@ class PreviewDialog(ModalScreen[None]):
 
     def on_mount(self) -> None:
         self.query_one("#preview-close", Button).focus()
-        build = self._sharing.preview
+        sharing = self._sharing
+
+        def build() -> tuple[str, bool]:
+            return sharing.preview(), sharing.is_sample()
+
         self.run_worker(
             build,
             name=PREVIEW_WORKER,
@@ -270,9 +284,12 @@ class PreviewDialog(ModalScreen[None]):
         if event.worker.name != PREVIEW_WORKER:
             return
         body = self.query_one("#preview-body", Static)
-        if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, str):
-            self.body = event.worker.result
+        if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, tuple):
+            self.body, self.sample = event.worker.result
             body.update(Text(self.body))
+            self.query_one("#preview-about", Static).update(
+                Text(ABOUT_SAMPLE if self.sample else ABOUT_PREVIEW)
+            )
         elif event.state is WorkerState.ERROR:
             body.update(Text(f"could not build it: {event.worker.error}", style="red"))
 
@@ -310,7 +327,7 @@ class ConsentDialog(ModalScreen[str]):
             yield Static(Text("Help improve AISquare?"), id="consent-title")
             yield Static(Text(CONSENT_TEXT), id="consent-text")
             with Horizontal(id="consent-buttons"):
-                yield Button("See exactly what's sent", id="consent-see")
+                yield Button("See what would be sent", id="consent-see")
                 yield GuardedButton("Share anonymous usage", id="consent-share", variant="primary")
                 yield Button("No thanks", id="consent-no")
 

@@ -7,7 +7,6 @@ and model (``metrics stats``), with the sweep that reads the transcripts no hook
 
 from __future__ import annotations
 
-import contextlib
 import json
 import sys
 from typing import Annotated
@@ -39,7 +38,7 @@ app = typer.Typer(
 )
 
 share_app = typer.Typer(
-    help="Opt-in anonymous usage sharing: on, off, status, and exactly what is sent.",
+    help="Opt-in anonymous usage sharing: on, off, status, and what would be sent.",
     no_args_is_help=True,
 )
 app.add_typer(share_app, name="share")
@@ -258,14 +257,27 @@ def share_status() -> None:
 
 @share_app.command("preview")
 def share_preview() -> None:
-    """Print the exact body the next shipment would POST (JSON). Works with sharing off: it is
-    what WOULD be sent, and nothing is sent by looking."""
-    if not sharing.read().install_id and not get_state().json_output:
+    """Print the body the next shipment would POST (JSON), built as a shipment builds it.
+
+    With sharing on, exactly that body. With sharing off it is a SAMPLE of your last 31 days with
+    placeholder ids, to show what would be sent: nothing is sent by looking, and once sharing is
+    on only the days from then on are sent."""
+    try:
+        sample = usage_share.is_sample()
+        body = usage_share.preview()
+    except Exception as exc:  # the state file is damaged, or the store would not open
+        fail(
+            "the preview could not be built",
+            error="preview_unavailable",
+            detail=f"{type(exc).__name__}: {exc}"[:200],
+        )
+    if sample and not get_state().json_output:
         typer.echo(
-            "sharing has never been on: the ids below are placeholders until you turn it on",
+            "sharing is off: this is a SAMPLE of your last 31 days with placeholder ids, "
+            "not what a shipment would send; once sharing is on only days from then on are sent",
             err=True,
         )
-    typer.echo(usage_share.preview())
+    typer.echo(body)
 
 
 @share_app.command("reset-id")
@@ -287,10 +299,7 @@ def ship(
 ) -> None:
     """Send the next batch of usage counts if sharing is on and one is due: the detached process
     a command starts (never the command itself), after reading any transcripts not yet read."""
-    if sharing.enabled():
-        with contextlib.suppress(Exception):
-            usage_stats.maybe_sweep()
-    report = usage_share.ship(force=force)
+    report = usage_share.ship(force=force)  # reads the transcripts first, as the preview does
     if get_state().json_output:
         _json(report.model_dump(mode="json"))
         return

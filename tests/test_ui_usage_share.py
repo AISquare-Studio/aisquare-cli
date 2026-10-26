@@ -63,6 +63,7 @@ class FakeSharing:
             linked=signed_in if enabled else None,
         )
         self.due = due
+        self.sample = not enabled
         self.ship_report = ship_report or ShipReport(sent=True, days=3, linked=signed_in)
         self.calls: list[str] = []
 
@@ -100,6 +101,9 @@ class FakeSharing:
         self.calls.append("preview")
         return json.dumps({"schema_version": 1, "days": []}, indent=2)
 
+    def is_sample(self) -> bool:
+        return self.sample
+
     def consent_due(self) -> bool:
         self.calls.append("consent_due")
         return self.due
@@ -120,6 +124,7 @@ class FakeSharing:
             ship=self.ship,
             ship_due=self.ship_due,
             preview=self.preview,
+            is_sample=self.is_sample,
             consent_due=self.consent_due,
             answer=self.answer,
         )
@@ -341,6 +346,28 @@ def test_whats_shared_shows_the_exact_body_and_sends_nothing() -> None:
     assert body is not None and json.loads(body) == {"schema_version": 1, "days": []} and shown
     assert depth == 1  # Escape closed it
     assert fake.calls == ["preview"]  # looking sends nothing and turns nothing on
+
+
+def test_the_preview_is_captioned_a_sample_while_sharing_is_off_and_exact_when_on() -> None:
+    async def about(pilot: Pilot[None], box: SharingBox) -> str:
+        await pilot.click("#usage-share-preview")
+        await settle_page(box.app)
+        screen = box.app.screen
+        assert isinstance(screen, PreviewDialog)
+        return _text(screen.query_one("#preview-about", Static))
+
+    off = _drive_page(FakeSharing(), about)
+    on = _drive_page(FakeSharing(enabled=True), about)
+
+    assert "SAMPLE" in off and "placeholder ids" in off and "only days from then on" in off
+    assert "SAMPLE" not in on and on.startswith("Exactly what the next shipment would send")
+
+
+def test_the_consent_text_says_only_days_from_yes_on_are_sent() -> None:
+    from aisquare.cli.ui.views.usage_sharing import CONSENT_TEXT
+
+    assert "Only days from the moment you say yes are sent" in CONSENT_TEXT
+    assert "exactly what's sent" not in CONSENT_TEXT.lower()
 
 
 def test_the_preview_is_built_off_the_ui_thread_and_a_failure_is_said() -> None:

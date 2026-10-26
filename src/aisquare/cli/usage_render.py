@@ -150,7 +150,7 @@ def sharing_lines(status: SharingStatus) -> list[str]:
         sent = _when(status.last_sent_at) if status.last_sent_at else "never"
         linked = "" if status.linked is None else f" (linked: {'yes' if status.linked else 'no'})"
         lines.append(f"last sent      {sent}{linked}")
-    lines.append("See exactly what is sent: aisquare metrics share preview")
+    lines.append("See what would be sent: aisquare metrics share preview")
     return lines
 
 

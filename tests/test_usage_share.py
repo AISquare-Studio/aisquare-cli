@@ -8,6 +8,7 @@ for every test (``AISQUARE_NO_TELEMETRY``); these take that off with ``sharing_a
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, timedelta
 from pathlib import Path
 from typing import Any
@@ -16,10 +17,10 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import feature_use, locking, sharing
+from aisquare.core import feature_use, locking, paths, sharing
 from aisquare.core import state_file as state_core
 from aisquare.core.store import store_session
-from aisquare.models import DailyRollup, DayAccounts, TokenCounts
+from aisquare.models import DailyRollup, DayAccounts, DayTokens, TokenCounts
 from aisquare.services import iam, usage_share, usage_stats
 from aisquare.services import settings as settings_service
 from tests.projects import add_project
@@ -104,7 +105,7 @@ def _on(days_back: int = 10) -> None:
     usage_share.enable(now=NOW - timedelta(days=days_back))
 
 
-# --- off, and forced off ----------
+# --- off, and forced off ----------------------------------------------------------------------
 
 
 def test_nothing_is_sent_or_kept_while_sharing_is_off(machine: Machine) -> None:
@@ -183,7 +184,7 @@ def test_a_switch_turned_on_in_the_config_is_still_forced_off_by_the_environment
     assert sharing.start_background_ship(NOW) is False
 
 
-# --- the identity and the hashes ----------
+# --- the identity and the hashes --------------------------------------------------------------
 
 
 def test_the_install_id_is_minted_at_the_first_opt_in_and_kept_across_off_and_on(
@@ -222,7 +223,7 @@ def test_a_repository_hash_is_stable_for_an_install_and_different_for_another(
     assert len(usage_share.repo_hash(salt, "x")) == 16
 
 
-# --- the body ----------
+# --- the body ---------------------------------------------------------------------------------
 
 
 def test_the_body_is_the_wire_contracts_and_its_days_are_the_dashboards(machine: Machine) -> None:
@@ -273,19 +274,42 @@ def test_the_body_carries_no_name_path_remote_email_alias_or_argument(machine: M
         assert secret not in wire, secret
 
 
-def test_a_names_only_field_cannot_carry_text(machine: Machine) -> None:
-    """Models and plans are free text in a transcript or a login: they are sent as a short
-    token of safe characters, whatever they were."""
+def test_plans_and_models_are_a_closed_set_whatever_a_file_said(machine: Machine) -> None:
+    """Contract v1.1: ``by_type`` keys are ``pro max team enterprise api unknown other`` and a model
+    is a Claude id (``^claude-[a-z0-9.-]{1,60}$``) or ``other``: text from a login or a transcript
+    that names a person, a host or a project is summed under ``other`` and goes no further."""
     rollup = DailyRollup(
         date="2026-10-26",
-        tz_offset_minutes=0,
-        models={"claude opus/5 'quoted' <b>": TokenCounts(input=1)},
-        accounts=DayAccounts(by_type={"a very\nlong plan name " * 5: 1}),
+        tz_offset_minutes=-240,
+        tokens=DayTokens(input=60, output=6),
+        models={
+            "claude-opus-5-5": TokenCounts(input=10, output=1),
+            "claude opus/5 'quoted' <b>": TokenCounts(input=20, output=2),
+            "acme-internal-finetune": TokenCounts(input=30, output=3),
+            "claude-" + "x" * 80: TokenCounts(),
+        },
+        accounts=DayAccounts(
+            by_type={
+                "team": 1,
+                "team alice.secret@acme-internal.example": 2,
+                "max": 1,
+                "api": 1,
+                "weird plan": 1,
+            }
+        ),
     )
+
     day = usage_share.day_body(rollup, "ab" * 32, signed_in=False)
 
-    assert list(day["models"]) == ["claudeopus5quotedb"]
-    assert list(day["accounts"]["by_type"]) == [("averylongplanname" * 5)[:32]]
+    assert day["models"] == {
+        "claude-opus-5-5": {"input": 10, "cache_write": 0, "cache_read": 0, "output": 1},
+        "other": {"input": 50, "cache_write": 0, "cache_read": 0, "output": 5},
+    }
+    assert day["accounts"]["by_type"] == {"api": 1, "max": 1, "other": 3, "team": 1}
+    assert day["tz_offset_minutes"] == -240  # negative is right for a zone west of UTC
+    wire = json.dumps(day)
+    for secret in ("alice", "acme", "internal", "secret", "quoted", "weird"):
+        assert secret not in wire, secret
 
 
 def test_the_caps_of_the_contract_hold(machine: Machine) -> None:
@@ -346,7 +370,7 @@ def test_a_batch_holds_at_most_31_days_oldest_first_and_fits_256_kb(
     assert list(cut[-1].digests)[-1] == "2026-10-26"  # today is the last of the last
 
 
-# --- the shipment ----------
+# --- the shipment -----------------------------------------------------------------------------
 
 
 def test_what_is_previewed_is_what_is_posted(machine: Machine) -> None:
@@ -539,7 +563,7 @@ def test_a_server_error_is_a_failure_and_a_200_without_a_body_is_not_trusted(
     first = usage_share.ship(now=NOW, tz=IST, transport=server)
     second = usage_share.ship(now=NOW + timedelta(minutes=6), tz=IST, transport=server)
 
-    assert first.error == "HTTP 503" and second.error == "HTTP 200"
+    assert first.error == "HTTP 503" and (second.error or "").startswith("HTTP 200")
     assert sharing.read().acked == {}
 
 
@@ -566,7 +590,7 @@ def test_a_shipment_that_raises_is_a_failed_report_and_not_a_crash(machine: Mach
     assert report.error is not None and "the transport broke" in report.error and not report.sent
 
 
-# --- turning it off ----------
+# --- turning it off ---------------------------------------------------------------------------
 
 
 def test_off_purges_what_was_kept_and_sends_only_the_opt_out(machine: Machine) -> None:
@@ -631,7 +655,7 @@ def test_a_failed_opt_out_notice_is_reported_and_costs_nothing(machine: Machine)
     assert sharing.switch_on() is False
 
 
-# --- the consent ----------
+# --- the consent ------------------------------------------------------------------------------
 
 
 def test_the_question_is_due_once_and_an_answer_ends_it(machine: Machine) -> None:
@@ -656,7 +680,7 @@ def test_no_question_for_a_switch_already_on_in_the_config(machine: Machine) -> 
     assert usage_share.consent_due() is False
 
 
-# --- the detached shipper ----------
+# --- the detached shipper ---------------------------------------------------------------------
 
 
 def test_a_command_starts_one_shipper_when_due_and_none_for_half_an_hour(
@@ -729,7 +753,7 @@ def test_off_it_costs_a_command_next_to_nothing(
     assert per_call < 0.005, f"{per_call * 1e6:.0f} µs of CPU a command"
 
 
-# --- the commands ----------
+# --- the commands -----------------------------------------------------------------------------
 
 
 def test_metrics_share_on_status_preview_off(
@@ -793,7 +817,7 @@ def test_the_shipper_command_reads_the_transcripts_first_and_prints_what_it_did(
     )
 
 
-# --- failing silently, retrying forever, losing nothing (the owner's decision) ----------
+# --- failing silently, retrying forever, losing nothing (the owner's decision) ----------------
 
 BACKLOG_DAYS = 70
 
@@ -970,7 +994,7 @@ def test_nothing_older_than_the_servers_400_days_is_attempted(machine: Machine) 
     assert usage_share.build_batches(now=NOW, tz=IST) == []  # the server would answer 400
 
 
-# --- only what happens from the moment it is agreed to ----------
+# --- only what happens from the moment it is agreed to ----------------------------------------
 
 
 def test_the_days_before_sharing_was_turned_on_are_never_sent(machine: Machine) -> None:
@@ -1013,3 +1037,385 @@ def test_a_switch_turned_on_by_hand_in_the_config_shares_from_its_first_shipment
     usage_share.ship(now=NOW, tz=IST, transport=server)
 
     assert _dates(server) == [["2026-10-26"]] and sharing.read().since == "2026-10-26"
+
+
+# --- turning it off stops a shipment in flight (review of #5, F1) -----------------------------
+
+
+def _wait_for(condition: Any, seconds: float = 10.0) -> bool:
+    import time
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_turning_it_off_while_a_shipment_is_in_flight_stops_it_and_it_leaves_no_state_behind(
+    machine: Machine,
+) -> None:
+    """The tester's repro: 75 days, a slow server, `share off` while the first POST is out. The
+    shipment finishes that POST, posts nothing after the opt-out notice, records nothing, and what
+    `off` purged stays purged."""
+    import threading
+
+    _backlog(machine)  # 70 days: three batches
+    order: list[str] = []
+    in_post, release = threading.Event(), threading.Event()
+    done: dict[str, Any] = {}
+
+    def slow(url: str, body: dict[str, Any], token: str | None, timeout: float) -> iam.HttpResult:
+        order.append(f"batch:{len(body['days'])}")
+        in_post.set()
+        release.wait(timeout=10)  # the POST is out: the user turns sharing off now
+        return ok(len(body["days"]))
+
+    def ping(url: str, body: dict[str, Any], token: str | None, timeout: float) -> iam.HttpResult:
+        order.append("opt_out" if body["opt_out"] else "BATCH AFTER OFF")
+        return ok(1)
+
+    shipper = threading.Thread(
+        target=lambda: done.update(ship=usage_share.ship(now=NOW, tz=IST, transport=slow))
+    )
+    off = threading.Thread(
+        target=lambda: done.update(off=usage_share.disable(now=NOW, transport=ping))
+    )
+    shipper.start()
+    assert in_post.wait(10)
+    off.start()
+    assert _wait_for(lambda: not sharing.switch_on()), "the switch is turned off at once"
+    release.set()
+    shipper.join(15)
+    off.join(15)
+
+    assert order == ["batch:31", "opt_out"], order  # one POST went; then only the notice
+    assert done["ship"].skipped == "sharing was turned off" and not done["ship"].sent
+    assert done["off"].opt_out and done["off"].sent  # a shipment was in flight: the notice goes
+    after = sharing.read()
+    assert (after.acked, after.last_sent_at, after.next_due_at, after.since) == (
+        {},
+        None,
+        None,
+        None,
+    )
+    assert (after.linked, after.failures, after.settled_through) == (None, 0, None)
+    assert usage_share.status().last_sent_at is None  # off says nothing of a "last sent"
+
+
+def test_the_switch_is_looked_at_again_before_every_post(machine: Machine) -> None:
+    _backlog(machine)
+    calls: list[int] = []
+
+    def turns_it_off(
+        url: str, body: dict[str, Any], token: str | None, timeout: float
+    ) -> iam.HttpResult:
+        calls.append(len(body["days"]))
+        settings_service.set_value("sharing.enabled", "false")  # as `share off` does, first
+        return ok(len(body["days"]))
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=turns_it_off)
+
+    assert calls == [31]  # not a second batch
+    assert report.skipped == "sharing was turned off" and report.sent is False
+    state = sharing.read()
+    assert state.acked == {} and state.last_sent_at is None and state.next_due_at is None
+
+
+def test_a_failure_after_it_went_off_does_not_write_back_either(machine: Machine) -> None:
+    _history(machine)
+    _on()
+
+    def turns_it_off_then_fails(*args: Any) -> iam.HttpResult:
+        settings_service.set_value("sharing.enabled", "false")
+        return status(503)
+
+    usage_share.ship(now=NOW, tz=IST, transport=turns_it_off_then_fails)
+
+    assert (sharing.read().failures, sharing.read().last_error, sharing.read().next_due_at) == (
+        0, None, None,
+    )  # fmt: skip
+
+
+def test_off_waits_for_a_stuck_shipment_only_a_little_and_then_purges_all_the_same(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _history(machine)
+    _on()
+    usage_share.ship(now=NOW, tz=IST, transport=Server())
+    monkeypatch.setattr(usage_share, "DISABLE_WAIT_S", 0.2)
+
+    with locking.holding(sharing.lock_path(), wait_s=0):  # a shipment that never ends
+        server = Server()
+        report = usage_share.disable(now=NOW, transport=server)
+
+    assert report.opt_out and report.sent and len(server.calls) == 1
+    assert server.calls[0].body["opt_out"] is True
+    assert sharing.read().last_sent_at is None and sharing.switch_on() is False
+
+
+# --- only the contract's 200 is an acknowledgement (F2) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({}, id="an empty object"),
+        pytest.param({"error": "Not Found"}, id="an error with a 200"),
+        pytest.param({"status": "ok"}, id="a gateway's ok"),
+        pytest.param({"accepted_days": "x", "linked": False}, id="accepted_days a string"),
+        pytest.param({"accepted_days": 0, "linked": False}, id="accepted_days 0"),
+        pytest.param({"accepted_days": True, "linked": False}, id="accepted_days a bool"),
+        pytest.param({"accepted_days": 2.5, "linked": False}, id="accepted_days a float"),
+        pytest.param({"accepted_days": 3}, id="linked missing"),
+        pytest.param({"accepted_days": 3, "linked": "yes"}, id="linked a string"),
+        pytest.param({"linked": True}, id="accepted_days missing"),
+        pytest.param([], id="a list"),
+        pytest.param("<html>200</html>", id="html"),
+        pytest.param(None, id="no body"),
+    ],
+)
+def test_a_200_that_is_not_the_contracts_reply_is_not_an_acknowledgement(
+    machine: Machine, body: Any
+) -> None:
+    _history(machine)
+    _on()
+    server = Server(status(200, body))
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=server)
+
+    assert report.sent is False and (report.error or "").startswith("HTTP 200")
+    state = sharing.read()
+    assert state.acked == {} and state.last_sent_at is None and state.failures == 1
+    assert len(_build().days) == 3  # every day is still queued, and goes next time
+    retry = usage_share.ship(now=NOW + timedelta(minutes=6), tz=IST, transport=Server())
+    assert retry.sent and retry.days == 3
+
+
+def test_a_reply_with_the_contracts_two_keys_is_taken_whatever_else_it_carries(
+    machine: Machine,
+) -> None:
+    _history(machine)
+    _on()
+    server = Server(status(200, {"accepted_days": 3, "linked": True, "request_id": "abc"}))
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=server)
+
+    assert report.sent and report.days == 3 and report.linked is True
+    assert len(sharing.read().acked) == 3
+
+
+# --- no redirect is followed (F3) -------------------------------------------------------------
+
+
+class _Site:
+    """A loopback HTTP server that records what it is sent and answers as told."""
+
+    def __init__(self, answer: Callable[[Any], tuple[int, dict[str, str], bytes]]) -> None:
+        import http.server
+        import threading
+
+        outer = self
+        self.requests: list[tuple[str, str, str | None]] = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def _serve(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                outer.requests.append((self.command, self.path, self.headers.get("Authorization")))
+                code, headers, payload = answer(self)
+                self.send_response(code)
+                for key, value in headers.items():
+                    self.send_header(key, value)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            do_GET = do_POST = _serve
+
+            def log_message(self, *args: object) -> None:
+                return
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_a_redirect_is_never_followed_and_the_bearer_goes_to_one_origin_only(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    other = _Site(lambda h: (200, {}, b'{"accepted_days": 9, "linked": true}'))
+    home = _Site(lambda h: (code, {"Location": f"{other.url}/stolen"}, b""))
+    try:
+        _history(machine)
+        _on()
+        monkeypatch.setenv("AISQUARE_API_URL", home.url)
+        monkeypatch.setenv(iam.TOKEN_ENV_VAR, "aisq_secret_bearer")
+
+        report = usage_share.ship(now=NOW, tz=IST)  # the real transport, over real sockets
+
+        assert report.sent is False and report.error == f"HTTP {code}"
+        assert [(m, p) for m, p, _ in home.requests] == [("POST", "/api/v1/cli/metrics/")]
+        assert home.requests[0][2] == "Bearer aisq_secret_bearer"
+        assert other.requests == []  # the redirect target was never contacted
+        state = sharing.read()
+        assert state.acked == {} and state.failures == 1  # a retryable failure, silent
+    finally:
+        home.close()
+        other.close()
+
+
+def test_a_post_that_is_answered_directly_goes_through_the_real_transport(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    site = _Site(
+        lambda h: (
+            200,
+            {"Content-Type": "application/json"},
+            b'{"accepted_days": 3, "linked": false}',
+        )
+    )
+    try:
+        _history(machine)
+        _on()
+        monkeypatch.setenv("AISQUARE_API_URL", site.url)
+
+        report = usage_share.ship(now=NOW, tz=IST)
+
+        assert report.sent and report.days == 3
+        assert site.requests == [("POST", "/api/v1/cli/metrics/", None)]  # anonymous: no header
+    finally:
+        site.close()
+
+
+# --- the preview is built the way a shipment is (F4) ------------------------------------------
+
+
+def test_the_preview_reads_the_transcripts_first_so_it_is_the_body_that_is_posted(
+    machine: Machine,
+) -> None:
+    repo = _history(machine)
+    _on()
+    machine.session(
+        1, repo, "unswept", prompt(_day(0, 11), cwd=repo),
+        request(_day(0, 11) + timedelta(minutes=1), "unswept", cwd=repo, cache_read=77_000),
+    )  # fmt: skip
+    with store_session() as store:
+        store.delete_meta("usage.sweep.at")  # the ten-minute throttle is open
+
+    shown = json.loads(usage_share.preview(now=NOW, tz=IST))
+    with store_session() as store:
+        store.delete_meta("usage.sweep.at")
+    server = Server()
+    usage_share.ship(now=NOW, tz=IST, transport=server, force=True)
+
+    assert server.calls[0].body == shown
+    assert shown["days"][-1]["tokens"]["cache_read"] >= 77_000  # the unswept session is in it
+
+
+def test_the_preview_command_reads_the_transcripts_first_too(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pin_clock(monkeypatch, usage_share, sharing)
+    swept: list[int] = []
+    monkeypatch.setattr(usage_stats, "maybe_sweep", lambda **kw: swept.append(1))
+
+    CliRunner().invoke(app, ["metrics", "share", "preview"])
+    CliRunner().invoke(app, ["metrics", "ship", "--force"])
+
+    assert swept == [1]  # `preview` swept; `ship` was not due to run (sharing off): it did not
+
+
+# --- the nits ---------------------------------------------------------------------------------
+
+
+def test_an_explicit_off_is_the_answer_to_the_one_time_question(machine: Machine) -> None:
+    assert usage_share.consent_due() is True
+
+    usage_share.disable(now=NOW)
+
+    assert usage_share.consent_due() is False
+    assert usage_share.status().consent_answer == "declined"
+    assert sharing.read().consent_asked_at is not None
+
+
+def test_off_after_a_yes_keeps_the_yes_as_the_answer(machine: Machine) -> None:
+    usage_share.record_consent("share", now=NOW)
+    usage_share.disable(now=NOW)
+
+    assert usage_share.status().consent_answer == "share"
+
+
+def test_the_preview_command_says_it_is_a_sample_while_sharing_is_off(machine: Machine) -> None:
+    _history(machine)
+    runner = CliRunner()
+
+    off = runner.invoke(app, ["metrics", "share", "preview"])
+    _on(days_back=0)
+    on = runner.invoke(app, ["metrics", "share", "preview"])
+
+    assert "SAMPLE" in off.stderr and "placeholder ids" in off.stderr
+    assert "once sharing is on only days from then on are sent" in off.stderr
+    assert "SAMPLE" not in on.stderr and "sharing is off" not in on.stderr
+    json.loads(off.stdout)  # the body alone on stdout, both ways
+    json.loads(on.stdout)
+
+
+# --- a damaged state file never prints a traceback (d) ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        {"salt": "not-hex"},
+        {"salt": "ab" * 31},
+        {"salt": ""},
+        {"install_id": "not-a-uuid"},
+        {"salt": "zz" * 32, "install_id": "x"},
+    ],
+)
+def test_a_damaged_identity_never_prints_a_traceback_and_is_minted_again(
+    machine: Machine, damage: dict[str, str]
+) -> None:
+    _history(machine)
+    _on()
+
+    def damage_it(state: sharing.SharingState) -> None:
+        for key, value in damage.items():
+            setattr(state, key, value)
+
+    sharing.update(damage_it)
+    runner = CliRunner()
+
+    preview = runner.invoke(app, ["metrics", "share", "preview"])
+    server = Server()
+    report = usage_share.ship(now=NOW, tz=IST, transport=server, force=True)
+
+    assert preview.exit_code == 0 and "Traceback" not in preview.output + preview.stderr
+    check_contract(json.loads(preview.stdout))
+    assert report.sent and len(server.calls) == 1
+    check_contract(server.calls[0].body)
+    state = sharing.read()
+    assert usage_share._valid_id(state.install_id) and usage_share._valid_salt(state.salt)
+
+
+def test_a_state_file_that_is_not_json_is_met_quietly(machine: Machine) -> None:
+    _history(machine)
+    paths_state = paths.state_path()
+    paths_state.parent.mkdir(parents=True, exist_ok=True)
+    paths_state.write_text("{not json", encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["metrics", "share", "preview"])
+
+    assert "Traceback" not in result.output + result.stderr
+    assert result.exit_code in (0, 1)

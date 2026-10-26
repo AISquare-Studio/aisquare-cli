@@ -65,6 +65,7 @@ _TOKEN_KEYS = {"input", "cache_write", "cache_read", "output"}
 _HOSTS = {"github", "gitlab", "bitbucket", "other", "none"}
 _SIZES = {"xs", "s", "m", "l", "xl"}
 _METHODS = {"brew", "pipx", "uv", "pip", "script", "unknown"}
+_PLANS = {"pro", "max", "team", "enterprise", "api", "unknown", "other"}  # contract v1.1
 
 
 def check_contract(body: dict[str, Any]) -> None:
@@ -98,13 +99,14 @@ def _check_day(day: dict[str, Any]) -> None:
     assert isinstance(day["cost_usd_list"], float) and day["cost_usd_list"] >= 0
     assert day["sessions"] >= 0 and day["turns"] >= 0
     for model, counts in day["models"].items():
-        assert re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", model)
+        assert model == "other" or re.fullmatch(r"claude-[a-z0-9.-]{1,60}", model), model
         assert set(counts) == _TOKEN_KEYS
     assert sum(sum(c.values()) for c in day["models"].values()) == tokens["total"]
     accounts = day["accounts"]
     assert set(accounts) == {"active", "registered", "by_type", "top_account_share"}
     assert 0 <= accounts["top_account_share"] <= 1
-    assert all(re.fullmatch(r"[A-Za-z0-9._:-]{1,32}", kind) for kind in accounts["by_type"])
+    assert set(accounts["by_type"]) <= _PLANS, set(accounts["by_type"]) - _PLANS
+    assert -840 <= day["tz_offset_minutes"] <= 840
     assert len(day["repos"]) <= 25 and day["repos_active"] >= len(day["repos"])
     for repo in day["repos"]:
         assert set(repo) == {"repo_hash", "tokens_total", "sessions", "turns", "traits"}

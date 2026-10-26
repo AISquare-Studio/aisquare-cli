@@ -58,9 +58,15 @@ MAX_REPOS = 25
 MAX_BODY_BYTES = 250_000
 """The contract caps a body at 256 KB; a batch past this drops its oldest days (they go next)."""
 TIMEOUT_S = 5.0
+DISABLE_WAIT_S = 6.0
+"""How long turning sharing off waits for a shipment in flight to finish (one POST, 5 s) before it
+purges what was kept: the shipment re-checks the switch before every POST and stops."""
+BY_TYPE_KEYS = frozenset({"pro", "max", "team", "enterprise", "api", "unknown"})
+"""The plans a shipment names (contract v1.1); any other is counted as ``other``."""
 PLACEHOLDER_ID = "00000000-0000-4000-8000-000000000000"
 
-_SAFE_NAME = re.compile(r"[^A-Za-z0-9._:-]")
+_MODEL_ID = re.compile(r"^claude-[a-z0-9.-]{1,60}$")
+_SALT = re.compile(r"^[0-9a-f]{64}$")
 
 Transport = Callable[[str, dict[str, Any], str | None, float], iam.HttpResult]
 """``(url, body, bearer token or None, timeout) -> result``: how a body reaches the server."""
@@ -132,11 +138,26 @@ def client_info() -> dict[str, str]:
     }
 
 
-def _word(text: str, *, limit: int = 40) -> str:
-    """``text`` as a short token of safe characters: what is sent as a NAME (a model, a plan)
-    can only be one."""
-    cleaned = _SAFE_NAME.sub("", text)[:limit]
-    return cleaned or "unknown"
+def _tally(counts: dict[str, int]) -> dict[str, int]:
+    """``counts`` keyed by plan, in the closed set of :data:`BY_TYPE_KEYS`: any other key is a
+    free text from a file and is summed under ``other``."""
+    out: dict[str, int] = {}
+    for kind, number in counts.items():
+        key = kind if kind in BY_TYPE_KEYS else "other"
+        out[key] = out.get(key, 0) + number
+    return dict(sorted(out.items()))
+
+
+def _models(models: dict[str, Any]) -> dict[str, dict[str, int]]:
+    """Per-model token counts keyed by a Claude model id (``^claude-[a-z0-9.-]{1,60}$``); a
+    model that is anything else is summed under ``other`` (contract v1.1)."""
+    out: dict[str, dict[str, int]] = {}
+    for name, counts in models.items():
+        key = name if _MODEL_ID.match(name) else "other"
+        kinds = out.setdefault(key, {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0})
+        for kind, number in counts.model_dump().items():
+            kinds[kind] += number
+    return dict(sorted(out.items()))
 
 
 def day_body(rollup: DailyRollup, salt: str, *, signed_in: bool) -> dict[str, Any]:
@@ -153,13 +174,11 @@ def day_body(rollup: DailyRollup, salt: str, *, signed_in: bool) -> dict[str, An
         "cost_usd_list": round(rollup.cost_usd_list, 4),
         "sessions": rollup.sessions,
         "turns": rollup.turns,
-        "models": {
-            _word(name, limit=64): counts.model_dump() for name, counts in rollup.models.items()
-        },
+        "models": _models(rollup.models),
         "accounts": {
             "active": rollup.accounts.active,
             "registered": rollup.accounts.registered,
-            "by_type": {_word(kind, limit=32): n for kind, n in rollup.accounts.by_type.items()},
+            "by_type": _tally(rollup.accounts.by_type),
             "top_account_share": rollup.accounts.top_account_share,
         },
         "repos_active": rollup.repos_active,
@@ -225,11 +244,7 @@ def build_batches(
     if sample is None:
         sample = held.since is None and not sharing.switch_on()
     if identity is None:
-        identity = (
-            (held.install_id, held.salt)
-            if held.install_id and held.salt
-            else (PLACEHOLDER_ID, os.urandom(32).hex())
-        )
+        identity = _held_identity(held) or (PLACEHOLDER_ID, os.urandom(32).hex())
     install_id, salt = identity
     today = _local_today(moment, tz)
     first = _first_day(held, today, sample=sample)
@@ -290,7 +305,8 @@ def build_batch(**kwargs: Any) -> Batch:
         return batches[0]
     moment = kwargs.get("now") or datetime.now(UTC)
     held = kwargs.get("state") or sharing.read()
-    install_id = (kwargs.get("identity") or (held.install_id or PLACEHOLDER_ID, ""))[0]
+    identity = kwargs.get("identity") or _held_identity(held) or (PLACEHOLDER_ID, "")
+    install_id = identity[0]
     return Batch(_batch(moment, install_id, []), {})
 
 
@@ -305,22 +321,54 @@ def _batch(moment: datetime, install_id: str, days: list[dict[str, Any]]) -> dic
     }
 
 
-def preview(**kwargs: Any) -> str:
-    """The body the next POST would carry, as the JSON it is: with sharing on, exactly it; with
+def is_sample() -> bool:
+    """Whether :func:`preview` shows a SAMPLE: sharing was never turned on, so nothing is yet to
+    be sent and the preview is the last 31 days with placeholder ids, not the next POST."""
+    return sharing.read().since is None and not sharing.switch_on()
+
+
+def preview(*, sweep: bool = True, **kwargs: Any) -> str:
+    """The body the next POST would carry, as the JSON it is: with sharing on, exactly it (built
+    by the same steps as a shipment, the transcripts not read for ten minutes read first); with
     it off, a sample of the last 31 days (nothing before the day it is turned on is ever sent)."""
+    if sweep:
+        _sweep_first(kwargs.get("now") or datetime.now(UTC))
     return json.dumps(build_batch(**kwargs).body, indent=2)
 
 
 # --- identity ----------
 
 
+def _valid_id(text: str | None) -> bool:
+    if not text:
+        return False
+    try:
+        return uuid.UUID(text).version == 4
+    except ValueError:
+        return False
+
+
+def _valid_salt(text: str | None) -> bool:
+    return bool(text) and _SALT.match(text or "") is not None
+
+
+def _held_identity(state: SharingState) -> tuple[str, str] | None:
+    """The installation's ``(install id, salt)`` from its state, if both are what they should be."""
+    if state.install_id and state.salt and _valid_id(state.install_id) and _valid_salt(state.salt):
+        return state.install_id, state.salt
+    return None
+
+
 def ensure_identity() -> tuple[str, str]:
-    """This installation's ``(install id, salt)``, minted at the first opt-in and kept after."""
+    """This installation's ``(install id, salt)``, minted at the first opt-in and kept after. A
+    part of the state file that is not what it should be (a damaged or hand-edited id or salt)
+    is minted again, quietly: a salt that is not 64 hex digits would otherwise fail every
+    repository hash."""
 
     def mint(state: SharingState) -> None:
-        if not state.install_id:
+        if not _valid_id(state.install_id):
             state.install_id = str(uuid.uuid4())
-        if not state.salt:
+        if not _valid_salt(state.salt):
             state.salt = os.urandom(32).hex()
 
     state = sharing.update(mint)
@@ -365,6 +413,19 @@ def _bearer(api_url: str) -> str | None:
     return session.token
 
 
+def _still_on() -> bool:
+    """Whether sharing is on and nothing forces it off, asked again before a POST and before
+    anything is recorded: turning it off stops a shipment already under way."""
+    return sharing.forced_off_reason() is None and sharing.switch_on()
+
+
+def _sweep_first(moment: datetime) -> None:
+    """Read the transcripts nothing has read for ten minutes, so that what is previewed and what
+    is shipped are built from the same record: one entry point for both."""
+    with contextlib.suppress(Exception):
+        usage_stats.maybe_sweep(now=moment)
+
+
 def ship(
     *,
     now: datetime | None = None,
@@ -372,12 +433,15 @@ def ship(
     store: ContextStore | None = None,
     transport: Transport | None = None,
     force: bool = False,
+    sweep: bool = True,
 ) -> ShipReport:
     """Post what is waiting, unless sharing is off or forced off, a shipment is not due (``force``
     ignores that), another one is running, or there is nothing to send. Never raises, and never
     makes a sound about failing: the days stay unsent and go next time, however long the server
     takes to answer (the report says what happened, for ``--json`` and the tests; nothing else
-    reads it aloud)."""
+    reads it aloud). Turning sharing off stops it: the switch is looked at again before every
+    POST. ``sweep`` reads the transcripts nothing has read for ten minutes first, as
+    :func:`preview` does."""
     reason = sharing.forced_off_reason()
     if reason is not None:
         return ShipReport(skipped=f"sharing is off: {reason}")
@@ -386,7 +450,7 @@ def ship(
     moment = now or datetime.now(UTC)
     try:
         with locking.holding(sharing.lock_path(), wait_s=0):
-            return _ship(moment, tz, store, transport or default_transport, force)
+            return _ship(moment, tz, store, transport or default_transport, force, sweep)
     except TimeoutError:
         return ShipReport(skipped="another shipment is running")
     except Exception as exc:  # a shipment may fail; it may not raise into whoever asked
@@ -394,12 +458,34 @@ def ship(
         return ShipReport(error=f"{type(exc).__name__}: {exc}"[:200])
 
 
+def _accepted(result: iam.HttpResult) -> tuple[int, bool] | None:
+    """``(accepted_days, linked)`` of a reply that is the contract's 200, else ``None``.
+
+    Only that is "the server has it": a 200 with any other body (an empty object, an error with
+    a 200, a gateway's page, ``accepted_days`` of the wrong type or 0) is not an answer of the
+    endpoint, and acknowledging it would drop the days for good."""
+    body = result.body
+    if result.status != 200 or not isinstance(body, dict):
+        return None
+    days, linked = body.get("accepted_days"), body.get("linked")
+    if type(days) is not int or days < 1 or type(linked) is not bool:
+        return None
+    return days, linked
+
+
 def _ship(
-    moment: datetime, tz: tzinfo | None, store: ContextStore | None, post: Transport, force: bool
+    moment: datetime,
+    tz: tzinfo | None,
+    store: ContextStore | None,
+    post: Transport,
+    force: bool,
+    sweep: bool,
 ) -> ShipReport:
     state = sharing.read()
     if not force and not sharing.due(state, moment):
         return ShipReport(skipped=f"not due until {state.next_due_at}")
+    if sweep:
+        _sweep_first(moment)
     identity = ensure_identity()
     state = _begin(moment, tz)
     batches = build_batches(now=moment, tz=tz, store=store, state=state, identity=identity)
@@ -413,6 +499,9 @@ def _ship(
     token = _bearer(iam.resolve_api_url())
     report = ShipReport()
     for batch in batches[:MAX_BATCHES]:
+        if not _still_on():  # turned off since the last POST: nothing more goes
+            report.skipped = "sharing was turned off"
+            return report
         try:
             result = post(url, batch.body, token, TIMEOUT_S)
             if result.status == 401 and token is not None:
@@ -423,17 +512,23 @@ def _ship(
                 result = post(url, batch.body, None, TIMEOUT_S)
         except iam.IamError as exc:
             return _failed(moment, str(exc), report=report)
-        if result.status == 200 and isinstance(result.body, dict):
-            linked = bool(result.body.get("linked"))
+        answer = _accepted(result)
+        if answer is not None:
+            if not _still_on():  # it went off while this was in flight: nothing is recorded
+                report.skipped = "sharing was turned off"
+                return report
+            accepted, linked = answer
             _acknowledge(moment, batch, linked)
-            accepted = result.body.get("accepted_days")
             report.sent, report.linked = True, linked
-            report.days += accepted if isinstance(accepted, int) else len(batch.days)
+            report.days += accepted
             continue
         wait = result.retry_after() if result.status == 429 else None
-        return _failed(
-            moment, f"HTTP {result.status}{_detail(result)}", retry_after=wait, report=report
+        what = (
+            "HTTP 200: not the contract's reply"
+            if result.status == 200
+            else f"HTTP {result.status}"
         )
+        return _failed(moment, f"{what}{_detail(result)}", retry_after=wait, report=report)
     return report
 
 
@@ -444,8 +539,9 @@ def _begin(moment: datetime, tz: tzinfo | None) -> SharingState:
         if state.since is None:
             state.since = _local_today(moment, tz).isoformat()
 
-    with contextlib.suppress(Exception):
-        return sharing.update(first)
+    if _still_on():
+        with contextlib.suppress(Exception):
+            return sharing.update(first)
     return sharing.read()
 
 
@@ -473,16 +569,18 @@ def _acknowledge(moment: datetime, batch: Batch, linked: bool) -> None:
         state.last_error = None
         state.next_due_at = (moment + sharing.SHIP_EVERY).isoformat(timespec="seconds")
 
-    with contextlib.suppress(Exception):
-        sharing.update(record)
+    if _still_on():  # off since: what turning it off purged is not written back
+        with contextlib.suppress(Exception):
+            sharing.update(record)
 
 
 def _schedule(moment: datetime) -> None:
     def record(state: SharingState) -> None:
         state.next_due_at = (moment + sharing.SHIP_EVERY).isoformat(timespec="seconds")
 
-    with contextlib.suppress(Exception):
-        sharing.update(record)
+    if _still_on():
+        with contextlib.suppress(Exception):
+            sharing.update(record)
 
 
 def _failed(
@@ -504,8 +602,9 @@ def _failed(
             delay = max(delay, timedelta(seconds=retry_after))
         state.next_due_at = (moment + delay).isoformat(timespec="seconds")
 
-    with contextlib.suppress(Exception):
-        sharing.update(record)
+    if _still_on():
+        with contextlib.suppress(Exception):
+            sharing.update(record)
     kept = report or ShipReport()
     kept.error = error[:200]
     return kept
@@ -542,26 +641,46 @@ def enable(*, now: datetime | None = None) -> SharingStatus:
 
 
 def disable(*, now: datetime | None = None, transport: Transport | None = None) -> ShipReport:
-    """Turn sharing off: the switch, and what was kept of the shipments. If anything was ever
-    sent, one ``opt_out`` ping says so, best effort; nothing is sent after it. Nothing is sent
-    at all while something forces sharing off."""
+    """Turn sharing off: at once, and for good until it is turned on again.
+
+    The switch goes first, so a shipment already under way re-reads it before its next POST and
+    stops. What was kept of the shipments is then purged under the shipper's lock, waited for up
+    to :data:`DISABLE_WAIT_S` (one POST is 5 s at most): the shipment in flight finishes before the
+    purge, and nothing it records can land after it. If anything was ever sent, or a shipment was
+    in flight, one ``opt_out`` ping says so, best effort; nothing is sent after it. Nothing is
+    sent at all while something forces sharing off. An explicit *off* is also the answer to the
+    one-time question: it is not asked afterwards."""
     moment = now or datetime.now(UTC)
-    state = sharing.read()
     settings_service.set_value("sharing.enabled", "false")
+    in_flight = False
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(locking.holding(sharing.lock_path(), wait_s=0))
+        except TimeoutError:
+            in_flight = True  # a shipment is running: wait for its POST, then purge
+            with contextlib.suppress(TimeoutError, OSError):
+                held.enter_context(locking.holding(sharing.lock_path(), wait_s=DISABLE_WAIT_S))
+        except OSError:
+            pass  # no lock file to take: nothing can be in flight
+        state = sharing.read()
 
-    def purge(old: SharingState) -> None:
-        old.acked = {}
-        old.settled_through = None
-        old.since = None
-        old.next_due_at = None
-        old.spawned_at = None
-        old.failures = 0
-        old.last_error = None
-        old.linked = None
-        old.last_sent_at = None
+        def purge(old: SharingState) -> None:
+            old.acked = {}
+            old.settled_through = None
+            old.since = None
+            old.next_due_at = None
+            old.spawned_at = None
+            old.failures = 0
+            old.last_error = None
+            old.linked = None
+            old.last_sent_at = None
+            if old.consent_answer is None:
+                old.consent_asked_at = moment.isoformat(timespec="seconds")
+                old.consent_answer = "declined"
 
-    sharing.update(purge)
-    if state.last_sent_at is None or state.install_id is None:
+        with contextlib.suppress(Exception):
+            sharing.update(purge)
+    if (state.last_sent_at is None and not in_flight) or state.install_id is None:
         return ShipReport(skipped="nothing had been sent", opt_out=False)
     if sharing.forced_off_reason() is not None:
         return ShipReport(skipped="sharing is forced off: nothing is sent", opt_out=False)
@@ -579,7 +698,7 @@ def disable(*, now: datetime | None = None, transport: Transport | None = None) 
     except Exception as exc:  # best effort, and silent: the switch is off either way
         log.debug("usage opt-out notice not sent: %r", exc)
         return ShipReport(error=f"{type(exc).__name__}: {exc}"[:200], opt_out=True)
-    if result.status == 200:
+    if result.status == 200:  # the notice has no days: only the status says it was taken
         return ShipReport(sent=True, opt_out=True)
     log.debug("usage opt-out notice not sent: HTTP %s", result.status)
     return ShipReport(error=f"HTTP {result.status}", opt_out=True)

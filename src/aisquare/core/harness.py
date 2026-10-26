@@ -94,25 +94,73 @@ def model_family(model: str | None) -> str | None:
     return next((family for family in MODEL_FAMILIES.values() if family in lowered), None)
 
 
-def model_arg(args: Sequence[str]) -> str | None:
-    """The model ``args`` name, the first ``--model X`` or ``--model=X``; ``None`` for none."""
+def flag_arg(args: Sequence[str], flag: str) -> str | None:
+    """The value ``args`` give ``flag``, the first ``<flag> X`` or ``<flag>=X``; ``None`` for
+    none."""
     for index, arg in enumerate(args):
-        if arg == "--model" and index + 1 < len(args):
+        if arg == flag and index + 1 < len(args):
             return args[index + 1]
-        if arg.startswith("--model="):
+        if arg.startswith(f"{flag}="):
             return arg.partition("=")[2]
     return None
 
 
-def launch_family(role: str, args: Sequence[str] = ()) -> str | None:
-    """The family a launch of ``role`` will run: its ``--model`` when ``args`` name one, else
-    the role's ladder as resolved WITHOUT probing (a cached verdict, or the first rung) —
-    a pick must not wait 150 s on a probe, and a wrong guess only costs the family window."""
-    named = model_arg(args)
-    if named is not None:
-        return model_family(named)
-    resolution = resolve_model(role, probe=False)
-    return model_family(resolution.model) if resolution is not None else None
+def model_arg(args: Sequence[str]) -> str | None:
+    """The model ``args`` name, the first ``--model X`` or ``--model=X``; ``None`` for none."""
+    return flag_arg(args, "--model")
+
+
+def without_flag(args: Sequence[str], flag: str) -> list[str]:
+    """``args`` less every ``<flag> X`` and ``<flag>=X``."""
+    kept: list[str] = []
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg == flag:
+            skip = True
+        elif not arg.startswith(f"{flag}="):
+            kept.append(arg)
+    return kept
+
+
+def launch_family(args: Sequence[str] = ()) -> str | None:
+    """The family a launch will run, for the account pick's per-family weeks (#277): the
+    ``--model`` its ``args`` name. ``None`` with none: the agent runs its account's own
+    default, which only Claude Code knows, and the pick reads no family's week. (Not the
+    role's ladder, which a fleet launch no longer runs: ``fleet._model_choice``.)"""
+    return model_family(model_arg(args))
+
+
+#: A context-window suffix Claude Code accepts on a model (``opus[1m]``); a reply names the
+#: model without it.
+_MODEL_SUFFIX = re.compile(r"\[[^\]]*\]$")
+
+
+def same_model(one: str | None, other: str | None) -> bool:
+    """Whether ``one`` and ``other`` name one model: the same text, or an alias and an id of
+    its family (``opus`` and ``claude-opus-5-5``, which is what a session reports for a launch
+    with ``--model opus``). A ``[1m]`` suffix is no other model."""
+    if one is None or other is None:
+        return one is other
+    first, second = (_MODEL_SUFFIX.sub("", value.strip().lower()) for value in (one, other))
+    if first == second:
+        return True
+    return any(
+        alias in MODEL_FAMILIES and model_family(model) == alias
+        for alias, model in ((first, second), (second, first))
+    )
+
+
+def same_effort(one: str | None, other: str | None) -> bool:
+    """Whether ``one`` and ``other`` are one effort: ``ultracode`` is ``xhigh`` as Claude Code
+    reports it (``CLAUDE_EFFORT``)."""
+    if one is None or other is None:
+        return one is other
+    first, second = normalize_effort(one), normalize_effort(other)
+    if first is None or second is None:
+        return one.strip().lower() == other.strip().lower()
+    return first == second
 
 
 #: The effort scale, weakest first — the levels ``claude --effort`` accepts.
@@ -1637,6 +1685,15 @@ def parse_env_pairs(pairs: Sequence[str]) -> dict[str, str]:
             raise ValueError(f"expected KEY=VALUE, got {pair!r}")
         parsed[key] = value
     return parsed
+
+
+def binding_args(role: str) -> list[str]:
+    """The arguments ``role``'s binding adds to every launch (``team bind --arg``), as
+    :func:`resolve_profile` gives them, without reading its bound files; none when the config
+    cannot be read."""
+    team, _unreadable = _team_settings()
+    profile = (team.profiles or {}).get(role) if team is not None else None
+    return list(profile.args or []) if profile is not None else []
 
 
 def resolve_profile(

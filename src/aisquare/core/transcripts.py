@@ -131,6 +131,27 @@ def latest_context_tokens(path: Path, *, tail_bytes: int = _TAIL_BYTES) -> int |
         window *= 4
 
 
+def latest_model(path: Path, *, tail_bytes: int = _TAIL_BYTES) -> str | None:
+    """The model the session's LAST reply came from (``message.model`` of its last
+    ``assistant`` entry in the tail), which a ``/model`` since the launch has changed.
+    ``None`` when the tail holds none, or the file cannot be read.
+
+    One bounded read of the tail, never grown: at a Stop hook the turn's last reply is
+    already on disk, followed only by the hook's own summary lines. Claude Code's synthetic
+    entries (an API error in place of a reply) name no model, and a subagent's turns
+    (``isSidechain``) run on a model of their own.
+    """
+    latest: str | None = None
+    for entry in _tail_entries(path, tail_bytes):
+        if entry.get("type") != "assistant" or entry.get("isSidechain") is True:
+            continue
+        message = entry.get("message")
+        model = message.get("model") if isinstance(message, dict) else None
+        if isinstance(model, str) and model and model != _SYNTHETIC_MODEL:
+            latest = model
+    return latest
+
+
 def refusal_count(path: Path, *, tail_bytes: int = _TAIL_BYTES, since: int = 0) -> int:
     """How many tool results in the transcript's TAIL are auto-mode refusals.
 

@@ -138,9 +138,9 @@ tmux can see and its row says so (`no hooks`).
    spawn's own default, and says what that runs on and why: `(default: rank 1 ·
    work)`, `(default: headroom · work)`, `(default: bound to tester · account
    2)` or `(default: project default · work)`, what `accounts order`, `team
-   bind` and `accounts default --project` decide for the role picked and a
-   `--model` in Extra agent args (read again when either changes; the captain's
-   dialog the same for the captain). It
+   bind` and `accounts default --project` decide for the role picked and the
+   model it runs (a `--model` in Extra agent args, else the Model field; read
+   again when either changes; the captain's dialog the same for the captain). It
    reads `(this shell's)` only when no account is signed in, so the spawn leaves
    this shell's `CLAUDE_CONFIG_DIR` as it is. A headroom pick is shown from the
    readings the status line already has; the spawn picks again when it runs.
@@ -157,6 +157,9 @@ tmux can see and its row says so (`no hooks`).
    picked; 🎲 offers `<role>-<adjective>-<animal>`; a label that breaks the rule
    disables *Spawn* and shows the rule), task (the project's open tasks),
    worktree (disabled with "not a git repository" outside one), permission mode,
+   **model** and **effort** (opened on your last pick, whatever the role, or on
+   what a role's settings pin for that role; blank is the account's own default,
+   and clearing a field makes that your pick too: [The roles](#the-roles)),
    extra agent args (split like a shell would; a quoting error is shown inline)
    and a first prompt. A field left as it opened means the role's default,
    exactly as an omitted `fleet spawn` flag does; picking `(none)` over a role
@@ -203,12 +206,24 @@ manager's loop. Model ladders and effort come from the existing harness
 (`aisquare team harness` shows the matrix): the manager rides the planner's
 ladder (`fable → opus → sonnet`); coder, tester, ui-tester and reviewer start on `sonnet`
 with `opus` as the fallback rung; the validator runs `fable → opus`, one effort
-tier above the work it gates. `fleet spawn` passes the role's rung and effort to the
-agent (`--model`, `--effort`) from the cached probe only — never a probe at spawn — and
-records both, so a restart or switch starts the same model; arguments that already name
-a model or an effort (the binding's `--arg`, the role's `extra_args`, yours) are left as
-they are, and another binary gets neither. `fleet ls --json` shows them in each agent's
-`launch_spec`.
+tier above the work it gates. Those ladders are what `team spawn` prints; **`fleet spawn`
+runs the model and effort you last chose** (0.9.1; 0.9.0 passed the ladder's top rung, so
+a manager always started on Fable at high effort over the default you saved with
+`/model`). Each of the two is decided on its own, in this order: a `--model` or
+`--effort` in the spawn's own arguments (`fleet spawn manager --model opus --effort
+xhigh`, or the Spawn dialog's Model and Effort fields and Extra agent args); then the
+role's settings, its `[fleet.roles.<role>] extra_args` or its binding's `--arg`, which is
+where a role is customised; then your last pick; and with none, no flag at all, so Claude
+Code runs the account's own saved default, as before 0.9.0. **Your last pick is one per
+home**, for every role and persona alike. It is written by a spawn that names one itself
+(a cleared dialog field forgets it) and by a `/model` inside any running fleet agent,
+which its next turn end reads (the model off its transcript's last reply, the effort off
+the hook's `CLAUDE_EFFORT`); a role's settings are that role's alone and never write it.
+A restart, a `fleet switch`, a hand-over and a fork start what the agent runs now, not
+what it was launched with. Any model or effort Claude Code takes is kept as written
+(`fable`, `claude-opus-5-5`, `opus[1m]`; `low` to `max`, `ultracode`); another binary
+gets neither flag. `fleet ls --json` shows the flags a spawn added in each agent's
+`launch_spec` (`model`, `effort`) and its `command`.
 
 **One tester per task.** The manager spawns a tester for each task that reaches review:
 `fleet spawn tester --task <id>` (a ui-tester for a task titled "UI: …"). Its cycle takes
@@ -228,8 +243,7 @@ final gate over the assembled deliverable.
 No role at all is `agent`: `aisquare fleet spawn agent` (the Spawn dialog's
 *(none) — general-purpose Claude*) starts a plain Claude Code session, labelled
 `agent-1` and on, that joins the board like any agent but is briefed with no
-standing cycle and no mission, and runs on the session's own model rather than a
-role's ladder. `aisquare launch agent` is the same outside the fleet.
+standing cycle and no mission, and runs on your last pick like every other spawn. `aisquare launch agent` is the same outside the fleet.
 
 The manager talks to its agents only through the board — tasks, notes, signals
 — and `fleet tell` nudges. When a sub-agent writes a result to the board, the
@@ -1071,8 +1085,9 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   per-family weeks count too, for an agent of that family: Claude Code's Opus
   and Sonnet limits apply only to requests to that model family, so an account
   whose Opus week is spent is no room for an Opus agent and still is for a
-  Sonnet one (the family is the session's model, or for a spawn its `--model`
-  or the role's ladder). A spent family week is no answer at all for that
+  Sonnet one (the family is the session's model, or for a spawn the `--model`
+  it runs: its own, its role's, or your last pick; with none, the account's own
+  default, no family). A spent family week is no answer at all for that
   family, not even the least bad one a switch by hand would take. A window the
   endpoint marks locked reads 100 % used.
   `[accounts] prefer = "reset-soonest"` (*under the line, prefer* in App
@@ -2502,7 +2517,8 @@ set stays as it was. New keys follow their defaults until you set them:
 - `task add` warns on stderr when a contract lacks `objective:`, `acceptance:` or
   `boundaries:`.
 - `fleet spawn` passes the role's model ladder (`--model`, `--effort`), and a tester
-  spawned for a task verifies that one task and stops.
+  spawned for a task verifies that one task and stops. (0.9.1 runs your last pick
+  instead, or the account's default: [The roles](#the-roles).)
 
 **Moving back** with `aisquare upgrade --version <v>` is safe for the store: an older build
 opens a v37 store as it is, without migrating it down, and never reads the two columns.

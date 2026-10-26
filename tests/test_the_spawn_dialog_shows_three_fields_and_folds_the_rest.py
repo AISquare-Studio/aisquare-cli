@@ -59,6 +59,8 @@ FOLDED = (
     "spawn-task",
     "spawn-worktree",
     "spawn-permission",
+    "spawn-model",
+    "spawn-effort",
     "spawn-args",
     "spawn-prompt",
 )

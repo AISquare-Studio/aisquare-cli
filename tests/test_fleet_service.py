@@ -75,10 +75,11 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import auto_mode, delivery, install_route, lifecycle
+from aisquare.services import auto_mode, delivery, install_route, lifecycle, model_memory
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
+from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.captain import screen as screen_reader
 from aisquare.services.explainability import PIPELINE_ID_ENV_VAR
@@ -2063,44 +2064,212 @@ def test_fleet_stop_acts_for_its_as_else_its_own_window_else_the_user(
     assert fleet_service.acting_as("ses_manager_1") == "ses_manager_1"
 
 
-def test_a_spawn_runs_the_roles_model_ladder_and_its_restart_keeps_it(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+def _model_flags(command: Sequence[str]) -> list[str]:
+    """Every ``--model`` and ``--effort`` on a command line, with its value, in order."""
+    found: list[str] = []
+    for index, arg in enumerate(command):
+        if arg in ("--model", "--effort"):
+            found += [arg, command[index + 1]]
+        elif arg.startswith(("--model=", "--effort=")):
+            found.append(arg)
+    return found
+
+
+def test_a_spawn_with_nothing_remembered_runs_the_accounts_own_default(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
-    """#129 (b): the fleet path never asked `harness.resolve_model`, so every agent ran on
-    the account's default model. A spawn now passes the ladder's model and effort, cached
-    probe only, and records both; arguments that already choose one are the caller's."""
-    ladder = harness.resolve_model("coder", probe=False)
-    assert ladder is not None
-    agent = _coder(project)
-    command = _command(tmux)
-    assert _flag(command, "--model") == ladder.model and _flag(command, "--effort") == ladder.effort
-    spec = agent.launch_spec
-    assert spec is not None and (spec.model, spec.effort) == (ladder.model, ladder.effort)
-    assert command.count("--model") == 1
+    """#16 on the board: #338 passed the ladder's head, so a manager always started on
+    ``--model fable --effort high`` over the default the owner saved with ``/model``. With
+    nothing remembered for the role and nothing in its arguments, a spawn passes neither
+    flag, and Claude Code runs the account's own default, as before 0.9.0."""
+    agent = fleet_service.spawn(project, "manager").agent
+    assert _model_flags(_command(tmux)) == []
+    assert agent.launch_spec is not None
+    assert (agent.launch_spec.model, agent.launch_spec.effort) == (None, None)
+    assert model_memory.remembered() == model_memory.Pick()
+
+
+@pytest.mark.parametrize(("model", "effort"), [("opus", "xhigh"), ("fable", "max")])
+def test_a_managers_pick_is_what_the_next_manager_runs(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, model: str, effort: str
+) -> None:
+    first = fleet_service.spawn(
+        project, "manager", agent_args=["--model", model, "--effort", effort]
+    ).agent
+    assert _model_flags(_command(tmux)) == ["--model", model, "--effort", effort]
+    assert model_memory.remembered() == model_memory.Pick(model, effort)
+    tmux.die(first.pane_id, 0)
+
+    again = fleet_service.spawn(project, "manager").agent
+    assert _model_flags(_command(tmux)) == ["--model", model, "--effort", effort]
+    spec = again.launch_spec
+    assert spec is not None and (spec.model, spec.effort) == (model, effort)
     assert "--model" not in spec.extra_args, "the spec's arguments stay the role's and yours"
 
-    # The ladder moves (a probe verdict, an entitlement); a restart starts what it recorded.
-    moved = ladder.model_copy(update={"model": "elsewhere", "effort": "low"})
-    monkeypatch.setattr(harness, "resolve_model", lambda *a, **k: moved)
+
+def test_a_pick_is_the_owners_and_every_role_and_persona_runs_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One pick per home (the owner's design for #16): what the owner last chose on any
+    spawn is what the next spawn runs, whatever its role or persona."""
+    _settings(monkeypatch, max_agents_per_project=10)
+    _coder(project, agent_args=["--model", "sonnet", "--effort", "low"])
+    fleet_service.spawn(project, "manager")
+    assert _model_flags(_command(tmux)) == ["--model", "sonnet", "--effort", "low"]
+    fleet_service.spawn(project, "tester", persona="skeptic")
+    assert _model_flags(_command(tmux)) == ["--model", "sonnet", "--effort", "low"]
+    fleet_service.spawn(project, fleet_service.PLAIN_ROLE)
+    assert _model_flags(_command(tmux)) == ["--model", "sonnet", "--effort", "low"]
+
+
+def test_a_role_its_settings_pin_keeps_its_pin_and_never_writes_the_pick(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-role customisation is the settings' alone: a reviewer pinned to haiku runs haiku
+    over the pick, and its spawns leave the pick as the owner made it."""
+    _settings(
+        monkeypatch,
+        max_agents_per_project=10,
+        roles={"reviewer": FleetRoleSettings(worktree=False, extra_args=["--model", "haiku"])},
+    )
+    _coder(project, agent_args=["--model", "opus", "--effort", "xhigh"])
+    fleet_service.spawn(project, "reviewer")
+    command = _command(tmux)
+    assert command.count("--model") == 1 and _flag(command, "--model") == "haiku"
+    assert _flag(command, "--effort") == "xhigh", "the effort it pins nothing of is the pick"
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+    _coder(project)
+    assert _model_flags(_command(tmux)) == ["--model", "opus", "--effort", "xhigh"]
+
+
+def test_the_spawns_args_and_the_roles_extra_args_win_over_the_memory_and_no_flag_is_doubled(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings(monkeypatch, max_agents_per_project=10)
+    _coder(project, agent_args=["--model", "opus", "--effort", "xhigh"])
+
+    # This spawn's own model: the remembered effort still comes, each flag once.
+    _coder(project, agent_args=["--model=haiku"])
+    command = _command(tmux)
+    assert sorted(_model_flags(command)) == ["--effort", "--model=haiku", "xhigh"]
+    assert model_memory.remembered() == model_memory.Pick("haiku", "xhigh")
+
+    # The role's `extra_args` win over the memory too, and are no pick of the owner's.
+    _settings(
+        monkeypatch,
+        max_agents_per_project=10,
+        roles={"coder": FleetRoleSettings(extra_args=["--effort", "low"])},
+    )
+    _coder(project)
+    command = _command(tmux)
+    assert command.count("--effort") == 1 and _flag(command, "--effort") == "low"
+    assert command.count("--model") == 1 and _flag(command, "--model") == "haiku"
+    assert model_memory.remembered() == model_memory.Pick("haiku", "xhigh")
+
+    # This spawn's args over the role's: the role's flag goes, not doubled.
+    agent = _coder(project, agent_args=["--effort", "max"])
+    command = _command(tmux)
+    assert command.count("--effort") == 1 and _flag(command, "--effort") == "max"
+    assert agent.launch_spec is not None and agent.launch_spec.extra_args == ["--effort", "max"]
+
+    # The binding's own arguments are the launch's (`team bind --arg`): nothing added beside.
+    settings_service.bind_role("coder", args=["--model", "sonnet"])
+    _coder(project)
+    assert "--model" not in _command(tmux)
+    assert model_memory.remembered() == model_memory.Pick("haiku", "max")
+
+
+def test_the_dialogs_pick_is_remembered_and_a_blank_one_is_the_accounts_default(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The Spawn dialog's Model and Effort fields: a value is a pick, as typed arguments are;
+    a cleared field (``""``) is the account's own default, and the role forgets its pick."""
+    _coder(project, model="claude-opus-5-5", effort="ultracode")
+    assert _model_flags(_command(tmux)) == ["--model", "claude-opus-5-5", "--effort", "ultracode"]
+    _coder(project)
+    assert _model_flags(_command(tmux)) == ["--model", "claude-opus-5-5", "--effort", "ultracode"]
+
+    _coder(project, model="", effort="")
+    assert _model_flags(_command(tmux)) == []
+    _coder(project)
+    assert _model_flags(_command(tmux)) == []
+    assert model_memory.remembered() == model_memory.Pick()
+
+
+def _captured(
+    monkeypatch: pytest.MonkeyPatch, agent: FleetAgent, transcript: Path, model: str, effort: str
+) -> None:
+    """The capture a turn end makes after the owner's ``/model`` inside ``agent``: its reply
+    names the new model in the transcript, its Stop hook's ``CLAUDE_EFFORT`` the effort."""
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "assistant", "message": {"model": model}}) + "\n")
+    assert agent.session_id is not None
+    model_memory.observe(agent.session_id, str(transcript), effort=effort, agent_id=agent.id)
+
+
+def test_a_restart_and_a_switch_start_what_the_agent_runs_now(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The recorded launch said opus at xhigh; a ``/model`` since moved the agent. A restart,
+    and then a switch, start what it runs now, never the launch-time pick (#338 replayed
+    ``LaunchSpec.model`` and undid the owner's change)."""
+    _two_slots_with_usage(monkeypatch, work=10, personal=10)
+    agent = fleet_service.spawn(
+        project,
+        "coder",
+        worktree=False,
+        account="2",
+        agent_args=["--model", "opus", "--effort", "xhigh"],
+    ).agent
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    _captured(monkeypatch, agent, transcript, "claude-fable-5-1", "max")
+    assert model_memory.remembered() == model_memory.Pick("claude-fable-5-1", "max")
+
+    tmux.die(agent.pane_id, 0)
+    restarted = fleet_service.restart(project, agent.label).started
+    command = _command(tmux)
+    assert _model_flags(command) == ["--model", "claude-fable-5-1", "--effort", "max"]
+    spec = restarted.launch_spec
+    assert spec is not None and (spec.model, spec.effort) == ("claude-fable-5-1", "max")
+    assert _model_flags(spec.extra_args) == [], "the launch-time pick is not replayed beside it"
+
+    _captured(monkeypatch, restarted, transcript, "claude-sonnet-5-5", "low")
+    fleet_service.switch(project, restarted.label, to="3")
+    assert _model_flags(_command(tmux)) == ["--model", "claude-sonnet-5-5", "--effort", "low"]
+
+
+def test_a_restart_with_nothing_changed_replays_the_launch_as_recorded(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """The session reports the full id its alias resolved to (``opus`` runs
+    ``claude-opus-5-5``): that is no change, and the replay keeps the alias it recorded."""
+    agent = _coder(project, agent_args=["--model", "opus"])
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text("", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    assert agent.session_id is not None
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "assistant", "message": {"model": "claude-opus-5-5"}}))
+    model_memory.observe(agent.session_id, str(transcript), effort=None, agent_id=agent.id)
     tmux.die(agent.pane_id, 0)
     fleet_service.restart(project, agent.label)
-    replayed = _command(tmux)
-    assert (
-        _flag(replayed, "--model") == ladder.model and _flag(replayed, "--effort") == ladder.effort
-    )
-
-    _coder(project, label="coder-pinned", agent_args=["--model", "sonnet"])
-    pinned = _command(tmux)
-    assert pinned.count("--model") == 1 and _flag(pinned, "--model") == "sonnet"
-    assert "--effort" not in pinned, "a caller who chose the model chose the effort too"
+    assert _model_flags(_command(tmux)) == ["--model", "opus"]
+    assert model_memory.remembered() == model_memory.Pick("opus", None)
 
 
 def test_another_binary_gets_no_model_flag(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _coder(project, agent_args=["--model", "opus"])
     monkeypatch.setattr(harness, "is_default_agent", lambda binary: False)
     agent = _coder(project)
-    assert "--model" not in _command(tmux)
+    assert "--model" not in _command(tmux), "a remembered pick is Claude Code's alone"
     assert agent.launch_spec is not None and agent.launch_spec.model is None
 
 

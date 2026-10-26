@@ -197,6 +197,7 @@ def stop() -> None:
             last_message=_str(payload, "last_assistant_message"),
             permission_mode=_str(payload, "permission_mode"),
             transcript_path=_str(payload, "transcript_path"),
+            effort=_effort_level(payload),
         )
     except ManagerWakeupError as exc:  # the row is right; only the wake-up was lost
         _cost_of_failing_open("stop", exc.cause, cost=_COST["manager-wakeup"])

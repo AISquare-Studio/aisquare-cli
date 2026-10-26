@@ -100,8 +100,8 @@ weaker than the coder whose output it reviews, which is not a gate at all.
 
 The base comes from, in order: `AISQUARE_EFFORT` → `CLAUDE_EFFORT` (what your
 own Claude session is running at, which Claude Code exports) → `high`. So
-raising your session to xhigh raises the fleet you spawn from it, with nothing
-to configure. Override per launch with `aisquare team spawn coder --effort
+raising your session to xhigh raises the roles you `team spawn` from it, with
+nothing to configure. Override per launch with `aisquare team spawn coder --effort
 xhigh`, or pin one role absolutely with `AISQUARE_EFFORT_<ROLE>` — both skip
 the offset, because you named the level yourself. `ultracode` is accepted and
 ranks as xhigh (it is xhigh plus automatic workflow orchestration). An
@@ -109,11 +109,25 @@ unusable value falls back to the base rather than being passed to the CLI,
 which would silently ignore it. `aisquare team harness` prints the live base
 and every derived level.
 
+**`fleet spawn` runs your last pick, not the ladder.** The ladder and the offsets are
+what `team spawn` and `aisquare team harness` give you; a fleet agent (`fleet spawn`, the
+manager's spawns, the Spawn dialog) runs the model and the effort you last chose, each on
+its own: a `--model` or `--effort` in the spawn's arguments, then the role's settings
+(`[fleet.roles.<role>] extra_args`, its binding's `--arg`), then your last pick, and with
+none no flag, so Claude Code runs the account's own saved default. The pick is one per
+home, for every role and persona; a spawn that names one, and a `/model` inside any
+running fleet agent (read at its next turn end), make it the pick, and a role's settings
+never do. A restart, a switch and a hand-over start what the agent runs now. 0.9.0 passed
+the ladder's top rung here, which started every manager on Fable at high effort over the
+default you saved with `/model` (fixed in 0.9.1). See [docs/fleet.md, The
+roles](fleet.md#the-roles).
+
 Sessions report their model back to the board, which flags any session
 running off its role's ladder (`⚠ off-ladder`). That signal is advisory: the
 model field is optional in Claude Code's hook payload and absent on some
-surfaces (MCP teammates have none), and an in-session `/model` switch isn't
-re-reported — so a missing chip means *not reported*, never *wrong*. Tiering
+surfaces (MCP teammates have none), and an in-session `/model` switch is
+re-read only for a fleet agent, at its next turn end — so a missing chip means
+*not reported*, never *wrong*. Tiering
 is enforced at launch, not policed in the store.
 
 On every prompt, each session receives a compact delta of what teammates did

@@ -230,6 +230,8 @@ UNTOUCHED: Kwargs = {
     "agent_args": [],
     "account": None,
     "persona": None,
+    "model": None,
+    "effort": None,
 }
 """What a Spawn press sends for a form nobody changed: the role's default everywhere."""
 
@@ -681,6 +683,7 @@ def test_spawn_sends_exactly_the_chosen_values_with_the_agent_args_shlex_split(
         dialog.query_one("#spawn-worktree", Switch).value = True  # a tester's default is False
         select(dialog, "permission").value = "plan"
         select(dialog, "account").value = "2"
+        select(dialog, "effort").value = "max"
         dialog.query_one("#spawn-binary", Input).value = " claude2 "
         dialog.query_one(
             "#spawn-args", Input
@@ -705,6 +708,8 @@ def test_spawn_sends_exactly_the_chosen_values_with_the_agent_args_shlex_split(
                 "agent_args": ["--model", "opus", "--append-system-prompt", "be brief"],
                 "account": "2",
                 "persona": None,
+                "model": None,  # untouched: the typed --model is this spawn's
+                "effort": "max",
             },
         )
     ]

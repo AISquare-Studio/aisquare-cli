@@ -38,7 +38,7 @@ from aisquare.core.injection import build_block, claude_md_files, without_loaded
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.workspace import active_project
 from aisquare.models import ClaudeAccount, FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession
-from aisquare.services import auto_mode, ci_augment, quiet_compact
+from aisquare.services import auto_mode, ci_augment, model_memory, quiet_compact
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import code as code_service
 from aisquare.services import explainability as explainability_service
@@ -235,6 +235,7 @@ def turn_stopped(
     last_message: str | None = None,
     permission_mode: str | None = None,
     transcript_path: str | None = None,
+    effort: str | None = None,
 ) -> team_service.StopDecision | None:
     """Mark the session as waiting for input, and close this turn's metrics row.
 
@@ -247,13 +248,16 @@ def turn_stopped(
     itself, and otherwise starts its worker. Off by default; never costs the turn its row.
 
     The turn's token usage is read off ``transcript_path`` from where the last
-    record stopped, and lands on the row ``close_turn`` closed.
+    record stopped, and lands on the row ``close_turn`` closed. And a fleet agent's model and
+    effort as the turn ran them (``effort``: the payload's ``effort.level``), which a ``/model``
+    may have changed: :func:`remember_the_model`.
     """
     if session_id is None:
         return None
     try:
         decision = team_service.hook_stop(session_id, cwd, stop_hook_active=stop_hook_active)
     finally:
+        remember_the_model(session_id, transcript_path, effort=effort)
         # After the team update, never before: a metrics failure must not cost the
         # board its state change (or the manager its decisions), and close_turn
         # swallows its own errors. In a finally: a manager's failed wake-up raises
@@ -279,6 +283,31 @@ def turn_stopped(
         # The turn is over: a decision keeps it going, and mid-turn is no place to move it.
         check_before_limit(session_id, transcript_path=transcript_path)
     return decision
+
+
+def remember_the_model(
+    session_id: str, transcript_path: str | None, *, effort: str | None = None
+) -> None:
+    """A fleet agent's turn end: the model and effort it runs now, for its restart and every
+    next spawn (``model_memory.observe``). The effort is the payload's, else the
+    ``CLAUDE_EFFORT`` Claude Code gives its hooks. Nothing for a session no fleet window runs
+    (no ``AISQUARE_FLEET_AGENT``): no store, no transcript read. An extra on the turn end,
+    never part of it: it fails open, said on stderr."""
+    agent_id = orchestrator.env_fleet_agent()
+    if agent_id is None:
+        return
+    try:
+        model_memory.observe(
+            session_id,
+            transcript_path,
+            effort=effort or os.environ.get("CLAUDE_EFFORT"),
+            agent_id=agent_id,
+        )
+    except Exception as exc:  # the turn ended all the same; only the reading is lost
+        sys.stderr.write(
+            f"aisquare: the agent's model was not read ({type(exc).__name__}: {exc}) — a "
+            "restart starts the model it was launched with; run: aisquare doctor\n"
+        )
 
 
 def _arm_auto_stop(session_id: str) -> None:

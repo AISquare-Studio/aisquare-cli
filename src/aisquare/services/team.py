@@ -28,8 +28,8 @@ from pathlib import Path
 from types import EllipsisType
 from typing import Any, Final, Literal, NamedTuple
 
-from aisquare.core import brain, experimental, harness, insights, orchestrator, paths, workspace
 from aisquare.core import claude_accounts as claude_accounts_core
+from aisquare.core import experimental, harness, insights, orchestrator, paths, workspace
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import (
@@ -49,7 +49,6 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import distill as distill_service
 from aisquare.services import install_route
 from aisquare.services import project as project_service
 
@@ -497,12 +496,6 @@ def _emit(
     return stored
 
 
-def _project_root(store: ContextStore, project_id: str) -> Path | None:
-    """The registered root of a project — spares hot paths a git subprocess."""
-    project = store.get_project(project_id)
-    return project.root if project is not None else None
-
-
 def _resolve_session(store: ContextStore, ref: str | None) -> TeamSession | None:
     if ref is None:
         return None
@@ -578,9 +571,9 @@ def _board_of(store: ContextStore, project_id: str) -> _Board:
 
     One forgotten since is still named and rooted by its row: its tasks and events are
     kept, and the agents whose rows recorded it still read it. Read as one the store does
-    not hold, a note ``fleet tell`` or the phone put on a forgotten hub was named by its id,
-    and its drain ran in the caller's directory, with a ``git rev-parse``, distilling the
-    caller's board and not the hub's (review of #259, round 32, 7/9)."""
+    not hold, a note ``fleet tell`` or the phone put on a forgotten hub was named by its id
+    and rooted in the caller's directory, with a ``git rev-parse``, not the hub's (review of
+    #259, round 32, 7/9)."""
     project = store.get_project(project_id, include_forgotten=True)
     if project is None:
         return _Board(id=project_id, name=project_id, root=None)
@@ -1534,8 +1527,6 @@ def add_note(
             else board.id
         )
     stored = _record_delivery(event, board)
-    if kind in distill_service.DISTILL_KINDS:
-        distill_service.spawn_drain(root=board.root, board=board.id)
     if kind in ("result", "question"):
         _nudge_manager(manager, reason=kind, board=board.id)
     elif _addressed_to_manager(to_role):
@@ -1917,7 +1908,6 @@ def finish_task(
     task, board, manager = _finish_task(
         ref, "done", "task_done", note=note, session_ref=session_ref, cwd=cwd
     )
-    distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_done", board=board.id)
     _flush_routed()
     return task
@@ -1929,7 +1919,6 @@ def review_task(ref: str, *, note: str | None = None, session_ref: str | None = 
     task, board, manager = _finish_task(
         ref, "review", "task_review", note=note, session_ref=session_ref
     )
-    distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_review", board=board.id)
     _flush_routed()
     return task
@@ -1961,7 +1950,6 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
         _route_up(store, event)
         board = _board_of(store, reopened.project_id)
     _record_delivery(event, board)
-    distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_reopened", board=board.id)
     _flush_routed()
     return reopened
@@ -2038,7 +2026,6 @@ def block_task(ref: str, *, reason: str, session_ref: str | None = None) -> Team
     task, board, manager = _finish_task(
         ref, "blocked", "task_blocked", note=reason, session_ref=session_ref
     )
-    distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_blocked", board=board.id)
     _flush_routed()
     return task
@@ -2073,35 +2060,6 @@ def release_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
         board = _board_of(store, released.project_id)
     _record_delivery(event, board)
     return released
-
-
-def distill_now(
-    cwd: Path | None = None, *, rescan: bool = False, board: str | None = None
-) -> int | None:
-    """Drain the pipe into the project brain synchronously (``team distill``): this
-    directory's board, or ``board``, the one a detached drain was spawned for
-    (``distill.spawn_drain``).
-
-    ``None`` means another drain (usually a detached one) is already running.
-    """
-    _require_enabled()
-    return distill_service.drain(cwd, rescan=rescan, board=board)
-
-
-def recall(query: str, cwd: Path | None = None) -> str | None:
-    """Search the project brain (``recall``); ``None`` = brain unavailable.
-
-    Recall is human-invoked and latency-tolerant, so any undistilled backlog
-    is drained first — a first recall on a busy pipe initialises the brain
-    and takes a few seconds; subsequent ones are instant.
-    """
-    _require_enabled()
-    project = orchestrator.team_project(cwd)
-    with store_session() as store:
-        backlog = distill_service.pending(store, project.id)
-    if backlog:
-        distill_service.drain(board=project.id)  # a busy (None) drain still means progress
-    return brain.recall(project.id, query)
 
 
 # --- hook integration ---------------------------------------------------------
@@ -3441,9 +3399,6 @@ def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = 
                     "lists the pool",
                     file=sys.stderr,
                 )
-        root = _project_root(store, session.project_id)
-    # Safety drain: catch anything a per-command spawn missed this session, on its board.
-    distill_service.spawn_drain(cwd, root=root, board=session.project_id)
 
 
 @dataclass(frozen=True)
@@ -3560,7 +3515,7 @@ def prune_sessions(
     for callers that know the sessions are dead.
 
     Data-safe by construction: only session presence and orphaned CLAIMS
-    change; tasks, notes, events and the project brain are untouched.
+    change; tasks, notes and events are untouched.
     ``dry_run`` reports what would go without ending anything. ``keep`` spares
     one session (id prefix); a still-warm session is spared automatically (it
     is not past the threshold).

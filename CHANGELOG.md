@@ -28,6 +28,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spent the product's 2 s on the capture, and failed it every time once sharding placed
   it beside a heavier test.
 
+### Removed
+
+- **The project brain (gbrain) is gone.** It was an optional third-party CLI that
+  nobody maintained or used, and it only added noise: `aisquare recall` and
+  `aisquare team distill` are removed (so is the `recall` tool of `aisquare serve`, now
+  eight tools), as are the detached drain every board write started, the `brain` row of
+  `aisquare doctor` and `AISQUARE_BRAIN`, `AISQUARE_BRAIN_EMBED` and
+  `AISQUARE_BRAIN_EMBED_MODEL`. Nothing on disk is deleted: an existing
+  `~/.aisquare/projects/<id>/brain` stays where it is, and the store's schema is
+  untouched. `install.sh` still expects the `brain` row from a release that has it
+  (`--version 0.9.0` and older), alongside the codebase-snapshot rows.
+
 ## [0.9.0] - 2026-10-25
 
 **The captain: an experimental voice-and-text agent that runs every project's fleet

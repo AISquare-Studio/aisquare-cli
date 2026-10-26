@@ -12,7 +12,7 @@ removes exactly them):
 | `UserPromptSubmit` | record the prompt in a project you added (anywhere, with `[projects] capture` on), unless `capture.enabled` is off; deliver the teammate delta; heartbeat, which stamps the session's last prompt and marks its fleet agent's first message taken ([fleet](fleet.md#the-first-message)) |
 | `Stop` | mark the session waiting; renew its task leases; keep a manager going on fresh board decisions, and any other agent on the notes addressed to it ([fleet](fleet.md#fleet-tell)); record the turn's token usage off the transcript (`aisquare metrics tokens`); for a fleet manager with `fleet.quiet_compact_at` set, start the hidden `aisquare hook compact-check` worker ([fleet](fleet.md#long-lived-managers-state-file-start-pack-and-quiet-compaction)); for a fleet worker that may have finished, start the hidden `aisquare hook auto-stop` check ([fleet](fleet.md#capacity)) |
 | `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |
-| `SessionEnd` | release claims, mark the session gone, final distill, record the last stretch of token usage |
+| `SessionEnd` | release claims, mark the session gone, record the last stretch of token usage |
 | `StopFailure` | the turn ended on an API error: a usage limit (`rate_limit`) marks the session `limited` with its reset time and remembers the limit on the account until that reset, so no pick by headroom sends an agent back to it before then; with `[accounts] on_limit = "switch"` a fleet agent is handed to another account, the line is a `limited_handing_over` event that wakes nobody, and a hand-over that cannot go ahead posts `handover_failed`, which wakes the manager; without a hand-over coming, `limited` wakes it ([accounts](orchestration.md#several-accounts-one-team)); any other error marks it `waiting`, with a feed line naming the error |
 
 `SessionStart` and `UserPromptSubmit` get `"timeout": 120` (seconds): Claude
@@ -31,7 +31,7 @@ concurrency-tested against racing parallel sessions):
 ├── fleet-tmux.conf  # the fleet's private tmux server config (regenerated, not yours)
 ├── state.json    # small runtime state (e.g. the pinned active project)
 ├── agents.json   # registry of connected agents
-├── projects/     # per-project data — code/ (symbol index), brain/ (gbrain), explainability-key
+├── projects/     # per-project data — code/ (symbol index), explainability-key
 ├── reports/      # what `asq exec` saved: argv, the streams' first bytes, source hashes (0700)
 ├── briefs/       # copies of the artifacts brief checks recorded, per project and brief (0700)
 ├── cache/        # disposable (e.g. last_injection.json)
@@ -88,7 +88,7 @@ aisquare
 │                   usage also shows the pace (≈ N min to the limit) — see [accounts] in config
 │                   share [--status | --enable PARTS | --disable PARTS]   — memory, skills,
 │                                agents, commands, claude_md shared across accounts
-├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]
+├── team            on · status · focus <text> · role <name> · log [-n N]
 │                   spawn <role> [--exec] [--probe/--no-probe] [--refresh]
 │                                 [--effort LEVEL] · harness
 │                   bind <role> [--bin CMD] [--env KEY=VALUE]… [--arg A]…
@@ -111,7 +111,7 @@ aisquare
 │                   check <brief> [--source-root PATH]   exit 1 until every requirement is proven
 │                   (all with [--as SESSION]; a brief is its id, or B1 / 1 — docs/work-briefs.md)
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
-├── board [-w] [-i SECONDS] [-P PROJECT] · recall <query>
+├── board [-w] [-i SECONDS] [-P PROJECT]
 ├── launch <role> [--command CMD] [--env KEY=VALUE]… [--account SLOT] [… agent args]
 │                   role = planner|coder|runner|validator, a fleet role (manager,
 │                   tester, reviewer, ui-tester), a numbered seat (coder1), or any role you

@@ -1062,7 +1062,7 @@ _HANDOFF_FLAGS = [
 #: the stub machine reaches the happy summary and the closing prompt.
 _DOCTOR_PAYLOAD = (
     '[{"name": "home", "status": "ok", "detail": "ok", "fix": null},'
-    '{"name": "brain", "status": "warn", "detail": "gbrain not found", "fix": "optional"}]'
+    '{"name": "brain", "status": "warn", "detail": "no brain CLI found", "fix": "optional"}]'
 )
 
 
@@ -1300,7 +1300,9 @@ def test_the_short_circuit_fires_for_a_current_no_project_machine(
     assert "Nothing to do" in result.stdout, (
         f"a fully current --no-project machine must short-circuit:\n{result.stdout}"
     )
-    assert "except brain (gbrain is out of scope)" in result.stdout, result.stdout
+    assert "except brain (this release's rows for what the next one removes)" in result.stdout, (
+        result.stdout
+    )
     offered = (
         "optional: the Chrome DevTools MCP for browser tools: Node 22.12+ (--no-agent: not"
         " registered with Claude Code) — rerun with --with chrome-devtools"
@@ -1861,9 +1863,17 @@ def test_a_chosen_extra_that_is_not_there_is_work_for_the_short_circuit(
     assert said.strip().splitlines()[-1] == expected, said
 
 
-#: The installed release's rows for the codebase snapshot (`RELEASE_ERA_AMBER`), named
-#: here with spaces; the script is given them one per line, as `doctor_amber` lists them.
-_RELEASE_ROWS = ("brain repomix", "brain snapshot", "brain tiktoken", "brain repomix snapshot")
+#: The installed release's rows for what the next one removes (`RELEASE_ERA_AMBER`), named
+#: here with spaces, in the script's own order; it is given them one per line, as
+#: `doctor_amber` lists them.
+_RELEASE_ROWS = (
+    "brain",
+    "repomix",
+    "brain repomix",
+    "brain snapshot",
+    "brain tiktoken",
+    "brain repomix snapshot",
+)
 
 
 @pytest.mark.parametrize("amber", _RELEASE_ROWS)
@@ -1880,12 +1890,13 @@ _RELEASE_ROWS = ("brain repomix", "brain snapshot", "brain tiktoken", "brain rep
     ],
     ids=["default", "no-system-deps", "no-project", "no-system-deps-no-project", "pinned-0.8.2"],
 )
-def test_the_installed_releases_snapshot_rows_are_expected(
+def test_the_installed_releases_removed_rows_are_expected(
     tmp_path: Path, amber: str, flags: str
 ) -> None:
     """install.sh installs the latest RELEASE, and up to 0.8.2 its doctor has `repomix`
     (amber with a Node below 22, which this script no longer upgrades unasked, or no
-    npm), `snapshot` (0.8.2, with no project or no Node to pack with) and `tiktoken`.
+    npm), `snapshot` (0.8.2, with no project or no Node to pack with) and `tiktoken`;
+    up to 0.9.0 it has `brain`, amber on a machine with no brain CLI.
     Review of #399, MAJOR 1: `--yes` on Debian 12's own Node 18 exited 2 on `repomix`.
     They are expected, under every flag and for a pin below 0.9.0 even once 0.9.0 is the
     latest, and the summary says why in one line."""
@@ -1895,13 +1906,13 @@ def test_the_installed_releases_snapshot_rows_are_expected(
     assert "UNEXPECTED=0" in result.stdout, result.stdout
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"expected: {amber}" in result.stdout, result.stdout
-    era = "/".join(amber.split()[1:])
-    assert f"  {era} — this release's rows for the codebase snapshot," in result.stdout
+    era = "/".join(amber.split())
+    assert f"  {era} — this release's rows for what the next release" in result.stdout
     assert "Not expected" not in result.stdout
 
 
 @pytest.mark.parametrize("flags", ["", "WANT_SYSTEM_DEPS=0"], ids=["default", "no-system-deps"])
-def test_the_installed_releases_snapshot_rows_do_not_stop_the_short_circuit(
+def test_the_installed_releases_removed_rows_do_not_stop_the_short_circuit(
     tmp_path: Path, flags: str
 ) -> None:
     """A current machine whose release doctor shows them still has nothing to do, and
@@ -1910,9 +1921,8 @@ def test_the_installed_releases_snapshot_rows_do_not_stop_the_short_circuit(
 
     assert said.strip().splitlines()[-1] == "SHORT", said
     assert (
-        "except brain repomix snapshot (gbrain is out of scope; this release's"
-        " codebase-snapshot rows, gone in the next)"
-    ) in said
+        "except brain repomix snapshot (this release's rows for what the next one removes)" in said
+    )
 
 
 def test_the_plan_names_an_extra_only_as_it_will_happen(tmp_path: Path) -> None:
@@ -2557,10 +2567,9 @@ def test_the_short_circuit_reason_names_only_the_checks_that_are_amber(
 ) -> None:
     """The bug 98b3626 fixed in `summary`, which was still live in `short_circuit`.
 
-    On a machine that HAS gbrain — reachable, since `brain` reports ok when
-    gbrain is installed and also when `AISQUARE_BRAIN=0` — a `--no-project` run
-    read "everything ok except snapshot (gbrain is out of scope)", blaming a
-    check that was perfectly fine. The same shape today, with the `gh` a
+    On a machine whose release has no `brain` row, a `--no-project` run read
+    "everything ok except snapshot (...)", blaming a check that was perfectly
+    fine for a reason that was not there. The same shape today, with the `gh` a
     `--no-system-deps` run skipped.
     """
     payload = (
@@ -2598,8 +2607,8 @@ def test_the_short_circuit_reason_names_only_the_checks_that_are_amber(
         path=f"{versions}:{cli}:{base_path(tmp_path)}",
     )
     assert "Nothing to do" in result.stdout, result.stdout
-    assert "gbrain" not in result.stdout, (
-        "the reason named gbrain while `brain` was green:\n" + result.stdout
+    assert "this release's rows" not in result.stdout, (
+        "the reason named a release's removed rows while none was amber:\n" + result.stdout
     )
     assert "except gh (system deps skipped)" in result.stdout, result.stdout
 
@@ -3132,7 +3141,7 @@ def _claude_code_doctor(status: str, detail: str) -> str:
     """A doctor payload with an amber brain and this claude-code row."""
     return json.dumps(
         [
-            {"name": "brain", "status": "warn", "detail": "gbrain not found", "fix": "x"},
+            {"name": "brain", "status": "warn", "detail": "no brain CLI found", "fix": "x"},
             {"name": "claude-code", "status": status, "detail": detail, "fix": "y"},
         ]
     )
@@ -3155,9 +3164,11 @@ _REFUSED = _claude_code_doctor(
 )
 _LEFT_ALONE = (
     "doctor: everything ok except brain claude-code "
-    "(gbrain is out of scope; Claude Code left alone (--no-agent))"
+    "(Claude Code left alone (--no-agent); this release's rows for what the next one removes)"
 )
-_ONLY_BRAIN = "doctor: everything ok except brain (gbrain is out of scope)"
+_ONLY_BRAIN = (
+    "doctor: everything ok except brain (this release's rows for what the next one removes)"
+)
 
 
 @pytest.mark.parametrize(

@@ -30,7 +30,6 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import brain as brain_core
 from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetSettings
@@ -909,14 +908,13 @@ def test_real_tmux_reports_available_and_sees_a_pane_come_and_go(
 def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two directories, one process: ``cwd`` decides which project the three checks describe."""
+    """Two directories, one process: ``cwd`` decides which project the project-scoped checks
+    describe."""
     here = tmp_path / "here"
     there = tmp_path / "there"
     here.mkdir()
     there.mkdir()
     monkeypatch.chdir(here)
-    monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
-    monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
     # Activate the orchestrator in `there` only, with an off-ladder live session.
     monkeypatch.setenv("AISQUARE_ROLE", "runner")
     add_project(there)  # a role session joins a board only where the project was added
@@ -927,11 +925,8 @@ def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(
 
     assert there_rows["agent harness"].status is CheckStatus.warn
     assert "off-ladder" in there_rows["agent harness"].detail
-    assert there_rows["brain"].status is CheckStatus.warn
-    assert "not initialised" in there_rows["brain"].detail
     # The control: the process cwd is a different, never-activated project.
     assert here_rows["agent harness"].detail == "not activated for this project"
-    assert "orchestrator not active here" in here_rows["brain"].detail
 
 
 def test_doctor_without_cwd_means_the_process_cwd(
@@ -1030,7 +1025,7 @@ def test_cli_doctor_emits_the_fleet_rows_in_text_and_json(runner: CliRunner) -> 
         assert name in names, names
         assert f" {name}: " in text, text
     assert names.index("claude-code") < names.index("tmux") < names.index("gh")
-    assert names.index("brain") < names.index("fleet") < names.index("explainability")
+    assert names.index("fleet") < names.index("explainability")
 
 
 def test_a_healthy_machine_yields_no_fleet_warning(runner: CliRunner) -> None:
@@ -1277,12 +1272,12 @@ def test_the_fleet_terminal_row_never_starts_a_server_and_survives_an_unknown_te
 def test_the_fleet_terminal_row_comes_after_the_actionable_checks() -> None:
     """It can warn (a server's kept prefix), and the not-ok rows are read in doctor
     order (the fleet sidebar showed only the first three): inserted beside
-    tmux, as #147 had it, that warning evicted one of brain / a logged-out
-    gh — the rows an operator can act on — from the one doctor
-    surface visible without a click. So it waits with browser tools."""
+    tmux, as #147 had it, that warning evicted a logged-out gh — a row an
+    operator can act on — from the one doctor surface visible without a click. So it waits
+    with browser tools."""
     names = [check.name for check in diagnostics.doctor()]
     terminal = names.index("fleet terminal")
-    for actionable in ("gh", "brain", "fleet"):
+    for actionable in ("gh", "fleet"):
         assert names.index(actionable) < terminal, (actionable, names)
     assert names.index("browser tools") < terminal, names
 

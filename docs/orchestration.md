@@ -271,26 +271,6 @@ column, the one above the detail, the one between the sessions and the tasks —
 a double-click puts it back. The sizes are kept in `~/.aisquare/state.json`, one
 for every project's board, and come back at the next launch.
 
-### Long-term memory (optional, via gbrain)
-
-Durable events — decisions, results, task outcomes, reopen feedback —
-distill into a per-project brain by a detached worker, never on the hot
-path. `aisquare recall "what did we decide about auth?"` searches it across
-sessions and weeks; `aisquare team distill --all` backfills; `aisquare
-doctor` reports brain health.
-
-This layer needs the AISquare **gbrain** CLI on `PATH` (a separate,
-optional tool — *not* the unrelated `gbrain` package on public npm) and is
-silently skipped when absent. Everything else works without it.
-
-**Semantic recall**: embeddings are off by default (no surprise network
-calls). Export `AISQUARE_BRAIN_EMBED=1` plus an `OPENAI_API_KEY` **before
-the first distill** and `recall` becomes hybrid vector + keyword search. The
-embedding schema is fixed at brain creation — to upgrade an existing brain,
-remove `~/.aisquare/projects/<id>/brain` and re-run
-`AISQUARE_BRAIN_EMBED=1 aisquare team distill --all`. `doctor` flags
-knob-vs-schema mismatches in both directions.
-
 ### Remote agents over MCP (`aisquare serve`)
 
 The same board, tasks, and notes — exposed as an MCP server so Claude
@@ -448,9 +428,6 @@ Orchestration has no config files — a handful of env knobs:
 | `AISQUARE_EFFORT` | base effort for spawned roles (default `high`, else inherits `CLAUDE_EFFORT`) |
 | `AISQUARE_EFFORT_<ROLE>` | pin one role's effort absolutely (skips the role offset) |
 | `AISQUARE_HARNESS_PROBE=0` | never probe model availability (ladders resolve optimistically) |
-| `AISQUARE_BRAIN=0` | disable the long-term-memory layer |
-| `AISQUARE_BRAIN_EMBED=1` | embed distilled pages for semantic recall (needs `OPENAI_API_KEY`; set before the first distill) |
-| `AISQUARE_BRAIN_EMBED_MODEL` | embedding model (default `openai:text-embedding-3-large`) |
 | `AISQUARE_HOME` | relocate the whole `~/.aisquare` tree |
 
 ### Several accounts, one team

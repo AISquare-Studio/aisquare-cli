@@ -16,7 +16,6 @@ from pathlib import Path, PurePath
 from urllib.parse import urlsplit
 
 from aisquare.core import agents as agent_core
-from aisquare.core import brain as brain_core
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import (
     claude_sharing,
@@ -63,7 +62,6 @@ from aisquare.services import (
 )
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import credits as credits_service
-from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
@@ -131,8 +129,8 @@ def doctor(
     explainability gateway round-trip). Everything else stays offline, so a
     plain ``aisquare doctor`` still answers on a train.
 
-    ``cwd`` is the directory whose PROJECT the project-scoped checks (brain,
-    harness, self-invocation) report on; ``None`` is the process cwd, which is
+    ``cwd`` is the directory whose PROJECT the project-scoped checks (harness,
+    self-invocation) report on; ``None`` is the process cwd, which is
     what the CLI means. The fleet UI hosts many projects in one process and
     must not ``os.chdir`` (docs/plans/fleet-tui.md §5.6), so it passes the
     selected project's root here and gets that project's report in-process.
@@ -159,7 +157,6 @@ def doctor(
         _check_gh(),
         # Never warns, so it moves no actionable row out of the sidebar's first three.
         _check_code_index(cwd),
-        _check_brain(cwd),
         _check_harness(cwd),
         _check_self_invocation(cwd),
         _check_fleet(),
@@ -169,11 +166,11 @@ def doctor(
         *_check_captured_projects(),
         # After the actionable machine checks on purpose. The fleet UI's sidebar
         # showed the first three not-ok rows (a stable sort within the warn
-        # group), so a row inserted at position 12 evicted one of `brain` /
-        # a logged-out `gh` — the ones an operator can act on — from
-        # what was seen first; the Doctor page still lists them in this order. The
-        # fleet terminal row (#147) can warn too, about a running server's kept
-        # prefix, so it waits here with them rather than beside tmux.
+        # group), so a row inserted at position 12 evicted a logged-out `gh`
+        # — one an operator can act on — from what was seen first; the Doctor
+        # page still lists them in this order. The fleet terminal row (#147) can
+        # warn too, about a running server's kept prefix, so it waits here with
+        # them rather than beside tmux.
         _check_browser_tools(cwd),
         *_check_role_tools(),
         _check_fleet_terminal(),
@@ -2974,68 +2971,6 @@ def _check_code_index(cwd: Path | None = None) -> DoctorCheck:
     if building:
         detail += "; a refresh is running"
     return _ok(name, detail)
-
-
-def _check_brain(cwd: Path | None = None) -> DoctorCheck:
-    """The team's long-term memory: gbrain presence, brain state, distill lag.
-
-    ``cwd`` picks the project the way the team hooks do (``team_project``);
-    ``None`` is the process cwd.
-    """
-    absent = _uncreated_home("brain")
-    if absent is not None:
-        return absent
-    if not brain_core.brain_enabled():
-        return _ok("brain", "brain layer disabled (AISQUARE_BRAIN=0)")
-    version = brain_core.gbrain_version()
-    if version is None:
-        return _warn(
-            "brain",
-            "gbrain not found — team decisions/results are not distilled",
-            "Optional: install the AISquare gbrain CLI to enable long-term memory "
-            "(not the unrelated 'gbrain' on public npm)",
-        )
-    try:
-        project = orchestrator.team_project(cwd)
-        with store_session() as store:
-            if not store.team_active(project.id):
-                return _ok("brain", f"gbrain {version} ready (orchestrator not active here)")
-            lag = distill_service.pending(store, project.id)
-    except Exception as exc:  # diagnostics must never crash
-        return _warn("brain", f"could not check the brain: {exc}", "Try: aisquare team distill")
-    if not brain_core.brain_ready(project.id):
-        return _warn(
-            "brain",
-            f"gbrain {version} found but this project's brain is not initialised",
-            "It initialises on the first distill: aisquare team distill",
-        )
-    # The embedding schema is fixed at create time, and the knob lives in
-    # per-shell env (never persisted), so BOTH mismatch directions are real and
-    # invisible without a signal. Surface either rather than reporting healthy.
-    knob = brain_core.embeddings_enabled()
-    embeds = brain_core.brain_embeds(project.id)
-    if knob and not embeds:
-        return _warn(
-            "brain",
-            f"gbrain {version}, brain ready — but it was created WITHOUT embeddings, "
-            "so AISQUARE_BRAIN_EMBED has no effect here (recall stays keyword-only)",
-            "Rebuild embedding-capable: remove ~/.aisquare/projects/<id>/brain, then "
-            "AISQUARE_BRAIN_EMBED=1 aisquare team distill --all",
-        )
-    if embeds and not knob:
-        return _warn(
-            "brain",
-            f"gbrain {version}, brain has embeddings but AISQUARE_BRAIN_EMBED is off — "
-            "recall stays keyword-only and new pages are distilled without vectors",
-            "Export AISQUARE_BRAIN_EMBED=1 (and OPENAI_API_KEY) in the shells that run "
-            "aisquare, or add them to your shell profile",
-        )
-    embed = " (embeddings on)" if embeds else ""
-    if lag > 0:
-        return _ok(
-            "brain", f"gbrain {version}, brain ready{embed} ({lag} pipe events awaiting distill)"
-        )
-    return _ok("brain", f"gbrain {version}, brain ready and fully distilled{embed}")
 
 
 def _captain_check() -> DoctorCheck | None:

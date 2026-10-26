@@ -162,9 +162,11 @@ def _lock(home: Path, *, wait_s: float) -> Iterator[bool]:
 
 def held_content(project_id: str) -> bool:
     """Whether this project has a brain to clear: anything in its folder but the lock file,
-    which :func:`clear` leaves in place."""
+    which :func:`clear` leaves in place. A folder that is a symbolic link holds none that
+    :func:`clear` would clear: it is refused, not followed, so the plan does not count it."""
+    home = brain_home(project_id)
     try:
-        return any(entry.name != LOCK_NAME for entry in brain_home(project_id).iterdir())
+        return not home.is_symlink() and any(entry.name != LOCK_NAME for entry in home.iterdir())
     except OSError:  # no folder, or one that cannot be read: nothing known to clear
         return False
 

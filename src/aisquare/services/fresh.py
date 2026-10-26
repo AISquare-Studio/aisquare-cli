@@ -587,8 +587,12 @@ def _manager_dir(project_id: str) -> Path:
 
 
 def _files(root: Path) -> int:
-    """How many files ``root`` holds, at any depth; 0 for none, or one that cannot be read."""
+    """How many files ``root`` holds, at any depth; 0 for none, one that cannot be read, or a
+    symbolic link, which a reset keeps rather than follows (:func:`_clear_on_disk`): the plan
+    counts what the report will say went."""
     try:
+        if root.is_symlink():
+            return 0
         return sum(1 for path in root.rglob("*") if path.is_file())
     except OSError:
         return 0

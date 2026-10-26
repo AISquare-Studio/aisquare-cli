@@ -1866,8 +1866,10 @@ def test_a_symlinked_folder_is_kept_with_a_reason_a_person_can_read(
     manager.parent.mkdir(parents=True, exist_ok=True)
     manager.symlink_to(elsewhere, target_is_directory=True)
 
+    planned = fresh_service.plan(alpha)
     report = fresh_service.start_fresh(alpha)
 
+    assert planned.counts.manager_state == report.cleared.manager_state == 0
     assert [(kept.path, kept.reason) for kept in report.kept] == [
         (manager, "could not be removed: it is a symbolic link, not followed")
     ]
@@ -1902,8 +1904,12 @@ def test_a_symlinked_brain_and_evidence_folder_are_kept_and_what_they_point_at_i
         link.parent.mkdir(parents=True, exist_ok=True)
         link.symlink_to(target, target_is_directory=True)
 
+    planned = fresh_service.plan(alpha, memory=True)
     report = fresh_service.start_fresh(alpha, memory=True)
 
+    # --dry-run counted the files behind the link as cleared, and the run kept them all.
+    assert (planned.counts.brain, planned.counts.evidence) == (0, 0)
+    assert (report.cleared.brain, report.cleared.evidence) == (0, 0)
     reason = "could not be removed: it is a symbolic link, not followed"
     assert sorted((kept.path, kept.reason) for kept in report.kept) == sorted(
         (link, reason) for link in links

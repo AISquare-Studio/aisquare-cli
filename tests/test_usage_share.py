@@ -721,12 +721,12 @@ def test_off_it_costs_a_command_next_to_nothing(
         sharing, "_spawn", lambda: pytest.fail("a shipper started with sharing off")
     )
     sharing.start_background_ship(NOW)  # warm the config cache
-    began = time.perf_counter()
+    began = time.process_time()  # CPU time: a wall budget measures the machine's load
     for _ in range(200):
         sharing.start_background_ship(NOW)
-    per_call = (time.perf_counter() - began) / 200
+    per_call = (time.process_time() - began) / 200
 
-    assert per_call < 0.005, f"{per_call * 1e6:.0f} µs a command"
+    assert per_call < 0.005, f"{per_call * 1e6:.0f} µs of CPU a command"
 
 
 # --- the commands ----------

@@ -937,11 +937,13 @@ def test_recording_a_use_is_a_few_microseconds_not_a_database_open() -> None:
     import time
 
     paths.ensure_home()
-    began = time.perf_counter()
+    # CPU time, not the wall clock: on a machine running other agents (or a CI runner) a wall
+    # budget measures the load, and this one failed under a load average of 100.
+    began = time.process_time()
     for _ in range(200):
         feature_use.record("cli.metrics.stats")
-    per_call = (time.perf_counter() - began) / 200
-    assert per_call < 0.005, f"{per_call * 1e6:.0f} µs a use"
+    per_call = (time.process_time() - began) / 200
+    assert per_call < 0.005, f"{per_call * 1e6:.0f} µs of CPU a use"
     assert os.path.getsize(paths.feature_use_path()) < 20_000
 
 

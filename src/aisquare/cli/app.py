@@ -9,7 +9,7 @@ the same refusal is one JSON object, because there stdout belongs to a program.
 from __future__ import annotations
 
 import json
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -41,7 +41,8 @@ from aisquare.cli import (
 )
 from aisquare.cli import config as config_cli
 from aisquare.cli import metrics as metrics_cli
-from aisquare.cli.global_flags import GlobalFlagsGroup
+from aisquare.cli.global_flags import DISPATCHED_WORDS, GlobalFlagsGroup
+from aisquare.core import feature_use
 from aisquare.core.state import RuntimeState, get_state, set_state
 from aisquare.core.version import __version__
 
@@ -109,6 +110,51 @@ def main_callback(
     ctx.obj = state
     if ctx.invoked_subcommand is None:
         _no_arguments(ctx)
+    else:
+        _count_command(ctx)
+
+
+#: Commands that tools run for the user, on every prompt or for the life of a session: what
+#: they do is not a choice of the user's, so they are not counted as features used. And
+#: ``uninstall``, whose plan must change no file of the home and whose purge removes it.
+_NOT_FEATURES = frozenset({"hook", "serve", "inject", "uninstall"})
+
+
+def command_path(ctx: typer.Context) -> str | None:
+    """The command being run as ``cli.<group>.<verb>``, built from the NAMES of the commands
+    it resolves to and nothing the user typed: a word counts only when it names a subcommand
+    of the group before it, and the walk stops at the first one that does not (an argument,
+    or an option's value). ``None`` for a command that is not a feature (:data:`_NOT_FEATURES`).
+    """
+    name = ctx.invoked_subcommand
+    if name is None or name in _NOT_FEATURES:
+        return None
+    names = [name]
+    # Duck-typed: Typer 0.27's groups are not click's ``Group``.
+    command: Any = (
+        ctx.command.get_command(ctx, name) if hasattr(ctx.command, "get_command") else None
+    )
+    rest = list(ctx.meta.get(DISPATCHED_WORDS, []))[1:]  # the first word is `name`
+    while hasattr(command, "get_command"):
+        words = [word for word in rest if not word.startswith("-")]
+        child = command.get_command(ctx, words[0]) if words else None
+        if child is None:
+            break
+        names.append(child.name or words[0])
+        rest = rest[rest.index(words[0]) + 1 :]
+        command = child
+    return "cli." + ".".join(names)
+
+
+def _count_command(ctx: typer.Context) -> None:
+    """Count this command in the local feature counters: an append to a spool file, failing
+    open (``core.feature_use``)."""
+    try:
+        path = command_path(ctx)
+        if path is not None:
+            feature_use.record(path)
+    except Exception:  # a counter never costs a command
+        return
 
 
 def _no_arguments(ctx: typer.Context) -> None:

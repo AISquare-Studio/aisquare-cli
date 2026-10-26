@@ -1,0 +1,117 @@
+"""``aisquare metrics stats`` as text: the same model the Usage & stats page draws."""
+
+from __future__ import annotations
+
+from rich.table import Table
+from rich.text import Text
+
+from aisquare.cli import usage_format as fmt
+from aisquare.core.console import stdout_console
+from aisquare.models import UsageStats
+
+
+def _head(text: str) -> Text:
+    return Text(text, style="bold")
+
+
+def emit_usage_stats(stats: UsageStats) -> None:
+    console = stdout_console()
+    label = fmt.RANGE_LABELS[stats.range]
+    if not stats.turns:
+        console.print(
+            f"No usage recorded for {label.lower()} yet. Claude Code's transcripts are read "
+            "by `aisquare metrics backfill`, and each Stop hook adds its turn."
+        )
+        return
+    span = f"{stats.since} → {stats.until}" if stats.since != stats.until else stats.until
+    console.print(_head(f"Usage — {label}  ({span})"))
+    kpi = Table(show_header=False, box=None, pad_edge=False)
+    kpi.add_column(style="dim")
+    kpi.add_column(justify="right")
+    tokens = stats.tokens
+    kpi.add_row("tokens (total)", f"{tokens.total:,}")
+    kpi.add_row("  input + output", f"{tokens.input_output:,}")
+    kpi.add_row("  input", f"{tokens.input:,}")
+    kpi.add_row("  output", f"{tokens.output:,}")
+    kpi.add_row("  cache write", f"{tokens.cache_write:,}")
+    kpi.add_row("  cache read", f"{tokens.cache_read:,}")
+    kpi.add_row("list-price cost", fmt.money(stats.cost_usd))
+    kpi.add_row("sessions", f"{stats.sessions:,}")
+    kpi.add_row("turns", f"{stats.turns:,}")
+    kpi.add_row("active days", f"{stats.active_days:,}")
+    console.print(kpi)
+    if len(stats.days) > 1:
+        peak = max(day.tokens.total for day in stats.days)
+        console.print(_head("\nPer day (tokens)"))
+        for day in stats.days[-31:]:
+            console.print(
+                f"{fmt.short_date(day.date):<11} {fmt.bar(day.tokens.total, peak, 30):<31}"
+                f" {fmt.tokens(day.tokens.total):>7}"
+            )
+    if stats.busiest_days:
+        console.print(_head("\nBusiest days"))
+        for day in stats.busiest_days:
+            console.print(
+                f"{fmt.short_date(day.date):<11} {fmt.tokens(day.tokens.total):>7}"
+                f"  {day.turns} turns · {day.sessions} sessions"
+            )
+    weekdays = " ".join(f"{n}:{c}" for n, c in zip(fmt.WEEKDAYS, stats.by_weekday, strict=True))
+    console.print(_head("\nWhen (turns)"))
+    console.print(f"by weekday   {fmt.spark(stats.by_weekday)}  {weekdays}")
+    console.print(f"by hour       {fmt.spark(stats.by_hour)}  (0h → 23h)")
+    _repos(stats)
+    _accounts(stats)
+    if stats.models:
+        table = Table(title="Models", title_justify="left", box=None, pad_edge=False)
+        for column in ("model", "tokens", "share", "cost"):
+            table.add_column(column, justify="left" if column == "model" else "right")
+        for model in stats.models:
+            cost = fmt.money(model.cost_usd) if model.priced else "unpriced"
+            table.add_row(
+                model.model, fmt.tokens(model.tokens.total), fmt.percent(model.share), cost
+            )
+        console.print()
+        console.print(table)
+    if stats.features:
+        console.print(_head("\nTop features"))
+        for feature in stats.features:
+            console.print(f"{feature.name:<34} {feature.count:>6,}")
+    if stats.unpriced_models:
+        console.print(
+            f"\n⚠ no list price for {', '.join(stats.unpriced_models)}: in the token totals, "
+            "not in the cost"
+        )
+    console.print(Text(f"\ncost at list prices as of {stats.prices_as_of}", style="dim"))
+
+
+def _repos(stats: UsageStats) -> None:
+    repos = stats.repos
+    table = Table(
+        title=f"Repositories ({repos.active} active)", title_justify="left", box=None,
+        pad_edge=False,
+    )  # fmt: skip
+    for column in ("repository", "tokens", "sessions", "last active"):
+        table.add_column(column, justify="left" if column == "repository" else "right")
+    for row in repos.rows:
+        table.add_row(
+            row.name, fmt.tokens(row.tokens.total), str(row.sessions), row.last_active or ""
+        )
+    stdout_console().print()
+    stdout_console().print(table)
+
+
+def _accounts(stats: UsageStats) -> None:
+    accounts = stats.accounts
+    kinds = ", ".join(f"{n} {kind}" for kind, n in accounts.by_type.items()) or "none"
+    table = Table(
+        title=f"Accounts ({accounts.active} of {accounts.registered} active: {kinds})",
+        title_justify="left", box=None, pad_edge=False,
+    )  # fmt: skip
+    for column in ("account", "plan", "tokens", "share"):
+        table.add_column(column, justify="left" if column in ("account", "plan") else "right")
+    for row in accounts.rows:
+        table.add_row(
+            row.label, row.subscription, fmt.tokens(row.tokens.total), fmt.percent(row.share)
+        )
+    stdout_console().print()
+    stdout_console().print(table)

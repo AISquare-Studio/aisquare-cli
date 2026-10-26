@@ -942,17 +942,13 @@ def doctor(
         ),
     ] = None,
 ) -> None:
-    """Check the tracing setup and suggest fixes: the section `aisquare doctor` used to carry.
-
-    ``--project`` resolves the key for one project, its own key (#141) first, as ``launch``
-    does. Without it the check reads the machine's key and opens no store. With ``--live``
-    that is the check that puts a project's key to the gateway: ``use`` names it once
-    tracing is on, and ``explainability status``, which it used to name, only probes the
-    proxy, so a revoked or wrong-workspace key passed it (review of #172, D2 round 2).
-
-    Exits 1 when a check fails, as `aisquare doctor` does. Nothing is a failure while
-    tracing is off: an unwired machine is not a broken one.
-    """
+    """Check the tracing setup and suggest fixes (the section `aisquare doctor` used to carry)."""
+    # --project resolves the key for one project, its own key (#141) first, as `launch` does.
+    # Without it the check reads the machine's key and opens no store. With --live that is the
+    # check that puts a project's key to the gateway: `use` names it once tracing is on, and
+    # `explainability status`, which it used to name, only probes the proxy, so a revoked or
+    # wrong-workspace key passed it (review of #172, D2 round 2). Exits 1 when a check fails,
+    # as `aisquare doctor` does; nothing fails while tracing is off.
     from aisquare.services import auto_mode  # lazy: the import cost of this group's commands
 
     project_id = project_for_ref(project).id if project is not None else None

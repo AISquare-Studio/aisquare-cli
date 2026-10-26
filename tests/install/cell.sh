@@ -245,9 +245,10 @@ if [ "$AGENT" = codex ]; then
         fail "the Chrome DevTools MCP is not in $CODEX_CONFIG after run 1 chose it with Codex installed"
     mcp_entry=$(codex mcp get chrome-devtools </dev/null 2>&1) ||
         fail "codex does not know the Chrome DevTools MCP after run 1: $mcp_entry"
-    printf '%s\n' "$mcp_entry" | grep -q 'command: npx' &&
-        printf '%s\n' "$mcp_entry" | grep -q 'chrome-devtools-mcp@latest' ||
-        fail "codex reads the Chrome DevTools MCP as something other than npx chrome-devtools-mcp@latest: $mcp_entry"
+    printf '%s\n' "$mcp_entry" | grep -q 'command: npx' ||
+        fail "codex reads the Chrome DevTools MCP as something other than npx: $mcp_entry"
+    printf '%s\n' "$mcp_entry" | grep -q 'args: chrome-devtools-mcp@latest' ||
+        fail "codex reads the Chrome DevTools MCP as something other than chrome-devtools-mcp@latest: $mcp_entry"
     head1 "codex mcp get: chrome-devtools is registered with Codex"
 fi
 

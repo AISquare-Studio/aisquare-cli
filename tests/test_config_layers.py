@@ -330,6 +330,8 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "auto_stop": True,
             "sources": {},
         },
+        # Opt-in usage sharing (docs/usage-telemetry.md): off, the default.
+        "sharing": {"enabled": False},
     }
     then = _overlay(_V1_DEFAULTS, changed)
     assert set(RETIRED_SECTIONS) <= set(then)

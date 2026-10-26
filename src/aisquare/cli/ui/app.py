@@ -150,6 +150,7 @@ from aisquare.models import (
     ProjectForgetReport,
     ProjectGroup,
     ProjectInfo,
+    ShipReport,
 )
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import diagnostics, install_route, project_groups
@@ -2975,7 +2976,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             box.refresh_status()
         # The answer is all this says. Whether the first shipment went is nothing a person is
         # told: sharing fails silently, and the days go whenever the server answers.
-        if event.worker.result is not None:  # a yes: a no returns nothing
+        if isinstance(event.worker.result, ShipReport):  # a yes: a no returns nothing
             self.notify("sharing is on: thank you", timeout=5, markup=False)
 
     def _usage_swept(self, event: Worker.StateChanged) -> None:

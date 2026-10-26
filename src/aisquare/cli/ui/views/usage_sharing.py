@@ -65,7 +65,7 @@ CONSENT_TEXT = (
 )
 
 
-def _answer(yes: bool) -> ShipReport | None:
+def _answer_the_sharing_question(yes: bool) -> ShipReport | None:
     """Record the answer to the question; on a yes, turn sharing on and send the first shipment."""
     if not yes:
         usage_share.record_consent("declined")
@@ -87,7 +87,7 @@ class Sharing:
     """Send if one is due (the shell's tick)."""
     preview: Callable[[], str] = usage_share.preview
     consent_due: Callable[[], bool] = usage_share.consent_due
-    answer: Callable[[bool], ShipReport | None] = _answer
+    answer: Callable[[bool], ShipReport | None] = _answer_the_sharing_question
 
 
 def status_text(status: SharingStatus) -> str:
@@ -153,12 +153,12 @@ class SharingBox(Vertical):
     def refresh_status(self) -> None:
         """Read where sharing stands, off the UI thread (a no-op while a switch is flipping)."""
         if not self.busy:
-            self._run("status")
+            self._flip_sharing("status")
 
-    def _run(self, action: str) -> None:
+    def _flip_sharing(self, action: str) -> None:
         sharing = self._sharing
 
-        def work() -> tuple[str, SharingStatus, ShipReport | None]:
+        def flip_sharing_job() -> tuple[str, SharingStatus, ShipReport | None]:
             if action == "enable":
                 sharing.enable()
                 report: ShipReport | None = sharing.ship()
@@ -170,7 +170,7 @@ class SharingBox(Vertical):
 
         self.query_one("#usage-share-toggle", Button).disabled = True
         self.run_worker(
-            work,
+            flip_sharing_job,
             name=SHARE_WORKER,
             group=SHARE_WORKER,
             thread=True,
@@ -178,7 +178,7 @@ class SharingBox(Vertical):
         )
 
     @on(Worker.StateChanged)
-    def _done(self, event: Worker.StateChanged) -> None:
+    def _share_worker_done(self, event: Worker.StateChanged) -> None:
         if event.worker.name != SHARE_WORKER:
             return
         status_line = self.query_one("#usage-share-status", Static)
@@ -209,7 +209,7 @@ class SharingBox(Vertical):
         event.stop()
         if self.status is None or self.busy:
             return
-        self._run("disable" if self.status.enabled else "enable")
+        self._flip_sharing("disable" if self.status.enabled else "enable")
 
     @on(Button.Pressed, "#usage-share-preview")
     def _preview(self, event: Button.Pressed) -> None:

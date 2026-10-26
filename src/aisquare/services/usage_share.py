@@ -29,9 +29,9 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import platform
 import re
-import secrets
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -192,7 +192,7 @@ def _digest(day: dict[str, Any]) -> str:
     ).hexdigest()
 
 
-def _stamp(moment: datetime) -> str:
+def _sent_at_stamp(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -228,7 +228,7 @@ def build_batches(
         identity = (
             (held.install_id, held.salt)
             if held.install_id and held.salt
-            else (PLACEHOLDER_ID, secrets.token_hex(32))
+            else (PLACEHOLDER_ID, os.urandom(32).hex())
         )
     install_id, salt = identity
     today = _local_today(moment, tz)
@@ -298,7 +298,7 @@ def _batch(moment: datetime, install_id: str, days: list[dict[str, Any]]) -> dic
     return {
         "schema_version": SCHEMA_VERSION,
         "install_id": install_id,
-        "sent_at": _stamp(moment),
+        "sent_at": _sent_at_stamp(moment),
         "opt_out": False,
         "client": client_info(),
         "days": list(days),
@@ -321,7 +321,7 @@ def ensure_identity() -> tuple[str, str]:
         if not state.install_id:
             state.install_id = str(uuid.uuid4())
         if not state.salt:
-            state.salt = secrets.token_hex(32)
+            state.salt = os.urandom(32).hex()
 
     state = sharing.update(mint)
     assert state.install_id is not None and state.salt is not None
@@ -333,7 +333,7 @@ def reset_identity() -> tuple[str, str]:
 
     def fresh(state: SharingState) -> None:
         state.install_id = str(uuid.uuid4())
-        state.salt = secrets.token_hex(32)
+        state.salt = os.urandom(32).hex()
         state.acked = {}
         state.settled_through = None
         state.since = datetime.now().astimezone().date().isoformat()  # not what went before
@@ -568,7 +568,7 @@ def disable(*, now: datetime | None = None, transport: Transport | None = None) 
     body = {
         "schema_version": SCHEMA_VERSION,
         "install_id": state.install_id,
-        "sent_at": _stamp(moment),
+        "sent_at": _sent_at_stamp(moment),
         "opt_out": True,
         "client": client_info(),
         "days": [],

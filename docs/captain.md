@@ -39,7 +39,7 @@ The captain ships **off**. While it is off:
 - `aisquare captain`, every subcommand (its `--help` included) and the Actions
   server's own entry (`python -m aisquare.services.captain`) exit 2 with one line
   saying how to turn it on. Only `aisquare captain --help` still prints, and exits 0.
-- The fleet UI (`asq`) shows no insignia, captain row or captain view, and starts
+- The fleet UI (`asq`) shows no *Start captain*, captain row or captain view, and starts
   no ui receiver: no socket, folder or thread.
 - `captain` is an unknown role to `aisquare launch` and `aisquare fleet spawn`, as
   on main.
@@ -61,8 +61,8 @@ fleet database and every Claude account's login data, which agents working there
 can read and change. Removing it from the fleet hides it again.
 
 Turn it on for this home in `asq`: *⚙ Settings ▸ Captain* (the box at the top of
-*App settings ▸ Agent settings*), tick *Captain (experimental)*. The ★ beside Fleet and the Captain section above the projects
-show at once, with no restart, and so does the captain's part of the sidebar's
+*App settings ▸ Agent settings*), tick *Captain (experimental)*. *▶ Start captain*, at the top of the
+sidebar under Fleet, shows at once, with no restart, and so does the captain's part of the sidebar's
 read and the receiver for its `ui` actions; untick, and they all go at once. From a
 shell, the same setting:
 
@@ -80,8 +80,10 @@ runs with the switch on even when the fleet's tmux server was started without
 it. Turning it off stops nothing that is already running. On, everything below
 holds exactly as written.
 
-With no captain running, the Captain section's *▶ Start captain* does what the
-dim ★ does: it opens the Spawn dialog with the captain chosen.
+With no captain running, *▶ Start captain* opens the Spawn dialog with the captain
+chosen. While the captain runs, its own row takes that place, and a click on it opens
+the captain's view. *＋ Spawn agent* sits right under them (it is there with the captain
+off, too).
 
 ## Setup, once
 
@@ -386,8 +388,8 @@ Three follow-ups are open:
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain's seats trace as their
   own projects.** A seat the captain spawns reads its own project's board (see
   the CHANGELOG), so its trace and its explainability key are its project's.
-  `aisquare explainability key set` and the Explainability tab in a shell with
-  the hub exported speak for the hub's project, and a key set there never
+  `aisquare explainability key set` and the other explainability commands in a shell
+  with the hub exported speak for the hub's project, and a key set there never
   reaches those seats. Set it for the seat's project with
   `aisquare explainability key set -P <project>`. Seats you spawn yourself follow
   the hub as before. Not fixed here: making one key cover both would change

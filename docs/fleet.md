@@ -128,9 +128,14 @@ tmux can see and its row says so (`no hooks`).
    the transcript when that is on disk (`fleet restart` below) — and the new row
    is shown if this view is still the one on screen. Both ignore a click in the
    second after they appear or move.
-   **`＋ spawn agent`** under a project opens the **Spawn dialog** for that
-   project, headed with its name and codename. It shows three fields: **role**
-   (`coder` preselected; first in the list *(none) — general-purpose Claude*, a
+   **`＋ Spawn agent`**, at the top of the sidebar under *Fleet* (one for the whole
+   list, not one per project), opens the **Spawn dialog**, headed with the project's
+   name and codename. Its first field is **project**: every listed project, in the
+   sidebar's order, preselected to the card or the agent's project you have selected,
+   else the first; changing it re-reads what depends on the project (git, a running
+   manager, teammates, tasks, personas, the prefilled label) and keeps what you typed
+   for the rest. With no project yet it says so and opens nothing. Under it come three
+   fields: **role** (`coder` preselected; first in the list *(none) — general-purpose Claude*, a
    plain Claude Code session with no standing cycle or mission, `fleet spawn
    agent` below; then the fleet's roles plus any role bound with `team bind`;
    `manager` is greyed out while one runs), **hand off from** (a teammate to
@@ -1346,7 +1351,7 @@ session is large — and a fleet agent's very first request is already the whole
 system prompt, tool schemas and skills (~140k tokens on a machine with several
 MCP connectors), so every tool call is refused with *"… is temporarily
 unavailable (server error), so auto mode cannot determine the safety of Bash"*
-while the chat itself keeps working. `aisquare doctor` says so (`explainability
+while the chat itself keeps working. `aisquare explainability doctor` says so (`explainability
 auto-mode`), the spawn receipt repeats it, and a session launched through the
 proxy that has been refused three times is put in 🔔 attention with one
 `auto_mode_blocked` board line (one that a restart or a switch is taking down
@@ -1790,7 +1795,7 @@ board (with its work briefs and their evidence) and fleet rows cleared (task and
 brief numbers start at #1 again), the manager's state file deleted, and a new
 blank manager started. The dialog reads the plan first and shows its counts,
 with three extras off by default that redraw it: *Project memory (context
-entries and brain)*, *Prompt log & metrics* and *Fleet git branches*. Work a
+entries)*, *Prompt log & metrics* and *Fleet git branches*. Work a
 tree or branch holds that no remote has is listed in a second dialog, *Discard
 and start fresh* or Cancel; a refused plan (a board another project's agents
 read) says why and cannot be confirmed. Cancel has the focus, and Esc cancels.

@@ -1497,8 +1497,7 @@ class FreshUnpushed(BaseModel):
 
 class FreshKept(BaseModel):
     """What a ``project fresh`` meant to remove and could not, with why: an agent's worktree,
-    a fleet branch, the briefs' evidence folder, the manager's state folder, or (with
-    ``--memory``) the project brain, which a running distill or recall keeps."""
+    a fleet branch, the briefs' evidence folder, or the manager's state folder."""
 
     path: Path | None = None
     branch: str | None = None
@@ -1529,8 +1528,6 @@ class FreshCounts(BaseModel):
     read back."""
     entries: int | None = None
     """``--memory``: the project's context entries."""
-    brain: int | None = None
-    """``--memory``: the project brain (``~/.aisquare/projects/<id>/brain``), 1 or 0."""
     prompts: int | None = None
     """``--prompts``: the prompt log."""
     metrics: int | None = None
@@ -1585,7 +1582,7 @@ class FreshReport(BaseModel):
     branches_deleted: list[str] = Field(default_factory=list)
     kept: list[FreshKept] = Field(default_factory=list)
     """What it could not remove (:class:`FreshKept`): trees, branches, the evidence folder,
-    the manager's state folder, the brain. The rows went all the same; a manager's state
+    the manager's state folder. The rows went all the same; a manager's state
     left in place withholds the new manager (:attr:`manager_error`)."""
     discarded: list[FreshUnpushed] = Field(default_factory=list)
     """The unpushed work it threw away, as asked: only what went (a tree removed, a branch

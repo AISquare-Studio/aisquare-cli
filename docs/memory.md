@@ -66,7 +66,7 @@ walking up to the nearest marker.
 Registrations accumulate — every directory a command once ran in is one, and
 the fleet UI loads state for all of them. `aisquare project forget` drops one
 (its context, prompt history and board rows stay in the store, hidden, until
-the root is registered again; `--purge` deletes them and its brain too), and
+the root is registered again; `--purge` deletes them and its data directory too), and
 `aisquare project prune` sweeps the stale ones: roots that no longer exist, and
 worktrees of a repository that is itself registered. It shows the plan and asks
 before dropping anything; off a terminal it is a dry run unless `--yes`. Both
@@ -93,15 +93,15 @@ settings and the symbol index (`~/.aisquare/projects/<id>/code`). It does not
 delete the command reports (`~/.aisquare/reports/`), but with their briefs gone
 they are no longer pinned as evidence (unless another board's brief cites one
 too): retention takes them as it takes any other
-([command reports](command-reports.md)). Its context entries and brain
-(`~/.aisquare/projects/<id>/brain`), prompt log and fleet branches stay unless
-`--memory`, `--prompts` or `--branches`; a brain a distill or a recall is
-running in is kept and said so. Work in a worktree or branch that no remote has
+([command reports](command-reports.md)). Its context entries, prompt log and
+fleet branches stay unless `--memory`, `--prompts` or `--branches`. A
+`~/.aisquare/projects/<id>/brain` folder, left by a release that still had the
+project brain, is never touched. Work in a worktree or branch that no remote has
 refuses it unless `--discard-unpushed`. `--dry-run` shows the plan.
 
 ```sh
 aisquare project fresh --dry-run              # what it would clear
-aisquare project fresh --memory --yes         # clear the entries and the brain too, without asking
+aisquare project fresh --memory --yes         # clear the context entries too, without asking
 ```
 
 `aisquare project onboard` adds a folder as a project on purpose and seeds its

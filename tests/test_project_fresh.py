@@ -36,8 +36,7 @@ from typer.core import TyperGroup
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import brain as brain_core
-from aisquare.core import locking, paths
+from aisquare.core import paths
 from aisquare.core.entries import new_entry
 from aisquare.core.ids import new_agent_id, new_event_id, new_task_id
 from aisquare.core.orchestrator import FLEET_AGENT_ENV_VAR, team_project
@@ -248,8 +247,8 @@ def test_a_reset_clears_the_board_and_fleet_and_keeps_memory_prompts_and_every_o
     assert [row[0] for row in after["fleet_agent"]] == [report.manager.id if report.manager else ""]
     assert {table: after[table] for table in _KEPT} == alpha_kept
     assert _rows(beta.id) == beta_before
-    # Its signals and its sessions' marks went; the distiller's watermark and every other
-    # key, beta's included, are as they were.
+    # Its signals and its sessions' marks went; the ``distill_seq`` a release with the brain
+    # left and every other key, beta's included, are as they were.
     gone = {key for key in alpha_keys if not key.startswith("distill_seq:")}
     assert _meta() == {k: v for k, v in meta_before.items() if k not in gone}
     assert report.cleared.model_dump() == {
@@ -263,7 +262,6 @@ def test_a_reset_clears_the_board_and_fleet_and_keeps_memory_prompts_and_every_o
         "evidence": 0,
         "manager_state": 0,
         "entries": None,
-        "brain": None,
         "prompts": None,
         "metrics": None,
         "branches": None,
@@ -494,7 +492,7 @@ def test_dry_run_prints_the_plan_and_changes_nothing(
     said = " ".join(result.output.split())
     assert "clears 3 tasks · 2 notes and events · 1 session · 3 signals and marks" in said
     assert "1 fleet agent · 0 worktrees · 0 briefs · 0 brief evidence files" in said
-    assert "0 manager state files · 1 context entry · 0 project brains" in said
+    assert "0 manager state files · 1 context entry" in said
     assert "keeps prompt log and metrics (--prompts), fleet branches (--branches)" in said
     as_json = runner.invoke(app, ["--json", "project", "fresh", "-P", "alpha-x", "--dry-run"])
     assert json.loads(as_json.stdout)["counts"]["tasks"] == 3
@@ -1566,7 +1564,7 @@ def test_a_store_error_in_the_confirming_read_keeps_the_partial_report(
     assert len(_rows(alpha.id)["team_task"]) == tasks and spawned == []
 
 
-# --- what 0.9.0 added to a project: briefs, the manager's state, the brain (#6) ------------
+# --- what 0.9.0 added to a project: briefs, the manager's state (#6) ----------------------
 
 
 def _briefs_with_evidence(
@@ -1683,113 +1681,42 @@ def test_a_manager_state_that_cannot_be_removed_starts_no_manager(
     assert state.exists() and report.cleared.tasks == 3
 
 
-def _brain(project: ProjectInfo) -> Path:
-    """A brain on disk, as gbrain leaves one (its PGLite marker)."""
-    home = brain_core.brain_home(project.id)
+def _leftover_brain(project: ProjectInfo) -> Path:
+    """A project brain folder as a release that still had gbrain left it."""
+    home = paths.project_data_dir(project.id) / "brain"
     marker = home / ".gbrain" / "brain.pglite" / "PG_VERSION"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text("16\n", encoding="utf-8")
+    (home / ".aisquare.lock").write_text("", encoding="utf-8")
     return home
 
 
-def test_memory_takes_the_project_brain_too_and_only_the_projects(
+def test_memory_clears_the_context_entries_and_leaves_a_leftover_brain_folder_alone(
     two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
     spawned: list[tuple[str, str, dict[str, Any]]],
     stops: Stops,
 ) -> None:
-    """The brain is the project's remembered context beside its entries: kept by default,
-    gone with --memory, counted; another project's brain is untouched."""
+    """The project brain is gone as a feature (rc/0.9.1's c002250b), and it deleted nothing on
+    disk: a ``projects/<id>/brain`` it left stays, with or without --memory, and is not
+    counted."""
     alpha, beta, _, _ = two
-    mine, theirs = _brain(alpha), _brain(beta)
+    mine, theirs = _leftover_brain(alpha), _leftover_brain(beta)
+    held = sorted(path.relative_to(mine) for path in mine.rglob("*"))
 
     kept = fresh_service.start_fresh(alpha)
-    assert kept.cleared.brain is None and mine.is_dir()
+    assert kept.cleared.entries is None and mine.is_dir()
 
     planned = fresh_service.plan(alpha, memory=True)
     report = fresh_service.start_fresh(alpha, memory=True)
 
-    assert planned.counts.brain == report.cleared.brain == 1
-    # Everything but the lock file goes; the lock file and the folder stay (on Windows the
-    # folder cannot go while the lock in it is open).
-    assert [entry.name for entry in mine.iterdir()] == [brain_core.LOCK_NAME]
-    assert not brain_core.brain_ready(alpha.id) and not brain_core.held_content(alpha.id)
-    assert theirs.is_dir() and brain_core.brain_ready(beta.id)
-    assert fresh_service.plan(alpha, memory=True).counts.brain == 0, "nothing left to clear"
-
-
-def test_a_brain_a_gbrain_run_holds_is_kept_not_torn(
-    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
-    spawned: list[tuple[str, str, dict[str, Any]]],
-) -> None:
-    """PGLite is single-process, and gbrain runs under aisquare's own lock on the brain: a
-    distill or a recall in it keeps it, named as kept, rather than deleted under it. The
-    board is cleared all the same."""
-    alpha, _, _, _ = two
-    home = _brain(alpha)
-
-    with locking.holding(home / ".aisquare.lock", wait_s=0):  # a distill is running
-        report = fresh_service.start_fresh(alpha, memory=True)
-
-    assert home.is_dir() and brain_core.brain_ready(alpha.id)
-    assert report.cleared.brain == 0 and report.cleared.tasks == 3
-    assert [(kept.path, kept.reason) for kept in report.kept] == [
-        (home, "a distill or a recall is running in it; kept as it is")
-    ]
+    assert planned.counts.entries == report.cleared.entries == 1
+    assert "brain" not in report.cleared.model_dump()
+    assert report.kept == []
+    assert sorted(path.relative_to(mine) for path in mine.rglob("*")) == held
+    assert theirs.is_dir() and (theirs / ".gbrain" / "brain.pglite" / "PG_VERSION").exists()
 
 
 # --- final review on #429 (#7) -------------------------------------------------------------
-
-
-def test_a_brain_lock_that_cannot_be_taken_is_not_read_as_busy(
-    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
-    spawned: list[tuple[str, str, dict[str, Any]]],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Any refusal of the brain's lock read as "a distill or a recall is running in it",
-    a lock file it could not open included. Only a lock another holder keeps is busy."""
-    alpha, _, _, _ = two
-    home = _brain(alpha)
-
-    def refused(path: Path, **_: Any) -> Any:
-        raise PermissionError(13, "Permission denied", str(path))
-
-    monkeypatch.setattr(brain_core, "holding", refused)
-
-    report = fresh_service.start_fresh(alpha, memory=True)
-
-    assert brain_core.brain_ready(alpha.id) and report.cleared.brain == 0
-    assert [(kept.path, kept.reason) for kept in report.kept] == [
-        (home, "could not be removed: Permission denied")
-    ]
-
-
-def test_a_brain_entry_that_cannot_be_removed_is_named_as_left_behind(
-    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
-    spawned: list[tuple[str, str, dict[str, Any]]],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The brain was moved aside and deleted with ``ignore_errors``: what failed to go stayed
-    as a ``.brain-cleared-*`` folder nobody was told of. Now nothing is moved, and every entry
-    left behind is named on the report."""
-    alpha, _, _, _ = two
-    home = _brain(alpha)
-    (home / "notes.md").write_text("a page\n", encoding="utf-8")
-    real = shutil.rmtree
-
-    def refuse(path: Any, *args: Any, **kwargs: Any) -> None:
-        if Path(path) == home / ".gbrain":
-            raise PermissionError(13, "Permission denied")
-        real(path, *args, **kwargs)
-
-    monkeypatch.setattr("aisquare.core.brain.shutil.rmtree", refuse)
-
-    report = fresh_service.start_fresh(alpha, memory=True)
-
-    assert not (home / "notes.md").exists() and (home / ".gbrain").is_dir()
-    assert [(kept.path, kept.reason) for kept in report.kept] == [
-        (home, "could not be removed: Permission denied; left behind: .gbrain")
-    ]
-    assert not list(home.parent.glob(".brain-cleared-*"))
 
 
 def test_a_withheld_manager_names_its_spawn_once(
@@ -1817,36 +1744,6 @@ def test_a_withheld_manager_names_its_spawn_once(
     assert result.exit_code == 1, result.output
     assert "remove it first — start one: aisquare fleet spawn --project alpha-x manager" in said
     assert said.count("fleet spawn") == 1
-
-
-@pytest.mark.skipif(
-    sys.platform == "win32" or os.geteuid() == 0, reason="POSIX permissions, and not as root"
-)
-def test_a_brain_part_of_which_cannot_be_deleted_is_reported_kept_not_cleared(
-    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
-    spawned: list[tuple[str, str, dict[str, Any]]],
-) -> None:
-    """tester-fresh-final's repro at 85209fb3: ``chmod 000`` on a folder inside the brain,
-    then a reset with --memory reported "1 project brain" cleared and exited 0, while the
-    files sat in ``projects/<id>/.brain-cleared-<pid>-<hex>/`` that nothing named. Nothing is
-    moved aside now; what could not go is named on the report, and none is counted cleared."""
-    alpha, _, _, _ = two
-    home = _brain(alpha)
-    locked = home / ".gbrain" / "brain.pglite" / "base"
-    locked.mkdir()
-    (locked / "1").write_text("a page of the database\n", encoding="utf-8")
-    locked.chmod(0)
-    try:
-        report = fresh_service.start_fresh(alpha, memory=True)
-    finally:
-        locked.chmod(0o755)
-
-    assert report.cleared.brain == 0
-    assert [kept.path for kept in report.kept] == [home]
-    assert report.kept[0].reason.endswith("left behind: .gbrain")
-    assert str(home) not in report.kept[0].reason, "the kept line names the folder once"
-    assert (locked / "1").exists()
-    assert not list(home.parent.glob(".brain-cleared-*"))
 
 
 @pytest.mark.skipif(not can_symlink(), reason="needs a symlink")
@@ -1882,42 +1779,34 @@ def test_a_symlinked_folder_is_kept_with_a_reason_a_person_can_read(
 
 
 @pytest.mark.skipif(not can_symlink(), reason="needs a symlink")
-def test_a_symlinked_brain_and_evidence_folder_are_kept_and_what_they_point_at_is_untouched(
+def test_a_symlinked_evidence_folder_is_kept_and_what_it_points_at_is_untouched(
     two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
     spawned: list[tuple[str, str, dict[str, Any]]],
     tmp_path: Path,
 ) -> None:
-    """A brain moved to a bigger disk and linked back is not the project's to empty:
-    reviewer-fresh-7 deleted ``brain.clear``'s ``is_symlink`` guard and no test failed, while
-    the link's target was left holding only the lock file. Both folders are kept with a
-    reason a person can read, the target's files are all there, and the board is cleared."""
+    """Evidence moved to a bigger disk and linked back is not the project's to empty. The
+    folder is kept with a reason a person can read, the target's files are all there, and the
+    board is cleared."""
     alpha, _, _, _ = two
     disk = tmp_path / "bigger-disk"
-    links = {
-        brain_core.brain_home(alpha.id): disk / "brain",
-        paths.aisquare_home() / "briefs" / alpha.id: disk / "evidence",
-    }
-    for link, target in links.items():
-        (target / "inside").mkdir(parents=True)
-        (target / "keep.txt").write_text("not the project's to delete\n", encoding="utf-8")
-        (target / "inside" / "page.md").write_text("a page\n", encoding="utf-8")
-        link.parent.mkdir(parents=True, exist_ok=True)
-        link.symlink_to(target, target_is_directory=True)
+    link, target = paths.aisquare_home() / "briefs" / alpha.id, disk / "evidence"
+    (target / "inside").mkdir(parents=True)
+    (target / "keep.txt").write_text("not the project's to delete\n", encoding="utf-8")
+    (target / "inside" / "page.md").write_text("a page\n", encoding="utf-8")
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target, target_is_directory=True)
 
     planned = fresh_service.plan(alpha, memory=True)
     report = fresh_service.start_fresh(alpha, memory=True)
 
     # --dry-run counted the files behind the link as cleared, and the run kept them all.
-    assert (planned.counts.brain, planned.counts.evidence) == (0, 0)
-    assert (report.cleared.brain, report.cleared.evidence) == (0, 0)
-    reason = "could not be removed: it is a symbolic link, not followed"
-    assert sorted((kept.path, kept.reason) for kept in report.kept) == sorted(
-        (link, reason) for link in links
-    )
-    assert report.cleared.brain == 0 and report.cleared.tasks == 3
-    for link, target in links.items():
-        assert link.is_symlink()
-        assert (target / "keep.txt").exists() and (target / "inside" / "page.md").exists()
+    assert planned.counts.evidence == report.cleared.evidence == 0
+    assert [(kept.path, kept.reason) for kept in report.kept] == [
+        (link, "could not be removed: it is a symbolic link, not followed")
+    ]
+    assert report.cleared.tasks == 3
+    assert link.is_symlink()
+    assert (target / "keep.txt").exists() and (target / "inside" / "page.md").exists()
 
 
 def test_the_before_limit_rows_of_the_project_go_with_its_signals_and_marks_and_no_others(

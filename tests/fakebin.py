@@ -1,9 +1,8 @@
 """Fake executables a test can put on PATH, findable on either platform.
 
-The PATHEXT lesson, in one place. Three fixtures learned it separately and the
-third learned it after the first had already been fixed:
+The PATHEXT lesson, in one place. Fixtures learned it separately and the
+later ones learned it after the first had already been fixed:
 
-* ``test_brain.py::fake_gbrain`` — the original, and the one that recorded why;
 * ``test_tmux.py::fake_bin`` — ``TmuxServer.binary()`` is ``shutil.which(...)``,
   so an extensionless file reported "tmux is not installed" about a file sitting
   right where the caller named it;

@@ -546,7 +546,7 @@ def test_no_gnu_only_regex_in_a_sed_expression() -> None:
     nothing else, so the amber list came back EMPTY on every Mac.
 
     Measured the first time this ran on `macos-latest`: `doctor: 17 checks, 0
-    not ok` on a machine with no gbrain installed. That is the worst outcome
+    not ok` on a machine whose release answered amber. That is the worst outcome
     this function has — an installer that calls every Mac perfectly healthy,
     never short-circuits, and can never surface an unexpected check, which is
     exactly what §3.8 exists to prevent. Two `-e` expressions have no

@@ -6,7 +6,7 @@ for a busy agent the whole fenced persona body and its guard sentence became an 
 ``note``: every OTHER session on the board read "Persona "skeptic" shapes how you work…"
 in its next prompt delta as if it were addressed to it, ``aisquare board`` printed it, a
 teammate starting on that board was briefed with the block although its own persona is
-none, and the distiller wrote it into the project brain as a fact. docs/personas.md and
+none. docs/personas.md and
 docs/plans/spawn-personas.md §3.1 say the opposite: the board gets one
 ``persona_attached`` line, with the name and never the body, and no factual surface
 carries persona text.
@@ -33,7 +33,6 @@ from aisquare.cli.app import app
 from aisquare.core import personas
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo, TeamEvent
-from aisquare.services import distill as distill_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from tests import test_fleet_service as fleet_suite
@@ -87,10 +86,6 @@ def _leaked(surface: str, project: ProjectInfo) -> list[str]:
 def test_a_busy_agent_gets_one_persona_attached_line_and_nothing_else_on_the_board(
     busy: FleetAgent, project: ProjectInfo, tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    drains: list[Path | None] = []
-    monkeypatch.setattr(
-        distill_service, "spawn_drain", lambda cwd=None, *, root=None: drains.append(root)
-    )
     before = len(_events(project))
 
     receipt = fleet_service.attach_persona(project, "coder-1", "skeptic")
@@ -100,7 +95,6 @@ def test_a_busy_agent_gets_one_persona_attached_line_and_nothing_else_on_the_boa
         ("persona_attached", LINE, "coder-1")
     ], "exactly one event, which names the persona — and no note beside it"
     assert _leaked("\n".join(event.text for event in written), project) == []
-    assert drains == [], "nothing went to the distiller: the brain learns no persona as a fact"
     assert tmux.typed == [], "never typed into a busy agent"
     assert (receipt.persona, receipt.delivered) == ("skeptic", "noted")
 

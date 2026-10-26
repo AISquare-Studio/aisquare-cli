@@ -249,7 +249,7 @@ def onboard(
 
 _PURGE_HELP = (
     "Also delete the project's context entries, prompt history, board rows, turn "
-    "metrics and brain. Without it they stay in the store, hidden, and come back if the "
+    "metrics and data directory. Without it they stay in the store, hidden, and come back if the "
     "root is registered again."
 )
 
@@ -385,7 +385,7 @@ def fresh(
         bool,
         typer.Option(
             "--memory",
-            help="Also clear its remembered context: context entries and the project brain.",
+            help="Also clear its remembered context: its context entries.",
         ),
     ] = False,
     prompts: Annotated[
@@ -424,7 +424,7 @@ def fresh(
     their kept evidence), the manager's state file and the fleet's rows are deleted;
     task and brief numbers start at #1 again. The checkout, every other branch, the
     registration and its settings, the symbol index and every other project are kept,
-    and so are its context entries and brain, prompt log and fleet branches unless
+    and so are its context entries, prompt log and fleet branches unless
     --memory, --prompts or --branches says otherwise. No command report is deleted,
     but with their briefs gone they are no longer pinned as evidence (unless another
     board's brief cites one), and normal retention takes them. Work its worktrees or
@@ -553,7 +553,7 @@ def _emit_fresh_plan(plan: FreshPlan, *, discard: bool) -> None:
     kept = [
         what
         for what, chosen in (
-            ("context entries and brain (--memory)", plan.memory),
+            ("context entries (--memory)", plan.memory),
             ("prompt log and metrics (--prompts)", plan.prompts),
             ("fleet branches (--branches)", plan.branches),
         )

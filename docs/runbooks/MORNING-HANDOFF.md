@@ -8,6 +8,11 @@ thing here that asks you to look at something outside this repo, and **the
 doctrine this integration holds to**, which is what to read before changing any
 of it. It assumes you have read none of the board.
 
+> **Since 0.9.1 the explainability section of `aisquare doctor` is its own command.** Where
+> this file says `doctor` for tracing's rows, `--live`, `--target`, `--project` or `--fix`,
+> run `aisquare explainability doctor`: `aisquare doctor` has no explainability row and takes
+> none of them. The measurements below are as they were taken.
+
 Why it is a file and not a board note: the handoff was a note for most of this
 shift, and notes scroll. Late in the shift the planner tried to retrieve the
 previous handoff and **could not** — `aisquare log` carries prompts, not notes,
@@ -88,7 +93,7 @@ forty lines.** Read the ones you need:
    `version`). Measured side by side on this box, same moment: **11 doctor rows
    with no provenance, against the train's 19 with five explainability rows —
    and both exit 0.** So neither the exit code nor `--version` distinguishes them,
-   and the check is: **if `aisquare doctor` shows you no `explainability` rows,
+   and the check is: **if `aisquare explainability doctor` shows you no `explainability` rows,
    you are not running this train.** §0 has the measurement; two sessions found
    it from opposite ends within an hour, one through doctor's row set and one
    because the feedback publisher fail-closed on `aisquare.core.redaction is not

@@ -167,7 +167,7 @@ CREATE INDEX team_event_project_seq ON team_event (project_id, seq);
 
 # v4: the review stage of the task lifecycle (coder → review → runner verifies)
 # — a CHECK constraint cannot be altered in SQLite, so the table is rebuilt —
-# and team_meta, small durable key/values (e.g. the distiller's watermark).
+# and team_meta, small durable key/values.
 _SCHEMA_V4 = """
 DROP INDEX team_task_project_status;
 ALTER TABLE team_task RENAME TO team_task_v3;
@@ -625,7 +625,7 @@ def _remove_old_packs() -> None:
 
     Only a directory named ``snapshot``, directly in a project's data directory, and
     only while it resolves to one inside ``projects/``: a symlink is never followed out
-    of the home, and ``brain/`` beside it is never touched. Best effort: what cannot be
+    of the home, and anything beside it is never touched. Best effort: what cannot be
     deleted stays, and the open goes on. ``RuntimeError`` too: on Python 3.11 and 3.12
     ``Path.resolve()`` raises it for a symlink loop, and a ``projects/`` that points at
     itself made every command a traceback (review of #399).
@@ -2584,12 +2584,11 @@ class SqliteStore:
         keyed; the metric rows are written even with the CI test bed off, and
         left behind they resurfaced in ``metrics list --all`` and in the
         project's own scope if its root was registered again. ``team_meta`` is a
-        key/value bag whose keys embed either the project id (the distiller's
-        watermark, signals) or a session id (nudge debounce, continuation
-        counters), so its rows are matched on both — in bounded statements, see
-        :meth:`_purge_team_meta`. LIVE fleet agents are the caller's problem to
-        refuse before getting here: this deletes their rows too, and a pane that
-        is still running would then be unaccounted for.
+        key/value bag whose keys embed either the project id (signals) or a session id
+        (nudge debounce, continuation counters), so its rows are matched on both — in
+        bounded statements, see :meth:`_purge_team_meta`. LIVE fleet agents are the
+        caller's problem to refuse before getting here: this deletes their rows too, and
+        a pane that is still running would then be unaccounted for.
 
         A key the CLI minted for the project (#142) is detached first, in the
         same transaction, and its revocation owed (:meth:`_owe_revocation`):
@@ -2675,9 +2674,8 @@ class SqliteStore:
         500 sessions.
         """
         removed = self._conn.execute(
-            "DELETE FROM team_meta WHERE key = ? OR key GLOB ? OR key GLOB ?",
+            "DELETE FROM team_meta WHERE key GLOB ? OR key GLOB ?",
             (
-                f"distill_seq:{project_id}",
                 f"signal/{_glob_escape(project_id)}/*",
                 # the processes that run this board's sessions (``services.mcp_host``)
                 f"host/{_glob_escape(project_id)}/*",
@@ -2701,8 +2699,8 @@ class SqliteStore:
         The ``ui_state`` rows the before-limit hand-over keeps per label
         (:data:`_FLEET_LABEL_STATE`) go with them, counted with the ``team_meta`` keys: the
         next fleet reuses a label (``coder-1``), and a stale "warned" row would hide its first
-        warning. The distiller's watermark stays: ``team_event.seq`` is one stream for every
-        board, so the next event is past it whatever went.
+        warning. A key no board owns stays, such as the ``distill_seq:<id>`` a release that still
+        had the project brain left.
 
         The ``host/<project id>/<pid>`` keys (``services.mcp_host``) stay too, on purpose.
         They name the Claude Code processes that run sessions, not board content, and the

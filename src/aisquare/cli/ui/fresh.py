@@ -42,7 +42,7 @@ PLAN_WORKER = "fresh-plan"
 """The dialog's read of what Start fresh would clear (``services.fresh.plan``)."""
 
 EXTRAS: tuple[tuple[str, str], ...] = (
-    ("fresh-memory", "Project memory (context entries and brain)"),
+    ("fresh-memory", "Project memory (context entries)"),
     ("fresh-prompts", "Prompt log & metrics"),
     ("fresh-branches", "Fleet git branches"),
 )
@@ -101,7 +101,6 @@ def narrowed(plan: FreshPlan, *, memory: bool, prompts: bool, branches: bool) ->
     counts = plan.counts.model_copy(
         update={
             "entries": plan.counts.entries if memory else None,
-            "brain": plan.counts.brain if memory else None,
             "prompts": plan.counts.prompts if prompts else None,
             "metrics": plan.counts.metrics if prompts else None,
             "branches": plan.counts.branches if branches else None,

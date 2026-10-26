@@ -1059,7 +1059,7 @@ def current_machine(machine: Machine) -> Machine:
     payload = (
         '[{"name": "home", "status": "ok", "detail": "ok", "fix": null},'
         '{"name": "snapshot", "status": "warn", "detail": "no snapshot", "fix": "onboard"},'
-        '{"name": "brain", "status": "warn", "detail": "gbrain not found", "fix": "optional"}]'
+        '{"name": "brain", "status": "warn", "detail": "no brain CLI found", "fix": "optional"}]'
     )
     _executable(
         machine.bin / "aisquare",

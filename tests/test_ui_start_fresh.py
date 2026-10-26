@@ -229,7 +229,7 @@ def test_the_dialog_shows_the_plan_and_each_extra_starts_off_and_changes_it(
     assert seen["focused"] == "fresh-cancel"
     assert seen["ticked"] == [False, False, False]
     assert seen["labels"] == [
-        "Project memory (context entries and brain)",
+        "Project memory (context entries)",
         "Prompt log & metrics",
         "Fleet git branches",
     ]
@@ -244,9 +244,7 @@ def test_the_dialog_shows_the_plan_and_each_extra_starts_off_and_changes_it(
     assert "command reports are unpinned, not deleted" in about
     assert "reports are kept" not in about
     assert "Also cleared: 1 context entry" in " ".join(str(seen["memory"]).split())
-    assert "1 context entry · 0 project brains · 1 prompt · 0 turn metrics" in " ".join(
-        str(seen["prompts"]).split()
-    )
+    assert "1 context entry · 1 prompt · 0 turn metrics" in " ".join(str(seen["prompts"]).split())
     assert "0 turn metrics · 0 fleet branches" in " ".join(str(seen["branches"]).split())
     off = " ".join(str(seen["memory off"]).split())
     assert "context entry" not in off and "Also cleared: 1 prompt" in off
@@ -290,9 +288,7 @@ def test_confirm_applies_with_the_extras_chosen_and_says_what_was_cleared(
     toasts = drive(go, notifications=True)
     assert applied == [{"memory": True, "prompts": False, "branches": False, "discard": ()}]
     assert "✓ alpha started fresh — cleared 2 tasks, 1 note or event" in toasts, toasts
-    assert "1 context entry, 0 project brains; a new manager started (session sess-new)" in (
-        toasts
-    ), toasts
+    assert "1 context entry; a new manager started (session sess-new)" in (toasts), toasts
     assert "manager manager" not in toasts
     board = _board("prj_a")
     assert board["team_task"] == board["team_event"] == board["entry"] == []

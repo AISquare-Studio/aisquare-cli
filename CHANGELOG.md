@@ -45,11 +45,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   they keep under `~/.aisquare/briefs/<id>/`) and fleet rows are deleted, with the
   manager's state (`~/.aisquare/projects/<id>/manager/state.md`), so the next task and
   brief are #1 again and the new manager does not read the old goal back (none is started
-  while that file cannot be removed). Its context entries and brain, prompt log and turn
+  while that file cannot be removed). Its context entries, prompt log and turn
   metrics and its local `fleet/<codename>/…` branches stay unless `--memory`, `--prompts`
-  or `--branches` says otherwise; a brain a distill or a recall is running in is kept and
-  named. The checkout, every other branch, the registration and its settings, the symbol
-  index, the captain and every other project are never touched. Nor are the command
+  or `--branches` says otherwise. The checkout, every other branch, the registration and
+  its settings, the symbol index, the captain and every other project are never touched,
+  nor is a `~/.aisquare/projects/<id>/brain` folder left by a release that still had the
+  project brain. Nor are the command
   reports, but once their briefs are gone none of them is pinned by them as evidence any
   more (a report another board's brief cites stays pinned): `asq reports prune`'s
   retention takes them as it takes any other.
@@ -78,7 +79,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `plan`, then `start_fresh`) is what the UI's Start fresh… calls. In `asq`, **↺ Start
   fresh…** is on a project card's menu (just above *Remove from fleet…*) and on the
   project's *Settings* tab: one dialog shows the plan's counts and that a new blank
-  manager starts, with *Project memory (context entries and brain)*, *Prompt log &
+  manager starts, with *Project memory (context entries)*, *Prompt log &
   metrics* and *Fleet git branches*
   off by default; unpushed work is listed in a second dialog (*Discard and start
   fresh*), and work found after it opens brings the dialog back on what was found; a
@@ -87,6 +88,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   again from their start.
 
 ### Changed
+
+- **The sidebar has one *Start captain* and one *Spawn agent*, not a spawn row under every
+  project.** Under the Fleet header, two full-width one-line actions: *▶ Start captain*
+  (with the experimental captain on; its own row takes that place while it is live, and an
+  exited one keeps its row with the start under it) and *＋ Spawn agent*. The "Captain"
+  heading and the ★ beside Fleet are gone. *Spawn agent* opens the Spawn dialog with a new
+  first field, **Project**: every listed project in the sidebar's order, preselected to the
+  selected card or the selected agent's project, else the first. Changing it re-reads what
+  depends on the project (git, a running manager, hand-off sources, tasks, personas and the
+  prefilled label) and keeps the account, binary, permission mode, extra args and first
+  prompt. With no project yet it says so in a toast and opens nothing. The captain's dialog
+  and the Personas tab's flow open on their own project, with no Project field.
 
 - **CI runs each leg's suite in shards: a sub-PR's CI takes about 8 minutes, the full
   matrix about 10-13, down from 22 and 64.** The suite is ~13k tests and its time is a
@@ -190,13 +203,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   measurements and the process trees, is docs/plans/mcp-own-row.md.
 
 - **`aisquare serve --stdio` keeps its protocol pipe to itself.** Its stdin is the pipe the client
-  writes requests into, and its tools started `git` (every call, twice) and `gbrain` with that
+  writes requests into, and its tools started `git` (every call, twice) with that
   stdin inherited, so a child held the pipe. On Windows a process started with a pipe that
   another thread is blocked reading can stall as it starts, which is the suspected cause (not
   confirmed on Windows) of a tool call that never answered. The server now reads requests from a
   private copy of stdin and points its own stdin at the null device before it serves, so
-  no process a tool starts, `git`, `gbrain` or a tmux nudge, can hold or read the pipe; the `git`
-  and `gbrain` calls a tool reaches also name no stdin of their own.
+  no process a tool starts, `git` or a tmux nudge, can hold or read the pipe; the `git`
+  calls a tool reaches also name no stdin of their own.
+
+- **Explainability and the CI test bed are dormant: out of `aisquare doctor` and out of
+  every UI, still there through their own commands.** Both are unmaintained and unused,
+  and a row or a tab each was noise. `aisquare doctor` has no `explainability…` row (nor
+  `explainability auto-mode`) and no `ci …` row, takes no `--target` or `--project`, and
+  its `--fix` only creates the home; `--yes` is still accepted. The section moved to
+  `aisquare explainability doctor [--live] [--target T] [--project P] [--fix] [--yes]`,
+  which runs the same checks and repairs and exits 1 on a failed row, and every hint that
+  said `doctor --live` for tracing names it. The test bed's rows are parked in
+  `services/ci_doctor.py`, which nothing imports; its `ci_*` modules, the `AISQUARE_CI`
+  gate, the hooks and the `ci_recall` tool are untouched. In the fleet UI a project has
+  the tabs Manager, Board, Settings and Personas (no AISquare tab), the Doctor page has no
+  "explainability enable" button, and nothing starts an explainability worker; the view
+  stays in `cli/ui/views/explainability.py`, unmounted, with how to mount it again. The
+  Remote page's agent view has Live and Transcript (no Card tab), and
+  `GET api/explainability/<agent>` still answers. `init` and its `--no-explainability`,
+  and the shipping line of `aisquare status`, are as they were.
+
+### Removed
+
+- **The project brain (gbrain) is gone.** It was an optional third-party CLI that
+  nobody maintained or used, and it only added noise: `aisquare recall` and
+  `aisquare team distill` are removed (so is the `recall` tool of `aisquare serve`, now
+  eight tools), as are the detached drain every board write started, the `brain` row of
+  `aisquare doctor` and `AISQUARE_BRAIN`, `AISQUARE_BRAIN_EMBED` and
+  `AISQUARE_BRAIN_EMBED_MODEL`. Nothing on disk is deleted: an existing
+  `~/.aisquare/projects/<id>/brain` stays where it is, and the store's schema is
+  untouched. `install.sh` still expects the `brain` row from a release that has it
+  (`--version 0.9.0` and older), alongside the codebase-snapshot rows.
 
 ## [0.9.0] - 2026-10-25
 

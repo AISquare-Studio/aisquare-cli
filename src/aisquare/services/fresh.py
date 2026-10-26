@@ -11,7 +11,7 @@ marks, its work briefs, ``store.reset_project``; the briefs' kept evidence under
 ``~/.aisquare/briefs/<id>/``), the manager's own state (``~/.aisquare/projects/<id>/
 manager/``, which a blank manager must not read back), its fleet (each live agent stopped as
 ``fleet shutdown`` stops it, each agent's worktree removed, then its rows), and with the
-extras asked for, its context entries and its brain (``memory``), its prompt log and turn
+extras asked for, its context entries (``memory``), its prompt log and turn
 metrics (``prompts``) and its local ``fleet/<codename>/…`` branches (``branches``). What
 stays: the checkout and every other branch, the registration (name, nickname, group, pin,
 settings, codename), its symbol index (``~/.aisquare/projects/<id>/code``), the accounts, the
@@ -27,7 +27,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal
 
-from aisquare.core import brain, orchestrator, paths
+from aisquare.core import orchestrator, paths
 from aisquare.core.store import ContextStore, is_the_home, store_session
 from aisquare.models import (
     FreshCounts,
@@ -114,7 +114,7 @@ def plan(
             tables,
             worktrees=len(trees),
             branches=len(tips) if branches else None,
-            files=_on_disk(project.id, memory=memory),
+            files=_on_disk(project.id),
         ),
         live_agents=[row.label for row in live],
         sessions=sessions,
@@ -208,7 +208,7 @@ def start_fresh(
             "start fresh again",
             report,
         ) from exc
-    files, stale = _clear_on_disk(project, report, memory=memory)
+    files, stale = _clear_on_disk(project, report)
     report.cleared = _counts(
         tables,
         worktrees=len(report.worktrees_removed),
@@ -375,7 +375,6 @@ def count_words(counts: FreshCounts) -> list[str]:
         (counts.evidence, "brief evidence file", "brief evidence files"),
         (counts.manager_state, "manager state file", "manager state files"),
         (counts.entries, "context entry", "context entries"),
-        (counts.brain, "project brain", "project brains"),
         (counts.prompts, "prompt", "prompts"),
         (counts.metrics, "turn metric", "turn metrics"),
         (counts.branches, "fleet branch", "fleet branches"),
@@ -553,7 +552,7 @@ def _counts(
     *,
     worktrees: int,
     branches: int | None,
-    files: Mapping[str, int | None],
+    files: Mapping[str, int],
 ) -> FreshCounts:
     """``store.reset_project``'s per-table counts and the files on disk (:func:`_on_disk`), by
     what a person calls them."""
@@ -565,10 +564,9 @@ def _counts(
         agents=tables.get("fleet_agent", 0),
         worktrees=worktrees,
         briefs=tables.get("brief", 0),
-        evidence=files.get("evidence") or 0,
-        manager_state=files.get("manager_state") or 0,
+        evidence=files["evidence"],
+        manager_state=files["manager_state"],
         entries=tables.get("entry"),
-        brain=files.get("brain"),
         prompts=tables.get("prompt"),
         metrics=tables.get("metric"),
         branches=branches,
@@ -598,13 +596,12 @@ def _files(root: Path) -> int:
         return 0
 
 
-def _on_disk(project_id: str, *, memory: bool) -> dict[str, int | None]:
+def _on_disk(project_id: str) -> dict[str, int]:
     """What of the project's state on disk a reset clears, counted: its briefs' evidence
-    files, its manager's state files, and with ``memory`` its brain (1 or 0)."""
+    files and its manager's state files."""
     return {
         "evidence": _files(_evidence_root(project_id)),
         "manager_state": _files(_manager_dir(project_id)),
-        "brain": int(brain.held_content(project_id)) if memory else None,
     }
 
 
@@ -618,17 +615,13 @@ def _why(exc: OSError) -> str:
     return said or type(exc).__name__
 
 
-def _clear_on_disk(
-    project: ProjectInfo, report: FreshReport, *, memory: bool
-) -> tuple[dict[str, int | None], str | None]:
+def _clear_on_disk(project: ProjectInfo, report: FreshReport) -> tuple[dict[str, int], str | None]:
     """Remove the project's state on disk once its rows have gone: its briefs' evidence (the
-    briefs citing it are gone), its manager's state (a blank manager must not read the old
-    goal back), and with ``memory`` its brain, which a running distill or recall keeps
-    (``brain.BrainBusy``), named on the report as kept rather than torn from under PGLite.
-    What went, counted, and why the manager's state stayed when it did (``None`` when it
-    went), which withholds the new manager; any other failure is a kept entry."""
-    counted = _on_disk(project.id, memory=memory)
-    gone: dict[str, int | None] = {"evidence": 0, "manager_state": 0}
+    briefs citing it are gone) and its manager's state (a blank manager must not read the old
+    goal back). What went, counted, and why the manager's state stayed when it did (``None``
+    when it went), which withholds the new manager; any other failure is a kept entry."""
+    counted = _on_disk(project.id)
+    gone = {"evidence": 0, "manager_state": 0}
     stale: str | None = None
     for key, root in (
         ("evidence", _evidence_root(project.id)),
@@ -646,22 +639,4 @@ def _clear_on_disk(
                 stale = f"{root}: {_why(exc)}"
             continue
         gone[key] = counted[key]
-    if memory:
-        gone["brain"] = 0
-        try:
-            gone["brain"] = int(brain.clear(project.id))
-        except brain.BrainBusy:
-            report.kept.append(
-                FreshKept(
-                    path=brain.brain_home(project.id),
-                    reason="a distill or a recall is running in it; kept as it is",
-                )
-            )
-        except OSError as exc:  # a lock that could not be taken, an entry left behind
-            report.kept.append(
-                FreshKept(
-                    path=brain.brain_home(project.id),
-                    reason=f"could not be removed: {_why(exc)}",
-                )
-            )
     return gone, stale

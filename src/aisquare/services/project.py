@@ -438,7 +438,7 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
     context entries, prompt history, board rows and ended fleet-agent rows stay
     in the store, hidden — reachable again only by registering the root again.
     With ``purge`` they are deleted, and so is ``~/.aisquare/projects/<id>/``
-    (its brain), and a key the CLI minted for it is revoked — or,
+    (its key and symbol index), and a key the CLI minted for it is revoked — or,
     when it cannot be yet, kept owed and named in the report
     (:func:`_revoke_owed`).
 
@@ -947,7 +947,7 @@ def _repin(store: ContextStore) -> tuple[ProjectInfo | None, str | None]:
 
 
 def _remove_data_dir(project_id: str) -> bool:
-    """Delete ``~/.aisquare/projects/<id>/`` (its brain, key and symbol index, ``code/``);
+    """Delete ``~/.aisquare/projects/<id>/`` (its key and symbol index, ``code/``);
     False if there was none.
 
     The project's kept brief artifacts (``~/.aisquare/briefs/<id>/``) go too: the purge

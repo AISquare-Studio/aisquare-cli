@@ -15,6 +15,7 @@ venv's ``python.exe`` launcher, and whatever the platform keeps above a server) 
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -50,6 +51,8 @@ STAND_IN = textwrap.dedent(
     report = {"hung": None, "journal": []}
     err_lines = []
     group = {} if os.name == "nt" else {"start_new_session": True}
+    children = []
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PID"}
 
     def stage(text):
         line = f"{time.monotonic() - started:7.1f}s {text}"
@@ -58,13 +61,33 @@ STAND_IN = textwrap.dedent(
 
     def kill_tree(proc):
         if os.name == "nt":
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True, stdin=subprocess.DEVNULL, timeout=30,
+            )
         else:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except OSError:
                 pass
         proc.kill()
+
+    def cleanup_and_exit(signum, frame):
+        # the test that started this process gave up on it: its children go with it
+        for proc in children:
+            kill_tree(proc)
+        os._exit(143)
+
+    if os.name != "nt":
+        signal.signal(signal.SIGTERM, cleanup_and_exit)
+
+    def with_stacks(name):
+        # the environment of a child that dumps its threads' stacks into the file ``name``
+        return dict(
+            env,
+            AISQUARE_STAND_IN_STACKS=os.path.join(diag, name),
+            PYTHONPATH=os.pathsep.join(p for p in (diag, env.get("PYTHONPATH", "")) if p),
+        )
 
     def hung(what, server=None):
         report["hung"] = what
@@ -73,27 +96,34 @@ STAND_IN = textwrap.dedent(
             report["server_alive"] = server.poll() is None
             report["server_stderr"] = "".join(err_lines)[-2000:]
             kill_tree(server)
-        stacks = os.path.join(diag, "server-stacks.txt")
-        if os.path.exists(stacks):
-            with open(stacks, encoding="utf-8", errors="replace") as handle:
-                report["server_stacks"] = handle.read()[-6000:]
+        for who in ("hook", "server"):
+            stacks = os.path.join(diag, who + "-stacks.txt")
+            if os.path.exists(stacks):
+                with open(stacks, encoding="utf-8", errors="replace") as handle:
+                    report[who + "_stacks"] = handle.read()[-6000:]
         print(json.dumps(report))
         sys.stdout.flush()
         os._exit(3)
 
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PID"}
     stage("hook: start")
     hook = subprocess.Popen(
         [sys.executable, "-m", "aisquare", "hook", "session-start"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=dict(env, CLAUDE_PID=str(os.getpid())), cwd=work, text=True, **group,
+        env=dict(with_stacks("hook-stacks.txt"), CLAUDE_PID=str(os.getpid())),
+        cwd=work, text=True, **group,
     )
+    children.append(hook)
     try:
         _, hook_stderr = hook.communicate(
             json.dumps({"cwd": work, "session_id": session, "source": "startup"}), timeout=HOOK_S
         )
     except subprocess.TimeoutExpired:
         kill_tree(hook)
+        try:  # what it had written, which a retried communicate() still holds
+            _, left = hook.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            left = "(its pipes did not close)"
+        report["hook_stderr"] = left[-2000:]
         hung(f"the SessionStart hook did not finish in {HOOK_S}s")
     stage(f"hook: exit {hook.returncode}")
 
@@ -102,16 +132,12 @@ STAND_IN = textwrap.dedent(
         serve = ["cmd", "/c", *serve]
     elif mode == "shell":
         serve = ["sh", "-c", shlex.join(serve) + "; true"]  # the shell stays above it
-    server_env = dict(
-        env,
-        AISQUARE_STAND_IN_STACKS=os.path.join(diag, "server-stacks.txt"),
-        PYTHONPATH=os.pathsep.join(p for p in (diag, env.get("PYTHONPATH", "")) if p),
-    )
     stage("server: start")
     server = subprocess.Popen(
-        serve, cwd=work, env=server_env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, **group,
+        serve, cwd=work, env=with_stacks("server-stacks.txt"), stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, **group,
     )
+    children.append(server)
     lines = queue.Queue()
 
     def pump_out():
@@ -180,7 +206,7 @@ SERVER_STACKS = textwrap.dedent(
 
     _where = os.environ.get("AISQUARE_STAND_IN_STACKS")
     if _where:
-        _file = open(_where, "w")
+        _file = open(_where, "a")
         faulthandler.dump_traceback_later(45, repeat=True, file=_file)
     """
 )
@@ -199,14 +225,25 @@ def work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _kill_tree(process: subprocess.Popen[str]) -> None:
+    """End the stand-in and what it started. Windows: ``taskkill /T`` takes the tree. Elsewhere
+    the stand-in's hook and server are each in a session of their own, so killing the stand-in
+    would orphan them: it is asked to end (SIGTERM), and its handler ends them first."""
     if os.name == "nt":
         subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True, check=False
+            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
         )
+    else:
+        process.terminate()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=15)
     process.kill()
 
 
-def _run(work: Path, mode: str, tmp_path: Path) -> dict[str, object]:
+def _run(work: Path, mode: str, tmp_path: Path, *, give_up_after: int = 420) -> dict[str, object]:
     script = tmp_path / "stand_in.py"
     script.write_text(STAND_IN, encoding="utf-8")
     diag = tmp_path / "diag"
@@ -223,7 +260,7 @@ def _run(work: Path, mode: str, tmp_path: Path) -> dict[str, object]:
         env=os.environ.copy(),
     )
     try:
-        out, err = process.communicate(timeout=420)
+        out, err = process.communicate(timeout=give_up_after)
     except subprocess.TimeoutExpired:
         _kill_tree(process)
         seen = journal.read_text(encoding="utf-8") if journal.exists() else "(no journal)"

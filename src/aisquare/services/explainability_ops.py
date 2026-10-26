@@ -1,7 +1,7 @@
 """The operator surface for explainability: targets, probes, and doctor checks.
 
-This is the half a human touches — ``aisquare doctor``'s explainability
-section, ``explainability enable``, ``explainability register`` — as opposed to
+This is the half a human touches — ``aisquare explainability doctor``,
+``explainability enable``, ``explainability register`` — as opposed to
 ``services/explainability.py``, which wires a launching session's environment.
 
 Three rules shape everything here.
@@ -12,10 +12,11 @@ moment of the call. No key, and no path to a file holding one, is ever written
 to config, logged, printed, or baked into source — a doctor that echoes a
 workspace key into a terminal scrollback has leaked it.
 
-**Checks are read-mostly and offline by default.** ``aisquare doctor`` has
-never made a network call; keeping it that way means an operator on a plane
-still gets an answer, and the suite stays hermetic. Everything that touches the
-gateway lives behind ``--live``, which is what the cutover runs.
+**Checks are read-mostly and offline by default.** ``aisquare explainability
+doctor`` (and ``aisquare doctor`` before it) has never made a network call without
+``--live``; keeping it that way means an operator on a plane still gets an answer,
+and the suite stays hermetic. Everything that touches the gateway lives behind
+``--live``, which is what the cutover runs.
 
 **A red line without its next command is half a doctor.** Every non-ok check
 carries the exact thing to type.
@@ -117,7 +118,7 @@ _SDK_MODULE = "aisquare.explainability"
 INSTALL_HINT = _EXTRA_INSTALL_HINT
 
 #: Override the machine's configured target for one command, e.g. during a
-#: cutover: ``AISQUARE_EXPLAINABILITY_TARGET=prod aisquare doctor --live``. A
+#: cutover: ``AISQUARE_EXPLAINABILITY_TARGET=prod aisquare explainability doctor --live``. A
 #: project whose traces were pointed somewhere with ``use`` (#142) keeps its
 #: destination's deployment; ``--target`` is what overrides that (see
 #: :func:`resolve_target`).
@@ -1494,10 +1495,12 @@ def checks(
     env: Mapping[str, str] | None = None,
     project_id: str | None = None,
 ) -> list[DoctorCheck]:
-    """The explainability section of ``aisquare doctor``, in dependency order.
+    """The explainability section, in dependency order: ``aisquare explainability doctor``.
+
+    It was a section of ``aisquare doctor``; that report no longer carries it.
 
     ``project_id`` resolves the key (and, through the project's destination,
-    the target) as that project's launches do (``doctor --project``); without
+    the target) as that project's launches do (``explainability doctor --project``); without
     it the read is machine-level and opens no store.
 
     Severity follows a single rule: **an unwired machine is not a broken
@@ -2297,14 +2300,15 @@ def _live_checks(target: ResolvedTarget, *, on: bool) -> list[DoctorCheck]:
 
 
 def _rerun_live(target: ResolvedTarget) -> str:
-    """``doctor --live`` for what this run checked, as the live rows' remedies name it.
+    """``explainability doctor --live`` for what this run checked, as the live rows' remedies
+    name it.
 
     Bare, the re-run checked the machine's target and key. For a project
-    (``doctor --live --project``, the check ``use`` names) whose destination is
+    (``explainability doctor --live --project``, the check ``use`` names) whose destination is
     on another deployment, that is another gateway and another key, and after
     ``--target`` another deployment (review of #170's follow-ups, round 1, F7).
     """
-    argv = ["aisquare", "doctor", "--live"]
+    argv = ["aisquare", "explainability", "doctor", "--live"]
     if target.target_source == "argument":
         argv += ["--target", target.name]
     if target.project_id is not None:
@@ -2433,6 +2437,7 @@ def apply_fixes(
     # Looking does not create the home; asking to fix does
     # (tests/test_doctor_does_not_create_state.py). It came about as a side effect of
     # turning tracing on until that took a --target (#51); a repair says what it did.
+    # (`aisquare doctor --fix` repairs the same, through `diagnostics.apply_fixes`.)
     home = paths.aisquare_home()
     if not home.exists():
         try:
@@ -2454,7 +2459,8 @@ def apply_fixes(
     # the deployment is the opt-in; `explainability enable` stays the other one.
     if not config.explainability.enabled and not target:
         actions.append(
-            "tracing left off — turn it on with: aisquare doctor --fix --target <name> "
+            "tracing left off — turn it on with: "
+            "aisquare explainability doctor --fix --target <name> "
             "(or aisquare explainability enable)"
         )
     elif not config.explainability.enabled:
@@ -2477,7 +2483,7 @@ def apply_fixes(
         # what the operator consented to was a repair.
         #
         # This is also why it must be checked HERE and not only at the hint: the
-        # test suite runs `doctor --fix --yes` against a checkout, so without
+        # test suite runs `explainability doctor --fix --yes` against a checkout, so without
         # this branch pytest pip-installs the SDK into its own interpreter and
         # every subsequent subprocess test fails against a shadowed CLI — while
         # the test doing it passes. That was the cause of a 15-failure CI run

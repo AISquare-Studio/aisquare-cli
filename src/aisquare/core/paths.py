@@ -493,7 +493,7 @@ def remote_push_path() -> Path:
 
 
 def project_data_dir(project_id: str) -> Path:
-    """Per-project data directory (the brain, the explainability key)."""
+    """Per-project data directory (the explainability key, the symbol index)."""
     return aisquare_home() / "projects" / project_id
 
 

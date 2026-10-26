@@ -248,7 +248,7 @@ def onboard(
 
 _PURGE_HELP = (
     "Also delete the project's context entries, prompt history, board rows, turn "
-    "metrics and brain. Without it they stay in the store, hidden, and come back if the "
+    "metrics and data directory. Without it they stay in the store, hidden, and come back if the "
     "root is registered again."
 )
 

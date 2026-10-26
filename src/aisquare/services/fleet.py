@@ -3574,8 +3574,8 @@ def spawn(
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
     # The hub as THIS process resolves it, blank for none: the window's
-    # `launch` joins the project the spawner — and the UI's Explainability tab
-    # beside it — resolves, and takes that project's key, not the one the tmux
+    # `launch` joins the project the spawner — and the UI's Explainability view
+    # (parked, but kept to agree) — resolves, and takes that project's key, not the one the tmux
     # server's frozen environment would name (review of #170, D1b round 2, B1).
     # A replacement's is the hub of the board its row recorded (`_board_and_hub`).
     env[orchestrator.TEAM_HUB_ENV_VAR] = hub
@@ -6022,10 +6022,9 @@ def attach_persona(
     ``tell``'s own readiness test (``tell(..., note=False)``). For any other agent
     nothing is filed in its place. ``tell``'s board note would be the whole fenced
     body and its guard sentence as an ordinary ``note``: every OTHER session read
-    it in its next delta as if it were addressed to it, ``aisquare board`` and a
-    teammate's session-start briefing showed it, and the distiller wrote it into
-    the project brain (review of #240, finding 7). The board names the persona
-    and never carries its body (§3.1). So such an agent is OWED the briefing
+    it in its next delta as if it were addressed to it, and ``aisquare board`` and a
+    teammate's session-start briefing showed it (review of #240, finding 7). The board
+    names the persona and never carries its body (§3.1). So such an agent is OWED the briefing
     (``team.owe_persona_briefing``, a marker under its row): its own next prompt's
     hook hands it the same preface and block, once and to it alone, unless a
     session start briefs it first. The receipt says that instead of a delivery.

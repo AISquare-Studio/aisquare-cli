@@ -59,7 +59,7 @@ def test_doctor_fresh_flags_missing_home(runner: CliRunner) -> None:
 
 def test_doctor_reports_dependency_checks(runner: CliRunner) -> None:
     result = runner.invoke(app, ["doctor"])
-    for name in ("python", "install", "claude-code", "tmux", "brain"):
+    for name in ("python", "install", "claude-code", "tmux"):
         assert name in result.stdout
 
 

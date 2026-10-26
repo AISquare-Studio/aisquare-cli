@@ -46,10 +46,10 @@
 >   compressed pack; tier 2 the bodies of the top-ranked files, read from the checkout, in rank order
 >   until the budget is spent; tier 3 one card per surviving doc.
 >   - **Config.** The curator's inputs read `[code] ignore` where #92 says `[snapshot] ignore`. The budget
->     (`[snapshot] max_tokens`, 150000) and the tier caps and reserves lived in `[snapshot]`, which is no
->     longer read: they need a new home, which is the owner's call. "Snapshot under 150k tokens" in the
->     acceptance reads "the map". Count the budget with an estimate that needs no tokenizer (`tiktoken` is
->     not used any more).
+>     lived in `[snapshot] max_tokens` (150000), and the tier caps and reserves #92 planned for `[snapshot]`
+>     were never built. `[snapshot]` is no longer read, so both need a new home, which is the owner's call.
+>     "Snapshot under 150k tokens" in the acceptance reads "the map". Count the budget with an estimate
+>     that needs no tokenizer (`tiktoken` is not used any more).
 >   - **Languages.** The index parses Python, and TypeScript and JavaScript with the `aisquare-cli[code]`
 >     extra; every other source file is counted as "not indexed" (`aisquare code index --status`), and the
 >     compressed pack that covered them is gone. A Go, Rust or Java repository, the large-repository case F3

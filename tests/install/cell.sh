@@ -15,7 +15,8 @@
 #      downloader is preinstalled, so this is the run that exercises the §5
 #      package matrix — tmux, gh, git and the extra's Node all come from the
 #      platform's own manager (Node through NodeSource or fnm where that one is
-#      too old). The extra registers its MCP only where Claude Code is installed.
+#      too old). The extra registers its MCP with each agent the run installs
+#      (Claude Code, Codex), and with neither under --no-agent.
 #   2. with a project. A local wheel is always installed, never short-circuited,
 #      so this run registers the project. THIS is the run the acceptance
 #      criterion is asserted against.
@@ -166,10 +167,20 @@ cd "$WORKDIR"
 
 set +e
 # shellcheck disable=SC2086  # AGENT_FLAG is deliberately word-split (or empty).
-sh "$INSTALLER" --yes --no-project --with chrome-devtools $AGENT_FLAG
+sh "$INSTALLER" --yes --no-project --with chrome-devtools $AGENT_FLAG >"${TMPDIR:-/tmp}/run1.log" 2>&1
 run1=$?
 set -e
+cat "${TMPDIR:-/tmp}/run1.log"
 printf '\nrun 1 exit: %s\n' "$run1"
+# Codex's own installer is a third party's CDN. When IT failed there is nothing of this
+# repo's to grade, and the cell says so with the one status the job maps to a warning
+# (75, EX_TEMPFAIL, in .github/workflows/install.yml's with-codex); every other failure
+# of this cell is a failure of the run.
+if [ "$AGENT" = codex ] && ! command -v codex >/dev/null 2>&1 &&
+    grep -q 'the Codex installer failed' "${TMPDIR:-/tmp}/run1.log"; then
+    printf '\n### SKIPPED: the Codex installer failed (a third party CDN); nothing was graded\n' >&2
+    exit 75
+fi
 # 0 or 2 are both legitimate here: 2 is a check amber for a reason the script
 # did not expect, which run 2's gate names, or a Node that did not install, which
 # the check below names. 1 means a FATAL step failed, which is never acceptable.
@@ -189,14 +200,26 @@ aisquare --version >/dev/null || fail "aisquare --version does not run"
 command -v node >/dev/null 2>&1 ||
     fail "node absent after run 1 — the installer's Chrome DevTools extra failed (no doctor row names Node)"
 
-# The extra's MCP, read from the file `claude mcp add --scope user` writes (`claude
-# mcp get` would start the server to health-check it). Under --no-agent, every
-# cell but one, Claude Code is left alone and nothing is registered; the cell
-# with Claude Code installed for real must have it.
+# The extra's MCP is registered with each agent the run sets up, by that agent's own
+# command, and read here from the file the command writes: `claude mcp add --scope user`
+# keeps it in .claude.json (`claude mcp get` would start the server to health-check it),
+# `codex mcp add` in config.toml under CODEX_HOME. Under --no-agent, every cell but two,
+# nothing is registered with either; the cell with Claude Code installed for real must
+# have it in Claude Code's, and the cell with Codex installed for real in Codex's and
+# not in Claude Code's, which that run does not set up.
 CLAUDE_JSON="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+CODEX_CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
 if [ "$SKIP_AGENT" = 1 ]; then
     if [ -f "$CLAUDE_JSON" ] && grep -q '"chrome-devtools"' "$CLAUDE_JSON"; then
-        fail "run 1 registered the Chrome DevTools MCP under --no-agent"
+        fail "run 1 registered the Chrome DevTools MCP with Claude Code under --no-agent"
+    fi
+    if [ -f "$CODEX_CONFIG" ] && grep -q 'chrome-devtools' "$CODEX_CONFIG"; then
+        fail "run 1 registered the Chrome DevTools MCP with Codex under --no-agent"
+    fi
+elif [ "$AGENT" = codex ]; then
+    # Read below, once `codex` itself is known to be on PATH.
+    if [ -f "$CLAUDE_JSON" ] && grep -q '"chrome-devtools"' "$CLAUDE_JSON"; then
+        fail "run 1 registered the Chrome DevTools MCP with Claude Code, which an --agent codex run does not set up"
     fi
 else
     grep -q '^    "chrome-devtools": ' "$CLAUDE_JSON" 2>/dev/null ||
@@ -215,6 +238,17 @@ if [ "$AGENT" = codex ]; then
     if command -v claude >/dev/null 2>&1; then
         fail "claude is on PATH after an --agent codex run — Claude Code was installed"
     fi
+    # The extra's MCP, as `codex mcp add` writes it: the table in config.toml, which Codex
+    # itself then reads back (`codex mcp get` prints the entry and starts nothing, measured
+    # with 0.164.0) as the npx command the guide gives.
+    grep -q '^\[mcp_servers\.chrome-devtools\]' "$CODEX_CONFIG" 2>/dev/null ||
+        fail "the Chrome DevTools MCP is not in $CODEX_CONFIG after run 1 chose it with Codex installed"
+    mcp_entry=$(codex mcp get chrome-devtools </dev/null 2>&1) ||
+        fail "codex does not know the Chrome DevTools MCP after run 1: $mcp_entry"
+    printf '%s\n' "$mcp_entry" | grep -q 'command: npx' &&
+        printf '%s\n' "$mcp_entry" | grep -q 'chrome-devtools-mcp@latest' ||
+        fail "codex reads the Chrome DevTools MCP as something other than npx chrome-devtools-mcp@latest: $mcp_entry"
+    head1 "codex mcp get: chrome-devtools is registered with Codex"
 fi
 
 for tool in tmux gh git node; do

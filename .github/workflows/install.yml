@@ -485,13 +485,17 @@ jobs:
     name: one cell with Codex installed for real (--agent codex)
     runs-on: ubuntu-latest
     needs: static
-    # The Codex twin of the cell above, and flaky-allowed for the same reason: it
-    # installs Codex with the installer its docs give (chatgpt.com/codex/install.sh),
-    # a third party's CDN. It needs nothing else: no login, no API key, no model call.
-    # `codex --version` and the doctor's codex row read files only, and the one row
-    # left amber is the trust step only a person can take in Codex's /hooks, which
-    # tests/install/cell.sh expects by its detail.
-    continue-on-error: true
+    # The Codex twin of the cell above. It installs Codex with the installer its docs
+    # give (chatgpt.com/codex/install.sh), a third party's CDN, and it needs nothing
+    # else: no login, no API key, no model call. `codex --version` and the doctor's
+    # codex row read files only, and the one row left amber is the trust step only a
+    # person can take in Codex's /hooks, which tests/install/cell.sh expects by its
+    # detail. It also asserts the Chrome DevTools MCP is in Codex's config.toml.
+    #
+    # NOT continue-on-error: that hid this job red on every run from the v0.9.0 merge
+    # to r23 (review 5659751791, M1). The one failure it excuses is Codex's own
+    # installer failing, which the cell reports as exit 75 and the step below turns
+    # into a visible warning; any other failure fails the job.
     steps:
       - uses: actions/checkout@v7
 
@@ -509,13 +513,20 @@ jobs:
           set -- dist/*.whl
           test "$#" -eq 1 || { echo "expected one wheel, found $#: $*"; exit 1; }
           wheel=$1
+          status=0
           docker run --rm \
             -v "$PWD:/mnt:ro" \
             -e "AISQUARE_INSTALL_PACKAGE=/mnt/$wheel" \
             -e CELL_SKIP_AGENT=0 \
             -e CELL_AGENT=codex \
             -e HOME=/root \
-            debian:12 sh /mnt/tests/install/cell.sh
+            debian:12 sh /mnt/tests/install/cell.sh || status=$?
+          # 75 is the cell saying Codex's own installer failed; no other failure of it is.
+          if [ "$status" = 75 ]; then
+            echo "::warning title=Codex's installer failed::chatgpt.com/codex/install.sh did not install Codex, so this cell graded nothing"
+            exit 0
+          fi
+          exit "$status"
 
   release-old-node:
     name: the latest release onto an old Node, no extra

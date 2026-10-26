@@ -2381,19 +2381,136 @@ def test_a_spawn_an_agent_makes_never_writes_the_owners_pick(
     assert model_memory.remembered() == model_memory.Pick("fable", "max")
 
 
-def test_a_cleared_field_on_a_role_its_settings_pin_leaves_the_pick(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("pin", ["extra_args", "binding"])
+def test_a_cleared_field_on_a_role_its_settings_pin_runs_the_pin_and_leaves_the_pick(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    pin: str,
 ) -> None:
-    """Review of #441 (8), seq 3427: the field showed the role's pin, not the pick, so
-    clearing it says nothing of the pick."""
-    _settings(
-        monkeypatch,
-        roles={"reviewer": FleetRoleSettings(worktree=False, extra_args=["--model", "haiku"])},
-    )
+    """Review of #441 (8), round 2 (minor 2): the role's settings win over the pick, and a
+    cleared field is no pick: over a pin it runs the pin, whichever kind, and leaves the
+    pick. It stripped an ``extra_args`` pin and kept a binding's, under one blank label."""
+    if pin == "extra_args":
+        _settings(
+            monkeypatch,
+            roles={"reviewer": FleetRoleSettings(worktree=False, extra_args=["--model", "haiku"])},
+        )
+    else:
+        _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(worktree=False)})
+        settings_service.bind_role("reviewer", args=["--model", "haiku"])
     model_memory.remember(model="opus", effort="xhigh")
     fleet_service.spawn(project, "reviewer", model="")
-    assert "--model" not in _command(tmux)
+    command = _command(tmux)
+    if pin == "extra_args":
+        assert command.count("--model") == 1 and _flag(command, "--model") == "haiku"
+    else:
+        assert "--model" not in command, "the binding's, which `aisquare launch` adds"
+    assert fleet_service.spawn_runs("reviewer", model="").model == "haiku"
     assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+
+
+def test_the_dialog_and_the_spawn_read_one_family(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2 review (minor 1): the account label and the spawn worked the family out in
+    two places, which disagreed for a cleared field over a pin. Both ask
+    :func:`fleet.spawn_runs`, the spawn's own precedence."""
+    from aisquare.cli.ui import spawn as spawn_module
+
+    _settings(
+        monkeypatch,
+        roles={"reviewer": FleetRoleSettings(extra_args=["--model", "haiku", "--effort", "low"])},
+    )
+    model_memory.remember(model="opus", effort="xhigh")
+    families: list[str | None] = []
+    monkeypatch.setattr(
+        accounts_service,
+        "launch_default",
+        lambda role, *, project=None, family=None: families.append(family),
+    )
+    cases = [
+        ("reviewer", [], None),
+        ("reviewer", [], ""),
+        ("reviewer", [], "sonnet"),
+        ("reviewer", ["--model", "fable"], None),
+        ("tester", [], None),
+        ("tester", [], ""),
+    ]
+    for role, args, model in cases:
+        spawn_module.read_launch_default(project, role, args, model)
+    assert families == ["haiku", "haiku", "sonnet", "fable", "opus", None]
+    assert [
+        harness.model_family(fleet_service.spawn_runs(role, args, model=model).model)
+        for role, args, model in cases
+    ] == families
+
+
+def test_a_restart_runs_the_model_and_effort_it_is_given_for_that_agent_alone(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """``fleet restart <label> --model … --effort …``: what an agent's ``/model`` cannot do
+    (round 2 review, FYI): a model for that one agent, over the recorded launch and what it
+    ran, and never the pick (3386)."""
+    agent = _coder(project, agent_args=["--model", "opus", "--effort", "xhigh"])
+    _on_disk(agent, tmp_path)
+    model_memory.remember(model="sonnet", effort="low")
+    tmux.die(agent.pane_id, 0)
+    restarted = fleet_service.restart(project, agent.label, model="haiku", effort="max").started
+    assert _model_flags(_command(tmux)) == ["--model", "haiku", "--effort", "max"]
+    assert restarted.launch_spec is not None
+    assert (restarted.launch_spec.model, restarted.launch_spec.effort) == ("haiku", "max")
+    assert model_memory.remembered() == model_memory.Pick("sonnet", "low")
+
+
+@pytest.mark.parametrize("who", ["as", "env"])
+def test_an_agents_tell_cannot_type_a_model_command(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    who: str,
+) -> None:
+    """Manager decision (seq 3428, b), round 2 review FYI: a ``/model`` typed into an agent
+    is the owner's pick, so an agent's ``fleet tell`` (``--as``, or from a fleet agent's
+    shell) may not type one; it is pointed at ``fleet restart … --model``."""
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+    if who == "env":
+        monkeypatch.setenv(FLEET_AGENT_ENV_VAR, "agt_somemanager")
+    with pytest.raises(fleet_service.FleetError, match=r"fleet restart .*coder-1 --model"):
+        fleet_service.tell(
+            project, agent.label, "  /model haiku", sender="ses_mgr1" if who == "as" else None
+        )
+    assert tmux.typed == [] and _events(project, "note") == []
+
+
+def test_the_owner_and_the_captain_may_tell_an_agent_a_model_command(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+    assert fleet_service.tell(project, agent.label, "/model haiku").delivered
+
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_thecaptain",
+                project_id=project.id,
+                label="captain",
+                role=fleet_service.CAPTAIN_ROLE,
+                pane_id="%77",
+                session_id="ses_captain",
+                cwd=project.root,
+                created_at=now,
+            )
+        )
+    monkeypatch.setenv(FLEET_AGENT_ENV_VAR, "agt_thecaptain")
+    fleet_service.tell(project, agent.label, "/model fable", sender="ses_captain")
 
 
 def test_a_fork_starts_what_its_source_runs_now(

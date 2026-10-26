@@ -9,13 +9,16 @@ the account's own default, as before 0.9.0 (``fleet.spawn``).
 ONE pick per home (the store's ``ui_state``), for every role and persona: the owner's last
 preference, not a role's. A role is customised in its settings alone (``[fleet.roles.<role>]
 extra_args``, a binding's ``--arg``), which win over the pick for that role and never write
-it. The model and the effort are kept apart: either can be chosen without the other. The
-pick is written by
+it. The model and the effort are kept apart: either can be chosen without the other. Only
+the owner's choices write the pick (manager decision, board seq 3428):
 
-- a spawn that chooses one itself, in its own arguments or the Spawn dialog's fields
-  (:func:`remember`, from ``fleet.spawn``); a cleared field forgets it;
+- an owner's new spawn that chooses one, in its own arguments or the Spawn dialog's fields
+  (:func:`remember`, from ``fleet.spawn``; ``fleet._the_owners_spawn``); a cleared field
+  forgets it, unless the role's settings pin that flag. A spawn an agent makes, and every
+  restart, switch, hand-over and fork, runs its flags for that agent alone;
 - a ``/model`` inside any running fleet agent, as its next turn end reads it
-  (:func:`observe`, from the Stop hook).
+  (:func:`observe`, from the Stop hook). An agent cannot type one into another
+  (``fleet.tell`` refuses it).
 
 The latest write wins.
 """

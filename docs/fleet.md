@@ -220,13 +220,16 @@ one (`--model ""`) is refused: leave it out instead, and clear the dialog's fiel
 forget your pick.
 
 **Your last pick is one per home**, for every role and persona alike. Only your own choices
-write it: a spawn of yours that names one (from asq's dialog, your own shell, or the
-captain acting on your words; a cleared dialog field forgets it, unless the field showed
-the role's own pin) and a `/model` inside any running fleet agent, which its next turn end
+write it: a spawn of yours that names one (from asq's dialog or your own shell; a cleared
+dialog field forgets it, unless the role's settings pin that flag, whose pin then runs and
+whose blank says so) and a `/model` inside any running fleet agent, the captain's
+included (the captain's spawns take no model), which its next turn end
 reads: the model off its transcript's last reply, the effort off the hook payload's
 `effort.level`, else its `CLAUDE_EFFORT`. A spawn an agent makes (`fleet spawn … --as
 <session>`, or from a fleet agent's own shell, such as a manager's) runs its flags for that
-one agent and leaves your pick alone. A reading
+one agent and leaves your pick alone, and an agent's `fleet tell` may not type a `/model`
+into another (it is refused, and pointed at `fleet restart <label> --model <model>`, which
+runs that agent alone on it and is no pick either). A reading
 is a `/model` when it names another id than the session's last one (its start's, or the
 previous turn's); an alias is only the id it resolved to, so `/model claude-opus-4-5` in
 an agent launched with `--model opus` (which runs `claude-opus-5-5`) is one. An agent
@@ -234,7 +237,9 @@ launched on `opusplan` runs opus and sonnet by mode, so a reply of either says n
 a pick, and one of another family does.
 Only the agent's own session counts: a `claude -p` run from its shell is not the agent. A
 role's settings are that role's alone and never write the pick. A restart, a `fleet
-switch`, a hand-over and a fork keep the model and effort the agent was actually running,
+switch`, a hand-over and a fork as the same role keep the model and effort the agent was
+actually running (a fork as another role is a new spawn of that role: its settings, else
+your pick),
 the account default it started on included, on whatever account it moves to: that wins
 over the recorded flag and over a binding's pin too (`aisquare launch` drops the
 binding's flag beside it), and the recorded flag stays only where it already runs that

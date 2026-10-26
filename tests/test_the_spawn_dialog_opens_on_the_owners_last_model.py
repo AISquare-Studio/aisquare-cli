@@ -190,13 +190,16 @@ def test_a_model_that_is_no_model_name_disables_spawn_and_says_why(
 def test_the_model_field_is_the_family_the_account_label_reads(
     git_project: ProjectInfo,
 ) -> None:
-    """#277: a headroom pick reads the model's family. The form's model is the field's when
-    the extra args name none, as the spawn runs it."""
+    """#277: a headroom pick reads the model's family. The label is read with the args and
+    the Model field as the spawn is sent them (``None`` untouched, ``""`` cleared), and the
+    service's own precedence decides (``fleet.spawn_runs``)."""
     model_memory.remember(model="opus")
-    reads: list[list[str]] = []
+    reads: list[tuple[list[str], str | None]] = []
 
-    def counted(project: ProjectInfo, role: str, args: list[str]) -> accounts_service.LaunchDefault:
-        reads.append(list(args))
+    def counted(
+        project: ProjectInfo, role: str, args: list[str], model: str | None = None
+    ) -> accounts_service.LaunchDefault:
+        reads.append((list(args), model))
         return accounts_service.LaunchDefault(accounts_service.AccountChoice(None, None))
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> None:
@@ -204,9 +207,17 @@ def test_the_model_field_is_the_family_the_account_label_reads(
         await settle(pilot)
         dialog.query_one("#spawn-args", Input).value = "--model haiku"
         await settle(pilot)
+        dialog.query_one("#spawn-args", Input).value = ""
+        dialog.query_one("#spawn-model", Input).value = ""
+        await settle(pilot)
 
     drive(git_project, scenario, defaults=counted)
-    assert reads == [["--model", "opus"], ["--model", "sonnet"], ["--model", "haiku"]]
+    assert reads == [
+        ([], None),  # untouched: the pick, as the spawn decides it
+        ([], "sonnet"),
+        (["--model", "haiku"], "sonnet"),
+        ([], ""),  # cleared: the account's default
+    ]
 
 
 def test_the_account_label_reads_the_family_the_spawn_runs(
@@ -228,6 +239,34 @@ def test_the_account_label_reads_the_family_the_spawn_runs(
     spawn_module.read_launch_default(git_project, "reviewer", ["--model", "opus"])
     spawn_module.read_launch_default(git_project, "reviewer", [])
     assert families == ["opus", "haiku"]
+
+
+def test_a_cleared_field_on_a_pinned_role_says_the_pin_runs(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """Round 2 review (minor 2): over a role its settings pin, a cleared field runs the pin
+    (the role's settings win over the pick), so its blank says so rather than
+    ``(account default)``; elsewhere blank is still the account's default."""
+    _pin_reviewer()
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        model = dialog.query_one("#spawn-model", Input)
+        seen = [model.placeholder]
+        select(dialog, "role").value = "reviewer"
+        await pilot.pause()
+        model.value = ""
+        select(dialog, "effort").value = ""
+        await pilot.pause()
+        seen += [model.placeholder, fields(dialog)[1]]
+        select(dialog, "role").value = "tester"
+        await pilot.pause()
+        seen.append(model.placeholder)
+        return seen
+
+    coder, reviewer, effort, tester = drive(git_project, scenario)
+    assert coder.startswith(ACCOUNT_DEFAULT_CHOICE) and tester.startswith(ACCOUNT_DEFAULT_CHOICE)
+    assert "haiku" in reviewer and "reviewer" in reviewer
+    assert "low" in effort and "account default" not in effort
 
 
 def test_a_hand_off_locks_the_fields_to_its_teammates_own(

@@ -355,6 +355,22 @@ def restart(
             "spawned before that was recorded (#144).",
         ),
     ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            help="Model for the replacement (opus, claude-opus-5-5, …); default: what the "
+            "agent was running. That agent's alone: it is not your pick for new spawns.",
+        ),
+    ] = None,
+    effort: Annotated[
+        str | None,
+        typer.Option(
+            "--effort",
+            help="Effort for the replacement (low … max, ultracode); default: what the agent "
+            "was running. That agent's alone.",
+        ),
+    ] = None,
     every: EveryAgent = False,
     managers: ManagersOnly = False,
     project: ProjectRef = None,
@@ -385,7 +401,12 @@ def restart(
         every,
         managers,
         project,
-        {"--fresh": fresh, "--permission-mode": permission_mode},
+        {
+            "--fresh": fresh,
+            "--permission-mode": permission_mode,
+            "--model": model,
+            "--effort": effort,
+        },
     )
     if label is None:
         _bulk("restart", managers_only=managers, acting_session=as_session)
@@ -398,6 +419,8 @@ def restart(
             fresh=fresh,
             spawned_by=as_session or "user",
             permission_mode=permission_mode,
+            model=model,
+            effort=effort,
             ack_wait=fleet_service.settings().prompt_ack_seconds,
         )
     except fleet_service.FleetError as exc:

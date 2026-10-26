@@ -124,18 +124,6 @@ def without_flag(args: Sequence[str], flag: str) -> list[str]:
     return kept
 
 
-def launch_family(
-    args: Sequence[str] = (), *, pinned: str | None = None, picked: str | None = None
-) -> str | None:
-    """The family a launch will run, for the account pick's per-family weeks (#277), by the
-    precedence a fleet spawn runs (``fleet._model_choice``): the ``--model`` its ``args``
-    name (typed, or the Spawn dialog's field), else the one its role's settings pin
-    (``pinned``), else the owner's last pick (``picked``). ``None`` with none: the agent runs
-    its account's own default, which only Claude Code knows, and the pick reads no family's
-    week. Never the role's ladder, which a fleet launch no longer runs."""
-    return model_family(model_arg(args) or pinned or picked)
-
-
 #: A context-window suffix Claude Code accepts on a model (``opus[1m]``); a reply names the
 #: model without it.
 _MODEL_SUFFIX = re.compile(r"\[[^\]]*\]$")

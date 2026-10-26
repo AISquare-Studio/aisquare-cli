@@ -468,7 +468,7 @@ def choose(
     usage through the cache, a minute deep (:data:`PICK_MAX_AGE_SECONDS`); a
     hand-over (``spread=True``) reads it live.
 
-    ``family`` is the launch's model family (``core.harness.launch_family``), for the
+    ``family`` is the launch's model family (``services.fleet.spawn_runs``), for the
     headroom rung's per-family weeks and limit marks (#277). ``max_age`` is how deep a
     launch's headroom rung reads the cache, :data:`PICK_MAX_AGE_SECONDS` when unsaid: a
     form that only SHOWS the pick reads the shared five minutes (:func:`launch_default`).

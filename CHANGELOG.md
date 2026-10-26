@@ -99,16 +99,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Claude Code runs the account's own default, as before 0.9.0. Fable or `max` run only when
   you chose them. Your last pick is one per home, for every role and persona, kept in the
   home's store, and only your choices write it: a spawn of yours that names one (asq's
-  dialog, your shell, the captain on your word; a cleared dialog field forgets it; an empty
-  `--model ""` is refused) and a `/model` inside any running fleet agent, which its Stop
+  dialog or your shell; a cleared dialog field forgets it, and over a role's own pin runs
+  the pin; an empty `--model ""` is refused) and a `/model` inside any running fleet agent, which its Stop
   hook reads from the transcript's last reply and the payload's `effort.level`, else
   `CLAUDE_EFFORT` (one tail read, fail-open; the agent's own session only, never a `claude
   -p` run from its shell). A spawn an agent makes (`--as`, or from its shell) runs its flags
-  for that agent alone. An alias is only the id it resolved to, as the session's start
+  for that agent alone, and an agent's `fleet tell` that starts with `/model` is refused in
+  favour of the new `fleet restart <label> --model … --effort …`, which runs that agent
+  alone on them. An alias is only the id it resolved to, as the session's start
   reports it, so a `/model` within its family counts; an `opusplan` agent's opus and sonnet
   replies never do. A role's settings win for that role and never write the pick. A
-  restart, a switch, a hand-over and a fork keep what the agent was actually running, the
-  account default included, on any account, over the recorded flag and a binding's pin;
+  restart, a switch, a hand-over and a fork as the same role keep what the agent was
+  actually running, the account default included, on any account, over the recorded flag
+  and a binding's pin (a fork as another role runs that role's settings, else the pick);
   none changes the pick. A
   spawn's own `--model` or `--effort` replaces the same flag in the role's `extra_args` and
   binding instead of passing it twice, and `aisquare launch` drops a binding's flag that its

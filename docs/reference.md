@@ -130,7 +130,7 @@ aisquare
 │                             [--board-context all|relevant|none] [-- agent args]
 │                   ls [--all] · status · tell <label> <text>
 │                   stop <label> [--force] [--as SESSION]
-│                   restart <label> [--fresh] [--permission-mode M]
+│                   restart <label> [--fresh] [--permission-mode M] [--model M] [--effort E]
 │                   switch <label> [--to A] [--fresh] [--reason R]
 │                   shutdown [--all] [--yes] [--force] [--forget] · attach
 │                   reap [--all] [--server-down] [--finished [--dry-run]]

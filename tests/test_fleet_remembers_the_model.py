@@ -352,17 +352,6 @@ def test_a_model_the_owner_chose_for_an_agent_is_never_off_its_ladder(
     assert "⚠ off-ladder" in board, "nobody chose that one"
 
 
-def test_the_family_a_launch_reads_has_the_spawns_precedence() -> None:
-    """Review of #441 (4), seq 3428 (d): typed (or the dialog's field) over the role's
-    settings over the pick."""
-    from aisquare.core import harness
-
-    assert harness.launch_family(["--model", "opus"], pinned="haiku", picked="sonnet") == "opus"
-    assert harness.launch_family([], pinned="haiku", picked="sonnet") == "haiku"
-    assert harness.launch_family([], picked="sonnet") == "sonnet"
-    assert harness.launch_family([]) is None
-
-
 @pytest.mark.parametrize(
     ("model", "effort"),
     [

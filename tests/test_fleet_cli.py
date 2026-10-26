@@ -1332,12 +1332,16 @@ def test_restart_and_stop_of_one_label_are_as_they_were(
 
     assert runner.invoke(app, ["fleet", "restart", "coder-auth"]).exit_code == 0
     assert runner.invoke(app, ["fleet", "stop", "coder-auth"]).exit_code == 0
+    # #16: a model and an effort for that agent alone.
+    picked = ["fleet", "restart", "coder-auth", "--model", "haiku", "--effort", "max"]
+    assert runner.invoke(app, picked).exit_code == 0
+    every = runner.invoke(app, ["fleet", "restart", "--all", "--model", "haiku"])
+    assert every.exit_code == 2 and "--model" in every.output
 
+    asked = {"fresh": False, "spawned_by": "user", "permission_mode": None, "ack_wait": 45.0}
     assert restart.calls == [
-        (
-            (PROJECT, "coder-auth"),
-            {"fresh": False, "spawned_by": "user", "permission_mode": None, "ack_wait": 45.0},
-        )
+        ((PROJECT, "coder-auth"), {**asked, "model": None, "effort": None}),
+        ((PROJECT, "coder-auth"), {**asked, "model": "haiku", "effort": "max"}),
     ]
     assert stop.calls == [((PROJECT, "coder-auth"), {"force": False, "actor": "user"})]
     assert bulk.calls == []

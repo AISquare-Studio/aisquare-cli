@@ -239,8 +239,9 @@ def test_the_dialog_shows_the_plan_and_each_extra_starts_off_and_changes_it(
     assert "Then a new blank manager starts." in plain and "Also cleared" not in plain
     assert seen["confirm"] is False
     # The reports are not deleted, and not kept either: their briefs' pin goes (review of #429).
+    # One short clause: the detail is in --help and the docs, and every row here is the plan's.
     about = " ".join(str(seen["about"]).split())
-    assert "No command report is deleted" in about and "retention takes them" in about
+    assert "command reports are unpinned, not deleted" in about
     assert "reports are kept" not in about
     assert "Also cleared: 1 context entry" in " ".join(str(seen["memory"]).split())
     assert "1 context entry · 0 project brains · 1 prompt · 0 turn metrics" in " ".join(
@@ -551,6 +552,46 @@ def test_both_dialogs_fit_whole_at_80x24(
         assert _inside(box, screen), (name, box, screen)
         border = box.shrink((1, 1, 1, 1))  # the heavy border is one cell all round
         assert buttons and all(_inside(button, border) for button in buttons), (name, box, buttons)
+
+
+def test_the_whole_plan_of_a_live_fleet_shows_at_80x24_without_scrolling(
+    alpha: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The dialog's body is capped at 12 rows at 24 high, and the about text grew from 4 rows
+    to 6: a project with a live fleet lost 'Its tmux session is killed: …' and 'Then a new
+    blank manager starts.' below the fold, and a user could confirm without seeing them
+    (tester-fresh-followups, #10). ``test_both_dialogs_fit_whole_at_80x24`` checks only the
+    frame; the plan is whole when the body has nothing left to scroll to."""
+    real_plan = fresh_service.plan
+
+    def plan(project: ProjectInfo, **kwargs: Any) -> FreshPlan:
+        found = real_plan(project, **kwargs)
+        return found.model_copy(
+            update={
+                "live_agents": ["manager", "coder-1"],
+                "sessions": ["asq:asq-amber-otter"],
+                "worktrees": [tmp_path / "trees" / "coder-1"],
+                "counts": found.counts.model_copy(update={"agents": 2, "worktrees": 1}),
+            }
+        )
+
+    monkeypatch.setattr(fresh_service, "plan", plan)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, int, int]:
+        app = fleet_app(pilot)
+        dialog = await _open_from_menu(pilot)
+        await settle(app)
+        body = dialog.query_one("#fresh-body")
+        return _plan_text(dialog), body.virtual_size.height, body.size.height
+
+    text, content, shown_rows = drive(go, size=(80, 24))
+    plain = " ".join(text.split())
+    assert "Stopped first: manager, coder-1" in plain
+    assert "Its tmux session is killed: asq:asq-amber-otter" in plain
+    assert "Then a new blank manager starts." in plain
+    assert content <= shown_rows, f"{content} rows of text in a body that shows {shown_rows}"
 
 
 def test_a_late_unpushed_refusal_says_what_to_do_in_the_ui(

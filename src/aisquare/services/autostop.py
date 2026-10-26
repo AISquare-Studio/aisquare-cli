@@ -39,7 +39,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from aisquare.core import selfcli
+from aisquare.core import claude_screen, selfcli
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import TmuxError
@@ -173,9 +173,13 @@ def pane_refusal(agent: FleetAgent) -> str | None:
     except (TmuxError, OSError) as exc:
         return f"tmux would not show its pane ({exc})"
     # By the pane's own agent (`screen.ready`: its input drawn, idle and empty where it reads
-    # one); a draft Claude Code's box holds is `delivery.draft_guard`'s below.
+    # one).
     if not screen.ready(agent, lines):
         return "it is not idle at its prompt"
+    # A draft Claude Code's box holds is named before someone typing, which the guard asks
+    # first: a pane that shows both is a draft, as 0.9.0 said (review r23 of #113, nit).
+    if claude_screen.composer_text(lines):
+        return "a draft is in its input box"
     try:
         return delivery.draft_guard(srv, agent.pane_id, quiet=fleet.settings().draft_quiet_seconds)
     except (TmuxError, OSError) as exc:

@@ -216,6 +216,23 @@ def test_each_condition_keeps_a_finished_reviewer(
     assert verdict.blocked is not None and verdict.blocked.startswith(blocked), verdict.blocked
 
 
+def test_a_draft_is_named_before_someone_typing_when_a_pane_shows_both(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, later: None
+) -> None:
+    """A draft in the box and a lease from ``asq`` on one pane: 0.9.0 named the draft, the
+    pane's own evidence, and the merge's ``draft_guard`` alone named the typing, which it asks
+    first (review r23 of #113, nit). Each alone still names itself."""
+    reviewer = _worker(project, tmux)
+    _result(reviewer)
+    _draft(reviewer, tmux)
+    _typing(reviewer, tmux)
+
+    assert autostop.pane_refusal(reviewer) == "a draft is in its input box"
+
+    tmux.screens[reviewer.pane_id] = _box("")  # the draft sent: the lease alone
+    assert autostop.pane_refusal(reviewer) == "someone is typing in its pane"
+
+
 def test_a_manager_or_a_coder_is_never_a_candidate(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, later: None
 ) -> None:

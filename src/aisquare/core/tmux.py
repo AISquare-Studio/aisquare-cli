@@ -269,9 +269,12 @@ _WINDOW_FIELDS = (
     "start_time",
 )
 _WINDOW_FORMAT = _SEP.join(f"#{{{name}}}" for name in _WINDOW_FIELDS)
-#: :meth:`TmuxServer.every_window`'s line: the session, a window as above, and when the
-#: window last produced output (``services.fleet._activity_times``'s field).
-_EVERY_FORMAT = _SEP.join(("#{session_name}", _WINDOW_FORMAT, "#{window_activity}"))
+#: :meth:`TmuxServer.every_window`'s line: the session (its name, then tmux's own id for it), a
+#: window as above, and when the window last produced output
+#: (``services.fleet._activity_times``'s field).
+_EVERY_FORMAT = _SEP.join(
+    ("#{session_name}", "#{session_id}", _WINDOW_FORMAT, "#{window_activity}")
+)
 _VERSION = re.compile(r"(\d+)\.(\d+)")
 #: The first tmux whose ``capture-pane`` takes ``-F`` (a flags column before each
 #: line: ``-`` none, ``W`` wrapped into the next, ``X`` extended cells, …).
@@ -744,7 +747,8 @@ class WindowInfo:
     ``list-panes``, as :attr:`PaneFacts.server_started` is, so a listing says which server's
     lifetime its pane ids belong to without a second process (review of #259, round 3)."""
     session_id: str | None = None
-    """Set by :meth:`TmuxServer.spawn_window` alone: tmux's own id for the session the
+    """Set by :meth:`TmuxServer.spawn_window`, and by :meth:`TmuxServer.every_window` (the
+    one answer a tick reads the whole server from): tmux's own id for the session the
     window was made in (``$3``), which it keeps whatever the session is renamed to; the
     one handle on it no name another session could take reaches."""
 
@@ -1524,7 +1528,9 @@ class TmuxServer:
             with contextlib.suppress(TmuxError):
                 self.run("set-environment", "-u", "-t", f"={session}", _data_arg(key))
 
-    def _parse_windows(self, session: str, stdout: str) -> list[WindowInfo]:
+    def _parse_windows(
+        self, session: str, stdout: str, session_id: str | None = None
+    ) -> list[WindowInfo]:
         windows: list[WindowInfo] = []
         for line in stdout.splitlines():
             fields = line.split(_SEP)
@@ -1542,6 +1548,7 @@ class TmuxServer:
                     current_command=values["pane_current_command"],
                     activity=values["window_activity_flag"] == "1",
                     server_started=_epoch(values["start_time"]),
+                    session_id=session_id,
                 )
             )
         return windows
@@ -1587,17 +1594,20 @@ class TmuxServer:
         if completed.returncode != 0:
             return {}, {}
         lines: dict[str, list[str]] = {}
+        ids: dict[str, str] = {}
         output_at: dict[str, datetime] = {}
         for line in completed.stdout.splitlines():
             session, _, rest = line.partition(_SEP)
+            session_id, _, rest = rest.partition(_SEP)
             window, _, activity = rest.rpartition(_SEP)
             pane_id = window.split(_SEP)[2] if window.count(_SEP) >= 2 else ""
             at = _epoch(activity)
             if pane_id and at is not None:
                 output_at[pane_id] = at
             lines.setdefault(session, []).append(window)
+            ids[session] = session_id
         windows = {
-            session: self._parse_windows(session, "\n".join(found))
+            session: self._parse_windows(session, "\n".join(found), ids[session] or None)
             for session, found in lines.items()
         }
         return windows, output_at

@@ -1416,7 +1416,12 @@ def _project_sessions(
     return list(found.values())
 
 
-def _running_ids(project_id: str, candidates: Collection[str], config: FleetSettings) -> set[str]:
+def _running_ids(
+    project_id: str,
+    candidates: Collection[str],
+    config: FleetSettings,
+    tick: _Tick | None = None,
+) -> set[str]:
     """The ``candidates`` (row ids, ended in the store) whose windows run, read from the
     panes alone: the windows the project's spawns recorded (``launch_seal.WindowEntry``)
     among the live panes of the sessions they recorded, by tmux's id, and the panes the
@@ -1425,7 +1430,11 @@ def _running_ids(project_id: str, candidates: Collection[str], config: FleetSett
     a manager whose row read ended in 2000 was hidden from ``fleet ls``, and a second was
     spawned beside it (review r9 of #113, finding 6). Asks tmux nothing when no candidate
     has a window recorded, and each server twice at most (its start, every live pane of it:
-    r10, finding 11), however many sessions; a server that does not answer shows none."""
+    r10, finding 11), however many sessions; a server that does not answer shows none.
+    Under a ``tick`` (:class:`_Tick`, a reader of many projects) it asks it nothing: the
+    server's one answer for the whole read says the same, panes and start, for every project
+    (review r23 of #113, finding 3: a stopped worker's window entry stays in the index until
+    ``reap``, and cost two tmux processes a project a tick)."""
     wanted = set(candidates)
     if not wanted:
         return set()
@@ -1443,8 +1452,11 @@ def _running_ids(project_id: str, candidates: Collection[str], config: FleetSett
     for sessions in servers.values():
         try:
             srv = sessions[0][0].server()
-            started = srv.started_at()
-            live = srv.live_panes_or_raise()
+            if tick is not None:
+                started, live = tick.live_panes(srv)
+            else:
+                started = srv.started_at()
+                live = srv.live_panes_or_raise()
         except TmuxError:
             continue
         for session, mine in sessions:
@@ -1474,8 +1486,12 @@ def _running_ids(project_id: str, candidates: Collection[str], config: FleetSett
     for (address, name), records in groups.items():
         session = _listed_session(address, name, config)
         try:
-            started = session.server().started_at()
-            alive = {window.pane_id for window in session.panes_or_raise() if not window.dead}
+            if tick is not None:
+                started, listed = tick.listed(session.server(), name)
+            else:
+                started = session.server().started_at()
+                listed = session.panes_or_raise()
+            alive = {window.pane_id for window in listed if not window.dead}
         except TmuxError:
             continue
         running |= {
@@ -3086,6 +3102,33 @@ class _Tick:
                 self._failed[key] = exc
                 raise
         return self._answers[key]
+
+    def live_panes(self, srv: TmuxServer) -> tuple[datetime | None, dict[str, set[str]]]:
+        """When the server started and every live pane of it by tmux's id for its session:
+        what :meth:`TmuxServer.started_at` and :meth:`TmuxServer.live_panes_or_raise` say,
+        out of the one answer, for :func:`_running_ids`. A server that answered nothing
+        has no pane and no start, which is no row running."""
+        every, _ = self.every_window(srv)
+        live: dict[str, set[str]] = {}
+        for found in every.values():
+            for window in found:
+                if window.session_id and not window.dead:
+                    live.setdefault(window.session_id, set()).add(window.pane_id)
+        return _server_start(every), live
+
+    def listed(self, srv: TmuxServer, name: str) -> tuple[datetime | None, list[WindowInfo]]:
+        """When the server started and the windows of the session called ``name``
+        (:meth:`TmuxServer.windows_or_raise`), out of the one answer."""
+        every, _ = self.every_window(srv)
+        return _server_start(every), every.get(name, [])
+
+
+def _server_start(every: Mapping[str, Sequence[WindowInfo]]) -> datetime | None:
+    """When the server that listed ``every`` started, as any of its windows says
+    (``#{start_time}``): one server, one start."""
+    return next(
+        (w.server_started for found in every.values() for w in found if w.server_started), None
+    )
 
 
 def _observe(
@@ -7479,7 +7522,7 @@ def _statuses(
     config = config or settings()
     # Running is what the panes say, whatever a row's `ended_at` (review r9 of #113, 6).
     running = _running_ids(
-        current.id, {agent.id for agent in agents if agent.ended_at is not None}, config
+        current.id, {agent.id for agent in agents if agent.ended_at is not None}, config, tick
     )
     if live_only:
         cutoff = now - RECENTLY_ENDED

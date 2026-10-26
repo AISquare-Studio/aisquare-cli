@@ -474,7 +474,7 @@ def test_render_loop_runs_fast_while_streaming_and_backs_off_when_idle(
 
 
 def test_a_hidden_pane_is_not_captured_and_catches_up_when_shown(
-    fake: FakeTmux, tmp_path: Path
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The docstring's claim: a pane that is not on screen is not captured at all.
 
@@ -488,8 +488,22 @@ def test_a_hidden_pane_is_not_captured_and_catches_up_when_shown(
     ``is_on_screen`` refuses first, and a hidden ``ContentSwitcher`` child also
     has a ``content_size`` of 0x0, which ``refresh_frame`` refuses on its own —
     so removing either alone still captures nothing. Both are asserted.
+
+    Counted in ticks, not in seconds: "never captured" is only said of a pane once it
+    has had ticks to be captured in, so each claim waits for the ticks it is about
+    (a fixed 0.6 s gave the shown pane one capture too few, and a tick of the pane
+    that was just hidden one capture too many, on a loaded runner: CI run 40234724456).
     """
     fake.panes["%2"] = FakePane(screen=["second pane"])
+    ticks: list[str] = []
+    real_tick = TerminalPane._tick
+
+    def counting_tick(pane: TerminalPane) -> None:
+        ticks.append(pane.id or "")
+        real_tick(pane)
+
+    monkeypatch.setattr(TerminalPane, "_tick", counting_tick)
+    monkeypatch.setattr(TerminalPane, "IDLE_INTERVAL", 0.05)  # many ticks in a short while
 
     def taken(pane_id: str) -> int:
         return len([capture for capture in fake.captures if capture[0] == pane_id])
@@ -497,16 +511,30 @@ def test_a_hidden_pane_is_not_captured_and_catches_up_when_shown(
     async def drive() -> tuple[int, int, int, int, tuple[int, int], list[str]]:
         host = SwitcherHost(fake.server(tmp_path))
         async with host.run_test(size=(40, 6)) as pilot:
-            await pilot.pause(0.6)
+            first = host.query_one("#first", TerminalPane)
             second = host.query_one("#second", TerminalPane)
+            await wait_until(
+                pilot, lambda: taken("%1") >= 2 and ticks.count("second") >= 5, timeout=10.0
+            )
             shown_first, hidden_first = taken("%1"), taken("%2")
             hidden_state = (second.is_on_screen, second.content_size.area)
             host.tabs.current = "second"
-            await pilot.pause(0.6)
+            # The switch is a message the switcher has yet to handle: a tick of the first
+            # pane in between still finds it on screen, and its capture is not one made
+            # while hidden.
+            await wait_until(
+                pilot, lambda: not first.is_on_screen and second.is_on_screen, timeout=10.0
+            )
+            hidden_at, first_ticks = taken("%1"), ticks.count("first")
+            await wait_until(
+                pilot,
+                lambda: ticks.count("first") - first_ticks >= 5 and taken("%2") - hidden_first >= 2,
+                timeout=10.0,
+            )
             return (
                 shown_first,
                 hidden_first,
-                taken("%1") - shown_first,
+                taken("%1") - hidden_at,
                 taken("%2") - hidden_first,
                 hidden_state,
                 screen_text(second),
@@ -3192,7 +3220,9 @@ def test_hiding_the_pane_drops_its_highlight(fake: FakeTmux, tmp_path: Path) -> 
     assert clipboard == "second", "so the copy key found nothing to wipe the clipboard with"
 
 
-def test_a_click_right_after_a_drag_is_not_a_double_click(fake: FakeTmux, tmp_path: Path) -> None:
+def test_a_click_right_after_a_drag_is_not_a_double_click(
+    fake: FakeTmux, tmp_path: Path, clock: Clock
+) -> None:
     """Finding 13 of the #135 review. Textual chains clicks by release position
     within half a second and synthesises a Click for a drag whose press and
     release land on the same widget, so a drag followed by a click on its end
@@ -3201,7 +3231,11 @@ def test_a_click_right_after_a_drag_is_not_a_double_click(fake: FakeTmux, tmp_pa
     only clicks chain (class docstring, rule 6).
 
     Driven through the app, not ``Pilot.click``, because the chaining under test
-    is the app's own (``tests/pane_harness.py``)."""
+    is the app's own (``tests/pane_harness.py``). Its clock is the test's
+    (``clock``): the click after the drag is "well within half a second" and the
+    two clicks of the double click are a double click because the test says so,
+    never because the runner turned the loop fast enough between them (on a slow
+    one the double click was two single ones: ubuntu py3.12, CI run 40212906171)."""
 
     async def drive() -> tuple[str, str, int, Selection | None, str, int]:
         host = Host(fake.server(tmp_path), "%1")
@@ -3214,6 +3248,7 @@ def test_a_click_right_after_a_drag_is_not_a_double_click(fake: FakeTmux, tmp_pa
             after_click, toasts, standing = host.clipboard, len(host.notices), pane.text_selection
             # The positive half: two real clicks are still a double click, and
             # over a standing highlight they copy the word exactly once.
+            clock.now += 5.0  # the next gesture comes a while later, as a person's does
             await drag(pilot, pane, (0, 2), (5, 2))
             await click(pilot, pane, (8, 1), times=2)
             return dragged, after_click, toasts, standing, host.clipboard, len(host.notices)

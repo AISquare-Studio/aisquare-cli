@@ -205,8 +205,9 @@ def test_the_rich_floor_provides_split_graphemes() -> None:
 
 
 def test_ci_installs_the_tls_trust_at_the_locks_versions() -> None:
-    """Review of #403, n8: CI installs with pip, which resolved truststore 0.10.5 against the
-    lock's 0.10.4. ``ci/constraints.txt`` pins both to what ``uv.lock`` holds."""
+    """Review of #403, n8: CI installed with pip, which resolved truststore 0.10.5 against
+    the lock's 0.10.4. CI's installs read ``ci/constraints.txt``, not ``uv.lock`` (ci.yml's
+    with uv, installers-check.yml's with pip), so it pins both to what ``uv.lock`` holds."""
     import tomllib
 
     root = Path(__file__).resolve().parent.parent

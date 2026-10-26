@@ -26,14 +26,14 @@ from typer.testing import CliRunner
 
 import aisquare
 from aisquare.core import agents as agent_core
-from aisquare.core import experimental
+from aisquare.core import experimental, insights
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
 from aisquare.models import ProjectInfo
 from aisquare.services import ci_client
 from aisquare.services import hooks as hooks_service
 from aisquare.services import project as project_service
-from tests import private_fleets
+from tests import private_fleets, shards
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -442,8 +442,8 @@ def home_outside_a_test(tmp_path_factory: pytest.TempPathFactory) -> Path:
     none of them, for module-scoped fixtures and for what outlives a test. Left set at
     the end on purpose: the panel's writer thread is joined at the interpreter's exit,
     and what it still had to write lands here, not in the developer's home. A home the
-    shell named is kept: the CI ``ambient`` job names a configured one, and a fixture
-    reading it outside a test is the leak that job exists to catch.
+    shell named is kept: CI's two ambient legs (py3.11 and py3.13) name a configured one,
+    and a fixture reading it outside a test is the leak those legs exist to catch.
     """
     if SHELL_HOME is not None:
         return Path(SHELL_HOME)
@@ -517,8 +517,11 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("AISQUARE_API_URL", "http://127.0.0.1:9")
     # The experiment settings are read once per process (ci_client._settings is
     # lru_cached, like core.insights._config), so a cached read from the previous
-    # test's HOME would outlive the home it came from.
+    # test's HOME would outlive the home it came from. So is the insights config,
+    # and a test that never turned shipping on passed only after one that had, in the
+    # same process: green in a whole run, red alone or in a CI shard without it.
     ci_client.reset_cache()
+    insights.reset_cache()
     # Cached once per process (core.agents.current_install), and tests change what it
     # reads: the interpreter (sys.executable) and the distribution's RECORD on sys.path.
     agent_core.current_install.cache_clear()
@@ -821,7 +824,7 @@ def isolated_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     ``~/.claude/settings.json`` — and since #84 it also globs ``~/.claude*`` for
     sibling installs and grades the binary each one's hooks name. A doctor row
     that depends on how the author's own machine is hooked is the ambient leak
-    ``.github/workflows/ci.yml``'s ``ambient`` job exists to catch; green there
+    ``.github/workflows/ci.yml``'s two ambient legs exist to catch; green there
     and red on a hooked laptop, or the reverse. Tests that want Claude Code
     detected build the tree under their own fixture (``fake_home`` in
     test_agents.py) and re-point ``_home`` at it, which overrides this.
@@ -1155,6 +1158,10 @@ CAPTAIN_GATE = "captain_gate"
 as the config says. Every other test runs with the gate off, as Phase 1 had none."""
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    shards.add_option(parser)
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
@@ -1171,6 +1178,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "e2e: drives a real, signed-in Claude Code (and spends tokens); skipped unless the "
         "test's own variables name what to drive",
     )
+    # A CI shard notes what it collected and ran, for the `shards` job's check that a
+    # leg's shards ran its suite exactly once (tests/shards.py).
+    manifest = config.getoption(shards.OPTION)
+    if manifest:
+        config.pluginmanager.register(shards.plugin(Path(manifest), config), "shard-manifest")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

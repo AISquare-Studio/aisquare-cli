@@ -1350,6 +1350,10 @@ class LaunchSpec(BaseModel):
     less the ones that chose a session (``--session-id``, ``--resume``, ``--continue``):
     those are per launch, like a restart's own ``--resume``."""
     account_slot: int | None = None
+    account_pinned: bool = False
+    """The account was NAMED for the agent — ``--account``, or the Spawn dialog's choice — not
+    picked: ``[accounts] before_limit`` leaves it there (F2 of #400). A replay keeps it, a
+    switch included; ``False`` on a spec recorded before it."""
     worktree: bool = False
     command: list[str] = Field(default_factory=list)
     recorded_by: str | None = None

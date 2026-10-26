@@ -1151,6 +1151,47 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   not move) in a note beside `switched`, and `switched` itself says whether
   the replacement's first line reached it. `doctor` lists parked agents; `doctor --live` warns when every account
   is over the line.
+- **Before the limit.** Off by default for this release: `[accounts] before_limit =
+  "switch"` moves a fleet agent before its account runs out instead of after.
+  When the agent's turn ends (the `Stop` hook), or Claude Code's idle notice says it has sat
+  at its prompt for a minute, and its account reads at or over `switch_at` (85 % used by
+  default, the line every pick counts as full), the same kind of detached hand-over as
+  `on_limit = "switch"` moves it to an account under the line, resuming its session.
+  The board says `switched … (before limit)` and the replacement is told it moved
+  before its usage limit. It never happens mid-turn: an agent that is working, asking for
+  permission or kept going by a note is left alone, and so is one whose turn left background
+  work running, which the `/exit` of a move would kill — a background command, a `Monitor`,
+  a background subagent or a skill forked in the background whose final notice (the one
+  with a status; a Monitor's events have none) is not in its transcript yet, its
+  subagents' transcripts included, until that work has reported (a `TaskStop` of it, or a
+  Monitor's own timeout, ends it too) — and one
+  with a message queued during its turn, which starts the next turn as this one ends. The
+  move waits five seconds after the turn end, past the start-up of the hook a just-typed
+  prompt runs, so that prompt is stamped on the board; then, before the stop and again once
+  the agent is marked as being moved, it checks that nothing began since the turn end — no
+  prompt stamped on the board, and no queued message taken, notice or reply in the
+  transcript — and that the pane shows Claude Code idle at its prompt, and no background
+  work. The pane is what catches a prompt typed in the last moment: Claude Code shows its
+  spinner from the moment a prompt is submitted, while its hook runs and before the prompt
+  reaches the board or the transcript. If anything has begun, the agent is left alone and
+  its next turn end asks again. The manager and the
+  captain are never moved before a limit (a limit still moves them). Nothing moves when the
+  windows over the line reset within `wait_if_reset_within_minutes`, when no other account
+  is under the line (the agent goes on where it is, and nobody is woken), for an agent put
+  on its account by name (`--account` at the spawn or in the Spawn dialog, `team bind <role>
+  --account`, or a binding that sets `CLAUDE_CONFIG_DIR` by hand), in a project `fleet
+  pause` holds (on the board its agents read, the hub's under one), or for an agent started
+  or looked at in the last ten minutes. The manager is woken only when a move that went
+  ahead fails (`handover_failed`). `warn` makes no move: it puts one `before_limit` line on
+  the board for each crossing of the line, naming the account, the account with room and
+  the `fleet switch` that moves it; it is said again only once the account has read under
+  the line or its windows have reset, and it is for you, not the agents (it reaches no
+  teammate's prompt). No loop polls, and a turn end asks the usage endpoint nothing: the
+  hook decides from what the usage cache already holds whether to look, and a worker
+  detached from it does the reads, through the cache (the agent's account five minutes
+  deep, a back-off honoured; the others a minute deep, as for a launch, which is what the
+  move then picks from). With every other account over the line, turn ends read none of
+  them. A kept reading (the last good figure of a failed read) moves nobody.
 - **Folder trust.** Claude Code asks *"Is this a project you created or one you
   trust?"* the first time it starts in a folder, once **per account** — and the
   answer it highlights is *No, exit*. So a yes on account 2 left every agent on
@@ -1238,6 +1279,7 @@ aisquare accounts move 3 top           # up · down · top · bottom
 aisquare accounts disable 3            # out of automatic selection; enable puts it back
 aisquare config set accounts.pick default      # spawns stay on the machine default (headroom is the default)
 aisquare config set accounts.on_limit wait     # an agent that hits its limit stays parked (switch is the default)
+aisquare config set accounts.before_limit switch # move an agent at its turn end once its account is over switch_at (off is the default; warn only says so)
 aisquare config set accounts.prefer reset-soonest # under the line, the week that ends first (priority is the default)
 aisquare accounts trust                # trust this folder on every account (its repository, in a checkout)
 aisquare accounts trust --sync         # every folder any account trusts, trusted on all of them

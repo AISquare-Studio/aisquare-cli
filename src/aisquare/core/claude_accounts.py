@@ -818,6 +818,11 @@ def subscription_label(creds: ClaudeCredentials | None) -> str | None:
 
 # --- what a usage-limit error says (#146) ----------------------------------------------------
 
+BEFORE_LIMIT_REASON = "before limit"
+"""The reason of a hand-over ``[accounts] before_limit = "switch"`` makes (F2 of #400): the
+agent's account read over ``switch_at`` at a turn end, and no limit was hit. The ``switched``
+line says it, ``(before limit)``, and the replacement is told it moved before its limit."""
+
 # The time is matched by a BOUNDED pattern (an optional weekday, a clock time,
 # am/pm — the shape ``_RESET_TIME`` reads) and nothing anchors the end: the
 # rendered line can carry a period, a second sentence or more lines after the

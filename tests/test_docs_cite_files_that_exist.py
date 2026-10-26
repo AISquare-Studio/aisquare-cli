@@ -42,6 +42,7 @@ import pytest
 DOCS = [
     Path("docs/runbooks/MORNING-HANDOFF.md"),
     Path("docs/runbooks/explainability-prod-cutover.md"),
+    Path("docs/runbooks/release.md"),
     Path("docs/store-migration-race.md"),
     Path("README.md"),
     Path("docs/fleet.md"),

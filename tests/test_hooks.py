@@ -15,8 +15,6 @@ from aisquare.core.store import store_session
 from aisquare.core.workspace import current_project
 from aisquare.services import hooks as hooks_service
 
-_PACK = '<files>\n<file path="a.py">\nprint("hi")\n</file>\n</files>\n'
-
 
 @pytest.fixture(autouse=True)
 def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -31,7 +29,7 @@ def _json(output: str) -> Any:
 
 
 def _add(work_dir: Path) -> None:
-    """Add ``work_dir`` on purpose, as ``project onboard`` does, without the snapshot."""
+    """Add ``work_dir`` on purpose, as ``project onboard`` does, without its facts."""
     with store_session() as store:
         store.onboard_project(current_project(work_dir))
 
@@ -121,30 +119,29 @@ def test_session_start_is_empty_for_an_unknown_repo(runner: CliRunner, work_dir:
 
 
 def test_session_start_names_no_snapshot_and_no_log_command(
-    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+    runner: CliRunner, work_dir: Path
 ) -> None:
-    """A pack on disk and prompts in the log, and session start says neither: the pack
-    line told agents to read ~110k tokens FIRST (the skeleton and the full pack were
-    often the same file), and both rode every request of the session."""
-    from aisquare.core import snapshot
+    """An old pack on disk and prompts in the log, and session start says neither: the
+    pack line told agents to read ~110k tokens FIRST (the skeleton and the full pack were
+    often the same file), and both rode every request of the session. The pack is
+    written after the store's first open, so its one-time cleanup has run and left it."""
+    from aisquare.core import paths
 
-    monkeypatch.setattr(
-        snapshot,
-        "_run_repomix",
-        lambda _root, *, compress, ignore=(): (_PACK, "Total Tokens: 9"),
-    )
-    monkeypatch.setattr(snapshot, "_total_tokens", lambda _text, _out: 100)
-    snapshot.generate(current_project(work_dir).id, work_dir)
     _add(work_dir)
     runner.invoke(app, ["context", "add", "prefer tabs", "--user"])
     _prompt(runner, work_dir)
+    pack = paths.project_data_dir(current_project(work_dir).id) / "snapshot"
+    pack.mkdir(parents=True)
+    (pack / "pack.xml").write_text("<files/>", encoding="utf-8")
+    (pack / "snapshot.json").write_text("{}", encoding="utf-8")
 
     result = runner.invoke(app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)}))
 
     assert result.exit_code == 0, result.output
     assert "prefer tabs" in result.stdout
+    assert pack.is_dir(), "the pack was there to be named"
     assert "snapshot" not in result.stdout
-    assert "pack.repomix.xml" not in result.stdout
+    assert "pack.xml" not in result.stdout
     assert "aisquare log" not in result.stdout
     assert "Past user prompts" not in result.stdout
 

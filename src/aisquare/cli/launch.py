@@ -20,9 +20,14 @@ byte-identical to what it always was.
 The environment has one more decision in it since #145: WHICH CLAUDE ACCOUNT.
 ``--account`` names one for this launch; without it the role's binding, the
 project's default and the machine's default are consulted in that order
-(``aisquare accounts default``), and with none of those set the environment is
-exactly what it always was. One resolver, ``services.claude_accounts.choose``,
-answers for ``launch`` and ``fleet spawn`` alike.
+(``aisquare accounts default``). The machine's default is the preferred account,
+the first enabled, signed-in one in the priority order (#406), so with an account
+signed in a launch runs on one. The exception is a role whose binding sets Claude
+Code's directory itself (``team bind --env``/``--env-file``): it keeps that directory
+unless a flag, an account binding, a project default or a headroom pick names an
+account. With no account signed in, the environment is exactly what it always was.
+One resolver, ``services.claude_accounts.choose``, answers for ``launch`` and
+``fleet spawn`` alike.
 """
 
 from __future__ import annotations
@@ -621,8 +626,11 @@ def launch(
     # the role's standing shape. For slot 1 that means RESTORING this shell's
     # own two variables (or their absence) over whatever the binding set — a
     # launch announced as `[plain claude]` must not run on the binding's other
-    # login. When NOTHING chose (no flag, no binding, no default — every
-    # machine before #145), the environment is left exactly as it was.
+    # login. The machine's default is the first enabled, signed-in account
+    # (#406), so something chooses whenever one is signed in. Nothing chooses
+    # when none is, or when the role's binding sets Claude Code's directory
+    # itself and no flag, account binding, project default or headroom pick
+    # names an account: then the environment is left as the binding made it.
     try:
         choice = claude_accounts_service.choose(account, role=role, project=project)
     except claude_accounts_service.NoSuchAccount as exc:

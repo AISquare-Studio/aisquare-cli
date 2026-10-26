@@ -28,6 +28,7 @@ from aisquare.cli.ui.sidebar import AppSettingsSelected
 from aisquare.cli.ui.views.app_settings import (
     AGENT_ADVANCED,
     AGENT_TAB,
+    PREFERENCES_ADVANCED,
     PREFERENCES_TAB,
     REMOTE_TAB,
     AppSettingsView,
@@ -82,8 +83,19 @@ def test_at_80x24_the_tabs_keep_mains_rows_and_the_preference_is_on_screen() -> 
         switch = app.query_one("#ui-always-show-path", Switch)
         seen["switch"] = _whole(switch, prefs.region)
         seen["hint"] = _whole(app.query_one("#ui-always-show-path-about", Static), prefs.region)
+        # The release check's switch, below Sidebar and shown as the tab opens (the owner's
+        # choice of three, for PR #301).
+        seen["updates"] = [
+            _whole(app.query_one(wid), prefs.region)
+            for wid in ("#updates-check", "#updates-check-about")
+        ]
+        # And the tab's Advanced below it still on screen, as on main: its line of three
+        # rows pushed it one scroll down (validator's gate on 19724a72, M2).
+        fold = app.query_one(f"#{PREFERENCES_ADVANCED}", Collapsible)
+        seen["advanced"] = _whole(fold.query_one("CollapsibleTitle"), prefs.region)
         seen["scrolled"] = prefs.scroll_y
         await pilot.click("#ui-always-show-path")  # a click lands only on what is on screen
+        await pilot.click("#updates-check")
         await pilot.click("#save-settings")
         await settle(app)
         return seen
@@ -95,8 +107,11 @@ def test_at_80x24_the_tabs_keep_mains_rows_and_the_preference_is_on_screen() -> 
     assert seen["buttons"] == [True, True, True], "Save, Reload and Reset all, whole"
     assert seen["note lines"] == 1
     assert seen["switch"] is True and seen["hint"] is True, seen
+    assert seen["updates"] == [True, True], "the release check's switch and its line, whole"
+    assert seen["advanced"] is True, "User preferences' Advanced, on screen as the tab opens"
     assert seen["scrolled"] == 0
     assert load_config().ui.always_show_project_path is True, "Save was reached and saved"
+    assert load_config().updates.check is False, "the release check's switch saved off"
 
 
 def _shown(widget: Widget, body: Widget) -> bool:

@@ -46,6 +46,14 @@ from tests.test_ui_accounts import no_network as _no_network
 from tests.test_ui_accounts import no_real_tmux as _no_real_tmux
 from tests.ui_workers import settle_until
 
+
+def _with_tooltip(view: AccountsView, slot: int) -> str:
+    """The row's cells, then its session cell's tooltip: a kept reading's age is in the cell,
+    and why the newer try read nothing is in the tooltip (review of #408, M1)."""
+    session = view.query_one(f"#account-cell-session-{slot}", Static)
+    return f"{line(view, slot)} | {session.tooltip or ''}"
+
+
 #: Re-exported so pytest collects them here: both are autouse in test_ui_accounts, and here.
 no_network = _no_network
 no_real_tmux = _no_real_tmux
@@ -318,16 +326,20 @@ def test_a_reading_served_from_the_cache_still_says_where_the_window_is_heading(
     no_network["usage"] = _answering(clock, 40.0)
     frame = _signed_in(2, tmp_path, "tok-two")
 
+    def pace(view: AccountsView) -> str:
+        # The session cell's tooltip: the pace has no column of its own (#8 on the board).
+        return str(view.query_one("#account-cell-session-2").tooltip)
+
     async def go(pilot: Pilot[None]) -> tuple[str, str, int]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         await settle_until(app, lambda: len(no_network["usage_calls"]) >= 1)
         await settle(app)
-        fetched = line(view, 2)
+        fetched = pace(view)
         clock.advance(minutes=1)
         view = await _away_and_back(pilot)
         await settle(app)
-        return fetched, line(view, 2), len(no_network["usage_calls"])
+        return fetched, pace(view), len(no_network["usage_calls"])
 
     fetched, served, calls = drive(go, overview=frame)
     assert "to the limit" in fetched, fetched
@@ -366,7 +378,7 @@ def test_a_failed_try_after_a_good_read_is_not_called_a_refresh(
         await settle_until(app, lambda: len(no_network["usage_calls"]) >= 2)
         await settle(app)
         seen["failed"] = _age(view)
-        seen["row"] = line(view, 2)
+        seen["row"] = _with_tooltip(view, 2)
         clock.advance(minutes=2)
         view.refresh_readings()  # the failure is served, not retried inside five minutes
         await settle(app)
@@ -381,7 +393,8 @@ def test_a_failed_try_after_a_good_read_is_not_called_a_refresh(
     seen = drive(go, overview=frame)
     assert seen["read"] == "last refreshed just now"
     assert seen["failed"] == "last refreshed 6m ago · last try failed just now"
-    assert "could not reach the usage endpoint" in str(seen["row"])
+    assert "40% · 6m" in str(seen["row"])  # the kept figure, aged in its cell…
+    assert "reading from 6m ago · could not reach the usage endpoint" in str(seen["row"])
     assert seen["aged"] == (2, "last refreshed 8m ago · last try failed 2m ago")
     assert seen["back"] == "last refreshed just now", "a good read clears the failure"
 
@@ -531,8 +544,8 @@ def test_a_refresh_that_fails_inside_the_window_keeps_the_figure_and_says_the_tr
     """The tester's repro (reopen of the m4/m5 fix): 40 % at T0, the endpoint at 503, ↻
     Refresh usage a minute later put '503' on the row; the next tick put 40 % back and
     dropped '· last try failed'; the row went 40 % → 503 → 40 % → 503. The row keeps its
-    figure while the figure is in the window, and the line says the try failed throughout.
-    Once the figure is out of the window, the failure is the newest word."""
+    figure, and the line says the try failed throughout. Since F1 of #400 the row also says
+    how old the figure is and why the try failed, and keeps the figure past the window."""
     endpoint: dict[str, Callable[[ClaudeAccount], ClaudeUsage]] = {"up": _answering(clock)}
     no_network["usage"] = lambda account: endpoint["up"](account)
     frame = _signed_in(2, tmp_path, "tok-two")
@@ -548,7 +561,7 @@ def test_a_refresh_that_fails_inside_the_window_keeps_the_figure_and_says_the_tr
         await pilot.click(view.query_one("#usage-refresh", Button))
         await settle_until(app, lambda: len(no_network["usage_calls"]) >= 2)
         await settle(app)
-        seen["refreshed"] = (_age(view), line(view, 2), len(no_network["usage_calls"]))
+        seen["refreshed"] = (_age(view), _with_tooltip(view, 2), len(no_network["usage_calls"]))
         for minute in (2, 3):
             clock.advance(minutes=1)
             view.refresh_readings()  # the tick: served, not retried inside five minutes
@@ -557,20 +570,20 @@ def test_a_refresh_that_fails_inside_the_window_keeps_the_figure_and_says_the_tr
         clock.advance(minutes=2, seconds=30)  # 5m30s: the figure is out, the failure is not
         view.refresh_readings()
         await settle(app)
-        seen["aged"] = (_age(view), line(view, 2), len(no_network["usage_calls"]))
+        seen["aged"] = (_age(view), _with_tooltip(view, 2), len(no_network["usage_calls"]))
         return seen
 
     seen = drive(go, overview=frame)
     said, row, _calls = seen["refreshed"]
     assert said == "last refreshed 1m ago · last try failed just now"
-    assert "40%" in row and "503" not in row, row
+    assert "40%" in row and "reading from 1m ago · HTTP 503 from the usage endpoint" in row, row
     for minute, age, tried in ((2, "2m ago", "1m ago"), (3, "3m ago", "2m ago")):
         said, row, calls = seen[minute]
         assert said == f"last refreshed {age} · last try failed {tried}", minute
         assert "40%" in row and calls == 2, (minute, row)
     said, row, calls = seen["aged"]
     assert said == "last refreshed 5m ago · last try failed 4m ago"
-    assert "503" in row and calls == 2, row
+    assert "40%" in row and "reading from 5m ago · HTTP 503" in row and calls == 2, row
 
 
 def test_the_page_says_the_fleets_share_left_now_and_of_the_week(

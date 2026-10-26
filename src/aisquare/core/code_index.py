@@ -13,10 +13,9 @@ end_line, signature, parent, arity), ``ref`` (name, path, line), ``meta`` (HEAD,
 versions, built_at), and ``symbol_fts`` over each name split into its snake_case and
 camelCase sub-tokens.
 
-**Files** are git's (``git ls-files -co --exclude-standard``), less the snapshot's
-ignore list (``core.snapshot.DEFAULT_IGNORE``, nested checkouts, ``[snapshot]
-ignore``), binaries, and files over ``[code] max_file_kb``. Outside git, a walk of the
-root with the same list.
+**Files** are git's (``git ls-files -co --exclude-standard``), less the ignore list
+(``core.ignore.DEFAULT_IGNORE``, nested checkouts, ``[code] ignore``), binaries, and
+files over ``[code] max_file_kb``. Outside git, a walk of the root with the same list.
 
 **Parsers.** Python through the standard library's ``ast``: no dependency. TypeScript
 and JavaScript through tree-sitter and each grammar's own ``tags.scm`` (definition and
@@ -52,8 +51,8 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+from aisquare.core import ignore as ignore_core
 from aisquare.core import locking, paths
-from aisquare.core import snapshot as snapshot_core
 from aisquare.core.spawn import git_env
 
 SCHEMA_VERSION = 1
@@ -344,9 +343,10 @@ def _git_files(root: Path) -> list[str] | None:
 
 
 def _walk_files(root: Path) -> list[str]:
-    """Every file under ``root`` outside git, never entering a directory the snapshot's
-    defaults leave out (``node_modules``, ``.venv``…): pruned as walked, not filtered after."""
-    stems = [p.removeprefix("**/").removesuffix("/**") for p in snapshot_core.DEFAULT_IGNORE]
+    """Every file under ``root`` outside git, never entering a directory the ignore
+    list's defaults leave out (``node_modules``, ``.venv``…): pruned as walked, not
+    filtered after."""
+    stems = [p.removeprefix("**/").removesuffix("/**") for p in ignore_core.DEFAULT_IGNORE]
     found: list[str] = []
     for current, dirs, files in os.walk(root, onerror=lambda _exc: None):
         dirs[:] = [
@@ -384,11 +384,11 @@ def _glob_regex(pattern: str) -> re.Pattern[str]:
 
 
 def listed_files(root: Path, ignore: Sequence[str] = ()) -> list[str]:
-    """The files the index reads: git's list (else a walk), less the snapshot's ignore list."""
+    """The files the index reads: git's list (else a walk), less ``core.ignore``'s list."""
     listed = _git_files(root)
     if listed is None:
         listed = _walk_files(root)
-    patterns = [_glob_regex(p) for p in snapshot_core.ignore_patterns(root, ignore)]
+    patterns = [_glob_regex(p) for p in ignore_core.ignore_patterns(root, ignore)]
     return sorted(path for path in listed if not any(p.match(path) for p in patterns))
 
 

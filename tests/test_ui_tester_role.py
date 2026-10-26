@@ -840,9 +840,9 @@ def test_doctor_is_ok_not_amber_when_nothing_is_declared(
     assert check.status is CheckStatus.ok, "advice, not a defect"
     assert check.fix is None, "an ok row carries no fix; the guidance is the detail"
     assert "not browser-verified" in check.detail
-    assert "claude mcp add -s user chrome-devtools npx chrome-devtools-mcp" in check.detail, (
-        "settings.json is not where Claude Code reads mcpServers"
-    )
+    assert (
+        "claude mcp add -s user chrome-devtools npx chrome-devtools-mcp@latest" in check.detail
+    ), "settings.json is not where Claude Code reads mcpServers"
     assert "settings.json" not in check.detail, "the old fix line was a dead-end loop"
 
 

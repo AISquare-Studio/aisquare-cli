@@ -621,8 +621,8 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
     _record_turn("trc_alpha", alpha)
     _record_turn("trc_beta", beta)
     data_dir = paths.project_data_dir(alpha)
-    (data_dir / "snapshot").mkdir(parents=True)
-    (data_dir / "snapshot" / "pack.xml").write_text("<pack/>", encoding="utf-8")
+    (data_dir / "brain").mkdir(parents=True)
+    (data_dir / "brain" / "page.md").write_text("a page", encoding="utf-8")
 
     result = runner.invoke(app, ["--json", "project", "forget", "alpha", "--purge"])
 
@@ -639,6 +639,7 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
         "metric": 1,
         "usage_turn": 1,
         "usage_session": 1,
+        "brief": 0,
         "project_setting": 0,
         "project_explainability": 0,
         "project_destination": 0,
@@ -663,6 +664,38 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
     assert _raw("SELECT COUNT(*) FROM usage_session WHERE project_id = ?", (beta,)) == [(1,)]
     assert _raw("SELECT value FROM team_meta WHERE key = ?", (f"distill_seq:{beta}",)) == [("7",)]
     assert _raw("SELECT COUNT(*) FROM metric WHERE project_id = ?", (beta,)) == [(1,)]
+
+
+def test_forget_purge_deletes_brief_rows(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``project forget --purge`` deletes the project's work briefs, counted, and leaves a
+    bystander's. The table carries no foreign key, so the purge has to name it."""
+    from aisquare.services import briefs, team
+
+    alpha = _register(runner, monkeypatch, work_dir / "alpha")
+    beta = _register(runner, monkeypatch, work_dir / "beta")
+    for directory in ("alpha", "alpha", "beta"):
+        monkeypatch.chdir(work_dir / directory)
+        assert runner.invoke(app, ["team", "on"]).exit_code == 0
+        created = briefs.create(f"{directory} brief", ["a requirement"])
+        task, _ = team.add_task(f"{directory} task")
+        (work_dir / directory / "shot.png").write_bytes(b"a screenshot")
+        briefs.finding(created.id, "R1", task_ref=task.id, summary="broken",
+                       artifact=work_dir / directory / "shot.png")  # fmt: skip
+    monkeypatch.chdir(work_dir)
+    kept = paths.aisquare_home() / "briefs"
+    assert len(list((kept / alpha).iterdir())) == 2 and (kept / beta).is_dir()
+    assert _raw("SELECT COUNT(*) FROM brief WHERE project_id = ?", (alpha,)) == [(2,)]
+
+    result = runner.invoke(app, ["--json", "project", "forget", "alpha", "--purge"])
+
+    assert result.exit_code == 0, result.output
+    assert _json(result.stdout)["removed"]["brief"] == 2
+    assert _raw("SELECT COUNT(*) FROM brief WHERE project_id = ?", (alpha,)) == [(0,)]
+    assert _raw("SELECT COUNT(*) FROM brief WHERE project_id = ?", (beta,)) == [(1,)]
+    assert not (kept / alpha).exists(), "the purged project's kept artifacts went with it"
+    assert len(list((kept / beta).iterdir())) == 1
 
 
 def test_purge_copes_with_hundreds_of_recorded_sessions(
@@ -1559,7 +1592,7 @@ def test_forget_purge_completes_and_reports_a_pin_it_could_not_clear(
     beta = _register(runner, monkeypatch, work_dir / "beta")
     assert runner.invoke(app, ["project", "switch", "beta"]).exit_code == 0
     data_dir = paths.project_data_dir(beta)
-    (data_dir / "snapshot").mkdir(parents=True)
+    (data_dir / "brain").mkdir(parents=True)
     body = paths.state_path().read_text()
 
     def refuse(key: str, value: object) -> None:
@@ -1606,7 +1639,7 @@ def test_forget_purge_of_the_last_project_reports_a_state_file_it_can_no_longer_
     alpha = _register(runner, monkeypatch, work_dir / "alpha")
     assert runner.invoke(app, ["project", "switch", "alpha"]).exit_code == 0  # the unpin asks
     data_dir = paths.project_data_dir(alpha)
-    (data_dir / "snapshot").mkdir(parents=True)
+    (data_dir / "brain").mkdir(parents=True)
     real_purge = SqliteStore.purge_project
     unreadable = False
 
@@ -1975,7 +2008,7 @@ def test_the_changelog_names_each_key_a_prunes_json_gained_since_080(
     notes = " ".join(changelog.split("## [0.8.1]")[1].split("## [0.8.0]")[0].split())
     assert "`project prune` reads why each candidate is one again" in notes
     assert all(f"`{key}`" in notes for key in since_080), notes
-    unreleased = " ".join(changelog.split("## [Unreleased]")[1].split("## [0.8.2]")[0].split())
+    unreleased = " ".join(changelog.split("## [Unreleased]")[1].split("## [0.9.0]")[0].split())
     assert "`unpinned`" in unreleased, "#271's key is named in the notes it ships in"
 
 

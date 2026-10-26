@@ -239,7 +239,8 @@ class CompactCommand:
     instructions: bool
     """Whether text after it is read as what the summary keeps (Claude Code's). Codex runs
     ``/compact <text>`` as a prompt, a turn and no compaction, so it is typed bare (measured
-    on 0.164.0)."""
+    on 0.164.0): its summary is its own, and the start pack that comes back with its next
+    turn restores what the instructions keep."""
 
 
 @dataclass(frozen=True)
@@ -354,8 +355,9 @@ class AgentCapabilities:
     """The command that compacts the session when typed at its idle prompt
     (:class:`CompactCommand`): what P1 WS-4's quiet-point compaction of a manager types
     (``services.quiet_compact``), its acknowledgement the compaction's ``SessionStart``
-    (source ``compact``) or, where none fires, the transcript
-    (``AgentTranscript.compacted_since``). An agent without is never compacted from here."""
+    (source ``compact``) where it comes at rest (:attr:`starts_at_its_prompt`), else the
+    transcript (``AgentTranscript.compacted_since``): Codex's ``SessionStart`` comes with the
+    next turn. An agent without is never compacted from here."""
     positional_prompt: bool = False
     """The first prompt is a positional argument, after ``--`` (Claude Code, Codex): a spawn's
     first message goes on its command line (``services.delivery.first_prompt_way``, through a

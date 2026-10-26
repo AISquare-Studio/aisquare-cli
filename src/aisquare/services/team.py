@@ -2478,10 +2478,14 @@ def hook_session_start(
         # overwrote the `working` of a first prompt submitted meanwhile (review r4 of #113,
         # finding 9). An agent whose start fires with its first prompt (Codex's) is working
         # then, and stays so.
-        if _take_quiet_compaction(store, session, source):
+        rests = adapter is not None and adapter.capabilities.starts_at_its_prompt
+        if rests and _take_quiet_compaction(store, session, source):
             # The compaction the quiet compaction typed into a manager waiting at its prompt
             # ran no turn (P1 WS-4, #281): left at `working`, the manager was one no nudge
-            # reached. Every other start reads as the upsert above set it.
+            # reached. Every other start reads as the upsert above set it. An agent whose
+            # start comes with a prompt (Codex's: its `compact` start fires with the next turn,
+            # which is working) is acknowledged by its transcript instead
+            # (`quiet_compact.check`).
             store.touch_session(session.id, state="waiting")
             session = store.get_session(session.id) or session
         if solo:

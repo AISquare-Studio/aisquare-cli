@@ -44,6 +44,7 @@ from aisquare.core.agent_adapters.types import (
     AnswerKind,
     BadEffortError,
     CallAsk,
+    CompactCommand,
     EventKind,
     ForkArgs,
     HookSpec,
@@ -491,6 +492,9 @@ class FakeAgentAdapter:
         hook_names_home=True,
         strict_hooks_file=True,
         sandboxes_tools=True,
+        # `/shrink` at its idle prompt compacts it and leaves a `compacted` record; text after
+        # it is a prompt, as Codex's `/compact <text>` is.
+        compact=CompactCommand("/shrink", instructions=False),
         # Its end of input ends it, as a shell's does; its Ctrl-C only clears the line. Its
         # empty prompt is not read off its screen, so Remote asks before every Ctrl-D.
         one_press_exits=frozenset({"C-d"}),

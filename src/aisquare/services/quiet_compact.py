@@ -18,10 +18,18 @@ Two halves, like the usage-limit hand-over:
   (``team.write_quiet_mark``) and types its agent's compaction line (:func:`compact_line`:
   Claude Code's ``/compact`` with instructions, Codex's bare) through the first message's
   verified delivery. The compaction's own SessionStart acknowledges the mark and puts the
-  row back to ``waiting`` (``team._take_quiet_compaction``), or, for an agent whose
-  compaction fires no hook (Codex), its transcript's record of it does
+  row back to ``waiting`` (``team._take_quiet_compaction``), for an agent whose start comes
+  at rest (Claude Code's). Codex's ``compact`` SessionStart comes with its next turn, so its
+  transcript's record of the compaction acknowledges the mark instead
   (``AgentTranscript.compacted_since``); no acknowledgement within
   :data:`ACK_WAIT` is one human-only board line, and no retry before the cooldown.
+
+A compacted manager gets its start pack back from that same SessionStart (``team.
+hook_session_start``: every source, a compaction's included), so :data:`RESUME_LINE` is true
+for both agents: Claude Code's pack comes at the compaction, Codex's with the next prompt
+(the line, or whatever is typed first), before it. The bare command takes no instructions, so
+Codex's summary is its own and the pack restores what they kept for Claude Code: the state
+file, the open tasks, the live agents (measured on Codex 0.164.0, #17).
 
 ``[fleet] quiet_compact_at = 0`` (the default) is off: nothing is armed. Claude Code's own
 auto and idle compaction are never lowered from here; they stay the backstops.
@@ -262,8 +270,8 @@ def check(session_id: str, cursor: int, token: str) -> str:
 
     def acked() -> bool:
         """The compaction's ``SessionStart`` acknowledged the mark (Claude Code's), or the
-        transcript records a compaction since it was typed (an agent whose compaction fires
-        no hook: Codex's ``compacted`` record), which acknowledges it here."""
+        transcript records a compaction since it was typed (Codex's ``compacted`` record: its
+        ``SessionStart`` comes with the next turn), which acknowledges it here."""
         with store_session() as store:
             mark = team_service.read_quiet_mark(store, session_id)
             if mark is None or mark.typed_at != typed_at:

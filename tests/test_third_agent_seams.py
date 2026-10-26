@@ -1062,3 +1062,103 @@ def test_a_third_agents_account_on_top_of_the_one_order_runs_it(
     picked = accounts_service.choose_any(agents=[third.id])
     assert picked.agent == third.id and picked.account is not None
     assert picked.account.slot == mine.slot  # the one candidate, taken with no reading
+
+
+def test_its_sessions_are_counted_by_the_token_ledger_through_its_own_reader(
+    tmp_path: Path,
+) -> None:
+    """``metrics ledger`` asks the transcript reader of each session's agent (#113's #17): this
+    agent's ``gemini`` records are one request of 30 fresh and 70 cached input and 9 out
+    (its ``thoughts`` count as output), and one call, with no line of shared code naming it."""
+    from datetime import UTC, datetime
+
+    from aisquare.models import TeamSession
+    from aisquare.services import token_ledger
+
+    adapter = GeminiShapedAdapter()
+    register(adapter)
+    try:
+        path = tmp_path / "chat.jsonl"
+        records = [
+            {
+                "type": "gemini",
+                "id": "g1",
+                "model": "gemini-x",
+                "tokens": {"input": 100, "cached": 70, "output": 7, "thoughts": 2},
+                "toolCalls": [{"id": "c1", "name": "run_shell_command", "args": {}}],
+            }
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+        now = datetime.now(tz=UTC)
+        session = TeamSession(
+            id="s1",
+            project_id="prj_x",
+            role="coder",
+            started_at=now,
+            last_seen_at=now,
+            transcript_path=str(path),
+            agent=adapter.id,
+        )
+
+        (row,) = token_ledger.ledger([session])
+    finally:
+        unregister(adapter.id)
+
+    assert (row.requests, row.input_fresh, row.input_cache_read, row.output) == (1, 30, 70, 9)
+    assert row.baseline == 100 and row.tool_calls == {"run_shell_command": 1}
+
+
+def test_an_agent_that_declares_no_compact_command_is_never_compacted_from_here(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``capabilities.compact`` is what the quiet compaction types (#113's #17): this agent
+    declares none, so its manager's Stop arms nothing, and a worker armed anyway refuses
+    before it types, saying why. (``tests/test_quiet_compaction_per_agent.py`` runs the
+    synthetic agent that does declare one.)"""
+    from aisquare.core.orchestrator import team_project
+    from aisquare.core.store import store_session
+    from aisquare.services import delivery, hooks, quiet_compact
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services import team as team_service
+    from tests.test_quiet_compaction_per_agent import QuietManager
+
+    project = team_project(tmp_path)
+    with store_session() as store:
+        store.ensure_project(project)
+
+    adapter = GeminiShapedAdapter()
+    assert adapter.capabilities.compact is None
+    register(adapter)
+    try:
+        monkeypatch.setattr(quiet_compact, "_sleep", lambda seconds: None)
+        monkeypatch.setattr(fleet_service, "quiet_prompt_refusal", lambda agent: None)
+        typed: list[str] = []
+
+        def type_line(agent: Any, text: str, *, acked: Any) -> delivery.Delivered:
+            typed.append(text)
+            return delivery.Delivered(delivery.TellResult("yes", "typed"), None, 1)
+
+        monkeypatch.setattr(fleet_service, "type_line", type_line)
+        armed: list[list[str]] = []
+        monkeypatch.setattr(hooks, "_detach", armed.append)
+        manager = QuietManager(project, tmp_path, adapter.id, adapter.binary)
+        # Over the line by its own reader's count, so the missing command is what refuses.
+        record = {"type": "gemini", "id": "g1", "tokens": {"input": 450_000, "output": 1}}
+        manager.rollout.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+        hooks.turn_stopped(
+            project.root,
+            session_id=manager.sid,
+            last_message="Spawned coder-auth for #12.",
+            permission_mode="auto",
+            agent=adapter.id,
+        )
+        said = quiet_compact.check(manager.sid, manager.cursor, manager.token)
+        with store_session() as store:
+            mark = team_service.read_quiet_mark(store, manager.sid)
+    finally:
+        unregister(adapter.id)
+
+    assert armed == [], "its Stop arms nothing"
+    assert typed == [] and mark is None, "nothing was typed, no mark left"
+    assert said == "its agent has no command that compacts it"

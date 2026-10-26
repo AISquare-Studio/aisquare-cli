@@ -606,8 +606,9 @@ class CodexAdapter:
         limits_in_transcript=True,
         native_telemetry=True,
         positional_prompt=True,
-        # A bare `/compact` at its idle prompt compacts (a `compacted` rollout record, no
-        # hook); `/compact <text>` runs as a prompt instead (measured on 0.164.0, #17).
+        # A bare `/compact` at its idle prompt compacts (a `compacted` rollout record; its
+        # `SessionStart` source `compact` fires with the next turn, not at the compaction);
+        # `/compact <text>` runs as a prompt instead (measured on 0.164.0, #17).
         compact=CompactCommand("/compact", instructions=False),
         one_press_exits=frozenset({"C-c", "C-d"}),
         first_context_file_only=True,
@@ -1045,10 +1046,10 @@ class CodexAdapter:
         return harness.RoleDefaults()
 
     def first_prompts_since(self, home: Path, cwd: Path, since: datetime) -> list[str] | None:
-        """Its rollouts' ``user`` messages (``codex_transcript.prompts_since``): Codex fires its
-        first hook only with its first prompt, and none at all with its hooks untrusted, so
-        its rollout is what says a first message ran."""
-        from aisquare.core.agent_adapters.codex_transcript import prompts_since
+        """Its rollouts' ``user`` messages (``codex_prompts``): Codex fires its first hook only
+        with its first prompt, and none at all with its hooks untrusted, so its rollout is what
+        says a first message ran."""
+        from aisquare.core.agent_adapters.codex_prompts import prompts_since
 
         return prompts_since(home, cwd, since)
 

@@ -35,9 +35,9 @@ from aisquare.core import code_index, harness, insights, orchestrator, paths, se
 from aisquare.core import spawn as spawn_core
 from aisquare.core.config import AccountsSettings, load_config
 from aisquare.core.injection import build_block, claude_md_files, without_loaded_preferences
-from aisquare.core.store import store_session
+from aisquare.core.store import ContextStore, store_session
 from aisquare.core.workspace import active_project
-from aisquare.models import ClaudeAccount, FleetAgent, ProjectInfo, TeamSession
+from aisquare.models import ClaudeAccount, FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession
 from aisquare.services import auto_mode, ci_augment, quiet_compact
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import code as code_service
@@ -671,7 +671,7 @@ class _TurnEnd:
 @dataclass(frozen=True)
 class _BeforeLimitAgent:
     """The fleet agent a before-limit check is about, read once: idle at its prompt, in a fleet
-    no pause holds, on an account nobody named for it."""
+    no pause holds, not finished for auto-stop, on an account nobody named for it."""
 
     session: TeamSession
     agent: FleetAgent
@@ -694,8 +694,9 @@ def check_before_limit(session_id: str, *, transcript_path: str | None = None) -
     (``handover_failed``).
 
     The hook looks no further for an agent that is not waiting at its prompt (mid-turn,
-    asking, parked, being moved), a hand-typed session, a project ``fleet pause`` holds, an
-    agent put on its account by name (``claude_accounts.account_pin``), one started within
+    asking, parked, being moved), a hand-typed session, a project ``fleet pause`` holds, a
+    finished worker auto-stop is about to stop (:func:`_auto_stop_has_it`), an agent put on
+    its account by name (``claude_accounts.account_pin``), one started within
     :data:`HANDOVER_COOLDOWN` or looked at within it, an account the cache reads under the
     line (or over it with every window over it resetting within
     ``wait_if_reset_within_minutes``), a crossing ``warn`` has named, background work its turn
@@ -739,6 +740,8 @@ def _before_limit_agent(
             return None
         if team_service.fleet_paused(store, agent):
             return None
+        if _auto_stop_has_it(store, agent, session):
+            return None
     named = agent.launch_spec is not None and agent.launch_spec.account_pinned
     if claude_accounts_service.account_pin(agent.role, named=named) is not None:
         return None
@@ -753,6 +756,21 @@ def _before_limit_agent(
         harness.model_family(session.model),
         _transcript_of(session, transcript_path),
     )
+
+
+def _auto_stop_has_it(store: ContextStore, agent: FleetAgent, session: TeamSession) -> bool:
+    """Whether auto-stop is about to stop ``agent`` (P2-W1b, #283): a role it stops that has
+    finished but for the idle window, as its own Stop asks before it arms the stop
+    (``autostop.finished(idle=False)``). Moved, it would take the resume prompt, run a whole
+    turn on a fresh account, and be stopped five minutes later. Asked of the board alone: its
+    row already reads ``waiting``, and the pane is the move's last check (:func:`_pane_shows`)."""
+    from aisquare.services import autostop  # lazy, as in `_arm_auto_stop`
+
+    settings = load_config().fleet
+    if not settings.auto_stop_finished:
+        return False
+    status = FleetAgentStatus(agent=agent, state="waiting", session=session)
+    return autostop.finished(status, store, settings, idle=False).finished
 
 
 def _transcript_of(session: TeamSession, given: str | None) -> Path | None:
@@ -965,9 +983,10 @@ class _StartedATurn(Exception):
 def _still_waiting(session_id: str, turn_end: _TurnEnd) -> Callable[[], None]:
     """``fleet.switch``'s ``before_stop`` for a move before the limit, asked once the turn end
     has settled (:data:`BEFORE_LIMIT_SETTLE_SECONDS`): the agent is still one ``before_limit``
-    may move — waiting at its prompt, no pause, no pin (:func:`_before_limit_agent`) — has
-    begun nothing since ``turn_end`` (:meth:`_TurnEnd.begun_since`) and left no background
-    work, or :class:`_StartedATurn` refuses before anything is marked or stopped."""
+    may move — waiting at its prompt, no pause, not finished, no pin
+    (:func:`_before_limit_agent`) — has begun nothing since ``turn_end``
+    (:meth:`_TurnEnd.begun_since`) and left no background work, or :class:`_StartedATurn`
+    refuses before anything is marked or stopped."""
 
     def check() -> None:
         found = _before_limit_agent(session_id)

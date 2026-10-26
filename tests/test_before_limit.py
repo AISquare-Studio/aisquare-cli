@@ -160,6 +160,7 @@ def _agent(
     role: str = "coder",
     spawned_by: str | None = None,
     agent_id: str = "agt_busy1",
+    task_id: str | None = None,
 ) -> FleetAgent:
     """A fleet agent on slot 2 whose board row is ``state``, started ``age`` ago, with a
     transcript on disk. A row of another ``agent_id`` replaces the live one (an upsert keeps a
@@ -193,6 +194,7 @@ def _agent(
             cwd=project.root,
             account_slot=2,
             spawned_by=spawned_by,
+            task_id=task_id,
             launch_spec=LaunchSpec(binary="claude", account_slot=2, account_pinned=pinned),
             created_at=now - age,
         )
@@ -903,6 +905,88 @@ def test_the_manager_and_the_captain_are_not_moved_before_a_limit(
     _work(runner)
 
     assert started == [] and switched == [] and endpoint.calls == []
+
+
+def _read_the_board(project: ProjectInfo) -> None:
+    """The agent's cursor at the board's last line, as a worker that read it all leaves it."""
+    with store_session() as store:
+        store.touch_session(SESSION, cursor=store.latest_seq(project.id))
+
+
+@pytest.mark.parametrize(
+    ("finished", "auto_stop", "moved"),
+    [(True, True, False), (False, True, True), (True, False, True)],
+    ids=["result in", "at its review", "result in, auto-stop off"],
+)
+def test_a_finished_reviewer_is_left_to_auto_stop_and_one_at_work_still_moves(
+    fake_home: Path,
+    work: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[list[str]],
+    switched: list[dict[str, Any]],
+    finished: bool,
+    auto_stop: bool,
+    moved: bool,
+) -> None:
+    """Board #2945 (2): a reviewer whose result is in has finished (``autostop.finished``), and
+    auto-stop stops it five minutes after its Stop. Moved before its limit, it would take the
+    resume prompt and run a whole turn on a fresh account first. One still at its review is
+    moved as before, and so is a finished one with ``auto_stop_finished`` off: nothing stops
+    it then."""
+    endpoint = _accounts(monkeypatch, work=_payload(92), home=_payload(10))
+    _settings(before_limit="switch")
+    config = load_config()
+    config.fleet.auto_stop_finished = auto_stop
+    save_config(config)
+    _agent(work, role="reviewer")
+    if finished:
+        team_service.add_note("REVIEW #423: CONFIRMED", kind="result", session_ref=SESSION)
+    _read_the_board(work)
+    _on_record(endpoint)
+
+    _stop(runner, work)
+    assert (_worker() in started) is moved
+    _work(runner)  # the worker asks again, as one started before the result went in would
+
+    if moved:
+        assert [call["label"] for call in switched] == [LABEL]
+    else:
+        assert switched == [] and endpoint.calls == []
+
+
+def test_a_task_closed_while_the_move_settles_leaves_its_tester_to_auto_stop(
+    fake_home: Path,
+    work: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[list[str]],
+    nudged: list[str],
+) -> None:
+    """``before_stop`` asks auto-stop's question again: a tester spawned for a task the manager
+    closes during the settle has finished, and is not moved."""
+    endpoint = _accounts(monkeypatch, work=_payload(92), home=_payload(10))
+    _settings(before_limit="switch")
+    task, _ = team_service.add_task("verify #423", cwd=work.root)
+    _agent(work, role="tester", task_id=task.id)
+    _read_the_board(work)
+    _on_record(endpoint)
+    _stop(runner, work)
+    assert _worker() in started
+    exited: list[str] = []
+
+    def switch(project: ProjectInfo, label: str, **kwargs: Any) -> Any:
+        with store_session() as store:
+            store.set_task_status(task.id, "done")
+        kwargs["before_stop"]()
+        exited.append(label)
+        raise AssertionError("moved after its task was closed")
+
+    monkeypatch.setattr(fleet_service, "switch", switch)
+    _work(runner)
+
+    assert exited == [] and nudged == []
+    assert _state() == "waiting"  # a `working` stamp would keep it from auto-stop for good
 
 
 # --------------------------------------------------------------------------- when it waits

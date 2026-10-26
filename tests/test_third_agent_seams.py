@@ -1275,3 +1275,50 @@ def test_a_merged_part_is_merged_once_and_handed_to_a_launch_by_its_agents_own_s
         ]
     finally:
         unregister(adapter.id)
+
+
+def test_its_old_quota_reading_over_the_line_counts_as_full_by_the_age_of_its_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A kept reading over the line with no reset since is full whatever its age (manager
+    decision, 2026-10-26): an agent that reads its usage offline has only such readings, and
+    this one's age is its ``quota.json``'s ``recorded_at``. Pro at 95 % three hours ago, its
+    day not over, passes its place to the slot with room, and the note says how old it is."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.services import claude_accounts as service
+
+    adapter = GeminiShapedAdapter()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        full, roomy = _signed_in_slot(adapter), _signed_in_slot(adapter)
+        now = datetime.now(UTC)
+
+        def record(slot: ClaudeAccount, pro: float, resets: datetime) -> None:
+            where = adapter.accounts.config_dir(slot.config_dir) / "quota.json"
+            where.write_text(
+                json.dumps(
+                    {
+                        "models": {
+                            "gemini-2.5-pro": {"used_percent": pro, "resets_at": resets.isoformat()}
+                        },
+                        "recorded_at": (now - timedelta(hours=3)).isoformat(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        record(full, 95.0, now + timedelta(hours=5))
+        record(roomy, 10.0, now + timedelta(hours=5))
+
+        decision = service.headroom_decision(
+            [full, roomy], switch_at=85, now=now, max_age=service.PICK_MAX_AGE_SECONDS
+        )
+        assert decision.account is not None and decision.account.slot == roomy.slot, decision.notes
+        assert any(
+            "its reading from 3h ago is over the 85%-used line and no window has reset since" in n
+            for n in decision.notes
+        ), decision.notes
+    finally:
+        unregister(adapter.id)

@@ -153,7 +153,12 @@ adapter.**
   keeps its place** (an expired token, an unreachable endpoint: unmeasured is not full):
   a lower agent takes the launch only from an account measured over the line or at a
   limit it named, so Claude Code's account with an expired token on top still runs
-  Claude Code. `--agent`, a role's agent, a binary, the project's agent and the account a
+  Claude Code, **unless its last good reading was over the line**: usage only rises within
+  a window, so a kept reading (the one a failed read shows) over `switch_at` with no window
+  reset since counts as full however old it is, and the pick's note gives its age (an older
+  reading under the line, or one from before a reset, stays unread). Codex's readings, taken
+  offline off its rollouts, follow the same rule by the age of the record they came from.
+  `--agent`, a role's agent, a binary, the project's agent and the account a
   launch names (`--account`, or the role's bound one, unless it is disabled) still pin it;
   a restart and Fork keep their record's agent, and so do a switch and a hand-over unless
   they cross to another agent. The Spawn dialog asks which agent the role launches in a

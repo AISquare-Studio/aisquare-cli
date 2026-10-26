@@ -2051,6 +2051,27 @@ def _has_reset(reading: ClaudeUsage, now: datetime) -> bool:
     return any(when is not None and when <= now for when in resets)
 
 
+def _floor(reading: ClaudeUsage, now: datetime) -> ClaudeUsage | None:
+    """What ``reading`` still proves at ``now``: only the windows it names a reset for that
+    has not come yet, a family week included. Usage only rises until its window resets, so
+    the figure of such a window is a floor under the account's now, however old the reading;
+    a window that has reset (or names no reset) says nothing of the new one. ``None`` when
+    no window is left."""
+    windows = tuple(w for w in reading.windows if w.resets_at is not None and w.resets_at > now)
+    weeks = {f: when for f, when in reading.family_week_resets_at.items() if when > now}
+    if not windows and not weeks:
+        return None
+    return reading.model_copy(
+        update={
+            "windows": windows,
+            "family_week_resets_at": weeks,
+            "family_week_percent": {
+                f: percent for f, percent in reading.family_week_percent.items() if f in weeks
+            },
+        }
+    )
+
+
 def _without_reset_windows(reading: ClaudeUsage, now: datetime) -> ClaudeUsage:
     """A kept reading with each window that has reset since emptied: its percentage
     describes a window that is over, so it is shown as reset (``reset 1h ago``, the reset
@@ -2577,11 +2598,19 @@ def headroom_decision(
     taken. ``prefer = "reset-soonest"`` compares the readings it has: an unmeasured account
     ahead of them is not passed over for a measured one, and is not preferred either.
 
-    An account the usage endpoint asked to wait (F1 of #400) is not asked
-    again, by a launch or a hand-over: the pick decides by its newest reading
-    recorded in the last :data:`USAGE_MAX_AGE_SECONDS`, and says so, or skips
-    it with a note naming the wait when that reading is older or missing. The
-    cache's older figure, shown on the page with its age, is never picked by.
+    An account the usage endpoint asked to wait (F1 of #400), or whose last read failed,
+    is not asked again, by a launch or a hand-over: the pick decides by its newest reading
+    recorded inside the pick's own window (``max_age``: :data:`PICK_MAX_AGE_SECONDS` for a
+    launch, :data:`USAGE_MAX_AGE_SECONDS` for a hand-over's live read), and says so, with
+    its age. An older one is no live figure and is never picked by, with one exception that
+    usage only rising within a window makes sound: a kept reading OVER the ``switch_at``
+    line with no window reset since is a floor, so the account counts as full and is
+    passed over (the note gives the reading's age). Any other old reading, one under the
+    line or from before a reset, leaves the account unread (skipped, or, for the launch's
+    agent rung, keeping its place: ``unread_keeps_place``). An agent that reads its usage
+    offline (Codex's, off its rollout) has readings of that kind always, and its age is the
+    age of the rollout record it was read from: over the line with no window reset since,
+    it counts as full the same way.
     """
     skip = set(exclude)
     candidates = [
@@ -2614,6 +2643,8 @@ def headroom_decision(
     else:
         readings = cached_usage(candidates, max_age=max_age, now=now, fetch=fetch)
     readings = dict(readings)
+    window = timedelta(seconds=max_age if max_age is not None else USAGE_MAX_AGE_SECONDS)
+    full_by_age: set[int] = set()
     # A kept reading — the last good figure a failed read shows (F1 of #400), or a slot the
     # endpoint asked to wait — is never taken for a live one: the pick decides by it only
     # while it is inside the pick's own window and neither window has reset since, and
@@ -2628,7 +2659,6 @@ def headroom_decision(
     ]
     if kept:
         moment = now or _now()
-        window = timedelta(seconds=max_age if max_age is not None else USAGE_MAX_AGE_SECONDS)
         tokens = {
             account.slot: token
             for account in kept
@@ -2656,6 +2686,22 @@ def headroom_decision(
                 notes.append(
                     f"headroom: {core.label(account)} {why} — picked by its reading from "
                     f"{describe_age(taken, now=moment)}"
+                )
+                continue
+            bound = _floor(last, moment) if last is not None else None
+            at_least = headroom_percent(bound, family) if bound is not None else None
+            if bound is not None and taken is not None and at_least and at_least >= switch_at:
+                # Usage only rises within a window: what this reading showed of a window that
+                # has not reset since is a floor, so an account over the line then is over it
+                # now, however old the reading (a floor is no live figure, but it is enough to
+                # know the account is full). An older reading UNDER the line says nothing of
+                # now, and falls to the rule below: unread.
+                readings[account.slot] = bound
+                full_by_age.add(account.slot)
+                notes.append(
+                    f"headroom: {core.label(account)} {why} — its reading from "
+                    f"{describe_age(taken, now=moment)} is over the {switch_at}%-used line "
+                    "and no window has reset since, so it counts as full"
                 )
                 continue
             if taken is None and not is_kept(reading):
@@ -2689,6 +2735,21 @@ def headroom_decision(
             notes.append(f"headroom: {core.label(account)} skipped — its {family} week is spent")
         elif percent is not None:
             measured.append((account, percent))
+            recorded = reading.fetched_at
+            if (
+                percent >= switch_at
+                and recorded is not None
+                and recorded < moment - window
+                and account.slot not in full_by_age
+            ):
+                # An agent that reads its usage offline (Codex: its rollout's newest record)
+                # has no live figure to wait for: a window that has not reset since is a
+                # floor under the account now, whatever the age the reading says.
+                notes.append(
+                    f"headroom: {core.label(account)} — its reading from "
+                    f"{describe_age(recorded, now=moment)} is over the {switch_at}%-used line "
+                    "and no window has reset since, so it counts as full"
+                )
         elif unread_keeps_place:
             measured.append((account, None))
             notes.append(

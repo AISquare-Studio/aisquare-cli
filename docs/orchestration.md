@@ -530,7 +530,18 @@ a limit it named (a limit mark, or a spent week for the launch's model family), 
 one that is not usable at all (disabled, signed out, its agent not installed).
 So with Claude Code's account on top and its token expired, an unpinned spawn runs
 Claude Code, whatever Codex reads; the rule is the one #406 states from the other
-side, rank 1 is the machine default even when its reading is missing. What this
+side, rank 1 is the machine default even when its reading is missing.
+
+**A last reading over the line still counts as full.** Within one usage window usage
+only rises until the reset, so when the read fails and the last good figure is old, that
+figure is a floor, not nothing: a reading **over** the `switch_at` line, in a window
+that has not reset since, makes the account measured-full, however old it is (its
+five-hour window may have reset while its week, over the line, has not, and the week
+counts), and the pick's note gives its age. A reading **under** the line that is older
+than the pick's window says nothing of now: the account stays unread and keeps its
+place, as above. One from before a reset is no figure at all. Codex's readings, taken
+offline off its rollouts, follow the same rule by the age of the record they were read
+from: over the line with no window reset since, such an account is full. What this
 decides is the **agent**: the account within it is then picked by the ordinary
 ladder (below), where a measured account of the same agent may still go before an
 unread one, and otherwise the agent's first usable account is taken, which is rank

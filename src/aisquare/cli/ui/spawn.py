@@ -169,8 +169,14 @@ ACCOUNTS_WORKER = "spawn-accounts"
 """The worker that reads every agent's accounts, so the dialog opens before they are read."""
 
 ROLE_AGENT_WORKER = "spawn-role-agent"
-"""The worker that asks which agent the role launches on for the Binary typed, off the UI
-thread: the answer reads the config and the store (:meth:`SpawnDialog._role_agent`)."""
+"""The worker that asks which agent the role launches on, for the role and the Binary typed,
+off the UI thread: the answer reads the config and the store, and with accounts of two agents
+the usage of each (:meth:`SpawnDialog._role_agent`). The dialog shows :data:`PICKING` until
+it answers (review of #14, M2)."""
+
+PICKING = "picking…"
+"""What the Agent field's ``(role's: …)`` says, and the launch line with it, while the role's
+agent is being asked."""
 
 BINARY_SETTLE_S = 0.3
 """How long the Binary field rests before its agent is asked: once per pause, not per key."""
@@ -467,6 +473,12 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._preset_agent = agent or ROLE_AGENT
         self._role_agents: dict[tuple[str, str], str] = {}
         """Role and binary → the agent they launch on (:meth:`_role_agent`)."""
+        self._role_agent_asked_for: tuple[str, str] | None = None
+        """The role and binary a worker is asking the agent of now (:meth:`_ask_agent_of`)."""
+        self._agent_shown: str | None = None
+        """The agent the form last followed: what it keeps showing while a newer role or Binary
+        is asked, so that a key typed ahead of its answer resets nothing (:meth:`launch_agent`).
+        ``None`` until the first answer: the form is then :data:`PICKING`."""
         self._preset_binary = binary or ""
         self._preset_account = account
         self._advanced_preset = (
@@ -559,18 +571,16 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         except Exception:  # a hint, never a reason to fail
             return harness.default_binary()
 
-    def _role_agent(self, role: str, binary: str = "") -> str:
-        """The agent ``role`` launches on here with no ``--agent``: ``agent_launch.resolve``'s
-        answer, given what the Binary field holds; Claude Code's when it cannot answer (a
-        binary that runs another agent than the role's: the spawn says why).
+    def _role_agent(self, role: str, binary: str = "") -> str | None:
+        """The agent ``role`` launches on here with no ``--agent``, as ``agent_launch.resolve``
+        answered for what the Binary field holds; ``None`` while that is being asked.
 
-        Asked once per role and binary while the dialog is open: the answer reads the config
-        and the project's choice in the store, which the Binary field asks in a worker
-        (:meth:`_binary_changed`)."""
-        key = (role, binary)
-        if key not in self._role_agents:
-            self._role_agents[key] = self._resolve_role_agent(role, binary)
-        return self._role_agents[key]
+        Never asked here: the answer reads the config and the store, and with accounts of two
+        agents their usage, up to ``USAGE_TIMEOUT_SECONDS`` when the cache is cold, which on
+        the UI thread froze the app as it opened (review of #14, M2). It is asked once per
+        role and binary in a worker (:meth:`_ask_agent_of`, :meth:`_binary_changed`) and kept;
+        until it lands the form says :data:`PICKING` and *Spawn* waits."""
+        return self._role_agents.get((role, binary))
 
     def _resolve_role_agent(self, role: str, binary: str) -> str:
         """:meth:`_role_agent`'s answer, asked of ``agent_launch.resolve`` (any thread)."""
@@ -582,8 +592,10 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             return DEFAULT_AGENT
 
     def _agent_options(self, role: str, binary: str) -> list[tuple[str, str]]:
-        """``(role's: <its agent>)``, then every agent this version knows."""
-        own = get_adapter(self._role_agent(role, binary)).label
+        """``(role's: <its agent>)`` — :data:`PICKING` while it is asked — then every agent this
+        version knows."""
+        agent = self._role_agent(role, binary)
+        own = get_adapter(agent).label if agent is not None else PICKING
         return [(f"(role's: {own})", ROLE_AGENT), *((a.label, a.id) for a in adapters())]
 
     # --- layout -----------------------------------------------------------------------
@@ -615,19 +627,20 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         return options
 
     def _account_options(
-        self, statuses: Iterable[ClaudeAccountStatus], agent: str
+        self, statuses: Iterable[ClaudeAccountStatus], agent: str | None
     ) -> list[tuple[str, str]]:
-        """``(this shell's)``, then ``agent``'s slots: a launch refuses another agent's."""
+        """``(this shell's)``, then ``agent``'s slots: a launch refuses another agent's. None
+        of them while the agent is being asked."""
         options = [("(this shell's)", THIS_SHELL)] + [
             (account_choice(status), str(status.account.slot))
             for status in statuses
-            if status.account.agent == agent
+            if agent is not None and status.account.agent == agent
         ]
         preset = self._preset_account
         if (
             preset
             and preset not in {value for _, value in options}
-            and self._slot_agent(preset) in (None, agent)
+            and (agent is None or self._slot_agent(preset) in (None, agent))
         ):
             options.append((f"{preset} (preset)", preset))
         return options
@@ -893,7 +906,10 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         if label_problem or args_problem:
             self._open_advanced()  # never a disabled Spawn whose reason is folded away
         ok = role_problem is None and label_problem is None and args_problem is None
-        self.query_one("#spawn-submit", Button).disabled = self._spawning or not ok
+        # The agent's own controls decide what a spawn sends: it waits for the role's agent.
+        self.query_one("#spawn-submit", Button).disabled = (
+            self._spawning or not ok or self._picking()
+        )
         return ok
 
     def _open_advanced(self) -> None:
@@ -991,10 +1007,22 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         value = self.query_one(selector, Select).value
         return value if isinstance(value, str) else ""
 
-    def launch_agent(self) -> str:
-        """The agent this launch starts: the one picked, else the role's (given the Binary)."""
+    def launch_agent(self) -> str | None:
+        """The agent this launch starts: the one picked, else the role's (given the Binary),
+        else the one the form still shows while that is asked; ``None`` only before the
+        first answer (:meth:`_picking`)."""
         binary = self.query_one("#spawn-binary", Input).value.strip()
-        return self._value_of("#spawn-agent") or self._role_agent(self._role, binary)
+        return (
+            self._value_of("#spawn-agent")
+            or self._role_agent(self._role, binary)
+            or self._agent_shown
+        )
+
+    def _picking(self) -> bool:
+        """Whether no agent is known yet for this form: the role's is being asked for the first
+        time and none is picked. *Spawn* waits for it; a later ask (another role, a Binary)
+        leaves the form on the agent it showed."""
+        return self.launch_agent() is None
 
     @staticmethod
     def _sandboxed(agent: str) -> bool:
@@ -1019,8 +1047,16 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             with self.prevent(Select.Changed):
                 field.set_options(options)
                 field.value = picked
-        agent = picked or self._role_agent(role, binary)
+        known = picked or self._role_agent(role, binary)
+        if known is not None:
+            self._agent_shown = known
+        if self._role_agent(role, binary) is None:
+            self._ask_agent_of(role, binary)
+        agent = known or self._agent_shown
         self.query_one("#spawn-binary", Input).placeholder = self._binary_hint(role, picked)
+        if agent is None:
+            self._follow_picking()
+            return
         if not self._captain:
             self.query_one("#spawn-args", Input).placeholder = args_hint(agent)
         self._offer_accounts(agent)
@@ -1034,7 +1070,20 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self.query_one("#spawn-approval-row").display = own
         self._paint_launch(agent, sandboxed)
 
-    def _offer_accounts(self, agent: str) -> None:
+    def _follow_picking(self) -> None:
+        """The form before the role's agent is first known: no accounts, no permission controls
+        and a launch line that says so, *Spawn* waiting for the answer (:meth:`_validate`).
+        :meth:`_role_agent_asked` fills it in."""
+        if not self._captain:
+            self.query_one("#spawn-args", Input).placeholder = ""
+        self._offer_accounts(None)
+        for row in ("#spawn-permission-row", "#spawn-sandbox-row", "#spawn-approval-row"):
+            self.query_one(row).display = False
+        self.query_one("#spawn-launch", Static).update(
+            Text(f"  {self._role} → {PICKING}", style="dim")
+        )
+
+    def _offer_accounts(self, agent: str | None) -> None:
         """``agent``'s accounts in the Account field; one shown that is not among them goes
         back to ``(this shell's)``."""
         select = self.query_one("#spawn-account", Select)
@@ -1089,10 +1138,20 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         role, binary = self._role, self.query_one("#spawn-binary", Input).value.strip()
         if (role, binary) in self._role_agents:
             self.workers.cancel_group(self, ROLE_AGENT_WORKER)
+            self._role_agent_asked_for = None  # the ask just cancelled is nobody's now
             self._follow_agent()
             return
+        self._ask_agent_of(role, binary, settle=BINARY_SETTLE_S)
+
+    def _ask_agent_of(self, role: str, binary: str, *, settle: float = 0.0) -> None:
+        """Ask ``agent_launch.resolve`` the agent of ``role`` and ``binary`` in a worker, after
+        ``settle`` seconds without a newer ask; one already out for them is not asked twice."""
+        key = (role, binary)
+        if key in self._role_agents or self._role_agent_asked_for == key:
+            return
+        self._role_agent_asked_for = key
         self.run_worker(
-            partial(self._ask_role_agent, role, binary),
+            partial(self._ask_role_agent, role, binary, settle),
             name=ROLE_AGENT_WORKER,
             group=ROLE_AGENT_WORKER,
             thread=True,
@@ -1100,21 +1159,42 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             exit_on_error=False,
         )
 
-    def _ask_role_agent(self, role: str, binary: str) -> tuple[str, str, str] | None:
+    def _ask_role_agent(
+        self, role: str, binary: str, settle: float = 0.0
+    ) -> tuple[str, str, str] | None:
         """In the worker: ``(role, binary, agent)`` once the field has rested, ``None`` for an
         ask a newer key replaced meanwhile."""
-        time.sleep(BINARY_SETTLE_S)
+        if settle:
+            time.sleep(settle)
         if get_current_worker().is_cancelled:
             return None
         return role, binary, self._resolve_role_agent(role, binary)
 
     def _role_agent_asked(self, worker: Worker[Any], state: WorkerState) -> None:
+        if state is WorkerState.ERROR:
+            # Never reached by ``_resolve_role_agent``, which answers for everything it can
+            # catch: still, a form that waits for an answer must not wait for ever.
+            self._role_agent_asked_for = None
+            self._role_agents.setdefault(self._current_agent_key(), DEFAULT_AGENT)
+            self._agent_of_the_role_landed()
+            return
         if state is not WorkerState.SUCCESS or not isinstance(worker.result, tuple):
             return
         role, binary, agent = worker.result
         self._role_agents[(role, binary)] = agent
-        if (role, binary) == (self._role, self.query_one("#spawn-binary", Input).value.strip()):
-            self._follow_agent()
+        if self._role_agent_asked_for == (role, binary):
+            self._role_agent_asked_for = None
+        if (role, binary) == self._current_agent_key():
+            self._agent_of_the_role_landed()
+
+    def _current_agent_key(self) -> tuple[str, str]:
+        return self._role, self.query_one("#spawn-binary", Input).value.strip()
+
+    def _agent_of_the_role_landed(self) -> None:
+        """The role's agent is known for the form as it is now: fill in what waited for it."""
+        self._adopt_preset_account_owner()
+        self._agent_changed()
+        self._validate()
 
     @on(Select.Changed, "#spawn-persona")
     def _persona_changed(self, event: Select.Changed) -> None:
@@ -1562,7 +1642,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         mode = self.query_one("#spawn-permission", Select).value
         account = self.query_one("#spawn-account", Select).value
         prompt = self.query_one("#spawn-prompt", TextArea).text
-        sandboxed = self._sandboxed(self.launch_agent())
+        sandboxed = self._sandboxed(self.launch_agent() or DEFAULT_AGENT)
         # One value for every agent, as `fleet spawn --permission-mode WRITE:APPROVALS`
         # takes it; else the agent's own words: the mode for Claude Code, the sandbox and
         # the approval policy for an agent whose permission is a sandbox (Codex). Another
@@ -1714,17 +1794,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     def _accounts_changed(self, worker: Worker[Any], state: WorkerState) -> None:
         if state is WorkerState.SUCCESS and isinstance(worker.result, AccountsOverview):
             self._account_statuses = list(worker.result.accounts)
-            # A preset account is its agent's: shown, it brings that agent with it, unless
-            # one was chosen (then the launch refuses the slot, and the field drops it).
-            owner = self._slot_agent(self._preset_account)
-            field = self.query_one("#spawn-agent", Select)
-            if (
-                owner is not None
-                and not self._value_of("#spawn-agent")
-                and owner != self.launch_agent()
-                and not field.disabled
-            ):
-                field.value = owner
+            self._adopt_preset_account_owner()
             self._follow_agent()
         elif state is WorkerState.ERROR:
             error = worker.error
@@ -1733,6 +1803,23 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                 f"accounts unavailable — {type(error).__name__}: {error}",
                 style="dim",
             )
+
+    def _adopt_preset_account_owner(self) -> None:
+        """A preset account is its agent's: shown, it brings that agent with it, unless one was
+        chosen (then the launch refuses the slot, and the field drops it). Once both the
+        accounts and the role's agent are known: it is the owner's agent only when the role's
+        is another."""
+        owner = self._slot_agent(self._preset_account)
+        agent = self.launch_agent()
+        field = self.query_one("#spawn-agent", Select)
+        if (
+            owner is not None
+            and agent is not None
+            and not self._value_of("#spawn-agent")
+            and owner != agent
+            and not field.disabled
+        ):
+            field.value = owner
 
     def action_cancel(self) -> None:
         if self._spawning:

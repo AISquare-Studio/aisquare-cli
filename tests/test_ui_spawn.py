@@ -74,13 +74,16 @@ from aisquare.models import (
     ClaudeAccountStatus,
     ClaudeIdentity,
     ClaudeInstall,
+    ClaudeUsage,
     FleetAgent,
     FleetAgentStatus,
     ProjectInfo,
     TeamSession,
     TeamTask,
+    UsageWindow,
 )
 from aisquare.services import agent_launch
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
@@ -1949,6 +1952,129 @@ def test_typing_a_binary_never_asks_its_agent_on_the_ui_thread(
     assert asked and not any(on_ui for _, on_ui in asked), asked
     assert len(asked) < len(typed), "once per pause, not per key"
     assert asked[-1][0] == typed
+
+
+def _two_agents_codex_on_top(monkeypatch: pytest.MonkeyPatch) -> tuple[int, int]:
+    """A Claude Code account and a Codex one above it, both installed: an unpinned launch runs
+    Codex by the order, which takes a usage read to know (``accounts.pick = "headroom"``)."""
+    import shutil
+
+    from tests.test_one_priority_order_across_agents import _claude, _codex
+
+    claude, codex = _claude("c@example.com"), _codex("x@example.com")
+    accounts_service.move(str(codex.slot), "top")
+    found = {"claude": "/bin/claude", "codex": "/bin/codex"}
+    real = shutil.which
+    monkeypatch.setattr(
+        shutil, "which", lambda name, *a, **k: found[name] if name in found else real(name, *a, **k)
+    )
+    return claude.slot, codex.slot
+
+
+def _usage_read_held(
+    monkeypatch: pytest.MonkeyPatch, slots: tuple[int, int]
+) -> tuple[threading.Event, threading.Event, list[int]]:
+    """``cached_usage`` held until the test lets it go: ``(started, release, threads)``, the
+    id of the thread of each read in ``threads``."""
+    started, release = threading.Event(), threading.Event()
+    threads: list[int] = []
+
+    def held(accounts: Any, **_: Any) -> dict[int, ClaudeUsage]:
+        threads.append(threading.get_ident())
+        started.set()
+        release.wait(10)
+        window = UsageWindow(name="session", minutes=300, used_percent=10.0)
+        return {a.slot: ClaudeUsage(available=True, windows=(window,)) for a in accounts}
+
+    monkeypatch.setattr(accounts_service, "cached_usage", held)
+    monkeypatch.setattr(accounts_service, "read_usage", lambda accounts, **_: held(accounts))
+    return started, release, threads
+
+
+def test_opening_the_dialog_reads_no_usage_on_the_ui_thread_and_says_it_is_picking(
+    git_project: ProjectInfo,
+    fake_home: Path,
+    spawns: SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #14, M2: ``compose`` asked ``agent_launch.resolve`` for the role's agent on the
+    UI thread, and with accounts of two agents that reads their usage, up to ten seconds on a
+    cold cache. It asks in a worker: the dialog opens at once with ``(role's: picking…)`` and
+    *Spawn* waiting, and fills in when the read answers. The read here is held until released;
+    one made on the UI thread is recorded (it is not held, so the failure is quick)."""
+    slots = _two_agents_codex_on_top(monkeypatch)
+    started, release, threads = _usage_read_held(monkeypatch, slots)
+
+    async def run() -> tuple[list[Any], list[Any], int]:
+        host = Host(git_project, accounts=lambda: agents_overview(*MIXED))
+        ui_thread = threading.get_ident()
+        async with host.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            dialog = host.screen
+            assert isinstance(dialog, SpawnDialog)
+            held = [
+                str(select(dialog, "agent")._options[0][0]),
+                submit(dialog).disabled,
+                shown(dialog.query_one("#spawn-launch", Static)),
+                dialog.query_one("#spawn-permission-row").display,
+                offered(dialog, "account"),
+            ]
+            assert await asyncio.to_thread(started.wait, 10), "the worker never read usage"
+            release.set()
+            await settle(pilot)
+            filled = [
+                str(select(dialog, "agent")._options[0][0]),
+                submit(dialog).disabled,
+                dialog.query_one("#spawn-sandbox-row").display,
+                offered(dialog, "account"),
+            ]
+            return held, filled, ui_thread
+
+    try:
+        held, filled, ui_thread = asyncio.run(run())
+    finally:
+        release.set()
+
+    assert held[0] == "(role's: picking…)"
+    assert held[1] is True, "Spawn waits for the agent its controls follow"
+    assert "picking…" in held[2]
+    assert held[3] is False, "no permission controls for an agent not yet known"
+    assert held[4] == [""], "no account of an agent not yet known"
+    assert threads and ui_thread not in threads, "usage was read on the UI thread"
+    assert filled == ["(role's: Codex)", False, True, ["", "5"]]
+
+
+def test_a_picked_agent_needs_no_wait_for_the_roles_own(
+    git_project: ProjectInfo,
+    fake_home: Path,
+    spawns: SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An Agent chosen up front is the launch's agent whatever the role's turns out to be: the
+    form is complete and *Spawn* is not held by the read still out for the ``(role's: …)``."""
+    slots = _two_agents_codex_on_top(monkeypatch)
+    started, release, _threads = _usage_read_held(monkeypatch, slots)
+
+    async def run() -> list[Any]:
+        host = Host(
+            git_project, accounts=lambda: agents_overview(*MIXED), presets={"agent": "claude-code"}
+        )
+        async with host.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            dialog = host.screen
+            assert isinstance(dialog, SpawnDialog)
+            await asyncio.to_thread(started.wait, 10)
+            seen = [select(dialog, "agent").value, submit(dialog).disabled]
+            release.set()
+            await settle(pilot)
+            return seen
+
+    try:
+        seen = asyncio.run(run())
+    finally:
+        release.set()
+
+    assert seen == ["claude-code", False]
 
 
 def test_a_preset_agent_is_honoured_and_a_preset_account_brings_its_agent(

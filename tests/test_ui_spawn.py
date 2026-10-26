@@ -7,7 +7,7 @@ recorder received, the text the dialog shows, the toasts the app raised, the
 view the app switched to — never the string that was handed in.
 
 Two hosts. A bare ``Host`` pushes the dialog for one project and records what it
-dismissed with: that is the form. ``FleetApp`` itself drives the row that opens
+dismissed with: that is the form. ``FleetApp`` itself drives the button that opens
 the dialog and the receipt that closes it, because both are the shell's.
 
 "No test reaches tmux" is ENFORCED, as in ``test_ui_shell.py``: the module-level
@@ -52,7 +52,13 @@ from aisquare.cli.ui import spawn as spawn_module
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested
 from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
-from aisquare.cli.ui.sidebar import AddProject, SpawnAgent, SpawnRow, agent_row_text
+from aisquare.cli.ui.sidebar import (
+    AddProject,
+    SpawnAgent,
+    SpawnButton,
+    agent_row_text,
+    short_path,
+)
 from aisquare.cli.ui.spawn import (
     LABEL_RULE,
     NO_TASK,
@@ -257,18 +263,22 @@ class Host(App[None]):
         *,
         accounts: Callable[[], AccountsOverview] | None = None,
         presets: dict[str, str] | None = None,
+        projects: Sequence[ProjectInfo] | None = None,
     ) -> None:
         super().__init__()
         self._project = project
         self._accounts = accounts
         self._presets = presets or {}
+        self._projects = projects
         self.results: list[fleet_service.SpawnReceipt | None] = []
         self.notices: list[tuple[str, str]] = []
         self.picks: list[str] = []
 
     def on_mount(self) -> None:
         self.push_screen(
-            SpawnDialog(self._project, accounts=self._accounts, **self._presets),
+            SpawnDialog(
+                self._project, projects=self._projects, accounts=self._accounts, **self._presets
+            ),
             callback=self.results.append,
         )
 
@@ -294,11 +304,12 @@ def drive(
     *,
     accounts: Callable[[], AccountsOverview] | None = None,
     presets: dict[str, str] | None = None,
+    projects: Sequence[ProjectInfo] | None = None,
 ) -> T:
     """Run ``scenario`` against the dialog open over a bare host."""
 
     async def run() -> T:
-        host = Host(project, accounts=accounts, presets=presets)
+        host = Host(project, accounts=accounts, presets=presets, projects=projects)
         async with host.run_test(size=SIZE) as pilot:
             await settle(pilot)
             dialog = host.screen
@@ -412,30 +423,64 @@ def drive_app(scenario: Callable[[Pilot[None], RecordingFleetApp], Coroutine[Any
     return asyncio.run(run())
 
 
-def spawn_row(app: FleetApp, project_id: str) -> SpawnRow:
-    return next(row for row in app.query(SpawnRow) if row.project_id == project_id)
+def spawn_button(app: FleetApp) -> SpawnButton:
+    """The sidebar's one *Spawn agent*: no card has a spawn row of its own."""
+    return app.query_one(SpawnButton)
 
 
-def test_the_spawn_row_opens_the_dialog_for_that_rows_project_and_no_toast(
+def test_the_spawn_button_opens_the_dialog_on_the_selected_project_and_no_toast(
     tmp_path: Path, fleet: dict[str, list[FleetAgentStatus]]
 ) -> None:
     register(tmp_path / "alpha", project_id="prj_a", codename="amber-otter")
     register(tmp_path / "beta", project_id="prj_b", codename="ruby-fox")
 
     async def scenario(pilot: Pilot[None], app: RecordingFleetApp) -> tuple[str, str, list[Any]]:
-        await pilot.click(spawn_row(app, "prj_b"))
+        await pilot.click("#card-prj_b ProjectTitle")
+        await pilot.pause()
+        await pilot.click(spawn_button(app))
         await pilot.pause()
         dialog = app.screen
-        assert isinstance(dialog, SpawnDialog), f"the row opened {type(dialog).__name__}"
+        assert isinstance(dialog, SpawnDialog), f"the button opened {type(dialog).__name__}"
         return dialog.project.id, shown(dialog.query_one("#spawn-header", Static)), app.notices
 
     project_id, header, notices = drive_app(scenario)
-    assert project_id == "prj_b"  # the row's own project, not the first or the selected one
+    assert project_id == "prj_b"  # the selected card's project, not the first one
     assert "beta · ruby-fox" in header  # the header names it before anything happens
     assert notices == []  # the "not built yet" toast is gone
 
 
-def test_a_spawn_row_for_a_project_that_left_the_frame_warns_and_opens_nothing(
+def test_the_spawn_button_with_nothing_selected_opens_on_the_first_project(
+    tmp_path: Path, fleet: dict[str, list[FleetAgentStatus]]
+) -> None:
+    register(tmp_path / "alpha", project_id="prj_a")
+    register(tmp_path / "beta", project_id="prj_b", codename="ruby-fox")
+
+    async def scenario(pilot: Pilot[None], app: RecordingFleetApp) -> tuple[str, str, str | None]:
+        await pilot.click(spawn_button(app))
+        await pilot.pause()
+        dialog = app.screen
+        assert isinstance(dialog, SpawnDialog)
+        return dialog.project.id, app.sidebar.ordered_projects()[0].id, app.sidebar.selected_key
+
+    project_id, first, selected = drive_app(scenario)
+    assert selected is None  # nothing was selected
+    assert project_id == first  # the first project in the sidebar's order
+
+
+def test_the_spawn_button_with_no_projects_says_so_and_opens_no_dialog(
+    fleet: dict[str, list[FleetAgentStatus]],
+) -> None:
+    async def scenario(pilot: Pilot[None], app: RecordingFleetApp) -> tuple[str, list[Any]]:
+        await pilot.click(spawn_button(app))
+        await pilot.pause()
+        return type(app.screen).__name__, app.notices
+
+    screen, notices = drive_app(scenario)
+    assert screen != "SpawnDialog"
+    assert notices == [("No projects yet — press + to onboard one", "information")]
+
+
+def test_a_spawn_for_a_project_that_left_the_frame_warns_and_opens_nothing(
     tmp_path: Path, fleet: dict[str, list[FleetAgentStatus]]
 ) -> None:
     register(tmp_path / "alpha", project_id="prj_a")
@@ -466,7 +511,7 @@ def test_opening_and_closing_the_dialog_leaves_the_app_keys_as_they_were(
         before = keys(app)
         # What every Screen binds anyway (focus movement, copy) — not the dialog's doing.
         screen_keys = set(app.screen._bindings.key_to_bindings)
-        await pilot.click(spawn_row(app, "prj_a"))
+        await pilot.click(spawn_button(app))
         await pilot.pause()
         dialog = app.screen
         assert isinstance(dialog, SpawnDialog)
@@ -994,7 +1039,7 @@ def test_a_receipt_dismisses_toasts_it_and_its_notes_refreshes_and_opens_the_new
             original(**kwargs)
 
         app.refresh_data = counted  # type: ignore[method-assign]
-        await pilot.click(spawn_row(app, "prj_a"))
+        await pilot.click(spawn_button(app))
         await pilot.pause()
         assert isinstance(app.screen, SpawnDialog)
         await pilot.click("#spawn-submit")
@@ -1021,7 +1066,7 @@ def test_a_receipt_dismisses_toasts_it_and_its_notes_refreshes_and_opens_the_new
 
 async def _submit_spawn(pilot: Pilot[None], app: RecordingFleetApp) -> None:
     """Open prj_a's spawn dialog from its row and press Spawn."""
-    await pilot.click(spawn_row(app, "prj_a"))
+    await pilot.click(spawn_button(app))
     await pilot.pause()
     assert isinstance(app.screen, SpawnDialog)
     await pilot.click("#spawn-submit")
@@ -1887,3 +1932,358 @@ def test_the_captains_dialog_hides_the_pick_note_beside_its_disabled_pick(
         git_project, scenario, presets={"role": fleet_service.CAPTAIN_ROLE}
     )
     assert disabled is True and shown_note is None
+
+
+# --- the Project field (tsk_01m5v6mvbqphwq8jtdw9sbc3he) -------------------------------------
+
+
+@pytest.fixture
+def other_project(tmp_path: Path) -> ProjectInfo:
+    """A second project, not a repository: where the Project field moves the dialog to."""
+    return register(tmp_path / "plain", project_id="prj_other", codename="ruby-fox")
+
+
+def test_the_project_field_is_the_first_field_and_offers_every_project_in_the_order_given(
+    git_project: ProjectInfo, other_project: ProjectInfo
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        labels = [str(label.render()) for label in dialog.query(".spawn-row > Label")]
+        field = select(dialog, "project")
+        return [labels[:2], field.value, option_prompts(dialog, "project"), field.disabled]
+
+    seen = drive(git_project, scenario, projects=[other_project, git_project])
+    assert seen == [["Project", "Role"], git_project.id, ["plain", "repo"], False]
+
+
+def test_two_projects_of_one_name_are_told_apart_by_codename_else_path(
+    tmp_path: Path,
+) -> None:
+    first = register(tmp_path / "a" / "app", project_id="prj_a", codename="amber-otter")
+    second = register(tmp_path / "b" / "app", project_id="prj_b", codename="ruby-fox")
+    third = register(tmp_path / "c" / "app", project_id="prj_c", codename="jade-lynx")
+    third = third.model_copy(update={"codename": None})  # a project that has no codename (yet)
+    solo = register(tmp_path / "solo", project_id="prj_solo", codename="coral-wren")
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        return option_prompts(dialog, "project")
+
+    prompts = drive(first, scenario, projects=[first, second, third, solo])
+    assert prompts == [
+        "app · amber-otter",
+        "app · ruby-fox",
+        f"app · {short_path(third.root)}",
+        "solo",  # a name of its own needs nothing after it
+    ]
+
+
+def test_a_dialog_opened_without_a_project_list_has_no_project_field(
+    git_project: ProjectInfo,
+) -> None:
+    """The persona-first flow (the Personas tab) opens on its own project: nothing to pick."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        return [
+            bool(dialog.query("#spawn-project")),
+            shown(dialog.query_one("#spawn-header", Static)),
+        ]
+
+    has_field, header = drive(git_project, scenario, presets={"persona": "skeptic"})
+    assert has_field is False and "repo · amber-otter" in header
+
+
+@pytest.mark.needs_captain
+def test_the_captains_dialog_has_no_project_field_whatever_it_is_offered(
+    git_project: ProjectInfo, other_project: ProjectInfo
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        return [bool(dialog.query("#spawn-project")), dialog.project.id, dialog._role]
+
+    seen = drive(
+        git_project,
+        scenario,
+        projects=[git_project, other_project],
+        presets={"role": fleet_service.CAPTAIN_ROLE, "persona": "captain"},
+    )
+    assert seen == [False, git_project.id, "captain"]  # the home it was opened on, as ever
+
+
+def test_the_spawn_goes_to_the_project_the_field_shows_and_the_header_follows(
+    git_project: ProjectInfo, other_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        header = [shown(dialog.query_one("#spawn-header", Static))]
+        select(dialog, "project").value = other_project.id
+        await settle(pilot)
+        header.append(shown(dialog.query_one("#spawn-header", Static)))
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return header
+
+    before, after = drive(git_project, scenario, projects=[git_project, other_project])
+    assert "repo · amber-otter" in before and "plain · ruby-fox" in after
+    assert spawns.calls == [(other_project.id, "coder", {**UNTOUCHED, "worktree": False})]
+
+
+def test_a_switch_from_a_git_project_to_a_plain_one_turns_the_worktree_off_and_back(
+    git_project: ProjectInfo, other_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        switch = dialog.query_one("#spawn-worktree", Switch)
+
+        def state() -> tuple[bool, bool, str]:
+            why = shown(dialog.query_one("#spawn-worktree-note", Static))
+            return switch.disabled, switch.value, why
+
+        seen = [state()]
+        select(dialog, "project").value = other_project.id
+        await settle(pilot)
+        seen.append(state())
+        seen.append(
+            dialog.spawn_kwargs()["worktree"]
+        )  # a coder's default is a worktree: "off" is sent
+        select(dialog, "project").value = git_project.id
+        await settle(pilot)
+        seen.append(state())
+        seen.append(dialog.spawn_kwargs()["worktree"])
+        return seen
+
+    seen = drive(git_project, scenario, projects=[git_project, other_project])
+    assert seen == [
+        (False, True, ""),
+        (True, False, "not a git repository"),
+        False,
+        (False, True, ""),  # back at the role's default
+        None,
+    ]
+
+
+def test_a_switch_to_a_project_whose_manager_runs_greys_the_role_and_blocks_the_manager(
+    git_project: ProjectInfo,
+    other_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    spawns: SpawnRecorder,
+) -> None:
+    monkeypatch.setattr(
+        fleet_service,
+        "manager_of",
+        lambda project: spawned_agent(project) if project.id == other_project.id else None,
+    )
+    manager = role_choices([]).index("manager")
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        def state() -> list[Any]:
+            greyed = select(dialog, "role").query_one(OptionList).get_option_at_index(manager)
+            return [
+                option_prompts(dialog, "role")[manager],
+                greyed.disabled,
+                label_input(dialog).value,
+                label_input(dialog).disabled,
+                submit(dialog).disabled,
+                note(dialog, "#spawn-role-note"),
+            ]
+
+        select(dialog, "role").value = "manager"
+        await settle(pilot)
+        seen = [state()]
+        select(dialog, "project").value = other_project.id
+        await settle(pilot)
+        seen.append(state())
+        select(dialog, "project").value = git_project.id
+        await settle(pilot)
+        seen.append(state())
+        return seen
+
+    free, running, back = drive(git_project, scenario, projects=[git_project, other_project])
+    assert free == ["manager", False, "manager", True, False, None]  # the label is locked
+    assert running == [
+        "manager — one per project, already running",
+        True,
+        "manager",
+        True,
+        True,  # Spawn waits: the role is the one this project already has
+        "plain already has a manager — one per project",
+    ]
+    assert back == free
+    assert spawns.calls == []
+
+
+def test_a_switch_re_reads_hand_off_sources_and_task_options_and_leaves_none_chosen(
+    git_project: ProjectInfo,
+    other_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    spawns: SpawnRecorder,
+    hand_offs: HandOffRecorder,
+) -> None:
+    mine = add_task(git_project, "Wire the auth flow")
+    theirs = add_task(other_project, "Fix the docs")
+    short = theirs.id.removeprefix("tsk_")[: fleet_service.TASK_SHORT]
+    listed = {
+        git_project.id: [teammate(git_project, role="tester", label="tester-1")],
+        other_project.id: [teammate(other_project, label="coder-7", slot=None)],
+    }
+    monkeypatch.setattr(fleet_service, "handoff_sources", lambda project: list(listed[project.id]))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "from").value = listed[git_project.id][0].agent.id
+        await settle(pilot)
+        chosen = [select(dialog, "role").value, select(dialog, "account").value]
+        select(dialog, "task").value = mine.id  # a hand-off locks it; the switch frees it
+        await settle(pilot)
+        select(dialog, "project").value = other_project.id
+        await settle(pilot)
+        seen: list[Any] = [chosen]
+        seen += [option_prompts(dialog, "from"), select(dialog, "from").value]
+        seen += [dialog.query_one("#spawn-how-row").display, str(submit(dialog).label)]
+        seen += [select(dialog, "role").value, select(dialog, "account").value]
+        seen += [option_prompts(dialog, "task"), select(dialog, "task").value]
+        seen += [select(dialog, "task").disabled, label_input(dialog).value]
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    seen = drive(git_project, scenario, projects=[git_project, other_project])
+    assert seen == [
+        ["tester", "2"],  # the teammate's, prefilled
+        ["(none)", "coder-7 · working · coder · no task · this shell's"],
+        "",
+        False,  # the How row goes with the teammate
+        "Spawn",
+        "coder",  # the plain form's own role and account, given back
+        "",
+        ["(none)", f"{short} [todo] Fix the docs"],
+        NO_TASK,
+        False,
+        "coder-1",
+    ]
+    assert hand_offs.calls == []
+    assert [call[0] for call in spawns.calls] == [other_project.id]
+
+
+def test_a_switch_moves_the_label_unless_it_was_edited(
+    git_project: ProjectInfo,
+    other_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    spawns: SpawnRecorder,
+) -> None:
+    monkeypatch.setattr(
+        fleet_service,
+        "next_label",
+        lambda project, role, task_id=None: f"{role}-{project.root.name}",
+    )
+
+    async def untouched(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        seen = [label_input(dialog).value]
+        select(dialog, "project").value = other_project.id
+        await settle(pilot)
+        seen.append(label_input(dialog).value)
+        return seen
+
+    async def edited(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        label_input(dialog).value = "coder-auth"
+        await pilot.pause()
+        select(dialog, "project").value = other_project.id
+        await settle(pilot)
+        shown_label = label_input(dialog).value
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return [shown_label, spawns.calls[0][2]["label"]]
+
+    projects = [git_project, other_project]
+    assert drive(git_project, untouched, projects=projects) == ["coder-repo", "coder-plain"]
+    assert drive(git_project, edited, projects=projects) == ["coder-auth", "coder-auth"]
+
+
+def test_a_switch_re_reads_the_persona_catalogue_and_the_roles_default_unless_one_was_picked(
+    git_project: ProjectInfo, other_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    tempo = other_project.root / ".aisquare" / "personas" / "tempo" / "SKILL.md"
+    tempo.parent.mkdir(parents=True)
+    tempo.write_text("---\nname: tempo\ndescription: A tempo.\n---\nKeep tempo.\n", "utf-8")
+    configure_role("coder", persona="tempo")  # this project (git_project) lacks it
+    layer = personas.resolve("tempo", other_project.root).layer
+
+    async def untouched(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        persona = select(dialog, "persona")
+        seen: list[Any] = [persona.value, note(dialog, "#spawn-persona-description")]
+        seen.append("tempo · " + layer in option_prompts(dialog, "persona"))
+        select(dialog, "project").value = other_project.id
+        await settle(pilot)
+        seen += [persona.value, note(dialog, "#spawn-persona-description")]
+        seen.append("tempo · " + layer in option_prompts(dialog, "persona"))
+        seen.append(dialog.spawn_kwargs()["persona"])  # still the role's default: not sent
+        return seen
+
+    async def picked(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "persona").value = "mentor"
+        await pilot.pause()
+        select(dialog, "project").value = other_project.id
+        await settle(pilot)
+        return [select(dialog, "persona").value, dialog.spawn_kwargs()["persona"]]
+
+    projects = [git_project, other_project]
+    seen = drive(git_project, untouched, projects=projects)
+    assert seen[0] == "tempo" and "not one of this project's personas" in str(seen[1])
+    assert seen[2] is False  # the catalogue of the first project lacks it
+    assert seen[3:] == ["tempo", "A tempo.", True, None]
+    assert drive(git_project, picked, projects=projects) == ["mentor", "mentor"]
+
+
+def test_a_switch_keeps_account_binary_permission_mode_args_and_the_first_prompt(
+    git_project: ProjectInfo, other_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> None:
+        select(dialog, "account").value = "2"
+        dialog.query_one("#spawn-binary", Input).value = "my-claude"
+        select(dialog, "permission").value = "acceptEdits"
+        dialog.query_one("#spawn-args", Input).value = "--model opus"
+        dialog.query_one("#spawn-prompt", TextArea).text = "start with the tests"
+        await pilot.pause()
+        select(dialog, "project").value = other_project.id
+        await settle(pilot)
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+
+    drive(
+        git_project,
+        scenario,
+        accounts=lambda: overview((1, "a@example.com"), (2, "b@example.com")),
+        projects=[git_project, other_project],
+    )
+    assert spawns.calls == [
+        (
+            other_project.id,
+            "coder",
+            {
+                **UNTOUCHED,
+                "worktree": False,
+                "account": "2",
+                "binary": "my-claude",
+                "permission_mode": "acceptEdits",
+                "agent_args": ["--model", "opus"],
+                "prompt": "start with the tests",
+            },
+        )
+    ]
+
+
+def test_the_project_field_waits_while_a_spawn_runs(
+    git_project: ProjectInfo, other_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    gate = threading.Event()
+
+    def slow(project: ProjectInfo, role: str) -> fleet_service.SpawnReceipt:
+        gate.wait(timeout=10)
+        return receipt_for(project)
+
+    spawns.answer = slow
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[bool]:
+        await pilot.click("#spawn-submit")
+        await pilot.pause()
+        seen = [select(dialog, "project").disabled]
+        gate.set()
+        await settle(pilot)
+        return seen
+
+    assert drive(git_project, scenario, projects=[git_project, other_project]) == [True]
+    assert [call[0] for call in spawns.calls] == [git_project.id]

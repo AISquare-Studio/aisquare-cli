@@ -8,6 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The sidebar has one *Start captain* and one *Spawn agent*, not a spawn row under every
+  project.** Under the Fleet header, two full-width one-line actions: *▶ Start captain*
+  (with the experimental captain on; its own row takes that place while it is live, and an
+  exited one keeps its row with the start under it) and *＋ Spawn agent*. The "Captain"
+  heading and the ★ beside Fleet are gone. *Spawn agent* opens the Spawn dialog with a new
+  first field, **Project**: every listed project in the sidebar's order, preselected to the
+  selected card or the selected agent's project, else the first. Changing it re-reads what
+  depends on the project (git, a running manager, hand-off sources, tasks, personas and the
+  prefilled label) and keeps the account, binary, permission mode, extra args and first
+  prompt. With no project yet it says so in a toast and opens nothing. The captain's dialog
+  and the Personas tab's flow open on their own project, with no Project field.
+
 - **CI runs each leg's suite in shards: a sub-PR's CI takes about 8 minutes, the full
   matrix about 10-13, down from 22 and 64.** The suite is ~13k tests and its time is a
   long tail, so it is split across standard runners rather than sped up: pytest-split

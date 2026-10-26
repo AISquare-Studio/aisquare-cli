@@ -139,7 +139,7 @@ def test_the_sidebar_has_the_projects_then_settings_and_its_status_and_nothing_e
         )
 
     sections, inside, order, settings, focusable, offered = _drive(go)
-    assert sections == ["fleet-header", "projects-notice", "projects", "others"]
+    assert sections == ["fleet-header", "actions", "projects-notice", "projects", "others"]
     assert inside == ["SettingsRow", "StatusLine"]
     # The ⬆ row (tests/test_ui_update_row.py) sits between the two, and shows only while a
     # newer release is offered: never here, as the suite runs from a checkout, which the

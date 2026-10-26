@@ -1,4 +1,4 @@
-"""The Spawn dialog — the sidebar's spawn-agent row, over ``services.fleet.spawn``.
+"""The Spawn dialog — the sidebar's *Spawn agent*, over ``services.fleet.spawn``.
 
 docs/plans/spawn-personas.md §4.1 (the field table this follows row by row) and
 docs/plans/fleet-tui.md §4.1, §5.7 (the row, the label rules, the 🎲 form). The
@@ -12,7 +12,10 @@ the service picks the free label under the store it is writing with.
 
 **Two tiers: three fields, then Advanced** (tsk_01m5mm2sz23b). Always on show,
 in this order: Role, *Hand off from* (its *How* row only once a teammate is
-picked) and Account, then the status line and the buttons. Role's first option
+picked) and Account, then the status line and the buttons. Above them, when the
+caller lists the projects (``projects=``: the sidebar's *Spawn agent* does), the
+**Project** field says where the agent goes; the persona-first flow and the
+captain, whose project is fixed, open without it. Role's first option
 is *(none) — general-purpose Claude*, ``fleet.PLAIN_ROLE``: a plain Claude Code
 session on the board, with no standing cycle and no mission; ``coder`` stays
 the default. Everything else is folded into one *Advanced* section (a
@@ -48,8 +51,15 @@ through their own change handlers — an open form keeps what was typed — and 
 *+ New account* hands over to the Accounts page. *Import…* beside the Persona
 select opens the Personas tab's import dialog and selects what it imports.
 
+**Changing Project** re-reads everything that hangs on the project, as the dialog does
+when it opens: the header, git (the worktree switch), whether a manager already runs (the
+Role prompt and its label lock), *Hand off from* and Task (reset to ``(none)``), the persona
+catalogue and the role's default persona (unless one was picked) and the prefilled label
+(unless it was edited). Account, Binary, Permission mode, Extra agent args and First prompt
+keep what was entered, and the spawn goes to the project the field shows.
+
 **The captain** (T4): opened on the home board preset to ``captain`` — the
-insignia's dialog when there is no captain — the form starts the captain through
+*Start captain*'s dialog when there is no live captain — the form starts the captain through
 ``services.captain.brain.start``, never ``fleet.spawn``, which refuses a captain
 without its brain folder and its one server (T2). So the fields that would change
 what the captain IS are fixed: the role, the label (one per home), the task (it
@@ -89,7 +99,8 @@ from __future__ import annotations
 import dataclasses
 import random
 import shlex
-from collections.abc import Callable, Iterable
+from collections import Counter
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, ClassVar
 
 from rich.text import Text
@@ -117,6 +128,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested, Target
 from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
+from aisquare.cli.ui.sidebar import short_path
 from aisquare.cli.ui.views.app_settings import permission_options
 from aisquare.core import codenames, experimental, harness, personas
 from aisquare.core.config import FleetRoleSettings, load_config
@@ -132,6 +144,7 @@ from aisquare.models import (
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
+from aisquare.services.project import display_name
 
 SPAWN_WORKER = "spawn-agent"
 """The worker that runs the spawn. Not ``spawn-manager`` — that is the Manager
@@ -387,6 +400,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self,
         project: ProjectInfo,
         *,
+        projects: Sequence[ProjectInfo] | None = None,
         persona: str | None = None,
         role: str | None = None,
         binary: str | None = None,
@@ -404,6 +418,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         flag flipped while the dialog is open never mixes the two (review of #240, R2-m5)."""
         self._captain = self._captain_role(self._role)
         """Started through ``brain.start``, its role, label, task and args fixed (T4)."""
+        self._choices = self._listed(projects)
+        """The projects the Project field offers, in the order given; empty: no field, the
+        project is fixed (the captain's home, the persona-first flow's)."""
         roles = role_choices(_bound_roles())
         self._roles = roles if self._role in roles else [*roles, self._role]
         self._preset_binary = binary or ""
@@ -436,6 +453,27 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         """What the teammate's prefill replaced, kept while one is chosen (``_give_back``)."""
 
     # --- what the form reads when it opens ----------------------------------------------
+
+    def _listed(self, projects: Sequence[ProjectInfo] | None) -> list[ProjectInfo]:
+        """``projects`` for the Project field, with this dialog's own project among them."""
+        if self._captain or not projects:
+            return []
+        listed = list(projects)
+        if all(listed_project.id != self.project.id for listed_project in listed):
+            listed.insert(0, self.project)
+        return listed
+
+    def _project_options(self) -> list[tuple[Text, str]]:
+        """``name`` per project — and, where two share a name, its codename (else its path)."""
+        names = Counter(display_name(project) for project in self._choices)
+        options: list[tuple[Text, str]] = []
+        for project in self._choices:
+            name = display_name(project)
+            label = Text(name)
+            if names[name] > 1:
+                label.append(f" · {project.codename or short_path(project.root)}", style="dim")
+            options.append((label, project.id))
+        return options
 
     def _read_tasks(self) -> tuple[list[TeamTask], str | None]:
         try:
@@ -531,7 +569,16 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         with Vertical(id="spawn-box"):
             yield Static(self._header(), id="spawn-header")
             with VerticalScroll(id="spawn-fields"):
-                # The basic tier: who runs it, from whom, on which account.
+                # The basic tier: where, who runs it, from whom, on which account.
+                if self._choices:
+                    with Horizontal(classes="spawn-row"):
+                        yield Label("Project")
+                        yield Select(
+                            self._project_options(),
+                            value=self.project.id,
+                            allow_blank=False,
+                            id="spawn-project",
+                        )
                 with Horizontal(classes="spawn-row"):
                     yield Label("Role")
                     yield Select(
@@ -890,6 +937,88 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         if self._source is None:  # a hand-off decides the task itself (_apply_handoff)
             self._relabel(self._role)
         self._validate()
+
+    # --- the Project field ----------------------------------------------------------------
+
+    @on(Select.Changed, "#spawn-project")
+    def _project_changed(self) -> None:
+        """The project the field holds now, not the one the message carries (as the role's)."""
+        chosen = self.query_one("#spawn-project", Select).value
+        project = next((p for p in self._choices if p.id == chosen), None)
+        if project is not None and project.id != self.project.id:
+            self._switch_project(project)
+
+    def _switch_project(self, project: ProjectInfo) -> None:
+        """Re-read what hangs on the project, as ``__init__`` read it for the first.
+
+        The form keeps what the project does not decide: Account, Binary, Permission mode,
+        Extra agent args and First prompt, a persona or label the user chose, a worktree
+        choice between two git projects. Every ``Select.Changed`` the rebuilds would send is
+        held back (``prevent``) — none of them is the owner's pick — and what each one would
+        have done is done here, once, at the end.
+        """
+        was_git = self._git
+        self.project = project
+        self._git = fleet_service.is_git_project(project.root)
+        self.query_one("#spawn-header", Static).update(self._header())
+        self._manager_live = self._read_manager_live()
+        self._offer_roles()  # the manager's prompt: "already running" here, or not
+        if self._manager_live:
+            self.call_after_refresh(self._grey_out_manager)
+        self._reset_tasks()
+        # A hand-off names a teammate of the OLD project: back to the plain spawn, which also
+        # gives Role, Account and Persona back (``_give_back``). After the Role field is
+        # rebuilt: the role it gives back is a change the form then follows (``_role_changed``).
+        self._reset_source()
+        self._personas, self._personas_unavailable = self._read_personas()
+        if self._persona_value() != self._persona_shown:
+            self._persona_touched = True  # a pick whose Changed is still on the way
+            self._persona_shown = self._persona_value()
+        self._put_persona(
+            self._persona_shown if self._persona_touched else self._persona_default(self._role),
+            rebuild=True,
+        )
+        switch = self.query_one("#spawn-worktree", Switch)
+        switch.disabled = not self._git
+        if not self._git:
+            switch.value = False
+        elif not was_git:
+            switch.value = self._defaults(self._role).worktree
+        self.query_one("#spawn-worktree-note", Static).update(
+            "" if self._git else "not a git repository"
+        )
+        self._relabel(self._role)
+        self._validate()
+
+    def _reset_tasks(self) -> None:
+        """Task offers this project's open tasks, on ``(none)``."""
+        self._tasks, self._tasks_unavailable = self._read_tasks()
+        field = self.query_one("#spawn-task", Select)
+        with self.prevent(Select.Changed):
+            field.set_options([("(none)", NO_TASK), *((task_choice(t), t.id) for t in self._tasks)])
+            field.value = NO_TASK
+        self._note("#spawn-task-note", self._tasks_unavailable, style="dim")
+
+    def _reset_source(self) -> None:
+        """*Hand off from* offers this project's teammates, on ``(none)``: the plain spawn."""
+        self._sources, self._sources_unavailable = self._read_sources()
+        chosen, self._source = self._source, None
+        field = self.query_one("#spawn-from", Select)
+        with self.prevent(Select.Changed):
+            field.set_options(
+                [("(none)", NO_SOURCE), *((source_choice(s), s.agent.id) for s in self._sources)]
+            )
+            field.value = NO_SOURCE
+        field.disabled = not self._sources
+        self._note("#spawn-from-note", self._sources_unavailable, style="dim")
+        if chosen is None:
+            return
+        self.query_one("#spawn-how-row").display = False
+        with self.prevent(RadioSet.Changed, Checkbox.Changed):
+            self.query_one("#spawn-fork", RadioButton).value = True
+            self.query_one("#spawn-fresh", Checkbox).value = False
+        self._give_back()
+        self._apply_handoff()
 
     # --- a hand-off from a teammate (card tsk_01m3ns5a736s) -------------------------------
 
@@ -1252,12 +1381,12 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                 return
             self._hand_off(source, handoff)
             return
-        role, kwargs = self._role, self.spawn_kwargs()
+        project, role, kwargs = self.project, self._role, self.spawn_kwargs()
         self._set_spawning(True)
         self.run_worker(
             (lambda: start_captain(kwargs))
             if self._captain
-            else (lambda: fleet_service.spawn(self.project, role, **kwargs)),
+            else (lambda: fleet_service.spawn(project, role, **kwargs)),
             name=SPAWN_WORKER,
             group=SPAWN_WORKER,
             thread=True,
@@ -1265,9 +1394,10 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         )
 
     def _hand_off(self, source: str, kwargs: dict[str, Any]) -> None:
+        project = self.project
         self._set_spawning(True)
         self.run_worker(
-            lambda: hand_off(self.project, source, kwargs),
+            lambda: hand_off(project, source, kwargs),
             name=SPAWN_WORKER,
             group=SPAWN_WORKER,
             thread=True,
@@ -1277,6 +1407,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     def _set_spawning(self, running: bool) -> None:
         self._spawning = running
         self.query_one("#spawn-cancel", Button).disabled = running
+        if self._choices:
+            self.query_one("#spawn-project", Select).disabled = running
         self._lock_other_screens()
         self._note("#spawn-status", f"spawning {self._role} …" if running else None, style="dim")
         self._validate()

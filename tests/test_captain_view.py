@@ -1,6 +1,8 @@
-"""The captain's corner of the fleet UI: the rank insignia, the captain view, its quick action (T4).
+"""The captain's corner of the fleet UI: its slot in the actions block, the captain view, its
+quick action (T4).
 
-Acceptance (card T4): the glyph state follows the row; a click opens the view;
+Acceptance (card T4): the slot follows the row (its row while live, *Start captain* else); a
+click opens the view;
 the quick action types into the pane (a recorder on ``fleet.tell``); the
 thinking indicator follows the flag; the divider, groups and existing bindings
 are untouched (their own suites stay green). Driven with the UI suite's
@@ -19,7 +21,7 @@ import pytest
 from textual.pilot import Pilot
 from textual.widgets import Button, Input, Static
 
-from aisquare.cli.ui.sidebar import AgentRow, CaptainButton
+from aisquare.cli.ui.sidebar import AgentRow, StartCaptain
 from aisquare.cli.ui.spawn import SpawnDialog
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.captain import WHAT_IS_UP, CaptainView
@@ -56,13 +58,13 @@ def drive(body: Callable[[Pilot[None]], Awaitable[T]], **options: Any) -> T:
 
 
 async def _open_view(pilot: Pilot[None]) -> CaptainView:
-    """Click the lit star and wait for the selection's last effect, not for a pause
+    """Click the captain's row and wait for the selection's last effect, not for a pause
     (``tests.test_captain_sidebar.until`` says why: Windows returned mid-handler)."""
     app = fleet_app(pilot)
     home = captain_state.home_project()
     rows = app.snapshot.agents.get(home.id, []) if app.snapshot else []
     assert rows, "a live captain row to open"
-    await pilot.click("#captain-button")
+    await pilot.click("#captain-section AgentRow")
     await until(pilot, agent_opened(pilot, rows[0].agent.id), what="the captain view open")
     view = app.current_view()
     assert isinstance(view, CaptainView)
@@ -73,69 +75,88 @@ def _captain(state: str = "waiting") -> FleetAgentStatus:
     return status(captain_state.home_project().id, "captain", "captain", state)
 
 
-def _insignia(pilot: Pilot[None]) -> CaptainButton:
-    return fleet_app(pilot).query_one("#captain-button", CaptainButton)
+def _start(pilot: Pilot[None]) -> StartCaptain:
+    return fleet_app(pilot).query_one("#captain-empty", StartCaptain)
 
 
-# --- the insignia ---------------------------------------------------------------------------
+def _captain_rows(pilot: Pilot[None]) -> list[AgentRow]:
+    return list(fleet_app(pilot).query_one("#captain-section").query(AgentRow))
+
+
+# --- the captain's slot -----------------------------------------------------------------------
 
 
 @pytest.mark.needs_captain
-def test_the_insignia_sits_in_the_fleet_header_between_fleet_and_plus(
+def test_the_captain_slot_leads_the_actions_block_under_a_header_with_no_star(
     tmp_path: Path, script: Script
 ) -> None:
     async def body(pilot: Pilot[None]) -> None:
-        header = fleet_app(pilot).query_one("#fleet-header")
-        assert [child.id for child in header.children] == [
+        app = fleet_app(pilot)
+        assert [child.id for child in app.query_one("#fleet-header").children] == [
             "fleet-title",
-            "captain-button",
             "add-project",
         ]
-        assert "★" in shown(_insignia(pilot))
+        header = app.query_one("#fleet-header")
+        assert "★" not in "".join(shown(s) for s in header.query(Static))
+        assert not app.query("#captain-title"), "no 'Captain' heading over the actions"
+        assert [child.id for child in app.query_one("#actions").children] == [
+            "captain-section",
+            "spawn-agent",
+        ]
+        assert shown(_start(pilot)) == "▶ Start captain"
 
     drive(body)
 
 
 @pytest.mark.parametrize(
-    ("state", "lit"),
-    [("waiting", True), ("working", True), ("attention", True), ("exited", False), (None, False)],
+    ("state", "row", "start"),
+    [
+        ("waiting", True, False),
+        ("working", True, False),
+        ("attention", True, False),
+        ("exited", True, True),  # the dead row keeps its exit status, with a start under it
+        (None, False, True),
+    ],
 )
 @pytest.mark.needs_captain
-def test_the_insignia_is_lit_while_the_captain_row_is_live_and_dim_otherwise(
-    tmp_path: Path, script: Script, state: str | None, lit: bool
+def test_a_live_captains_row_takes_the_place_of_start_captain(
+    tmp_path: Path, script: Script, state: str | None, row: bool, start: bool
 ) -> None:
-    """Plan section 4: lit in the accent while the captain row is live, dim otherwise."""
+    """The slot shows the captain's row while it is live; an exited one stays, restartable."""
     seed(tmp_path, ("prj_aaa", "alpha", "amber-otter"))
     if state is not None:
         script[captain_state.home_project().id] = [_captain(state)]
 
     async def body(pilot: Pilot[None]) -> None:
         await refreshed(fleet_app(pilot))
-        assert _insignia(pilot).has_class("live") is lit
+        assert bool(_captain_rows(pilot)) is row
+        assert _start(pilot).display is start
 
     drive(body)
 
 
 @pytest.mark.needs_captain
-def test_the_insignia_follows_the_row_from_frame_to_frame(tmp_path: Path, script: Script) -> None:
+def test_the_slot_follows_the_row_from_frame_to_frame(tmp_path: Path, script: Script) -> None:
     home = captain_state.home_project()
 
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
         await refreshed(app)
-        assert not _insignia(pilot).has_class("live")
+        assert not _captain_rows(pilot) and _start(pilot).display
         script[home.id] = [_captain("working")]
         await refreshed(app)
-        assert _insignia(pilot).has_class("live")
+        await pilot.pause()
+        assert len(_captain_rows(pilot)) == 1 and not _start(pilot).display
         script[home.id] = []
         await refreshed(app)
-        assert not _insignia(pilot).has_class("live")
+        await pilot.pause()
+        assert not _captain_rows(pilot) and _start(pilot).display
 
     drive(body)
 
 
 @pytest.mark.needs_captain
-def test_the_lit_insignia_opens_the_captain_view_over_its_pane(
+def test_the_live_captains_row_opens_the_captain_view_over_its_pane(
     tmp_path: Path, script: Script
 ) -> None:
     captain = _captain()
@@ -155,13 +176,13 @@ def test_the_lit_insignia_opens_the_captain_view_over_its_pane(
 
 
 @pytest.mark.needs_captain
-def test_the_dim_insignia_opens_the_spawn_dialog_preset_to_the_captain(
+def test_start_captain_opens_the_spawn_dialog_preset_to_the_captain(
     tmp_path: Path, script: Script
 ) -> None:
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
         await refreshed(app)
-        await pilot.click("#captain-button")
+        await pilot.click("#captain-empty")
         await pilot.pause()
         dialog = app.screen
         assert isinstance(dialog, SpawnDialog)
@@ -171,22 +192,25 @@ def test_the_dim_insignia_opens_the_spawn_dialog_preset_to_the_captain(
         assert dialog.query_one("#spawn-label", Input).disabled, "one per home: the label is fixed"
         assert dialog.query_one("#spawn-args", Input).disabled, "its arguments are its own"
         assert "Start the captain" in shown(dialog.query_one("#spawn-header", Static))
+        assert not dialog.query("#spawn-project"), "the captain's home is not a project to pick"
 
     drive(body)
 
 
 @pytest.mark.needs_captain
-def test_a_dim_insignia_over_an_exited_captain_offers_a_start_not_its_dead_pane(
+def test_start_captain_under_an_exited_captain_offers_a_start_not_its_dead_pane(
     tmp_path: Path, script: Script
 ) -> None:
-    """A 💤 row still lists for a while (``remain-on-exit``); the star is dim, and a click
-    does what the dim star says — the Spawn dialog, whose start replaces the dead row."""
+    """A 💤 row still lists for a while (``remain-on-exit``); the row keeps its exit status,
+    and *Start captain* under it opens the Spawn dialog, whose start replaces the dead row."""
     script[captain_state.home_project().id] = [_captain("exited")]
 
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
         await refreshed(app)
-        await pilot.click("#captain-button")
+        await pilot.pause()
+        assert "exited" in shown(_captain_rows(pilot)[0])
+        await pilot.click("#captain-empty")
         await pilot.pause()
         assert isinstance(app.screen, SpawnDialog)
 
@@ -226,7 +250,7 @@ def test_the_captain_dialog_starts_the_captain_through_its_own_launch(
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
         await refreshed(app)
-        await pilot.click("#captain-button")
+        await pilot.click("#captain-empty")
         await pilot.pause()
         dialog = app.screen
         assert isinstance(dialog, SpawnDialog)

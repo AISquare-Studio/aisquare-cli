@@ -2,7 +2,7 @@
 
 On a fresh install the owner could not find how to turn the captain on (it took ``aisquare
 config set experimental.captain true`` and a restart) or how to talk to it. Settings' box
-switches it at once, *▶ Start captain* in its section opens what the ``★`` opens when there
+switches it at once, *▶ Start captain* in the actions block opens the Spawn dialog when there
 is no captain, and the captain's view has a one-line box that types by What's up's path.
 Driven headless through ``tests.test_ui_shell``'s ``drive``; every claim reads what a widget
 shows or what the one door typed.
@@ -21,9 +21,9 @@ from aisquare.cli.ui.receiver import ui_receiver
 from aisquare.cli.ui.sidebar import (
     CAPTAIN_READING,
     AgentRow,
-    CaptainButton,
     CaptainSection,
     SettingsRow,
+    SpawnButton,
     StartCaptain,
 )
 from aisquare.cli.ui.spawn import SpawnDialog
@@ -75,13 +75,13 @@ async def _tick(pilot: Pilot[None], box: Checkbox) -> None:
 def test_ticking_the_captain_box_shows_the_captain_at_once_and_unticking_hides_it(
     tmp_path: Path, script: Script, captain_off: None
 ) -> None:
-    """Off, as it ships: no ``★``, no Captain section, no ui receiver. A tick saves the setting
-    and shows all of it with no restart, the captain's row read into its section; an untick
-    takes it all away again, the setting saved off."""
+    """Off, as it ships: no Start captain, no captain slot, no ui receiver — and Spawn agent,
+    which stays. A tick saves the setting and shows all of it with no restart, the captain's
+    row read into its slot; an untick takes it all away again, the setting saved off."""
     seed(tmp_path, ("prj_aaa", "alpha", "amber-otter"))
     home = captain_state.home_project()
     script[home.id] = [_captain("waiting")]
-    Seen = tuple[bool, bool, list[str], bool, bool]
+    Seen = tuple[bool, bool, list[str], bool, bool, bool]
 
     async def body(pilot: Pilot[None]) -> tuple[Seen, Seen, Seen]:
         app = fleet_app(pilot)
@@ -89,11 +89,12 @@ def test_ticking_the_captain_box_shows_the_captain_at_once_and_unticking_hides_i
         def seen() -> Seen:
             rows = [row.status.agent.label for row in app.query(AgentRow) if _in_section(row)]
             return (
-                bool(app.query(CaptainButton)),
+                bool(app.query(StartCaptain)),
                 bool(app.query(CaptainSection)),
                 rows,
                 ui_receiver(app) is not None,
                 load_config().experimental.captain,
+                bool(app.query(SpawnButton)),
             )
 
         await refreshed(app)
@@ -107,9 +108,11 @@ def test_ticking_the_captain_box_shows_the_captain_at_once_and_unticking_hides_i
         return before, ticked, seen()
 
     before, ticked, unticked = drive(body)
-    assert before == (False, False, [], False, False)
-    assert ticked == (True, True, ["captain"], True, True), "★, section, its row, receiver, saved"
-    assert unticked == (False, False, [], False, False)
+    assert before == (False, False, [], False, False, True)
+    assert ticked == (True, True, ["captain"], True, True, True), (
+        "start, slot, row, receiver, saved"
+    )
+    assert unticked == (False, False, [], False, False, True)
 
 
 def test_reset_all_and_reload_move_the_box_and_the_shell_with_the_file(
@@ -117,7 +120,7 @@ def test_reset_all_and_reload_move_the_box_and_the_shell_with_the_file(
 ) -> None:
     """The box sits in App settings' form now (#41), whose Reset all and Reload re-read the
     file: the box and the shell follow it. Reset all with the captain ticked put the file's
-    captain back to off while the box stayed ticked and the ``★`` stayed lit until a restart;
+    captain back to off while the box stayed ticked and the captain's slot stayed until a restart;
     a ``config set`` from a shell, then Reload, left both as they were."""
     seed(tmp_path, ("prj_aaa", "alpha", "amber-otter"))
     Seen = tuple[bool, bool, bool]
@@ -127,7 +130,7 @@ def test_reset_all_and_reload_move_the_box_and_the_shell_with_the_file(
 
         def seen() -> Seen:
             box = app.query_one("#captain-toggle", Checkbox)
-            return box.value, app.captain_on, bool(app.query(CaptainButton))
+            return box.value, app.captain_on, bool(app.query(CaptainSection))
 
         await refreshed(app)
         toggle = await _settings(pilot)
@@ -149,7 +152,7 @@ def test_reset_all_and_reload_move_the_box_and_the_shell_with_the_file(
 
     ticked, reset, reloaded = drive(body)
     assert ticked == (True, True, True)
-    assert reset == (False, False, False), "the box, the switch, the ★: off with the file"
+    assert reset == (False, False, False), "the box, the switch, the slot: off with the file"
     assert reloaded == (True, True, True), "a shell's config set, after Reload"
 
 
@@ -247,8 +250,8 @@ def test_the_environment_variable_greys_the_box_in_the_state_it_forces_and_says_
 def test_start_captain_opens_the_spawn_dialog_with_the_captain_chosen(
     tmp_path: Path, script: Script
 ) -> None:
-    """The section's line where there is no captain is a *Start captain* that does what the dim
-    ``★`` does: the Spawn dialog, on the home board, with the captain chosen."""
+    """The slot's line where there is no live captain is a *Start captain*: the Spawn dialog, on
+    the home board, with the captain chosen."""
 
     async def body(pilot: Pilot[None]) -> tuple[str, str, bool]:
         app = fleet_app(pilot)

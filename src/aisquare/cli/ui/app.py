@@ -1021,7 +1021,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._undo: list[project_groups.UndoEntry] = []
         """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
         self.captain_on = experimental.captain_enabled()
-        """The experimental captain, read at the start: off, there is no insignia, captain
+        """The experimental captain, read at the start: off, there is no Start captain, captain
         row or captain view, and no ui receiver is started (:meth:`on_mount`). Settings'
         *Captain* box switches it while asq runs (:meth:`on_captain_switched`)."""
 
@@ -1086,7 +1086,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     async def on_captain_switched(self, event: CaptainSwitched) -> None:
         """Settings' *Captain* box (#33): all that :attr:`captain_on` gates, at once, with no
-        restart: the insignia and the Captain section, the captain's part of the fleet read
+        restart: Start captain and the captain's row, the captain's part of the fleet read
         (read as each read runs) and the ui receiver."""
         if event.on == self.captain_on:
             return
@@ -1973,14 +1973,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         return AgentView(status, usage=self.session_usage, id=view_id)
 
     def on_captain_requested(self, event: CaptainRequested) -> None:
-        """The insignia: the captain's view when it is live, else the Spawn dialog preset to it.
+        """*▶ Start captain*: the captain's view when live, else the Spawn dialog preset to it.
 
-        Decided from the frame the insignia was painted from, so the click does what
-        the star showed: lit is a live row (``ALIVE_STATES``), dim is none — or one
-        that is gone, which a start replaces (``brain.find`` reaps it first).
+        Decided from the frame the row was painted from, so the click does what the sidebar
+        showed: a live row (``ALIVE_STATES``) opens its view, none — or one that is gone, which
+        a start replaces (``brain.find`` reaps it first) — starts one.
         """
         if not self.captain_on:
-            return  # the insignia is not there to click; nothing else may start one
+            return  # the row is not there to click; nothing else may start one
         # Imported here, not at the top: the shell starts without the captain's modules.
         from aisquare.services.captain import brain
         from aisquare.services.captain import state as captain_state
@@ -2349,13 +2349,23 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             await view.remove()
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
-        """The sidebar's spawn-agent row: the Spawn dialog for THAT row's project."""
-        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        """*Spawn agent*: the Spawn dialog, on the project asked for — else the first listed —
+        with every listed project in its Project field, in the sidebar's order."""
+        snapshot = self.snapshot
+        listed = self.sidebar.ordered_projects() or (snapshot.projects if snapshot else [])
+        if event.project_id is None:
+            if not listed:
+                self.notify("No projects yet — press + to onboard one", timeout=4)
+                return
+            project: ProjectInfo | None = listed[0]
+        else:
+            project = snapshot.project(event.project_id) if snapshot else None
         if project is None:
             self.notify("that project is no longer listed", severity="warning", timeout=4)
             return
         self.push_screen(
-            SpawnDialog(project, accounts=self._accounts), callback=self.spawn_finished
+            SpawnDialog(project, projects=listed, accounts=self._accounts),
+            callback=self.spawn_finished,
         )
 
     def spawn_finished(self, receipt: fleet_service.SpawnReceipt | None) -> None:

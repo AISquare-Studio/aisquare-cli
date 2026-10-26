@@ -423,10 +423,12 @@ def fresh(
     is removed, and the board's tasks, notes, sessions, signals and work briefs (with
     their kept evidence), the manager's state file and the fleet's rows are deleted;
     task and brief numbers start at #1 again. The checkout, every other branch, the
-    registration and its settings, the symbol index, the command reports and every
-    other project are kept, and so are its context entries and brain, prompt log and
-    fleet branches unless --memory, --prompts or --branches says otherwise. Work its
-    worktrees or branches hold that no remote has refuses the reset, named, unless
+    registration and its settings, the symbol index and every other project are kept,
+    and so are its context entries and brain, prompt log and fleet branches unless
+    --memory, --prompts or --branches says otherwise. No command report is deleted,
+    but with their briefs gone they are no longer pinned as evidence (unless another
+    board's brief cites one), and normal retention takes them. Work its worktrees or
+    branches hold that no remote has refuses the reset, named, unless
     --discard-unpushed. It prints the plan and asks first at a terminal (twice when
     discarding); off a terminal it is a dry run unless --yes, and under --json
     without --yes it prints the plan and changes nothing. Refused from inside one

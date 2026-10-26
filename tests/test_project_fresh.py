@@ -603,6 +603,10 @@ def test_fresh_and_reset_are_the_same_command(
     assert json.loads(fresh.stdout) == json.loads(reset.stdout)
     listed = runner.invoke(app, ["project", "--help"])
     assert "fresh" in listed.output
+    helped = " ".join(runner.invoke(app, ["project", "fresh", "--help"]).output.split())
+    # Nothing deletes a report, but the briefs' pin on them goes (review of #429).
+    assert "No command report is deleted" in helped and "retention takes them" in helped
+    assert "command reports and every other project are kept" not in helped
 
 
 def test_it_is_refused_from_inside_one_of_the_projects_own_fleet_agents(

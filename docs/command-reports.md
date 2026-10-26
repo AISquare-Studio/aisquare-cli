@@ -191,8 +191,8 @@ Retention never removes a report that recorded evidence cites
 toward the 64. Those reports stay, whatever `--keep` and `--days` say, until the briefs
 that cite them are deleted (`aisquare project forget --purge`, or a Start fresh:
 `aisquare project fresh`). A Start fresh deletes no report itself; with their briefs gone
-the reports they cited are pinned no more, and retention takes them as it takes any
-other. `asq reports prune` says
+the reports they cited are pinned no more (unless another board's brief cites one too),
+and retention takes them as it takes any other. `asq reports prune` says
 how many it kept for that reason (`kept_for_evidence` under `--json`). When the list
 of those reports cannot be read, nothing is removed.
 

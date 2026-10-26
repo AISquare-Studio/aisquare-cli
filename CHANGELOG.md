@@ -40,7 +40,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Every live agent is stopped as `fleet shutdown` stops it, and the project's tmux
   session is killed whenever it stands, a live row or none, so a dead pane or a process
   whose row says it died goes with it; each agent's worktree is removed, and the
-  project's tasks, notes and events, sessions, signals, work briefs (with the evidence
+  project's tasks, notes and events, sessions, signals and marks (a session's, and the
+  before-limit rows of its fleet labels), work briefs (with the evidence
   they keep under `~/.aisquare/briefs/<id>/`) and fleet rows are deleted, with the
   manager's state (`~/.aisquare/projects/<id>/manager/state.md`), so the next task and
   brief are #1 again and the new manager does not read the old goal back (none is started
@@ -49,8 +50,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or `--branches` says otherwise; a brain a distill or a recall is running in is kept and
   named. The checkout, every other branch, the registration and its settings, the symbol
   index, the captain and every other project are never touched. Nor are the command
-  reports, but once their briefs are gone none of them is pinned as evidence any more:
-  `asq reports prune`'s retention takes them as it takes any other.
+  reports, but once their briefs are gone none of them is pinned by them as evidence any
+  more (a report another board's brief cites stays pinned): `asq reports prune`'s
+  retention takes them as it takes any other.
   A worktree or branch that holds uncommitted changes or commits no remote has refuses
   the reset, naming each tree, its branch and the commit count, unless
   `--discard-unpushed`; a count git cannot give refuses it too, never reading as pushed.

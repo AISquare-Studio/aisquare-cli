@@ -91,8 +91,9 @@ its `state.md`), so task and brief numbers start at #1 again and the new manager
 starts blank, and starts that manager. It keeps the registration and its
 settings and the symbol index (`~/.aisquare/projects/<id>/code`). It does not
 delete the command reports (`~/.aisquare/reports/`), but with their briefs gone
-they are no longer pinned as evidence: retention takes them as it takes any
-other ([command reports](command-reports.md)). Its context entries and brain
+they are no longer pinned as evidence (unless another board's brief cites one
+too): retention takes them as it takes any other
+([command reports](command-reports.md)). Its context entries and brain
 (`~/.aisquare/projects/<id>/brain`), prompt log and fleet branches stay unless
 `--memory`, `--prompts` or `--branches`; a brain a distill or a recall is
 running in is kept and said so. Work in a worktree or branch that no remote has

@@ -201,7 +201,9 @@ class ConfirmFresh(ModalScreen[FreshChoice | None]):
                         "Its agents are stopped, their worktrees removed, and its board, "
                         "briefs and fleet cleared, with the manager's state: task and brief "
                         "numbers start at #1 again. The folder, its other branches, its "
-                        "settings, its symbol index and the command reports are kept."
+                        "settings and its symbol index are kept. No command report is "
+                        "deleted, but without their briefs they are no longer pinned as "
+                        "evidence, and retention takes them."
                     ),
                     id="fresh-about",
                 )

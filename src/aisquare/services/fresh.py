@@ -5,17 +5,19 @@ Two steps, so a surface can ask before it acts: :func:`plan` reads what would go
 what must not be done, changing nothing; :func:`start_fresh` asks the same again and does
 it. ``project fresh`` and the UI's Start fresh… call these two.
 
-What goes, scoped to the one project: its board (tasks, events, sessions, its signals and
-the gone sessions' marks, its work briefs, ``store.reset_project``; the briefs' kept evidence
-under ``~/.aisquare/briefs/<id>/``), the manager's own state (``~/.aisquare/projects/<id>/
+What goes, scoped to the one project: its board (tasks, events, sessions, its signals, the
+gone sessions' marks and its labels' before-limit rows, counted together as signals and
+marks, its work briefs, ``store.reset_project``; the briefs' kept evidence under
+``~/.aisquare/briefs/<id>/``), the manager's own state (``~/.aisquare/projects/<id>/
 manager/``, which a blank manager must not read back), its fleet (each live agent stopped as
 ``fleet shutdown`` stops it, each agent's worktree removed, then its rows), and with the
 extras asked for, its context entries and its brain (``memory``), its prompt log and turn
 metrics (``prompts``) and its local ``fleet/<codename>/…`` branches (``branches``). What
 stays: the checkout and every other branch, the registration (name, nickname, group, pin,
-settings, codename), its symbol index (``~/.aisquare/projects/<id>/code``), the command
-reports (``~/.aisquare/reports/``, kept by report id for every project), the accounts, the
-captain, and every other project.
+settings, codename), its symbol index (``~/.aisquare/projects/<id>/code``), the accounts, the
+captain, and every other project. No command report (``~/.aisquare/reports/``) is deleted,
+but with their briefs gone the reports they cited are no longer pinned as evidence, and
+normal retention takes them (unless another board's brief cites one).
 """
 
 from __future__ import annotations

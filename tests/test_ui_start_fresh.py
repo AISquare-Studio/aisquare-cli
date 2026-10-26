@@ -216,6 +216,7 @@ def test_the_dialog_shows_the_plan_and_each_extra_starts_off_and_changes_it(
             "ticked": [box.value for box in dialog.query(Checkbox)],
             "labels": [str(box.label) for box in dialog.query(Checkbox)],
             "plain": _plan_text(dialog),
+            "about": shown(dialog.query_one("#fresh-about", Static)),
             "confirm": dialog.query_one("#fresh-confirm", Button).disabled,
         }
         seen["memory"] = await _tick(pilot, dialog, "fresh-memory")
@@ -237,6 +238,10 @@ def test_the_dialog_shows_the_plan_and_each_extra_starts_off_and_changes_it(
     assert "0 fleet agents · 0 worktrees" in plain
     assert "Then a new blank manager starts." in plain and "Also cleared" not in plain
     assert seen["confirm"] is False
+    # The reports are not deleted, and not kept either: their briefs' pin goes (review of #429).
+    about = " ".join(str(seen["about"]).split())
+    assert "No command report is deleted" in about and "retention takes them" in about
+    assert "reports are kept" not in about
     assert "Also cleared: 1 context entry" in " ".join(str(seen["memory"]).split())
     assert "1 context entry · 0 project brains · 1 prompt · 0 turn metrics" in " ".join(
         str(seen["prompts"]).split()

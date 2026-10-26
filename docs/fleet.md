@@ -1790,10 +1790,10 @@ board (with its work briefs and their evidence) and fleet rows cleared (task and
 brief numbers start at #1 again), the manager's state file deleted, and a new
 blank manager started. The dialog reads the plan first and shows its counts,
 with three extras off by default that redraw it: *Project memory (context
-entries and brain)*, *Prompt log & metrics* and *Fleet git branches*. Work a tree or branch holds that no remote has is
-listed in a second dialog, *Discard and start fresh* or Cancel; a refused plan (a
-board another project's agents read) says why and cannot be confirmed. Cancel has
-the focus, and Esc cancels.
+entries and brain)*, *Prompt log & metrics* and *Fleet git branches*. Work a
+tree or branch holds that no remote has is listed in a second dialog, *Discard
+and start fresh* or Cancel; a refused plan (a board another project's agents
+read) says why and cannot be confirmed. Cancel has the focus, and Esc cancels.
 
 **Codename.** Every project that enters the fleet gets an `adjective-animal`
 codename — `amber-otter` — matching `^[a-z]{3,7}-[a-z]{3,7}$`, from two

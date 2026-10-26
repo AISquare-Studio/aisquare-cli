@@ -521,6 +521,11 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # exits through its `unreachable` message and never leaves the machine. Tests
     # that exercise sign-in point --api-url at their own stub server.
     monkeypatch.setenv("AISQUARE_API_URL", "http://127.0.0.1:9")
+    # Usage sharing is forced off for the whole suite: nothing a test does may send a body to
+    # the real server (or ask the TUI's consent question in tests that never meant to). The
+    # tests of sharing take it off with the ``sharing_allowed`` fixture and give it a fake
+    # transport; DO_NOT_TRACK and CI are cleared there too, as GitHub's runners set CI.
+    monkeypatch.setenv("AISQUARE_NO_TELEMETRY", "1")
     # The experiment settings are read once per process (ci_client._settings is
     # lru_cached, like core.insights._config), so a cached read from the previous
     # test's HOME would outlive the home it came from. So is the insights config,
@@ -858,6 +863,14 @@ CLAUDE_ACCOUNTS_NOW = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
 Tests that write credentials against it import it (``NOW`` in
 test_claude_accounts.py), so a token they mint and the clock that grades it agree.
 """
+
+
+@pytest.fixture
+def sharing_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Usage sharing may be turned on: none of the three things that force it off is set
+    (``core.sharing.forced_off_reason``). The suite forces it off for every test otherwise."""
+    for name in ("AISQUARE_NO_TELEMETRY", "DO_NOT_TRACK", "CI"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture

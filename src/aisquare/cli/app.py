@@ -42,7 +42,7 @@ from aisquare.cli import (
 from aisquare.cli import config as config_cli
 from aisquare.cli import metrics as metrics_cli
 from aisquare.cli.global_flags import DISPATCHED_WORDS, GlobalFlagsGroup
-from aisquare.core import feature_use
+from aisquare.core import feature_use, sharing
 from aisquare.core.state import RuntimeState, get_state, set_state
 from aisquare.core.version import __version__
 
@@ -120,6 +120,10 @@ def main_callback(
 _NOT_FEATURES = frozenset({"hook", "serve", "inject", "uninstall"})
 
 
+#: The detached shipper itself: not a feature, and it must not start another.
+_SHIPPER = "cli.metrics.ship"
+
+
 def command_path(ctx: typer.Context) -> str | None:
     """The command being run as ``cli.<group>.<verb>``, built from the NAMES of the commands
     it resolves to and nothing the user typed: a word counts only when it names a subcommand
@@ -151,8 +155,9 @@ def _count_command(ctx: typer.Context) -> None:
     open (``core.feature_use``)."""
     try:
         path = command_path(ctx)
-        if path is not None:
+        if path is not None and path != _SHIPPER:
             feature_use.record(path)
+            sharing.start_background_ship()  # a detached `metrics ship`, once in 6 h if on
     except Exception:  # a counter never costs a command
         return
 

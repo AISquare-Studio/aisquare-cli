@@ -331,6 +331,13 @@ SEAMS: dict[str, Seam] = {
         "`git_env()`; no model",
         strips_identity=True,
     ),
+    "aisquare/core/sharing.py::_spawn": Seam(
+        EXCLUDED,
+        "a detached `aisquare metrics ship` of ours — the opt-in usage shipper, started from a "
+        "command at most every half hour; a worker, not an agent session, and it outlives the "
+        "command that started it",
+        strips_identity=True,
+    ),
     "aisquare/core/repo_profile.py::git_output": Seam(
         EXCLUDED,
         "`git config`/`remote -v`/`ls-files` for a repository's profile (Usage & stats): a "

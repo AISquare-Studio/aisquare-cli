@@ -1642,6 +1642,9 @@ class ContextStore(Protocol):
         self, since: datetime | None, until: datetime | None
     ) -> list[UsageTurnRow]: ...
     def usage_transcripts(self) -> dict[str, str]: ...
+    def fleet_activity(
+        self, since: datetime, until: datetime
+    ) -> tuple[list[tuple[datetime, str]], list[datetime]]: ...
     def usage_turn_count(self) -> int: ...
     def unattributed_usage(self, limit: int = 5_000) -> list[SessionUsage]: ...
     def attribute_usage(
@@ -3789,6 +3792,30 @@ class SqliteStore:
             )
             for row in rows
         ]
+
+    def fleet_activity(
+        self, since: datetime, until: datetime
+    ) -> tuple[list[tuple[datetime, str]], list[datetime]]:
+        """What the fleet did in ``[since, until)``: ``(started, role)`` of each agent started,
+        and when each task was marked done. Counts are all the usage sharing wants of it: no
+        label, task, project or text leaves this method."""
+        low, high = since.astimezone(UTC).isoformat(), until.astimezone(UTC).isoformat()
+        agents = [
+            (datetime.fromisoformat(row["created_at"]), str(row["role"]))
+            for row in self._conn.execute(
+                "SELECT created_at, role FROM fleet_agent WHERE created_at >= ? AND created_at < ?",
+                (low, high),
+            ).fetchall()
+        ]
+        done = [
+            datetime.fromisoformat(row["created_at"])
+            for row in self._conn.execute(
+                "SELECT created_at FROM team_event WHERE kind = 'task_done' "
+                "AND created_at >= ? AND created_at < ?",
+                (low, high),
+            ).fetchall()
+        ]
+        return agents, done
 
     def usage_turn_count(self) -> int:
         """How many turn rows are recorded, of any date."""

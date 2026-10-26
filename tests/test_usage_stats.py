@@ -773,7 +773,7 @@ def test_daily_rollups_are_one_record_per_active_local_day_in_the_contracts_shap
     assert list(by_date) == ["2026-10-25", "2026-10-26"]
     assert set(today) == {
         "date", "tz_offset_minutes", "active", "tokens", "cost_usd_list", "sessions", "turns",
-        "models", "accounts", "repos_active", "repos", "features",
+        "models", "accounts", "repos_active", "repos", "features", "fleet",
     }  # fmt: skip
     assert today["tz_offset_minutes"] == 330 and today["active"] is True
     assert set(today["tokens"]) == {"input", "cache_write", "cache_read", "output", "total"}
@@ -1205,3 +1205,44 @@ def test_a_nickname_names_the_repository_it_was_given_to(machine: Machine) -> No
     usage_stats.sweep(tz=IST)
 
     assert [row.name for row in _read("today").repos.rows] == ["the big one"]
+
+
+def test_a_rollup_counts_the_agents_started_by_role_and_the_tasks_done_each_local_day(
+    machine: Machine,
+) -> None:
+    with store_session() as store:
+        conn = store._conn  # type: ignore[attr-defined]
+        for number, (role, when) in enumerate(
+            [
+                ("coder", _day(0, 9)), ("coder", _day(0, 10)), ("tester", _day(0, 11)),
+                ("hush-custom-role", _day(0, 12)), ("manager", _day(-1, 23)),
+                ("coder", _day(1, 0)),
+            ]
+        ):  # fmt: skip
+            conn.execute(
+                "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at) "
+                "VALUES (?, 'prj_x', ?, ?, '%1', '/x', ?)",
+                (f"a{number}", f"label-{number}", role, when.astimezone(UTC).isoformat()),
+            )
+        for number, when in enumerate([_day(0, 9), _day(0, 23), _day(-1, 9)]):
+            conn.execute(
+                "INSERT INTO team_event (id, project_id, kind, text, created_at) "
+                "VALUES (?, 'prj_x', 'task_done', 't', ?)",
+                (f"e{number}", when.astimezone(UTC).isoformat()),
+            )
+        conn.execute(  # a task that was merely claimed is not a task done
+            "INSERT INTO team_event (id, project_id, kind, text, created_at) "
+            "VALUES ('c', 'prj_x', 'task_claimed', 't', ?)",
+            (_day(0, 9).astimezone(UTC).isoformat(),),
+        )
+        conn.commit()
+        days = usage_stats.daily_rollups(
+            date(2026, 10, 25), date(2026, 10, 27), now=NOW, tz=IST, store=store
+        )
+
+    fleet = {day.date: day.fleet.model_dump() for day in days}
+    assert fleet == {
+        "2026-10-25": {"agents_spawned": {"manager": 1}, "tasks_done": 1},
+        "2026-10-26": {"agents_spawned": {"coder": 2, "other": 1, "tester": 1}, "tasks_done": 2},
+        "2026-10-27": {"agents_spawned": {"coder": 1}, "tasks_done": 0},
+    }  # the custom role is "other": a role's name is text an operator chose

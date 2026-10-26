@@ -7,6 +7,7 @@ and model (``metrics stats``), with the sweep that reads the transcripts no hook
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from typing import Annotated
@@ -18,18 +19,30 @@ from aisquare.cli.common import (
     emit_token_ledger,
     emit_token_summary,
     emit_turn_metrics,
+    fail,
     parse_since,
     refuse_conflicting_scope,
 )
-from aisquare.cli.usage_render import emit_usage_stats
+from aisquare.cli.usage_render import (
+    emit_sharing_status,
+    emit_ship_report,
+    emit_usage_stats,
+)
+from aisquare.core import sharing
 from aisquare.core.state import get_state
 from aisquare.models import USAGE_RANGES
 from aisquare.services import metrics as metrics_service
-from aisquare.services import token_ledger, usage_stats
+from aisquare.services import token_ledger, usage_share, usage_stats
 
 app = typer.Typer(
     help="Inspect per-turn metrics recorded by the CI test bed.", no_args_is_help=True
 )
+
+share_app = typer.Typer(
+    help="Opt-in anonymous usage sharing: on, off, status, and exactly what is sent.",
+    no_args_is_help=True,
+)
+app.add_typer(share_app, name="share")
 
 _LIMIT_HELP = "How many recent turns to read (at least 1)."
 _SESSION_HELP = "Restrict to one agent session."
@@ -187,3 +200,98 @@ def backfill() -> None:
         + (f", {report.failed} unreadable" if report.failed else "")
         + f" — {report.turns} turns recorded in {report.seconds:.1f}s"
     )
+
+
+# --- opt-in anonymous usage sharing (docs/usage-telemetry.md) ----------------------------------
+
+
+def _json(payload: object) -> None:
+    typer.echo(json.dumps(payload, default=str))
+
+
+@share_app.command("on")
+def share_on() -> None:
+    """Share anonymous daily usage counts with AISquare (off by default).
+
+    What is sent is counts: tokens, sessions, commands used and a salted hash per repository,
+    never names, paths, remotes, prompts or arguments (`aisquare metrics share preview` prints
+    the exact body). Not available with DO_NOT_TRACK=1, AISQUARE_NO_TELEMETRY=1 or CI set.
+    """
+    try:
+        status = usage_share.enable()
+    except usage_share.SharingForcedOff as forced:
+        fail(
+            f"sharing cannot be turned on: {forced.reason}",
+            error="sharing_forced_off",
+            hint="unset it to share, or leave sharing off",
+        )
+    sharing.start_background_ship()
+    if get_state().json_output:
+        _json(status.model_dump(mode="json"))
+        return
+    emit_sharing_status(status)
+
+
+@share_app.command("off")
+def share_off() -> None:
+    """Stop sharing. What was kept of the shipments is purged, and one opt-out notice is sent
+    (best effort, only if anything was ever sent); nothing is sent after it."""
+    report = usage_share.disable()
+    if get_state().json_output:
+        _json({"enabled": False, **report.model_dump(mode="json")})
+        return
+    typer.echo("Sharing is off.")
+    if report.opt_out:
+        emit_ship_report(report)
+
+
+@share_app.command("status")
+def share_status() -> None:
+    """Whether usage is shared, what forces it off, when it was last sent, and whether it is linked
+    to your AISquare account."""
+    status = usage_share.status()
+    if get_state().json_output:
+        _json(status.model_dump(mode="json"))
+        return
+    emit_sharing_status(status)
+
+
+@share_app.command("preview")
+def share_preview() -> None:
+    """Print the exact body the next shipment would POST (JSON). Works with sharing off: it is
+    what WOULD be sent, and nothing is sent by looking."""
+    if not sharing.read().install_id and not get_state().json_output:
+        typer.echo(
+            "sharing has never been on: the ids below are placeholders until you turn it on",
+            err=True,
+        )
+    typer.echo(usage_share.preview())
+
+
+@share_app.command("reset-id")
+def share_reset_id() -> None:
+    """Forget this installation's random id and salt for a new pair: what was sent before can no
+    longer be tied to what is sent next."""
+    install_id, _salt = usage_share.reset_identity()
+    if get_state().json_output:
+        _json({"install_id": install_id})
+        return
+    typer.echo(f"New installation id {install_id[:8]}… (the repository hashes change with it).")
+
+
+@app.command("ship", hidden=True)
+def ship(
+    force: Annotated[
+        bool, typer.Option("--force", help="Send now even if a shipment is not due yet.")
+    ] = False,
+) -> None:
+    """Send the next batch of usage counts if sharing is on and one is due: the detached process
+    a command starts (never the command itself), after reading any transcripts not yet read."""
+    if sharing.enabled():
+        with contextlib.suppress(Exception):
+            usage_stats.maybe_sweep()
+    report = usage_share.ship(force=force)
+    if get_state().json_output:
+        _json(report.model_dump(mode="json"))
+        return
+    emit_ship_report(report)

@@ -62,6 +62,7 @@ from aisquare.models import (
     DayAccounts,
     DayRepo,
     DayTokens,
+    FleetDay,
     RepoProfile,
     RepoTraits,
     SessionUsage,
@@ -103,6 +104,15 @@ _HEAD_BYTES = 262_144
 _WORKTREES = ".aisquare-worktrees"
 
 UNKNOWN_TYPE = "unknown"
+
+FLEET_ROLES = frozenset(
+    {
+        "manager", "planner", "coder", "tester", "runner", "reviewer", "validator",
+        "ui-tester", "agent", "captain",
+    }
+)  # fmt: skip
+"""The roles a rollup names: the built-in ones. A role an operator invented may be any text, so
+it is counted as ``other``."""
 
 TEMP_REPO = "tmp"
 """The one repository id every throwaway directory is counted under (:func:`repo_id_of`)."""
@@ -1080,11 +1090,19 @@ def daily_rollups(
             by_day.setdefault(turn.day, []).append(turn)
         registered = len(accounts_core.list_accounts())
         known_types = account_types(active, refresh=False)
+        fleet = _fleet_days(active, since, until, tz)
         return [
             _rollup(
-                day, by_day.get(day, []), uses.get(day, {}), profiles, known_types, registered, tz
+                day,
+                by_day.get(day, []),
+                uses.get(day, {}),
+                fleet.get(day, FleetDay()),
+                profiles,
+                known_types,
+                registered,
+                tz,
             )
-            for day in sorted(set(by_day) | set(uses))
+            for day in sorted(set(by_day) | set(uses) | set(fleet))
         ]
 
     if store is not None:
@@ -1093,10 +1111,28 @@ def daily_rollups(
         return run(owned)
 
 
+def _fleet_days(
+    store: ContextStore, since: date, until: date, tz: tzinfo | None
+) -> dict[date, FleetDay]:
+    """The agents started and tasks done on each local day of ``[since, until]``."""
+    agents, done = store.fleet_activity(
+        _day_start(since, tz), _day_start(until + timedelta(days=1), tz)
+    )
+    days: dict[date, FleetDay] = {}
+    for started, role in agents:
+        spawned = days.setdefault(_local(started, tz).date(), FleetDay()).agents_spawned
+        name = role if role in FLEET_ROLES else "other"
+        spawned[name] = spawned.get(name, 0) + 1
+    for finished in done:
+        days.setdefault(_local(finished, tz).date(), FleetDay()).tasks_done += 1
+    return days
+
+
 def _rollup(
     day: date,
     turns: list[_Turn],
     features: dict[str, int],
+    fleet: FleetDay,
     profiles: dict[str, RepoProfile],
     known_types: dict[int, str],
     registered: int,
@@ -1144,4 +1180,7 @@ def _rollup(
         repos_active=len(by_repo),
         repos=repos,
         features=dict(sorted(features.items())),
+        fleet=FleetDay(
+            agents_spawned=dict(sorted(fleet.agents_spawned.items())), tasks_done=fleet.tasks_done
+        ),
     )

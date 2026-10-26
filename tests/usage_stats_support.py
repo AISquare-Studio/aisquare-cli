@@ -104,21 +104,30 @@ def tokens(**kinds: int) -> int:
     return sum({**base, **kinds}.values())
 
 
-def pin_hook_clock(monkeypatch: pytest.MonkeyPatch, at: datetime = NOW) -> None:
-    """Stamp what the Stop hook records at ``at``, not at the wall clock.
+def pin_clock(monkeypatch: pytest.MonkeyPatch, *modules: Any, at: datetime = NOW) -> None:
+    """Make ``datetime.now`` in each of ``modules`` answer ``at``, not the wall clock.
 
-    ``services.metrics`` stamps a hook's turn with the real ``datetime.now``, and the stats tests
-    read at the fixed :data:`NOW`: a turn recorded after that day's end fell out of the range
-    they read, and three tests failed on every run after 18:30 UTC on 2026-10-26 (CI's red).
-    Every test of the hook beside the stats pins it (the ``machine`` fixture does)."""
-    from aisquare.services import metrics as metrics_service
+    A module that stamps what it records with the real ``datetime.now`` and a test that reads at
+    the fixed :data:`NOW` disagree from the day the wall clock leaves NOW's: the Stop hook's turns
+    fell out of the range three tests read, on every run after 18:30 UTC on 2026-10-26 (CI's
+    red), and a window of "the last 31 days" would drop the fixtures a month on. Whatever a test
+    makes a module stamp or window by the real clock, it pins here."""
 
     class Pinned(datetime):
         @classmethod
         def now(cls, tz: tzinfo | None = None) -> Pinned:
             return cls.fromtimestamp(at.timestamp(), tz)
 
-    monkeypatch.setattr(metrics_service, "datetime", Pinned)
+    for module in modules:
+        monkeypatch.setattr(module, "datetime", Pinned)
+
+
+def pin_hook_clock(monkeypatch: pytest.MonkeyPatch, at: datetime = NOW) -> None:
+    """Stamp what the Stop hook records at ``at`` (``services.metrics``): :func:`pin_clock`. Every
+    test of the hook beside the stats pins it (the ``machine`` fixture does)."""
+    from aisquare.services import metrics as metrics_service
+
+    pin_clock(monkeypatch, metrics_service, at=at)
 
 
 @dataclass

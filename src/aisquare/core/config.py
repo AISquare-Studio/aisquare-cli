@@ -1018,6 +1018,22 @@ class UiSettings(BaseModel):
     always_show_project_path: bool = False
 
 
+class SharingSettings(BaseModel):
+    """``[sharing]`` — opt-in anonymous usage sharing (docs/usage-telemetry.md).
+
+    ``enabled`` is the switch, **off by default**: nothing leaves this machine until it is
+    turned on (Settings ▸ Usage & stats, or ``aisquare metrics share on``). Turned on, daily
+    counts of usage (tokens, sessions, which commands) are sent to AISquare, never names, paths,
+    remotes, prompts or arguments. ``DO_NOT_TRACK=1``, ``AISQUARE_NO_TELEMETRY=1`` and ``CI``
+    force it off whatever this says (``core.sharing.forced_off_reason``).
+
+    The installation's random id, its salt for the repository hashes and what has been sent
+    are kept beside the other runtime state (``state.json``), not here.
+    """
+
+    enabled: bool = False
+
+
 class AppConfig(BaseModel):
     """Root configuration object persisted at ``~/.aisquare/config.toml``."""
 
@@ -1038,6 +1054,7 @@ class AppConfig(BaseModel):
     watch: WatchSettings = Field(default_factory=WatchSettings)
     code: CodeSettings = Field(default_factory=CodeSettings)
     ui: UiSettings = Field(default_factory=UiSettings)
+    sharing: SharingSettings = Field(default_factory=SharingSettings)
 
 
 #: Sections an older build read and this one does not, each with why. An unknown section

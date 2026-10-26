@@ -1014,6 +1014,14 @@ class DayAccounts(BaseModel):
     top_account_share: float = 0.0
 
 
+class FleetDay(BaseModel):
+    """What the fleet did on one local day, by role: counts only."""
+
+    agents_spawned: dict[str, int] = Field(default_factory=dict)
+    """Agents started that day by role; a role that is not one of the built-in ones is ``other``."""
+    tasks_done: int = 0
+
+
 class DailyRollup(BaseModel):
     """One local day, shaped as the telemetry contract's ``days[]`` entry (docs/usage-telemetry.md)
     before hashing: the sharing task builds its batches from these."""
@@ -1031,6 +1039,7 @@ class DailyRollup(BaseModel):
     repos: list[DayRepo] = Field(default_factory=list)
     """The 25 with the most tokens that day."""
     features: dict[str, int] = Field(default_factory=dict)
+    fleet: FleetDay = Field(default_factory=FleetDay)
 
 
 TaskStatus = Literal["todo", "doing", "review", "blocked", "done", "dropped"]
@@ -1723,3 +1732,49 @@ class FleetAgentStatus(BaseModel):
     run on where no client reaches it. Its state is ``unknown`` whatever its board says, and
     its pane id is no pane of its own there: that server numbers its panes from ``%0``
     again."""
+
+
+# --- opt-in anonymous usage sharing ------------------------------------------------------------
+
+
+class SharingStatus(BaseModel):
+    """``aisquare metrics share status``, and the line under the page's sharing switch."""
+
+    enabled: bool
+    """Whether usage is being shared: the switch is on AND nothing forces it off."""
+    switch: bool
+    """The switch as the user left it (``[sharing] enabled``)."""
+    forced_off: str | None = None
+    """Why nothing is shared whatever the switch says (``DO_NOT_TRACK``, ``AISQUARE_NO_TELEMETRY``,
+    ``CI``); ``None`` when nothing forces it."""
+    consent_asked: bool = False
+    consent_answer: Literal["share", "declined"] | None = None
+    install_id: str | None = None
+    """The random id of this installation; ``None`` until sharing was first turned on."""
+    signed_in: bool = False
+    """Whether the next ship carries the AISquare sign-in, so that the server links it."""
+    linked: bool | None = None
+    """Whether the server linked the last ship to an AISquare account; ``None`` before any."""
+    last_sent_at: datetime | None = None
+    next_due_at: datetime | None = None
+    days_acknowledged: int = 0
+    failures: int = 0
+    last_error: str | None = None
+    endpoint: str | None = None
+
+
+class ShipReport(BaseModel):
+    """What one shipment did."""
+
+    sent: bool = False
+    days: int = 0
+    """Days in the batch the server accepted."""
+    linked: bool | None = None
+    skipped: str | None = None
+    """Why nothing was sent: sharing off or forced off, not due, nothing to send, or a ship
+    already running."""
+    error: str | None = None
+    """Why the send failed (it is tried again after a backoff)."""
+    retried_anonymously: bool = False
+    """The server refused the sign-in (401), and the batch was sent again without it."""
+    opt_out: bool = False

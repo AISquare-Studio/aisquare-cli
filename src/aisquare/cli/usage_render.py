@@ -7,7 +7,7 @@ from rich.text import Text
 
 from aisquare.cli import usage_format as fmt
 from aisquare.core.console import stdout_console
-from aisquare.models import UsageStats
+from aisquare.models import SharingStatus, ShipReport, UsageStats
 
 
 def _head(text: str) -> Text:
@@ -121,3 +121,59 @@ def _accounts(stats: UsageStats) -> None:
         )
     stdout_console().print()
     stdout_console().print(table)
+
+
+def _when(moment: object) -> str:
+    from datetime import datetime
+
+    return moment.astimezone().strftime("%Y-%m-%d %H:%M") if isinstance(moment, datetime) else "—"
+
+
+def sharing_lines(status: SharingStatus) -> list[str]:
+    """``aisquare metrics share status`` as lines: one word first, then the facts."""
+    if status.forced_off:
+        head = f"Sharing is OFF, and forced off: {status.forced_off}."
+    elif status.enabled:
+        head = "Sharing is ON: daily usage counts are sent to AISquare."
+    else:
+        head = "Sharing is off. Nothing leaves this machine."
+    lines = [head]
+    if status.install_id:
+        lines.append(f"installation   {status.install_id[:8]}… (random; not derived from you)")
+    if status.enabled or status.last_sent_at:
+        who = (
+            "signed in: batches are linked to your AISquare account"
+            if status.signed_in
+            else "not signed in: batches are anonymous"
+        )
+        lines.append(f"account        {who}")
+        sent = _when(status.last_sent_at) if status.last_sent_at else "never"
+        linked = "" if status.linked is None else f" (linked: {'yes' if status.linked else 'no'})"
+        lines.append(f"last sent      {sent}{linked}")
+    if status.enabled:
+        lines.append(f"next           {_when(status.next_due_at) if status.next_due_at else 'due'}")
+        if status.endpoint:
+            lines.append(f"endpoint       {status.endpoint}")
+    if status.last_error:
+        lines.append(f"last error     {status.last_error} (tried {status.failures}x)")
+    lines.append("See exactly what is sent: aisquare metrics share preview")
+    return lines
+
+
+def emit_sharing_status(status: SharingStatus) -> None:
+    console = stdout_console()
+    for line in sharing_lines(status):
+        console.print(line)
+
+
+def emit_ship_report(report: ShipReport) -> None:
+    console = stdout_console()
+    if report.sent and report.opt_out:
+        console.print("Sent the opt-out notice. Nothing is sent from now on.")
+    elif report.sent:
+        linked = "" if report.linked is None else f", linked: {'yes' if report.linked else 'no'}"
+        console.print(f"Sent {report.days} day(s){linked}.")
+    elif report.error:
+        console.print(f"Not sent: {report.error}. It is tried again after a wait.")
+    else:
+        console.print(f"Nothing sent: {report.skipped}.")

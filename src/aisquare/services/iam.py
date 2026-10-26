@@ -622,6 +622,19 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+def post_json(
+    url: str, body: Any, *, token: str | None = None, timeout: float = HTTP_TIMEOUT_SECONDS
+) -> HttpResult:
+    """POST ``body`` as JSON to ``url``, as ``token``'s bearer when one is given and anonymously
+    when not: for an endpoint that takes both (the usage-sharing one, ``services.usage_share``).
+
+    The caller resolves ``url`` (``resolve_api_url``, which refuses plain http away from
+    loopback) and decides whether ``token`` may go there; error statuses are results, and a
+    transport error is ``IamError("unreachable")``, as for every call here."""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    return _http("POST", url, json_body=body, headers=headers, timeout=timeout)
+
+
 # --------------------------------------------------------------------------- calling the API
 
 

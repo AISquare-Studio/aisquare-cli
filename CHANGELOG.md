@@ -40,7 +40,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   MCP instructions and team block on new starts, about 1.1k tokens a request. A Claude Code
   session's own `aisquare serve --stdio` now proves it is that session's: its SessionStart hook
   records the Claude Code process it runs under (`CLAUDE_PID`, with the process's start time, so
-  a reused pid never matches), and the server must have been started by that very process,
+  a pid another process takes later does not match; macOS reads that time to the second), and
+  the server must have been started by that very process,
   through `uv`, `uvx`, `pipx` or its own launcher at most. It then acts **as the session**: its
   notes, claims and `team_log(by_session='me')` are the session's, there is no `mcp:` row, and
   the board shows one session per agent where each coder's MCP calls used to add a row of their

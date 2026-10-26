@@ -362,7 +362,7 @@ def team_log(since_seq: int = 0, limit: int = 20, by_session: str | None = None)
     """Team events after ``since_seq`` (track the returned seq as your cursor).
 
     ``by_session`` filters to one author: a session id/prefix, or the literal
-    ``"me"`` for your own virtual session — read back your own recent writes.
+    ``"me"`` for yourself — read back your own recent writes.
     """
 
     def run() -> str:

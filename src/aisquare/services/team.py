@@ -4251,8 +4251,9 @@ def _fleet_row_hint(
 
     A session bound to a row is that row. Without one — no session at all (the
     plain ``task next --status review`` of a cycle typed by hand), or a session
-    no row is bound to (the MCP server's virtual ``mcp:`` session, whose process
-    is the agent's own child) — the window's variable still says which row this
+    no row is bound to (an MCP server's virtual ``mcp:`` session, whose process
+    is the agent's own child; a session whose own server acts as it is the
+    session, and bound as any other) — the window's variable still says which row this
     process works under, and for the order that is enough: the worst a misread
     costs is a nested child being shown its parent's task first, which it may
     not claim anyway. Two testers spawned for two review tasks were both handed

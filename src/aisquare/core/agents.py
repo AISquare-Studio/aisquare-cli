@@ -528,6 +528,8 @@ class StatusLineEntry:
     kind: str
     theirs: str | None = None
     settings_path: Path | None = None
+    note: str | None = None
+    """Why ``--wrap`` left a ``foreign`` command as it is (:func:`_wrap_refusal`)."""
 
 
 def _statusline_program_command() -> str:
@@ -564,6 +566,36 @@ def _read_statusline(entry: Any) -> tuple[str, str | None]:
     return "ours", None
 
 
+def _wrap_refusal(theirs: str) -> str | None:
+    """Why ``--wrap`` must leave ``theirs`` as it is, or ``None`` when it can wrap it.
+
+    Wrapped, ``theirs`` is one quoted argument of ours and is read back from there
+    (:func:`_read_statusline`), so it is wrapped only when that gives exactly ``theirs``.
+    That is checked, not assumed: POSIX quoting inverts, but on Windows a ``"`` in
+    ``theirs`` (a quoted path under ``Program Files``, the common shape) cannot be nested in
+    the double quotes that wrap it and read back by :func:`_split_command`. An escape that
+    ``cmd.exe`` would also run as one argument is not provable here: it toggles its quote
+    state on every ``"``, and which shell runs the line, ``cmd.exe`` or Git Bash, is
+    Claude Code's to say. So the command stays the user's own, and the answer says so.
+    """
+    if sys.platform == "win32" and '"' in theirs:
+        return (
+            "not wrapped: your status line holds a double quote (a quoted path), which "
+            "cannot be nested inside ours on Windows and read back as you wrote it; "
+            "it is left as it is"
+        )
+    try:
+        words = _split_command(f"{STATUSLINE_PROGRAM} {STATUSLINE_WRAP} {_quote(theirs)}")
+    except ValueError:
+        words = []
+    if words != [STATUSLINE_PROGRAM, STATUSLINE_WRAP, theirs]:
+        return (
+            "not wrapped: your status line would not read back from inside ours exactly "
+            "as you wrote it; it is left as it is"
+        )
+    return None
+
+
 def _statusline_settings(config_dir: Path | None) -> Path:
     return _claude_home(config_dir) / "settings.json"
 
@@ -595,6 +627,8 @@ def install_statusline(config_dir: Path, *, wrap: bool = False) -> StatusLineEnt
     if kind == "none":
         settings["statusLine"] = {"type": "command", "command": ours}
     elif wrap and isinstance(entry, dict) and theirs is not None:
+        if (refusal := _wrap_refusal(theirs)) is not None:
+            return StatusLineEntry("foreign", theirs, path, refusal)
         settings["statusLine"] = {**entry, "command": f"{ours} {STATUSLINE_WRAP} {_quote(theirs)}"}
         kind = "wrapped"
     else:
@@ -630,17 +664,27 @@ def remove_statusline(config_dir: Path | None = None) -> bool:
         return False
     entry = settings.get("statusLine")
     kind, theirs = _read_statusline(entry)
-    if kind == "ours":
-        settings.pop("statusLine")
-    elif kind == "wrapped" and isinstance(entry, dict):
-        settings["statusLine"] = {**entry, "command": theirs}
-    else:
-        return False
     kept = path.with_name(path.name + STATUSLINE_KEPT)
     try:
         before: Any = json.loads(kept.read_bytes()) if kept.exists() else None
     except (OSError, ValueError):
         before = None
+    if kind == "ours":
+        settings.pop("statusLine")
+    elif kind == "wrapped" and isinstance(entry, dict):
+        # The user's command is the copy's, as it was written, not what the wrapped string
+        # reads back as: the copy is the only thing that holds it whatever the parsing does
+        # (on Windows a quoted path was read back as '' and written over theirs).
+        own = before.get("statusLine") if isinstance(before, dict) else None
+        if (
+            isinstance(own, dict)
+            and isinstance(own.get("command"), str)
+            and _read_statusline(own)[0] == "foreign"
+        ):
+            theirs = own["command"]
+        settings["statusLine"] = {**entry, "command": theirs}
+    else:
+        return False
     if before == settings:
         # The file as it was, byte for byte: what is left is what was there.
         _write_settings_bytes(path, kept.read_bytes())

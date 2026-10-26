@@ -28,6 +28,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spent the product's 2 s on the capture, and failed it every time once sharding placed
   it beside a heavier test.
 
+### Fixed
+
+- **A solo session's own board tools no longer make it read as a team.** Fixes the known
+  limitation the 0.9.0 notes named ("Less per-request context from aisquare"): a solo session
+  that called one of aisquare's board tools over MCP wrote its server's row, every live row
+  counted as a teammate, and for 30 minutes it got the board on its next prompt and the full
+  MCP instructions and team block on new starts, about 1.1k tokens a request. A Claude Code
+  session's own `aisquare serve --stdio` now proves it is that session's: its SessionStart hook
+  records the Claude Code process it runs under (`CLAUDE_PID`, with the process's start time, so
+  a reused pid never matches), and the server must have been started by that very process,
+  through `uv`, `uvx`, `pipx` or its own launcher at most. It then acts **as the session**: its
+  notes, claims and `team_log(by_session='me')` are the session's, there is no `mcp:` row, and
+  the board shows one session per agent where each coder's MCP calls used to add a row of their
+  own. A `/clear`, a fork or a resume moves the server's writes to the session the process
+  serves now. How you mount the server does not change. Everything that cannot be proved is
+  still a teammate, as before, because a teammate read as solo gets no board and no protocol:
+  Claude Desktop (WSL included), a server given `AISQUARE_SERVE_CLIENT` or
+  `AISQUARE_SERVE_ROLE`, `serve` over HTTP, a `serve` started from a shell (the Bash tool's
+  too), a session whose hooks never ran on this board, a session started before this upgrade
+  (its hook recorded no process: it stays a teammate until it restarts), and rows and servers
+  from older code, which count until they go stale. Not closed: at a fresh start the hook
+  registers 1 to 3 s after the server has read the board (measured), so a server for a
+  restarted session whose own row survived a crash still gets the team's instructions; a server
+  that starts later, such as an MCP reconnect, proves its host and does not. The plan, with the
+  measurements and the process trees, is docs/plans/mcp-own-row.md.
+
 ## [0.9.0] - 2026-10-25
 
 **The captain: an experimental voice-and-text agent that runs every project's fleet

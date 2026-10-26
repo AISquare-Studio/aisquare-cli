@@ -1,11 +1,105 @@
 # Precise detection of a session's own MCP server row (option B)
 
-> **Status: a handoff, not code.** A follow-up to #274. Its option A (task #52, landed
-> on `fix/followups` at `0545dc5b`) counts every live `mcp:` row as a teammate and pins
-> the cost as a known limitation. This plan describes option B: tell a session's own MCP
-> server row apart from a real remote teammate's, so a solo session's own board-tool calls
-> stop counting as a team. Every claim about the code below was checked at `0545dc5b`.
-> Build it fresh on top of #274 once that is merged, in one PR.
+> **Status: built, for 0.9.1.** A follow-up to #274. Its option A (task #52, `0545dc5b`)
+> counted every live `mcp:` row as a teammate and pinned the cost as a known limitation,
+> which the 0.9.0 release notes named. Option B is in: a session's own stdio MCP server
+> proves whose it is and acts **as that session**, so a solo session's own board-tool calls
+> no longer read as a team, and the board shows one session per agent. Everything the server
+> cannot prove stays a teammate, as before. The sections from *The problem* down are the
+> handoff this was built from, kept as written (repo convention); *What was built* and
+> *What was measured* below say what shipped and what it rests on.
+>
+> **What shipped.**
+>
+> - `core/procs.py`: one process's parent, start token and image, from `/proc` (Linux, WSL),
+>   `ps` (macOS, the BSDs) or the Toolhelp snapshot and `GetProcessTimes` (Windows).
+> - `services/mcp_host.py`: the proof. The SessionStart hook records "the Claude Code process
+>   `CLAUDE_PID` (pid and start token, checked to be one of the hook's own ancestors) runs
+>   session X" per board, in `team_meta` as `host/<project id>/<pid>`; every start overwrites
+>   it, so it names the session the process serves *now*. A stdio server walks up from its
+>   parent over launchers only (`uv`, `uvx`, `pipx`, its own console script, the venv's
+>   `python.exe` launcher) and, if the process it reaches is the registered one for **this
+>   board** (pid and start token equal), and that session's row is there and not ended
+>   (found by exact id among this board's sessions, #49 m1), it is that session's own server.
+> - `services/mcp_server.py`: a proved server acts **as the host session** (see *Attribution*
+>   below): `_ensure_virtual_session` returns the host's id and only touches its row. It is
+>   tried for a stdio server with no `AISQUARE_SERVE_CLIENT` and no `AISQUARE_SERVE_ROLE`
+>   only; HTTP never. The server's instructions at start pass the host id to
+>   `team.board_has_team`, so the host's own row is not a teammate (#346's start-order case,
+>   as far as the order allows: *What was measured*, 5).
+> - The hook registers at session start and at the late join of a first prompt
+>   (`team.hook_session_start`, `team.hook_prompt_heartbeat`). `purge_project` removes the
+>   records with the board.
+> - Tests: `tests/test_mcp_own_row.py` (every row of the matrix below, a fake process tree),
+>   `tests/test_mcp_own_row_processes.py` (a stand-in for Claude Code, the real hook and the
+>   real `aisquare serve --stdio` under it, on every platform CI runs), `tests/test_procs.py`.
+>   The old pin `test_known_limitation_a_solo_sessions_own_board_tool_reads_as_a_team_until_it_goes_stale`
+>   is `test_a_solo_sessions_own_board_tool_stays_solo`; the three tests the plan named as
+>   "team" pass unchanged.
+>
+> **The owner's two open questions, decided by the manager for this build** (the owner may
+> still override either):
+>
+> 1. *Ship the MCP server in the plugin (c)?* No, not for its own sake. How users mount the
+>    server does not change. The proof is built from (a), the stdio-only rule with the parent
+>    check, and (b), the hook's record of the session's process. An ancestry check alone repeats
+>    #49 MAJOR-1; "my parent is that process" does not. A per-session nonce (the other half of
+>    (b), and (c)'s marker) is not possible anyway: Claude Code passes `${CLAUDE_CODE_SESSION_ID}`
+>    in an MCP `env` entry through *unexpanded* (*What was measured*, 4).
+> 2. *Change attribution (#49 m2)?* Yes, **as the host session itself**, not a rendered
+>    `aaaa1111 coder (mcp)`. A write made through the session's own server is then the same
+>    write its hooks or its shell would make: one row, one author on every note, and a claim
+>    taken through MCP is the claim `aisquare task done` in that session's shell finishes, and
+>    `team_log(by_session='me')` reads back what the session wrote either way. The session's
+>    prompt delta also stops echoing its own MCP notes back to it as a teammate's, which the
+>    `mcp:` row did. A rendered label would have kept two ids for one agent and fixed only how
+>    they print. The cost: a write through the server cannot tell the board it came over MCP.
+>
+> **What stays a teammate, on purpose** (the hard rule: no member of a team may read as solo):
+> a Desktop client, a named client or one with a role (`AISQUARE_SERVE_CLIENT`,
+> `AISQUARE_SERVE_ROLE`), `serve` over HTTP, a `serve` started from a shell (the Bash tool's,
+> a `tmux` pane, `bash -lc "cd … && aisquare serve --stdio"`: a shell above the server is not
+> a launcher, because a shell is also what the Bash tool is), WSL, a Claude Code session whose
+> hooks never ran on this board, a session started before the upgrade (its hook recorded no
+> process), a session on another board, a host whose row has ended, and anything that cannot be
+> read: a process, the store, a record. Rows older code wrote and servers still running older
+> code count until they go stale, as before.
+>
+> **What was not measured, and is reasoned instead.** This was built on one macOS machine,
+> with Claude Code 2.1.310. Linux, Windows and WSL were not run by hand, and the interactive
+> TUI was not driven (`-p`, including stream-json input, is the same binary and the same
+> MCP and hook launch). Linux reads `/proc`, a documented interface; Windows is the new
+> code with the most unknowns (the venv launcher, `uv`'s and pip's `.exe` trampolines, whether
+> Claude Code's hook environment has `CLAUDE_PID` there): wherever one is wrong the server is
+> a teammate, never a hidden one. `tests/test_mcp_own_row_processes.py` runs the real hook and
+> the real server under a stand-in for Claude Code on every leg of CI, so the Windows leg is the
+> first real reading of that process tree: **a red there is information about the tree, not a
+> flake**. WSL: Claude Code inside WSL is Linux. Claude Desktop on Windows over
+> `wsl -e bash -lc "… aisquare serve --stdio"` has a `bash` inside WSL above the server and no
+> registered process anywhere above that, so it is a teammate by construction.
+
+## What was measured
+
+Real Claude Code **2.1.310** on macOS (Darwin 27, arm64), in an isolated `HOME` (never
+`~/.claude` or `~/.aisquare`), against a stub of the Messages API on `127.0.0.1` that scripts a
+Bash call and calls to the MCP tools (`ANTHROPIC_BASE_URL`; nothing left the machine). `claude
+-p`, and `-p --input-format stream-json` for `/clear`. Servers: a probe MCP package installed
+each way (`uv tool install`, `pipx install`, `pipx run`, `uv tool run`, `pip` into a venv as a
+script and as `python -m`), and the real `aisquare serve --stdio` from this branch. uv 0.11.6.
+
+| What | Measured |
+|---|---|
+| 1. The server's parent | The Claude Code process itself, for `uv tool install`, `pipx install`, `pipx run` (it execs), a venv script, `python -m`, and `sh -c "<one command>"` (macOS `sh` execs). `uv tool run` (`uvx`) leaves **`uv`** between: claude → `uv` → server. `bash -lc "cd x && cmd"` leaves `bash`. The Bash tool's shell (`zsh -c`) is a child of the same process, so anything it starts is a grandchild. A server's stdin is a socket (macOS). A server registered with `claude mcp add` (user scope), one from a project `.mcp.json` and one from `--mcp-config` are all started this way. |
+| 2. Environment | A server gets `CLAUDE_CODE_SESSION_ID`, `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_MESSAGING_SOCKET` (`/tmp/cc-socks/<claude pid>.sock`), `CLAUDE_PROJECT_DIR`. The SessionStart hook also gets **`CLAUDE_PID`**, the pid of the Claude Code process, and its own parent *is* that process (the hook's `sh -c` ran the command in place). The Bash tool has the same environment as the hook, `CLAUDE_PID` and `CLAUDE_CODE_SESSION_ID` included, which is why neither proves anything by itself. |
+| 3. `/clear`, `--resume`, `--fork-session` | `/clear`: the **same process and servers**, a new session id (hook source `clear`, preceded by SessionEnd), and the server's environment keeps the **old** id. `--resume`: the same id in a new process, new servers (source `resume`). `--resume --fork-session`: a new id, a new process (source `fork`). |
+| 4. A per-session value in `env` | `"X": "${CLAUDE_CODE_SESSION_ID}"` in an MCP server's `env` arrives as that literal text. No nonce can be passed to a server through its configuration. |
+| 5. Hook against server at a fresh start | In 6 of 6 runs the server had read the board **1.2 to 3.2 s before** the hook registered the process (the server asked 0.9 to 2.0 s after its own start; the hook's record landed at +1.2, +1.5, +1.9, +2.1, +2.9, +3.2 s after that). So at a fresh start the server cannot yet prove its host, and counts every live row: with a stale own row of the previous process (a `--resume` after a crash) the instructions are the team's, as before. A server that starts later (an MCP reconnect, a second server in the same Claude Code) proves it and passes the host. Waiting for the hook was not built: it would hold every MCP start up to 3 s for a one-line saving in a rare case. |
+
+Checked for real with the branch's `aisquare`: a session's own server (`aisquare serve --stdio`
+and through `uv tool run`) wrote its `note_add` as the session, with one row on the board and no
+`mcp:` row; after `/clear` the same server's next note was the **new** session's; and a `serve`
+started from the Bash tool, with the session's `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID` in its
+environment, wrote `mcp:remote:<project>` beside the session: a team.
 
 ## The problem
 
@@ -186,7 +280,7 @@ Plus real-machine checks, one per install method (uv tool, uvx, pipx, pip in a v
 macOS, Linux, Windows and WSL: a real Claude Code session with the server mounted, and a
 real Claude Desktop beside it.
 
-## Where the code lives (at `0545dc5b`)
+## Where the code lives (at `0545dc5b`; what moved, and the new files, are in the status block)
 
 - `src/aisquare/services/team.py`: `_has_team` (line 2042), `board_has_team` (2067),
   `_solo` (2014), `member_by_env` (2004), `_STALE_AFTER` (61).
@@ -207,12 +301,13 @@ real Claude Desktop beside it.
 ## Decisions B must not reopen
 
 - The hard rule above comes before the trim (#48's brief, after #47 MAJOR-1).
-- Option A is the shipped behaviour until B lands: every live `mcp:` row counts (the
-  owner, 2026-10-24, board seq 1819).
+- Option A was the shipped behaviour until B landed: every live `mcp:` row counts (the
+  owner, 2026-10-24, board seq 1819). It still is for every server that cannot prove it is
+  a session's own.
 - A hand-run plain `agent` (`aisquare launch agent`) alone on its board is solo; a
   fleet-spawned one, or one with a persona, is a member (the owner, 2026-10-24, #46).
 
-## Open questions for the owner
+## Open questions for the owner (decided for this build: see the status block)
 
 1. Is (c), shipping the MCP server in the plugin, wanted for its own sake? It is the
    simplest proof, and it changes how users mount the server.

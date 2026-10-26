@@ -125,7 +125,13 @@ def test_a_start_from_another_boot_is_another_start(
     assert first is not None and procs.inspect(500) != first
 
 
-def test_macos_asks_ps_with_the_locale_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_macos_asks_ps_with_the_locale_and_the_zone_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``lstart`` is printed in the reader's time zone: the hook and the server must read the
+    same start whatever zone each runs in (a ``TZ`` in an MCP ``env`` entry, a laptop that
+    moved between a registration and a server's first read)."""
+    monkeypatch.setenv("TZ", "Asia/Kolkata")
     asked: list[tuple[list[str], dict[str, str]]] = []
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -138,6 +144,18 @@ def test_macos_asks_ps_with_the_locale_pinned(monkeypatch: pytest.MonkeyPatch) -
     argv, env = asked[0]
     assert argv == ["ps", "-o", "ppid=,lstart=,comm=", "-p", "1234"]
     assert env["LC_ALL"] == "C"
+    assert env["TZ"] == "UTC", "the reader's own zone would write its own start"
+
+
+def test_a_process_has_the_same_start_in_every_time_zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real thing, not the argv: ``ps`` run under three zones names one start."""
+    starts = set()
+    for zone in ("UTC", "Asia/Kolkata", "America/Los_Angeles"):
+        monkeypatch.setenv("TZ", zone)
+        info = procs.inspect(os.getppid())
+        assert info is not None
+        starts.add(info.started)
+    assert len(starts) == 1
 
 
 def test_a_ps_that_fails_or_is_missing_reads_nothing(monkeypatch: pytest.MonkeyPatch) -> None:

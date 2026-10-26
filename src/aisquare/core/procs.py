@@ -13,7 +13,8 @@ One question, three sources, the same answer:
   since boot) and ``/proc/<pid>/exe``. The token carries this boot's id, so a pid and a tick
   count from another boot do not match.
 - **macOS and the BSDs**: ``ps -o ppid=,lstart=,comm=`` (one run per question, with the
-  locale pinned so the start reads the same every time). ``lstart`` has a second's
+  locale AND the time zone pinned: ``lstart`` is written in the reader's zone, and a hook
+  and a server that disagree on it would never match). ``lstart`` has a second's
   resolution: a pid recycled inside the second its holder started is what that cannot see.
 - **Windows**: the Toolhelp snapshot for the parent and the image, ``GetProcessTimes`` for
   the creation time (a ``FILETIME``). Windows keeps the pid of whoever *created* a process,
@@ -145,7 +146,7 @@ def _inspect_ps(pid: int) -> ProcInfo | None:
         capture_output=True,
         text=True,
         timeout=5,
-        env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+        env={**os.environ, "LC_ALL": "C", "LANG": "C", "TZ": "UTC"},
     )
     if result.returncode != 0:
         return None

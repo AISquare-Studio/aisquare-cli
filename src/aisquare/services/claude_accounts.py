@@ -1072,6 +1072,17 @@ def fix_line(reading: ClaudeUsage) -> str:
     return f"fix: {reading.fix}" if reading.fix else NO_FIX
 
 
+def kept_fix_line(reading: ClaudeUsage, *, slot: int | None = None) -> str | None:
+    """``fix: point SSL_CERT_FILE …``: the fix for the failed try a kept reading stands in
+    for (:attr:`~ClaudeUsage.last_failed_cause`, :data:`USAGE_FIXES`), or :data:`NO_FIX`;
+    ``None`` for a live reading, or a kept one recorded before the cause was."""
+    cause = reading.last_failed_cause
+    if not reading.available or reading.last_failed_reason is None or cause is None:
+        return None
+    fix = usage_fix(cause, slot=slot, until=reading.rate_limited_until)
+    return f"fix: {fix}" if fix else NO_FIX
+
+
 def explain_usage(reading: ClaudeUsage) -> str:
     """``the stored token has expired; fix: press Log in …``: the reason and its fix in one
     line, for a surface with no hover (``accounts list --usage``, ``accounts usage``)."""
@@ -1980,6 +1991,7 @@ def _preferred(good: ClaudeUsage | None, failed: ClaudeUsage | None) -> ClaudeUs
         update={
             "last_failed_at": failed.fetched_at,
             "last_failed_reason": failed.reason,
+            "last_failed_cause": failed.cause,
             "rate_limited": failed.rate_limited,
             "rate_limited_until": failed.rate_limited_until,
         }

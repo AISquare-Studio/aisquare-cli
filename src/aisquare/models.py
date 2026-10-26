@@ -363,6 +363,10 @@ class ClaudeUsage(BaseModel):
     last_failed_reason: str | None = None
     """Why the try at :attr:`last_failed_at` read nothing ("rate-limited until 14:32",
     "could not reach the usage endpoint …"), shown beside the older figure it kept."""
+    last_failed_cause: UsageCause | None = None
+    """The :attr:`cause` of that try, so the older figure shows its fix too
+    (``services.claude_accounts.kept_fix_line``): a TLS failure on an account with a
+    reading on record shows the figure, and the fix is the only word of what to do."""
     rate_limited: bool = False
     """The usage endpoint answered HTTP 429 (or 503 with ``Retry-After``) for this account,
     now or on a try still being waited out: logging in again does not clear it."""

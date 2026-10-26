@@ -284,8 +284,9 @@ def _say_why(statuses: list[ClaudeAccountStatus]) -> None:
 
 def _kept_lines(statuses: list[ClaudeAccountStatus]) -> list[Text]:
     """One line per row showing an older reading because the newest try read nothing:
-    ``account 2: rate-limited until 14:32 — …; showing the reading from 12m ago`` (F1 of
-    #400). The numbers in the table are that reading's; this says how old, and why."""
+    ``account 2: rate-limited until 14:32 — …; showing the reading from 12m ago; fix: …``
+    (F1 of #400). The numbers in the table are that reading's; this says how old, why, and
+    what to do about the failed try (``kept_fix_line``, from its cause)."""
     lines: list[Text] = []
     for status in statuses:
         usage = status.usage
@@ -296,7 +297,9 @@ def _kept_lines(statuses: list[ClaudeAccountStatus]) -> list[Text]:
             if usage.fetched_at is not None
             else ""
         )
-        lines.append(Text(f"{status.label}: {usage.last_failed_reason}{age}", style="yellow"))
+        fix = accounts_service.kept_fix_line(usage, slot=status.account.slot)
+        then = f"; {fix}" if fix is not None else ""
+        lines.append(Text(f"{status.label}: {usage.last_failed_reason}{age}{then}", style="yellow"))
     return lines
 
 

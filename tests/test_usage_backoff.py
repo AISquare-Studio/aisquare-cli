@@ -18,10 +18,12 @@ requests it is sent:
 from __future__ import annotations
 
 import json
+import ssl
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
 
 import pytest
 from typer.testing import CliRunner
@@ -34,8 +36,9 @@ from aisquare.cli.ui.views.accounts import (
     problem_tooltip,
 )
 from aisquare.core import claude_accounts as core
+from aisquare.core import tls
 from aisquare.core.store import store_session
-from aisquare.models import ClaudeAccountStatus, ClaudeIdentity, ClaudeUsage
+from aisquare.models import ClaudeAccountStatus, ClaudeIdentity, ClaudeUsage, UsageCause
 from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics
 from tests.test_claude_accounts import NOW
@@ -690,6 +693,69 @@ def test_the_cli_shows_a_kept_readings_reset_window_as_reset(
     assert "40% ·" not in shown.stdout, "never the old figure beside its reset"
     assert "7% · resets" in shown.stdout  # the week's window is still open: its figure stays
     assert "showing the reading from 2h ago" in shown.stdout
+
+
+@pytest.mark.parametrize(
+    ("error", "cause", "fix"),
+    [
+        (
+            tls.CABundleError("SSL_CERT_FILE=/dev/null: no certificate in it"),
+            UsageCause.tls_bundle,
+            tls.BUNDLE_FIX,
+        ),
+        (
+            URLError(ssl.SSLCertVerificationError(1, "certificate verify failed")),
+            UsageCause.tls_cert,
+            tls.CERT_HINT,
+        ),
+        (ConnectionRefusedError(61, "refused"), UsageCause.unreachable, "check the network"),
+    ],
+    ids=["tls-bundle", "tls-cert", "unreachable"],
+)
+def test_a_kept_reading_says_the_failed_tries_fix_on_the_page_and_in_the_cli(
+    fake_home: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    error: OSError,
+    cause: UsageCause,
+    fix: str,
+) -> None:
+    """Review of #432, (1): TLS usually breaks on an account that read fine the day before,
+    so the row shows that older figure, not the '!'. 0.9.0 printed #403's fix inside the
+    reason; since #13 the fix comes from the cause (USAGE_FIXES), and the kept figure's
+    tooltip and CLI line never read it. The kept reading carries the cause, and both say
+    its fix — for #13's other causes too."""
+    work = _slot("work@example.com", "tok-work")
+    monkeypatch.setattr(
+        service,
+        "_http_get",
+        _Endpoint({"tok-work": _payload(40, resets_at=NOW + timedelta(hours=9))}),
+    )
+    _at(monkeypatch, NOW)
+    assert runner.invoke(app, ["accounts", "usage"]).exit_code == 0
+
+    def failing(*_args: Any) -> tuple[int, bytes]:
+        raise error
+
+    monkeypatch.setattr(service, "_http_get", failing)
+    _new_process()
+    later = NOW + timedelta(minutes=10)
+    _at(monkeypatch, later)
+    reading = service.cached_usage([work], force=True, now=later)[work.slot]
+    assert reading.available and reading.kept, reading
+    assert reading.last_failed_cause is cause
+
+    # The page: the session cell's tooltip says how old, why, then the fix.
+    tooltip = kept_tooltip(reading, slot=work.slot, now=later) or ""
+    assert tooltip.startswith("reading from 10m ago · "), tooltip
+    assert tooltip.splitlines()[-1].startswith(f"fix: {fix}"), tooltip
+
+    # The CLI: the line under the table, the same fix after it.
+    monkeypatch.setenv("COLUMNS", "300")
+    _new_process()
+    shown = runner.invoke(app, ["accounts", "usage", "--refresh"])
+    assert shown.exit_code == 0, shown.stdout
+    assert f"showing the reading from 10m ago; fix: {fix}" in shown.stdout, shown.stdout
 
 
 def test_during_a_wait_the_cli_says_no_try_was_made_now(

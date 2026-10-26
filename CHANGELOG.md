@@ -75,7 +75,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (HTTP 401)`, a locked or refusing Keychain reads without the `— unlock it …`
   tail, and 0.9.0's two TLS reasons read `TLS: the CA bundle could not be
   loaded` and `TLS certificate could not be verified`, their fix (the same
-  words as before, and as `doctor`'s tls row) beside them.
+  words as before, and as `doctor`'s tls row) beside them. A row that still shows
+  an older reading because the newest try failed (a TLS failure on an account
+  that read fine the day before, say) gives that try's fix too: on the second
+  line of the session cell's tooltip, and after `showing the reading from …` in
+  the CLI. `--json` carries the try's cause as `last_failed_cause`.
 
 ### Fixed
 

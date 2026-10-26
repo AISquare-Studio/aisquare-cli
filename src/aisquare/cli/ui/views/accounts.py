@@ -451,14 +451,20 @@ def wait_said(usage: ClaudeUsage, *, now: datetime | None = None) -> str | None:
     return "the rate limit has ended — the next read asks again"
 
 
-def kept_tooltip(usage: ClaudeUsage | None, *, now: datetime | None = None) -> str | None:
+def kept_tooltip(
+    usage: ClaudeUsage | None, *, slot: int | None = None, now: datetime | None = None
+) -> str | None:
     """``reading from 12m ago · rate-limited until 14:32 — logging in again does not clear
-    it``: why the session cell shows an older figure, or ``None`` for a live one."""
+    it``: why the session cell shows an older figure, or ``None`` for a live one. Then, on
+    its own line, the failed try's fix (``kept_fix_line``), as the ``!`` says it for a row
+    with nothing kept."""
     if usage is None or kept_age(usage, now=now) is None or usage.fetched_at is None:
         return None
     age = accounts_service.describe_age(usage.fetched_at, now=now)
     why = wait_said(usage, now=now) or usage.last_failed_reason
-    return f"reading from {age} · {why}"
+    said = f"reading from {age} · {why}"
+    fix = accounts_service.kept_fix_line(usage, slot=slot)
+    return said if fix is None else f"{said}\n{fix}"
 
 
 def account_cells(
@@ -926,7 +932,7 @@ class AccountRow(Horizontal, can_focus=True):
             return f"{text.plain}{disabled} — double-click (or Enter / F2) to rename"
         if key == "session":
             lines = [text.plain] if text.plain else []
-            if (kept := kept_tooltip(self.usage)) is not None:
+            if (kept := kept_tooltip(self.usage, slot=self.slot)) is not None:
                 lines.append(kept)  # why the bar is an older reading (F1 of #400)
             pace = accounts_service.describe_trend(self.trend)
             if pace:

@@ -8,10 +8,12 @@ transport behaviour, and a mock only proves what the mock believes urllib does.
 
 from __future__ import annotations
 
+import itertools
 import json
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -209,24 +211,34 @@ def test_a_served_response_comes_back_intact(wired: StubCI) -> None:
     assert result.error_codes == []
 
 
-def test_network_cost_stays_separable_from_server_cost(wired: StubCI) -> None:
+@pytest.mark.parametrize(
+    "round_trip_ms", [4, 900], ids=["faster-than-the-claim", "slower-than-the-claim"]
+)
+def test_network_cost_stays_separable_from_server_cost(
+    wired: StubCI, monkeypatch: pytest.MonkeyPatch, round_trip_ms: int
+) -> None:
     """Folded together, a slow link is indistinguishable from a slow server, so
     both halves are recorded as columns and the difference is a subtraction over
     the rows — not a third derived property nothing writes down.
 
-    The two are INDEPENDENTLY sourced, which is the property that matters and
-    which this stub demonstrates by disagreeing with itself: ``server_ms`` is
-    whatever the response body claimed, ``round_trip_ms`` is the client's own
-    clock, and a local stub answers in under a millisecond while reporting 63.
-    A single folded number could not represent that, and a client that derived
-    one from the other would have hidden it.
+    The two are INDEPENDENTLY sourced: ``server_ms`` is whatever the response
+    body claimed (63), ``round_trip_ms`` is the client's own clock. The clock is
+    the test's, read either side of the claim, because a stub that answers in
+    under 10 ms here took 295 ms on a loaded windows-latest runner (shard 1/10 of
+    run 40296457841), and "smaller than the claim" was a fact about the machine,
+    not about the client. A client that derived one number from the other could
+    not give both readings.
     """
+    reads = itertools.count()
+
+    def clock() -> float:
+        # The first read is the exchange's start; every later one is the elapsed time.
+        return 0.0 if next(reads) == 0 else round_trip_ms / 1000
+
+    monkeypatch.setattr(ci_client, "time", SimpleNamespace(monotonic=clock))
     result = _call(wired)
     assert result.server_ms == 63, "the server's own number, straight from the body"
-    assert result.round_trip_ms < result.server_ms, (
-        "the client clock is measured, not derived — here it is smaller than the "
-        "server's claim, which is only visible because both are kept"
-    )
+    assert result.round_trip_ms == round_trip_ms, "the client's own clock, not the body's claim"
 
 
 def test_a_degraded_response_records_its_error_codes(wired: StubCI) -> None:

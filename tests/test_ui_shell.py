@@ -110,7 +110,7 @@ from aisquare.services.captain import state as captain_state
 from tests import guard_clock, toast_log
 from tests.fleet_fakes import list_agents_as
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
-from tests.ui_workers import settle_page, settle_until, settle_until_held
+from tests.ui_workers import settle_page, settle_until_held, watch_until
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -3642,13 +3642,6 @@ def test_a_successful_stop_toasts_the_ended_row_re_reads_and_leaves_its_view(
 
     async def go(pilot: Pilot[None]) -> tuple[list[str], int, str | None]:
         app = fleet_app(pilot)
-        # Every toast, not the first: the scripted pane has no tmux behind it and raises its
-        # own "(pane gone)" here, which is the harness, not the claim. Recorded as each is
-        # raised, not read off the screen: the toast is raised as the dialog dismisses, and a
-        # read of the screen after the settle found none on windows-latest, whether the toast
-        # had gone with the dialog's screen or its 6 s were spent in the settle (CI runs
-        # 40264914683 and 40265569327, the same shard of both).
-        told = toast_log.record(app)
         dialog = await open_stop_dialog(pilot, app, "agt_a_coder-auth")
         before = len(reads)
         # Pressed on the dialog, and the toast waited for: a click the moment the dialog
@@ -3656,9 +3649,20 @@ def test_a_successful_stop_toasts_the_ended_row_re_reads_and_leaves_its_view(
         # 40234523081 at e28697f1), as the take-over test's click once did (c6adca04).
         dialog.query_one("#stop-confirm", Button).press()
         wanted = f"✓ stopped coder-auth ({live.agent.id})"
-        await settle_until(app, lambda: wanted in told)
-        await settle_page(app)  # and the re-read the stop asks for, which is counted below
-        return told, len(reads) - before, app.content.current
+        shown: list[str] = []
+
+        def toasted() -> bool:
+            # Every toast, not the first: the scripted pane has no tmux behind it and
+            # raises its own "(pane gone)" here, which is the harness, not the claim.
+            shown[:] = [toast.render().plain for toast in app.screen.query(Toast)]
+            return wanted in shown
+
+        # Looked for on the loop's own clock, the toast kept as it was seen, the page settled
+        # after: a toast is gone 6 s after its notify, and on windows-latest the settle that
+        # used to come first outlasted it (shard 5/10 at 658bf0c6, twice).
+        await watch_until(toasted)
+        await settle_page(app)
+        return shown, len(reads) - before, app.content.current
 
     toasts, re_reads, current = drive(go, notifications=True)
     assert f"✓ stopped coder-auth ({live.agent.id})" in toasts

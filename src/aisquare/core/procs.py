@@ -82,12 +82,6 @@ def inspect(pid: int) -> ProcInfo | None:
         return None
 
 
-def current(look: Inspect | None = None) -> ProcessRef | None:
-    """This process as a :class:`ProcessRef`."""
-    info = (look or inspect)(os.getpid())
-    return None if info is None else ProcessRef(os.getpid(), info.started)
-
-
 # --- Linux and WSL ----------------------------------------------------------------------
 
 #: Where Linux keeps its processes; a test points it at a tree of its own.

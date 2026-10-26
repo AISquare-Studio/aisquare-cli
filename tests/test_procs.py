@@ -200,7 +200,6 @@ def test_this_process_is_inspected_with_its_parent_and_a_start() -> None:
     assert info.started != ""
     assert info.image != ""
     assert procs.inspect(os.getpid()) == info, "the token is the same every time it is asked"
-    assert procs.current() == procs.ProcessRef(os.getpid(), info.started)
 
 
 def test_a_child_is_seen_under_this_process_with_a_start_of_its_own(

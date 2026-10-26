@@ -112,10 +112,7 @@ def _hosting_session(store: ContextStore, project_id: str) -> TeamSession | None
     doubt, a read that fails included, is ``None``, and the caller is a teammate."""
     if not _stdio:
         return None
-    if any(
-        os.environ.get(name, "").strip()
-        for name in ("AISQUARE_SERVE_CLIENT", "AISQUARE_SERVE_ROLE")
-    ):
+    if _client_named() or _role_named():
         return None
     try:
         return mcp_host.host_of(store, project_id)
@@ -131,12 +128,22 @@ def client_session_id(project_id: str) -> str:
     every other project's board would render the remote unattributed while
     the first kept a phantom live session forever.
     """
-    client = os.environ.get("AISQUARE_SERVE_CLIENT", "").strip() or "remote"
+    client = _client_named() or "remote"
     return f"mcp:{client}:{project_id.removeprefix('prj_')[:6]}"
 
 
+def _client_named() -> str:
+    """What ``AISQUARE_SERVE_CLIENT`` calls this client, ``""`` when it names none."""
+    return os.environ.get("AISQUARE_SERVE_CLIENT", "").strip()
+
+
+def _role_named() -> str:
+    """What ``AISQUARE_SERVE_ROLE`` calls this client's role, ``""`` when it names none."""
+    return os.environ.get("AISQUARE_SERVE_ROLE", "").strip()
+
+
 def _client_role() -> str:
-    return os.environ.get("AISQUARE_SERVE_ROLE", "").strip() or "remote"
+    return _role_named() or "remote"
 
 
 def _ensure_virtual_session() -> str:

@@ -25,7 +25,6 @@ class Tree:
     def __init__(self) -> None:
         self.table: dict[int, procs.ProcInfo] = {}
         self._next = 4000
-        self._parent = 1
 
     def spawn(self, image: str, parent: int = 1, *, started: str | None = None) -> int:
         """A new process running ``image`` under ``parent``; its pid."""

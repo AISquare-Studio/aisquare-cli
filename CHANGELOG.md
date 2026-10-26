@@ -21,7 +21,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   metrics and its local `fleet/<codename>/…` branches stay unless `--memory`, `--prompts`
   or `--branches` says otherwise; a brain a distill or a recall is running in is kept and
   named. The checkout, every other branch, the registration and its settings, the symbol
-  index, the command reports, the captain and every other project are never touched.
+  index, the captain and every other project are never touched. Nor are the command
+  reports, but once their briefs are gone none of them is pinned as evidence any more:
+  `asq reports prune`'s retention takes them as it takes any other.
   A worktree or branch that holds uncommitted changes or commits no remote has refuses
   the reset, naming each tree, its branch and the commit count, unless
   `--discard-unpushed`; a count git cannot give refuses it too, never reading as pushed.
@@ -47,7 +49,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `plan`, then `start_fresh`) is what the UI's Start fresh… calls. In `asq`, **↺ Start
   fresh…** is on a project card's menu (just above *Remove from fleet…*) and on the
   project's *Settings* tab: one dialog shows the plan's counts and that a new blank
-  manager starts, with *Project memory*, *Prompt log & metrics* and *Fleet git branches*
+  manager starts, with *Project memory (context entries and brain)*, *Prompt log &
+  metrics* and *Fleet git branches*
   off by default; unpushed work is listed in a second dialog (*Discard and start
   fresh*), and work found after it opens brings the dialog back on what was found; a
   refused plan says why and cannot be confirmed; one run a project at a time, off the

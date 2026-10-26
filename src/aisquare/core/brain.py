@@ -154,24 +154,59 @@ def _lock(home: Path, *, wait_s: float) -> Iterator[bool]:
         yield won
 
 
+LOCK_NAME = ".aisquare.lock"
+"""The file aisquare's own lock on a brain lives in (:func:`_lock`), inside the brain."""
+
+
+def held_content(project_id: str) -> bool:
+    """Whether this project has a brain to clear: anything in its folder but the lock file,
+    which :func:`clear` leaves in place."""
+    try:
+        return any(entry.name != LOCK_NAME for entry in brain_home(project_id).iterdir())
+    except OSError:  # no folder, or one that cannot be read: nothing known to clear
+        return False
+
+
 def clear(project_id: str) -> bool:
-    """Delete this project's brain (``project fresh --memory``): ``True`` when it went,
-    ``False`` when there was none.
+    """Delete this project's brain (``project fresh --memory``): ``True`` when something
+    went, ``False`` when there was nothing.
 
     Never torn from under a running gbrain: taken under the brain's own lock, tried and never
-    waited for, so a distill or a recall that holds it makes this raise :class:`BrainBusy`,
-    and the brain is left as it is. Moved aside under the lock and deleted after it, so a run
-    that comes next finds no brain and makes a new, empty one. Any other failure is the
-    ``OSError`` it is, the brain as it was."""
+    waited for, so a distill or a recall that holds it raises :class:`BrainBusy`, and the
+    brain is left as it is. A lock that cannot be taken for any other reason (a lock file
+    that cannot be opened, a folder that cannot be written) is the ``OSError`` it is, never
+    read as busy.
+
+    Under the lock, every entry of the brain's folder but the lock file goes, and the lock
+    file and the folder stay: on Windows a folder cannot be renamed or removed while a file
+    in it is open, and the lock is, and deleting the lock file after letting go of it would
+    let the next run lock one file while a third locked another. A run that comes next finds
+    no brain and makes a new, empty one. An entry that cannot be removed raises the
+    ``OSError``, naming every entry left behind."""
     home = brain_home(project_id)
-    if not home.exists():
+    if not held_content(project_id):
         return False
-    aside = home.with_name(f".brain-cleared-{os.getpid()}-{os.urandom(4).hex()}")
-    with _lock(home, wait_s=0) as won:
-        if not won:
-            raise BrainBusy(f"a gbrain run holds {home}")
-        os.replace(home, aside)
-    shutil.rmtree(aside, ignore_errors=True)
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(holding(home / LOCK_NAME, wait_s=0))
+        except TimeoutError as exc:
+            raise BrainBusy(f"a gbrain run holds {home}") from exc
+        left: list[str] = []
+        failure: OSError | None = None
+        for entry in sorted(home.iterdir()):
+            if entry.name == LOCK_NAME:
+                continue
+            try:
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+            except OSError as exc:
+                left.append(entry.name)
+                failure = failure or exc
+        if failure is not None:
+            why = failure.strerror or str(failure)
+            raise OSError(failure.errno, f"{why}; left in {home}: {', '.join(left)}")
     return True
 
 

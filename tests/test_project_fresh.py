@@ -1672,7 +1672,8 @@ def test_a_manager_state_that_cannot_be_removed_starts_no_manager(
 
     assert report.manager is None and spawned == []
     assert report.manager_error is not None and "state could not be removed" in report.manager_error
-    assert "aisquare fleet spawn --project alpha-x manager" in report.manager_error
+    assert "remove it first" in report.manager_error
+    assert "fleet spawn" not in report.manager_error, "the renderers name the spawn, once"
     assert state.exists() and report.cleared.tasks == 3
 
 
@@ -1702,7 +1703,12 @@ def test_memory_takes_the_project_brain_too_and_only_the_projects(
     report = fresh_service.start_fresh(alpha, memory=True)
 
     assert planned.counts.brain == report.cleared.brain == 1
-    assert not mine.exists() and theirs.is_dir() and brain_core.brain_ready(beta.id)
+    # Everything but the lock file goes; the lock file and the folder stay (on Windows the
+    # folder cannot go while the lock in it is open).
+    assert [entry.name for entry in mine.iterdir()] == [brain_core.LOCK_NAME]
+    assert not brain_core.brain_ready(alpha.id) and not brain_core.held_content(alpha.id)
+    assert theirs.is_dir() and brain_core.brain_ready(beta.id)
+    assert fresh_service.plan(alpha, memory=True).counts.brain == 0, "nothing left to clear"
 
 
 def test_a_brain_a_gbrain_run_holds_is_kept_not_torn(
@@ -1723,3 +1729,85 @@ def test_a_brain_a_gbrain_run_holds_is_kept_not_torn(
     assert [(kept.path, kept.reason) for kept in report.kept] == [
         (home, "a distill or a recall is running in it; kept as it is")
     ]
+
+
+# --- final review on #429 (#7) -------------------------------------------------------------
+
+
+def test_a_brain_lock_that_cannot_be_taken_is_not_read_as_busy(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any refusal of the brain's lock read as "a distill or a recall is running in it",
+    a lock file it could not open included. Only a lock another holder keeps is busy."""
+    alpha, _, _, _ = two
+    home = _brain(alpha)
+
+    def refused(path: Path, **_: Any) -> Any:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(brain_core, "holding", refused)
+
+    report = fresh_service.start_fresh(alpha, memory=True)
+
+    assert brain_core.brain_ready(alpha.id) and report.cleared.brain == 0
+    assert [(kept.path, kept.reason) for kept in report.kept] == [
+        (home, "could not be removed: Permission denied")
+    ]
+
+
+def test_a_brain_entry_that_cannot_be_removed_is_named_as_left_behind(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The brain was moved aside and deleted with ``ignore_errors``: what failed to go stayed
+    as a ``.brain-cleared-*`` folder nobody was told of. Now nothing is moved, and every entry
+    left behind is named on the report."""
+    alpha, _, _, _ = two
+    home = _brain(alpha)
+    (home / "notes.md").write_text("a page\n", encoding="utf-8")
+    real = shutil.rmtree
+
+    def refuse(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == home / ".gbrain":
+            raise PermissionError(13, "Permission denied")
+        real(path, *args, **kwargs)
+
+    monkeypatch.setattr("aisquare.core.brain.shutil.rmtree", refuse)
+
+    report = fresh_service.start_fresh(alpha, memory=True)
+
+    assert not (home / "notes.md").exists() and (home / ".gbrain").is_dir()
+    assert [(kept.path, kept.reason) for kept in report.kept] == [
+        (home, f"could not be removed: Permission denied; left in {home}: .gbrain")
+    ]
+    assert not list(home.parent.glob(".brain-cleared-*"))
+
+
+def test_a_withheld_manager_names_its_spawn_once(
+    runner: CliRunner,
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The manager-withheld message ended in the spawn command, and the report appended "start
+    one: <the same spawn>". It says to remove the state first, and names the spawn once."""
+    alpha, _, _, _ = two
+    state = _manager_state(alpha, "ship the old feature")
+    real = shutil.rmtree
+
+    def refuse(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == state.parent:
+            raise PermissionError(13, "Permission denied")
+        real(path, *args, **kwargs)
+
+    monkeypatch.setattr("aisquare.services.fresh.shutil.rmtree", refuse)
+
+    result = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--yes"])
+
+    said = " ".join(result.output.split())
+    assert result.exit_code == 1, result.output
+    assert "remove it first — start one: aisquare fleet spawn --project alpha-x manager" in said
+    assert said.count("fleet spawn") == 1

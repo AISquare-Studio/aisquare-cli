@@ -1453,7 +1453,9 @@ class FreshUnpushed(BaseModel):
 
 
 class FreshKept(BaseModel):
-    """A worktree or branch a ``project fresh`` meant to remove and could not, with why."""
+    """What a ``project fresh`` meant to remove and could not, with why: an agent's worktree,
+    a fleet branch, the briefs' evidence folder, the manager's state folder, or (with
+    ``--memory``) the project brain, which a running distill or recall keeps."""
 
     path: Path | None = None
     branch: str | None = None
@@ -1538,7 +1540,9 @@ class FreshReport(BaseModel):
     worktrees_removed: list[Path] = Field(default_factory=list)
     branches_deleted: list[str] = Field(default_factory=list)
     kept: list[FreshKept] = Field(default_factory=list)
-    """Trees and branches it could not remove; their rows went all the same."""
+    """What it could not remove (:class:`FreshKept`): trees, branches, the evidence folder,
+    the manager's state folder, the brain. The rows went all the same; a manager's state
+    left in place withholds the new manager (:attr:`manager_error`)."""
     discarded: list[FreshUnpushed] = Field(default_factory=list)
     """The unpushed work it threw away, as asked: only what went (a tree removed, a branch
     deleted), never what it was let discard and then kept."""

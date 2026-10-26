@@ -214,11 +214,11 @@ def start_fresh(
         files=files,
     )
     if stale is not None:
-        # A blank manager must not read the old one's state back: no manager, said why.
-        spawn = project_service.fleet_command("spawn", project, "manager")
+        # A blank manager must not read the old one's state back: no manager, said why. The
+        # spawn to run once it is removed is the renderers' to name, as for any manager_error.
         report.manager_error = (
             f"its old manager's state could not be removed ({stale}), so no manager was "
-            f"started to read it back: remove it, then {spawn}"
+            "started to read it back: remove it first"
         )
         return report
     try:
@@ -598,7 +598,7 @@ def _on_disk(project_id: str, *, memory: bool) -> dict[str, int | None]:
     return {
         "evidence": _files(_evidence_root(project_id)),
         "manager_state": _files(_manager_dir(project_id)),
-        "brain": int(brain.brain_home(project_id).is_dir()) if memory else None,
+        "brain": int(brain.held_content(project_id)) if memory else None,
     }
 
 
@@ -640,7 +640,7 @@ def _clear_on_disk(
                     reason="a distill or a recall is running in it; kept as it is",
                 )
             )
-        except OSError as exc:
+        except OSError as exc:  # a lock that could not be taken, an entry left behind
             report.kept.append(
                 FreshKept(
                     path=brain.brain_home(project.id),

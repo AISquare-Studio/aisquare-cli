@@ -247,7 +247,7 @@ def test_a_reset_clears_the_board_and_fleet_and_keeps_memory_prompts_and_every_o
     assert [row[0] for row in after["fleet_agent"]] == [report.manager.id if report.manager else ""]
     assert {table: after[table] for table in _KEPT} == alpha_kept
     assert _rows(beta.id) == beta_before
-    # Its signals and its sessions' marks went; the ``distill_seq`` a release with the brain
+    # Its signals and its sessions' marks went; the ``distill_seq`` key an earlier release
     # left and every other key, beta's included, are as they were.
     gone = {key for key in alpha_keys if not key.startswith("distill_seq:")}
     assert _meta() == {k: v for k, v in meta_before.items() if k not in gone}
@@ -1679,41 +1679,6 @@ def test_a_manager_state_that_cannot_be_removed_starts_no_manager(
     assert "remove it first" in report.manager_error
     assert "fleet spawn" not in report.manager_error, "the renderers name the spawn, once"
     assert state.exists() and report.cleared.tasks == 3
-
-
-def _leftover_brain(project: ProjectInfo) -> Path:
-    """A project brain folder as a release that still had gbrain left it."""
-    home = paths.project_data_dir(project.id) / "brain"
-    marker = home / ".gbrain" / "brain.pglite" / "PG_VERSION"
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text("16\n", encoding="utf-8")
-    (home / ".aisquare.lock").write_text("", encoding="utf-8")
-    return home
-
-
-def test_memory_clears_the_context_entries_and_leaves_a_leftover_brain_folder_alone(
-    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
-    spawned: list[tuple[str, str, dict[str, Any]]],
-    stops: Stops,
-) -> None:
-    """The project brain is gone as a feature (rc/0.9.1's c002250b), and it deleted nothing on
-    disk: a ``projects/<id>/brain`` it left stays, with or without --memory, and is not
-    counted."""
-    alpha, beta, _, _ = two
-    mine, theirs = _leftover_brain(alpha), _leftover_brain(beta)
-    held = sorted(path.relative_to(mine) for path in mine.rglob("*"))
-
-    kept = fresh_service.start_fresh(alpha)
-    assert kept.cleared.entries is None and mine.is_dir()
-
-    planned = fresh_service.plan(alpha, memory=True)
-    report = fresh_service.start_fresh(alpha, memory=True)
-
-    assert planned.counts.entries == report.cleared.entries == 1
-    assert "brain" not in report.cleared.model_dump()
-    assert report.kept == []
-    assert sorted(path.relative_to(mine) for path in mine.rglob("*")) == held
-    assert theirs.is_dir() and (theirs / ".gbrain" / "brain.pglite" / "PG_VERSION").exists()
 
 
 # --- final review on #429 (#7) -------------------------------------------------------------

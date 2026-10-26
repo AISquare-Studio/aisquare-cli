@@ -94,10 +94,9 @@ delete the command reports (`~/.aisquare/reports/`), but with their briefs gone
 they are no longer pinned as evidence (unless another board's brief cites one
 too): retention takes them as it takes any other
 ([command reports](command-reports.md)). Its context entries, prompt log and
-fleet branches stay unless `--memory`, `--prompts` or `--branches`. A
-`~/.aisquare/projects/<id>/brain` folder, left by a release that still had the
-project brain, is never touched. Work in a worktree or branch that no remote has
-refuses it unless `--discard-unpushed`. `--dry-run` shows the plan.
+fleet branches stay unless `--memory`, `--prompts` or `--branches`. Work in a
+worktree or branch that no remote has refuses it unless `--discard-unpushed`.
+`--dry-run` shows the plan.
 
 ```sh
 aisquare project fresh --dry-run              # what it would clear

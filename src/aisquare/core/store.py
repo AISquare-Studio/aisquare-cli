@@ -2699,8 +2699,7 @@ class SqliteStore:
         The ``ui_state`` rows the before-limit hand-over keeps per label
         (:data:`_FLEET_LABEL_STATE`) go with them, counted with the ``team_meta`` keys: the
         next fleet reuses a label (``coder-1``), and a stale "warned" row would hide its first
-        warning. A key no board owns stays, such as the ``distill_seq:<id>`` a release that still
-        had the project brain left.
+        warning. Keys no board owns stay.
 
         The ``host/<project id>/<pid>`` keys (``services.mcp_host``) stay too, on purpose.
         They name the Claude Code processes that run sessions, not board content, and the

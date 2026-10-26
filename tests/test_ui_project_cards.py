@@ -708,4 +708,5 @@ def test_the_help_screen_names_the_rename_and_the_menu(tmp_path: Path, script: S
 
     keys = drive(go)
     assert "F2 dblclick" in keys and "rename the card in place" in keys
-    assert ". ⋯ r-click" in keys and "remove from the fleet" in keys
+    assert ". ⋯ r-click" in keys
+    assert "settings, start fresh, remove from the fleet" in keys

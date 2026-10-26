@@ -540,7 +540,10 @@ class HelpScreen(ModalScreen[None]):
             ("shift+g", "group the marked cards; Esc clears the marks"),
             ("drag title", "move a card or a group header to a new place"),
             ("F2 dblclick", "rename the card in place: Enter or a click away saves, Esc cancels"),
-            (". ⋯ r-click", "the card's menu: rename, pin, settings, remove from the fleet"),
+            (
+                ". ⋯ r-click",
+                "the card's menu: rename, pin, settings, start fresh, remove from the fleet",
+            ),
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
             ("drag", "select text in a pane (double-click: a word) — copied on release"),

@@ -255,8 +255,10 @@ def _record_usage(
             if not project_service.tracked(store, project):
                 return None
             project_id = project.id
+            attribution = _attribution(store, transcript, cwd, (project.id, project.root))
         else:
             project_id = existing.project_id
+            attribution = (None, None, None)
         state = usage_core.ScanState.parse(existing.state if existing else None)
         began = time.perf_counter()
         delta, state = usage_core.scan(transcript, state)
@@ -280,6 +282,9 @@ def _record_usage(
             cost_usd=session_totals.cost_usd,
             started_at=existing.started_at if existing else now,
             updated_at=now,
+            account_slot=attribution[0],
+            account_type=attribution[1],
+            repo_id=attribution[2],
             # A turn recorded after the session ended is the session running again (a
             # `claude --resume` of the same id): no longer ended (#45, n3). A record that is
             # not an end and adds nothing returned above.
@@ -315,6 +320,24 @@ def _record_usage(
             metric_counts=counts,
         )
     return turn if written else None
+
+
+def _attribution(
+    store: ContextStore, transcript: Path, cwd: Path | None, project: tuple[str, Path]
+) -> tuple[int | None, str | None, str | None]:
+    """The account slot, its subscription type and the repository a session's first record
+    notes (``services.usage_stats``); nothing at all when that fails: the sweep fills them in
+    later, and a session never waits on it. ``project`` (its id and root) is the repository
+    unless a project is pinned, in which case the working directory is asked."""
+    try:
+        from aisquare.core.workspace import pinned_project_id
+        from aisquare.services import usage_stats  # lazy: it imports this module
+
+        repo = project if pinned_project_id() is None else None
+        return usage_stats.hook_attribution(store, transcript, cwd, repo=repo)
+    except Exception as exc:
+        _log_failure("usage attribution failed", exc)
+        return None, None, None
 
 
 def _log_failure(what: str, exc: BaseException) -> None:

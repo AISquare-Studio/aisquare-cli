@@ -331,6 +331,12 @@ SEAMS: dict[str, Seam] = {
         "`git_env()`; no model",
         strips_identity=True,
     ),
+    "aisquare/core/repo_profile.py::git_output": Seam(
+        EXCLUDED,
+        "`git config`/`remote -v`/`ls-files` for a repository's profile (Usage & stats): a "
+        "remote's host and file counts, run in `git_env()`; no model",
+        strips_identity=True,
+    ),
     "aisquare/core/workspace.py::git_common_root": Seam(
         EXCLUDED, "`git rev-parse`, in `git_env()`", strips_identity=True
     ),

@@ -34,6 +34,7 @@ from aisquare.services import ci_client
 from aisquare.services import hooks as hooks_service
 from aisquare.services import project as project_service
 from tests import private_fleets, shards
+from tests.usage_stats_support import Machine
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -857,6 +858,18 @@ CLAUDE_ACCOUNTS_NOW = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
 Tests that write credentials against it import it (``NOW`` in
 test_claude_accounts.py), so a token they mint and the clock that grades it agree.
 """
+
+
+@pytest.fixture
+def machine(tmp_path: Path, fake_home: Path, monkeypatch: pytest.MonkeyPatch) -> Machine:
+    """A machine with Claude Code accounts, repositories and transcripts to build
+    (``tests/usage_stats_support.py``). Its repositories are repositories: the scratch
+    directories the usage stats count as one "temporary directories" are none here, the
+    suite's own living in a temporary directory."""
+    from aisquare.services import usage_stats
+
+    monkeypatch.setattr(usage_stats, "_ephemeral_roots", lambda: ())
+    return Machine(root=tmp_path, home=fake_home)
 
 
 @pytest.fixture

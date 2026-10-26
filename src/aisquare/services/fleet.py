@@ -10067,6 +10067,19 @@ def _still_to_restart(row: BulkRow) -> None:
         raise NoSuchAgent(left)
 
 
+def restart_leaves(project: ProjectInfo, status: FleetAgentStatus) -> str | None:
+    """Why a restart leaves this agent with no process, read again now, or ``None`` to start
+    it again: :func:`bulk`'s rule for one row (:func:`_still_to_restart`), its death recorded
+    first. For the asq a one-click update reopened (``updates.reattach_agents``): an agent
+    stopped on purpose between the press and the reopen, or one that exited 0, is left, as
+    a Restart all leaves it."""
+    try:
+        _still_to_restart(BulkRow(project, status))
+    except NoSuchAgent as exc:
+        return str(exc)
+    return None
+
+
 def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> ReapReport:
     """Record dead panes as ended, mark vanished panes lost, remove finished worktrees.
 

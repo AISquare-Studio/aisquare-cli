@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import subprocess
 import sys
 import time
@@ -100,7 +101,13 @@ def session_start_context(
     block = build_block(entries, project) if entries else ""
     team_block = (
         team_service.hook_session_start(
-            session_id, cwd, source, transcript_path=transcript_path, model=model, effort=effort
+            session_id,
+            cwd,
+            source,
+            transcript_path=transcript_path,
+            model=model,
+            effort=effort,
+            reserve=len(block) + 2 if block else 0,
         )
         if session_id
         else ""
@@ -115,7 +122,17 @@ def session_start_context(
         if recorded
         else ("", "")
     )
-    return "\n\n".join(part for part in (block, team_block, instruction, retrieved) if part)
+    joined = "\n\n".join(part for part in (block, team_block, instruction, retrieved) if part)
+    if len(joined) > team_service.HOOK_OUTPUT_CAP:
+        # The CI parts come after the board and were not known when the requirements
+        # block was sized: if the whole goes over the cap, the block goes, rather than
+        # Claude Code cutting the tail. The board and the rest stay as main had them.
+        joined = _REQUIREMENTS_BLOCK.sub("", joined)
+    return joined
+
+
+#: The session start's requirements block (``briefs.session_requirements``), whole.
+_REQUIREMENTS_BLOCK = re.compile(r"\n<aisquare-requirements>\n.*?\n</aisquare-requirements>", re.S)
 
 
 def _session_start_ci(

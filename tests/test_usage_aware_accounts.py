@@ -1260,17 +1260,17 @@ def test_headroom_skips_what_it_cannot_read_and_honours_disabled_and_exclude(
     assert any("no account's usage could be read" in note for note in notes)
 
 
-def test_choose_uses_headroom_only_when_configured_and_falls_back_to_the_default(
+def test_choose_uses_headroom_only_when_configured_and_falls_back_to_rank_1(
     fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _slot("work@example.com", "tok-work")
     _slot("personal@example.com", "tok-personal")
-    service.set_default("2")
+    service.set_default("2")  # moves slot 2 to rank 1: the machine default (#8 on the board)
     fetch = _Usage({"tok-work": _payload(95), "tok-personal": _payload(10)})
 
     _settings(pick="default")
     plain = service.choose(role="coder", project=work, fetch=fetch)
-    assert plain.source == "machine default" and plain.account is not None
+    assert plain.source == "preferred" and plain.account is not None
     assert plain.account.slot == 2 and fetch.calls == []  # pick=default: no request at all
 
     _settings(switch_at=85)  # pick=headroom, the default since 0.8.1
@@ -1285,12 +1285,12 @@ def test_choose_uses_headroom_only_when_configured_and_falls_back_to_the_default
     settings_service.bind_role("coder", account="2")
     assert service.choose(role="coder", project=work, fetch=fetch).source == "role binding"
 
-    # Nothing readable (a minute on, past what a launch serves): the default decides, with
+    # Nothing readable (a minute on, past what a launch serves): rank 1 decides, with
     # the notes saying why.
     later = NOW + timedelta(seconds=service.PICK_MAX_AGE_SECONDS + 1)
     monkeypatch.setattr(service, "_now", lambda: later)
     offline = service.choose(role="tester", project=work, fetch=_Usage({}))
-    assert offline.source == "machine default" and offline.account is not None
+    assert offline.source == "preferred" and offline.account is not None
     assert offline.account.slot == 2
     assert any("no account's usage could be read" in note for note in offline.notes)
 
@@ -1397,7 +1397,7 @@ def test_choose_for_handover_asks_headroom_before_the_binding_and_refuses_when_a
     service.set_default("3")
     blind = service.choose_for_handover(role="coder", project=work, exclude=(2,), fetch=_Usage({}))
     assert blind.account is not None and blind.account.slot == 3
-    assert blind.source == "machine default"
+    assert blind.source == "preferred"
     assert (
         service.choose_for_handover(
             role="coder", project=work, exclude=(2,), automatic=True, fetch=_Usage({})
@@ -1649,6 +1649,9 @@ def test_accounts_usage_and_list_usage_read_every_account_in_one_round_with_labe
         return real(accounts, **kwargs)
 
     monkeypatch.setattr(service, "read_usage", spy)
+    # One clock for a reset (the cell measures it against the service's clock, not the wall
+    # clock), so it reads "resets in 3h (15:00)", not "now": wide enough not to wrap a row.
+    monkeypatch.setenv("COLUMNS", "200")
 
     usage = runner.invoke(app, ["accounts", "usage"])
     assert usage.exit_code == 0, usage.output
@@ -1692,12 +1695,13 @@ def test_reorder_and_move_read_the_registry_once(
     assert len(reads) == 1
 
 
-def test_the_pages_read_opens_the_store_three_times_however_many_accounts(
+def test_the_pages_read_opens_the_store_four_times_however_many_accounts(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Eight opens a minute for four accounts before (third round). The page's read
-    (``cached_usage_with_trends``) opens it once to look in the cache, once to record what
-    it fetched and once for every trend, whatever the number of accounts."""
+    (``cached_usage_with_trends``) opens it once to look in the cache, once to read the
+    slots' back-offs before fetching (F1 of #400), once to record what it fetched and once
+    for every trend, whatever the number of accounts."""
     import contextlib
 
     a = _slot("work@example.com", "tok-work")
@@ -1718,7 +1722,7 @@ def test_the_pages_read_opens_the_store_three_times_however_many_accounts(
     monkeypatch.setattr("aisquare.services.claude_accounts.store_session", counted_session)
     fetched = service.cached_usage_with_trends([a, b], now=NOW, fetch=fetch)
 
-    assert opens == [1, 1, 1]
+    assert opens == [1, 1, 1, 1]
     assert fetched[a.slot][0].session_percent == 40 and fetched[b.slot][0].session_percent == 60
     trend = fetched[a.slot][1]
     assert trend is not None and trend.per_hour == pytest.approx(40.0)  # 20 → 40 in 30 min
@@ -1727,13 +1731,14 @@ def test_the_pages_read_opens_the_store_three_times_however_many_accounts(
         assert len(store.usage_samples(b.slot, since=NOW - timedelta(days=1))) == 1
 
 
-def test_a_recording_usage_round_opens_the_store_once_on_the_callers_thread(
+def test_a_recording_usage_round_opens_the_store_twice_on_the_callers_thread(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``read_usage`` recorded from each pool thread — every headroom pick, ``accounts usage``,
     ``list --usage`` and ``doctor --live``: up to four concurrent writers on ``context.db``,
     on the launch path (review of #205, fourth round). The threads fetch; one session
-    records every answered reading, and an unanswered one leaves no row."""
+    records every answered reading, and an unanswered one leaves no row. The one other
+    open reads the back-offs before the round (F1 of #400), on the caller's thread too."""
     import contextlib
     import threading
 
@@ -1753,7 +1758,7 @@ def test_a_recording_usage_round_opens_the_store_once_on_the_callers_thread(
     monkeypatch.setattr("aisquare.services.claude_accounts.store_session", counted_session)
     readings = service.read_usage([a, b, c], now=NOW, fetch=fetch)
 
-    assert opens == [threading.current_thread().name]
+    assert opens == [threading.current_thread().name] * 2
     assert readings[a.slot].session_percent == 40 and readings[b.slot].session_percent == 60
     assert not readings[c.slot].available
     since = NOW - timedelta(days=1)

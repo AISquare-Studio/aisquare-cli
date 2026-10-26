@@ -31,7 +31,9 @@ concurrency-tested against racing parallel sessions):
 ├── fleet-tmux.conf  # the fleet's private tmux server config (regenerated, not yours)
 ├── state.json    # small runtime state (e.g. the pinned active project)
 ├── agents.json   # registry of connected agents
-├── projects/     # per-project data — snapshot/ (Repomix pack), code/ (symbol index), brain/ (gbrain)
+├── projects/     # per-project data — code/ (symbol index), brain/ (gbrain), explainability-key
+├── reports/      # what `asq exec` saved: argv, the streams' first bytes, source hashes (0700)
+├── briefs/       # copies of the artifacts brief checks recorded, per project and brief (0700)
 ├── cache/        # disposable (e.g. last_injection.json)
 └── log/          # capture and diagnostic logs
 ```
@@ -71,15 +73,18 @@ aisquare
 │                                (docs/orchestration.md#a-manager-over-a-group)
 ├── code            find <name> [--kind K] [--limit N] · refs <name> [--defs] [--limit N]
 │                   similar <name|path:line> [--limit N] · index [--full] [--status]
-│                   — the project's symbol index (docs/memory.md#symbol-index; [code] enabled, max_file_kb)
+│                   — the project's symbol index (docs/memory.md#symbol-index; [code] enabled, max_file_kb, ignore)
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
 │                                                  [--config-dir DIR]
 ├── accounts        list [--usage] · add · run <slot> [… claude args] · usage [slot]
-│                   (--usage and usage read a five-minute cache; --refresh reads now)
+│                   (--usage and usage read a five-minute cache; --refresh reads now,
+│                   except an account backed off after HTTP 429/503 — see docs/fleet.md)
 │                   remove <slot>            — Claude Code accounts the CLI owns (docs/fleet.md)
 │                   default [<slot|alias|email>] [--project P] [--role R] [--clear]
+│                     (machine level: an alias of `move <slot> top` — rank 1 IS the default)
 │                   alias <slot> <name> [--clear] · order <slot>… · move <slot> up|down|top|bottom
-│                   disable <slot> · enable <slot>   — the default, the order, the names
+│                   disable <slot> · enable <slot>   — the order (its first enabled, signed-in
+│                     account is the machine default), the project defaults, the names
 │                   usage also shows the pace (≈ N min to the limit) — see [accounts] in config
 │                   share [--status | --enable PARTS | --disable PARTS]   — memory, skills,
 │                                agents, commands, claude_md shared across accounts
@@ -95,12 +100,26 @@ aisquare
 │                   claim · review [--note] · reopen --reason · done [--note]
 │                   block --reason · drop · release        (all with [--as SESSION])
 │                   a task is its id, or 12 / #12 — its number on the caller's board
+├── brief           create <title> -r TEXT… [--check R1=…]… [--assumption A]… [--boundary B]…
+│                   list · show <brief> · link <brief> <task> -r R1…
+│                   update <brief> [-r R1=…] [--check R1=…] [--add TEXT] [--title T]
+│                                  [--assumption A]… [--boundary B]…
+│                                  [--clear-assumptions] [--clear-boundaries]
+│                   evidence <brief> R1 --task T --verdict pass|fail --summary S
+│                                    (--report ID | --artifact F)
+│                   finding <brief> R1 --task T --summary S [--artifact F]
+│                   check <brief> [--source-root PATH]   exit 1 until every requirement is proven
+│                   (all with [--as SESSION]; a brief is its id, or B1 / 1 — docs/work-briefs.md)
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
-├── board [-w] [-i SECONDS] · recall <query>
+├── board [-w] [-i SECONDS] [-P PROJECT] · recall <query>
 ├── launch <role> [--command CMD] [--env KEY=VALUE]… [--account SLOT] [… agent args]
 │                   role = planner|coder|runner|validator, a fleet role (manager,
 │                   tester, reviewer, ui-tester), a numbered seat (coder1), or any role you
 │                   have bound; env merges over `team bind`
+├── exec [--project P] [--task T] [--session S] [--raw] [--max-output-bytes N] -- CMD …
+│                   run CMD once and save a report of how it ended (docs/command-reports.md)
+├── reports         list · show <id> [--raw] [--stream stdout|stderr|both] · stats
+│                   prune [--keep N] [--days N]   — read saved reports; never reruns
 ├── serve [--stdio | --port N --bind H] [--show-token]
 ├── ui              [--project P]… [--group G]…
 │                   the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
@@ -158,7 +177,7 @@ list` prints every key. The ones that need more than their name:
 | --- | --- | --- |
 | `accounts.pick` | `headroom` | how a launch picks an account when nothing names one: `headroom` (the first under `switch_at`) or `default` (the machine default) |
 | `accounts.switch_at` | `85` | percent USED of the fuller window (and, for an agent of that family, its family week) at which an account counts as full |
-| `accounts.prefer` | `priority` | of the accounts under `switch_at`, `priority` takes the first in order; `reset-soonest` takes the one whose week resets first |
+| `accounts.prefer` | `priority` | of the accounts under `switch_at`, `priority` takes the first in rank order (rank 1, the machine default, first); `reset-soonest` takes the one whose week resets first. The headroom pick's alone: with `pick = "default"` rank 1 decides |
 | `accounts.on_limit` | `switch` | on a usage limit, `switch` hands a fleet agent to another account; `wait` leaves it parked |
 | `accounts.wait_if_reset_within_minutes` | `15` | with `switch`, wait instead when the limit lifts this soon |
 | `accounts.share_trust` | `true` | copy a folder's trust into the account a launch runs on |
@@ -166,6 +185,7 @@ list` prints every key. The ones that need more than their name:
 | `accounts.share` | `[]` | what every account shares: `memory`, `skills`, `agents`, `commands`, `claude_md` (`plugins` is experimental); set with `aisquare accounts share --enable` ([fleet](fleet.md)) |
 | `code.enabled` | `true` | build a project's symbol index at `project onboard` and `init` (in the background) and refresh it at session start ([memory](memory.md#symbol-index)) |
 | `code.max_file_kb` | `1024` | a file larger than this is not indexed |
+| `code.ignore` | `[]` | globs the symbol index leaves out, extending its built-in list (comma-separated on the command line); a `[snapshot] ignore` from 0.8.2 is read here and moved at the next save ([memory](memory.md#symbol-index)) |
 | `capture.enabled` | `true` | `false`: the `UserPromptSubmit` hook stores no prompt (`aisquare log` stays empty) and spools none for Explainability. The turn's metrics row (no text), the teammate delta and the CI experiment, if you turned it on, carry on. A config that cannot be read records no prompt either, with one line on stderr. |
 | `fleet.busy_quiet_seconds` | `30` | how long an agent's pane may print nothing while the board says `working` before its screen is checked once: Claude Code idle at its prompt reads `waiting` (*idle (the board said working)*), as after a turn ended with Esc, which fires no hook. A pane that is busy is never captured. |
 | `fleet.max_agents_total` | `0` | live agents across every project, the captain excluded; `0` is no budget ([fleet](fleet.md#capacity)) |

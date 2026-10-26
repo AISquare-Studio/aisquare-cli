@@ -37,9 +37,10 @@ explainability = [
 
 [[package]]
 name = "aisquare-cli"
-version = "0.8.2"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
+    { name = "certifi" },
     { name = "cryptography" },
     { name = "ngrok", version = "1.4.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine == 'armv7l' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine != 'ARM64' and sys_platform == 'win32') or (python_full_version < '3.12' and sys_platform == 'darwin')" },
     { name = "ngrok", version = "1.7.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and platform_machine == 'armv7l' and sys_platform == 'linux') or (python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version >= '3.12' and sys_platform == 'darwin') or (python_full_version >= '3.12' and sys_platform == 'win32')" },
@@ -50,6 +51,7 @@ dependencies = [
     { name = "starlette" },
     { name = "textual" },
     { name = "tomli-w" },
+    { name = "truststore" },
     { name = "typer" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
     { name = "uvicorn" },
@@ -104,6 +106,7 @@ requires-dist = [
     { name = "aisquare", extras = ["explainability"], marker = "extra == 'explainability'", specifier = ">=1.1" },
     { name = "anthropic", marker = "extra == 'dev'", specifier = ">=1" },
     { name = "anthropic", marker = "extra == 'llm'", specifier = ">=1" },
+    { name = "certifi", specifier = ">=2024.7.4" },
     { name = "cryptography", specifier = ">=42" },
     { name = "faster-whisper", marker = "extra == 'voice'", specifier = ">=1.0" },
     { name = "hatchling", marker = "extra == 'dev'", specifier = ">=1.30.1" },
@@ -133,6 +136,7 @@ requires-dist = [
     { name = "tree-sitter-javascript", marker = "extra == 'dev'", specifier = ">=0.25" },
     { name = "tree-sitter-typescript", marker = "extra == 'code'", specifier = ">=0.23" },
     { name = "tree-sitter-typescript", marker = "extra == 'dev'", specifier = ">=0.23" },
+    { name = "truststore", specifier = ">=0.10" },
     { name = "typer", specifier = ">=0.26.8" },
     { name = "types-jsonschema", marker = "extra == 'dev'", specifier = ">=4.18" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },

@@ -23,11 +23,19 @@
 $ErrorActionPreference = 'Stop'
 
 $Repo = 'AISquare-Studio/aisquare-cli'
+# THE RELEASE STAMP. In the repository these two lines name main's install.sh
+# and no version, so this file installs the latest release. The copy attached to
+# a GitHub Release is rewritten by scripts/stamp_installers.py to fetch THAT
+# release's install.sh asset and to pin its version, so
+# releases/download/vX.Y.Z/install.ps1 installs exactly X.Y.Z. A --version among
+# the arguments still wins: install.sh reads its options left to right.
+$StampedVersion = ''
 $InstallUrl = "https://raw.githubusercontent.com/$Repo/main/install.sh"
 
 # Arguments are passed straight through to install.sh, so
 # `... | iex` with no arguments and `install.ps1 --yes --no-agent` both work.
 $Forward = if ($args.Count -gt 0) { $args -join ' ' } else { '' }
+$Pin = if ($StampedVersion) { "--version $StampedVersion " } else { '' }
 
 function Write-Step($Message) { Write-Host "==> $Message" -ForegroundColor Cyan }
 function Write-Note($Message) { Write-Host "    $Message" -ForegroundColor DarkGray }
@@ -131,7 +139,7 @@ Write-Host ''
 #
 # Deliberately NOT `--yes`: the point of the one-liner is that it ends by
 # offering the UI, and a user who ran this by hand is sitting at a terminal.
-$inner = "set -e; curl -fsSL '$InstallUrl' | sh -s -- $Forward"
+$inner = "set -e; curl -fsSL '$InstallUrl' | sh -s -- $Pin$Forward"
 & wsl.exe -d $target -- bash -lc $inner
 $code = $LASTEXITCODE
 

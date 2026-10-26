@@ -12,6 +12,8 @@ lost the race it closes on windows-latest.
 
 ``settle_until`` is that settle, repeated until the fact a test is about to
 assert holds.
+
+``released`` waits out a Button's press effect before the next click on it.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from typing import Any
 from textual.app import App
 from textual.css.query import NoMatches
 from textual.pilot import Pilot
+from textual.widgets import Button
 from textual.worker import Worker, WorkerError
 
 
@@ -194,3 +197,15 @@ def _ours(worker: Worker[Any], group: str | None) -> bool:
     """Whether a settle waits for ``worker``: never the app's own ``_loader``, and with
     ``group``, only that group's."""
     return worker.group != "_loader" and (group is None or worker.group == group)
+
+
+async def released(pilot: Pilot[Any], button: Button) -> None:
+    """Wait out a press's ``-active`` effect, during which ``Button`` ignores a click: a
+    click inside it presses nothing. Its end is a 0.2 s timer, so wait on the class, not
+    on a guess at the clock (windows-latest, CI run 40144039659: the second *Spawn* of
+    the take-over test landed inside it and the question never came)."""
+    for _ in range(250):
+        if not button.has_class("-active"):
+            return
+        await pilot.pause(0.02)
+    raise AssertionError(f"#{button.id} stayed pressed")

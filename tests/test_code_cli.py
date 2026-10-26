@@ -138,6 +138,35 @@ def test_index_then_find_refs_and_similar_answer_in_json(runner: CliRunner, chec
     assert status["exists"] and status["symbols"] == 4 and status["stale"] is False
 
 
+@pytest.mark.parametrize(
+    ("config", "found"),
+    [
+        ("", True),
+        ("[code]\nignore = ['generated/**']\n", False),
+        ("[snapshot]\nignore = ['generated/**']\n", False),
+    ],
+    ids=["control", "code-ignore", "legacy-snapshot-ignore"],
+)
+def test_the_operators_ignore_list_reaches_the_index(
+    runner: CliRunner, checkout: Path, config: str, found: bool
+) -> None:
+    """The index leaves out ``[code] ignore`` (built-in list first), and a config from
+    before 0.9.0 that holds ``[snapshot] ignore`` still does: #399 retired that section,
+    and the final sync moved the list to ``[code]`` (core.config._carry_snapshot_ignore)."""
+    from aisquare.core import paths
+
+    (checkout / "generated").mkdir()
+    (checkout / "generated" / "out.py").write_text("def generated_helper():\n    pass\n")
+    subprocess.run(["git", "add", "-A"], cwd=checkout, check=True, capture_output=True)
+    paths.config_path().parent.mkdir(parents=True, exist_ok=True)
+    paths.config_path().write_text(config, encoding="utf-8")
+
+    _json(runner, "index")
+
+    assert bool(_json(runner, "find", "generated_helper")["symbols"]) is found
+    assert _json(runner, "find", "parse_duration")["symbols"], "the rest is indexed"
+
+
 def test_the_human_lines_name_path_line_kind_and_signature(
     runner: CliRunner, checkout: Path
 ) -> None:

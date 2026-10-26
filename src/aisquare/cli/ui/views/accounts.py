@@ -8,10 +8,11 @@ docs/plans/claude-accounts.md. Two halves, one page:
   here, the browser is opened when one can reach the user, and a thread
   worker polls (``services.device_flow``) until the approval lands or *Cancel*
   is pressed. *Sign out* revokes and forgets, as ``aisquare logout`` does.
-- **Claude Code** — a table (:data:`COLUMNS`), one aligned row per slot that
-  ``services.claude_accounts`` knows: the default's ★, the slot, its name, who
-  is signed in, the plan, the five-hour and seven-day windows (a bar and the
-  percent USED), a status with *Log in* beside it, then when each window resets.
+- **Claude Code** — a table (:data:`LAYOUT`), one aligned row per slot that
+  ``services.claude_accounts`` knows, in priority order: *↑*/*↓*, the slot, its
+  name, who is signed in, the five-hour and seven-day windows (a bar and the
+  percent USED, or why there is no reading) with *Log in* beside them, when each
+  window resets, then the plan.
   *Add* makes a fresh slot and opens Claude Code's own login in a tmux window
   rendered right here (a ``TerminalPane``); the view polls the slot's
   directory and, the moment Claude Code has written a login into it, records
@@ -20,16 +21,16 @@ docs/plans/claude-accounts.md. Two halves, one page:
   (:func:`needs_login`) — then the window waits for a NEW login, not the stale
   one on disk. Nothing is typed for the user and nothing is written into
   Claude Code's files.
-- **Arranging** (#145) — each row carries *Default*, *↑*/*↓* and
-  *Disable*/*Enable*: the machine default a launch picks when nothing more
-  specific says, the priority order, and whether the slot may be picked at
-  all. The name — the alias ``--account``, the board and the row say, any text
+- **Arranging** (#145) — each row carries *↑*/*↓* and *Disable*/*Enable*: the
+  priority order, whose first enabled, signed-in row is the machine default a
+  launch picks when nothing more specific says (#8 on the board), and whether the
+  slot may be picked at all. The name — the alias ``--account``, the board and the row say, any text
   the operator likes — is renamed in place: double-click it (or Enter / F2 on
   the row) and it becomes a field prefilled with it; Enter or leaving the
   field saves (blank clears it), Esc closes it untouched, and a name the
   service refuses keeps the field open to correct. All of them write the
   registry through ``services.claude_accounts`` exactly as ``aisquare accounts
-  default|move|disable|alias`` do; the page lists the slots in priority order.
+  move|disable|alias`` do; the page lists the slots in priority order.
 
 **The view holds no state that matters** (fleet-tui plan §2). The shell hands
 it a fresh ``AccountsOverview`` on every refresh; what the view owns is the
@@ -47,6 +48,7 @@ a path and a server's reason are DATA (CONTRIBUTING: no markup in data).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import math
 import threading
@@ -316,10 +318,6 @@ def _resets(when: datetime | None, *, now: datetime | None = None) -> str:
     return "" if when is None else f" · resets {format_reset(when, now=now)}"
 
 
-DEFAULT_BADGE = "★"
-"""Marks the machine default (#145) — the account a launch picks when nothing more specific says."""
-
-
 class Column(NamedTuple):
     """One column of the Claude accounts table: its key, its header and its width in cells."""
 
@@ -329,39 +327,57 @@ class Column(NamedTuple):
 
 
 COLUMNS: tuple[Column, ...] = (
-    Column("default", "", 1),
     Column("slot", "#", 2),
     Column("name", "name", 16),
     Column("email", "signed in as", 24),
-    Column("plan", "plan", 7),
-    Column("session", "session used", 12),
+    Column("session", "session used", 16),
     Column("week", "week used", 10),
-    Column("status", "status", 20),
     Column("session-resets", "session resets", 21),
     Column("week-resets", "week resets", 21),
+    Column("plan", "plan", 7),
 )
 """The table's data columns, left to right; the header and every row are cut from them.
 
 Fixed widths, so a column starts at the same x on every row whatever its values:
 a value too long for its cell ends in ``…`` and never wraps (the whole text is the
 cell's tooltip). The resets columns fit :func:`format_reset`'s longest answer,
-``in 6d 12h (Tue 02:00)``; the usage columns fit ``▮▮▮▮▮ 100%``.
-
-The status comes before the resets, and *Log in* right after it (:data:`LAYOUT`): what
-needs doing reads, and can be done, without scrolling sideways at 160 columns with the
-sidebar at its default width. When each window resets is the detail that can wait.
+``in 6d 12h (Tue 02:00)``; the usage columns fit ``▮▮▮▮▮ 100%``, the session's also
+``⚠ token rejected`` and a kept reading's age beside its bar, ``▮▮▮▮▮ 100% · 59m`` (F1
+of #400): a session window resets within five hours, and a kept reading's reset window
+reads ``reset``. When there is no
+reading, the usage cells say why — not signed in, a token to renew, the reason the
+usage could not be read — where the bars would be (#8 on the board: there is no
+status column).
 """
 
-LOGIN_COLUMN = Column("login", "", 8)
-"""*Log in*'s column, beside the status that says why it is there."""
+MOVE_COLUMNS: tuple[Column, ...] = (Column("up", "↑", 3), Column("down", "↓", 3))
+"""The *↑*/*↓* buttons, the first columns of every line: the order IS the arrangement."""
+
+LOGIN_COLUMN = Column("login", "", 14)
+"""*Log in*'s column, beside the usage cells that say why it is there — or *Log in again*,
+the same flow as a secondary action on a row that reads fine (:func:`offers_login_again`)."""
 
 LAYOUT: tuple[Column, ...] = (
-    *(column for column in COLUMNS if not column.key.endswith("-resets")),
+    *MOVE_COLUMNS,
+    *(column for column in COLUMNS if column.key in ("slot", "name", "email", "session", "week")),
     LOGIN_COLUMN,
     *(column for column in COLUMNS if column.key.endswith("-resets")),
+    *(column for column in COLUMNS if column.key == "plan"),
 )
-"""Every column of a line as laid out — :data:`COLUMNS` with *Log in* after the status —
-then the arranging buttons (:data:`_ACTIONS`)."""
+"""Every column of a line as laid out: *↑*/*↓*, then :data:`COLUMNS` with *Log in* after
+the usage that says why it is there — what needs doing reads, and can be done, without
+scrolling sideways at 160 columns — and the plan last; then the arranging buttons
+(:data:`_ACTIONS`)."""
+
+
+def offers_login_again(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> bool:
+    """Whether the row offers *Log in again*: signed in and not already offering *Log in*.
+
+    The same sign-in flow (``begin_claude_sign_in``), for a person who wants a fresh login
+    on a slot that reads fine — another login, or a token they distrust. Not a cure for a
+    rate limit: the 429 reason says so itself (F1 of #400).
+    """
+    return status.signed_in and status.identity is not None and not needs_login(status, usage)
 
 
 def needs_login(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> bool:
@@ -386,39 +402,74 @@ def _window_cells(
     if usage is None:
         return Text("…", style="dim"), Text()
     percent: float | None = getattr(usage, f"{window}_percent")
+    resets_at: datetime | None = getattr(usage, f"{window}_resets_at")
+    moment = now or accounts_service._now()
+    if usage.available and percent is None and resets_at is not None and resets_at <= moment:
+        # A kept reading's window that has reset since: its figure is over (review of #408,
+        # MAJ-1), so it reads as reset, never as the old bar with "now".
+        age = accounts_service.describe_age(resets_at, now=moment)
+        return Text("reset", style="dim"), Text(f"reset {age}", style="dim")
     if not usage.available or percent is None:
         return Text("—", style="dim"), Text()
-    resets_at: datetime | None = getattr(usage, f"{window}_resets_at")
-    return usage_bar(percent), Text(format_reset(resets_at, now=now), style="dim")
+    bar = usage_bar(percent)
+    if window == "session" and (kept := kept_age(usage, now=moment)) is not None:
+        bar.append(f" · {kept}", style="yellow")
+    return bar, Text(format_reset(resets_at, now=moment), style="dim")
+
+
+def kept_age(usage: ClaudeUsage, *, now: datetime | None = None) -> str | None:
+    """``12m`` — how old a kept reading is (the last good figure a failed read shows, F1 of
+    #400), for the session cell; ``None`` for a live one. The full ``reading from 12m ago ·
+    <why>`` is the cell's tooltip (:func:`kept_tooltip`)."""
+    if not usage.available or usage.last_failed_reason is None or usage.fetched_at is None:
+        return None
+    age = accounts_service.describe_age(usage.fetched_at, now=now)
+    return "now" if age == "just now" else age.removesuffix(" ago")
+
+
+def wait_said(usage: ClaudeUsage, *, now: datetime | None = None) -> str | None:
+    """A rate limit's wait as of ``now``, from its end time: ``rate-limited until 14:32 —
+    logging in again does not clear it``, or that it has ended; ``None`` when ``usage``
+    names no wait. Never the reason string frozen at the read, which after a short
+    Retry-After named a time already past until the page's next tick, a minute on
+    (TUI-401b check 5 at e28697f1; review of #401, m1; 55d1bc78 did this for the CLI)."""
+    if not usage.rate_limited or usage.rate_limited_until is None:
+        return None
+    if usage.rate_limited_until > (now or accounts_service._now()):
+        return accounts_service.backoff_reason(usage.rate_limited_until)
+    return "the rate limit has ended — the next read asks again"
+
+
+def kept_tooltip(usage: ClaudeUsage | None, *, now: datetime | None = None) -> str | None:
+    """``reading from 12m ago · rate-limited until 14:32 — logging in again does not clear
+    it``: why the session cell shows an older figure, or ``None`` for a live one."""
+    if usage is None or kept_age(usage, now=now) is None or usage.fetched_at is None:
+        return None
+    age = accounts_service.describe_age(usage.fetched_at, now=now)
+    why = wait_said(usage, now=now) or usage.last_failed_reason
+    return f"reading from {age} · {why}"
 
 
 def account_cells(
     status: ClaudeAccountStatus,
     usage: ClaudeUsage | None,
-    trend: UsageTrend | None = None,
     *,
     now: datetime | None = None,
 ) -> dict[str, Text]:
-    """One slot's cells, keyed like :data:`COLUMNS`: ``★``, ``2``, ``work``, ``me@…``, ``max 5x``,
-    ``▮▯▯▯▯ 12%``, ``in 3h 10m (15:29)``, ``▮▮▯▯▯ 40%``, ``in 6d 12h (Tue 02:00)``, status.
+    """One slot's cells, keyed like :data:`COLUMNS`: ``2``, ``work``, ``me@…``,
+    ``▮▯▯▯▯ 12%``, ``▮▮▯▯▯ 40%``, ``in 3h 10m (15:29)``, ``in 6d 12h (Tue 02:00)``, ``max 5x``.
 
     The name is the alias when there is one (``core.label``), so the row reads the way
-    the operator named it. The status says the one thing to know, worst first: no
-    login, a missing, expired or rejected token, why the usage cannot be read, a
-    reading still owed, or where the session window is heading at the current pace
-    (#146). ``usage`` is ``None`` while a reading is owed; a slot with no login shows
-    no bars at all.
+    the operator named it. With no reading to show, the session cell says why, worst
+    first — no login, a missing, expired or rejected token, why the usage cannot be
+    read — and the week cell ``—``; the whole reason is the cell's tooltip
+    (:func:`usage_reason`). ``usage`` is ``None`` while a reading is owed (``…``).
     """
     account = status.account
     cells = {column.key: Text() for column in COLUMNS}
-    if account.is_default:
-        cells["default"] = Text(DEFAULT_BADGE, style="bold green")
     cells["slot"] = Text(str(account.slot), style="bold", justify="right")
-    cells["name"] = Text(status.label, style="cyan")
-    notes: list[Text] = []
-    if status.identity is None:
-        notes.append(Text("not signed in", style="yellow"))
-    else:
+    cells["name"] = Text(status.label, style="dim cyan" if account.disabled else "cyan")
+    if status.identity is not None:
         cells["email"] = Text(status.identity.email)
         if status.subscription:
             cells["plan"] = Text(status.subscription, style="dim")
@@ -426,27 +477,36 @@ def account_cells(
         reading = usage if status.signed_in else ClaudeUsage(available=False)
         for window in ("session", "week"):
             cells[window], cells[f"{window}-resets"] = _window_cells(reading, window, now=now)
-        if not status.signed_in:
-            notes.append(Text("⚠ token missing", style="yellow"))
-        elif status.token_state == "expired":
-            notes.append(Text("⚠ token expired", style="yellow"))
-        elif usage is not None and usage.needs_login:
-            notes.append(Text("⚠ token rejected", style="yellow"))
-        elif usage is None:
-            notes.append(Text("reading usage…", style="dim"))
-        elif not usage.available:
-            notes.append(Text(f"usage: {usage.reason or 'unavailable'}", style="dim"))
-        else:
-            pace = accounts_service.describe_trend(trend)
-            if pace:
-                notes.append(Text(pace, style="dim italic"))  # a projection, so dim
-    if account.disabled:
-        notes.append(Text("disabled", style="dim italic"))
-    cells["status"] = Text(" · ").join(notes)
+    reason = usage_reason(status, usage, now=now)
+    if reason is not None:
+        cells["session"] = reason
+        cells["week"] = Text("—", style="dim")
     for text in cells.values():
         text.no_wrap = True
         text.overflow = "ellipsis"
     return cells
+
+
+def usage_reason(
+    status: ClaudeAccountStatus, usage: ClaudeUsage | None, *, now: datetime | None = None
+) -> Text | None:
+    """Why a row shows no usage, worst first — or ``None`` when it shows a reading or ``…``.
+
+    What the status column said before #8 on the board took it away: the usage cells
+    are where the answer is missing, so that is where the reason reads.
+    """
+    if status.identity is None:
+        return Text("not signed in", style="yellow")
+    if not status.signed_in:
+        return Text("⚠ token missing", style="yellow")
+    if status.token_state == "expired":
+        return Text("⚠ token expired", style="yellow")
+    if usage is not None and usage.needs_login:
+        return Text("⚠ token rejected", style="yellow")
+    if usage is not None and not usage.available:
+        # A backed-off account with no kept reading: its wait as of the paint (m1).
+        return Text(wait_said(usage, now=now) or usage.reason or "unavailable", style="dim")
+    return None
 
 
 def claude_title_text(overview: AccountsOverview) -> Text:
@@ -519,14 +579,11 @@ def _column_css() -> str:
 
 
 _ACTIONS: tuple[tuple[str, str, int], ...] = (
-    ("default", "Default", 9),
-    ("up", "↑", 3),
-    ("down", "↓", 3),
     ("toggle", "Disable", 9),
     ("remove", "Remove", 8),
 )
 """The arranging buttons at the end of a line, left to right: id stem, label and width.
-*Log in* is not one of them: it has its column beside the status (:data:`LAYOUT`)."""
+*↑*/*↓* and *Log in* are not among them: they have columns of their own (:data:`LAYOUT`)."""
 
 
 class AccountsTable(Vertical):
@@ -602,15 +659,17 @@ class NameCell(Static):
 class AccountRow(Horizontal, can_focus=True):
     """One slot as a table row: its cells (:data:`LAYOUT`), then its arranging buttons.
 
-    *Log in*, beside the status, shows when the slot has no login or its token is
-    missing, expired or rejected (:func:`needs_login`); *Default* makes it the
-    machine default (not on the default's own row); *↑*/*↓* move it in the
-    priority order (the end stops are disabled); *Disable*/*Enable* take it out of
+    *↑*/*↓*, first, move it in the priority order (the end stops are disabled) —
+    the first enabled, signed-in row is the machine default; *Log in*, beside the
+    usage, shows when the slot has no login or its token is missing, expired or
+    rejected (:func:`needs_login`), and reads *Log in again* — the same sign-in, as a
+    secondary action — on any other signed-in row (:func:`offers_login_again`);
+    *Disable*/*Enable* take it out of
     or back into automatic selection; *Remove* shows when the CLI owns the
     directory. A button that does not apply keeps its place, so the buttons stay
     in columns too. Every
     button is a command (``aisquare accounts
-    default|move|disable|enable|run|remove``), and the row shows what the shell's
+    move|disable|enable|run|remove``), and the row shows what the shell's
     next frame says rather than guessing.
 
     The name is renamed in place: double-click it, or press Enter or F2 on the
@@ -647,6 +706,7 @@ class AccountRow(Horizontal, can_focus=True):
         self.status = status
         self.usage: ClaudeUsage | None = None
         self.trend: UsageTrend | None = None
+        self._wait_ends: asyncio.TimerHandle | None = None
         self.first = True
         self.last = True
         self.openings = 0
@@ -661,6 +721,15 @@ class AccountRow(Horizontal, can_focus=True):
     def compose(self) -> ComposeResult:
         for column in LAYOUT:
             classes = f"cell col-{column.key}"
+            if column in MOVE_COLUMNS:
+                button = Button(
+                    column.title,
+                    id=f"account-{column.key}-{self.slot}",
+                    classes=classes,
+                    compact=True,
+                )
+                yield button
+                continue
             if column is LOGIN_COLUMN:
                 yield Button(
                     "Log in",
@@ -770,6 +839,35 @@ class AccountRow(Horizontal, can_focus=True):
         if self.is_mounted:
             self._paint()
 
+    def _repaint_when_the_wait_ends(self) -> None:
+        """Paint again the moment the shown rate limit ends: the page re-reads once a
+        minute, and until then the tooltip kept the wait it was painted with.
+
+        The loop's own timer, not a Textual one (as the release dialog's deadline is): on
+        Windows a pending Textual timer holds a thread of asyncio's default executor for
+        its whole interval, and a wait runs up to 30 min, or 6 h with a Retry-After. Two
+        rows in a wait starved every other timer in asq, toasts and the page's re-read
+        included, and quitting waited for the waits (review of #401, MAJOR-1).
+        """
+        self._forget_the_wait()
+        usage = self.usage
+        if usage is None or not usage.rate_limited or usage.rate_limited_until is None:
+            return
+        left = (usage.rate_limited_until - accounts_service._now()).total_seconds()
+        if left > 0:
+            # Posted to the row, so the repaint runs on its message queue like any other.
+            self._wait_ends = asyncio.get_running_loop().call_later(
+                left + 0.05, self.call_later, self._paint
+            )
+
+    def _forget_the_wait(self) -> None:
+        if self._wait_ends is not None:
+            self._wait_ends.cancel()
+            self._wait_ends = None
+
+    def on_unmount(self) -> None:
+        self._forget_the_wait()
+
     def cell(self, key: str) -> Static:
         """The cell of column ``key`` (``name`` is the label the field covers while open)."""
         if key == "name":
@@ -778,17 +876,22 @@ class AccountRow(Horizontal, can_focus=True):
 
     def _paint(self) -> None:
         account = self.status.account
-        cells = account_cells(self.status, self.usage, self.trend)
+        cells = account_cells(self.status, self.usage)
+        self._repaint_when_the_wait_ends()
         for column in COLUMNS:
             cell = self.cell(column.key)
             cell.update(cells[column.key])
-            if column.key in ("name", "email", "status"):
+            if column.key in ("name", "email", "session", "week"):
                 # The whole value, for the cell that cut it short with an ellipsis.
                 cell.tooltip = self._cell_tooltip(column.key, cells[column.key])
         login = self.query_one(f"#account-login-{self.slot}", Button)
+        needed = needs_login(self.status, self.usage)
+        login.label = "Log in" if needed else "Log in again"
+        login.variant = "primary" if needed else "default"
         login.tooltip = "log in again: Claude Code opens below; type /login if it does not ask"
-        self._offer(login, needs_login(self.status, self.usage))
-        self._offer(self.query_one(f"#account-default-{self.slot}", Button), not account.is_default)
+        if not needed:
+            login.tooltip += " — a rate limit is not cleared by it"
+        self._offer(login, needed or offers_login_again(self.status, self.usage))
         self.query_one(f"#account-up-{self.slot}", Button).disabled = self.first
         self.query_one(f"#account-down-{self.slot}", Button).disabled = self.last
         toggle = self.query_one(f"#account-toggle-{self.slot}", Button)
@@ -798,9 +901,25 @@ class AccountRow(Horizontal, can_focus=True):
 
     def _cell_tooltip(self, key: str, text: Text) -> str | None:
         if key == "name":
-            return f"{text.plain} — double-click (or Enter / F2) to rename"
-        if key == "status" and self.usage is not None and self.usage.reason:
-            return f"{text.plain}\n{self.usage.reason}" if text.plain else self.usage.reason
+            disabled = (
+                " (disabled: never picked automatically)" if self.status.account.disabled else ""
+            )
+            return f"{text.plain}{disabled} — double-click (or Enter / F2) to rename"
+        if key == "session":
+            lines = [text.plain] if text.plain else []
+            if (kept := kept_tooltip(self.usage)) is not None:
+                lines.append(kept)  # why the bar is an older reading (F1 of #400)
+            if (
+                self.usage is not None
+                and self.usage.reason
+                and self.usage.reason != text.plain
+                and wait_said(self.usage) is None  # a wait reads as of the paint, above
+            ):
+                lines.append(self.usage.reason)
+            pace = accounts_service.describe_trend(self.trend)
+            if pace:
+                lines.append(pace)  # where the session window is heading (#146)
+            return "\n".join(lines) or None
         return text.plain or None
 
     @staticmethod
@@ -1184,7 +1303,7 @@ class AccountsView(Vertical):
 
         A row that needs a login (signed out, its token expired or refused) or whose token
         this CLI cannot read (missing, a locked Keychain) counts in neither half
-        (``usage_is_readable``, the CLI's rule too): its own status says so, and an account
+        (``usage_is_readable``, the CLI's rule too): its own usage cells say so, and an account
         left expired would otherwise say "failed" every tick.
         """
         # A tick's read is the cache's: it asks nothing while the readings are fresh, and
@@ -1390,13 +1509,6 @@ class AccountsView(Vertical):
         elif button_id.startswith("account-remove-"):
             event.stop()
             self.remove_claude_account(int(button_id.rsplit("-", 1)[1]))
-        elif button_id.startswith("account-default-"):
-            event.stop()
-            slot = int(button_id.rsplit("-", 1)[1])
-            self.arrange_accounts(
-                lambda: accounts_service.set_default(str(slot)),
-                done=f"✓ slot {slot} is the machine default",
-            )
         elif button_id.startswith("account-up-") or button_id.startswith("account-down-"):
             event.stop()
             slot = int(button_id.rsplit("-", 1)[1])
@@ -1418,7 +1530,7 @@ class AccountsView(Vertical):
                 done=f"✓ slot {slot} {outcome}",
             )
 
-    # --- arranging (#145): default, order, disabled ----------------------------------------------
+    # --- arranging (#145): order, disabled ----------------------------------------------
 
     def arrange_accounts(self, change: Callable[[], object], *, done: str) -> None:
         """Run one registry write off the UI thread, then let the shell re-read the page.
@@ -1538,7 +1650,7 @@ class AccountsView(Vertical):
         whether another slot has it — so nothing is checked here. A refusal is
         the worker's error: the notice says it and the field stays open with
         what was typed, to be corrected. The write takes the arranging lock, so
-        it waits its turn behind a *Default* or *↑* still writing. On success
+        it waits its turn behind a *↑* or *↓* still writing. On success
         the row says the name the service stored at once, and the page re-reads
         as an arrangement does; :meth:`_settle_saved` decides when the frames
         have the last word again.

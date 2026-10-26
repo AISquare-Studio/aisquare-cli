@@ -18,7 +18,6 @@ from rich.table import Table
 from rich.text import Text
 
 from aisquare.core import paths
-from aisquare.core import snapshot as snapshot_core
 from aisquare.core.claude_accounts import format_reset as _format_reset
 from aisquare.core.config import AppConfig
 from aisquare.core.console import stderr_console, stdout_console
@@ -695,7 +694,7 @@ def emit_connected(connection: AgentConnection) -> None:
 
 
 def emit_onboard(report: OnboardReport) -> None:
-    """Render the outcome of ``project onboard`` — snapshot summary + seeded facts."""
+    """Render the outcome of ``project onboard``: the facts it seeded."""
     if get_state().json_output:
         typer.echo(report.model_dump_json())
         return
@@ -703,34 +702,24 @@ def emit_onboard(report: OnboardReport) -> None:
     if report.warning is not None:
         # The one line adding the aisquare home says (D5): a warning, never a refusal.
         stderr_console().print(f"warning: {report.warning}", style="yellow", markup=False)
-    snapshot = report.snapshot
-    if report.snapshot_note is not None:
-        # Nothing packed: off, a pack that failed and why, or a --refresh that kept
-        # the last pack -- the service's sentence, which `init` prints too.
-        console.print(f"snapshot: {report.snapshot_note}")
-    elif snapshot is not None and snapshot.status == "ready":
-        line = f"✓ snapshot: {snapshot.file_count} files, {snapshot.token_count} tokens"
-        if snapshot.skeleton_token_count:
-            line += f" (skeleton {snapshot.skeleton_token_count} tokens)"
-        console.print(line)
-    elif snapshot is not None and snapshot.status == "skeleton_only":
-        console.print(f"snapshot: {snapshot_core.skeleton_only_detail(snapshot)}")
-    elif snapshot is not None and snapshot.status == "too_large" and snapshot_core.can_pack():
-        # The same sentence the doctor prints (one definition, so the two never
-        # disagree on the numbers), plus what to run once a remedy is in place.
-        # Where nothing can pack, no remedy can run: the verdict reads off below,
-        # as the doctor's row does.
-        console.print(
-            f"snapshot: {snapshot_core.too_large_detail(snapshot)} {snapshot_core.REPACK_HINT}"
-        )
-    else:
-        console.print(f"snapshot: {snapshot_core.skipped_detail()}")
     if report.code_index is not None:
+        # The symbol index (#285) says its own line, whatever the facts below did.
         console.print(f"code index: {report.code_index}", markup=False)
-    if report.seeded:
-        console.print(f"seeded {len(report.seeded)} project fact(s):")
-        for entry in report.seeded:
-            console.print(f"  - {entry.text}")
+    if not report.markers_read:
+        # Said as what happened: the markers were not read (review of #399).
+        console.print("✓ already onboarded; --refresh reads the markers again")
+        return
+    if report.restored:
+        # A forgotten project added again: its kept facts are back (review of #399, m12).
+        console.print("✓ onboarded again; its earlier facts are back")
+        if not report.seeded:
+            return
+    elif not report.seeded:
+        console.print("✓ onboarded — no new project facts to seed")
+        return
+    console.print(f"seeded {len(report.seeded)} project fact(s):")
+    for entry in report.seeded:
+        console.print(f"  - {entry.text}")
 
 
 def emit_prompts(prompts: list[PromptRecord]) -> None:

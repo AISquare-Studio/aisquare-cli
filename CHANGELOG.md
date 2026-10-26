@@ -8,6 +8,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **CI runs each leg's suite in shards: a sub-PR's CI takes about 8 minutes, the full
+  matrix about 10-13, down from 22 and 64.** The suite is ~13k tests and its time is a
+  long tail, so it is split across standard runners rather than sped up: pytest-split
+  (now in the `dev` extra) splits each leg by the per-test times in `.test_durations`,
+  measured on CI itself, into 4 jobs per Linux leg and 10 on Windows, each on every core.
+  Every shard notes what it collected and ran, and a `shards` job fails unless each
+  leg's shards ran every collected test exactly once (`tests/shards.py`). The two
+  ambient jobs, which ran the suite serially for over an hour, are now the py3.11
+  (proxy-down) and py3.13 (proxy-up) legs, sharded and parallel, with every premise
+  check in every shard; the suite runs 5 times per full run, not 7. ruff, the format
+  check, mypy (now also as `--platform win32`, which the Windows leg used to cover) and
+  `uv lock --check` run once, in `lint`. Installs use uv. Every job has a timeout. A
+  new `ci-ok` job passes only when every other job did: one check name for branch
+  protection, whatever the shards. The suite now resets `insights`' once-per-process
+  config for every test, as it already did `ci_client`'s, so no test passes or fails by
+  which test ran before it in its process, which a shard changes. The snapshot test runs
+  git on the suite's unhurried budget, as `test_ci_snapshot` does: a slow Windows runner
+  spent the product's 2 s on the capture, and failed it every time once sharding placed
+  it beside a heavier test.
 - **An account with no usage to show reads `!` on the Accounts page, and says
   why on hover** (#13 on the board). With no reading and none kept, the row read
   `⚠ token missing` cut to its 16-wide cell and `—`, which looked like no usage

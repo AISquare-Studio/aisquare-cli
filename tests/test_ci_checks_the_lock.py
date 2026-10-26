@@ -3,8 +3,9 @@
 The lock drifted for days once: ``pyyaml``, required since the persona core (#201),
 was missing from it, so ``uv run --frozen`` raised ``ModuleNotFoundError: yaml`` on
 every persona path, and nothing noticed, because CI installs with pip. Then the
-``voice`` extra landed without a relock. ``uv lock --check`` in CI and in
-``make check`` is what notices the next one.
+``voice`` extra landed without a relock. ``uv lock --check`` in CI (a step of the
+``lint`` job, which absorbed the ``lock`` job) and in ``make check`` is what notices the
+next one.
 """
 
 from __future__ import annotations
@@ -28,9 +29,9 @@ def _steps(job: str) -> list[dict[str, Any]]:
 
 
 def test_ci_checks_the_lock_with_a_pinned_uv() -> None:
-    steps = _steps("lock")
+    steps = _steps("lint")
     setup = [step for step in steps if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")]
-    assert len(setup) == 1, "the lock job installs uv with astral-sh/setup-uv"
+    assert len(setup) == 1, "the lint job installs uv with astral-sh/setup-uv"
     ref = str(setup[0]["uses"]).split("@", 1)[1]
     assert re.fullmatch(r"[0-9a-f]{40}|v\d+\.\d+\.\d+", ref), (
         f"setup-uv@{ref}: a commit or a full tag; it publishes no floating major past v7, "
@@ -60,5 +61,5 @@ def test_the_lock_matches_pyproject() -> None:
         check=False,
     )
     if "offline" in result.stderr.lower() and "network" in result.stderr.lower():
-        pytest.skip("uv's cache cannot resolve offline here; CI's lock job runs it online")
+        pytest.skip("uv's cache cannot resolve offline here; CI's lint job runs it online")
     assert result.returncode == 0, result.stderr

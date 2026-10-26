@@ -1429,8 +1429,14 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         out, so the reopened dialog fills it the same way (the label for the role and
         task, the persona for the role). Worktree, permission mode, extra args and a
         hand-off are not carried; they open at the role's defaults again.
+
+        The projects the Project field offers are carried too, when it has them (*Spawn
+        agent*): the dialog's own project is the one it is on now, which the caller passes,
+        and without the list the reopened form would have no field to change it with.
         """
         state: dict[str, Any] = {"role": self._role}
+        if self._choices:
+            state["projects"] = list(self._choices)
         binary = self.query_one("#spawn-binary", Input).value.strip()
         if binary:
             state["binary"] = binary

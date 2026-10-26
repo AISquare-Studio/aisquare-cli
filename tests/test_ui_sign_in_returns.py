@@ -24,10 +24,10 @@ from textual.widgets import Button, Input, OptionList, Select
 
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.attach import AttachTargetScreen
-from aisquare.cli.ui.sidebar import AccountsSelected, ProjectSelected, SpawnAgent
+from aisquare.cli.ui.sidebar import AccountsSelected, ProjectSelected, SpawnAgent, action_text
 from aisquare.cli.ui.spawn import SpawnDialog
 from aisquare.cli.ui.views import welcome
-from aisquare.cli.ui.views.accounts import AccountsView
+from aisquare.cli.ui.views.accounts import AccountsView, next_step
 from aisquare.cli.ui.views.personas_tab import AttachRequested, PersonasTab
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.welcome import WelcomeView
@@ -258,6 +258,49 @@ def test_the_spawn_dialogs_new_account_comes_back_as_it_was_typed(
     assert (seen["label"], seen["persona"], seen["account"]) == ("coder-auth", "skeptic", "2")
 
 
+def test_the_spawn_dialogs_project_field_comes_back_on_the_project_it_was_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offline: dict[str, Any]
+) -> None:
+    """*Spawn agent* asks which project (#442); the form comes back from a sign-in (#286)
+    with that field, on the project it had been changed to, and still offering the others.
+    Without the list the reopened form had a fixed project and nothing to change it with."""
+    alpha = register(tmp_path / "alpha", project_id="prj_alpha")
+    beta = register(tmp_path / "beta", project_id="prj_beta", codename="brave-lynx")
+    _script_claude_sign_in(monkeypatch, tmp_path, lands=True)
+
+    async def go(pilot: Pilot[None], app: Shell) -> dict[str, Any]:
+        app.post_message(SpawnAgent(alpha.id))
+        await settle_page(app)
+        dialog = app.screen
+        assert isinstance(dialog, SpawnDialog)
+        dialog.query_one("#spawn-project", Select).value = beta.id
+        await settle_page(app)
+        dialog.query_one("#spawn-label", Input).value = "coder-auth"
+        dialog.query_one("#spawn-pick", Button).press()
+        await settle_page(app)
+        picker = app.screen
+        assert isinstance(picker, AttachTargetScreen)
+        picker.query_one("#picker-new-account", Button).press()
+        await settle_page(app)
+        await sign_in_lands(pilot, app, offline)
+        again = app.screen
+        seen: dict[str, Any] = {"reopened": type(again).__name__}
+        if isinstance(again, SpawnDialog):
+            field = again.query_one("#spawn-project", Select)
+            seen["project"] = again.project.id
+            seen["field"] = field.value
+            seen["offered"] = sorted(p.id for p in again._choices)
+            seen["label"] = again.query_one("#spawn-label", Input).value
+            seen["account"] = again.query_one("#spawn-account", Select).value
+        return seen
+
+    seen = drive(go)
+    assert seen["reopened"] == "SpawnDialog"
+    assert (seen["project"], seen["field"]) == (beta.id, beta.id)
+    assert seen["offered"] == [alpha.id, beta.id]
+    assert (seen["label"], seen["account"]) == ("coder-auth", "2")
+
+
 def test_a_cancelled_sign_in_reopens_nothing_and_says_so_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offline: dict[str, Any]
 ) -> None:
@@ -307,6 +350,19 @@ def test_a_sign_in_from_nowhere_in_particular_names_the_next_step(
     step, offered, current = drive(go)
     assert step == "Next: open alpha and press Start manager"
     assert offered and current == "welcome", "Go to Welcome takes it there"
+
+
+def test_the_step_after_a_sign_in_names_the_sidebars_one_spawn_action(tmp_path: Path) -> None:
+    """The last step says what to press: *Spawn agent*, which #442 made one action at the top
+    of the sidebar, not a row under a project. It names the action as the sidebar labels it."""
+    alpha = register(tmp_path / "alpha", project_id="prj_alpha")
+
+    assert next_step([], set()).text == "Next: add a project (+ beside Fleet)"
+    assert next_step([alpha], set()).welcome, "no manager yet: Welcome walks through it"
+    fleet_up = next_step([alpha], {alpha.id})
+    assert not fleet_up.welcome
+    label = action_text("\uff0b", "Spawn agent").plain.split()
+    assert fleet_up.text.split()[1:] == label, (fleet_up.text, label)
 
 
 def test_spawn_dialog_presets_round_trip_through_form_state(

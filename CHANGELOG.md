@@ -135,11 +135,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keyboard on the next step (from a signed-out step 2, *Start manager*: two keys
   to the manager's pane, where no path existed); the picker opens again with the
   new account highlighted, and confirming it opens the Spawn dialog on that
-  account; the Spawn dialog opens again as it was typed, on the new account. A
+  account; the Spawn dialog opens again as it was typed, on the new account (and
+  on the project its Project field had been changed to, still offering the others). A
   sign-in that does not land reopens nothing and says so in one toast, and going
   to another page first drops the way back. A sign-in from nowhere in particular
   names the one step after it under the notice: add a project, start a
-  project's manager (with *Go to Welcome*, `w`), or spawn under one. The board
+  project's manager (with *Go to Welcome*, `w`), or spawn an agent. The board
   (the *Board* tab, and `aisquare board -w`) gains a top line, `needs you: 🔔 1
   waiting · ❓ 2 questions · 👀 1 in review · ⛔ 1 blocked`, each count a button to
   what it counts, or "nothing needs you"; it counts by the captain's attention

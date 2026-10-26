@@ -199,7 +199,7 @@ tmux can see and its row says so (`no hooks`).
    taken back, so the dialog waits for its answer, and *Pick…* and *Import…*
    are disabled until it has it. *Pick… ▸ + New account* leaves for the
    Accounts page's sign-in, and once it lands the dialog opens again as it was
-   typed (label, task, first prompt, persona, binary), on the new account; the
+   typed (project, label, task, first prompt, persona, binary), on the new account; the
    persona picker's *+ New account* comes back the same way, the new account
    highlighted. A sign-in that does not land reopens nothing, and one toast says
    so; going to another page first drops the way back.

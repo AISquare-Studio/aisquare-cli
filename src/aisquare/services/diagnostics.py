@@ -13,6 +13,7 @@ from collections.abc import Callable, Collection, Container, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from importlib import metadata
 from pathlib import Path, PurePath
+from urllib.parse import urlsplit
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core

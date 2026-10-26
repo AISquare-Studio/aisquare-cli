@@ -15,7 +15,6 @@ import ast
 import inspect
 import json
 import os
-import shutil
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -41,7 +40,6 @@ from aisquare.services.onboarding import (
     summary_line,
     validate_path,
 )
-from tests import fakebin
 
 # --------------------------------------------------------------------------- fakes
 
@@ -89,17 +87,18 @@ WARN_CONNECT = DoctorCheck(
     detail="hooks are missing",
     fix="(Re)connect it: aisquare agents connect claude-code",
 )
-WARN_SNAPSHOT = DoctorCheck(
-    name="snapshot",
+# No doctor row offers a project-scoped fix today; this one stands in for one.
+WARN_FACTS = DoctorCheck(
+    name="facts",
     status=CheckStatus.warn,
-    detail="no codebase snapshot for the active project",
-    fix="Pack one: aisquare project onboard",
+    detail="no project facts seeded",
+    fix="Seed them: aisquare project onboard",
 )
-WARN_REPOMIX = DoctorCheck(
-    name="repomix",
+WARN_TMUX = DoctorCheck(
+    name="tmux",
     status=CheckStatus.warn,
-    detail="repomix not found",
-    fix="Install Node.js, then: npm install -g repomix",
+    detail="tmux not found",
+    fix="Install it: brew install tmux",
 )
 FAIL_HOME = DoctorCheck(
     name="home", status=CheckStatus.fail, detail="/x is missing", fix="Set it up: aisquare init"
@@ -318,7 +317,7 @@ def test_failure_reason_reads_the_exception_out_of_a_wrapped_traceback() -> None
 
 
 def test_summary_line_counts_each_status() -> None:
-    assert summary_line([OK, WARN_CONNECT, WARN_SNAPSHOT, FAIL_HOME]) == "✓ 1 · ⚠ 2 · ✗ 1"
+    assert summary_line([OK, WARN_CONNECT, WARN_FACTS, FAIL_HOME]) == "✓ 1 · ⚠ 2 · ✗ 1"
     assert summary_line([]) == "✓ 0 · ⚠ 0 · ✗ 0"
 
 
@@ -454,7 +453,7 @@ def _fix(name: str, fix: str, status: CheckStatus = CheckStatus.warn) -> DoctorC
 def test_fix_commands_maps_each_known_hint_to_its_non_interactive_argv() -> None:
     checks = [
         WARN_CONNECT,
-        WARN_SNAPSHOT,
+        WARN_FACTS,
         _fix("explainability", "Turn it on: aisquare explainability enable"),
         _fix(
             "explainability-config",
@@ -465,7 +464,7 @@ def test_fix_commands_maps_each_known_hint_to_its_non_interactive_argv() -> None
     fixes = fix_commands(checks)
     assert [(fix.check, fix.argv, fix.scope) for fix in fixes] == [
         ("claude-code", ("agents", "connect", "claude-code"), "machine"),
-        ("snapshot", ("project", "onboard", "--refresh"), "project"),
+        ("facts", ("project", "onboard", "--refresh"), "project"),
         ("explainability", ("explainability", "enable"), "machine"),
         ("sdk", ("doctor", "--fix", "--yes"), "machine"),
     ]
@@ -477,7 +476,7 @@ def test_fix_commands_maps_each_known_hint_to_its_non_interactive_argv() -> None
 def test_fix_commands_leaves_everything_that_is_not_our_command_as_text() -> None:
     """Negative: mentions of `aisquare` that are NOT a runnable fix must make no button."""
     not_buttons = [
-        WARN_REPOMIX,  # npm, not us
+        WARN_TMUX,  # brew, not us
         _fix(
             "install",
             "Install as a global tool: pipx install aisquare-cli "
@@ -505,7 +504,7 @@ def test_fix_commands_ignores_ok_checks_and_deduplicates_by_command() -> None:
         "claude-code", "(Re)connect it: aisquare agents connect claude-code", CheckStatus.ok
     )
     assert fix_commands([passing]) == [], "a fix hint on a healthy check is history, not a button"
-    twice = [WARN_SNAPSHOT, _fix("snapshot-2", "Try: aisquare project onboard")]
+    twice = [WARN_FACTS, _fix("facts-2", "Try: aisquare project onboard")]
     assert [fix.argv for fix in fix_commands(twice)] == [("project", "onboard", "--refresh")]
 
 
@@ -520,11 +519,11 @@ def test_fix_commands_admits_only_the_flags_the_table_allows() -> None:
         ("agents", "connect", "claude-code", "--config-dir", "/home/me/.claude4"),
         ("agents", "connect", "claude-code", "--config-dir", "/home/me/.claude5"),
     ]
-    already_flagged = _fix("snapshot", "Re-pack: aisquare project onboard --refresh.")
+    already_flagged = _fix("facts", "Read them again: aisquare project onboard --refresh.")
     assert [fix.argv for fix in fix_commands([already_flagged])] == [
         ("project", "onboard", "--refresh")
     ]
-    unknown_flag = _fix("snapshot", "aisquare project onboard --force")
+    unknown_flag = _fix("facts", "aisquare project onboard --force")
     assert fix_commands([unknown_flag]) == []
 
 
@@ -588,137 +587,30 @@ class Live:
         return selfcli.run(args, cwd=cwd, env=self.env, timeout=120.0)
 
 
-#: What ``snapshot._repomix_base`` runs to pack a directory: ``repomix``, else ``npx
-#: --yes repomix``. A child that can resolve either can pack.
-PACKERS = ("repomix", "npx")
-
-
-def _packer_free(entries: Sequence[str]) -> str:
-    """``entries`` as a PATH, less every directory in which a packer resolves.
-
-    Measured rather than assumed. Naming a directory believed to be packer-free is
-    what went wrong twice (see :func:`_hermetic_env`), so each entry is put to
-    ``shutil.which``, the lookup the child makes.
-    """
-    return os.pathsep.join(
-        entry for entry in entries if not any(shutil.which(tool, path=entry) for tool in PACKERS)
-    )
-
-
 def _hermetic_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
     """This process's environment (the suite's isolated ``AISQUARE_HOME`` included).
 
     ``CLAUDE_CONFIG_DIR`` is always one of ``overrides``: the developer's real
-    one must not be read. The PATH is cut so a machine with Node does not pack
-    the directory with its repomix, and the answer is the same on every machine.
+    one must not be read. The PATH is cut, so the child's doctor finds none of this
+    machine's tools and answers the same on every machine: on POSIX one EMPTY
+    directory under ``tmp_path``, on Windows the OS's own System32. The child needs
+    nothing by name: ``selfcli`` runs it by the interpreter's own path, and without
+    ``git`` a directory that is not a repository resolves by its markers, which is
+    what these plain directories do anyway.
 
-    This is ``conftest.no_repomix`` carried across a process boundary. That
-    autouse fixture says the policy in one line — "disable the repomix
-    subprocess by default so tests never shell out" — and enforces it with
-    ``monkeypatch``, which reaches every test in this process and NO child of
-    one. For a test that spawns the real CLI, the PATH is the only enforcement
-    there is.
-
-    THAT LAST CLAUSE USED TO BE A CLAIM RATHER THAN A FACT. The cut was guarded
-    by ``if os.name == "posix"``, so the Windows child inherited the whole PATH,
-    found Node, and ran the pack the POSIX child is spared. ``init`` onboards
-    unless told ``--no-onboard``, and ``snapshot._repomix_base`` falls back to
-    ``npx --yes repomix`` — which is an npm-registry DOWNLOAD, on a runner with
-    a cold npx cache, inside a test that believed it was hermetic. Measured here
-    with Node on PATH: ``init`` costs 31.1s, of which 7.5s is repomix and 3.3s
-    is import; on windows-latest it exceeded the 120s budget outright and took
-    the lane from 18/18 to 17/18. Stripping the PATH is what the docstring
-    always said happened, so it now happens.
-
-    On POSIX the PATH is one EMPTY directory under ``tmp_path``, not the bare
-    default ``os.defpath``. ``/usr/bin`` is where Debian's ``npm`` and Fedora's
-    ``nodejs-npm`` put ``npx``, so the default hid Node only from machines that
-    installed it somewhere else, like the CI runner's ``/usr/local/bin`` (review
-    of #65, R1). The child needs nothing by name: ``selfcli`` runs it by the
-    interpreter's own path, and without ``git`` a directory that is not a
-    repository resolves by its markers, which is what these plain directories do
-    anyway.
-
-    System32 stays on the Windows PATH. It is the OS's own directory, and no
-    Node installer writes to it. That is a belief about a machine, the kind that
-    was wrong twice above, so what either platform's base keeps is measured
-    (:func:`_packer_free`): a directory in which a packer resolves is dropped. The
-    #65 fold took that check out along with ``os.defpath``, and the Windows PATH
-    became a name nothing looked into, so the latch below could not fail there
-    (review of the #65 re-fold).
+    It once had a second job, measured on every platform: keeping a packer from the
+    child, whose ``init`` packed the directory with ``npx`` on a runner with Node
+    (31.1s, past the 120s budget on windows-latest, review of #65). The codebase
+    snapshot is gone, and that job with it.
     """
     env = {**os.environ, **overrides, "NO_COLOR": "1"}
     if os.name == "posix":
         empty = tmp_path / "hermetic-path"
         empty.mkdir(exist_ok=True)
-        base = [str(empty)]
+        env["PATH"] = str(empty)
     else:
-        base = [str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32")]
-    env["PATH"] = _packer_free(base)
+        env["PATH"] = str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32")
     return env
-
-
-@pytest.mark.parametrize("tool", ["npx", "repomix"])
-def test_the_hermetic_env_hides_node_from_the_child_on_every_platform(
-    tool: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The child must not be able to resolve a packer, whatever this machine has.
-
-    The latch on :func:`_hermetic_env`. Asserting "npx is not on the cut PATH" on
-    a machine that has no npx passes for the wrong reason — the vacuity that let
-    the POSIX-only cut sit unnoticed until a Windows runner ran it. So the fake
-    is MANUFACTURED onto the real PATH first, and the control below asserts it is
-    genuinely findable there; only then does the absence mean the cut did it.
-
-    Both names, because ``snapshot._repomix_base`` tries ``repomix`` first and
-    falls back to ``npx --yes repomix``, and hiding only one leaves the other.
-
-    The fake is also in the platform's DEFAULT search path, as a distro's Node is
-    in ``/usr/bin``: a cut back to ``os.defpath`` hid only a Node installed
-    somewhere else.
-    """
-    installed = tmp_path / "installed"
-    fakebin.executable_fake(installed, tool, posix="echo packed", windows="echo packed")
-    fakebin.prepend_to_path(installed, monkeypatch)
-    monkeypatch.setattr(os, "defpath", f"{installed}{os.pathsep}{os.defpath}")
-
-    # The control: without the cut, this machine CAN see it.
-    assert shutil.which(tool) is not None, "the fake is not on PATH; the assertion below is vacuous"
-    assert shutil.which(tool, path=os.defpath) is not None, "the fake is not on the default path"
-
-    assert shutil.which(tool, path=_hermetic_env(tmp_path)["PATH"]) is None
-
-
-@pytest.mark.parametrize("tool", PACKERS)
-def test_a_packer_in_the_directory_the_child_is_handed_is_dropped_with_it(
-    tool: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """What the cut KEEPS is measured too, on every platform: the empty directory on POSIX,
-    System32 on Windows. The latch above puts its fake somewhere the cut never looks, so it
-    could not see a packer inside the directory the child is given. On Windows that
-    directory was a name nothing looked into (review of the #65 re-fold). Here a packer is
-    planted in it, so the cut has to find it."""
-    if os.name == "posix":
-        kept = tmp_path / "hermetic-path"
-    else:
-        monkeypatch.setenv("SYSTEMROOT", str(tmp_path / "Windows"))
-        kept = tmp_path / "Windows" / "System32"
-    fakebin.executable_fake(kept, tool, posix="echo packed", windows="echo packed")
-
-    # The control: as a PATH on its own, the directory really does resolve the packer.
-    assert shutil.which(tool, path=str(kept)) is not None
-
-    assert shutil.which(tool, path=_hermetic_env(tmp_path)["PATH"]) is None
-
-
-def test_the_cut_keeps_a_directory_with_no_packer_in_it(tmp_path: Path) -> None:
-    """The other half: a directory that resolves no packer stays, so the child is not
-    handed an empty PATH whenever the check runs."""
-    ships_a_packer, innocent = tmp_path / "usr-bin", tmp_path / "plain-bin"
-    innocent.mkdir()
-    fakebin.executable_fake(ships_a_packer, "npx", posix="echo packed", windows="echo packed")
-
-    assert _packer_free([str(ships_a_packer), str(innocent)]) == str(innocent)
 
 
 def test_onboard_runs_the_real_cli_in_a_throwaway_home(tmp_path: Path) -> None:

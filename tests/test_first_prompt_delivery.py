@@ -486,6 +486,9 @@ def test_an_unacknowledged_first_prompt_reads_attention_once(
     later = datetime.now(tz=UTC) + timedelta(seconds=46)
     monkeypatch.setattr(fleet_service, "_now", lambda: later)
 
+    with store_session() as store:
+        named = store.get_project(project.id) or project  # the codename the spawn gave it
+
     def unsent_events() -> list[str]:
         with store_session() as store:
             events = store.events_since(project.id, 0, limit=500)
@@ -494,7 +497,7 @@ def test_an_unacknowledged_first_prompt_reads_attention_once(
     for _ in range(2):
         [status] = fleet_service.list_agents(project)
         assert status.state == "attention"
-        assert status.detail == fleet_service.unsent_detail(project, agent.label)
+        assert status.detail == fleet_service.unsent_detail(named, agent.label)
         assert status.detail.startswith("first prompt not taken — `aisquare fleet tell --project")
     assert len(unsent_events()) == 1 and _row(agent.id).first_prompt == "unsent"
     assert "prompt_unsent" in team_service.MANAGER_WAKE_KINDS
@@ -541,10 +544,12 @@ def test_a_first_prompt_held_at_the_security_notes_after_session_start_is_never_
     assert _row(agent.id).first_prompt == "unsent" and len(nudges) == 1
 
     tmux.screens[agent.pane_id] = _box()  # a human pressed Enter past the notes
+    with store_session() as store:
+        named = store.get_project(project.id) or project  # the codename the spawn gave it
     [status] = fleet_service.list_agents(project)
     assert (status.state, status.detail) == (
         "attention",
-        fleet_service.unsent_detail(project, agent.label),
+        fleet_service.unsent_detail(named, agent.label),
     )
     assert len(unsent_events()) == 1
 
@@ -636,7 +641,8 @@ def test_a_v35_store_gains_the_first_prompt_columns_and_a_second_open_changes_no
     once = _contents(db)
     open_store().close()
 
-    assert SCHEMA_VERSION == 36 and _contents(db) == once
+    # W1a's step is v36; P1 WS-2's (#279) is v37 on a train that holds both.
+    assert SCHEMA_VERSION >= 36 and _contents(db) == once
     assert old is not None and (old.first_prompt, old.first_prompt_at) == (None, None)
     assert _db_path() == db
 

@@ -587,7 +587,7 @@ def test_an_answer_http_client_cannot_read_is_unreachable_and_an_error_keeps_its
     from http.client import IncompleteRead, LineTooLong
     from urllib.error import HTTPError
 
-    def too_long(request: urllib.request.Request, timeout: float) -> object:
+    def too_long(request: urllib.request.Request, timeout: float, **_: object) -> object:
         raise LineTooLong("header line")
 
     monkeypatch.setattr(urllib.request, "urlopen", too_long)
@@ -602,7 +602,7 @@ def test_an_answer_http_client_cannot_read_is_unreachable_and_an_error_keeps_its
         def close(self) -> None:  # HTTPError closes its body when collected
             return None
 
-    def unavailable(request: urllib.request.Request, timeout: float) -> object:
+    def unavailable(request: urllib.request.Request, timeout: float, **_: object) -> object:
         raise HTTPError(request.full_url, 503, "unavailable", Message(), CutShort())  # type: ignore[arg-type]
 
     monkeypatch.setattr(urllib.request, "urlopen", unavailable)
@@ -638,7 +638,7 @@ def test_a_success_whose_answer_is_cut_short_says_the_server_answered(
         def read(self, *args: object) -> bytes:
             raise failure
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda request, timeout: Answered())
+    monkeypatch.setattr(urllib.request, "urlopen", lambda request, timeout, **_: Answered())
     url = "https://api.example.com/api/v2/iam/workspace-api-key/"
     with pytest.raises(iam.IamError) as caught:
         iam._http("POST", url, json_body={"workspace_id": 7})

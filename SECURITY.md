@@ -30,6 +30,12 @@ setting it comes from.
 
 - `context.db` holds your memory entries, the board, and every prompt you
   submit, verbatim. Claude Code's `UserPromptSubmit` hook captures them.
+  It also holds the board's work briefs (`aisquare brief`): their text, and for
+  each recorded check the artifact's SHA-256 and where it was.
+- `briefs/<project>/<brief>/` holds a **copy of every artifact** a brief check
+  recorded (`aisquare brief evidence|finding --artifact`, up to 16 MiB each),
+  restricted to your user. A screenshot of a secret is kept here until the
+  project is purged (`aisquare project forget <id> --purge`).
 - `credentials` (from `aisquare login`, `aisquare init --api-key` and
   `aisquare serve`) and the Explainability keys (`explainability-key`,
   `projects/<id>/explainability-key`) are restricted to your user. The CLI
@@ -39,6 +45,13 @@ setting it comes from.
   (`.credentials.json`), and in the Keychain on macOS. `aisquare accounts remove`
   renames the directory and signs nothing out, so run `/logout` in the account
   first (`aisquare accounts run <n>`).
+- `reports/` holds what `asq exec` saved: each command's argv, working
+  directory, the first 1 MiB of its standard output and error (more with
+  `--max-output-bytes`), and with `--project` a hash of each source file. Readable
+  by your user only on Linux and macOS; kept 14 days, newest 64. `asq reports
+  prune --keep 0 --days 0` removes them, except the reports that recorded brief
+  evidence cites: those stay until the project's briefs are purged
+  (`aisquare project forget <id> --purge`), and prune says how many it kept.
 - Everything else gets your umask's default permissions. To restrict the whole
   tree to your user, run `chmod 700 "${AISQUARE_HOME:-$HOME/.aisquare}"`.
 
@@ -100,10 +113,6 @@ that mode, Claude Code's classifier, not you, approves each tool call.
   on the first session. If no Python 3.11 to 3.13 is installed, uv first
   downloads a CPython build from Astral (python-build-standalone), unless uv's
   `python-downloads` setting (`UV_PYTHON_DOWNLOADS`) is `manual` or `never`.
-- **Snapshots.** Packing a snapshot (`aisquare init`, `aisquare project
-  onboard`) runs `npx --yes repomix` when no `repomix` is installed, which
-  fetches the latest Repomix from npm. With tiktoken installed, the first token
-  count downloads its encoding from OpenAI's blob store.
 - **Plan usage.** Wherever the CLI shows or checks a Claude account's plan
   usage, or picks an account by headroom, it reads that usage from Anthropic with the
   account's own sign-in.

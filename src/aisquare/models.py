@@ -884,6 +884,13 @@ class TeamEvent(BaseModel):
     task_id: str | None = None
     to_role: str | None = None
     created_at: datetime
+    actor: str | None = None
+    """Who caused it, when not the author (P1 WS-2, #279): a session id, ``user`` (asq or
+    a shell with no session), ``usage-limit`` or ``auto-stop``. ``None``: the author's own
+    act, or unknown."""
+    meta: dict[str, object] | None = None
+    """Its details, by kind: ``agent_exited`` carries ``status``, ``force``, ``released``
+    and ``why``."""
 
     def as_envelope(self) -> DataEnvelope:
         """This event as a capture-pipe envelope (``kind`` namespaced ``team.*``).
@@ -901,6 +908,8 @@ class TeamEvent(BaseModel):
             "text": self.text,
             "task_id": self.task_id,
             "to_role": self.to_role,
+            "actor": self.actor,
+            "meta": self.meta,
         }
         if self.kind == "signal":
             decoded = _SIGNAL_TEXT.match(self.text)
@@ -922,43 +931,174 @@ class TeamEvent(BaseModel):
         )
 
 
-class Snapshot(BaseModel):
-    """A packed snapshot of a project's codebase (Repomix full pack + skeleton)."""
+EvidenceVerdict = Literal["pass", "fail"]
+"""What a recorded check found (``asq brief evidence --verdict``)."""
 
+EvidenceKind = Literal["manual", "report"]
+"""What backs a check. ``manual``: an artifact, such as a screenshot, that only the
+validator can judge, and labelled so everywhere. ``report``: a saved command report
+(``asq exec``), checked against the source it ran on; recorded by a later build."""
+
+RequirementState = Literal["pass", "fail", "stale", "missing", "blocked", "unlinked"]
+"""Where one requirement, or one linked task's part of it, stands (``asq brief show``)."""
+
+
+class RequirementVersion(BaseModel):
+    """A requirement as it read before a correction superseded it: kept, never rewritten."""
+
+    revision: int
+    text: str
+    check: str | None = None
+    superseded_at: datetime
+    superseded_by: str | None = None
+    """The session (``--as``) whose correction superseded it."""
+
+
+class BriefRequirement(BaseModel):
+    """One numbered requirement of a brief. ``id`` (``R1``, ``R2``, …) is stable for the
+    brief's life; ``revision`` counts the corrections that changed what it asks, and a
+    check recorded against an older revision is stale."""
+
+    id: str
+    text: str = Field(min_length=1, max_length=2000)
+    check: str | None = Field(default=None, max_length=2000)
+    """The expected check, as the brief's author wrote it: what proves this one."""
+    revision: int = 1
+    task_ids: list[str] = Field(default_factory=list)
+    """The board tasks linked to it, each of which proves its own contribution."""
+    history: list[RequirementVersion] = Field(default_factory=list)
+
+
+class BriefEvidence(BaseModel):
+    """One recorded check of one requirement by one linked task. Appended, never edited."""
+
+    id: str
+    requirement_id: str
+    requirement_revision: int
+    """The requirement's revision when this was recorded: a correction makes it stale."""
+    task_id: str
+    verdict: EvidenceVerdict
+    kind: EvidenceKind = "manual"
+    finding: bool = False
+    """Recorded by ``asq brief finding``: a failure someone found, not a check run."""
+    summary: str = Field(min_length=1, max_length=4000)
+    artifact: str | None = None
+    """The kept copy of the artifact, for ``manual`` evidence: under the store's home
+    (``briefs/<project>/<brief>/``), owner-only. What the check is judged against."""
+    artifact_source: str | None = None
+    """Where the artifact was when it was recorded. Provenance only: the original may
+    go, and the check stands on its copy."""
+    artifact_sha256: str | None = None
+    report_id: str | None = None
+    """The command report behind ``report`` evidence."""
+    report_sha256: str | None = None
+    """That report's digest when recorded: a report changed since no longer backs it."""
+    source_root: str | None = None
+    """The checkout the check ran in, for ``report`` evidence."""
+    source_fingerprint: str | None = None
+    """That checkout's source identity when the check ran, for ``report`` evidence."""
+    recorded_at: datetime
+    session_id: str | None = None
+
+
+class BriefCorrection(BaseModel):
+    """One write that changed what a brief asks: what changed, and what it made stale."""
+
+    revision: int
+    """The brief revision this correction produced."""
+    changes: list[str]
+    stale: list[str] = Field(default_factory=list)
+    """The requirement ids whose recorded checks it made stale."""
+    at: datetime
+    session_id: str | None = None
+
+
+class WorkBrief(BaseModel):
+    """One user request as numbered requirements, linked to ordinary board tasks.
+
+    ``revision`` counts every write, which is how two writers never overwrite each other
+    (the store compares it). ``number`` is its number on its board (``B1``), given by the
+    store at insert, and not part of the stored document.
+    """
+
+    id: str
     project_id: str
-    head_sha: str | None = None
-    generated_at: datetime
-    pack_path: Path
-    skeleton_path: Path
-    index_path: Path
-    token_count: int = 0
-    skeleton_token_count: int = 0
-    file_count: int = 0
-    compressed: bool = False
-    status: str = "ready"
-    # What a ``too_large`` verdict was made of, so the failure can say what it
-    # measured: the full pack's size and the budget it was held to
-    # (``token_count`` is the pack that was kept — or, when none was, the
-    # compressed pack's size). Both are None on a snapshot.json written before
-    # they were recorded (0.6.0 and earlier); see ``core.snapshot.too_large_detail``.
-    full_token_count: int | None = None
-    max_tokens: int | None = None
+    number: int | None = None
+    title: str = Field(min_length=1, max_length=500)
+    revision: int = 1
+    requirements: list[BriefRequirement] = Field(min_length=1, max_length=64)
+    assumptions: list[str] = Field(default_factory=list)
+    boundaries: list[str] = Field(default_factory=list)
+    evidence: list[BriefEvidence] = Field(default_factory=list, max_length=1024)
+    corrections: list[BriefCorrection] = Field(default_factory=list)
+    created_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    @property
+    def label(self) -> str:
+        """``B1`` once stored; the id before."""
+        return f"B{self.number}" if self.number is not None else self.id
+
+
+class TaskProof(BaseModel):
+    """One live linked task's part of a requirement: its latest check, and what it is worth."""
+
+    task_id: str
+    task_number: int | None = None
+    task_status: TaskStatus
+    state: RequirementState
+    reason: str
+    evidence_id: str | None = None
+    kind: EvidenceKind | None = None
+    command: str | None = None
+    """The command whose report backs this check, as run: shown beside the requirement's
+    expected check, so a report of ``true`` cannot pass for ``pytest`` unseen."""
+
+
+class RequirementStatus(BaseModel):
+    """Where a requirement stands: the worst of its live linked tasks' proofs."""
+
+    id: str
+    state: RequirementState
+    reason: str
+    manual: bool = False
+    """A pass here rests on manual evidence, which only the validator can judge."""
+    tasks: list[TaskProof] = Field(default_factory=list)
+
+
+class BriefView(BaseModel):
+    """A brief with each requirement's standing, as ``asq brief show`` reads it."""
+
+    brief: WorkBrief
+    requirements: list[RequirementStatus]
+
+
+class BriefCheck(BriefView):
+    """``asq brief check``: every pass checked against the source now."""
+
+    complete: bool
+    """Every requirement is a pass: what makes ``brief check`` exit 0."""
+    source_root: str | None = None
+    """The one checkout every pass was compared with (``--source-root``), if any."""
 
 
 class OnboardReport(BaseModel):
-    """Outcome of ``project onboard``: seeded facts and the codebase snapshot."""
+    """Outcome of ``project onboard``: the facts it seeded."""
 
     seeded: list[ContextEntry] = Field(default_factory=list)
-    snapshot: Snapshot | None = None
-    snapshot_note: str | None = None
-    """Why this run packed nothing, as ``onboard`` says it: off, or the pack failed
-    and why. ``None`` when a pack was made or reused, or not asked for (``init``),
-    except in the aisquare home, which says why it is never packed, asked or not. Set
-    beside a ``snapshot``, it is a ``--refresh`` that failed: that is the last pack,
-    kept."""
+    markers_read: bool = True
+    """``False`` for a plain run on a project already onboarded: the markers were not
+    read, so "no new facts" would be a claim nobody checked. ``--refresh`` reads them."""
+    restored: bool = False
+    """``True`` when this run added a forgotten project again: the facts forget kept,
+    hidden, are back. Such a run reads the markers, as a first one does."""
     warning: str | None = None
     """``project_service.HOME_WARNING`` when this onboarding made the aisquare home a
     project (D5), said once; else ``None``."""
+    code_index: str | None = None
+    """The symbol index's line (#285): what this onboard (or ``init``) started, or why
+    not. ``None`` with ``[code] enabled = false``."""
 
 
 class ProjectForgetReport(BaseModel):
@@ -1221,6 +1361,15 @@ class LaunchSpec(BaseModel):
     (``core.orchestrator.window_team_hub``). A restart or switch gives the replacement's
     window the same, whoever runs it (``services.fleet._board_and_hub``). ``None`` on a spec
     recorded before 0.8.1 kept it."""
+    model: str | None = None
+    """The ``--model`` the spawn resolved down the role's ladder (#129 b), ``None`` when it
+    passed none: another binary, a model already in the arguments, or an untiered role."""
+    effort: str | None = None
+    """The ``--effort`` passed beside ``model``."""
+    board_context: str | None = None
+    """What of the board the agent reads (``all``, ``relevant``, ``none``; P1 WS-2, #279),
+    as its spawn resolved it, so a restart or switch keeps it. ``None`` on a spec recorded
+    before it: the role's setting applies."""
 
 
 class FleetAgent(BaseModel):

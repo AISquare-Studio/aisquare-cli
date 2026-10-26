@@ -32,7 +32,6 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import brain as brain_core
 from aisquare.core import paths
-from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetSettings
 from aisquare.core.ids import new_agent_id
@@ -40,11 +39,10 @@ from aisquare.core.store import store_session
 from aisquare.core.terminal import outer_terminal
 from aisquare.core.tmux import PaneFacts, SocketAnswer, TmuxError, TmuxServer, TmuxUnavailable
 from aisquare.core.workspace import project_id_for
-from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, ProjectInfo, Snapshot
+from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, ProjectInfo
 from aisquare.services import diagnostics
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
-from aisquare.services.onboarding import fix_commands
 from tests.fsperms import can_symlink
 from tests.projects import add_project
 
@@ -908,121 +906,6 @@ def test_real_tmux_reports_available_and_sees_a_pane_come_and_go(
 # --- doctor(cwd=…) ----------------------------------------------------------------------------
 
 
-def _ready_snapshot(project_id: str) -> None:
-    directory = snapshot_core.snapshot_dir(project_id)
-    directory.mkdir(parents=True, exist_ok=True)
-    meta = Snapshot(
-        project_id=project_id,
-        generated_at=datetime.now(tz=UTC),
-        pack_path=snapshot_core.pack_path(project_id),
-        skeleton_path=snapshot_core.skeleton_path(project_id),
-        index_path=snapshot_core.index_path(project_id),
-        token_count=42,
-        file_count=3,
-    )
-    snapshot_core.meta_path(project_id).write_text(meta.model_dump_json(), encoding="utf-8")
-
-
-def _too_large_snapshot(project_id: str) -> Snapshot:
-    directory = snapshot_core.snapshot_dir(project_id)
-    directory.mkdir(parents=True, exist_ok=True)
-    meta = Snapshot(
-        project_id=project_id,
-        generated_at=datetime.now(tz=UTC),
-        pack_path=snapshot_core.pack_path(project_id),
-        skeleton_path=snapshot_core.skeleton_path(project_id),
-        index_path=snapshot_core.index_path(project_id),
-        token_count=203_991,
-        compressed=True,
-        status="too_large",
-        full_token_count=412_318,
-        max_tokens=150_000,
-    )
-    snapshot_core.meta_path(project_id).write_text(meta.model_dump_json(), encoding="utf-8")
-    return meta
-
-
-def _skeleton_only_snapshot(project_id: str) -> Snapshot:
-    directory = snapshot_core.snapshot_dir(project_id)
-    directory.mkdir(parents=True, exist_ok=True)
-    meta = Snapshot(
-        project_id=project_id,
-        generated_at=datetime.now(tz=UTC),
-        pack_path=snapshot_core.pack_path(project_id),
-        skeleton_path=snapshot_core.skeleton_path(project_id),
-        index_path=snapshot_core.index_path(project_id),
-        token_count=2_030_000,
-        skeleton_token_count=2_030_000,
-        file_count=1234,
-        compressed=True,
-        status="skeleton_only",
-        full_token_count=10_990_000,
-        max_tokens=150_000,
-    )
-    snapshot_core.meta_path(project_id).write_text(meta.model_dump_json(), encoding="utf-8")
-    return meta
-
-
-def test_doctor_treats_a_skeleton_only_snapshot_as_usable_and_offers_no_fix(
-    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The skeleton and its index are what agents are handed, so this is green — and has no fix.
-
-    Measured on the issue: the Doctor tab's fix ran ``onboard --refresh``, showed a
-    tick, and changed nothing, forever. A fix here would be that button again.
-    """
-    root = tmp_path / "huge"
-    root.mkdir()
-    monkeypatch.chdir(root)
-    monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
-    monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
-    # A machine that can pack. Where nothing can, the row also says the skeleton cannot
-    # be refreshed there (test_snapshot_optional_without_node.py), whatever is on PATH.
-    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
-    verdict = _skeleton_only_snapshot(_seed(root).id)
-
-    check = _by_name(diagnostics.doctor())["snapshot"]
-
-    assert check.status is CheckStatus.ok
-    assert check.detail == snapshot_core.skeleton_only_detail(verdict)
-    assert check.detail == (
-        "skeleton only: 2030000 tokens, 1234 files indexed; "
-        "full pack skipped over budget 150000 (10990000 tokens)"
-    )
-    assert check.fix is None
-    assert fix_commands([check]) == []
-
-
-def test_doctor_reports_an_over_budget_snapshot_with_its_numbers_and_a_re_pack(
-    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#82: a ``too_large`` verdict is not "no codebase snapshot" — it has numbers and a way out.
-
-    The fix is ``--refresh`` on purpose: the old hint, ``Pack one: aisquare
-    project onboard``, reloaded the same verdict, which is how the line stayed a
-    warning forever. The detail is the SAME sentence ``project onboard`` prints,
-    by identity, so the two can never disagree on the numbers; and the UI turns
-    the hint into the ``--refresh`` button its fix table already knows.
-    """
-    root = tmp_path / "big"
-    root.mkdir()
-    monkeypatch.chdir(root)
-    monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
-    monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
-    # A machine that can pack. Where nothing can, the verdict reads off with no fix
-    # (test_snapshot_optional_without_node.py), whatever is on PATH.
-    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
-    verdict = _too_large_snapshot(_seed(root).id)
-
-    check = _by_name(diagnostics.doctor())["snapshot"]
-
-    assert check.status is CheckStatus.warn
-    assert check.detail == snapshot_core.too_large_detail(verdict)
-    assert "full 412318 tokens, compressed 203991 tokens, budget 150000" in check.detail
-    assert check.fix == "Re-pack: aisquare project onboard --refresh"
-    assert [fix.argv for fix in fix_commands([check])] == [("project", "onboard", "--refresh")]
-
-
 def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1034,26 +917,19 @@ def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(
     monkeypatch.chdir(here)
     monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
     monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
-    # A machine that can pack, so `here`'s missing snapshot reads opt-in rather than
-    # off -- without a Node it is off on purpose, whatever this machine has on PATH.
-    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     # Activate the orchestrator in `there` only, with an off-ladder live session.
     monkeypatch.setenv("AISQUARE_ROLE", "runner")
     add_project(there)  # a role session joins a board only where the project was added
     team_service.hook_session_start("sess-there-1", there, "startup", model="claude-haiku-4-5")
-    _ready_snapshot(_seed(there).id)
 
     there_rows = _by_name(diagnostics.doctor(cwd=there))
     here_rows = _by_name(diagnostics.doctor())
 
-    assert there_rows["snapshot"].status is CheckStatus.ok
-    assert "3 files, 42 tokens" in there_rows["snapshot"].detail
     assert there_rows["agent harness"].status is CheckStatus.warn
     assert "off-ladder" in there_rows["agent harness"].detail
     assert there_rows["brain"].status is CheckStatus.warn
     assert "not initialised" in there_rows["brain"].detail
     # The control: the process cwd is a different, never-activated project.
-    assert here_rows["snapshot"].detail == "none — opt-in: aisquare project onboard packs one"
     assert here_rows["agent harness"].detail == "not activated for this project"
     assert "orchestrator not active here" in here_rows["brain"].detail
 
@@ -1154,7 +1030,7 @@ def test_cli_doctor_emits_the_fleet_rows_in_text_and_json(runner: CliRunner) -> 
         assert name in names, names
         assert f" {name}: " in text, text
     assert names.index("claude-code") < names.index("tmux") < names.index("gh")
-    assert names.index("snapshot") < names.index("fleet") < names.index("explainability")
+    assert names.index("brain") < names.index("fleet") < names.index("explainability")
 
 
 def test_a_healthy_machine_yields_no_fleet_warning(runner: CliRunner) -> None:
@@ -1401,12 +1277,12 @@ def test_the_fleet_terminal_row_never_starts_a_server_and_survives_an_unknown_te
 def test_the_fleet_terminal_row_comes_after_the_actionable_checks() -> None:
     """It can warn (a server's kept prefix), and the not-ok rows are read in doctor
     order (the fleet sidebar showed only the first three): inserted beside
-    tmux, as #147 had it, that warning evicted one of brain / snapshot / a
-    logged-out gh — the rows an operator can act on — from the one doctor
+    tmux, as #147 had it, that warning evicted one of brain / a logged-out
+    gh — the rows an operator can act on — from the one doctor
     surface visible without a click. So it waits with browser tools."""
     names = [check.name for check in diagnostics.doctor()]
     terminal = names.index("fleet terminal")
-    for actionable in ("gh", "snapshot", "brain", "fleet"):
+    for actionable in ("gh", "brain", "fleet"):
         assert names.index(actionable) < terminal, (actionable, names)
     assert names.index("browser tools") < terminal, names
 
@@ -1683,3 +1559,25 @@ def test_the_fleet_server_row_warns_about_a_seats_identity_on_the_server(tmp_pat
 def test_the_fleet_server_row_reaches_the_real_doctor_after_the_fleet_terminal() -> None:
     names = [check.name for check in diagnostics.doctor()]
     assert names.index("fleet terminal") < names.index("fleet server env"), names
+
+
+def test_doctor_names_each_roles_denied_tools_and_skill_listing() -> None:
+    """#280: one ok row per fleet role, the tools its launch denies and its skill listing,
+    so `/context`'s Tools row can be checked against what aisquare passed."""
+    rows = {check.name: check for check in diagnostics._check_role_tools()}
+    assert set(rows) == {f"{role} tools" for role in FleetSettings().roles}
+    assert all(check.status == CheckStatus.ok for check in rows.values())
+    reviewer = rows["reviewer tools"].detail
+    assert "Edit" in reviewer and "NotebookEdit" in reviewer and "Workflow" in reviewer
+    assert rows["manager tools"].detail.endswith("skill listing full")
+    assert rows["coder tools"].detail.endswith("skill listing names")
+    assert "Edit" not in rows["coder tools"].detail
+
+
+def test_doctor_says_a_role_on_another_agent_gets_no_deny_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AISQUARE_BIN_REVIEWER", "aider")
+    (reviewer,) = [c for c in diagnostics._check_role_tools() if c.name == "reviewer tools"]
+    assert reviewer.status == CheckStatus.ok
+    assert reviewer.detail.startswith("no deny token: 'aider' is not claude"), reviewer.detail

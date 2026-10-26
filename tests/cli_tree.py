@@ -7,6 +7,7 @@ and duck-type the command/parameter attributes instead of importing click.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
 from enum import Enum
 from typing import Any
@@ -46,12 +47,24 @@ def _placeholder(parameter: Any) -> str:
     if choices:
         first = choices[0]
         return first.value if isinstance(first, Enum) else str(first)
+    # A number for a number: "sample" is a usage error, and the command's body never ran
+    # (`hook compact-check --cursor`, the sweep's USAGE_ONLY ratchet).
+    if getattr(parameter.type, "name", None) in (
+        "int",
+        "integer",
+        "float",
+        "int range",
+        "float range",
+    ):
+        return "0"
     return "sample"
 
 
 NEEDED_UNLESS: dict[tuple[str, ...], tuple[str, str]] = {
     ("fleet", "restart"): ("label", "--all"),
     ("fleet", "stop"): ("label", "--all"),
+    ("project", "group", "parent"): ("project", "--clear"),
+    ("workspace", "group", "parent"): ("project", "--clear"),
 }
 """Arguments a command still needs unless a flag stands in for them: ``(argument, flag)``.
 
@@ -60,6 +73,16 @@ and the command would exit 2 on usage without running a line of its own (the
 configured-home sweep's USAGE_ONLY ratchet caught both when ``--all`` came in).
 Filled like a required argument. tests/test_fleet_cli.py checks that each one is
 refused without either."""
+
+
+TRAILING: dict[tuple[str, ...], list[str]] = {
+    ("exec",): ["--", sys.executable, "-c", "pass"],
+}
+"""What a command that takes everything after ``--`` is given to run.
+
+``exec`` has no declared argument, so the walk would leave it bare and it would exit 2 on
+usage. A placeholder such as ``sample`` is no answer: it is a real program on macOS
+(``/usr/bin/sample``). The interpreter running the suite, doing nothing, is."""
 
 
 def leaf_invocations_by_path() -> list[tuple[tuple[str, ...], list[str]]]:
@@ -88,6 +111,7 @@ def leaf_invocations_by_path() -> list[tuple[tuple[str, ...], list[str]]]:
                 argv.append(_placeholder(parameter))
             elif parameter.param_type_name == "option":
                 argv.extend([parameter.opts[0], _placeholder(parameter)])
+        argv.extend(TRAILING.get(path, []))
         invocations.append((path, argv))
     return invocations
 

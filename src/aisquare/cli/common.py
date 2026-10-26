@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import errno
 import json
+import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import tomli_w
 import typer
+from rich import box
 from rich.table import Table
 from rich.text import Text
 
 from aisquare.core import paths
-from aisquare.core import snapshot as snapshot_core
 from aisquare.core.claude_accounts import format_reset as _format_reset
 from aisquare.core.config import AppConfig
 from aisquare.core.console import stderr_console, stdout_console
@@ -41,6 +42,9 @@ from aisquare.models import (
     TokenSummary,
     TurnMetric,
 )
+
+if TYPE_CHECKING:  # the ledger's model only, never loaded for another command
+    from aisquare.services.token_ledger import SessionLedger
 
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
 
@@ -690,7 +694,7 @@ def emit_connected(connection: AgentConnection) -> None:
 
 
 def emit_onboard(report: OnboardReport) -> None:
-    """Render the outcome of ``project onboard`` — snapshot summary + seeded facts."""
+    """Render the outcome of ``project onboard``: the facts it seeded."""
     if get_state().json_output:
         typer.echo(report.model_dump_json())
         return
@@ -698,32 +702,24 @@ def emit_onboard(report: OnboardReport) -> None:
     if report.warning is not None:
         # The one line adding the aisquare home says (D5): a warning, never a refusal.
         stderr_console().print(f"warning: {report.warning}", style="yellow", markup=False)
-    snapshot = report.snapshot
-    if report.snapshot_note is not None:
-        # Nothing packed: off, a pack that failed and why, or a --refresh that kept
-        # the last pack -- the service's sentence, which `init` prints too.
-        console.print(f"snapshot: {report.snapshot_note}")
-    elif snapshot is not None and snapshot.status == "ready":
-        line = f"✓ snapshot: {snapshot.file_count} files, {snapshot.token_count} tokens"
-        if snapshot.skeleton_token_count:
-            line += f" (skeleton {snapshot.skeleton_token_count} tokens)"
-        console.print(line)
-    elif snapshot is not None and snapshot.status == "skeleton_only":
-        console.print(f"snapshot: {snapshot_core.skeleton_only_detail(snapshot)}")
-    elif snapshot is not None and snapshot.status == "too_large" and snapshot_core.can_pack():
-        # The same sentence the doctor prints (one definition, so the two never
-        # disagree on the numbers), plus what to run once a remedy is in place.
-        # Where nothing can pack, no remedy can run: the verdict reads off below,
-        # as the doctor's row does.
-        console.print(
-            f"snapshot: {snapshot_core.too_large_detail(snapshot)} {snapshot_core.REPACK_HINT}"
-        )
-    else:
-        console.print(f"snapshot: {snapshot_core.skipped_detail()}")
-    if report.seeded:
-        console.print(f"seeded {len(report.seeded)} project fact(s):")
-        for entry in report.seeded:
-            console.print(f"  - {entry.text}")
+    if report.code_index is not None:
+        # The symbol index (#285) says its own line, whatever the facts below did.
+        console.print(f"code index: {report.code_index}", markup=False)
+    if not report.markers_read:
+        # Said as what happened: the markers were not read (review of #399).
+        console.print("✓ already onboarded; --refresh reads the markers again")
+        return
+    if report.restored:
+        # A forgotten project added again: its kept facts are back (review of #399, m12).
+        console.print("✓ onboarded again; its earlier facts are back")
+        if not report.seeded:
+            return
+    elif not report.seeded:
+        console.print("✓ onboarded — no new project facts to seed")
+        return
+    console.print(f"seeded {len(report.seeded)} project fact(s):")
+    for entry in report.seeded:
+        console.print(f"  - {entry.text}")
 
 
 def emit_prompts(prompts: list[PromptRecord]) -> None:
@@ -852,6 +848,60 @@ def emit_token_summary(summary: TokenSummary) -> None:
 
 def _counts(bucket: dict[str, int]) -> str:
     return ", ".join(f"{key} {count}" for key, count in sorted(bucket.items()))
+
+
+def parse_since(value: str) -> datetime:
+    """``--since`` accepts a relative span (15m, 2h, 3d) or an ISO timestamp."""
+    span = re.fullmatch(r"(\d+)([smhd])", value.strip())
+    if span:
+        unit = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}[span.group(2)]
+        return datetime.now(tz=UTC) - timedelta(**{unit: int(span.group(1))})
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        raise typer.BadParameter(
+            f"{value!r} is neither a span (15m, 2h) nor an ISO timestamp"
+        ) from None
+    # A naive timestamp means the user's local clock.
+    return moment if moment.tzinfo is not None else moment.astimezone()
+
+
+def emit_token_ledger(rows: list[SessionLedger], summed: SessionLedger) -> None:
+    """Render the token ledger — ``{"sessions": [...], "total": {...}}`` under ``--json``, a
+    table with a total row otherwise. Counts only: no path, no prompt, no text."""
+    if get_state().json_output:
+        typer.echo(
+            json.dumps({"sessions": [row.as_counts() for row in rows], "total": summed.as_counts()})
+        )
+        return
+    if not rows:
+        stdout_console().print("No agent sessions recorded for this scope.")
+        return
+    table = Table(show_header=True, header_style="bold", box=box.SIMPLE_HEAD)
+    for column in ("SESSION", "ROLE"):
+        table.add_column(column, no_wrap=True)
+    for column in ("REQ", "INPUT", "BASELINE", "PEAK", "WAKES", "DELTA CH", "COMPACT"):
+        table.add_column(column, justify="right", no_wrap=True)
+    for row in [*rows, summed]:
+        mine = row is not summed
+        table.add_row(
+            row.session_id[:8] if mine else "total",
+            (row.role or "") + (" (no transcript)" if mine and not row.transcript_found else ""),
+            f"{row.requests:,}",
+            f"{row.input_total:,}",
+            f"{row.baseline:,}" if row.baseline is not None else "—",
+            f"{row.peak_context:,}",
+            f"{row.wakes}/{row.no_action_wakes}",
+            f"{row.delta_chars:,}",
+            str(row.compactions),
+        )
+    console = stdout_console()
+    console.print(table)
+    console.print(
+        "INPUT is every request's input summed (fresh + cache write + cache read); "
+        "WAKES is wakes/no-action wakes. Every field: --json",
+        style="dim",
+    )
 
 
 def emit_turn_metrics(turns: list[TurnMetric]) -> None:

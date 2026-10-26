@@ -6,14 +6,66 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **An account with no usage to show reads `!` on the Accounts page, and says
+  why on hover** (#13 on the board). With no reading and none kept, the row read
+  `⚠ token missing` cut to its 16-wide cell and `—`, which looked like no usage
+  rather than an error. Now one `!` stands across the session and week used
+  columns, the resets are empty, and hovering it shows what is wrong and the
+  fix: `the login Keychain is locked`, then `fix: unlock the login keychain
+  (Keychain Access, or log out and back in), then ↻ Refresh usage (or
+  --refresh)`. Where nothing done on the machine helps (an HTTP 5xx, an answer
+  it cannot read) it says so. *Log in* stays beside the rows that need one, and
+  a kept reading still shows its numbers and age. `accounts list --usage` and
+  `accounts usage` have no hover, so they print the reason with the same fix
+  after it (`the stored token has expired; fix: press Log in, …`), a slot with
+  no login too, which printed `—`. In `--json` such a row's `usage` carries
+  `cause` (`token_expired`, `not_signed_in`, `keychain_locked`, `rate_limited`,
+  `tls_bundle`, `tls_cert`…) and `fix`, where a slot with no login said `null`.
+  Its `reason` no longer carries a fix of its own, so a token that expired or
+  was rejected reads `the stored token has expired` or `the token was rejected
+  (HTTP 401)`, a locked or refusing Keychain reads without the `— unlock it …`
+  tail, and 0.9.0's two TLS reasons read `TLS: the CA bundle could not be
+  loaded` and `TLS certificate could not be verified`, their fix (the same
+  words as before, and as `doctor`'s tls row) beside them.
+
+### Fixed
+
+- **The Spawn dialog's Account field says what a spawn with no account runs on**
+  (#12 on the board). With rank 1 the default (#406), the field still opened on
+  `(this shell's)`, which read as if the spawn skipped the accounts while it ran
+  on rank 1. It now names the account and the rung that picks it — `(default:
+  rank 1 · work)`, `(default: headroom · work)`, `(default: bound to tester ·
+  account 2)`, `(default: project default · work)` — for the role in the form
+  and a `--model` in its Extra agent args (the family a headroom pick reads),
+  read again when either changes; the captain's dialog says the captain's. It
+  reads `(this shell's)` only when no account is signed in, and `(default:
+  <role>'s CLAUDE_CONFIG_DIR)` for a role bound to a directory by hand (#9).
+  What is sent is unchanged: no `--account`, so the spawn asks the same ladder
+  when it runs. A headroom pick is shown from the shared five-minute usage
+  cache, so the label sends no request the status line would not.
+- **A headroom pick no longer overrides a hand-written `CLAUDE_CONFIG_DIR`
+  binding.** With `[accounts] pick = "headroom"` (the default) and usage
+  readable, a role bound with `team bind <role> --env CLAUDE_CONFIG_DIR=…` (or
+  `--env-file`) launched on the picked account instead of its own directory;
+  the rank-1 default already left it alone. Both silent defaults now do. The
+  flag, an account binding, a project default and a hand-over still win over it.
+  **Upgrade note:** this completes 0.9.0's note on the rank-1 default, which
+  said a headroom pick still overrides such a binding: after this upgrade it
+  does not, so a role bound by hand launches on its own directory whatever
+  headroom would pick. A hand-over still moves it.
+
 ## [0.9.0] - 2026-10-25
 
 **The captain: an experimental voice-and-text agent that runs every project's fleet
 for you, off until you turn it on. Personas: run any agent as someone. Remote control
-needs nothing more installed. Restart all brings back agents that died, the agent
-pane keeps up with your typing, the first enabled, signed-in account is the
-machine default, asq offers each new release and installs it in one click with the
-fleet still running, and every release now carries its own installer.**
+needs nothing more installed. Work briefs and the evidence gate: a task linked to a
+brief's requirements is done only on a fresh pass from an `asq exec` report. Restart
+all brings back agents that died, the agent pane keeps up with your typing, the first
+enabled, signed-in account is the machine default, asq offers each new release and
+installs it in one click with the fleet still running, and every release now carries
+its own installer.**
 
 ### Added
 
@@ -31,12 +83,111 @@ fleet still running, and every release now carries its own installer.**
   its own URL. The default one-liner is unchanged: the copy on `main`, which
   installs the latest release, in the README, `docs/install.md` and the repair
   command `aisquare upgrade` prints. `docs/install.md` shows how to pin.
+- **The one-liner on `main` runs the release's own installer** (#402). Main's
+  `install.sh` installs the latest release, but its steps and checks are main's,
+  which can be ahead of that release. Unstamped, it now downloads the latest
+  release's own `install.sh` (or release V's, with `--version V`), checks that it is
+  a POSIX sh script stamped with the version it should install, and runs it with
+  the same arguments, saying `using the v0.9.0 installer`. On any failure (no
+  network, a 404 for a release before 0.9.0 or one whose installers are not yet
+  attached, a check that fails) it says `using this installer (…)` and carries on
+  itself. A stamped release script never hands off, and a second hop is stopped.
+  `--no-handoff`, `AISQUARE_INSTALL_NO_HANDOFF=1`, `--offline` and
+  `AISQUARE_INSTALL_PACKAGE` keep main's copy. With no `--version` the install is the
+  latest release, unpinned, as main's own would be (the release's script is handed
+  `--version latest`, and the PyPI answer main's copy already read), so
+  `uv tool upgrade` still moves it; `--version V` pins.
+  `install.ps1` hands WSL main's `install.sh`, so the hand-off happens there.
 - **Accounts: *Log in again* on any signed-in row.** The login column offers the same
   sign-in flow as *Log in* (as a secondary button) on a row that reads fine, so a fresh
   login no longer needs `aisquare accounts run <slot>` and `/login` by hand. Its tooltip
   says it does not clear a rate limit. (F1 of #400.)
 - **`doctor` lists accounts whose usage reads are backed off** (`claude-account-backoff`),
   and until when. (F1 of #400.)
+- **Command reports: `asq exec` and `asq reports`** (`docs/command-reports.md`).
+  `asq exec [--project ID] [--task REF] [--session ID] [--raw] [--max-output-bytes N]
+  -- CMD …` runs a command once, with no shell and its arguments unchanged, and
+  saves a report of how it ended: the exit status (a death by signal is reproduced
+  after the report is saved; a command that cannot start is a saved 126 or 127),
+  `interrupted_by`, whether both streams were kept whole, and any launch error. Both
+  streams' originals are kept, the first 1 MiB each by default, with truncation
+  marked. Interrupts go to the command's process group, and on Linux and macOS the
+  second is sent as SIGTERM and the third as SIGKILL. A background process holding
+  the output pipe no longer keeps the wrapper waiting: it stops after two seconds of
+  silence, ten seconds after the exit at most, and records
+  `output_pipes_held_open`. With `--project`, the report holds the checkout's
+  per-file source identity before and after the command: content, not Git HEAD;
+  build directories left out among untracked files only; submodule and nested-repo
+  content counted; a worktree as its own files; the home tree refused; and a
+  capture failure recorded as unknown proof without stopping the command. Only git
+  status's usage hints and pytest's progress lines are shortened for display
+  (`--raw` or `AISQUARE_REPORTS=off` turns that off). `asq reports list | show |
+  prune | stats` read reports back without running anything. Reports live under
+  `AISQUARE_HOME/reports` for 14 days, newest 64; a `--project` report stays the
+  full 14 days, and when the list of evidence-backed reports cannot be read,
+  nothing is pruned.
+- **Work briefs** (`docs/work-briefs.md`): a request as numbered requirements
+  linked to the board's own tasks. `aisquare brief create | show | list | update |
+  link | evidence | finding`, every write with `--as`. Requirement ids (`R1`, `R2`,
+  …) are stable for the brief's life; one task can cover several requirements and
+  one requirement can need several tasks, each proving its own part. `brief
+  evidence --artifact` records a check as **manual** evidence, labelled so in
+  `show`, the board event and `--json`. The artifact is copied, owner-only, under
+  `~/.aisquare/briefs/` (16 MiB at most) and the check stands on the copy: the
+  original's path is provenance only, so deleting it (a temp dir, a reaped
+  worktree) leaves the check as it was. A changed or missing copy makes a pass
+  stale; a failure stays a failure. `brief finding` sends a task in review or
+  done back to todo, keeps an in-progress task's owner, leaves a dropped task
+  dropped, and blocks a task at its third distinct failure on one revision of a
+  requirement. A correction keeps every id: a changed requirement or check makes
+  its evidence stale, a changed assumption or boundary makes all of it stale, and
+  linked tasks in review or done go back to todo, with the old text and checks
+  kept. An identical update changes nothing, a dropped or vanished duplicate task
+  is ignored while a live linked task remains, and a session's own writes do not
+  wake it. Store v39 adds the `brief` table (not #136's `work_brief`, which a store
+  that ran a #136 build keeps, unread); `project forget --purge` deletes its rows.
+- **The evidence gate** (`docs/work-briefs.md`). `aisquare task done` on a task
+  linked to a brief's requirements refuses unless that task recorded a fresh pass
+  for each, naming every requirement and its state (`missing`, `failed`, `blocked`
+  or `stale`, and `unreadable` for a damaged brief that names the task) in text and
+  as a list under `--json` (`task_not_proven`). The check
+  and the status write are one transaction, so a correction landing in between
+  fails the completion (`brief_changed`); a task is gated only by the briefs that
+  link it, and a task no brief links is done exactly as before. `brief evidence
+  --report ID` records a check backed by an `asq exec --project` report: a pass
+  needs exit 0, no interruption, both streams whole, no launch error, a known
+  source identity and the same identity before, after and now, compared file by
+  file in the report's own checkout: every tracked file and every untracked one
+  git does not ignore, with no exemption for a check's own output. Check output
+  goes in a gitignored directory (`--junitxml=reports/a.xml` with `reports/` in
+  `.gitignore`) or outside the checkout. The ignore rules themselves count (every
+  `.gitignore` git reads, a self-ignored one too, `.git/info/exclude` and
+  `core.excludesFile`), and a symlink counts as its in-checkout target, walked as a
+  checkout is (so ignored files under a linked directory count: check output goes
+  in a gitignored directory no link reaches). A run during which a source file is
+  created, changed or removed is refused, and so is one during which a file that
+  existed was changed and put back (each file's change time is kept before and
+  after, nested repositories included), and a pass goes stale when one is new,
+  changed or gone since, such as an added `conftest.py`. The reason names the first
+  changed files and says to gitignore (in git), delete or write elsewhere a check's
+  own output, and says when a changed path is a linked directory. `brief show` and
+  `brief check` print the command that backed each report pass. Known limits: a file
+  created and deleted within one run is not seen, nor is a case-only rename on a
+  case-insensitive file system (by git either), and on Windows a change put back with
+  its old modification time, e.g. via utime or by renaming the original back, is not
+  seen. `asq exec
+  --task` takes the task's number or id, like every other
+  `--task`, and a report taken with it backs only that task. Manual `--artifact`
+  passes keep their checkout's whole-tree fingerprint.
+  `aisquare brief check BRIEF [--source-root PATH]` re-checks every pass against
+  the source now and exits 1 while anything is missing, failed, blocked, stale or
+  unlinked; `--source-root` compares every pass with one checkout of the project
+  and refuses any other path with exit 2. A session whose task is linked sees those
+  requirements at start, in at most 2,500 characters and only the room the session
+  start leaves under the 10,000-character hook cap, failing open on its own.
+  Reports that recorded evidence cites are kept by `asq reports prune` (it says how
+  many) until the briefs citing them are purged, and when the brief store cannot be
+  read nothing is pruned.
 - **Exact token usage per session** — `aisquare metrics tokens [--session S]
   [--project P | --all]` (`--json` too). The Stop, StopFailure and SessionEnd hooks
   read only the bytes the session's transcript gained since the last record, plus its
@@ -61,6 +212,94 @@ fleet still running, and every release now carries its own installer.**
   when it saves, reloads or resets, so it shows at once and the two-second refresh
   never reads `config.toml` for it. A `config set` from a shell while `asq` runs
   shows after App settings' *Reload* or at `asq`'s next start, not live.
+- **A symbol index, and `aisquare code` to ask it before grepping** (#285, phase A of
+  #91). `aisquare code find <name>` lists definitions (exact, then case-insensitive,
+  then prefix, then by name part), `code refs <name> [--defs]` every use, and
+  `code similar <name|path:line>` the like-named definitions to check before writing
+  a helper; `code index [--full] [--status]` builds, refreshes or describes it. Every
+  command takes `--json`, and `aisquare serve` offers the same as the MCP tool
+  `code_lookup`, registered only where the project has an index. The index is its own
+  SQLite file under `~/.aisquare/projects/<id>/code/`, built in the background at
+  `project onboard` (and `init`), which return at once, from git's file list less an
+  ignore list: built in, extended by `[code] ignore` (it was `[snapshot] ignore`; a
+  config that still has that is read as `[code] ignore` and moved there at the next
+  save) (the doctor's `code index` row says "building" until it is ready; a first `code find|refs|similar` builds it if none is there yet), and
+  refreshed incrementally: on this repository a full build takes about 4 s and a
+  one-file refresh 0.03 s. Python is parsed with the standard library; TypeScript and
+  JavaScript need the new optional extra `aisquare-cli[code]` (tree-sitter and the
+  grammars' own wheels, so nothing is downloaded); other languages are listed as not
+  indexed. Where a project has an index, a session start starts a detached
+  incremental refresh, at most once a minute per project. `aisquare doctor` has a `code index` row. `[code] enabled` and
+  `max_file_kb` (1024) are the keys.
+
+- **The fleet admits a spawn against the machine, not only the project** (#283).
+  `[fleet] max_agents_total` (0, no budget) caps the live agents across every
+  project, the captain excluded, and its refusal names each project's count;
+  `min_free_mb` (2048) refuses a spawn below that much available memory, or with
+  the kernel's memory pressure at critical, naming both numbers, and admits at warn
+  pressure with a note. After a memory refusal the floor is 512 MB higher for five
+  minutes, so admission does not flap. Parallel spawns at the budget's last seat
+  settle to exactly the budget, as the per-project cap does. `--json` errors are
+  `capacity_project`, `capacity_fleet` and `capacity_memory`. Memory is
+  `MemAvailable` and PSI on Linux and WSL, the pressure level and `vm_stat` on
+  macOS; elsewhere admission admits and says it could not tell.
+  `aisquare fleet capacity [--json]` shows the headroom and every limit, and
+  `aisquare doctor` has it as `fleet capacity`. `aisquare fleet gate [-- CMD]` waits
+  for memory before a heavy run and exits 75 at the deadline without running it;
+  with `test_gate_mb` set, the tester's and validator's cycles name it. Refusals and
+  admissions at the budget go to `~/.aisquare/fleet/admission.jsonl`.
+- **Finished workers stop by themselves** (#283). A tester, reviewer, validator or
+  ui-tester that has finished is stopped by the fleet, with `actor: auto-stop` and the
+  reason on its `agent_exited`, which wakes nobody. Finished means its task closed (or
+  a result posted), nothing claimed, nothing addressed to it unread, nothing queued for
+  it, idle `[fleet] auto_stop_idle_minutes` (5), and an empty input box nobody is
+  typing in. Its own Stop arms the check, a later turn cancels it, and `aisquare fleet
+  reap --finished [--dry-run]` does it on demand. A spawn refused for capacity stops
+  finished workers first and tries once more. `[fleet] auto_stop_finished = false`
+  turns it off; coders opt in through `auto_stop_roles`.
+- **`aisquare watch`: one watcher for the whole fleet, with no model** (#284). It looks
+  every minute at what needs a manager: an agent at a permission or question dialog, a
+  usage limit, a crash or a stall, and, with `[watch] github = true`, each project's pull
+  requests (approved, changes requested, checks done) through `gh` with ETags, so an
+  unchanged answer costs no rate limit. It also runs your own source commands. For each
+  project with something new it writes the details to a file (mode 600), puts one
+  `watch` line on the board for the manager with the counts and the path, never the
+  text, and nudges it. A working manager gets the line when its turn ends. `aisquare
+  watch --detach` runs it in the fleet's tmux server, one per home; `--status` and
+  `aisquare doctor` say how long ago it looked; `aisquare watch show` prints a line's
+  items; `--once` looks once, and says `busy` beside a running watcher's look. The
+  captain's queue lists approved pull requests from the same reader.
+- **A parent manager over a project group** (#199). `aisquare project group parent
+  <group> <project>` names a project outside the group whose manager is the group's. A
+  member's questions, blocked tasks, results and delegated tasks, notes matching
+  `project group route --pattern`, and any `note --to parent` land on the parent's
+  board in the same write, as one `routed` line with a pointer (`aisquare board --project
+  <member>`, which shows that member's board), and wake its manager;
+  one line per member a minute, the rest folded into a count (a question, a blocked
+  task and `--to parent` always route at once). `aisquare task add "…" --project
+  <member> --origin <task>` delegates a task from the parent: both boards show the
+  link, and `linked_all_done` asks the parent's manager to close the origin once every
+  child is closed, saying how many were done and how many dropped. `aisquare fleet pause
+  --group <group>` pauses the members and the parent, and an agent may not spawn on a
+  paused board there. `project group cap` caps their live agents. A member's manager
+  asks its parent before the human. The store moves to schema 38 (five nullable
+  columns, added by presence). A group without a parent behaves as before.
+- **Accounts can share memory, skills, agents, commands and CLAUDE.md** (#198).
+  `[accounts] share` (empty by default) and `aisquare accounts share --status |
+  --enable <parts> | --disable <parts> [--json]`. `memory` gives every launch one
+  auto-memory directory per project under `~/.aisquare/claude-shared/memory`
+  (Claude Code's `autoMemoryDirectory`, passed as `--settings`), merged from every
+  account the first time with nothing overwritten: a note kept under another
+  account's name stays a `.md`, and the merged `MEMORY.md` keeps its blank lines.
+  `skills`, `agents`, `commands` and `claude_md` make each managed account's entry a
+  link to the plain claude's, its own kept beside it (and its entries copied to the
+  plain claude's, never over one there), and `--disable` puts it back exactly; a
+  launch on an account added since links it. `plugins` is experimental. Transcripts are
+  never shared. `aisquare doctor` has a `claude-accounts sharing` line. A session is
+  attributed to the account its fleet row launched it on, not the one a shared
+  transcript path names. Cross-account resume is verified on Claude Code 2.1.309: a
+  session moved to another account keeps its id and what was said, and its turns go on
+  the original transcript (`docs/runbooks/cross-account-resume.md`).
 - **`[accounts] prefer = "reset-soonest"`** (*under the line, prefer* in App
   settings): of the accounts under `switch_at`, a spawn and a hand-over take the
   one whose week resets first, priority breaking ties, so a week's allowance is
@@ -131,12 +370,9 @@ fleet still running, and every release now carries its own installer.**
   (`aisquare init` or `aisquare project onboard` there, or `+` in asq) makes it a
   project with its own card, which never shows the captain's row; it warns once
   that the folder holds aisquare's settings, the fleet database and every Claude
-  account's login data, which agents working there can read and change. It is
-  never packed into a codebase snapshot, not even by `project onboard`, and `init`
-  there says so rather than that the pack is opt-in (a pack of it left from before
-  is not served, and the next onboard or `init` deletes it). Removing it from the
-  fleet hides it again. Every other role, fleet row and board, and the store
-  (schema v36), are the same either way. Four fleet changes that came with it are
+  account's login data, which agents working there can read and change. Removing it
+  from the fleet hides it again. Every other role, fleet row and board, and the store
+  (schema v39), are the same either way. Four fleet changes that came with it are
   not behind the switch, on or off: a tmux server the fleet starts holds no team
   variable, doctor's `fleet server env` row, the board each delta and wake-up line
   names, and `serve --stdio`'s idle clock (all under Fixed, below).
@@ -373,6 +609,44 @@ fleet still running, and every release now carries its own installer.**
   model ladder. It is the Spawn dialog's new first Role option, *(none) —
   general-purpose Claude*; `coder` stays the one preselected.
 
+- **`aisquare metrics ledger`: what each agent session spent in tokens, counted
+  live from its transcript.** Beside `metrics tokens` (the usage the hooks record, with
+  its cost), it reads each session's Claude Code transcript and prints one row per
+  session and a total:
+  requests, input (fresh, cache write and cache read), output, the baseline (the
+  first request), peak and mean context, wakes and the ones that took no action,
+  the team-delta blocks with their characters and carried cost, compactions, and
+  tool calls by name. `--json` gives every field; `--role`, `--session` and
+  `--since` narrow it. It prints counts, never text, and streams a transcript of
+  any size a line at a time. This is the ruler the P1 workstreams report their
+  before/after numbers with (`docs/plans/handoff-p1-token-diet.md` §1.7).
+- **One tester per task, and `fleet spawn` runs the model ladder** (#129 a, b).
+  `aisquare task next --task <ref>` returns that task when it is in `--status` and
+  ready, and nothing else. A tester or ui-tester spawned for a task (`fleet spawn tester
+  --task <id>`) verifies that one task and stops after its verdict; the manager spawns one
+  per task at its review, and the validator stays the single final gate. `fleet spawn`
+  runs the role's model ladder, as `team spawn` does: `--model` and `--effort` from the
+  cached probe (never a probe at spawn), recorded so a restart or switch starts the same
+  model, and shown in `fleet ls --json`'s `launch_spec`. Arguments that already name a
+  model or an effort are yours, and another binary gets neither.
+- **A manager starts from its start pack, cites briefs by path, and can be compacted at
+  a quiet point** (#281). At every session start, compactions and restarts included, a
+  manager is given its state file (`~/.aisquare/projects/<id>/manager/state.md`), every
+  open task, unanswered questions, live agents, the wake events waiting for it, and the
+  project's `.aisquare/rules/*.md` by path, in at most 20,000 characters, instead of the
+  plain board and the re-reading that followed; its cycle asks it to keep that file
+  current and to cite scripts and rules by path rather than paste them. `aisquare task
+  add --detail-file <path>` and `--rules testing,git` read a contract from a file and
+  cite rules files by path (a rules file that does not exist refuses the add), and
+  `[team] brief_blocks` (`objective`, `acceptance`, `boundaries`) warns about a contract
+  missing one, or refuses it under `[team] brief_strict = true`. Quiet-point compaction
+  ships off: with `[fleet] quiet_compact_at` set (400000 is a good start), a manager whose
+  turn ends with nothing pending, no question and a fresh state file is sent `/compact`
+  after `quiet_compact_delay` seconds, only into an idle prompt with an empty input box
+  and never while someone types in its pane, at most once per `quiet_compact_cooldown`
+  minutes, and its row reads `waiting` afterwards. Claude Code's own auto and idle
+  compaction are left as they are.
+
 ### Changed
 
 - **A hand-over whose live usage read fails now picks by a recent reading.** When the live
@@ -412,10 +686,6 @@ fleet still running, and every release now carries its own installer.**
   those sections, so they reached every session twice. Preferences from anywhere else
   stay. For a solo onboarded repo, SessionStart output plus MCP instructions go from
   about 2,400 characters to about 130.
-- `init` no longer packs the codebase with Repomix: no agent reads the pack, and it
-  cost a minute on a large repo. `aisquare project onboard` packs one on demand, as it
-  did; doctor's snapshot row reads `none — opt-in: aisquare project onboard packs one`
-  instead of warning.
 - In `asq`, the Spawn dialog shows three fields — Role, Hand off from (with its How row
   once a teammate is picked) and Account — and folds everything else into one
   **Advanced** section: *Pick…* (moved there from beside Role, where it sat next to the
@@ -450,30 +720,30 @@ fleet still running, and every release now carries its own installer.**
   is promoted too, once. No schema step. A machine that never set a default and
   has accounts signed in now launches on the first enabled, signed-in one. A
   `team bind <role> --env CLAUDE_CONFIG_DIR=…` written by hand wins over the
-  preferred account and over a headroom pick. That is a change where an older
-  build set a machine default, or where headroom picks: either won over such a
-  binding, and now the binding does, so that role launches on its own directory
-  after the upgrade. A hand-over still moves it. An old default that is signed
-  out or disabled no longer gets the launch: the next enabled, signed-in account
-  does.
-- **An account with no usage to show reads `!` on the Accounts page, and says
-  why on hover** (#13 on the board). With no reading and none kept, the row read
-  `⚠ token missing` cut to its 16-wide cell and `—`, which looked like no usage
-  rather than an error. Now one `!` stands across the session and week used
-  columns, the resets are empty, and hovering it shows what is wrong and the
-  fix: `the login Keychain is locked`, then `fix: unlock the login keychain
-  (Keychain Access, or log out and back in), then ↻ Refresh usage (or
-  --refresh)`. Where nothing done on the machine helps (an HTTP 5xx, an answer
-  it cannot read) it says so. *Log in* stays beside the rows that need one, and
-  a kept reading still shows its numbers and age. `accounts list --usage` and
-  `accounts usage` have no hover, so they print the reason with the same fix
-  after it (`the stored token has expired; fix: press Log in, …`), a slot with
-  no login too, which printed `—`. In `--json` such a row's `usage` carries
-  `cause` (`token_expired`, `not_signed_in`, `keychain_locked`, `rate_limited`…)
-  and `fix`, where a slot with no login said `null`. Its `reason` no longer
-  carries a fix of its own, so a token that expired or was rejected reads `the
-  stored token has expired` or `the token was rejected (HTTP 401)`, and a locked
-  or refusing Keychain reads without the `— unlock it …` tail.
+  preferred account. That is a change where an older build set a machine
+  default and headroom does not pick (`pick = "default"`, or no usage readable):
+  the default won over such a binding, and now the binding does, so that role
+  launches on its own directory after the upgrade. A headroom pick still
+  overrides the binding, as before. An old default that is signed out or
+  disabled no longer gets the launch: the next enabled, signed-in account does.
+- **`asq`'s tick costs what its agents cost, not what its project list costs** (#83).
+  Every two seconds the sidebar read every listed project: a store session each, and
+  two tmux processes each, whether it had an agent or not. It now reads them all in
+  one store session, asks each tmux server once (`list-panes -a`), and skips a project
+  with no live agent and none that ended in the last day, and the members of a
+  collapsed group, whose header counts their live agents instead. A card whose agents
+  did not change is not repainted. With 50 listed projects, 10 of them with 3 agents:
+  51 store sessions and 20 tmux processes per read became 1 and 1, the read ~200 ms to
+  ~11 ms, and the UI thread's paint ~15 ms to ~4–7 ms (measured on one Mac).
+  `aisquare ui --project <ref>` and `--group <name>` (both repeatable) list only those
+  projects for the session, plus the captain's section when it is on; a name that
+  matches nothing is refused before the app starts. The fleet's tmux server turns the
+  mouse on (#100), so the wheel scrolls Claude Code in `fleet attach`: a plain drag
+  there is tmux's selection now; hold Shift (Option in macOS Terminal and iTerm2) to
+  select in your own terminal. `[fleet] pane_clipboard = "on"` lets a program in an
+  agent's pane set your clipboard with OSC 52, which tmux keeps as a paste buffer and
+  hands to the terminal `fleet attach` runs in (#101); off, the default, keeps any pane
+  program from writing your clipboard. Both apply to a server started after the change.
 - **A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and
   the suite on one Linux leg (py3.12), the Linux package job and the other jobs
   bar the ambient legs and the demo. Pushes to `rc/**` and `main`, PRs into
@@ -496,8 +766,61 @@ fleet still running, and every release now carries its own installer.**
   nothing read it, and `uv run --frozen` failed on every persona path for want of
   `pyyaml`. The `voice` extra had drifted the same way since (the xdist change
   relocked it). A dependency change without its relock now fails CI.
-- The store migrates to schema v36 on first open, from 0.8.2's v32, in four steps: v36
-  adds the first message's three columns (under Fixed; a store a pre-release build
+
+- **A manager wakes for decisions, not news** (#279, #214). A clean exit, a switch, a
+  restart and the manager's own `fleet stop` no longer cost it a turn: they wait past its
+  cursor and ride along with the next wake. An exit still wakes it when it failed, was
+  killed or lost, released a claim, or was a hand-over that did not start, and asq's
+  Stop on an agent that exits cleanly types no nudge into a waiting manager. Every board
+  update an agent reads is one line, `#<seq> <who> <kind>[ #<task>]: <first line>`, with
+  the board named once in the block's header; `aisquare team show <seq>` prints one in
+  full (who wrote it and who caused it, the task, the addressee, its details and the
+  whole text), and the human board (`aisquare board`) keeps full text. `fleet stop --as
+  SESSION` records who stopped an agent, and every `agent_exited` names it (`coder-auth
+  exited (0) — stopped by manager`, `(--force)`) with its status, the claims its end
+  released and `--force` in its details; a stop with no `--as` acts for the fleet window
+  it runs in, else for `user`. `[fleet.roles.<role>] board_context = "all" | "relevant" |
+  "none"` and `fleet spawn --board-context`, kept by `restart` and `switch`, set what of
+  the board an agent reads: `relevant` keeps its own tasks, what is addressed to its role
+  or label, and decisions; `none` gives no recent updates at start and no deltas, and at
+  its turn's end only the notes addressed to it. The reviewer's default is `none`, so it
+  judges a change cold; a manager reads `all`, and doctor says when its key says
+  otherwise. Store v37 adds the events' `actor` and `meta` columns,
+  added by presence and nullable, so an older row reads as no actor and no details.
+- **Fleet roles launch without eight tools no role uses** (#280). Every tool
+  schema and the skill listing ride every request of every agent, so each role now
+  launches with only what it uses, wherever it starts: `fleet spawn`, `team spawn`
+  and `aisquare launch <role>`. `[fleet] deny_tools` denies Artifact,
+  ArtifactComments, Workflow, ReportFindings, ShareOnboardingGuide,
+  PushNotification, ScheduleWakeup and SendFeedback by default. Each
+  `[fleet.roles.<role>]` table takes `deny_tools`, `allow_tools` (the one way to
+  hand a tool back) and `skill_listing`: `full` for the manager, and `names` for
+  every other role, which keeps every skill name with its description cut. Every
+  `--disallowedTools` on the line is merged into one sorted token. On Claude Code
+  2.1.309, `/context` in a fresh coder read 9.9k tokens where it read 26.9k (tools
+  21.6k → 7.4k, skills 2.5k → 100), and every request of the session carries that.
+  A launch at `ultracode` effort keeps Workflow, which ultracode orchestrates with.
+  `aisquare doctor` has a `<role> tools` row for each role. The config file moves
+  to version 3, once: a reviewer whose `extra_args` are exactly 0.8.2's default
+  loses them, since the deny is the role's own now. Moving back with `aisquare
+  upgrade --version` to 0.8.2 or earlier names each role that release would launch
+  with tools denied here, with the `config set` that keeps them denied there.
+  A reviewer's own `extra_args` no longer drops its Edit/Write deny list either: the
+  deny was the reviewer's default `extra_args`, and a list replaces whole, so setting
+  them launched the reviewer with Edit, Write and NotebookEdit, and `aisquare launch
+  reviewer` and `team spawn reviewer` denied it nothing at all.
+- The store migrates to schema v39 on first open, from 0.8.2's v32, in seven steps: v39
+  adds the `brief` table and its `brief_number` index, for work briefs. The briefs
+  branches (#306, #341, #417) stamped it v34, v36, v37 or v38: such a store reaches v39
+  through the presence pass, which adds what a step under its stamp left out, and v39
+  finds `brief` in place. v38
+  adds a group's parent manager, routing rules and cap (`project_group.parent_project_id`,
+  `route`, `max_agents`) and a task's origin (`team_task.origin_task_id`,
+  `origin_project_id`), for a parent manager over a group (above; a store the pre-release
+  P2 train stamped v36 with them reaches v38 through the presence pass). v37
+  adds `team_event.actor` and `team_event.meta`, who caused a board event and its
+  details (above; a store the pre-release P1 train stamped v35 with them reaches v37
+  through the presence pass). v36 adds the first message's three columns (under Fixed; a store a pre-release build
   stamped v34 with them reaches v36 through the presence pass, as #346's does). v35
   adds two tables, `usage_session` and `usage_turn`, for `aisquare metrics tokens`. v34
   adds `fleet_agent.ended_by`, how an agent's row ended (`stopped` on aisquare's word,
@@ -594,28 +917,55 @@ fleet still running, and every release now carries its own installer.**
   in `limits[]`. `tests/test_claude_accounts.py` gains a fixture shaped like the
   endpoint's answer of 2026-10-23, with invented values.
 
+- **`install.sh` offers the Chrome DevTools MCP as an opt-in extra** (#399, the owner's
+  decisions of 2026-10-24). Node 22.12+ is no longer installed for aisquare, which never
+  runs it, but for the MCP, whose floor 22.12 is. Chosen, the extra installs Node, then
+  registers the MCP with Claude Code at user scope, as the package's own guide does:
+  `claude mcp add chrome-devtools --scope user npx chrome-devtools-mcp@latest`. The
+  summary says how to undo it (`claude mcp remove -s user chrome-devtools`). It skips
+  the registration in one line under `--no-agent`, without Claude Code, or when the MCP
+  (or the chrome-devtools-mcp plugin) is already there, and a failed registration only
+  warns. It is asked about with its own prompt, which defaults to no, or chosen without
+  asking with `--with chrome-devtools`; `--yes`, a run with no terminal and
+  `--no-system-deps` install no extra unless named. The extras are a list
+  (`OPTIONAL_EXTRAS`), so more can be added the same way. A machine without Node is
+  current, and the run exits 2 only when an extra you chose did not install (its Node,
+  or the npx that starts the MCP). Doctor's browser tools row names the same command.
+  A release up to 0.8.2 still has its own `repomix`, `snapshot` and `tiktoken` doctor
+  rows: the installer expects them amber when it installs one, so `--yes` on a machine
+  with an older Node exits 0.
+
+### Removed
+
+- **The codebase snapshot, and Repomix with it** (#399; the owner's decision of
+  2026-10-24: nothing on the AISquare platform reads a CLI pack). No pack is made,
+  read or reported, and the CLI never runs Node. `aisquare project onboard` keeps its
+  other job: the first run seeds one fact per marker it finds at the root, a plain
+  second run reads nothing and says so (`already onboarded; --refresh reads the markers
+  again`; `--json` gains `markers_read`, false on that run), and `--refresh` adds only
+  the facts that are new. A forgotten project onboarded again is a first run: forget
+  kept its facts, and it says they are back (`onboarded again; its earlier facts are
+  back`; `--json` gains `restored`, true on that run). It starts
+  no process but the `git rev-parse` that finds the root. `init` makes no pack and says
+  nothing about one. Doctor's `repomix`, `tiktoken` and `snapshot` rows are gone, so a
+  machine with no Node and no tiktoken has nothing amber over them.
+  - **Old packs are deleted once**, by the first command that opens the store: every
+    `~/.aisquare/projects/<id>/snapshot/`, the aisquare home's included, and nothing
+    else (never `brain/`, never a symlink's target). It runs after the store's
+    migrations, because a store from 0.6 or older still reads a project's pack as the
+    mark of a project you added (#139): such a project stays listed, then its pack goes.
+  - **A `config.toml` with `[snapshot]` still loads.** Doctor's config row says the
+    section is no longer read (green), and the next save drops it. Its `ignore` list
+    is the one part kept: it is read as `[code] ignore`, the symbol index's (Added,
+    above), and written there by that save. `aisquare config get/set snapshot.*`
+    answer `unknown config key`.
+  - **tiktoken** counted pack tokens and nothing else, and this build never imports it.
+    The one-liner still adds it for now: it can install a release up to 0.8.2, which
+    asks for tiktoken in doctor on a machine with Node. An install that has
+    it keeps a harmless unused package.
+
 ### Fixed
 
-- **The Spawn dialog's Account field says what a spawn with no account runs on**
-  (#12 on the board). With rank 1 the default (#406), the field still opened on
-  `(this shell's)`, which read as if the spawn skipped the accounts while it ran
-  on rank 1. It now names the account and the rung that picks it — `(default:
-  rank 1 · work)`, `(default: headroom · work)`, `(default: bound to tester ·
-  account 2)`, `(default: project default · work)` — for the role in the form
-  and a `--model` in its Extra agent args (the family a headroom pick reads),
-  read again when either changes; the captain's dialog says the captain's. It
-  reads `(this shell's)` only when no account is signed in, and `(default:
-  <role>'s CLAUDE_CONFIG_DIR)` for a role bound to a directory by hand (#9).
-  What is sent is unchanged: no `--account`, so the spawn asks the same ladder
-  when it runs. A headroom pick is shown from the shared five-minute usage
-  cache, so the label sends no request the status line would not.
-
-- **A headroom pick no longer overrides a hand-written `CLAUDE_CONFIG_DIR`
-  binding.** With `[accounts] pick = "headroom"` (the default) and usage
-  readable, a role bound with `team bind <role> --env CLAUDE_CONFIG_DIR=…` (or
-  `--env-file`) launched on the picked account instead of its own directory;
-  the rank-1 default already left it alone. Both silent defaults now do. The
-  flag, an account binding, a project default and a hand-over still win over it.
 - **Spawn dialog follow-ups to #303.** With Role *(none) — general-purpose
   Claude* and no persona, the Persona note says *plain Claude: no role, no
   persona* instead of "runs as its role alone". The *Pick…* note under Advanced
@@ -666,6 +1016,35 @@ fleet still running, and every release now carries its own installer.**
   launcher presses Enter past it, then types the prompt. An agent left at that
   screen reads `attention` in `fleet ls`, the sidebar and Remote, with the
   reason, and its prompt is kept rather than typed into it.
+- **A stale `ANTHROPIC_BASE_URL` is found wherever it hides, and one command removes
+  it** (#51). Tracing's proxy can outlive Disable in a Claude `settings.json` `env`
+  block (the plain claude's, a managed slot's, a project's shared or local file), a
+  role binding's `env` or `env_files`, the fleet tmux server's global environment or
+  the shell, and once that proxy is gone every agent launched with it fails at its
+  first model call. `aisquare doctor` has an `anthropic routing` row that reads them
+  all, with or without the team active: a proxy of ours (a target's, the shipped
+  default, or one carrying our identity headers) with tracing off or on another
+  target warns, naming each place and its fix; a URL the agent cannot parse warns;
+  your own gateway is information and is never changed. No header value is printed,
+  JSON included, and a URL is shown without its userinfo or query.
+  `aisquare explainability reset [--dry-run] [--yes] [--json]` turns tracing off
+  (targets kept) and removes only what is ours (a proxy URL of ours, and our header
+  lines; your gateway URL and your own headers beside them stay) from settings files
+  (a `settings.json.bak-<stamp>` copy kept, written under Claude Code's own lock),
+  from bindings and from the tmux server, prints the shell's `unset` line and the rc
+  files that mention them (never edited), and a second run says "nothing to reset".
+  `explainability disable` and the Explainability tab's Disable name the leftovers;
+  the tab then offers **Reset routing**. `doctor --fix` no longer undoes a Disable: it
+  turns tracing on only with `--target <name>`, and otherwise says how. A traced launch
+  no longer waits on the gateway (#129 (e)): the Run's root, posted inline between the
+  proxy probe and the agent's exec (a WAN write #129 measured over its 3 s budget on 2
+  of 11 launches), is posted by a detached `explainability post-root` worker with the
+  key on its stdin, which retries a transport failure or a 5xx; the agent starts on the
+  `traceparent` path at once, and the gateway holds its first spans until the root
+  lands. A gateway URL that cannot be parsed still falls back to `X-Pipeline-Id`
+  before anything starts; a post that fails in the worker leaves its reason in
+  `~/.aisquare/log/explainability-root.log`.
+
 - **Every first message reaches its agent and starts a turn, or `fleet ls` says it
   did not.** A spawn's `--prompt`, the line `fleet restart` and `fleet switch` start
   a replacement with, a fresh hand-off and the usage-limit hand-over's were typed
@@ -691,7 +1070,7 @@ fleet still running, and every release now carries its own installer.**
   its window: it read `waiting` with nothing on the board, for good, once its
   SessionStart had fired. `aisquare doctor` gains a `fleet-delivery` row: the last week's first
   messages acknowledged, N of M, and how long agents took to start their first turn.
-  The store migrates to schema v36, which adds three nullable columns:
+  Store v36 adds three nullable columns:
   `team_session.prompted_at`, `fleet_agent.first_prompt` and
   `fleet_agent.first_prompt_at`. A row from before them reads as "not tracked".
   And `fleet spawn coder --task <id>` with no `--prompt` typed nothing, so the coder
@@ -772,6 +1151,25 @@ fleet still running, and every release now carries its own installer.**
   busy_quiet_seconds` (30) is checked once: if Claude Code sits idle at its prompt —
   a turn ended with Esc fires no hook — it reads ⏸ waiting, *idle (the board said
   working)*, and a `fleet tell` is typed into it instead of filed. (#123, #32)
+- **HTTPS calls verify against the OS trust store, so usage reads work on a
+  python.org Python on macOS.** That interpreter ships no CA bundle until its
+  "Install Certificates.command" is run, so every usage read failed
+  `CERTIFICATE_VERIFY_FAILED` and each account said *could not reach the usage
+  endpoint (URLError)* while `curl` to the same URL worked. Every HTTPS caller —
+  usage, IAM, explainability, CI, persona import, the upgrade check, remote push
+  — now goes through one lazily built context (`core/tls.py`, one per thread):
+  `SSL_CERT_FILE` / `SSL_CERT_DIR` when set, trusted as the stdlib always did
+  (`SSL_CERT_FILE` replaces OpenSSL's default CA file, so a proxy's bundle must hold
+  the public roots too; `SSL_CERT_DIR` adds to it), else the OS store via `truststore`, else `certifi` where
+  `truststore` cannot be imported (both now declared dependencies). Every rung
+  requires a certificate, checks the hostname and refuses below TLS 1.2. A certificate that does not verify says
+  *TLS certificate could not be verified* with a hint instead of a bare
+  `URLError`, and a bundle `SSL_CERT_FILE` names that will not load says *the
+  CA bundle could not be loaded*. A plain `http://` call uses the context only
+  to verify a redirect to `https://`, and goes without it when the bundle will
+  not load. `aisquare doctor --live` gains a `tls` row: one verified handshake
+  to api.anthropic.com, through `HTTPS_PROXY` when one applies, naming the
+  trust source in use.
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
   and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for
   every other spawn: a seat reads the board of the hub its spawner honours, and its
@@ -812,9 +1210,8 @@ fleet still running, and every release now carries its own installer.**
   while every real document passed (measured on `rc/hackathon-v1` with two
   coder worktrees; from a clean checkout or inside a worktree it passed). The
   sweep now never enters the fleet's `worktree_dir` (the `[fleet]` default) or
-  any directory holding a `.git` *file* — a linked worktree wherever it was put
-  — the way `core/snapshot.py` already ignores `**/.aisquare-worktrees/**`. It
-  prunes as it walks, so it no longer reads every agent's `.venv` to throw the
+  any directory holding a `.git` *file* — a linked worktree wherever it was put.
+  It prunes as it walks, so it no longer reads every agent's `.venv` to throw the
   result away. The guard's rules and its document list are unchanged, and the
   positive control stays: the same fenced page at the repo's own level is still
   reported.
@@ -897,6 +1294,9 @@ fleet still running, and every release now carries its own installer.**
 - **The soft-cap warning names a command that works:** `persona import <its folder>
   --condense --force`, with `--project` for a project persona. `--condense` alone
   keeps the persona's name, which the persona itself holds, and was refused.
+- *Superseded on `main` by #346, not in this release:* the P1 train's change to
+  when session start says to read the snapshot skeleton first (#282). `main` no
+  longer points agents at the pack at all, so there is no directive left to change.
 
 ## [0.8.2] - 2026-10-19
 

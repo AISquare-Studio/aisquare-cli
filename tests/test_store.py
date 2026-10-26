@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import sys
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
@@ -10,12 +12,14 @@ from typing import Any
 
 import pytest
 
+from aisquare.core import paths
 from aisquare.core import store as store_module
 from aisquare.core.ids import new_entry_id
 from aisquare.core.store import (
     SCHEMA_VERSION,
     AmbiguousIdError,
     ContextStore,
+    GroupSettings,
     is_corrupt_error,
     open_store,
     store_session,
@@ -438,8 +442,12 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v33 the persona a session and a fleet agent run as (#201), v34 how a fleet agent's
     # row ended, stopped or died (#38), v35 session token usage (#346, stamped v34 there),
     # v36 a fleet agent's first message and a session's last prompt (P0-W1a, #122, stamped
-    # v34 on rc/p0-reliability)
-    assert version == SCHEMA_VERSION == 36
+    # v34 on rc/p0-reliability), v37 who caused a board event and its details (P1 WS-2,
+    # #279, stamped v35 on rc/p1-token-diet), v38 a group's parent manager and a task's
+    # origin (P2-W6, #199, stamped v36 on rc/p2-capacity-setup), v39 work briefs
+    # (docs/plans/evidence-gate.md, part 2; stamped v34, v36, v37 and v38 on #306's, #341's
+    # and #417's branches)
+    assert version == SCHEMA_VERSION == 39
 
 
 def test_a_v14_store_gains_nullable_persona_columns_through_the_persona_step() -> None:
@@ -1310,6 +1318,28 @@ _FIRST_PROMPT_COLUMNS = {
     ("column", "fleet_agent.first_prompt_at"),
 }
 """v36's products (P0-W1a): no dump of an older store holds them, every store reaches them."""
+#: P1 WS-2's step (#279, v37; v35 on rc/p1-token-diet): who caused a board event, and its
+#: details.
+_EVENT_ACTOR_COLUMNS = {("column", "team_event.actor"), ("column", "team_event.meta")}
+#: P2-W6's step (#199, v38; v36 on rc/p2-capacity-setup): a group's parent, rules and cap;
+#: a task's origin.
+_PARENT_COLUMNS = {
+    ("column", "project_group.parent_project_id"),
+    ("column", "project_group.route"),
+    ("column", "project_group.max_agents"),
+    ("column", "team_task.origin_task_id"),
+    ("column", "team_task.origin_project_id"),
+}
+#: v39, work briefs (v34, then v36, on #306's and #341's branches, v37 and v38 on #417's): the
+#: ``brief`` table and its per-board number index.
+_BRIEF_STEP = {
+    ("table", "brief"),
+    ("index", "brief_number"),
+    *(
+        ("column", f"brief.{column}")
+        for column in ("id", "project_id", "number", "revision", "data", "created_at", "updated_at")
+    ),
+}
 # Main's v22 to v24 by name: SQLite's automatic index for the primary key is left out.
 _MAINS_STEPS_PAST_21 = {
     ("table", "pending_revocation"),
@@ -1505,6 +1535,9 @@ def test_mains_v24_store_gains_the_persona_columns_and_keeps_every_row() -> None
         | _ENDED_BY_COLUMN
         | _USAGE_STEP
         | _FIRST_PROMPT_COLUMNS
+        | _EVENT_ACTOR_COLUMNS
+        | _PARENT_COLUMNS
+        | _BRIEF_STEP
     )
     assert shape == _built(SCHEMA_VERSION), "not the schema a fresh store has"
     assert after == before, "a row the store held changed on a column it had"
@@ -1571,12 +1604,17 @@ def test_one_schema_is_mains_v32_with_the_persona_columns_and_the_rcs_v21_with_m
     persona columns are #201's v33, one step on main's v32 with an empty script and the two
     columns as its products, so a store that holds them already (the RC's) is not changed
     by it. v34 adds ``fleet_agent.ended_by`` (#38) on top, v35 the two token-usage tables
-    (#346), v36 the first message's three columns (P0-W1a), and nothing else."""
+    (#346), v36 the first message's three columns (P0-W1a), v37 a board event's actor and
+    details (P1 WS-2), v38 a group's parent manager and a task's origin (P2-W6), v39 the
+    work-brief table, and nothing else."""
     fresh = _built(SCHEMA_VERSION)
     persona = _built(33)
 
-    assert SCHEMA_VERSION == 36
-    assert fresh == persona | _ENDED_BY_COLUMN | _USAGE_STEP | _FIRST_PROMPT_COLUMNS
+    assert SCHEMA_VERSION == 39
+    assert fresh == _built(38) | _BRIEF_STEP
+    assert _built(38) == _built(37) | _PARENT_COLUMNS
+    assert _built(37) == _built(36) | _EVENT_ACTOR_COLUMNS
+    assert _built(36) == persona | _ENDED_BY_COLUMN | _USAGE_STEP | _FIRST_PROMPT_COLUMNS
     assert _built(35) == persona | _ENDED_BY_COLUMN | _USAGE_STEP
     assert _built(34) == persona | _ENDED_BY_COLUMN
     assert persona == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS
@@ -1683,7 +1721,7 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
     _schema_again, rows_again = _contents(db)
     version, shape, notnull = _persona_shape(db)
 
-    assert version == SCHEMA_VERSION == 36, label
+    assert version == SCHEMA_VERSION == 39, label
     assert shape == _built(SCHEMA_VERSION), label
     assert notnull == {"team_session": 0, "fleet_agent": 0}, label
     assert old_session is not None and old_session.persona == persona, label
@@ -1694,11 +1732,11 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
 
 
 def test_a_fresh_store_is_built_with_the_persona_step() -> None:
-    """No file at all: v1 to v36, the same shape as every cohort above reaches."""
+    """No file at all: v1 to v38, the same shape as every cohort above reaches."""
     open_store().close()
     version, shape, notnull = _persona_shape(_db_path())
 
-    assert version == SCHEMA_VERSION == 36
+    assert version == SCHEMA_VERSION == 39
     assert shape == _built(SCHEMA_VERSION)
     assert {("column", "team_session.persona"), ("column", "fleet_agent.persona")} <= shape
     assert notnull == {"team_session": 0, "fleet_agent": 0}
@@ -1784,7 +1822,7 @@ def test_the_two_v34_steps_are_v34_and_v35_each_idempotent() -> None:
     Run twice on one store, each leaves what it left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 36
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 39
     assert _MIGRATIONS[33] == ""
     assert _PRODUCTS[33] == _Products(columns=(("fleet_agent", "ended_by", "TEXT"),))
     assert _PRODUCTS[34] == _Products(
@@ -1800,7 +1838,15 @@ def test_the_two_v34_steps_are_v34_and_v35_each_idempotent() -> None:
         assert _shape(conn) == once
     finally:
         conn.close()
-    assert once == _built(33) | _ENDED_BY_COLUMN | _USAGE_STEP | _FIRST_PROMPT_COLUMNS
+    assert once == (
+        _built(33)
+        | _ENDED_BY_COLUMN
+        | _USAGE_STEP
+        | _FIRST_PROMPT_COLUMNS
+        | _EVENT_ACTOR_COLUMNS
+        | _PARENT_COLUMNS
+        | _BRIEF_STEP
+    )
 
 
 @pytest.mark.parametrize(
@@ -1888,7 +1934,10 @@ def test_a_store_from_either_branchs_v34_reaches_v35_with_both_steps(
 #
 # Main owns v34 (#38's ``ended_by``) and v35 (#346's usage tables). Each release train stamped
 # its own step at its branch's top, and moves past main's on the sync, in train order:
-# rc/p0-reliability's v34 (P0-W1a's first-message columns) is v36 here. A store that ran a
+# rc/p0-reliability's v34 (P0-W1a's first-message columns) is v36 here, and
+# rc/p1-token-diet's v35 (P1 WS-2's event columns, on top of its own v34 = P0-W1a's) is v37,
+# and rc/p2-capacity-setup's v36 (P2-W6's parent columns, on top of v34 and v35) is v38.
+# A store that ran a
 # lineage reads that lineage's top version with only that lineage's products, and must reach
 # head with every product of every lineage. A train's step is replayed from its DDL as the
 # branch shipped it, frozen here, never this ladder's; a later train adds its own case.
@@ -1903,6 +1952,36 @@ UPDATE team_session SET prompted_at = '2026-10-23T00:01:00+00:00' WHERE id = 'se
 UPDATE fleet_agent SET first_prompt = 'acked', first_prompt_at = '2026-10-23T00:01:00+00:00'
     WHERE id = 'agt_old';
 """
+
+#: rc/p1-token-diet's v35 as it shipped (P1 WS-2, b2ecee3f), on top of its v34 (rc/p0's
+#: above): an empty script, the two columns added by the ladder, with an event a run of it
+#: wrote carrying both.
+_EVENT_ACTOR_V35_OF_RC_P1 = (
+    _FIRST_PROMPT_V34_OF_RC_P0
+    + """
+ALTER TABLE team_event ADD COLUMN actor TEXT;
+ALTER TABLE team_event ADD COLUMN meta TEXT;
+INSERT INTO team_event (id, project_id, session_id, kind, text, created_at, actor, meta)
+    VALUES ('evt_old', 'prj_used', 'ses_old', 'agent_exited', 'coder-1 exited (1)',
+            '2026-10-23T00:02:00+00:00', 'user', '{"status": 1}');
+"""
+)
+
+#: rc/p2-capacity-setup's v36 as it shipped (P2-W6, #199), on top of its v34 and v35 (rc/p1's
+#: above): an empty script, the five columns added by the ladder, with a group a run of it
+#: gave a parent, rules and a cap.
+_PARENT_V36_OF_RC_P2 = (
+    _EVENT_ACTOR_V35_OF_RC_P1
+    + """
+ALTER TABLE project_group ADD COLUMN parent_project_id TEXT;
+ALTER TABLE project_group ADD COLUMN route TEXT;
+ALTER TABLE project_group ADD COLUMN max_agents INTEGER;
+ALTER TABLE team_task ADD COLUMN origin_task_id TEXT;
+ALTER TABLE team_task ADD COLUMN origin_project_id TEXT;
+INSERT INTO project_group (id, name, created_at, parent_project_id, route, max_agents)
+    VALUES ('grp_old', 'app', '2026-10-23T00:03:00+00:00', 'prj_seen', '{"off": true}', 4);
+"""
+)
 
 #: What a run of main's v35 left: #38's stopped row and #346's scan state and turn.
 _MAINS_V35_ROWS = (
@@ -1926,7 +2005,7 @@ def test_the_first_prompt_step_is_v36_past_mains_two_and_idempotent() -> None:
     it left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 36
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 39
     assert _MIGRATIONS[35] == ""
     assert _PRODUCTS[33] == _Products(columns=(("fleet_agent", "ended_by", "TEXT"),))
     assert _PRODUCTS[35] == _Products(
@@ -1945,7 +2024,61 @@ def test_the_first_prompt_step_is_v36_past_mains_two_and_idempotent() -> None:
         assert _shape(conn) == once
     finally:
         conn.close()
-    assert once == _built(35) | _FIRST_PROMPT_COLUMNS
+    assert once == (
+        _built(35) | _FIRST_PROMPT_COLUMNS | _EVENT_ACTOR_COLUMNS | _PARENT_COLUMNS | _BRIEF_STEP
+    )
+
+
+def test_the_event_actor_step_is_v37_past_the_first_prompt_and_idempotent() -> None:
+    """rc/p1's step moved from v35 to v37 on the sync: an empty script, its two columns in
+    ``_PRODUCTS[36]``, past main's v34 and v35 and P0-W1a's v36. Run twice, it leaves what it
+    left once."""
+    from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
+
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 39
+    assert _MIGRATIONS[36] == ""
+    assert _PRODUCTS[36] == _Products(
+        columns=(("team_event", "actor", "TEXT"), ("team_event", "meta", "TEXT"))
+    )
+    conn = sqlite3.connect(":memory:")
+    try:
+        for step in range(SCHEMA_VERSION):
+            _run_step(conn, step)
+        once = _shape(conn)
+        _run_step(conn, 36)
+        assert _shape(conn) == once
+    finally:
+        conn.close()
+    assert once == _built(36) | _EVENT_ACTOR_COLUMNS | _PARENT_COLUMNS | _BRIEF_STEP
+
+
+def test_the_parent_step_is_v38_past_the_event_actor_and_idempotent() -> None:
+    """rc/p2's step moved from v36 to v38 on the sync: an empty script, its five columns in
+    ``_PRODUCTS[37]``, past main's v34 and v35, P0-W1a's v36 and P1 WS-2's v37. Run twice, it
+    leaves what it left once."""
+    from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
+
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 39
+    assert _MIGRATIONS[37] == ""
+    assert _PRODUCTS[37] == _Products(
+        columns=(
+            ("project_group", "parent_project_id", "TEXT"),
+            ("project_group", "route", "TEXT"),
+            ("project_group", "max_agents", "INTEGER"),
+            ("team_task", "origin_task_id", "TEXT"),
+            ("team_task", "origin_project_id", "TEXT"),
+        )
+    )
+    conn = sqlite3.connect(":memory:")
+    try:
+        for step in range(SCHEMA_VERSION):
+            _run_step(conn, step)
+        once = _shape(conn)
+        _run_step(conn, 37)
+        assert _shape(conn) == once
+    finally:
+        conn.close()
+    assert once == _built(37) | _PARENT_COLUMNS | _BRIEF_STEP
 
 
 @pytest.mark.parametrize(
@@ -1959,21 +2092,33 @@ def test_the_first_prompt_step_is_v36_past_mains_two_and_idempotent() -> None:
             33, _A_SESSION_AND_AN_AGENT + _FIRST_PROMPT_V34_OF_RC_P0, 34, "rc/p0",
             id="rc/p0's v34: the first-message columns",
         ),
+        pytest.param(
+            33, _A_SESSION_AND_AN_AGENT + _EVENT_ACTOR_V35_OF_RC_P1, 35, "rc/p1",
+            id="rc/p1's v35: the first-message and event-actor columns",
+        ),
+        pytest.param(
+            33, _A_SESSION_AND_AN_AGENT + _PARENT_V36_OF_RC_P2, 36, "rc/p2",
+            id="rc/p2's v36: the first-message, event-actor and parent columns",
+        ),
     ],
 )  # fmt: skip
 def test_a_store_from_main_or_a_train_reaches_head_with_every_lineages_steps(
     steps: int, after: str, stamp: int, label: str
 ) -> None:
-    """Stamped by main's v35 or by rc/p0's v34, a store opens at head with
-    ``fleet_agent.ended_by``, the usage tables and their indexes, AND the first message's
-    three columns: the schema a fresh store has, nothing missing. Its rows read back
+    """Stamped by main's v35, rc/p0's v34, rc/p1's v35 or rc/p2's v36, a store opens at head
+    with ``fleet_agent.ended_by``, the usage tables and their indexes, the first message's
+    three columns, a board event's actor and details AND a group's parent, rules and cap and
+    a task's origin: the schema a fresh store has, nothing missing. Its rows read back
     unchanged on every column they had; the store then writes and reads every lineage's
     data, and a second open changes nothing.
 
     Bites: with the presence pass off, the rc/p0 store fails on ``ended_by``; with v36 out
     of the ladder, main's store has no ``first_prompt``; with v35's CREATE not ``IF NOT
-    EXISTS``, a store that holds the tables fails to open."""
-    from aisquare.models import FleetAgent, SessionUsage
+    EXISTS``, a store that holds the tables fails to open; with v37 out of the ladder, main's
+    and rc/p0's stores have no ``team_event.actor``; with v38 out of it, no store but rc/p2's
+    has ``project_group.parent_project_id``; with the presence pass off, rc/p2's store fails
+    on ``ended_by`` too."""
+    from aisquare.models import FleetAgent, SessionUsage, TeamEvent
 
     db = _at_version(steps, after=_TWO_PROJECTS + after, stamp=stamp)
     before, columns = _rows(db)
@@ -1984,17 +2129,32 @@ def test_a_store_from_main_or_a_train_reaches_head_with_every_lineages_steps(
         raw.close()
     assert (("column", "fleet_agent.ended_by") in stamped) == (label == "main"), "the fixture"
     assert (("table", "usage_session") in stamped) == (label == "main"), "the fixture"
-    assert (("column", "fleet_agent.first_prompt") in stamped) == (label == "rc/p0"), "fixture"
+    assert (("column", "fleet_agent.first_prompt") in stamped) == (label != "main"), "fixture"
+    assert (("column", "team_event.actor") in stamped) == (label in ("rc/p1", "rc/p2")), "fixture"
+    assert (("column", "project_group.route") in stamped) == (label == "rc/p2"), "the fixture"
 
     with store_session() as store:
         missing = store.missing_schema()
         old_agent = store.get_fleet_agent("agt_old")
         old_session = store.get_session("ses_old")
         old_usage = store.session_usage("ses_old")
+        old_event = store.get_event("evt_old")
+        old_group = store.group_settings("grp_old")
     after_rows, _ = _rows(db, columns)
 
     now = datetime(2026, 10, 24, tzinfo=UTC)
     with store_session() as store:
+        posted = store.add_team_event(
+            TeamEvent(
+                id="evt_new",
+                project_id="prj_used",
+                kind="agent_exited",
+                text="coder-2 exited (0)",
+                created_at=now,
+                actor="user",
+                meta={"status": 0},
+            )
+        )
         given = store.upsert_fleet_agent(
             FleetAgent(
                 id="agt_new",
@@ -2019,6 +2179,7 @@ def test_a_store_from_main_or_a_train_reaches_head_with_every_lineages_steps(
             previous_state=None,
         )
         acked = store.get_fleet_agent("agt_new")
+        read_back = store.get_event_by_seq(posted.seq)
     once = _contents(db)
     open_store().close()
 
@@ -2030,9 +2191,27 @@ def test_a_store_from_main_or_a_train_reaches_head_with_every_lineages_steps(
         raw.close()
     assert (version, missing) == (SCHEMA_VERSION, []), label
     assert shape == _built(SCHEMA_VERSION), f"{label}: not the schema a fresh store has"
-    assert shape >= _ENDED_BY_COLUMN | _USAGE_STEP | _FIRST_PROMPT_COLUMNS, label
+    assert shape >= (
+        _ENDED_BY_COLUMN
+        | _USAGE_STEP
+        | _FIRST_PROMPT_COLUMNS
+        | _EVENT_ACTOR_COLUMNS
+        | _PARENT_COLUMNS
+    ), label
     assert after_rows == before, f"{label}: a row the store held changed on a column it had"
     assert old_agent is not None and old_session is not None
+    if label in ("rc/p1", "rc/p2"):
+        assert old_event is not None
+        assert (old_event.actor, old_event.meta) == ("user", {"status": 1}), "rc/p1's own event"
+    else:
+        assert old_event is None
+    if label == "rc/p2":
+        assert old_group == GroupSettings(
+            group_id="grp_old", parent_project_id="prj_seen", route={"off": True}, max_agents=4
+        ), "rc/p2's own group keeps its parent, rules and cap"
+    else:
+        assert old_group == GroupSettings(group_id="grp_old"), "no group, no settings"
+    assert read_back is not None and (read_back.actor, read_back.meta) == ("user", {"status": 0})
     if label == "main":
         assert old_agent.ended_by == "stopped", "#38's own row keeps how it ended"
         assert old_usage is not None and old_usage.state == '{"offset": 812}'
@@ -2044,6 +2223,175 @@ def test_a_store_from_main_or_a_train_reaches_head_with_every_lineages_steps(
     assert acked is not None and (acked.first_prompt, acked.first_prompt_at) == ("acked", now)
     assert ended.ended_by == "died" and wrote
     assert _contents(db) == once, f"{label}: a second open changed the store"
+
+
+# --- the stack's step: work briefs, stamped v34, v36 and v37 before it was v38 -------------
+#
+# #306 and #341 stamped work briefs v34 on their branches, and v36 once they had merged main's
+# v34 and v35. #417 stamped it v37, after rc/p0's v36 (P0-W1a). Merged after rc/p1's v37
+# (P1 WS-2), the step is v38. A store that ran those branches reads v34 with ``brief`` and no
+# ``fleet_agent.ended_by``, usage tables, first-message or event-actor columns; v36 with
+# ``brief``, the column and the tables but neither set of columns; or v37 with ``brief`` and
+# the first-message columns but no event-actor columns. Each must reach v38 with every step.
+# The briefs step is replayed from its DDL as those branches shipped it (1f669088, unchanged
+# since), frozen here.
+
+#: The stack's briefs step as its branches shipped it, with one brief a run of them left.
+_BRIEF_V34_OF_THE_STACK = """
+CREATE TABLE IF NOT EXISTS brief (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    revision INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS brief_number ON brief (project_id, number);
+INSERT INTO brief (id, project_id, number, revision, data, created_at, updated_at)
+    VALUES ('brf_old', 'prj_used', 1, 3, '{"title": "Login"}',
+            '2026-10-23T00:00:00+00:00', '2026-10-23T00:05:00+00:00');
+"""
+
+
+def test_the_brief_step_is_v39_and_idempotent() -> None:
+    """The briefs step is v39, past P0-W1a's v36, P1 WS-2's v37 and P2-W6's v38: #417 took
+    v38 and main's P2 took v38 in the same release, and P2 kept it (``CREATE ... IF NOT
+    EXISTS`` only, its table and index in ``_PRODUCTS[38]``). Run twice on one store, it
+    leaves what it left once."""
+    from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
+
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 39
+    assert _PRODUCTS[38] == _Products(("brief", "brief_number"))
+    conn = sqlite3.connect(":memory:")
+    try:
+        for step in range(SCHEMA_VERSION):
+            _run_step(conn, step)
+        once = _shape(conn)
+        _run_step(conn, 38)
+        assert _shape(conn) == once
+    finally:
+        conn.close()
+    assert once == _built(38) | _BRIEF_STEP
+
+
+@pytest.mark.parametrize(
+    ("steps", "stamp"),
+    [
+        pytest.param(33, 34, id="the stack's v34: brief, before main's v34 and v35"),
+        pytest.param(35, 36, id="the stack's v36: brief on main's v35"),
+        pytest.param(36, 37, id="#417's v37: brief on P0-W1a's v36"),
+        pytest.param(37, 38, id="#417's v38: brief on P1 WS-2's v37, without P2-W6's v38"),
+    ],
+)  # fmt: skip
+def test_a_store_from_the_stacks_v34_to_v38_reaches_v39_with_every_step(
+    steps: int, stamp: int
+) -> None:
+    """Stamped v34 by the stack, with ``brief`` and neither ``fleet_agent.ended_by``, the
+    usage tables nor the first message's or a board event's actor columns; v36, with
+    ``brief``, the column and the tables but neither set of columns; v37 by #417, with
+    ``brief`` and the first message's columns but not the actor's; or v38 by #417 as pushed
+    (ce1530ae), with everything to P1's v37 and ``brief`` but not P2-W6's v38 columns, which
+    its stamp claims: a store opens at v39 with all of them, the schema a fresh store has.
+    The presence pass adds what the stamp claims and the store lacks, the ladder runs the
+    steps above the stamp, and v39 finds ``brief`` in place. Its brief and every other row
+    read back unchanged, and a second open changes nothing.
+
+    Bites: with the presence pass off, each of the four fails: the v34 store has no
+    ``ended_by``, the v36 store no ``first_prompt``, the v37 store no ``team_event.actor``,
+    and the v38 store no ``project_group.parent_project_id`` (as with P2's columns taken
+    out of ``_PRODUCTS``)."""
+    db = _at_version(
+        steps,
+        after=_TWO_PROJECTS + _A_SESSION_AND_AN_AGENT + _BRIEF_V34_OF_THE_STACK,
+        stamp=stamp,
+    )
+    before, columns = _rows(db)
+    raw = sqlite3.connect(str(db))
+    try:
+        stamped = _shape(raw)
+    finally:
+        raw.close()
+    assert stamped >= _BRIEF_STEP, "the fixture"
+    assert not _PARENT_COLUMNS & stamped, "the fixture: P2-W6's columns are what it lacks"
+    if stamp == 38:
+        assert stamped >= _EVENT_ACTOR_COLUMNS, "the fixture"
+    else:
+        assert not _EVENT_ACTOR_COLUMNS & stamped, "the fixture"
+    if stamp in (37, 38):
+        assert stamped >= _FIRST_PROMPT_COLUMNS, "the fixture"
+    else:
+        assert not _FIRST_PROMPT_COLUMNS & stamped, "the fixture"
+    if stamp >= 36:
+        assert stamped >= _ENDED_BY_COLUMN | _USAGE_STEP, "the fixture"
+    else:
+        assert not (_ENDED_BY_COLUMN | _USAGE_STEP) & stamped, "the fixture"
+
+    with store_session() as store:
+        missing = store.missing_schema()
+        old_brief = store.get_brief("prj_used", "1")
+        old_agent = store.get_fleet_agent("agt_old")
+    after_rows, _ = _rows(db, columns)
+    with store_session() as store:
+        ended = store.end_fleet_agent("agt_1", exit_status=143, ended_by="died")
+        usage = store.session_usage("ses_none")
+    once = _contents(db)
+    open_store().close()
+
+    raw = sqlite3.connect(str(db))
+    try:
+        version = raw.execute("PRAGMA user_version").fetchone()[0]
+        shape = _shape(raw)
+    finally:
+        raw.close()
+    label = f"the v{stamp} store"
+    every = (
+        _ENDED_BY_COLUMN
+        | _USAGE_STEP
+        | _FIRST_PROMPT_COLUMNS
+        | _EVENT_ACTOR_COLUMNS
+        | _PARENT_COLUMNS
+    )
+    assert (version, missing) == (SCHEMA_VERSION, []), label
+    assert shape == _built(SCHEMA_VERSION), f"{label}: not the schema a fresh store has"
+    assert shape >= every | _BRIEF_STEP, label
+    assert after_rows == before, f"{label}: a row the store held changed on a column it had"
+    assert old_brief is not None and (old_brief.id, old_brief.revision) == ("brf_old", 3)
+    assert old_agent is not None, label
+    assert (old_agent.ended_by, old_agent.first_prompt) == (None, None), "rows from before"
+    assert ended.ended_by == "died" and usage is None
+    assert _contents(db) == once, f"{label}: a second open changed the store"
+
+
+def test_a_store_main_stamped_v38_takes_the_briefs_step() -> None:
+    """Main's P2-W6 took v38 too, so a store a build of main (8425a08d) opened reads v38 with
+    the parent columns and no ``brief``: it opens at v39 with the table, the schema a fresh
+    store has, its rows unchanged, and a second open changes nothing."""
+    db = _at_version(38, after=_TWO_PROJECTS + _A_SESSION_AND_AN_AGENT)
+    before, columns = _rows(db)
+    raw = sqlite3.connect(str(db))
+    try:
+        stamped = _shape(raw)
+    finally:
+        raw.close()
+    assert stamped >= _PARENT_COLUMNS and not _BRIEF_STEP & stamped, "the fixture"
+
+    with store_session() as store:
+        missing = store.missing_schema()
+    after_rows, _ = _rows(db, columns)
+    once = _contents(db)
+    open_store().close()
+
+    raw = sqlite3.connect(str(db))
+    try:
+        version = raw.execute("PRAGMA user_version").fetchone()[0]
+        shape = _shape(raw)
+    finally:
+        raw.close()
+    assert (version, missing) == (SCHEMA_VERSION, [])
+    assert shape == _built(SCHEMA_VERSION) and shape >= _BRIEF_STEP
+    assert after_rows == before
+    assert _contents(db) == once, "a second open changed the store"
 
 
 # --- doctor's database row reads the schema, not only the file (review of #203) ---------------
@@ -2951,8 +3299,6 @@ def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(
 ) -> None:
     """Rows with context entries, a codename, linked repos, board activity, a fleet
     agent or a snapshot on disk become onboarded; captured-only rows stay hidden."""
-    from aisquare.core import snapshot as snapshot_core
-
     rows = [
         ("prj_entries", "/w/entries"),
         ("prj_named", "/w/named"),
@@ -2998,8 +3344,7 @@ def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(
     )
     _at_version(16, after=after)
     for with_snapshot in ("prj_snap", "prj_gone_used"):  # forget keeps the snapshot
-        snapshot_core.meta_path(with_snapshot).parent.mkdir(parents=True, exist_ok=True)
-        snapshot_core.meta_path(with_snapshot).write_text("{}", encoding="utf-8")
+        _old_pack(with_snapshot)
 
     store = open_store()
     try:
@@ -3028,8 +3373,6 @@ def test_an_unreadable_snapshot_is_no_evidence_and_the_store_still_opens(
     migration, which rolls back only on ``sqlite3.Error``, so the open failed with a raw
     traceback and the write transaction left open, on every command until the directory
     was readable again (review of #203). It is no evidence: the row stays captured."""
-    from aisquare.core import snapshot as snapshot_core
-
     after = "".join(
         "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES "
         f"('{pid}', '/w/{pid}', '{pid}', '[]', '2026-09-01T00:00:00+00:00');\n"
@@ -3037,13 +3380,12 @@ def test_an_unreadable_snapshot_is_no_evidence_and_the_store_still_opens(
     )
     _at_version(16, after=after)
     for pid in ("prj_locked", "prj_snap"):
-        snapshot_core.meta_path(pid).parent.mkdir(parents=True, exist_ok=True)
-        snapshot_core.meta_path(pid).write_text("{}", encoding="utf-8")
-    locked = snapshot_core.snapshot_dir("prj_locked")
+        _old_pack(pid)
+    locked = paths.project_data_dir("prj_locked") / "snapshot"
     locked.chmod(0o000)
     try:
         try:
-            snapshot_core.exists("prj_locked")
+            (locked / "snapshot.json").exists()
         except PermissionError:
             pass
         else:
@@ -3058,6 +3400,187 @@ def test_an_unreadable_snapshot_is_no_evidence_and_the_store_still_opens(
         locked.chmod(0o700)
     assert shown == {"prj_snap"}, "a readable snapshot still adopts its row"
     assert everything == {"prj_snap", "prj_locked"}, "the unreadable one stays captured"
+
+
+def _old_pack(project_id: str) -> Path:
+    """A codebase pack as a build up to 0.8.2 left one for ``project_id``: its files, and the
+    ``snapshot.json`` the v17 backfill reads as evidence."""
+    pack = paths.project_data_dir(project_id) / "snapshot"
+    pack.mkdir(parents=True, exist_ok=True)
+    for name in ("pack.xml", "skeleton.xml", "index.json"):
+        (pack / name).write_text("", encoding="utf-8")
+    (pack / "snapshot.json").write_text("{}", encoding="utf-8")
+    return pack
+
+
+def test_a_pack_is_the_evidence_first_and_deleted_after(isolated_home: Path) -> None:
+    """A store from 0.6 or older, upgraded straight to this build: the only mark of a
+    project the owner added is its pack. The v17 backfill must read it before the open
+    deletes it, or the project vanishes from ``project list`` and the fleet. Then the
+    pack goes, and the ``brain/`` beside it stays."""
+    after = (
+        "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES "
+        "('prj_packed', '/w/packed', 'packed', '[]', '2026-09-01T00:00:00+00:00');\n"
+    )
+    _at_version(16, after=after)
+    pack = _old_pack("prj_packed")
+    brain = paths.project_data_dir("prj_packed") / "brain"
+    brain.mkdir()
+    (brain / "page.md").write_text("kept", encoding="utf-8")
+
+    with store_session() as store:
+        shown = {p.id for p in store.list_projects()}
+    assert shown == {"prj_packed"}, "the pack adopted its row before it was deleted"
+    assert not pack.exists()
+    assert (brain / "page.md").read_text(encoding="utf-8") == "kept"
+
+
+def test_the_homes_old_pack_does_not_list_the_home(isolated_home: Path) -> None:
+    """Builds before D5 packed the aisquare home as well. That pack is not the owner adding
+    it, as main's ``snapshot.exists()`` held, so the v17 backfill passes over the home's
+    row and the pack still goes (review of #399, m10)."""
+    from aisquare.core.workspace import project_id_for
+
+    home = paths.aisquare_home().resolve()
+    home_id = project_id_for(home)
+    after = (
+        "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES "
+        f"('{home_id}', '{home}', '.aisquare', '[]', '2026-09-01T00:00:00+00:00');\n"
+    )
+    _at_version(16, after=after)
+    pack = _old_pack(home_id)
+
+    with store_session() as store:
+        shown = {p.id for p in store.list_projects()}
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        onboarded = raw.execute(
+            "SELECT onboarded_at FROM project WHERE id = ?", (home_id,)
+        ).fetchone()
+    finally:
+        raw.close()
+    assert onboarded == (None,), "the home's pack adopted nothing"
+    assert home_id not in shown
+    assert not pack.exists()
+
+
+def test_the_backfill_resolves_no_root_for_a_row_without_a_pack(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Asking whether a row is the home resolves its root, which can hang on a dead mount,
+    and most captured rows have no pack. So the stat comes first, and only a row with a
+    pack is asked (review of #399, n11)."""
+    after = (
+        "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES "
+        "('prj_bare', '/gone/mount/bare', 'bare', '[]', '2026-09-01T00:00:00+00:00'),"
+        " ('prj_packed', '/w/packed', 'packed', '[]', '2026-09-01T00:00:00+00:00');\n"
+    )
+    _at_version(16, after=after)
+    _old_pack("prj_packed")
+    asked: list[str] = []
+    is_the_home = store_module.is_the_home
+
+    def spy(root: Path) -> bool:
+        asked.append(root.as_posix())
+        return is_the_home(root)
+
+    monkeypatch.setattr(store_module, "is_the_home", spy)
+    with store_session():
+        pass
+
+    assert "/w/packed" in asked, "control: a row with a pack is asked"
+    assert "/gone/mount/bare" not in asked
+
+
+def test_old_packs_go_once_and_nothing_outside_projects_is_followed(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """Every project's ``snapshot/`` goes on the first open, the aisquare home's own among
+    them (D5: its pack copied the home's login data), and only that: not a file of that
+    name, not a symlink's target, not a pack reached through a project directory that is a
+    symlink out of the home. A pack written after that open stays: the cleanup ran, and
+    records it."""
+    from aisquare.core.workspace import project_id_for
+
+    first = _old_pack("prj_a")
+    second = _old_pack("prj_b")
+    homes = _old_pack(project_id_for(paths.aisquare_home().resolve()))
+    (paths.project_data_dir("prj_b") / "explainability-key").write_text("k", encoding="utf-8")
+    (paths.project_data_dir("prj_file")).mkdir(parents=True)
+    (paths.project_data_dir("prj_file") / "snapshot").write_text("not ours", encoding="utf-8")
+    outside = tmp_path / "elsewhere"
+    (outside / "snapshot").mkdir(parents=True)
+    (outside / "snapshot" / "keep.txt").write_text("keep", encoding="utf-8")
+    try:
+        paths.project_data_dir("prj_link").mkdir(parents=True)
+        (paths.project_data_dir("prj_link") / "snapshot").symlink_to(outside / "snapshot")
+        paths.project_data_dir("prj_out").symlink_to(outside)
+    except OSError:
+        pytest.skip("this filesystem cannot make symlinks")
+
+    with store_session():
+        pass
+    assert not first.exists() and not second.exists() and not homes.exists()
+    assert (paths.project_data_dir("prj_b") / "explainability-key").exists()
+    assert (paths.project_data_dir("prj_file") / "snapshot").read_text(encoding="utf-8")
+    assert (outside / "snapshot" / "keep.txt").exists(), "never followed out of the home"
+    assert (paths.project_data_dir("prj_link") / "snapshot").is_symlink()
+
+    again = _old_pack("prj_a")
+    with store_session():
+        pass
+    assert again.exists(), "it ran once"
+
+
+def test_a_home_with_no_projects_dir_has_nothing_to_clean_and_says_so(
+    isolated_home: Path,
+) -> None:
+    """A new home has no ``projects/`` and so no pack: done on the first open, so later
+    opens do not look again."""
+    with store_session():
+        pass
+    assert not (paths.aisquare_home() / "projects").exists(), "the premise: nothing there"
+    assert (paths.cache_dir() / "old-packs-removed").exists()
+
+
+@pytest.mark.parametrize("damage", ["looping", "unreadable", "resolve-raises"])
+def test_a_projects_dir_the_cleanup_cannot_read_never_breaks_the_open(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    """The cleanup is best effort, so ``projects/`` in any state it cannot read leaves the
+    open working: a symlink to itself (Python 3.11 and 3.12 raise ``RuntimeError`` from
+    ``resolve()``, not ``OSError``; review of #399), a directory this user cannot list,
+    and, on every Python, a ``resolve()`` that raises ``RuntimeError``. Nothing is
+    recorded as done, so a later open tries again."""
+    projects = paths.aisquare_home() / "projects"
+    if damage == "looping":
+        projects.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            projects.symlink_to(projects)
+        except OSError:
+            pytest.skip("this filesystem cannot make symlinks")
+    elif damage == "unreadable":
+        if sys.platform == "win32" or os.geteuid() == 0:  # mypy narrows on sys.platform
+            pytest.skip("needs POSIX permissions that bind this user")
+        _old_pack("prj_a")
+        projects.chmod(0)
+    else:
+        _old_pack("prj_a")
+        resolve = Path.resolve
+
+        def loop(self: Path, strict: bool = False) -> Path:
+            if self.name == "projects":
+                raise RuntimeError(f"Symlink loop from {str(self)!r}")
+            return resolve(self, strict)
+
+        monkeypatch.setattr(Path, "resolve", loop)
+    try:
+        with store_session() as store:
+            store.list_projects()
+    finally:
+        if damage == "unreadable":
+            projects.chmod(0o700)
+    assert not (paths.cache_dir() / "old-packs-removed").exists()
 
 
 # --- the reads a poller makes every few seconds (remote's needs scan) -------------------------

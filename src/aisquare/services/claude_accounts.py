@@ -50,8 +50,8 @@ from typing import Any, Literal
 
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing as sharing
-from aisquare.core import paths
-from aisquare.core.config import AccountsSettings, FleetSettings, load_config
+from aisquare.core import paths, tls
+from aisquare.core.config import AccountsSettings, FleetSettings, load_config, save_config
 from aisquare.core.harness import MODEL_FAMILIES, model_family
 from aisquare.core.names import name_key
 from aisquare.core.spawn import untraced_env
@@ -855,7 +855,7 @@ def _http_get(
 
     request = urllib.request.Request(url, headers=dict(headers), method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with tls.urlopen(request, timeout=timeout) as response:
             return int(response.status), bytes(response.read()), dict(response.headers.items())
     except urllib.error.HTTPError as exc:
         sent = dict(exc.headers.items()) if exc.headers is not None else {}
@@ -1022,20 +1022,19 @@ USAGE_FIXES: dict[UsageCause, str | None] = {
     UsageCause.keychain_failed: "↻ Refresh usage (or --refresh) asks the Keychain again",
     UsageCause.rate_limited: "none needed, reads resume {at}by themselves",
     UsageCause.unreachable: "check the network or HTTPS_PROXY",
-    # #403's tls.BUNDLE_FIX and tls.CERT_HINT, word for word.
-    UsageCause.tls_bundle: (
-        "point SSL_CERT_FILE / SSL_CERT_DIR at a readable PEM bundle, or unset them"
-    ),
-    UsageCause.tls_cert: (
-        "set SSL_CERT_FILE to your CA bundle if a proxy re-signs HTTPS, "
-        "or see `aisquare doctor --live`"
-    ),
+    UsageCause.tls_bundle: tls.BUNDLE_FIX,  # the same words as doctor's tls row
+    UsageCause.tls_cert: tls.CERT_HINT,
     UsageCause.http_error: None,
     UsageCause.bad_answer: None,
     UsageCause.read_failed: None,
 }
 """What to do about each cause, ``{slot}`` and ``{at}`` filled in by :func:`usage_fix`; ``None``
 where nothing done on this machine helps, which :data:`NO_FIX` says."""
+
+TLS_BUNDLE_REASON = "TLS: the CA bundle could not be loaded"
+"""Why there is no reading when ``SSL_CERT_FILE`` / ``SSL_CERT_DIR`` will not load (#403)."""
+TLS_CERT_REASON = "TLS certificate could not be verified"
+"""Why there is no reading when the endpoint's certificate did not verify (#403)."""
 
 NO_FIX = "fix: none from here, the next read tries again by itself"
 """What :func:`fix_line` says for a cause with no fix (:data:`USAGE_FIXES`)."""
@@ -1154,6 +1153,12 @@ def usage(
     try:
         answer = (fetch or _http_get)(USAGE_URL, headers, USAGE_TIMEOUT_SECONDS)
     except OSError as exc:  # URLError, a refused connection, a timeout
+        # #403's two TLS failures, each with its own cause: the fix is tls.BUNDLE_FIX /
+        # tls.CERT_HINT (USAGE_FIXES), shown beside the reason, not inside it.
+        if isinstance(exc, tls.CABundleError):
+            return unreadable_usage(UsageCause.tls_bundle, TLS_BUNDLE_REASON, slot=slot)
+        if tls.cert_failure(exc):
+            return unreadable_usage(UsageCause.tls_cert, TLS_CERT_REASON, slot=slot)
         return unreadable_usage(
             UsageCause.unreachable,
             f"could not reach the usage endpoint ({type(exc).__name__})",
@@ -1359,10 +1364,15 @@ def _record_sample(
 
 
 def _with_family_weeks(
-    store: ContextStore, slot: int, sample: UsageSample, reading: ClaudeUsage
+    store: ContextStore, slot: int, sample: UsageSample, reading: ClaudeUsage, now: datetime
 ) -> ClaudeUsage:
     """``reading`` (built from ``sample``) with the family weeks recorded with that very
-    sample (:data:`_FAMILY_KEY`); as it was when the row is another sample's, or unreadable."""
+    sample (:data:`_FAMILY_KEY`); as it was when the row is another sample's, or unreadable.
+
+    A family week whose reset has passed by ``now`` comes back without its figure, its reset
+    time kept, as :func:`_without_reset_windows` empties a kept reading's: given back whole,
+    a pick read the old figure for the cache's window after the reset, skipped the account
+    as "its opus week is spent" and ranked it on it (review of #401, m2)."""
     raw = store.ui_state(_FAMILY_KEY.format(slot=slot))
     if not raw:
         return reading
@@ -1379,6 +1389,8 @@ def _with_family_weeks(
         }
     except (ValueError, TypeError, KeyError, AttributeError):
         return reading
+    over = {family for family, when in resets.items() if when <= now}
+    percent = {family: used for family, used in percent.items() if family not in over}
     return reading.model_copy(
         update={"family_week_percent": percent, "family_week_resets_at": resets}
     )
@@ -1894,6 +1906,7 @@ def _recorded_usage(
                         week_resets_at=newest.week_resets_at,
                         fetched_at=newest.fetched_at,
                     ),
+                    now,
                 )
     except sqlite3.Error:
         return {}
@@ -2044,8 +2057,13 @@ def is_kept(reading: ClaudeUsage) -> bool:
 
 
 def _has_reset(reading: ClaudeUsage, now: datetime) -> bool:
-    """Whether either window of ``reading`` has reset by ``now``: the figure is over."""
-    resets = (reading.session_resets_at, reading.week_resets_at)
+    """Whether any window of ``reading`` has reset by ``now``, a family week included (review
+    of #401, m2): the figure is over."""
+    resets = (
+        reading.session_resets_at,
+        reading.week_resets_at,
+        *reading.family_week_resets_at.values(),
+    )
     return any(when is not None and when <= now for when in resets)
 
 
@@ -3182,7 +3200,7 @@ def share_for_launch(
     """
     try:
         knobs = accounts_settings()
-        if not (knobs.share_trust or knobs.share_settings):
+        if not (knobs.share_trust or knobs.share_settings or knobs.share):
             return []
         accounts = list_accounts()
         if len(accounts) < 2:
@@ -3204,6 +3222,7 @@ def share_for_launch(
             notes += _share_trust_into(target, scope, accounts)
         if knobs.share_settings and target.managed:
             notes += _share_settings_into(target)
+        notes += _share_parts_into(target)
         return notes
     except Exception as exc:  # an observer of the launch: it costs the sharing, never the launch
         return [f"nothing was shared into this launch's account ({exc})"]
@@ -3435,3 +3454,197 @@ def unshare_settings() -> tuple[Path, list[SettingsChange]]:
         state = sharing.settings_state(account, source)
         changes.append(SettingsChange(account, "unshared" if unlinked else state))
     return source, changes
+
+
+# --- [accounts] share: memory, skills, agents, commands, CLAUDE.md, plugins (P2-W7) -------
+
+
+@dataclass(frozen=True)
+class PartChange:
+    """What ``accounts share`` did to one part on one account, or what it holds there."""
+
+    account: ClaudeAccount
+    part: sharing.SharePart
+    outcome: Literal[
+        "linked",
+        "already",
+        "unlinked",
+        "restored",
+        "refused",
+        "failed",
+        "shared",
+        "own",
+        "none",
+        "elsewhere",
+        "merged",
+    ]
+    detail: str | None = None
+    """The kept copy's name, the reason a part was refused, or what a memory merge noted."""
+
+    def as_json(self) -> dict[str, object]:
+        return {
+            "slot": self.account.slot,
+            "account": core.label(self.account),
+            "part": self.part,
+            "outcome": self.outcome,
+            "detail": self.detail,
+        }
+
+
+def shared_memory_root() -> Path:
+    """Where ``memory`` keeps each project's auto memory: under the aisquare home, outside
+    every ``.claude`` path on purpose (anthropics/claude-code#98044: since 2.1.280 every
+    auto-memory write prompts when it lands under a linked ``.claude`` directory)."""
+    return paths.aisquare_home() / "claude-shared" / "memory"
+
+
+def memory_settings_args(cwd: Path) -> list[str]:
+    """``--settings`` pointing Claude Code's auto memory at the shared directory for the
+    project in ``cwd``, when ``[accounts] share`` names ``memory``; else nothing.
+
+    ``autoMemoryDirectory`` is read from any settings scope, ``--settings`` included
+    (Claude Code, Memory). Every launch gets it, the plain claude's too, so all of them
+    read and write one directory per project."""
+    try:
+        if "memory" not in accounts_settings().share:
+            return []
+    except Exception:  # an unreadable config shares nothing
+        return []
+    directory = shared_memory_root() / sharing.memory_key(cwd)
+    return ["--settings", json.dumps({"autoMemoryDirectory": str(directory)})]
+
+
+def share_status() -> list[PartChange]:
+    """What every account holds for every part: the linked parts per managed slot, and
+    ``memory`` as on (``shared``) or off (``none``) for the machine."""
+    knobs = accounts_settings()
+    source = core.default_account().config_dir
+    held: list[PartChange] = []
+    for account in list_accounts():
+        for part in sharing.SHARE_PARTS:
+            if part == "memory":
+                held.append(
+                    PartChange(account, part, "shared" if "memory" in knobs.share else "none")
+                )
+            elif account.managed:
+                held.append(
+                    PartChange(account, part, sharing.part_state(account.config_dir, part, source))
+                )
+    return held
+
+
+def enable_share(
+    parts: Sequence[sharing.SharePart], *, now: datetime | None = None
+) -> list[PartChange]:
+    """Turn ``parts`` on: write them into ``[accounts] share`` and apply them now.
+
+    Linked parts link every managed slot's entry (its own kept beside it); one linked
+    anywhere else is refused and left as it is. ``memory`` merges every account's
+    ``projects/<key>/memory/`` into the shared directory the first time it is turned on
+    (nothing overwritten; a file that differs is kept as ``<name>.slot<N>.md``).
+    Idempotent: a part already on changes nothing.
+    """
+    config = load_config()
+    first_memory = "memory" in parts and "memory" not in config.accounts.share
+    config.accounts.share = list(dict.fromkeys([*config.accounts.share, *parts]))
+    save_config(config)
+    moment = now or _now()
+    source = core.default_account().config_dir
+    changes: list[PartChange] = []
+    for part in parts:
+        if part == "memory":
+            changes += _merge_memory() if first_memory else []
+            continue
+        for account in list_accounts():
+            if account.managed:
+                changes.append(_link_part(account, part, source, moment))
+    return changes
+
+
+def disable_share(parts: Sequence[sharing.SharePart]) -> list[PartChange]:
+    """Turn ``parts`` off: out of ``[accounts] share``, and every linked entry back to the
+    slot's own copy (the one :func:`enable_share` kept), exactly as it was. ``memory``
+    stops being passed to launches; the shared directory stays where it is."""
+    config = load_config()
+    config.accounts.share = [part for part in config.accounts.share if part not in parts]
+    save_config(config)
+    source = core.default_account().config_dir
+    changes: list[PartChange] = []
+    for part in parts:
+        if part == "memory":
+            continue
+        for account in list_accounts():
+            if not account.managed:
+                continue
+            was = sharing.part_state(account.config_dir, part, source)
+            if was != "shared":  # nothing of ours to undo: say what it holds
+                changes.append(PartChange(account, part, was))
+                continue
+            try:
+                restored = sharing.unlink_part(account.config_dir, part, source)
+            except OSError as exc:
+                changes.append(PartChange(account, part, "failed", exc.strerror or str(exc)))
+                continue
+            if restored is not None:
+                changes.append(PartChange(account, part, "restored", restored.name))
+            else:
+                changes.append(PartChange(account, part, "unlinked"))
+    return changes
+
+
+def _link_part(
+    account: ClaudeAccount, part: sharing.SharePart, source: Path, now: datetime
+) -> PartChange:
+    if sharing.part_state(account.config_dir, part, source) == "shared":
+        return PartChange(account, part, "already")
+    try:
+        kept = sharing.link_part(account.config_dir, part, source, now=now)
+    except sharing.SharingError as exc:
+        return PartChange(account, part, "refused", str(exc))
+    except OSError as exc:
+        return PartChange(account, part, "failed", exc.strerror or str(exc))
+    return PartChange(account, part, "linked", kept.name if kept is not None else None)
+
+
+def _merge_memory() -> list[PartChange]:
+    """Every account's per-project memory into the shared root, once (:func:`enable_share`)."""
+    root = shared_memory_root()
+    changes: list[PartChange] = []
+    accounts = list_accounts()
+    keys = sorted(
+        {
+            memory.parent.name
+            for account in accounts
+            for memory in (account.config_dir / "projects").glob("*/memory")
+            if memory.is_dir()
+        }
+    )
+    for key in keys:
+        sources = [
+            (f"slot{account.slot}", account.config_dir / "projects" / key / "memory")
+            for account in accounts
+        ]
+        by_label = {f"slot{account.slot}": account for account in accounts}
+        for label, note in sharing.merge_memory(sources, root / key):
+            changes.append(PartChange(by_label[label], "memory", "merged", f"{key}: {note}"))
+    return changes
+
+
+def _share_parts_into(target: ClaudeAccount) -> list[str]:
+    """``[accounts] share`` at a launch: link the parts ``target`` does not have yet (a slot
+    made after they were turned on), saying what changed or why it could not."""
+    knobs = accounts_settings()
+    linked = [part for part in knobs.share if part in sharing.LINKED_PARTS]
+    if not linked or not target.managed:
+        return []
+    source = core.default_account().config_dir
+    notes: list[str] = []
+    for part in linked:
+        change = _link_part(target, part, source, _now())
+        name = core.label(target)
+        if change.outcome == "linked":
+            kept = f" (its own kept as {change.detail})" if change.detail else ""
+            notes.append(SharedNote(f"{name} now shares the plain claude's {part}{kept}"))
+        elif change.outcome in ("refused", "failed"):
+            notes.append(f"{part} is not shared into {name}: {change.detail}")
+    return notes

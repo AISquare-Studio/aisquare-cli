@@ -20,6 +20,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -30,12 +31,16 @@ from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core import harness, paths
 from aisquare.core.config import (
+    FLEET_DENY_TOOLS,
     ExplainabilitySettings,
+    FleetRoleSettings,
+    FleetSettings,
     RoleLaunchProfile,
     load_config,
     save_config,
 )
 from aisquare.services import settings as settings_service
+from tests.role_policy import policy_args
 
 ROLE = "coder"
 
@@ -230,7 +235,7 @@ class TestLaunchWiring:
         result = runner.invoke(app, ["launch", "coder", "-p", "go"])
 
         assert result.exit_code == 0, result.output
-        assert spy["argv"] == ["claude", "--model", "opus", "-p", "go"]
+        assert spy["argv"] == ["claude", "--model", "opus", *policy_args("coder"), "-p", "go"]
 
     def test_an_unbound_role_leaves_the_ambient_env_alone(
         self,
@@ -527,11 +532,11 @@ class TestLaunchHonoursTheBoundBinary:
     def test_an_unbound_role_still_launches_the_default(
         self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
     ) -> None:
-        # The no-binding path must stay byte-identical to what it always was.
+        # The no-binding path carries the role's own flags and nothing else.
         result = runner.invoke(app, ["launch", "coder"])
 
         assert result.exit_code == 0, result.output
-        assert spy["argv"] == ["claude"]
+        assert spy["argv"] == ["claude", *policy_args("coder")]
 
     def test_a_missing_binary_names_who_chose_it(
         self, runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -983,3 +988,113 @@ class TestBindEnvFile:
         settings_service.bind_role(ROLE, clear_account=True)
 
         assert load_config().team.profiles[ROLE].env_files, "the file binding stays"
+
+
+def _policy(
+    role: str,
+    args: Sequence[str] = (),
+    *,
+    binary: str = "claude",
+    effort: str | None = None,
+    **role_keys: Any,
+) -> harness.ToolPolicy:
+    """``harness.tool_policy`` at the built-in config, with ``role_keys`` set on the role."""
+    fleet = FleetSettings()
+    fleet.roles[role] = fleet.roles.get(role, FleetRoleSettings()).model_copy(update=role_keys)
+    return harness.tool_policy(role, binary=binary, args=args, fleet=fleet, effort=effort)
+
+
+def _denied_by(flags: Sequence[str]) -> list[str]:
+    """The names of the ONE ``--disallowedTools`` token in ``flags``."""
+    tokens = [flag for flag in flags if flag.startswith("--disallowedTools")]
+    assert len(tokens) == 1, flags
+    return tokens[0].partition("=")[2].split(" ")
+
+
+class TestToolPolicy:
+    """#280: the role's tools and skill listing, one home, applied wherever it starts."""
+
+    def test_the_reviewer_is_denied_its_editing_tools_and_the_fleets_eight(self) -> None:
+        policy = _policy("reviewer")
+        assert _denied_by(policy.args) == sorted(
+            {"Edit", "Write", "NotebookEdit", *FLEET_DENY_TOOLS}
+        )
+        assert policy.denied == _denied_by(policy.args)
+
+    def test_a_numbered_seat_has_its_roles_safety_list(self) -> None:
+        assert {"Edit", "Write", "NotebookEdit"} <= set(_policy("reviewer2").denied)
+
+    def test_every_deny_already_given_is_merged_into_one_token_and_stripped(self) -> None:
+        args = [
+            "--disallowed-tools",
+            "Bash",
+            "Edit",
+            "--model",
+            "opus",
+            "--disallowedTools=Read,Glob",
+        ]
+        policy = _policy("coder", args)
+        assert {"Bash", "Edit", "Read", "Glob"} <= set(_denied_by(policy.args))
+        assert policy.strip(args) == ["--model", "opus"]
+
+    def test_nothing_after_a_bare_double_dash_is_read_as_a_flag(self) -> None:
+        args = ["--", "--disallowedTools=Edit"]
+        policy = _policy("coder", args)
+        assert "Edit" not in policy.denied
+        assert policy.strip(args) == args
+
+    def test_the_token_is_byte_identical_whatever_order_the_denies_came_in(self) -> None:
+        one = _policy("coder", ["--disallowedTools=Bash Read"], deny_tools=["Glob", "Grep"])
+        two = _policy("coder", ["--disallowedTools=Read,Bash"], deny_tools=["Grep", "Glob"])
+        assert one.args == two.args
+
+    def test_allow_tools_hands_a_safety_listed_tool_back(self) -> None:
+        assert "Edit" not in _policy("reviewer", allow_tools=["Edit"]).denied
+
+    def test_allow_tools_never_hands_back_a_deny_on_the_command_line(self) -> None:
+        policy = _policy("reviewer", ["--disallowedTools=Edit"], allow_tools=["Edit"])
+        assert "Edit" in policy.denied
+
+    def test_a_role_adds_its_own_denies_to_the_fleets(self) -> None:
+        assert {"Bash", *FLEET_DENY_TOOLS} <= set(_policy("tester", deny_tools=["Bash"]).denied)
+
+    def test_another_agent_gets_no_flags_and_a_note_says_why(self) -> None:
+        args = ["--disallowedTools=Edit"]
+        policy = _policy("reviewer", args, binary="/opt/bin/aider")
+        assert policy.args == []
+        assert policy.strip(args) == args, "another agent's flags are its own"
+        (note,) = policy.notes
+        assert "withheld" in note and "'aider' is not claude" in note and "Edit" in note
+
+    def test_names_cuts_the_skill_descriptions_and_full_leaves_them(self) -> None:
+        assert _policy("coder").args[-2:] == ["--settings", harness.SKILL_NAMES_SETTINGS]
+        assert "--settings" not in _policy("manager").args
+
+    def test_names_is_withheld_beside_a_settings_already_given(self) -> None:
+        policy = _policy("coder", ["--settings", "{}"])
+        assert "--settings" not in policy.args
+        assert policy.notes == ["skill_listing withheld: --settings already given"]
+
+    def test_off_denies_the_skill_tool(self) -> None:
+        policy = _policy("coder", skill_listing="off")
+        assert "Skill" in policy.denied
+        assert "--settings" not in policy.args
+
+    def test_ultracode_keeps_workflow_and_says_so(self) -> None:
+        """Ultracode is xhigh plus workflow orchestration: the default deny of Workflow
+        turned that half off without a word (review of #311)."""
+        for args, effort in (
+            (["--effort", "ultracode"], None),
+            (["--effort=ULTRACODE"], None),
+            ([], "ultracode"),
+        ):
+            policy = _policy("coder", args, effort=effort)
+            assert "Workflow" not in policy.denied, (args, effort)
+            assert "Workflow kept: effort ultracode orchestrates workflows" in policy.notes
+
+    def test_xhigh_still_denies_workflow(self) -> None:
+        assert "Workflow" in _policy("coder", ["--effort", "xhigh"], effort="xhigh").denied
+
+    def test_a_typed_deny_of_workflow_holds_under_ultracode(self) -> None:
+        policy = _policy("coder", ["--effort", "ultracode", "--disallowedTools=Workflow"])
+        assert "Workflow" in policy.denied

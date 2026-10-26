@@ -493,8 +493,23 @@ def remote_push_path() -> Path:
 
 
 def project_data_dir(project_id: str) -> Path:
-    """Per-project data directory (codebase snapshots, future sync artifacts)."""
+    """Per-project data directory (the brain, the explainability key)."""
     return aisquare_home() / "projects" / project_id
+
+
+def brief_evidence_dir(project_id: str, brief_id: str) -> Path:
+    """Where a work brief keeps copies of its checks' artifacts, beside ``reports/``.
+
+    Per project, so ``project forget --purge`` removes a project's copies whole.
+    """
+    return aisquare_home() / "briefs" / project_id / brief_id
+
+
+def manager_state_file(project_id: str) -> Path:
+    """Where a project's manager keeps its state (P1 WS-4, #281): goal, decisions, open items
+    and next step, rewritten as a plan step completes. Its start pack reads it back after a
+    compaction or a restart, and a quiet compaction waits for a fresh one."""
+    return project_data_dir(project_id) / "manager" / "state.md"
 
 
 def credentials_path() -> Path:

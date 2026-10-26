@@ -630,9 +630,9 @@ def test_tick_frames_that_paint_after_the_accounts_wait_still_cost_one_read_afte
     counting = threading.Lock()
     read_fleet = shell_module._read_fleet
 
-    def slow_fleet(show_captured: bool, **kwargs: Any) -> Any:
+    def slow_fleet(show_captured: bool, *args: Any, **kwargs: Any) -> Any:
         frames.wait(HOLD_S)
-        return read_fleet(show_captured, **kwargs)
+        return read_fleet(show_captured, *args, **kwargs)
 
     def reader() -> AccountsOverview:
         with counting:
@@ -702,9 +702,9 @@ def test_a_frame_orders_its_calls_and_the_accounts_reads_by_count_not_by_the_clo
     frames.set()
     read_fleet = shell_module._read_fleet
 
-    def slow_fleet(show_captured: bool, **kwargs: Any) -> Any:
+    def slow_fleet(show_captured: bool, *args: Any, **kwargs: Any) -> Any:
         frames.wait(HOLD_S)
-        return read_fleet(show_captured, **kwargs)
+        return read_fleet(show_captured, *args, **kwargs)
 
     def reader() -> AccountsOverview:
         reads[0] += 1  # one read at a time
@@ -849,6 +849,161 @@ def test_a_kept_readings_age_fits_the_session_cell_without_an_ellipsis(
     assert column == 16 and width == 16
     assert rendered.rstrip() == shown, rendered
     assert "…" not in rendered
+
+
+def test_a_rate_limit_that_ends_between_ticks_never_shows_a_past_until(
+    no_network: dict[str, Any],
+) -> None:
+    """TUI-401b check 5 at e28697f1: after a short Retry-After passed, the session cell's
+    tooltip still said 'rate-limited until <a time already past>' until the page's next
+    re-read, a minute on: it printed the reason frozen at the read. The row now repaints
+    the moment the wait ends, and the wait is written from its end time as of then."""
+    no_network["usage"] = ClaudeUsage(available=True, session_percent=40, week_percent=10)
+    overview = _overview(_status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: "40%" in cells(view, 2)["session"])
+        until = datetime.now(tz=UTC) + timedelta(seconds=1)
+        kept = ClaudeUsage(
+            available=True,
+            session_percent=40,
+            week_percent=10,
+            fetched_at=datetime.now(tz=UTC) - timedelta(minutes=12),
+            last_failed_at=datetime.now(tz=UTC),
+            last_failed_reason=accounts_service.backoff_reason(until),
+            rate_limited=True,
+            rate_limited_until=until,
+        )
+        line = row(view, 2)
+        line.show(line.status, kept)  # a read that was refused, as the page paints it
+        during = str(line.cell("session").tooltip)
+        await pilot.pause(1.5)  # the wait is over; the page's next re-read is a minute away
+        return until.astimezone().strftime("%H:%M"), during, str(line.cell("session").tooltip)
+
+    clock, during, after = drive(go, overview=overview)
+    assert f"reading from 12m ago · rate-limited until {clock}" in during, during
+    assert "rate-limited until" not in after, after
+    assert "the rate limit has ended" in after, after
+
+
+def test_a_backed_off_row_with_no_reading_repaints_when_its_wait_ends(
+    no_network: dict[str, Any],
+) -> None:
+    """Review of #401, m1, on the page: a backed-off account with no kept reading says its
+    wait on hover over its ``!`` (#13), and says it has ended the moment it does, with no
+    re-read."""
+    no_network["usage"] = ClaudeUsage(available=True, session_percent=40, week_percent=10)
+    overview = _overview(_status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: "40%" in cells(view, 2)["session"])
+        until = datetime.now(tz=UTC) + timedelta(seconds=1)
+        line = row(view, 2)
+        line.show(
+            line.status,
+            accounts_service.UsageBackoff(
+                slot=2, until=until, attempts=1, since=datetime.now(tz=UTC)
+            ).reading(datetime.now(tz=UTC)),
+        )
+        during = why(view, 2)
+        await pilot.pause(1.5)  # the wait is over; the page's next re-read is a minute away
+        return until.astimezone().strftime("%H:%M"), during, why(view, 2)
+
+    clock, during, after = drive(go, overview=overview)
+    assert during.startswith(f"rate-limited until {clock}"), during
+    assert "until" not in after and after.startswith("the rate limit has ended"), after
+
+
+@pytest.fixture
+def windows_timers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Textual's timers as they sleep on Windows (``textual._win_sleep``), on any OS.
+
+    Each timer's sleep is a blocking wait in asyncio's default executor, and its cancel is
+    set from that executor too; the executor has 8 threads, a 4-vCPU runner's
+    ``min(32, cpu + 4)``. So a pending timer holds a thread for its whole interval.
+    """
+    import concurrent.futures
+
+    import textual.timer as textual_timer
+
+    real_init = concurrent.futures.ThreadPoolExecutor.__init__
+
+    def eight(
+        self: Any, max_workers: Any = None, thread_name_prefix: str = "", *a: Any, **k: Any
+    ) -> None:
+        if max_workers is None and thread_name_prefix == "asyncio":
+            max_workers = 8
+        real_init(self, max_workers, thread_name_prefix, *a, **k)
+
+    async def win_sleep(secs: float) -> None:
+        sleep_for = max(0.0, secs - 0.001)
+        if sleep_for < 0.0005:
+            return
+        cancel = threading.Event()
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, cancel.wait, sleep_for)
+        except asyncio.CancelledError:
+            await loop.run_in_executor(None, cancel.set)
+            raise
+
+    async def sleep(secs: float) -> None:
+        await asyncio.create_task(win_sleep(secs))
+
+    monkeypatch.setattr(concurrent.futures.ThreadPoolExecutor, "__init__", eight)
+    monkeypatch.setattr(textual_timer, "sleep", sleep)
+
+
+@pytest.mark.usefixtures("windows_timers")
+def test_rows_in_a_rate_limit_wait_hold_no_timer_thread(no_network: dict[str, Any]) -> None:
+    """Review of #401, MAJOR-1: check 5's fix gave every rate-limited row a Textual timer for
+    its whole wait (up to 30 min, 6 h with a Retry-After). On Windows a pending Textual timer
+    holds one of the default executor's 8 threads, so two such rows starved every other
+    timer in asq, toasts and the page's re-read included, and quitting waited for the
+    waits. With four rows in a 30 s wait, another 0.2 s timer fires at once, and the app
+    quits at once."""
+    rows = range(2, 6)
+    no_network["usage"] = ClaudeUsage(available=True, session_percent=40, week_percent=10)
+    overview = _overview(*[_status(slot, f"a{slot}@example.com") for slot in rows])
+    quit_at: list[float] = []
+
+    async def go(pilot: Pilot[None]) -> float | None:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: "40%" in cells(view, 2)["session"])
+        until = datetime.now(tz=UTC) + timedelta(seconds=30)
+        for slot in rows:
+            line = row(view, slot)
+            line.show(
+                line.status,
+                ClaudeUsage(
+                    available=True,
+                    session_percent=40,
+                    week_percent=10,
+                    fetched_at=datetime.now(tz=UTC) - timedelta(minutes=12),
+                    last_failed_at=datetime.now(tz=UTC),
+                    last_failed_reason=accounts_service.backoff_reason(until),
+                    rate_limited=True,
+                    rate_limited_until=until,
+                ),
+            )
+        await pilot.pause(0.3)
+        fired: list[float] = []
+        start = time.monotonic()
+        app.set_timer(0.2, lambda: fired.append(time.monotonic() - start))
+        while not fired and time.monotonic() - start < 4:
+            await asyncio.sleep(0.05)
+        quit_at.append(time.monotonic())
+        return fired[0] if fired else None
+
+    took = drive(go, overview=overview)
+    quitting = time.monotonic() - quit_at[0]
+    assert took is not None and took < 2, f"a 0.2 s timer fired after {took} s"
+    assert quitting < 5, f"quitting took {quitting:.1f} s: it waited for the rows' waits"
 
 
 def test_buttons_follow_each_slots_state(no_network: dict[str, Any]) -> None:

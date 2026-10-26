@@ -81,6 +81,8 @@ def _plan_json(plan: lifecycle_service.UpgradePlan) -> dict[str, Any]:
         "remote": plan.remote,
         # The roles a move back ignores the file-bound variables of, each with its keys.
         "env_files_dropped": list(plan.env_files_dropped),
+        # The roles a move back launches with tools their safety list denies here.
+        "tools_regained": list(plan.tools_regained),
         # The settings a move back reads from that release's defaults, not this one's.
         "config_defaults_lost": list(plan.config_defaults_lost),
     }
@@ -217,6 +219,8 @@ def _fleet_lines(plan: lifecycle_service.UpgradePlan, *, one_click: bool = False
         _say(f"⚠ {plan.remote_warning}")
     if plan.env_files_warning is not None:
         _say(f"⚠ {plan.env_files_warning}")
+    if plan.tools_warning is not None:
+        _say(f"⚠ {plan.tools_warning}")
     if plan.config_warning is not None:
         _say(f"⚠ {plan.config_warning}")
 
@@ -248,6 +252,7 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
                 "live_agents": list(plan.live_agents),
                 "remote": plan.remote,
                 "env_files_dropped": list(plan.env_files_dropped),
+                "tools_regained": list(plan.tools_regained),
                 "config_defaults_lost": list(plan.config_defaults_lost),
                 "notes": list(report.notes),
             }

@@ -12,14 +12,17 @@ and read back as the page's tooltip and as ``accounts usage``'s cell say it.
 
 from __future__ import annotations
 
+import ssl
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.error import URLError
 
 import pytest
 
 from aisquare.cli.ui.views.accounts import problem_tooltip
 from aisquare.core import claude_accounts as core
+from aisquare.core import tls
 from aisquare.models import ClaudeAccount, ClaudeUsage, UsageCause
 from aisquare.services import claude_accounts as service
 from tests.test_claude_accounts import NOW, _sign_in
@@ -63,15 +66,9 @@ CAUSES: dict[UsageCause, tuple[str, str | None]] = {
         "could not reach the usage endpoint (ConnectionRefusedError)",
         "check the network or HTTPS_PROXY",
     ),
-    UsageCause.tls_bundle: (
-        "TLS: the CA bundle could not be loaded",
-        "point SSL_CERT_FILE / SSL_CERT_DIR at a readable PEM bundle, or unset them",
-    ),
-    UsageCause.tls_cert: (
-        "TLS certificate could not be verified",
-        "set SSL_CERT_FILE to your CA bundle if a proxy re-signs HTTPS, "
-        "or see `aisquare doctor --live`",
-    ),
+    # #403's wording: its reason, then its fix, the words doctor's tls row says too.
+    UsageCause.tls_bundle: ("TLS: the CA bundle could not be loaded", tls.BUNDLE_FIX),
+    UsageCause.tls_cert: ("TLS certificate could not be verified", tls.CERT_HINT),
     UsageCause.http_error: ("HTTP 500 from the usage endpoint", None),
     UsageCause.bad_answer: ("the usage endpoint did not answer with JSON", None),
     UsageCause.read_failed: ("usage read failed (RuntimeError)", None),
@@ -125,10 +122,10 @@ def _reading(
         _keychain(monkeypatch, "failed", "could not read the Keychain (security exited 25)")
     if cause.name.startswith("keychain_"):
         return read((200, b"{}"))
-    if cause is UsageCause.tls_bundle or cause is UsageCause.tls_cert:
-        # #403's two branches of `usage`, which stamp these when it lands; until then this
-        # branch has no TLS module, so the reading is made as they will make it.
-        return service.unreadable_usage(cause, CAUSES[cause][0], slot=account.slot)
+    if cause is UsageCause.tls_bundle:  # #403: SSL_CERT_FILE names a bundle that will not load
+        return read(tls.CABundleError("SSL_CERT_FILE=/dev/null: no certificate in it"))
+    if cause is UsageCause.tls_cert:  # #403: a proxy re-signs HTTPS with a CA not trusted
+        return read(URLError(ssl.SSLCertVerificationError(1, "certificate verify failed")))
     if cause is UsageCause.read_failed:  # not an OSError: `read_usage` keeps the round going
         fetch = _answering(RuntimeError("the endpoint's shape broke the reader"))
         return service.read_usage([account], now=NOW, fetch=fetch)[account.slot]
@@ -161,7 +158,12 @@ def test_every_cause_reads_with_its_reason_and_its_fix_or_says_there_is_none(
     assert said.startswith("fix: ")
     # The Accounts page's '!', on hover: what is wrong, then what to do (or that nothing does).
     status = service.describe(account)
-    assert problem_tooltip(status, reading) == f"{reason}\n{said}"
+    # A rate limit names its wait as of the paint, not the reason frozen at the read (#401 m1).
+    shown = reason
+    if cause is UsageCause.rate_limited:
+        assert reading.rate_limited_until is not None
+        shown = service.backoff_reason(reading.rate_limited_until)
+    assert problem_tooltip(status, reading, now=NOW) == f"{shown}\n{said}"
     # `accounts list --usage` and `accounts usage`: no hover, so the two on one line.
     assert service.explain_usage(reading) == f"{reason}; {said}"
 

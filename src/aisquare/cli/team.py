@@ -8,20 +8,23 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import shutil
 import sqlite3
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, NoReturn
 
 import typer
 
-from aisquare.cli.common import expected_config_write_errors, fail, local_time
+from aisquare.cli.common import expected_config_write_errors, fail, local_time, parse_since
 from aisquare.core import harness, orchestrator
-from aisquare.core.config import ExplainabilitySettings, RoleLaunchProfile, load_config
+from aisquare.core.config import (
+    ExplainabilitySettings,
+    FleetSettings,
+    RoleLaunchProfile,
+    load_config,
+)
 from aisquare.core.console import stdout_console
 from aisquare.core.spawn import IDENTITY_ENV_VARS
 from aisquare.core.state import get_state
@@ -263,22 +266,6 @@ def role(
         stdout_console().print(f"✓ {team_service.short_id(session.id)} is now {session.role}")
 
 
-def _parse_since(value: str) -> datetime:
-    """``--since`` accepts a relative span (15m, 2h, 3d) or an ISO timestamp."""
-    span = re.fullmatch(r"(\d+)([smhd])", value.strip())
-    if span:
-        unit = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}[span.group(2)]
-        return datetime.now(tz=UTC) - timedelta(**{unit: int(span.group(1))})
-    try:
-        moment = datetime.fromisoformat(value)
-    except ValueError:
-        raise typer.BadParameter(
-            f"{value!r} is neither a span (15m, 2h) nor an ISO timestamp"
-        ) from None
-    # A naive timestamp means the user's local clock.
-    return moment if moment.tzinfo is not None else moment.astimezone()
-
-
 def _bin_env_hint(role: str) -> str:
     """The env var that would pin this role's binary — shown in the failure so
     the fix is readable where the problem is."""
@@ -480,13 +467,30 @@ def spawn(
     # `launch_profile.args`, so the role's flags come last here and in the
     # middle in `launch`, under the same rule.
     defaults = harness.role_defaults(role_name, binary=binary.binary, args=launch_profile.args)
-    role_args = defaults.args
-    for note in defaults.notes:
+    # The role's tools and skill listing, as `launch` applies them (`harness.tool_policy`):
+    # the reviewer spawned here denied nothing, its deny living in fleet `extra_args` alone.
+    try:
+        fleet = load_config().fleet
+    except Exception as exc:  # the safety list is code: it holds without the config
+        fleet = FleetSettings()
+        typer.echo(f"tool policy: config unreadable ({exc}) — the built-in deny list", err=True)
+    policy = harness.tool_policy(
+        role_name,
+        binary=binary.binary,
+        args=launch_profile.args,
+        fleet=fleet,
+        effort=resolution.effort if resolution is not None else None,
+    )
+    role_args = [*defaults.args, *policy.args]
+    spawn_args = policy.strip(launch_profile.args)
+    notes = [*defaults.notes, *policy.notes]
+    for note in [] if get_state().json_output else notes:
         # The banner is meant to be pasted; a flag this role would normally
-        # carry and does not is part of what the paste will do.
+        # carry and does not is part of what the paste will do. Under --json,
+        # `notes` in the object says it.
         typer.echo(f"{role_name}: {note}", err=True)
     if resolution is None:
-        argv = [binary.binary, *launch_profile.args, *role_args]
+        argv = [binary.binary, *spawn_args, *role_args]
         banner = f"{role_name}: untiered role — launching on the session default model"
     else:
         argv = [
@@ -495,7 +499,7 @@ def spawn(
             resolution.model,
             "--effort",
             resolution.effort,
-            *launch_profile.args,
+            *spawn_args,
             *role_args,
         ]
         skipped = f" (skipped: {', '.join(resolution.skipped)})" if resolution.skipped else ""
@@ -571,8 +575,10 @@ def spawn(
                     "env_files": launch_profile.env_files,
                     "env_sources": launch_profile.env_sources,
                     "extra_args": launch_profile.args,
+                    "denied_tools": policy.denied,
                     "command": command,
                     "not_added": unjoined,
+                    "notes": notes,
                 }
             )
         )
@@ -639,9 +645,7 @@ def spawn(
                     "this one takes its own identity",
                     err=True,
                 )
-            identity = explainability_service.plan_session_identity(
-                binary.binary, launch_profile.args
-            )
+            identity = explainability_service.plan_session_identity(binary.binary, spawn_args)
             # Same fail-open bar as `launch`: an unreadable target costs the
             # overrides and the key — so the trace — and never the spawn.
             # `resolve_target` is effectively total today; the guard is here so
@@ -1073,7 +1077,7 @@ def log(
         if as_session is None:
             fail("--mine needs --as <session> (your id is on the board)", error="missing_session")
         by = as_session
-    moment = _parse_since(since) if since is not None else None
+    moment = parse_since(since) if since is not None else None
     try:
         events = team_service.log_events(
             limit=limit,
@@ -1135,6 +1139,63 @@ def verify(
             f"✓ delivered · seq {result.event.seq} on {result.board_id}: {result.line}",
             markup=False,
         )
+
+
+@app.command("show")
+def show(
+    receipt: Annotated[
+        str, typer.Argument(help="An event's seq number (as a board line shows it), or its id.")
+    ],
+    as_session: SessionRef = None,
+) -> None:
+    """Print one board event in full: what a one-line update points at.
+
+    Agents read each board event as one short line ending in ``aisquare team show <seq>``
+    when there is more; this prints the rest: who wrote it, who caused it, the task, the
+    addressee, its details and the whole text.
+    """
+    try:
+        shown = team_service.show_event(receipt, session_ref=as_session)
+    except STORE_ERRORS as exc:
+        _fail_team(exc, receipt)
+    event = shown.event
+    if event is None:
+        aside = f" — it exists on board {shown.elsewhere}" if shown.elsewhere else ""
+        fail(
+            f"no event matches '{receipt}' on board {shown.board_name}{aside}",
+            error="not_found",
+            ref=receipt,
+            hint=shown.elsewhere,
+        )
+    if get_state().json_output:
+        typer.echo(json.dumps(event.as_envelope().model_dump(mode="json")))
+        return
+    author = shown.author
+    who = (
+        f"{author.label or '-'} ({author.role}) · session {team_service.short_id(author.id)}"
+        if author is not None
+        else (f"session {team_service.short_id(event.session_id)}" if event.session_id else "cli")
+    )
+    task = shown.task
+    lines = [
+        f"seq {event.seq} · {local_time(event.created_at):%Y-%m-%d %H:%M:%S}"
+        f" · board {shown.board_id}",
+        f"kind:   {event.kind}",
+        f"from:   {who}",
+    ]
+    if event.actor:
+        lines.append(f"actor:  {event.actor}")
+    if event.to_role:
+        lines.append(f"to:     {event.to_role}")
+    if task is not None:
+        number = f"#{task.number} " if task.number is not None else ""
+        lines.append(f"task:   {number}{task.id} {task.title}")
+    elif event.task_id:
+        lines.append(f"task:   {event.task_id}")
+    if event.meta:
+        lines.append("meta:   " + json.dumps(event.meta, sort_keys=True, ensure_ascii=False))
+    lines += ["", event.text]
+    stdout_console().print("\n".join(lines), markup=False, highlight=False)
 
 
 def _signal_json(state: team_service.SignalState) -> dict[str, object]:
@@ -1433,23 +1494,35 @@ def board(
     interval: Annotated[
         float, typer.Option("--interval", "-i", help="Refresh seconds in watch mode.")
     ] = 3.0,
+    project_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--project",
+            "-P",
+            help="Show this project's board (codename, name or id prefix), not this "
+            "folder's: the pointer a parent manager's routed line gives.",
+            metavar="PROJECT",
+        ),
+    ] = None,
 ) -> None:
     """Show the live team board (sessions, tasks, recent updates)."""
+    named = _named_project(project_ref)
     if watch:
         if get_state().json_output:
             raise typer.BadParameter("--watch and --json cannot be combined")
-        _watch_board(max(interval, 0.5))
+        _watch_board(max(interval, 0.5), named)
         return
     try:
         # The captain's audit is left out before the recent updates are counted: one
         # line per captain tool call filled the list (review of #240, finding 11). The
         # bell and the notices are this board's own; `aisquare captain log` is the audit.
         project, sessions, tasks, events = team_service.board_data(
-            exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS
+            project=named, exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS
         )
     except STORE_ERRORS as exc:
         _fail_team(exc)
-    warn_board_scope(None)
+    if named is None:
+        warn_board_scope(None)
     if get_state().json_output:
         typer.echo(json.dumps(board_json(project, sessions, tasks, events)))
         return
@@ -1464,11 +1537,27 @@ def board(
     )
 
 
-def _watch_board(interval: float) -> None:
+def _named_project(ref: str | None) -> ProjectInfo | None:
+    """The project ``board --project`` names (as ``ui --project`` resolves it), or
+    ``None`` for this folder's. A parent manager's routed line points at a member's board
+    this way (P2-W6), and the option it named did not exist (TUI-401c check 4)."""
+    if ref is None:
+        return None
+    from aisquare.services import fleet as fleet_service  # lazy: board alone needs none
+
+    try:
+        return fleet_service.resolve_project(ref)
+    except fleet_service.FleetError as exc:
+        fail(str(exc), error="not_found", ref=ref)
+    except STORE_ERRORS as exc:
+        _fail_team(exc)
+
+
+def _watch_board(interval: float, project: ProjectInfo | None = None) -> None:
     """Run the live board (interactive TUI or Rich fallback — see cli.watch)."""
     from aisquare.cli import watch as watch_ui
 
     try:
-        watch_ui.run_watch(interval)
+        watch_ui.run_watch(interval, project)
     except TeamDisabledError as exc:
         _fail_team(exc)

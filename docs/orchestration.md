@@ -121,7 +121,13 @@ since its last turn. The board lists task titles; the contract travels with
 the claim: `task claim` and `task next --claim` print the task's contract
 (`--detail`) and the reason it was last reopened, so nobody pastes a contract
 into a coder's pane. `task show <ref>` prints the whole task. The rest of the
-coordination is the ambient state of the board.
+coordination is the ambient state of the board. Each event is one line —
+`#812 coder-auth review #12: PR #300 ready … → aisquare team show 812` — with the
+board named once in the block's header; `aisquare team show <seq>` prints the whole
+event. What of the board an agent reads is its board context
+(`[fleet.roles.<role>] board_context`, `fleet spawn --board-context`): `all`, `relevant`
+(its own tasks, what is addressed to its role or label, and decisions) or `none` (the
+reviewer's default: no recent updates at start and no deltas). A manager reads `all`.
 
 A note addressed to a session does not wait for its next prompt. When the
 session's turn ends, its `Stop` hook hands it the notes addressed to its role
@@ -147,6 +153,7 @@ aisquare task add "ship it" --needs 1             # held until #1 is done
 aisquare task next --role coder --claim --as <id> # atomic claim — exactly one winner; a
                                                   # fleet agent's own assigned task comes first;
                                                   # prints the contract and any reopen reason
+aisquare task next --status review --task 12      # only #12, when it is in review; else nothing
 aisquare task review 1 --note "how to verify" --as <id>
 aisquare task reopen '#1' --reason "fails on py3.11" --as <id>
 aisquare note "JWT it is" --kind decision --as <id>
@@ -166,6 +173,24 @@ minutes), and renewed by the session's own lifecycle hooks — so a dead
 session's claims release themselves and the work gets picked up again.
 `task next` only hands out tasks whose dependencies are done.
 
+**Contracts and rules files.** A contract is what the claim prints to whoever
+takes the task, so it carries the whole brief: `objective:`, `acceptance:` and
+`boundaries:`, the blocks `[team] brief_blocks` lists. `task add` warns on
+stderr about a missing block and lists them under `"missing_blocks"` with
+`--json`. With `[team] brief_strict = true` it refuses the add (exit 2).
+Write a long contract to a file and pass `--detail-file brief.md`. Keep rules
+you reuse in `.aisquare/rules/<name>.md` in the project and cite them with
+`--rules testing,git`. The contract then ends with `Rules:
+.aisquare/rules/testing.md, .aisquare/rules/git.md`, and a name with no file
+refuses the add. Text cited by path is read when it is needed. Text pasted
+into `--detail` rides every later request of the manager that wrote it. A
+manager's start pack lists the rules files by path and first line
+([fleet](fleet.md#long-lived-managers-state-file-start-pack-and-quiet-compaction)).
+
+```sh
+aisquare task add "wire auth" --role coder --detail-file briefs/auth.md --rules testing,git
+```
+
 ### Self-check: receipts you can re-prove
 
 Every successful write prints a receipt (`✓ … · seq N on <board>`; under
@@ -174,6 +199,7 @@ any time:
 
 ```sh
 aisquare team verify 42                     # is seq 42 really on this board? exit 0/1
+aisquare team show 42                       # the whole event: author, actor, task, details, text
 aisquare team verify evt_01k… --as <id>     # by event id (prefix ok), session's board
 aisquare team log --mine --as <id>          # read back your own recent writes
 aisquare team log --by aaaa1111 --since 15m --kind decision   # filters compose
@@ -359,6 +385,53 @@ with it off where it can, and its panel says when it could not.
 cards and quick answers, notifications on iPhone, the security model, and a
 checklist for before you leave the desk.
 
+**Long waits.** A manager waiting on CI, a review or an agent's dialog does not poll
+for it with Monitor or `sleep` loops, each of which is a turn that re-sends its whole
+context. `aisquare watch --detach` runs one watcher for the fleet, and its `watch:` board
+lines wake the manager with counts and a file path ([fleet](fleet.md#watching-the-fleet)).
+
+### A manager over a group
+
+A manager hears only its own board. When one manager coordinates several projects, a
+project group (`aisquare project group …`) can name a **parent**: an ordinary project,
+outside the group, whose manager is the group's. The members' boards stay their own; what
+the group's rules choose is copied up as one line.
+
+```sh
+aisquare project group parent app hq              # hq's manager is app's parent (--clear)
+aisquare project group route app --kinds question,task_blocked,result,linked
+aisquare project group route app --pattern 'READY|BLOCKED'   # a matching note routes too
+aisquare project group cap app 6                  # live agents across members and parent
+aisquare note "which base?" --kind question --to parent       # from a member's agent
+aisquare task add "auth API" --project api --origin 12       # from the parent's manager
+```
+
+- **Routed lines.** A member's event the rules choose lands, in the member's own write, on
+  the parent's board as `routed from api#812 (question by coder-auth): which base? —
+  aisquare board --project api`, addressed to the parent's manager (so it wakes it), and
+  that manager is nudged. By default a group routes questions to the manager or the
+  parent, `task_blocked`, `result`, and every status change of a task delegated from the
+  parent; `--kinds` chooses, `--pattern` adds notes whose text matches, `--off` stops it,
+  and `--to parent` always routes. One child routes at most one line a minute: the rest
+  are folded into a count the child's next routed line carries (`+4 folded`). A question, a
+  blocked task and anything `--to parent` are never folded: they always route at once.
+- **Linked tasks.** `task add --project <member> --origin <task>` delegates a task from the
+  parent's board to a member's: the member's line shows `← hq#12`, the origin's
+  `→ 2 linked, 1 done`, a child's status changes route up, and when every child is
+  closed (at least one done; a dropped one does not hold the origin open),
+  `linked_all_done` asks the parent's manager to close the origin. It closes it itself.
+- **Escalation.** Under a parent, a member's manager asks the parent before the human
+  ("blocked twice" in its cycle names `--to parent`).
+- **Subtree pause and cap.** `aisquare fleet pause --group app` pauses every member and the
+  parent; under a parent an agent's own spawn on a paused board is refused. `project group
+  cap` counts the live agents across members and parent, as the fleet-wide budget does.
+- **Briefing.** The parent's manager is told its group in its start pack: the members,
+  whether each has a manager up, and the delegation verbs, in a few lines.
+
+A group without a parent behaves exactly as before. `AISQUARE_TEAM_HUB` is still the
+way one board serves several repositories; a parent is for several boards with a manager
+each.
+
 ### Tuning (environment variables)
 
 Orchestration has no config files — a handful of env knobs:
@@ -369,6 +442,7 @@ Orchestration has no config files — a handful of env knobs:
 | `AISQUARE_TEAM=0` | master off switch — hooks and commands no-op |
 | `AISQUARE_TEAM_HUB` | point sessions from several repos at one shared board |
 | `AISQUARE_TEAM_DELTA=0` | mute per-prompt teammate deltas for a session |
+| `AISQUARE_BOARD_CONTEXT` | `all`, `relevant` or `none`: what of the board a session reads (set per fleet window from the role's `board_context`; a manager reads `all`) |
 | `AISQUARE_TEAM_LEASE_MIN` | task-claim lease in minutes (default 120) |
 | `AISQUARE_MODEL_<ROLE>` | pin a role's model outright (skips the harness ladder) |
 | `AISQUARE_EFFORT` | base effort for spawned roles (default `high`, else inherits `CLAUDE_EFFORT`) |
@@ -482,6 +556,23 @@ Code's own files — it reads the email and plan Claude Code recorded, and the
 usage numbers come from the endpoint Claude Code's `/usage` reads, best effort:
 if that endpoint changes, a row says `usage unavailable` and nothing else
 breaks.
+
+**TLS.** Usage reads, like every HTTPS call the CLI makes, verify the server
+against the OS trust store (the macOS Keychain, Windows' store, the distro
+bundle on Linux) through `truststore`, or through `certifi` where `truststore`
+cannot be imported. `SSL_CERT_FILE` and `SSL_CERT_DIR` still name a bundle of your
+own, e.g. behind a proxy that re-signs HTTPS, and trust what they did before, as
+OpenSSL reads them: `SSL_CERT_FILE` REPLACES the default CA file, so the bundle must
+hold the public roots as well as the proxy's CA (append it to a copy of them);
+`SSL_CERT_DIR`, a directory of hashed certificates (`openssl rehash`), replaces only
+the default directory and so adds to the default file. On Windows both add to the
+Windows store. On a machine with no trust store at all (a minimal
+container with no CA files), name certifi's: `SSL_CERT_FILE=$(python -m certifi)`. A row that says *TLS certificate could not be
+verified* is that, not the endpoint: `aisquare doctor --live`'s `tls` row
+performs one handshake to api.anthropic.com (through `HTTPS_PROXY` when one
+applies, as every request does) and names the trust source it used. A plain
+`http://` call uses the context only to verify a redirect to `https://`, and goes
+without it when the bundle will not load, so a bad bundle affects only HTTPS.
 
 Accounts laid out some other way — a wrapper script, a proxy, a directory you
 made yourself — still bind to a role as a **launch profile**: a binary, a set

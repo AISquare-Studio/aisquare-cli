@@ -42,12 +42,13 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from http.client import HTTPException, IncompleteRead
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from aisquare.core import paths
 from aisquare.core.config import (
@@ -56,6 +57,7 @@ from aisquare.core.config import (
     load_config,
     save_config,
 )
+from aisquare.core.tls import urlopen
 from aisquare.core.version import DISTRIBUTION
 from aisquare.models import (
     CheckStatus,
@@ -128,9 +130,12 @@ GATEWAY_ENV_VAR = "EXPLAINABILITY_GATEWAY_URL"
 #: Gateway-side checks are opt-in, so they may take a beat — but never hang a
 #: terminal. Chosen over the proxy probe's 1.5s because this is a real WAN hop.
 _HTTP_TIMEOUT = 6.0
-#: Posting a Run's root sits on the LAUNCH path, where a human is waiting. The
-#: proxy probe beside it allows 1.5 s; this is a write and gets twice that.
-_ROOT_TIMEOUT = 3.0
+#: Posting a Run's root used to sit on the LAUNCH path with a 3 s budget (#129
+#: measured it over on 2 of 11 launches). The detached ``post-root`` worker makes
+#: it now, where nobody waits, so it gets a WAN call's budget and retries.
+_ROOT_TIMEOUT = _HTTP_TIMEOUT
+_ROOT_BACKOFF = (1.0, 4.0)
+"""Seconds before the second and third attempt of a root post (:func:`post_run_root`)."""
 _SDK_DOCTOR_TIMEOUT = 30.0
 
 #: SDK doctor lines that are expected noise for this lane rather than findings:
@@ -1323,6 +1328,34 @@ def probe_ingest(
     return verdict
 
 
+def _root_retry_sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def post_run_root(gateway_url: str, api_key: str, agent_name: str, pipeline_id: str) -> HttpVerdict:
+    """:func:`open_run_root`, tried again after :data:`_ROOT_BACKOFF` — the detached worker's post.
+
+    A 4xx is the gateway's answer (a key it refuses, a payload it rejects) and is
+    not retried; a transport failure or a 5xx is. A failure that remains is
+    appended to ``<home>/log/explainability-root.log``: the worker has no terminal,
+    and the agent it posted for runs on regardless.
+    """
+    verdict = open_run_root(gateway_url, api_key, agent_name, pipeline_id)
+    for delay in _ROOT_BACKOFF:
+        if verdict.ok or (verdict.status is not None and 400 <= verdict.status < 500):
+            break
+        _root_retry_sleep(delay)
+        verdict = open_run_root(gateway_url, api_key, agent_name, pipeline_id)
+    if not verdict.ok:
+        with contextlib.suppress(OSError):
+            log = paths.log_dir() / "explainability-root.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(tz=UTC).isoformat(timespec="seconds")
+            with log.open("a", encoding="utf-8") as out:
+                out.write(f"{stamp} {agent_name} pipeline {pipeline_id}: {verdict.detail}\n")
+    return verdict
+
+
 def open_run_root(
     gateway_url: str,
     api_key: str,
@@ -2385,17 +2418,28 @@ def apply_fixes(
 ) -> list[str]:
     """Repair what a machine can repair by itself, and report each action.
 
-    Deliberately narrow. Turning the switch on and installing the SDK are
-    reversible, local, and exactly what the operator asked for by typing
-    ``--fix``. Inventing a gateway URL or a key is not: those are the operator's
-    to supply, so a missing one stays a red line with the command that sets it
-    rather than a guess this function makes on their behalf.
+    Deliberately narrow. Turning the switch on (only when ``target`` names the
+    deployment) and installing the SDK are reversible, local, and exactly what
+    the operator asked for by typing ``--fix``. Inventing a gateway URL or a key
+    is not: those are the operator's to supply, so a missing one stays a red
+    line with the command that sets it rather than a guess this function makes
+    on their behalf.
 
     Installing reaches the network and mutates the environment the CLI itself
     runs in, so it needs consent every time — ``assume_yes`` or a ``confirm``
     callback that says yes. Without either, it is reported as skipped.
     """
     actions: list[str] = []
+    # Looking does not create the home; asking to fix does
+    # (tests/test_doctor_does_not_create_state.py). It came about as a side effect of
+    # turning tracing on until that took a --target (#51); a repair says what it did.
+    home = paths.aisquare_home()
+    if not home.exists():
+        try:
+            paths.ensure_home()
+            actions.append(f"created the aisquare home at {home}")
+        except OSError as exc:
+            actions.append(f"could not create the aisquare home at {home} ({exc})")
     try:
         config = load_config()
     except Exception as exc:  # never crash the doctor we are called from
@@ -2404,13 +2448,21 @@ def apply_fixes(
             "defaults: aisquare init --reinit --yes"
         ]
 
-    if not config.explainability.enabled:
+    # Only with a --target (#51). Without one, `--fix` turned tracing back on
+    # whenever it was off, so the next fix run undid a Disable and routed every
+    # launch through a proxy the operator had just switched away from. Naming
+    # the deployment is the opt-in; `explainability enable` stays the other one.
+    if not config.explainability.enabled and not target:
+        actions.append(
+            "tracing left off — turn it on with: aisquare doctor --fix --target <name> "
+            "(or aisquare explainability enable)"
+        )
+    elif not config.explainability.enabled:
         config.explainability.enabled = True
-        if target:
-            config.explainability.target = target
+        config.explainability.target = target or config.explainability.target
         try:
             save_config(config)
-            actions.append("enabled explainability tracing for this machine")
+            actions.append(f"enabled explainability tracing for this machine (target {target})")
         except Exception as exc:
             actions.append(f"could not write the config ({exc})")
 
@@ -2485,3 +2537,566 @@ def install_sdk() -> tuple[bool, str]:
     if completed.returncode != 0:
         return False, _summarise(completed.stderr or completed.stdout, limit=400)
     return True, f"installed {DISTRIBUTION}[explainability]"
+
+
+# ── stale routing: ANTHROPIC_BASE_URL wherever it hides (#51) ───────────────
+#
+# Tracing routes an agent through the proxy with ANTHROPIC_BASE_URL and our
+# identity headers. The same pair can sit in places Disable never touched: a
+# Claude settings `env` block (Claude Code applies it "no matter how `claude`
+# was launched"), a role binding's `env` or `env_files`, the fleet tmux server's
+# global environment, this process. Once tracing is off or that proxy is gone,
+# every model call of an agent launched afterwards fails, and the fix used to be
+# editing files by hand. This is the scan the doctor row and Disable read, and
+# the reset that removes what the scan calls ours.
+
+#: What the scan reads in every source. The same names as ``RESERVED_ENV_VARS``
+#: and ``core.spawn.TRACING_ENV_VARS``; spelled once more here because the reset
+#: prints them as a shell line and the order of that line is part of the output.
+ROUTING_VARS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS")
+
+#: The header names only this CLI's wiring sends (:func:`explainability._custom_headers`).
+#: A source carrying one is ours whatever URL sits beside it. Matched on the NAME:
+#: the values (a workspace key among them) are never read out, stored or printed.
+_OUR_HEADER = re.compile(r"(?im)^\s*(?:X-Agent-Name|X-Pipeline-Id|X-AISquare-Key)\s*:")
+
+#: The shell rc files ``reset`` names when they mention a routing variable —
+#: named, never edited: a shell rc is the operator's own file.
+_RC_FILES = (
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".bashrc",
+    ".bash_profile",
+    ".profile",
+    ".config/fish/config.fish",
+)
+
+RESET_COMMAND = "aisquare explainability reset"
+
+#: ``ours-stale`` — a proxy this machine configured (any target's, the shipped
+#: default, or our identity headers) while tracing is off or another target is
+#: active: the leftover that kills a launch. ``ours-live`` — the proxy tracing
+#: uses now. ``foreign`` — the operator's own gateway: reported, never changed.
+#: ``unparsable`` — a base URL the agent cannot parse, so it dies at its first call.
+RoutingVerdict = str
+
+
+@dataclass(frozen=True)
+class RoutingSource:
+    """One place that sets a routing variable, and what the scan made of it."""
+
+    kind: str
+    """``process``, ``settings``, ``binding``, ``env-file`` or ``tmux``."""
+    where: str
+    """The place, as an operator finds it: a path, a config table, a tmux server."""
+    variables: tuple[str, ...]
+    """Which of :data:`ROUTING_VARS` are set there."""
+    base_url: str | None
+    verdict: RoutingVerdict
+    fix: str
+    path: Path | None = None
+    """The settings file, for ``settings``; the file holding the value, for ``env-file``."""
+    role: str | None = None
+    """The ``[team.profiles.<role>]`` of a ``binding`` or ``env-file``."""
+
+    @property
+    def stale(self) -> bool:
+        """What the doctor warns on: a leftover of ours, or a URL the agent cannot use."""
+        return self.verdict in ("ours-stale", "unparsable")
+
+    def as_json(self) -> dict[str, Any]:
+        """The source for ``--json``: no header value, ever."""
+        return {
+            "kind": self.kind,
+            "where": self.where,
+            "variables": list(self.variables),
+            "base_url": self.base_url,
+            "verdict": self.verdict,
+            "fix": self.fix,
+        }
+
+
+def _normal_url(url: str) -> str:
+    return url.strip().rstrip("/").lower()
+
+
+def _our_proxies(settings: ExplainabilitySettings) -> set[str]:
+    """Every proxy URL this machine could have routed an agent to, normalised."""
+    found = {ExplainabilitySettings().proxy_url, settings.proxy_url}
+    for name in {settings.target, *settings.targets}:
+        with contextlib.suppress(Exception):  # an unresolvable target names no proxy
+            resolved = resolve_target(settings, name, env={})
+            found.add(resolved.proxy_url)
+            if resolved.gateway_url:
+                found.add(hosted_proxy_for(resolved.gateway_url) or "")
+    return {_normal_url(url) for url in found if url}
+
+
+def _live_proxy(settings: ExplainabilitySettings) -> str | None:
+    """The proxy a launch is routed to now, or ``None`` with tracing off."""
+    if not settings.enabled:
+        return None
+    try:
+        return _normal_url(resolve_target(settings, None).proxy_url)
+    except Exception:
+        return None
+
+
+def _verdict(values: Mapping[str, str], ours: set[str], live: str | None) -> RoutingVerdict:
+    base = (values.get(ROUTING_VARS[0]) or "").strip()
+    headers = values.get(ROUTING_VARS[1]) or ""
+    if base and url_problem(base, what="base URL") is not None:
+        return "unparsable"
+    if not ((base and _normal_url(base) in ours) or _OUR_HEADER.search(headers)):
+        return "foreign"
+    if live is not None and (not base or _normal_url(base) == live):
+        return "ours-live"
+    return "ours-stale"
+
+
+def _shown_url(url: str) -> str:
+    """``url`` as output may carry it: no userinfo, no query, no fragment.
+
+    A gateway URL can hold ``user:token@`` or a ``?key=`` (the operator's, never
+    ours), and the doctor's line is what lands in a pasted bug report. Done on the
+    text rather than through a parser so an unparsable URL is cut as well. The authority
+    is what follows ``scheme://`` (or ``//``, or nothing: ``user:token@host`` is cut too)
+    up to the first ``/``, ``?`` or ``#``, and its userinfo runs to its LAST ``@``, so a
+    password holding one goes whole (review of #356).
+    """
+    lead, authority, rest = _URL_AUTHORITY.match(url.strip()).groups()  # type: ignore[union-attr]
+    shown = (lead or "") + authority.rpartition("@")[2] + rest
+    return re.split(r"[?#]", shown, maxsplit=1)[0]
+
+
+_URL_AUTHORITY = re.compile(r"((?:[A-Za-z][A-Za-z0-9+.-]*:)?//)?([^/?#]*)(.*)", re.DOTALL)
+"""A URL's lead (``scheme://`` or ``//``, if any), its authority, and the rest; it matches
+any text."""
+
+
+def _cleaned(values: Mapping[str, str], ours: set[str]) -> dict[str, str | None]:
+    """What ``reset`` changes in one place: each routing variable's new value, ``None`` to remove.
+
+    Only what is ours goes. The base URL only when it IS a proxy of ours: beside our
+    headers, the operator's own gateway is kept. The headers lose only our lines
+    (``X-Agent-Name``, ``X-Pipeline-Id``, ``X-AISquare-Key``); another header there,
+    an auth header for that gateway say, stays, and the variable goes only when
+    nothing else is left in it.
+    """
+    changed: dict[str, str | None] = {}
+    base = (values.get(ROUTING_VARS[0]) or "").strip()
+    if base and _normal_url(base) in ours:
+        changed[ROUTING_VARS[0]] = None
+    headers = values.get(ROUTING_VARS[1])
+    if headers and _OUR_HEADER.search(headers):
+        kept = [
+            line for line in headers.splitlines() if line.strip() and not _OUR_HEADER.match(line)
+        ]
+        changed[ROUTING_VARS[1]] = "\n".join(kept) or None
+    return changed
+
+
+def _source(
+    kind: str,
+    where: str,
+    values: Mapping[str, str],
+    fix: str,
+    *,
+    ours: set[str],
+    live: str | None,
+    path: Path | None = None,
+    role: str | None = None,
+) -> RoutingSource | None:
+    present = {name: values[name] for name in ROUTING_VARS if values.get(name)}
+    if not present:
+        return None
+    verdict = _verdict(present, ours, live)
+    return RoutingSource(
+        kind=kind,
+        where=where,
+        variables=tuple(present),
+        base_url=_shown_url(present[ROUTING_VARS[0]]) if ROUTING_VARS[0] in present else None,
+        verdict=verdict,
+        fix={
+            "foreign": "yours — left as it is",
+            "unparsable": f"correct or remove {ROUTING_VARS[0]} in {where}",
+        }.get(verdict, fix),
+        path=path,
+        role=role,
+    )
+
+
+def _settings_files() -> list[Path]:
+    """Every Claude settings file whose ``env`` reaches an agent here, each file once.
+
+    The plain claude's (``~/.claude`` and ``$CLAUDE_CONFIG_DIR``), each managed
+    slot's, and each project's shared and local files. Linked slot files resolve
+    to the file they share, so one file is one source.
+    """
+    from aisquare.core import claude_accounts  # lazy: core imports stay cheap for the CLI
+
+    candidates = [
+        claude_accounts.home_config_dir() / "settings.json",
+        *(account.config_dir / "settings.json" for account in claude_accounts.list_accounts()),
+    ]
+    if paths.aisquare_home().is_dir():  # never bring a home into being from a scan
+        from aisquare.core.store import store_session
+
+        with contextlib.suppress(Exception), store_session() as store:
+            for project in store.list_projects(all=True):
+                folder = Path(project.root) / ".claude"
+                candidates += [folder / "settings.json", folder / "settings.local.json"]
+    seen: set[str] = set()
+    found: list[Path] = []
+    for candidate in candidates:
+        real = os.path.realpath(candidate)
+        if real in seen or not os.path.isfile(real):
+            continue
+        seen.add(real)
+        found.append(candidate)
+    return found
+
+
+def _settings_env(path: Path) -> dict[str, str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {}
+    env = data.get("env") if isinstance(data, dict) else None
+    if not isinstance(env, dict):
+        return {}
+    return {k: v for k, v in env.items() if isinstance(v, str)}
+
+
+class FleetServer(Protocol):
+    """What the scan and the reset ask of the fleet tmux server (``core.tmux.TmuxServer``)."""
+
+    socket: str
+
+    def available(self) -> bool: ...
+
+    def server_absent(self) -> bool: ...
+
+    def run(self, *args: str, stdin: bytes | None = None) -> str: ...
+
+
+def _fleet_tmux_server() -> FleetServer:
+    """The fleet's tmux server (a seam: tests hand in a fake)."""
+    from aisquare.core import tmux as tmux_core
+    from aisquare.services import fleet as fleet_service  # lazy: fleet imports this module
+
+    return tmux_core.TmuxServer(fleet_service.settings().tmux_socket)
+
+
+def _server_env(server: FleetServer) -> dict[str, str] | None:
+    """The routing variables in the running server's global environment; ``None`` with no server.
+
+    Asked one name at a time: ``show-environment -g`` prints each value raw, and
+    ``ANTHROPIC_CUSTOM_HEADERS`` is newline-separated by design, so a listing read
+    line by line kept only its first header. Asked by name, the value is everything
+    after ``NAME=`` (measured on tmux 3.5a); an unset name is tmux's "unknown variable".
+    """
+    try:
+        if not server.available() or server.server_absent():
+            return None
+    except Exception:  # a tmux that will not answer is no source
+        return None
+    held: dict[str, str] = {}
+    for var in ROUTING_VARS:
+        try:
+            line = server.run("show-environment", "-g", var)
+        except Exception:
+            continue
+        if line.startswith(f"{var}="):
+            held[var] = line[len(var) + 1 :].removesuffix("\n")
+    return held
+
+
+def _rc_home() -> Path:
+    return Path.home()
+
+
+def rc_files_mentioning() -> list[Path]:
+    """The shell rc files that mention a routing variable — for ``reset`` to name."""
+    found: list[Path] = []
+    for name in _RC_FILES:
+        path = _rc_home() / name
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if any(var in text for var in ROUTING_VARS):
+            found.append(path)
+    return found
+
+
+def routing_sources(
+    *,
+    env: Mapping[str, str] | None = None,
+    server: FleetServer | None = None,
+    tracing_on: bool | None = None,
+) -> list[RoutingSource]:
+    """Every place that sets ``ANTHROPIC_BASE_URL`` or its headers, with a verdict each.
+
+    Read-only. ``env`` is this process's environment (``None``: ``os.environ``);
+    ``server`` the fleet tmux server (``None``: the configured socket's; never
+    started). ``tracing_on`` overrides the config's switch: ``reset`` asks as if
+    tracing were already off, which makes every source of ours a leftover.
+    """
+    config = load_config()
+    settings = config.explainability
+    if tracing_on is not None:
+        settings = settings.model_copy(update={"enabled": tracing_on})
+    ours = _our_proxies(settings)
+    live = _live_proxy(settings)
+    unset = f"unset {' '.join(ROUTING_VARS)}"
+    found: list[RoutingSource | None] = [
+        _source(
+            "process",
+            "this process's environment",
+            os.environ if env is None else env,
+            f"{unset} in the shell this runs from",
+            ours=ours,
+            live=live,
+        )
+    ]
+    for path in _settings_files():
+        found.append(
+            _source(
+                "settings",
+                str(path),
+                _settings_env(path),
+                f"{RESET_COMMAND} (or delete env.{ROUTING_VARS[0]} from {path})",
+                ours=ours,
+                live=live,
+                path=path,
+            )
+        )
+    for role, profile in config.team.profiles.items():
+        table = f"[team.profiles.{role}]"
+        found.append(
+            _source(
+                "binding",
+                f"{table}.env",
+                profile.env,
+                f"{RESET_COMMAND} (or aisquare team bind {role} --unset {ROUTING_VARS[0]})",
+                ours=ours,
+                live=live,
+                role=role,
+            )
+        )
+        for variable, file in profile.env_files.items():
+            if variable not in ROUTING_VARS:
+                continue
+            held = Path(file).expanduser()
+            with contextlib.suppress(OSError, UnicodeDecodeError):
+                value = held.read_text(encoding="utf-8").rstrip("\r\n")
+                found.append(
+                    _source(
+                        "env-file",
+                        f"{table}.env_files: {held}",
+                        {variable: value},
+                        f"{RESET_COMMAND} (drops the binding's env_files.{variable}; "
+                        "the file is left as it is)",
+                        ours=ours,
+                        live=live,
+                        path=held,
+                        role=role,
+                    )
+                )
+    # No home, no fleet server of ours to ask — and asking would write its conf into
+    # the home the doctor is at that moment reporting as missing.
+    srv = server
+    if srv is None and paths.aisquare_home().is_dir():
+        srv = _fleet_tmux_server()
+    held_env = _server_env(srv) if srv is not None else None
+    if srv is not None and held_env is not None:
+        found.append(
+            _source(
+                "tmux",
+                f"the fleet tmux server's global environment (tmux -L {srv.socket})",
+                held_env,
+                "; ".join(
+                    f"tmux -L {srv.socket} set-environment -gu {var}" for var in ROUTING_VARS
+                ),
+                ours=ours,
+                live=live,
+            )
+        )
+    return [source for source in found if source is not None]
+
+
+@dataclass
+class RoutingReset:
+    """What ``explainability reset`` did, or would do with ``--dry-run``."""
+
+    dry_run: bool
+    tracing_was_on: bool
+    removed: list[RoutingSource]
+    failed: list[tuple[RoutingSource, str]]
+    backups: list[Path]
+    shell_unset: str | None
+    rc_files: list[Path]
+    remaining: list[RoutingSource]
+    """What a fresh scan still calls stale afterwards (on ``--dry-run``: now)."""
+
+    @property
+    def nothing_to_reset(self) -> bool:
+        return not (self.tracing_was_on or self.removed or self.failed)
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "dry_run": self.dry_run,
+            "tracing_was_on": self.tracing_was_on,
+            "nothing_to_reset": self.nothing_to_reset,
+            "removed": [source.as_json() for source in self.removed],
+            "failed": [{**source.as_json(), "error": why} for source, why in self.failed],
+            "backups": [str(path) for path in self.backups],
+            "shell_unset": self.shell_unset,
+            "rc_files": [str(path) for path in self.rc_files],
+            "remaining": [source.as_json() for source in self.remaining],
+        }
+
+
+def reset_routing(
+    *,
+    dry_run: bool = False,
+    env: Mapping[str, str] | None = None,
+    server: FleetServer | None = None,
+    now: datetime | None = None,
+) -> RoutingReset:
+    """Tracing off (targets kept), and every leftover of ours removed where it can be.
+
+    Only what is ours goes (:func:`_cleaned`): a proxy URL of ours, and our header
+    lines. Settings files are edited with a ``settings.json.bak-<stamp>`` copy kept
+    first, under Claude Code's own ``<file>.lock``, by rename through a symlink;
+    bindings in ``env`` (an ``env_files`` entry is dropped only when its file holds
+    nothing but ours, since the file is never edited); the fleet tmux server's
+    global environment in place. A shell cannot be changed from here: its
+    ``unset`` line and the rc files that mention the variables are returned to
+    print. A ``foreign`` gateway is never touched. ``dry_run`` plans and changes
+    nothing.
+    """
+    srv = server if server is not None else _fleet_tmux_server()
+    config = load_config()
+    tracing_was_on = config.explainability.enabled
+    ours = _our_proxies(config.explainability)
+    planned = [
+        source
+        for source in routing_sources(env=env, server=srv, tracing_on=False)
+        if source.verdict == "ours-stale"
+    ]
+    fixable = [source for source in planned if source.kind != "process"]
+    in_shell = any(source.kind == "process" for source in planned)
+    report = RoutingReset(
+        dry_run=dry_run,
+        tracing_was_on=tracing_was_on,
+        removed=fixable if dry_run else [],
+        failed=[],
+        backups=[],
+        shell_unset=_shell_line(os.environ if env is None else env, ours) if in_shell else None,
+        rc_files=rc_files_mentioning() if in_shell or planned else [],
+        remaining=[],
+    )
+    if dry_run:
+        report.remaining = [s for s in routing_sources(env=env, server=srv) if s.stale]
+        return report
+    if tracing_was_on:
+        config.explainability.enabled = False
+    stamp = (now or datetime.now(tz=UTC)).strftime("%Y%m%dT%H%M%SZ")
+    for source in fixable:
+        try:
+            if source.kind == "settings" and source.path is not None:
+                backup = _drop_settings_env(source.path, stamp, ours)
+                if backup is not None:
+                    report.backups.append(backup)
+            elif source.kind == "binding" and source.role is not None:
+                _apply(config.team.profiles[source.role].env, ours)
+            elif source.kind == "env-file" and source.role is not None and source.path:
+                [variable] = source.variables
+                held = source.path.read_text(encoding="utf-8").rstrip("\r\n")
+                if _cleaned({variable: held}, ours).get(variable, held) is not None:
+                    raise OSError(
+                        f"{source.path} holds more than ours — remove our lines from it "
+                        f"yourself, or the binding's env_files.{variable}"
+                    )
+                config.team.profiles[source.role].env_files.pop(variable, None)
+            elif source.kind == "tmux":
+                for var, value in _cleaned(_server_env(srv) or {}, ours).items():
+                    if value is None:
+                        srv.run("set-environment", "-g", "-u", var)
+                    else:
+                        srv.run("set-environment", "-g", var, value)
+        except Exception as exc:
+            report.failed.append((source, str(exc)))
+        else:
+            report.removed.append(source)
+    if tracing_was_on or any(s.kind in ("binding", "env-file") for s in report.removed):
+        save_config(config)
+    report.remaining = [s for s in routing_sources(env=env, server=srv) if s.stale]
+    return report
+
+
+def _shell_line(env: Mapping[str, str], ours: set[str]) -> str:
+    """What to type in the shell: ``unset`` for what is ours, an ``export`` for headers kept."""
+    changed = _cleaned(env, ours)
+    gone = [var for var, value in changed.items() if value is None]
+    line = f"unset {' '.join(gone)}" if gone else ""
+    if changed.get(ROUTING_VARS[1]):
+        # The kept headers are the operator's own, so not shown here: name what to drop.
+        kept = (
+            "; then re-export ANTHROPIC_CUSTOM_HEADERS without our X-Agent-Name, "
+            "X-Pipeline-Id and X-AISquare-Key lines"
+        )
+        line = (line + kept) if line else kept.removeprefix("; then ")
+    return line
+
+
+def _apply(env: dict[str, str], ours: set[str]) -> bool:
+    """:func:`_cleaned` applied to ``env`` in place; whether anything changed."""
+    changed = _cleaned(env, ours)
+    for var, value in changed.items():
+        if value is None:
+            env.pop(var, None)
+        else:
+            env[var] = value
+    return bool(changed)
+
+
+def _drop_settings_env(path: Path, stamp: str, ours: set[str]) -> Path | None:
+    """Remove what is ours from a settings file's ``env``; the backup kept, or ``None``.
+
+    A file aisquare does not own, so: Claude Code's ``<file>.lock`` taken as it
+    takes it, the file re-read under it, a copy kept beside it first, and the
+    rest written back in its own two-space shape, replaced by rename through a
+    symlink as Claude Code replaces it.
+    """
+    from aisquare.core import atomic
+    from aisquare.core.claude_sharing import SharingError, _config_lock, _keep_beside
+
+    try:
+        with _config_lock(path):
+            target = Path(os.path.realpath(path))
+            raw = target.read_bytes()
+            data = json.loads(raw.decode("utf-8"))
+            env = data.get("env") if isinstance(data, dict) else None
+            if not isinstance(env, dict):
+                return None
+            routing = {k: v for k, v in env.items() if k in ROUTING_VARS and isinstance(v, str)}
+            if not _cleaned(routing, ours):
+                return None
+            backup = _keep_beside(target, f"{target.name}.bak-{stamp}")
+            _apply(routing, ours)
+            for var in ROUTING_VARS:
+                if var in routing:
+                    env[var] = routing[var]
+                else:
+                    env.pop(var, None)
+            body = json.dumps(data, indent=2, ensure_ascii=False)
+            if raw.endswith(b"\n"):
+                body += "\n"
+            atomic.write_replacing(target, body.encode("utf-8"))
+            return backup
+    except SharingError as exc:
+        raise OSError(str(exc).replace("its .claude.json", path.name)) from None

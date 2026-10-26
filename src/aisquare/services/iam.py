@@ -240,7 +240,9 @@ def _http(
     """
     from http.client import HTTPException, IncompleteRead
     from urllib.error import HTTPError, URLError
-    from urllib.request import Request, urlopen
+    from urllib.request import Request
+
+    from aisquare.core.tls import urlopen
 
     if form is not None and json_body is not None:
         raise ValueError("a request has one body shape: form or JSON, not both")

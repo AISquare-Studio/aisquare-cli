@@ -203,14 +203,25 @@ manager's loop. Model ladders and effort come from the existing harness
 (`aisquare team harness` shows the matrix): the manager rides the planner's
 ladder (`fable → opus → sonnet`); coder, tester, ui-tester and reviewer start on `sonnet`
 with `opus` as the fallback rung; the validator runs `fable → opus`, one effort
-tier above the work it gates.
+tier above the work it gates. `fleet spawn` passes the role's rung and effort to the
+agent (`--model`, `--effort`) from the cached probe only — never a probe at spawn — and
+records both, so a restart or switch starts the same model; arguments that already name
+a model or an effort (the binding's `--arg`, the role's `extra_args`, yours) are left as
+they are, and another binary gets neither. `fleet ls --json` shows them in each agent's
+`launch_spec`.
+
+**One tester per task.** The manager spawns a tester for each task that reaches review:
+`fleet spawn tester --task <id>` (a ui-tester for a task titled "UI: …"). Its cycle takes
+that task alone (`aisquare task next --status review --task <id>`), and after its verdict
+it stops rather than draining the rest of the review pool. The validator stays the one
+final gate over the assembled deliverable.
 
 | Fleet role | Repo role | Job in the loop | Runs in |
 | --- | --- | --- | --- |
 | **manager** | `planner` + fleet authority | intake → contracts → `fleet spawn` → steer → report. One per project. Never codes — a direct "fix this" becomes a coder spawn — never merges. | the repo root |
 | **coder** | `coder` | implements one task to its acceptance criteria; pushes and opens the PR | its own git worktree |
 | **tester** | `runner` (`tester` is the fleet's name for it; `runner` still works everywhere) | adversarial verification: runs the *full* check the contract names, tries to break the change, then `task done` with evidence or `task reopen` with the reason | the repo root. It gets no worktree of its own and **nothing moves it into the coder's** — so whoever spawns it names the branch or the tree to check, in the tester's `--prompt` or a later `fleet tell`, or its "full check" runs against an unchanged root |
-| **reviewer** | new | reads the PR as the stranger who will maintain it; findings on the PR via `gh pr review`. Launched without the tools that edit files (`--disallowedTools=Edit Write NotebookEdit`) and with its shell: Claude Code's `--restricted` removes the Bash that `gh pr diff`, `gh pr review` and its `aisquare` cycle need (0.6.0 and 0.7.0 launched it so, and it could do none of them). Its shell could still push or merge: its briefing forbids both and `auto` mode checks each action, but only the credentials it runs with can refuse them (see the table below) | its own worktree |
+| **reviewer** | new | reads the PR as the stranger who will maintain it; findings on the PR via `gh pr review`. Launched without the tools that edit files (Edit, Write and NotebookEdit: the role's own deny, wherever it starts, see [Tools and skills per role](#tools-and-skills-per-role)) and with its shell: Claude Code's `--restricted` removes the Bash that `gh pr diff`, `gh pr review` and its `aisquare` cycle need (0.6.0 and 0.7.0 launched it so, and it could do none of them). Its shell could still push or merge: its briefing forbids both and `auto` mode checks each action, but only the credentials it runs with can refuse them (see the table below) | its own worktree |
 | **validator** | `validator` | one final gate over the assembled deliverable before the manager says READY | the repo root |
 | **ui-tester** | new | verifies tasks titled `UI: …` in a **real browser** — Claude in Chrome, the Chrome DevTools MCP or a Playwright MCP, whichever this window has — and measures (screenshots, computed sizes, console, network) instead of eyeballing; `task done` names the branch or commit and the URL it verified, or `task reopen` carries a screenshot. With no browser tool it runs the non-browser checks and reopens the task as "not browser-verified", never passes it. **Asked to be read-only, not made read-only** — its briefing says never edit and never push, and nothing enforces that (see the permission-mode table below: no allowed-tools list is written or passed, and `--restricted` would remove the Bash its own `task done`/`task reopen` need). Launched with `--chrome` by the role itself (`RoleProfile.default_args`), on any machine, unless `--no-chrome` is given | the repo root. Like the tester it gets no worktree and **nothing moves it into the coder's** — worse here, because it fails silently: it opens the URL, sees a working page and measures the PRE-change build honestly. So whoever spawns it names the branch or tree and the URL in its `--prompt` (the manager's loop does), and its verdict says which build it measured |
 
@@ -226,6 +237,17 @@ manager is woken (a fixed one-line nudge typed into its pane, only while it is
 *waiting*) and reads the update on its next turn; when the manager stops with
 new board events pending, its `Stop` hook lets it continue. No daemon, no poll
 loop, and it works with the UI closed (Phase 5).
+
+**What wakes the manager.** A review, a done, a blocked or reopened task, a result,
+a question, an agent on its usage limit, anything addressed `--to manager`, and an
+agent that exited badly: a non-zero status, a kill or a loss (no status), an exit
+that released a claim it still held, or a hand-over whose replacement did not start.
+Everything else — a clean exit, a switch, a restart, a claim, a note, a decision — is
+news: it waits past the manager's cursor and rides along with the next wake or
+prompt, so it costs no turn of its own. What the manager did itself never wakes it:
+its own `fleet stop` names it as the actor (`coder-auth exited (0) — stopped by
+manager`). Each event reaches an agent as one line, `#<seq> <who> <kind>[ #<task>]:
+<first line>`, with `… → aisquare team show <seq>` when there is more.
 
 Standalone use is unchanged: `aisquare launch planner` and `aisquare launch
 runner` keep working outside any fleet.
@@ -248,6 +270,7 @@ aisquare fleet spawn coder --label coder-auth --task tsk_01k9q8p3
 aisquare fleet spawn tester --no-worktree
 aisquare fleet spawn reviewer --permission-mode acceptEdits
 aisquare fleet spawn coder --persona skeptic
+aisquare fleet spawn reviewer --board-context all   # what of the board it reads
 aisquare fleet spawn coder --bin claude2 --prompt "start from the failing test" -- --model opus
 ```
 
@@ -270,11 +293,15 @@ follows as a `⚠` line.
 | `--bin B` | the agent executable | the role's binding, else `claude` |
 | `--prompt TEXT` | the agent's first message: on Claude Code's command line, typed for any other binary ([the first message](#the-first-message)); after the kickoff with `--task`. Typed into Claude Code (`[fleet] first_prompt = "type"`), it goes in once its input box is drawn, past its first-run Security notes screen (Enter) | none |
 | `--persona NAME` | the persona the agent runs as ([docs/personas.md](personas.md)): passed to `launch`, briefed once at session start, recorded on the row | the role's `[fleet.roles.<role>].persona`, else none |
+| `--board-context all\|relevant\|none` | what of the board it reads: `relevant` keeps its own tasks, what is addressed to its role or label, and decisions; `none` gives no recent updates at start and no per-prompt deltas, its task, protocol and cycle unchanged. Set on its window as `AISQUARE_BOARD_CONTEXT` and recorded, so `restart` and `switch` keep it. A manager reads `all`, and a narrower one is refused | the role's `[fleet.roles.<role>].board_context`: `none` for the reviewer, `all` for the rest |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
 
 Refused, with the reason in the message: a second `manager`, more agents than
-`max_agents_per_project`, `--worktree` in a project that is not a git
+`max_agents_per_project`, more live agents across every project than
+`max_agents_total`, less available memory than `min_free_mb` or memory pressure
+at critical (see [Capacity](#capacity); `--json` errors `capacity_project`,
+`capacity_fleet`, `capacity_memory`), `--worktree` in a project that is not a git
 repository, an unknown role, a `--task` that is already done or dropped, a
 persona the project does not have (the known names are listed; a stale
 `[fleet.roles.<role>].persona` default names its key). All of these are checked
@@ -452,7 +479,14 @@ receipt reads `typed` or `noted`.
 ```sh
 aisquare fleet stop coder-auth
 aisquare fleet stop coder-auth --force
+aisquare fleet stop coder-auth --as <session>   # who is stopping it
 ```
+
+The board's `agent_exited` names who stopped the agent — `--as`, else the session of
+the fleet window you run it in (a manager's), else `user` — with the status, `--force`
+and the claims it released in its details (`aisquare team show <seq>`). A manager's own
+stop wakes no one; a clean stop by anyone is news for the manager's next wake, and a
+kill or a failed exit wakes it.
 
 Sends `/exit`, waits a grace period, then kills the window. The agent's own
 `SessionEnd` hook releases its task claims on the way out; whatever the ended
@@ -710,7 +744,11 @@ aisquare fleet attach --project amber-otter
 ```
 
 Replaces this terminal with `tmux attach` on the project's fleet session — the
-full-fidelity escape hatch. Under `--json` it prints the command it would run
+full-fidelity escape hatch. The server has tmux's mouse on: the wheel scrolls
+Claude Code (or tmux's history, over a program that did not ask for the mouse),
+and a plain drag is tmux's own selection, copied to tmux's paste buffer. Hold
+Shift (Option in macOS Terminal and iTerm2) to select in your own terminal
+instead. Under `--json` it prints the command it would run
 instead of running it. The session is found on the server the project's live
 agents are on, at the socket their spawns recorded (`tmux -S`), the line the
 project's Settings tab prints, so it works from a shell under another `TMUX_TMPDIR`. With
@@ -738,6 +776,7 @@ else is killed on an interrupt.
 aisquare fleet reap
 aisquare fleet reap --all
 aisquare fleet reap --all --server-down
+aisquare fleet reap --finished [--dry-run] [--json]
 ```
 
 Records agents whose panes have died as ended (with their exit code), marks
@@ -770,6 +809,13 @@ the main checkout's HEAD without them. A restart of an agent whose tree was
 removed makes the tree again on the branch its row recorded: *One rule for a
 worktree and its branch* under [Naming](#naming).
 `--all` walks every project's fleet, not just this one.
+
+`--finished` does something else: it stops the workers that have finished (see
+*Auto-stop* under [Capacity](#capacity)), each `agent_exited` saying `stopped by
+auto-stop` and why. `--dry-run` lists every candidate with the reason it would be
+stopped, or the condition that keeps it, and stops none. With `--json` it prints one
+object per worker: `label`, `project_id`, `finished`, `reason`, `kept_because`,
+`stopped`.
 
 Each row is asked of its own server, at the socket its spawn recorded, so a
 shell under another `TMUX_TMPDIR` reaps exactly what the spawning shell would,
@@ -813,7 +859,14 @@ that moment the row is renamed anyway and the next `reap` reconciles.
 ```sh
 aisquare fleet pause
 aisquare fleet resume
+aisquare fleet pause --group <name>       # the group's members and its parent
 ```
+
+`--group` pauses (or resumes) every member of a project group and its parent at once
+(see [A manager over a group](orchestration.md#a-manager-over-a-group)), and under a
+parent an agent's own spawn (`fleet spawn --as …`, a parent manager restarting a child) on
+a paused board is refused, not only advised against. A person's spawn goes ahead, and a
+project with no parent above or below it behaves as before.
 
 Sets (and clears) a named board signal, the project's `fleet-paused`, that the
 manager's cycle respects: while it is on, the manager spawns nothing. Running
@@ -840,11 +893,28 @@ fleet commands name.
 
 ```sh
 aisquare ui
+aisquare ui --project amber-otter --project web   # only these projects
+aisquare ui --group frontend                      # only this group's projects
 ```
 
 The app — what bare `asq` runs. Explicit so a script or alias can reach it, and
 so `aisquare ui --help` exists. Without an interactive terminal it refuses with
 the reason (`not_a_tty`) rather than starting a full-screen app into a pipe.
+
+`--project` (repeatable; codename, name or id prefix) and `--group` (repeatable;
+the group's members as they stand when the app starts) list only those projects
+for this session, plus the captain's section when it is on. A name that matches
+nothing is refused before the app starts.
+
+**What a tick costs.** Every two seconds the sidebar reads the fleet off the UI
+thread: one store session and one `tmux list-panes -a` per server, however many
+projects are listed. A project with no live agent and none that ended in the
+last day is not read at all, and the members of a collapsed group are not read
+either: its header counts their live agents instead, and its bells show once it
+is unfolded. A card whose agents did not change is not repainted. Measured with
+50 listed projects, 10 of them with 3 agents: the read went from 51 store
+sessions and 20 tmux processes (~200 ms) to 1 and 1 (~11 ms), and the UI thread's
+paint from ~15 ms to ~4–7 ms.
 
 *⚙ Settings ▸ Remote control* (App settings' own *Remote* tab) turns Remote on: the fleet on your phone through
 your own ngrok tunnel, with the link, a QR code and the passphrase; the first time,
@@ -1114,11 +1184,37 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   shared nor replaced — the command says which setting stopped it. `aisquare
   accounts settings --sync` links them now, `--unshare` gives each its own copy
   back.
+- **Memory, skills, agents, commands, CLAUDE.md.** Opt-in, `[accounts] share`
+  (empty by default), turned on and off with `aisquare accounts share`:
+  - `memory`: every launch, the plain claude's included, gets
+    `--settings '{"autoMemoryDirectory": "~/.aisquare/claude-shared/memory/<project>"}'`,
+    so a memory saved on one account is read on every other. The first
+    `--enable memory` merges what each account already remembered there: nothing
+    overwritten, a file that differs kept as `<name>.slot<N>.md`, `MEMORY.md`
+    merged by line. The directory is outside every `.claude` path on purpose:
+    since Claude Code 2.1.280 every auto-memory write into a linked `.claude`
+    directory asks for approval nothing can give.
+  - `skills`, `agents`, `commands`, `claude_md`: each managed account's entry
+    becomes a link to the plain claude's (a junction on Windows, and a copy of
+    `CLAUDE.md`), its own kept beside it as `<entry>.own-<stamp>`;
+    `--disable` puts it back exactly. An entry already linked somewhere else is
+    yours and is left alone. A launch on an account added since links it.
+  - `plugins`: experimental. MCP logins and the plugin store are per account.
+  - Transcripts are never shared. A linked `projects/` makes every auto-memory
+    write prompt, and the shortest `cleanupPeriodDays` would sweep them all. A
+    session moved to another account resumes by its transcript's path instead
+    (verified on Claude Code 2.1.309:
+    [cross-account resume](runbooks/cross-account-resume.md)).
+
+  `aisquare doctor`'s `claude-accounts sharing` line says what is shared and
+  warns about an account that does not share a part that is on, a link it
+  did not make, or a `projects/` that is a symlink. A session is attributed to
+  the account its fleet row launched it on, whatever its transcript's path says.
 
 Nothing on this page writes into Claude Code's login: the email and plan
 are read from what Claude Code recorded, and a token is never refreshed by the
-CLI. Claude Code refreshes it on the account's next session. The two things the
-accounts share (above) are the only writes into an account's directory.
+CLI. Claude Code refreshes it on the account's next session. What the
+accounts share (above) is the only thing written into an account's directory.
 
 Everything the page does is a command, and every reporting one takes `--json`:
 
@@ -1150,6 +1246,9 @@ aisquare accounts settings             # what each account's settings.json is: s
 aisquare accounts settings --sync      # link every managed account's settings.json to the plain claude's
 aisquare accounts settings --unshare   # each linked account gets its own copy back
 aisquare config set accounts.share_settings true # keep them linked at every launch (off by default)
+aisquare accounts share --status       # what every account shares: memory, skills, agents, commands, CLAUDE.md
+aisquare accounts share --enable memory,skills   # one memory per project and one skills/ for every account
+aisquare accounts share --disable skills         # each account gets its own skills/ back, as it was
 aisquare fleet switch coder-auth       # move one now: resumes its session on the account with room
 aisquare fleet restart manager         # an exited (or stuck) agent, back under its label, session resumed
                                        # …launched as it was first launched: the row records the
@@ -1185,7 +1284,7 @@ answer.
 | --- | --- | --- |
 | manager | `auto` | its tool use is board and fleet CLI calls |
 | coder, tester, validator | `auto` | the classifier answers every tool call, the project's own check commands included. A project allowlist that pre-approves `make check`, `pytest`, `git` and `gh` is designed (plan §3.6) and **is not in this checkout**: nothing here writes or passes an allowed-tools list |
-| reviewer | `auto` + `--disallowedTools=Edit Write NotebookEdit` | the flag is the role's `extra_args`: it keeps Bash, which its whole cycle runs on and `--restricted` would take, and loses the tools that edit files, so a prompt injected through the PR it reads cannot edit the tree with them. Its shell is not read-only: `sed -i`, `git push` or `gh pr merge` injected through a PR meets only its briefing and `auto` mode's check of each action, and no allowlist of commands would hold (its inline comments are `gh api` calls, as a merge is, and verifying a finding runs the PR's code). Where that matters, run it with a `gh` token that cannot write the repository's contents, which can comment but not push or merge, and protect the branch: [A reviewer that cannot push](#a-reviewer-that-cannot-push). `extra_args = []` gives it every tool. A config saved by 0.6.0 or 0.7.0 holds that release's default, `extra_args = ["--restricted"]`; exactly that list loads as today's default, once: the next save writes the file's `config_version` at its top, and from then on `--restricted` set there is yours and kept. A reviewer those releases started recorded the flag in its launch spec, and `fleet restart`, `fleet switch` and Restart replay today's arguments in its place, with `--disallowedTools=Edit Write NotebookEdit` beside them where they do not deny those tools: the spec cannot tell that release's default from a `--restricted` its spawn was given, so the replay errs toward the reviewer without them, and a fresh spawn gets whatever today's arguments give. One recorded since is replayed as recorded. Any other list stays as written |
+| reviewer | `auto`, denied Edit, Write and NotebookEdit | the deny is the role's own, merged into the one `--disallowedTools` every role gets ([Tools and skills per role](#tools-and-skills-per-role)), so `fleet spawn`, `team spawn` and `aisquare launch reviewer` all have it, and an `extra_args` you set no longer replaces it; `allow_tools = ["Edit"]` is the one way to give a tool back. It keeps Bash, which its whole cycle runs on and `--restricted` would take, and loses the tools that edit files, so a prompt injected through the PR it reads cannot edit the tree with them. Its shell is not read-only: `sed -i`, `git push` or `gh pr merge` injected through a PR meets only its briefing and `auto` mode's check of each action, and no allowlist of commands would hold (its inline comments are `gh api` calls, as a merge is, and verifying a finding runs the PR's code). Where that matters, run it with a `gh` token that cannot write the repository's contents, which can comment but not push or merge, and protect the branch: [A reviewer that cannot push](#a-reviewer-that-cannot-push). A config saved by 0.8.0 to 0.8.2 holds that release's default, `extra_args = ["--disallowedTools=Edit Write NotebookEdit"]`, and one saved by 0.6.0 or 0.7.0 holds `["--restricted"]`; exactly that list loads as today's default (none), once: the next save writes the file's `config_version` at its top, and from then on a list set there is yours and kept. A reviewer 0.6.0 or 0.7.0 started recorded `--restricted` in its launch spec, and `fleet restart`, `fleet switch` and Restart replay today's arguments in its place, with `--disallowedTools=Edit Write NotebookEdit` beside them where they do not deny those tools: the spec cannot tell that release's default from a `--restricted` its spawn was given, so the replay errs toward the reviewer without them. One recorded by 0.8.0 to 0.8.2 leads with that release's default deny, which a restart drops, since the role's own deny holds; so `allow_tools` reaches a restarted reviewer too. Any other list stays as written |
 | ui-tester | `auto` + `--chrome` | `--chrome` comes from the role, not this table: `aisquare launch ui-tester` adds it for the default `claude` binary wherever the role starts, and `--no-chrome` in `extra_args` or on the command turns it off. Its "read-only" is a briefing instruction, NOT construction — the row above says so, and the sentence in the coder/tester cell applies here too: nothing here writes or passes an allowed-tools list, so a PreToolUse allowlist (plan §3.6, not in this checkout) is what would enforce it |
 
 The mode is passed straight through to `claude` and nothing here reads its
@@ -1265,7 +1364,13 @@ following today's, and the next save writes it down to yours. A file 0.8.0 saves
 whole again after a move back is read the same way. Moving back with
 `aisquare upgrade --version 0.8.0` names what that release reads differently:
 the settings the file leaves to today's defaults where 0.8.0's differ
-(`accounts.pick`, `accounts.on_limit`).
+(`accounts.pick`, `accounts.on_limit`). A move back to 0.8.2 or earlier also names
+each role that release would launch with tools its safety list denies here: those
+releases deny a role only what its `extra_args` say, and this one leaves the
+reviewer's empty, so a reviewer there could edit the tree it reviews. The warning
+gives the one `config set` that keeps the deny there. It is said only by `aisquare
+upgrade`: an older install that shares `~/.aisquare` without going through it
+leaves no trace this one can read.
 
 ```sh
 aisquare config list --overrides   # what you changed, and nothing else
@@ -1291,13 +1396,27 @@ max_agents_per_project = 4                # the manager (and you) cannot exceed 
 worktree_dir = ".aisquare-worktrees"      # relative to the repo root; kept out of git via .git/info/exclude
 disable_native_agent_teams = true         # exports CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0 into fleet launches
 max_continuations_per_hour = 30           # cap on the manager's Stop-hook continuations
+max_agents_total = 0                      # live agents across every project, captain excluded; 0 = no budget
+min_free_mb = 2048                        # refuse a spawn below this much available memory; 0 = off
+test_gate_mb = 0                          # `fleet gate`'s floor; 0 = min_free_mb
+test_gate_wait_minutes = 15               # how long `fleet gate` waits for it
+auto_stop_finished = true                 # stop finished workers of these roles by themselves
+auto_stop_idle_minutes = 5                # … once idle this long
+auto_stop_roles = ["tester", "reviewer", "validator", "ui-tester"]  # coders opt in
+pane_clipboard = "off"                    # "on": a program in a pane may set your clipboard (OSC 52)
 busy_quiet_seconds = 30                   # a "working" row whose pane printed nothing this long is
                                           # checked once: an idle Claude Code prompt reads waiting
+deny_tools = ["Artifact", "ArtifactComments", "Workflow", "ReportFindings",
+              "ShareOnboardingGuide", "PushNotification", "ScheduleWakeup", "SendFeedback"]
+                                          # every role launches without these, wherever it starts
 
 [fleet.roles.manager]
 permission_mode = "auto"                  # any Claude Code mode; "" = pass no flag
 worktree = false
-extra_args = []
+extra_args = []                           # fleet windows only; `launch` and `team spawn` never read them
+deny_tools = []                           # added to [fleet] deny_tools and the role's own safety list
+allow_tools = []                          # taken back out of that set: the one way to give back a safety-listed tool
+skill_listing = "full"                    # "full" | "names" | "off"; every other role defaults to "names"
 
 [fleet.roles.coder]
 permission_mode = "auto"
@@ -1312,7 +1431,8 @@ extra_args = []
 [fleet.roles.reviewer]
 permission_mode = "auto"
 worktree = true
-extra_args = ["--disallowedTools=Edit Write NotebookEdit"]  # a shell, no editing tools
+extra_args = []                           # its Edit/Write/NotebookEdit deny is the role's own, not this
+board_context = "none"                    # judges a change cold: no recent updates, no deltas
 
 [fleet.roles.ui-tester]
 permission_mode = "auto"
@@ -1333,9 +1453,189 @@ unless `--persona` names another:
 persona = "minimalist"                    # checked at spawn: a name the project lacks refuses, naming this key
 ```
 
-A role or a key your file leaves out takes its default above; a role the table
-above does not name gets `auto`, no worktree and no extra args. A config file that will not parse costs you the customisation and
+Every role table also takes `deny_tools`, `allow_tools` and `skill_listing`, shown
+once under the manager: [Tools and skills per role](#tools-and-skills-per-role). A
+role or a key your file leaves out takes its default above; a role the table above
+does not name gets `auto`, no worktree, no extra args, the `[fleet]` deny list and
+skill names only. A config file that will not parse costs you the customisation and
 never the fleet: the defaults apply and nothing refuses.
+
+### Capacity
+
+A spawn is admitted against three limits, in this order, each checked before any
+window opens:
+
+1. **`max_agents_per_project`** (4): the project's live agents.
+2. **`max_agents_total`** (0, no budget): live agents across every project, the
+   captain excluded and managers counted. The refusal names each project's count.
+3. **`min_free_mb`** (2048): available memory. Below it, or with the kernel's
+   memory pressure at critical, the spawn is refused with both numbers; at warn
+   pressure it is admitted with a note on the receipt. After a memory refusal
+   the floor is `min_free_mb + 512` for five minutes, so admission does not flap
+   on a machine hovering at the line. `0` turns the floor off.
+
+Available memory is `MemAvailable` from `/proc/meminfo` on Linux, with PSI
+(`/proc/pressure/memory`, `some avg10`: warn at 10, critical at 40) when the
+kernel has it; on macOS it is `vm_stat`'s free + inactive + speculative pages,
+and the pressure is `kern.memorystatus_vm_pressure_level`, which wins because
+that figure ignores the compressor. Under WSL2 these are the VM's numbers,
+capped by `.wslconfig`. Where neither can be read, admission admits and says so.
+
+```text
+aisquare fleet capacity [--json]
+```
+
+shows the headroom, the pressure, the floor in force, and the live agents
+against each limit, and whether the next spawn would be admitted; `aisquare
+doctor` has the same as its `fleet capacity` row. Every refusal, and every
+admission that fills the budget, is a line in `~/.aisquare/fleet/admission.jsonl`
+(rotated at 1 MB).
+
+**The test-run gate.** A heavy run (the full suite, a build) can wait for memory
+instead of pushing the machine into swap:
+
+```text
+aisquare fleet gate [--min-free-mb N] [--wait 15m] [--json] [-- CMD …]
+```
+
+It polls every 5 s. With the headroom it runs `CMD` and exits with its code
+(with no `CMD`, exits 0); at the deadline it runs nothing and exits **75**,
+`not run: <available> MB available, <N> MB needed for <wait>`. The floor is
+`--min-free-mb`, else `test_gate_mb`, else `min_free_mb`; the wait is
+`test_gate_wait_minutes`. Once `test_gate_mb` is set, the tester's and the
+validator's cycles tell them to run heavy checks through it.
+
+**Auto-stop of finished workers.** A tester that posted its verdict or a reviewer
+whose review is in keeps a seat, its memory and a slot of `max_agents_total` until
+something stops it. With `auto_stop_finished` (on by default) the fleet stops a
+worker of a role in `auto_stop_roles` once it has finished. All of these must hold:
+
+- it reads `waiting`, not `working`, `attention` or `limited`;
+- it has been idle `auto_stop_idle_minutes`, by its board row and by its pane's
+  output;
+- it holds no claim;
+- the task it was spawned for is closed, or, spawned for none, it wrote a `result`;
+- nothing addressed to its label or role waits unread;
+- nothing is queued that its cycle would take (the review pool for a checking
+  role);
+- its input box is idle and empty, so your half-typed draft is never killed with it.
+
+Three things act on it, with no daemon. A worker's own Stop starts a short-lived
+background check that waits out the idle window, asks again and stops it; a later
+turn supersedes that check. `aisquare fleet reap --finished` does the same on demand
+(`--dry-run` lists without stopping). And a spawn that `max_agents_total` or the
+memory floor refuses stops the finished workers first and tries once more, saying
+which it stopped on the receipt. The exit is an `agent_exited` with actor
+`auto-stop` and the reason (`reviewer-1 exited (0) — stopped by auto-stop (it
+posted its result)`). It wakes nobody: the manager reads it with its next update.
+Coders are not in the default list, because a coder in review may be reopened; add
+`"coder"` to opt in. A manager or the captain is never stopped.
+
+### Watching the fleet
+
+A manager that watches panes, CI or pull requests with its own turns (a Monitor, a
+`sleep` loop, a `gh` poll) pays for its whole context on every look, and most looks
+find nothing; a Monitor also expires after 30 minutes at most. `aisquare watch` is
+one plain process that looks instead, and wakes a manager only for something new:
+
+```text
+aisquare watch [--interval 60] [--once] [--json]
+aisquare watch --detach | --stop | --status
+aisquare watch show [<path> | --last] [--json]
+```
+
+Every `[watch] interval_seconds` (60) it looks at:
+
+- **what needs you**: the same scan as the phone's *Needs you* cards, the phone's
+  dismissals honoured. That covers a permission or question dialog, an agent asking,
+  a usage limit, a crashed, lost or failed agent, and a manager or fleet down;
+- **stale agents**: the captain queue's rule for an agent that shows no sign of life;
+- **pull requests**, with `[watch] github = true` (off by default, since it leaves the
+  machine): each project's GitHub repository (its `origin`) through `gh api`, every
+  `github_every_seconds` (120). Each request carries the last ETag, so an unchanged
+  answer is a 304 that costs no rate limit and makes no further call. It reports
+  `pr_approved`, `pr_changes_requested` and `pr_checks_done`;
+- **your own sources**: `[watch.sources.<name>]` with `command = [...]` and
+  `every_seconds = 300`. A command prints JSON lines `{"id", "project", "kind",
+  "summary"}`; `project` is a codename or an id. aisquare ships no integration with any
+  outside service: a source for an inbox is your own script. One that fails is said
+  once per streak while the others carry on.
+
+**What it delivers.** Each item has a stable id, kept in `~/.aisquare/watch/state.json`,
+so the same news is never new twice and a new prompt is a new item. For each project
+with something new, the full items go to `~/.aisquare/watch/<project>/<UTC stamp>.json`
+(mode 600: pane excerpts stay on this machine). Then one board line of kind `watch`,
+addressed to the manager, carries the counts and that path and never an excerpt:
+`watch: 3 new (2 permission, 1 pr_approved): aisquare watch show <path>`. The manager
+then gets one nudge. A working manager is handed the line when its turn ends, because a
+line addressed to it wakes it. With `[watch] auto_stop` (on), each look also stops the
+workers that have finished (see *Auto-stop* under [Capacity](#capacity)).
+
+**One watcher per home.** `--detach` starts it in the `asq-watch` session of the fleet's
+own tmux server and returns; a second refuses and names the first. `--status` says
+whether one runs and how long ago it last looked, and `aisquare doctor`'s `fleet watcher`
+row says the same, and warns when a running watcher has not looked for three intervals.
+`--stop` ends it, and so does a `fleet shutdown` that leaves no agent live on the
+machine: it watches every project, so one project's shutdown leaves it running.
+`--once` looks once, delivers and exits, which suits a cron line. Beside a running
+watcher's look it waits a moment, then exits 1 with `busy` (`{"error": "busy"}` under
+`--json`) rather than deliver the same news twice.
+
+### Tools and skills per role
+
+Every tool schema and the skill listing ride every request of every agent, for the
+whole session. So each role launches with only what it uses, wherever it starts:
+`fleet spawn`, `team spawn` or `aisquare launch <role>` (#280). The tools a launch
+denies are, in one `--disallowedTools` token, sorted:
+
+- the role's own safety list: Edit, Write and NotebookEdit for the reviewer, none
+  for the others;
+- `[fleet] deny_tools`: by default eight tools no role's cycle and no aisquare
+  command uses (Artifact, ArtifactComments, Workflow, ReportFindings,
+  ShareOnboardingGuide, PushNotification, ScheduleWakeup, SendFeedback). The board,
+  `remote` and `fleet tell` do what Artifact, PushNotification and ScheduleWakeup
+  would;
+- the role's `deny_tools`;
+- less the role's `allow_tools`, the only way to hand back a safety-listed tool;
+- plus every `--disallowedTools` already on the command line (a binding's `--arg`,
+  a fleet `extra_args`, or what you type after `--`). `allow_tools` never hands
+  those back. Every one of them comes out of the line and goes into the one token.
+
+A launch at `ultracode` effort keeps `Workflow`, because ultracode is xhigh plus
+workflow orchestration, and the launch says `Workflow kept: effort ultracode
+orchestrates workflows`. That covers an `--effort ultracode` on the line and the
+effort `team spawn` resolves (`AISQUARE_EFFORT=ultracode`). An agent put at
+ultracode by Claude Code's own settings is not seen from here: give its role
+`allow_tools = ["Workflow"]`.
+
+`skill_listing` sets how much of Claude Code's skill listing a role carries:
+`full` (the manager's default), `names` (everyone else's: every skill name, with
+its description cut to nothing by `--settings '{"skillListingMaxDescChars": 1}'`),
+or `off` (the `Skill` tool denied). A line that already passes `--settings` is
+never merged with: the launch says `skill_listing withheld: --settings already
+given` and runs as asked. All of it applies to Claude Code alone. A role bound to
+another agent gets none of it, and the launch says so.
+
+Measured with `/context` in fresh interactive sessions on Claude Code 2.1.309
+(Opus 5.5), which is how fleet agents run:
+
+| Session | System tools | Skills | Context at start |
+| --- | --- | --- | --- |
+| no flags | 21.6k | 2.5k | 26.9k |
+| coder: the eight denied, skill names | 7.4k | 100 | 9.9k |
+| reviewer: Edit, Write and NotebookEdit too | 6.8k | 100 | 9.4k |
+| `skill_listing = "off"` | 6.8k | none | 9.3k |
+
+Every request of the session carries that. `skillListingBudgetFraction` at its
+smallest cut the listing by about 40 tokens on that release, so `names` uses
+`skillListingMaxDescChars` instead. `off` takes the `Skill` tool too; no role
+defaults to it, because then no agent can invoke a skill at all.
+
+`aisquare doctor` prints one `<role> tools` row per role with what it denies and
+its listing. Claude Code does not report a name it has no tool for, so a typo in
+`deny_tools` denies nothing, and the row is where that shows. A restart that
+changes a running agent's deny set pays one uncached first request: the tool list
+is part of the cached prefix.
 
 **Model, effort and binary per role stay where they already live** — one home
 per concept: `aisquare team harness` (the ladder and the effort offsets),
@@ -1470,7 +1770,7 @@ and `Esc` clears the marks. Pinned projects and groups sit in a **📌 Pinned**
 section at the top, in pin order; a group header carries the roll-up of its
 members' agents, so a folded group still tells you something is running. A
 group shares **nothing**:
-context, prompts, snapshots, boards and explainability settings stay per
+context, prompts, boards and explainability settings stay per
 project, and deleting a group never deletes a project. Forgetting a project
 takes it out of its group and off the pin: added again, it comes back loose, at
 the end. The same layer from a shell, with the same store state:
@@ -1542,7 +1842,7 @@ remote; the slug is the task title lowercased, runs of anything but `[a-z0-9]`
 collapsed to `-`, clipped to 32 characters. A spawn without a task uses
 `fleet/<codename>/<label>`. Its worktree lives at
 `<repo>/.aisquare-worktrees/<label>`, excluded through `.git/info/exclude`, and
-shares the principal repo's board, context and snapshot for free — that is the
+shares the principal repo's board and context for free — that is the
 worktree resolution the memory layer already had. **A non-git project cannot
 have worktrees:** `fleet spawn coder --worktree` there refuses with
 "not a git repository — spawn without --worktree or pick a repo inside it",
@@ -1616,9 +1916,12 @@ codename `amber-otter`, session `asq-amber-otter`, branches
 config is bundled and regenerated (do not edit it): status line off,
 `escape-time 0` so Esc interrupts Claude immediately, 50,000 lines of history,
 `remain-on-exit on` so a crashed agent's last screen stays readable, truecolor,
-extended keys on so shift+enter and friends reach Claude Code, mouse off (the
-UI owns the mouse), monitor-activity on. One server for every project; one
-session per project; one window per agent. Agents survive an update of aisquare:
+extended keys on so shift+enter and friends reach Claude Code, mouse on (so
+the wheel scrolls Claude Code in `fleet attach`; the UI sends its own mouse
+reports straight to the pane and is unaffected), the clipboard off unless
+`[fleet] pane_clipboard` says on, monitor-activity on. One server for every
+project; one session per project; one window per agent. A changed setting
+applies to the next server started. Agents survive an update of aisquare:
 `aisquare launch` hands each pane to the agent's own program, so no aisquare
 code runs in a pane, and asq's ⬆ *Restart & update* reattaches them after it
 reopens, restarting any whose pane is gone ([Updating from asq](install.md#updating-from-asq)).
@@ -1820,8 +2123,9 @@ through `update-environment`; agents already running keep what they had, and
 the window the same way, so the agent's `launch` joins the project, and traces
 with the key and to the deployment, that the spawner and the UI's Explainability
 tab resolve, not the server's.
-*Passthrough:* the server keeps `set-clipboard off` and no `allow-passthrough`,
-and it does not matter for
+*Passthrough:* the server keeps `set-clipboard off` (unless `[fleet]
+pane_clipboard = "on"`, which lets a program in a pane set your clipboard with
+OSC 52 in `fleet attach`) and no `allow-passthrough`, and it does not matter for
 the UI. The only client the UI attaches is a control-mode client (see *The UI's
 pipe to tmux* below), which has no terminal, so an OSC 52 copy, an OSC 8 link or
 an OSC 9 notification from Claude Code has no terminal to reach; copies arrive
@@ -2001,11 +2305,68 @@ from: a letter arriving within ~100 ms of a lone Escape is read as that chord,
 so pressing Esc and immediately typing `p` switches the model instead of
 typing the letter.
 
+### Long-lived managers: state file, start pack and quiet compaction
+
+A manager is the longest-lived session in a fleet, and every request it makes
+re-sends its whole context. Three things keep that context small.
+
+**The state file.** The manager's cycle asks it to keep its state in
+`~/.aisquare/projects/<project id>/manager/state.md`, at most 4,000 characters:
+goal, decisions, open items, next step. It rewrites the file when a plan step
+completes and before it stops. Scripts and rule text it reuses live in files,
+and it cites them by path rather than pasting them into a prompt.
+
+**The start pack.** At every `SessionStart` (startup, resume, `/clear`, a
+compaction) a manager gets its start pack instead of the plain board. The pack
+holds its state file (up to its 4,000 characters, with its age), every open
+task on one line each (the board shows eight), the unanswered questions, the
+live agents with their task and account, how many wake events wait past its
+cursor, the project's `.aisquare/rules/*.md` by path and first line, and then
+the protocol and its cycle. It is never more than 20,000 characters: the task
+list takes what the rest leaves, and a last line says how many tasks did not
+fit.
+
+**Quiet-point compaction** is off by default (`fleet.quiet_compact_at = 0`).
+Set it to a token count (400,000 is a sensible first value) and a manager is
+compacted only at a quiet point. That is when its turn ends with no decision
+pending, it is not asking a question, it is not in plan mode, and it does not
+need the human. Its Stop hook then starts `aisquare hook compact-check` in the
+background. After `quiet_compact_delay` seconds the check asks everything again,
+and it types `/compact` only if all of these hold:
+
+- the row still reads `waiting` and its cursor has not moved;
+- no wake-class event is pending;
+- the context (the transcript's last request) is at least `quiet_compact_at`;
+- no quiet compaction ran within `quiet_compact_cooldown` minutes;
+- the state file is under `quiet_compact_state_max_age` minutes old and newer
+  than the last decision the manager was woken for;
+- the pane shows the manager idle at its prompt with an empty input box.
+
+A half-typed draft of yours is never sent. The line goes through the same
+verified delivery as a first message. The compaction's own `SessionStart`
+confirms it, and the row reads `waiting` afterwards, so a coder's
+`task review` still nudges it. If no compaction starts within 120 seconds, the
+board gets one human-only line and nothing is retried before the cooldown.
+Each refusal is kept, the newest, under `team_meta` key
+`compact-refused:<session>`. With `quiet_compact_resume = true` the manager
+is also given a one-line resume prompt after the compaction.
+
+Claude Code's own auto-compaction (about 967K tokens on 1M-context models)
+and idle compaction (after about 54 idle minutes at 200K tokens or more) are
+left as they are; aisquare never lowers them. Quiet compaction runs well
+before both, at a moment chosen by what the manager is doing, not by a
+threshold or a timer.
+
 ---
 
 ## Upgrading
 
-### To 0.9.0: verified first messages (store schema 36)
+To 0.9.0 from 0.8.2: the store migrates itself from v32 to v39 on first open, and
+the config file moves to version 3, once. The four steps below are all 0.9.0's: the
+first messages (v36), the token diet (v37 and config version 3), capacity and setup
+(v38), then work briefs (v39).
+
+### To 0.9.0, part 1: verified first messages (store schema 36)
 
 **The store migrates itself on first open, from v35 to v36, in one step** (from 0.8.2's
 v32, in four: v33 to v35 are under [0.9.0] in the CHANGELOG). v36 adds three
@@ -2040,6 +2401,12 @@ follows it:
 - `capture.enabled = false` now stops prompt capture: `aisquare log` stays empty and
   nothing is spooled ([reference](reference.md#configuration-keys)).
 - `aisquare doctor` gains a `fleet-delivery` row.
+- The codebase snapshot is gone, and `aisquare doctor` loses its `repomix`, `snapshot`
+  and `tiktoken` rows. The first command that opens the store deletes the old packs
+  under `~/.aisquare/projects/<id>/snapshot/`, once, and nothing else. A `[snapshot]` section
+  in `config.toml` is no longer read, except its `ignore` list, which becomes `[code]
+  ignore` (the symbol index's, part 3): doctor's config row says so, and the next save
+  drops the section and writes that list under `[code]`.
 - **On a shared machine**, a first message on the command line can be read by other
   local users in `ps` while the agent runs. `aisquare config set fleet.first_prompt
   type` keeps it off the command line.
@@ -2047,9 +2414,131 @@ follows it:
 **Moving back** to 0.8.2 or earlier with `aisquare upgrade --version <v>` is safe. An
 older build opens a v36 store as it is, without migrating it down, and never reads the
 three columns. It ignores the new config keys and types first messages as it always
-did.
+did. It packs a project again on `project onboard` and `init` where its Node can,
+with its default `[snapshot]` settings once a save here has dropped yours.
+
+### To 0.9.0, part 2: the token diet (store schema 37, config version 3)
+
+**The store migrates itself on first open, from v36 to v37, in one step.** v37 adds two
+nullable columns, `team_event.actor` (who caused an event: a session, `user`,
+`usage-limit`, `auto-stop`) and `team_event.meta` (its details as JSON; an `agent_exited`
+carries its status, `--force`, the claims it released and why). They are checked for by
+presence and added only where absent. An event written before the step reads as no actor
+and no details; an old `agent_exited` is read from its text, so an upgrade wakes no
+manager for exits it had already seen.
+
+**The config file moves to version 3, once.** A reviewer whose `extra_args` are exactly
+0.8.2's default (`--disallowedTools=Edit Write NotebookEdit`) loses them, because that
+deny is the role's own now and every launch of a reviewer has it. Every other value you
+set stays as it was. New keys follow their defaults until you set them:
+
+| Key | Default | What it changes |
+| --- | --- | --- |
+| `[fleet] deny_tools` | the eight tools in [Tools and skills per role](#tools-and-skills-per-role) | Every role launches without them. `[]` gives them back. |
+| `[fleet.roles.<role>] skill_listing` | `full` for the manager, `names` for the others | How much of Claude Code's skill listing a role carries. |
+| `[fleet.roles.<role>] deny_tools` / `allow_tools` | `[]` | Tools one role also denies, or gets back. |
+| `[fleet.roles.<role>] board_context` | `none` for the reviewer, `all` for the others | What of the board an agent reads. |
+| `[fleet] quiet_compact_at` | `0` (off) | A manager's context size at which it is compacted at a quiet point. |
+| `[fleet] quiet_compact_delay` / `_cooldown` / `_state_max_age` / `_resume` | `45` s / `30` min / `20` min / `false` | The quiet compaction's timing. |
+| `[team] brief_blocks` / `brief_strict` | `["objective", "acceptance", "boundaries"]` / `false` | The blocks `task add` checks a contract for, and whether a missing one refuses the add. |
+
+**What you will notice.**
+
+- An agent restarted after the upgrade launches with the merged deny token, and its first
+  request is uncached once: the tool list is part of the cached prefix.
+- A manager wakes for decisions, not news: a clean exit, a switch or its own `fleet stop`
+  waits for its next wake. Updates arrive one line each; `aisquare team show <seq>` prints
+  one in full.
+- A reviewer reads no board by default. Set `fleet.roles.reviewer.board_context` to `all`
+  to give it the board back.
+- A manager starts from its start pack, not the board. Its cycle asks it to keep
+  `~/.aisquare/projects/<id>/manager/state.md`.
+- `task add` warns on stderr when a contract lacks `objective:`, `acceptance:` or
+  `boundaries:`.
+- `fleet spawn` passes the role's model ladder (`--model`, `--effort`), and a tester
+  spawned for a task verifies that one task and stops.
+
+**Moving back** with `aisquare upgrade --version <v>` is safe for the store: an older build
+opens a v37 store as it is, without migrating it down, and never reads the two columns.
+For the config, `upgrade --version` to 0.8.2 or earlier names each role that release would
+launch with tools this one denies, with the `config set` that keeps them denied there.
+0.8.1 and 0.8.2 read a version-3 file over their own defaults. An install that shares
+`~/.aisquare` without going through `aisquare upgrade` (a second tool install, a synced
+home) is not warned.
+
+### To 0.9.0, part 3: capacity and setup (store schema 38)
+
+**The store migrates itself on first open, from v37 to v38, in one step.** v38 adds five
+nullable columns for a parent manager over a group: `project_group.parent_project_id`,
+`project_group.route` and `project_group.max_agents`, and `team_task.origin_task_id` and
+`team_task.origin_project_id` (a task delegated from a parent's). They are checked for by
+presence and added only where absent. A group without a parent, and every task written
+before the step, reads as before. The symbol index is its own SQLite file per project
+(`~/.aisquare/projects/<id>/code/`), not part of the store.
+
+**The config file keeps version 3.** Every new key follows its default until you set it:
+
+| Key | Default | What it changes |
+| --- | --- | --- |
+| `[fleet] max_agents_total` | `0` (no budget) | Live agents across every project, the captain excluded. |
+| `[fleet] min_free_mb` | `2048` | A spawn is refused below this much available memory. `0` turns it off. |
+| `[fleet] test_gate_mb` / `test_gate_wait_minutes` | `0` / `15` | What `aisquare fleet gate` waits for before a heavy run. |
+| `[fleet] auto_stop_finished` / `auto_stop_idle_minutes` / `auto_stop_roles` | `true` / `5` / every checking role | Finished workers stop by themselves; coders opt in. |
+| `[fleet] pane_clipboard` | `off` | Whether a pane program may set your clipboard. |
+| `[watch] interval_seconds` / `github` / `github_every_seconds` / `auto_stop` / `sources` | `60` / `false` / `120` / `true` / `{}` | `aisquare watch`, which nothing starts until you do. |
+| `[code] enabled` / `max_file_kb` | `true` / `1024` | The symbol index behind `aisquare code`. |
+| `[code] ignore` | `[]` | Globs the symbol index leaves out, beside its built-in list; a `[snapshot] ignore` from 0.8.2 is carried here. |
+| `[accounts] share` | `[]` | What every Claude account shares. Nothing until you enable a part. |
+
+**What you will notice.**
+
+- On a machine with under 2 GB available, a spawn is refused and names both numbers. Lower
+  `fleet.min_free_mb` (or set it to `0`) to spawn anyway. A refusal for the per-project cap
+  says `capacity_project` under `--json`, where it said `fleet_error`.
+- A tester, reviewer, validator or ui-tester that has finished stops by itself after five
+  idle minutes, and its exit wakes nobody. `fleet.auto_stop_finished = false` keeps them.
+- The fleet's tmux server turns the mouse on: in `fleet attach` a plain drag is tmux's
+  selection; hold Shift (Option in macOS Terminal and iTerm2) to select in your terminal.
+  It applies to a server started after the upgrade.
+- `project onboard` and `init` start a symbol index in the background, and a session start
+  in a project with an index refreshes it in the background, adding nothing to the
+  session's context. `code.enabled = false` leaves `aisquare code index` as the only way
+  to build one.
+- `aisquare doctor` has new rows: `fleet capacity`, `code index`, `anthropic routing`,
+  `claude-accounts sharing` and `fleet watcher`.
+
+**Moving back** with `aisquare upgrade --version <v>` is safe for the store: an older build
+opens a v39 store as it is, without migrating it down, and never reads the five columns. A
+group's parent, its routes and its cap, and every task's link to its origin, are then
+ignored, and come back on the next upgrade. The new config keys are ignored by an older
+build. Shared accounts stay linked: run `aisquare accounts share --disable <parts>` before
+moving back to put each account's own entries back.
+
+### To 0.9.0, part 4: work briefs (store schema 39)
+
+**The store migrates itself on first open, from v38 to v39, in one step.** v39 adds the
+`brief` table and its `brief_number` index, for work briefs and the evidence gate
+([work-briefs.md](work-briefs.md)). Its script is `CREATE … IF NOT EXISTS` only. A store
+that a pre-release build of the briefs branches (#306, #341, #417) stamped v34, v36, v37
+or v38 already holds `brief`, and converges the same way as the steps above: the presence
+pass adds what a step under its stamp left out (for #417's v38, part 3's columns), and
+v39 finds `brief` in place, its briefs intact. No config key is added, and a task no
+brief links is done exactly as before.
+
+**Moving back** with `aisquare upgrade --version <v>` is safe for the store: an older build
+opens a v39 store as it is, without migrating it down, and never reads the `brief` table.
 
 ## Troubleshooting
+
+**`asq` lags with many projects listed.** Each tick reads only the projects
+with recent agents, and nothing of a collapsed group's members (see [`ui`](#ui)).
+Fold the groups you are not watching, `aisquare project forget` the projects you
+are done with, or start a session with only the ones you work in:
+`aisquare ui --project a --project b` or `aisquare ui --group <name>`.
+
+**A drag in `fleet attach` selects in tmux, not in my terminal.** The fleet's
+server has the mouse on so the wheel reaches Claude Code. Hold Shift (Option in
+macOS Terminal and iTerm2) while you drag to select in your terminal.
 
 **An agent reads `attention`: "first prompt not taken".** Its first message
 never started a turn: nothing acknowledged it within `[fleet] prompt_ack_seconds`
@@ -2248,6 +2737,39 @@ error lists both with their codenames — use the codename.
 `aisquare fleet attach` shows the same session with no rendering hop in
 between. If tmux shows it right and the UI does not, that is a UI bug worth an
 issue with your terminal's name.
+
+**What did the fleet spend in tokens?** `aisquare metrics tokens` sums what the
+Stop hook recorded for each session, with its cost. `aisquare metrics ledger`
+counts the same sessions live from each Claude Code transcript (the path the board
+recorded at its start), with what the fleet's own traffic cost, and prints one row
+per session and a total. The ledger's columns are:
+
+- requests;
+- input summed over them: fresh plus cache write plus cache read, which is also the
+  context size at each request;
+- the baseline, the session's first request: system prompt, tool schemas, skills;
+- the peak context;
+- wakes, and how many of them took no action: a Stop-hook continuation whose turn
+  made no tool call but a board read (`board`, `team log|status|signals`, `task
+  list|show`, `task next` without `--claim`, `fleet ls|status`, alone or behind a `cd`
+  and piped through a filter; `aisquare log` is the prompt log, not the board);
+- the characters of the `<aisquare-team-delta>` blocks it was given;
+- compactions.
+
+`--json` adds the rest: output, the input split, mean and latest context, wake
+input, each delta's carried characters (its size times the requests after it, up
+to the next compaction), compaction triggers, and tool calls by name. It prints
+counts, never a prompt or a path.
+
+```sh
+aisquare metrics ledger                       # this project's sessions
+aisquare metrics ledger --role manager --since 2h
+aisquare --json metrics ledger --all          # every project, as JSON
+```
+
+A transcript is read a line at a time, so a large one costs no memory. The line
+Claude Code is still writing is skipped and counted. A session whose transcript
+was never recorded, or is gone, is a row of zeros marked `(no transcript)`.
 
 ---
 

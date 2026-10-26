@@ -242,7 +242,7 @@ def test_the_manager_stops_and_reaps_finished_agents_and_everyone_else_cleans_up
     manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
     assert (
         "An agent whose task is done, with no queued task that fits it: "
-        "`aisquare fleet stop <label>`, then `aisquare fleet reap`"
+        "`aisquare fleet stop <label> --as abcd1234`, then `aisquare fleet reap`"
     ) in manager
     assert "removes the agent's worktree once its work is pushed" in manager
     assert manager.index("`aisquare fleet reap` again") < manager.index('"READY:')
@@ -281,13 +281,13 @@ def test_the_boards_cycles_name_their_project_in_every_fleet_command() -> None:
 
     manager = cycle("manager")
     assert (
-        "`aisquare fleet stop --project calm-otter <label>`, then "
+        "`aisquare fleet stop --project calm-otter <label> --as abcd1234`, then "
         "`aisquare fleet reap --project calm-otter`"
     ) in manager
     verbs = re.findall(r"aisquare fleet (\S+)( --project calm-otter)?", manager)
     assert {verb for verb, _named in verbs} == {"spawn", "tell", "switch", "stop", "reap"}
     assert all(named for _verb, named in verbs), verbs
-    assert "`aisquare fleet spawn --project calm-otter tester`" in manager
+    assert "`aisquare fleet spawn --project calm-otter tester --task <id> --as abcd1234`" in manager
     assert "`fleet spawn " not in manager, "the short forms name it too"
     coder = cycle("coder")
     assert "`aisquare fleet reap --project calm-otter` removes that." in coder
@@ -1624,6 +1624,22 @@ def test_spawn_printed_command_joins_each_paste_to_its_own_run(
     assert len(started) == 2, proc.stdout
     assert started == keyed, "the agent must start on the id its Run is keyed by"
     assert started[0] != started[1], "a second paste must not reuse the first session's id"
+
+
+@pytest.mark.parametrize("role", ["tester", "runner", "validator"])
+def test_the_checking_roles_name_the_memory_gate_only_when_it_is_set(role: str) -> None:
+    """#283: `fleet gate` is in the tester's and validator's cycle once `[fleet]
+    test_gate_mb` is set, and not before: a line naming a gate nobody configured is noise."""
+    from aisquare.core.config import load_config, save_config
+
+    assert "fleet gate" not in " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped))
+    config = load_config()
+    config.fleet.test_gate_mb = 4096
+    save_config(config)
+    assert "aisquare fleet gate -- <command>" in " ".join(
+        harness.role_cycle(role, "abcd1234", fleet=unscoped)
+    )
+    assert "fleet gate" not in " ".join(harness.role_cycle("coder", "abcd1234", fleet=unscoped))
 
 
 def test_the_coder_cycle_names_task_show_and_the_manager_puts_the_contract_in_detail() -> None:

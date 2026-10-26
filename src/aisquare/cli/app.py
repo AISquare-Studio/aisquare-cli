@@ -17,8 +17,11 @@ from aisquare.cli import (
     accounts,
     agents,
     auth,
+    brief,
     captain,
     capture,
+    code,
+    command_reports,
     connectors,
     context,
     enforce,
@@ -34,6 +37,7 @@ from aisquare.cli import (
     serve,
     task,
     team,
+    watcher,
 )
 from aisquare.cli import config as config_cli
 from aisquare.cli import metrics as metrics_cli
@@ -151,13 +155,17 @@ app.add_typer(policy.app, name="policy", hidden=True)
 app.add_typer(enforce.app, name="enforce", hidden=True)
 app.add_typer(team.app, name="team")
 app.add_typer(task.app, name="task")
+app.add_typer(brief.app, name="brief")
 app.command("note")(team.note)
 app.command("board")(team.board)
 app.command("recall")(team.recall)
 launch.register(app)  # needs context_settings to forward agent args
+command_reports.register(app)  # `exec` forwards everything after -- to the command
 app.command("serve")(serve.serve)
 app.add_typer(remote.app, name="remote")
 app.add_typer(fleet.app, name="fleet")
+app.add_typer(watcher.app, name="watch")
+app.add_typer(code.app, name="code")
 app.add_typer(persona.app, name="persona")
 app.add_typer(captain.app, name="captain")
 app.command("ui")(fleet.ui)

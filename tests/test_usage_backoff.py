@@ -27,7 +27,12 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.cli.ui.views.accounts import account_cells, kept_tooltip
+from aisquare.cli.ui.views.accounts import (
+    PROBLEM_MARK,
+    account_cells,
+    kept_tooltip,
+    problem_tooltip,
+)
 from aisquare.core import claude_accounts as core
 from aisquare.core.store import store_session
 from aisquare.models import ClaudeAccountStatus, ClaudeIdentity, ClaudeUsage
@@ -226,7 +231,7 @@ def test_the_real_fetch_hands_back_the_headers(monkeypatch: pytest.MonkeyPatch) 
     sent = Message()
     sent["Retry-After"] = "30"
 
-    def refuse(request: Any, timeout: float) -> Any:
+    def refuse(request: Any, timeout: float, **_: Any) -> Any:
         raise urllib.error.HTTPError(request.full_url, 429, "Too Many", sent, io.BytesIO(b""))
 
     monkeypatch.setattr(urllib.request, "urlopen", refuse)
@@ -290,10 +295,45 @@ def test_the_row_says_how_old_the_kept_reading_is_and_why() -> None:
     assert kept_tooltip(usage, now=NOW) == (
         f"reading from 12m ago · rate-limited until {clock} — logging in again does not clear it"
     )
+    # TUI-401b check 5: the reason is frozen at the read; once the wait is over it is
+    # never named, whatever time the reason held.
+    after = until + timedelta(seconds=1)
+    assert "until" not in str(kept_tooltip(usage, now=after)), kept_tooltip(usage, now=after)
+    assert str(kept_tooltip(usage, now=after)).endswith("the next read asks again")
     live = usage.model_copy(update={"last_failed_reason": None, "rate_limited": False})
     assert kept_tooltip(live, now=NOW) is None and account_cells(status, live, now=NOW)[
         "session"
     ].plain.endswith("40%")
+
+
+def test_a_backed_off_account_with_no_kept_reading_never_names_a_past_until() -> None:
+    """Review of #401, m1: with no kept reading, a backed-off account's session cell printed
+    the wait's reason as frozen at the read ('rate-limited until <a past time>') until the
+    page's next tick, a minute on. It reads from the wait's end as of the paint, on hover
+    over the row's '!' (#13)."""
+    from aisquare.models import ClaudeAccount
+
+    status = ClaudeAccountStatus(
+        account=ClaudeAccount(slot=2, config_dir=Path("/h/.aisquare/claude-accounts/2")),
+        label="work",
+        identity=ClaudeIdentity(email="work@example.com"),
+        signed_in=True,
+        token_state="ok",
+    )
+    until = NOW + timedelta(seconds=45)
+    waiting = service.UsageBackoff(slot=2, until=until, attempts=1, since=NOW).reading(NOW)
+    clock = until.astimezone().strftime("%H:%M")
+
+    # The row reads '!' (#13); the wait is on hover over it, as of the paint.
+    assert account_cells(status, waiting, now=NOW)["session"].plain == PROBLEM_MARK
+    during = (problem_tooltip(status, waiting, now=NOW) or "").partition("\n")[0]
+    after = (problem_tooltip(status, waiting, now=until + timedelta(seconds=1)) or "").partition(
+        "\n"
+    )[0]
+
+    assert waiting.reason == service.backoff_reason(until), "control: the frozen reason"
+    assert during == f"rate-limited until {clock} — logging in again does not clear it"
+    assert "until" not in after and after.startswith("the rate limit has ended"), after
 
 
 # --------------------------------------------------------------------------- picks
@@ -594,6 +634,44 @@ def test_the_fleet_dot_ignores_a_reset_or_old_kept_reading(fake_home: Path) -> N
     assert fresh.usable == 1 and fresh.left_by_slot == {other.slot: 70.0}
 
 
+def test_a_family_week_that_has_reset_shows_live_and_cached(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TUI-401b (b) at e28697f1: a live read printed 'sonnet reset 1h ago', but the same
+    reading from the store cache printed no Sonnet at all. The cache (m2) drops a reset
+    family week's figure and keeps its reset time, and the week cell looped over the
+    figures only. Both paths print it, and the cached --json is as it was."""
+    _slot("work@example.com", "tok-work")
+    payload = _payload(40, week=30)
+    payload["seven_day_opus"] = {
+        "utilization": 60,
+        "resets_at": (NOW + timedelta(days=1)).isoformat(),
+    }
+    payload["seven_day_sonnet"] = {
+        "utilization": 45,
+        "resets_at": (NOW - timedelta(hours=1)).isoformat(),
+    }
+    monkeypatch.setattr(service, "_http_get", _Endpoint({"tok-work": payload}))
+    _at(monkeypatch, NOW)
+    # One line a row: the week cell unwrapped beside slot 1's not-signed-in fix (#13).
+    monkeypatch.setenv("COLUMNS", "300")
+    live = runner.invoke(app, ["accounts", "usage", "--refresh"])
+    monkeypatch.setattr(service, "_http_get", _Endpoint({"tok-work": 503}))  # never asked
+    _new_process()
+    _at(monkeypatch, NOW + timedelta(minutes=1))
+    cached = runner.invoke(app, ["accounts", "usage"])
+    as_json = runner.invoke(app, ["--json", "accounts", "usage"])
+
+    for shown in (live, cached):
+        assert shown.exit_code == 0, shown.stdout
+        assert "sonnet reset 1h ago" in shown.stdout, shown.stdout
+        assert "45%" not in shown.stdout and "resets now" not in shown.stdout
+        assert "opus 60% resets in" in shown.stdout, "a week still running is as before"
+    [row] = [row for row in json.loads(as_json.stdout) if row.get("usage")]
+    assert row["usage"]["family_week_percent"] == {"opus": 60.0}, row["usage"]
+    assert set(row["usage"]["family_week_resets_at"]) == {"opus", "sonnet"}
+
+
 def test_the_cli_shows_a_kept_readings_reset_window_as_reset(
     fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -782,6 +860,42 @@ def test_a_cached_read_keeps_the_family_weeks_the_live_one_saw(
     _new_process()
     later = service.cached_usage([work], now=NOW + timedelta(minutes=10), fetch=endpoint)
     assert later[work.slot].family_week_percent == {}
+
+
+@pytest.mark.parametrize(
+    ("opus_resets", "picked"),
+    [(timedelta(minutes=1), 0), (timedelta(days=1), 1)],
+    ids=["reset-since", "control-still-spent"],
+)
+def test_a_cached_family_week_that_has_reset_is_not_read_as_spent(
+    fake_home: Path, opus_resets: timedelta, picked: int
+) -> None:
+    """Review of #401, m2 (the reviewer's repro): a reads 10 % with its Opus week spent until
+    NOW+1m, b 60 %. Three minutes on, a new process's pick for an Opus agent read a's Opus
+    week as spent from the store cache, skipped it and took b. The week has reset: a is
+    picked. Control: with the Opus week spent for a day, a is still skipped."""
+    a = _slot("a@example.com", "tok-a")
+    b = _slot("b@example.com", "tok-b")
+    payload = _payload(10, week=10)
+    payload["seven_day_opus"] = {
+        "utilization": 100,
+        "resets_at": (NOW + opus_resets).isoformat(),
+    }
+    endpoint = _Endpoint({"tok-a": payload, "tok-b": _payload(60, week=60)})
+    service.read_usage([a, b], now=NOW, fetch=endpoint)
+    _new_process()
+    later = NOW + timedelta(minutes=3)
+
+    choice, notes = service.headroom_choice(
+        [a, b], switch_at=90, now=later, fetch=endpoint, max_age=300, family="opus"
+    )
+
+    assert choice is not None and choice.slot == [a, b][picked].slot, notes
+    assert len(endpoint.calls) == 2, "served from the store cache"
+    cached = service.cached_usage([a], now=later, fetch=endpoint)[a.slot]
+    if picked == 0:
+        assert "opus" not in cached.family_week_percent, "the figure for a week that is over"
+        assert service._has_reset(cached, later), "a family reset counts as a reset"
 
 
 def _new_token(account: Any, token: str) -> None:

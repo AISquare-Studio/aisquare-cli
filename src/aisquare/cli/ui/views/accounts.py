@@ -49,6 +49,7 @@ a path and a server's reason are DATA (CONTRIBUTING: no markup in data).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import math
 import threading
@@ -437,13 +438,27 @@ def kept_age(usage: ClaudeUsage, *, now: datetime | None = None) -> str | None:
     return "now" if age == "just now" else age.removesuffix(" ago")
 
 
+def wait_said(usage: ClaudeUsage, *, now: datetime | None = None) -> str | None:
+    """A rate limit's wait as of ``now``, from its end time: ``rate-limited until 14:32 —
+    logging in again does not clear it``, or that it has ended; ``None`` when ``usage``
+    names no wait. Never the reason string frozen at the read, which after a short
+    Retry-After named a time already past until the page's next tick, a minute on
+    (TUI-401b check 5 at e28697f1; review of #401, m1; 55d1bc78 did this for the CLI)."""
+    if not usage.rate_limited or usage.rate_limited_until is None:
+        return None
+    if usage.rate_limited_until > (now or accounts_service._now()):
+        return accounts_service.backoff_reason(usage.rate_limited_until)
+    return "the rate limit has ended — the next read asks again"
+
+
 def kept_tooltip(usage: ClaudeUsage | None, *, now: datetime | None = None) -> str | None:
     """``reading from 12m ago · rate-limited until 14:32 — logging in again does not clear
     it``: why the session cell shows an older figure, or ``None`` for a live one."""
     if usage is None or kept_age(usage, now=now) is None or usage.fetched_at is None:
         return None
     age = accounts_service.describe_age(usage.fetched_at, now=now)
-    return f"reading from {age} · {usage.last_failed_reason}"
+    why = wait_said(usage, now=now) or usage.last_failed_reason
+    return f"reading from {age} · {why}"
 
 
 def account_cells(
@@ -483,14 +498,18 @@ def account_cells(
     return cells
 
 
-def problem_tooltip(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> str | None:
+def problem_tooltip(
+    status: ClaudeAccountStatus, usage: ClaudeUsage | None, *, now: datetime | None = None
+) -> str | None:
     """``the login Keychain is locked`` over ``fix: unlock the login keychain …``: what the
     row's ``!`` says on hover, from ``usage_problem`` alone — or ``None`` when the row shows
-    a reading or ``…``."""
+    a reading or ``…``. A backed-off account with no kept reading says its wait as of
+    ``now`` (:func:`wait_said`; review of #401, m1), never the reason frozen at the read."""
     problem = accounts_service.usage_problem(status, usage)
     if problem is None:
         return None
-    return f"{problem.reason or 'unavailable'}\n{accounts_service.fix_line(problem)}"
+    said = wait_said(problem, now=now) or problem.reason or "unavailable"
+    return f"{said}\n{accounts_service.fix_line(problem)}"
 
 
 def claude_title_text(overview: AccountsOverview) -> Text:
@@ -691,6 +710,7 @@ class AccountRow(Horizontal, can_focus=True):
         self.status = status
         self.usage: ClaudeUsage | None = None
         self.trend: UsageTrend | None = None
+        self._wait_ends: asyncio.TimerHandle | None = None
         self.first = True
         self.last = True
         self.openings = 0
@@ -830,6 +850,35 @@ class AccountRow(Horizontal, can_focus=True):
         if self.is_mounted:
             self._paint()
 
+    def _repaint_when_the_wait_ends(self) -> None:
+        """Paint again the moment the shown rate limit ends: the page re-reads once a
+        minute, and until then the tooltip kept the wait it was painted with.
+
+        The loop's own timer, not a Textual one (as the release dialog's deadline is): on
+        Windows a pending Textual timer holds a thread of asyncio's default executor for
+        its whole interval, and a wait runs up to 30 min, or 6 h with a Retry-After. Two
+        rows in a wait starved every other timer in asq, toasts and the page's re-read
+        included, and quitting waited for the waits (review of #401, MAJOR-1).
+        """
+        self._forget_the_wait()
+        usage = self.usage
+        if usage is None or not usage.rate_limited or usage.rate_limited_until is None:
+            return
+        left = (usage.rate_limited_until - accounts_service._now()).total_seconds()
+        if left > 0:
+            # Posted to the row, so the repaint runs on its message queue like any other.
+            self._wait_ends = asyncio.get_running_loop().call_later(
+                left + 0.05, self.call_later, self._paint
+            )
+
+    def _forget_the_wait(self) -> None:
+        if self._wait_ends is not None:
+            self._wait_ends.cancel()
+            self._wait_ends = None
+
+    def on_unmount(self) -> None:
+        self._forget_the_wait()
+
     def cell(self, key: str) -> Static:
         """The cell of column ``key`` (``name`` is the label the field covers while open)."""
         if key == "name":
@@ -839,6 +888,7 @@ class AccountRow(Horizontal, can_focus=True):
     def _paint(self) -> None:
         account = self.status.account
         cells = account_cells(self.status, self.usage)
+        self._repaint_when_the_wait_ends()
         for column in COLUMNS:
             cell = self.cell(column.key)
             cell.update(cells[column.key])

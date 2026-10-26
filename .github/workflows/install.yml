@@ -484,7 +484,8 @@ jobs:
     # The one job that installs FROM PyPI, as everyone who is not CI does. Every
     # other cell grades a wheel of this tree with --with chrome-devtools, so none
     # could see the installed release's own doctor rows (the codebase snapshot's,
-    # up to 0.8.2) going amber on Debian's Node 18: review of #399, MAJOR 1.
+    # up to 0.8.2, going amber on Debian's Node 18: review of #399, MAJOR 1; and the
+    # project brain's, up to 0.9.0, amber wherever its CLI is not installed).
     # tests/install/release-cell.sh says what it asserts.
     steps:
       - uses: actions/checkout@v7

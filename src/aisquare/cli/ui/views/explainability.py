@@ -1,4 +1,17 @@
+# DORMANT: mounted by nothing. To mount it again, see "Re-mounting" in the docstring below.
 """The Explainability section of a project's AISquare tab: both tracing lanes, and the switches.
+
+Dormant: no screen mounts this view since tracing left the fleet UI (the tab, the Doctor
+page's "explainability enable" button and the Remote card went together). The code, its
+tests (which mount ``ExplainabilityView`` on its own) and ``aisquare explainability`` are as
+they were.
+
+**Re-mounting** it takes three steps. Put ``TabPane("AISquare", ExplainabilityView(project,
+id="project-explainability"), id="tab-explainability")`` back between Board and Settings in
+``views/project.py`` (and ``"tab-explainability"`` in ``ProjectView.TAB_IDS``); list the
+``*_WORKER`` names this module starts in ``ui/app.py``'s ``_writing_workers`` (the writes:
+setup, registration, ship, routing reset) and ``_waited_reads`` (the status reads); take
+``views/explainability.py`` out of ``DORMANT`` in tests/test_ui_writing_workers.py.
 
 Everything here goes through the services behind ``cli/explainability.py`` —
 what ``status``, ``enable``, ``disable``, ``register`` and ``ship`` call — and
@@ -1013,7 +1026,8 @@ class ExplainabilityView(VerticalScroll):
             return
         resolved = ops.resolve_target(config.explainability, None)
         self.notify(
-            f"✓ tracing enabled for target '{resolved.name}' — next: aisquare doctor --live",
+            f"✓ tracing enabled for target '{resolved.name}' — "
+            "next: aisquare explainability doctor --live",
             timeout=6,
             markup=False,
         )

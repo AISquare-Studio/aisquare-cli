@@ -121,8 +121,6 @@ aisquare doctor
 ```
 
 It reports every dependency and gives the exact command for anything missing.
-`gbrain` staying amber is expected — long-term memory is optional
-([Orchestration](orchestration.md#long-term-memory-optional-via-gbrain)).
 
 Update in place with `aisquare upgrade`. It keeps your extras and re-connects
 Claude Code's hooks. It runs for the uv tool install the one-liner makes; any

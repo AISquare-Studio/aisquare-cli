@@ -3,7 +3,7 @@
 The owner, 2026-09-29: "feature flag off captain for now, allow experimentally".
 ``core.experimental.captain_enabled`` is the one reader: ``AISQUARE_EXPERIMENTAL_CAPTAIN``
 wins over ``[experimental] captain`` in config.toml either way. OFF, every surface refuses
-or hides: the CLI and the server's lean entry, the fleet UI's insignia, captain row and
+or hides: the CLI and the server's lean entry, the fleet UI's captain row and
 view, its ui receiver, the bundled persona, the voice page; doctor says so in one ok row.
 ON is the captain as it was: the rest of the suite runs with it on (``tests/conftest.py``,
 ``captain_on``; its captain-OFF run skips what is marked ``needs_captain``), and each
@@ -250,39 +250,39 @@ def _a_home_with_a_captain(tmp_path: Path, script: Script) -> str:
     return captain.agent.id
 
 
-def _captain_surfaces(tmp_path: Path, script: Script) -> tuple[int, int, bool, int, bool]:
-    """The insignia, the captain section, the home board, captain views, alpha's card."""
+def _captain_surfaces(tmp_path: Path, script: Script) -> tuple[int, int, bool, int, bool, int]:
+    """The Spawn agent button, the captain slot, the home board, captain views, alpha's card —
+    and the ★ the header no longer has."""
     _a_home_with_a_captain(tmp_path, script)
 
-    async def body(pilot: Pilot[None]) -> tuple[int, int, bool, int, bool]:
+    async def body(pilot: Pilot[None]) -> tuple[int, int, bool, int, bool, int]:
         app = fleet_app(pilot)
         await refreshed(app)
         home = app.snapshot.home if app.snapshot is not None else None
         return (
-            len(app.query("#captain-button")),
+            len(app.query("#spawn-agent")),
             len(app.query("#captain-section")),
             home is not None,
             len(app.query(CaptainView)),
             bool(app.query("#card-prj_aaa")),
+            len(app.query("#captain-button")),
         )
 
     return drive(body)
 
 
-def test_the_fleet_ui_has_no_insignia_captain_row_or_home_when_off(
+def test_the_fleet_ui_has_no_captain_row_or_home_when_off(
     off: None, tmp_path: Path, script: Script
 ) -> None:
-    button, section, home, views, alpha = _captain_surfaces(tmp_path, script)
-    assert (button, section, home, views) == (0, 0, False, 0)
+    spawn, section, home, views, alpha, star = _captain_surfaces(tmp_path, script)
+    assert (spawn, section, home, views, star) == (1, 0, False, 0, 0)  # Spawn agent stays
     assert alpha, "the projects are listed as ever"
 
 
 @pytest.mark.needs_captain
-def test_the_fleet_ui_shows_the_insignia_and_the_captain_when_on(
-    tmp_path: Path, script: Script
-) -> None:
-    button, section, home, _views, alpha = _captain_surfaces(tmp_path, script)
-    assert (button, section, home, alpha) == (1, 1, True, True)
+def test_the_fleet_ui_shows_the_captain_when_on(tmp_path: Path, script: Script) -> None:
+    spawn, section, home, _views, alpha, star = _captain_surfaces(tmp_path, script)
+    assert (spawn, section, home, alpha, star) == (1, 1, True, True, 0)  # and no ★ in the header
 
 
 def test_a_remembered_captain_opens_no_captain_view_when_off(

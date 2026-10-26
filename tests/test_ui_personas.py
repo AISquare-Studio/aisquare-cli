@@ -1376,11 +1376,14 @@ def test_choosing_a_bind_or_an_account_opens_the_spawn_dialog_preset_with_the_pe
             dialog.query_one("#spawn-account", Select).value,
             dialog.query_one("#spawn-persona", Select).value,
         ]
+        # Opened on the project the Personas tab belongs to, which it fixes: no Project field.
+        where = [dialog.project.id, bool(dialog.query("#spawn-project"))]
         await press(pilot, "#spawn-submit")
         await settle(pilot)
-        return [shown_values, host.spawned]
+        return [shown_values, host.spawned, where]
 
-    shown_values, spawned = drive(scenario, project=project)
+    shown_values, spawned, where = drive(scenario, project=project)
+    assert where == [project.id, False]
     ((role, kwargs),) = spawns
     if pick == "bind:coder2":
         assert shown_values == ["coder2", "claude2", "", "pair"]

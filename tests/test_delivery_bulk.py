@@ -85,16 +85,12 @@ def _base_env(home: Path) -> dict[str, str]:
         "AISQUARE_TEAM_HUB",
         "AISQUARE_TEAM_DELTA",
         "AISQUARE_TEAM_LEASE_MIN",
-        "AISQUARE_BRAIN",
-        "AISQUARE_BRAIN_EMBED",
-        "AISQUARE_BRAIN_EMBED_MODEL",
         "AISQUARE_DB_BUSY_MS",
         "AISQUARE_SERVE_CLOSE_AFTER",
         "CLAUDE_CONFIG_DIR",
     ):
         env.pop(knob, None)
     env[HOME_ENV_VAR] = str(home)
-    env["AISQUARE_BRAIN"] = "0"  # no detached drain workers inside the storm
     env["NO_COLOR"] = "1"
     return env
 

@@ -3329,13 +3329,18 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
             out["open"] = _columns_at(view)
             out["field"] = (field(view, 2).region, name_box)
             await pilot.press("escape")
+            # The field is closed and the page quiet before the table is scrolled: a scroll made
+            # while the closing was still being laid out was undone by it (scroll_x back at 0
+            # for good, in 3 runs of 120 under load at 100 and 140 columns).
+            await settle_until(app, lambda: not row(view, 2).renaming, group=_NO_WORKER)
+            await settle_page(app, group=_NO_WORKER)
             table = view.query_one("#claude-table")
             out["scrolls"] = table.max_scroll_x
             table.scroll_to(x=table.max_scroll_x, animate=False, immediate=True)
             # Settled until the columns have moved, which is what is read next, not paused for
             # once: they were read before the scroll had been laid out (1 run in a full suite
-            # under load at 140 columns, and 3 in 3 repeats of it at 100 and 140). Where the
-            # table fits there is nothing to scroll, and nothing to wait for.
+            # under load at 140 columns). Where the table fits there is nothing to scroll, and
+            # nothing to wait for.
             await settle_until(
                 app, lambda: not out["scrolls"] or _columns_at(view) != out["closed"], timeout=30
             )

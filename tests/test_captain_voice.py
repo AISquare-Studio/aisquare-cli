@@ -238,14 +238,6 @@ def _spoken(harness: Harness, count: int) -> None:
         time.sleep(0.005)
 
 
-def _until_fed(transcriber: FakeTranscriber, size: int) -> None:
-    """Wait until the server has fed ``transcriber`` ``size`` bytes in all: it has taken them."""
-    deadline = time.monotonic() + 10
-    while len(transcriber.fed) < size and time.monotonic() < deadline:
-        time.sleep(0.005)
-    assert len(transcriber.fed) >= size, "the server never took the audio"
-
-
 def _until(connection: Any, kind: str) -> dict[str, Any]:
     """Frames until one of ``kind``; the others (interims, thinking, utterance) interleave freely.
 
@@ -949,14 +941,21 @@ def test_a_request_begun_inside_the_window_is_delivered_though_its_final_lands_a
         for connection in _authed(client):
             _say(connection)
             assert _until(connection, "awake")["on"] is True
-            fed = len(harness.transcribers[0].fed)
-            for _ in range(FRAMES_PER_SECOND // 4):  # the request begins inside the window …
+            for _ in range(FRAMES_PER_SECOND):  # the request begins inside the window …
                 connection.send_bytes(LOUD)
-            # … which is judged as its first frame is taken: the clock moves on once the server
-            # has taken it (a step straight after the send could land before that).
-            _until_fed(harness.transcribers[0], fed + FRAME_BYTES)
+            # … which was judged as it began, and the live line it shows (whole, inside a window)
+            # says so: the clock moves on once the server has said it, never before. A step
+            # made on the audio's having been fed alone could land before the verdict did.
+            live = _until(connection, "stt")
+            assert not live["final"] and live["text"] == "find me this"
             clock.step(0.6)  # … and is still being spoken when the window's time is up
             time.sleep(0.6)  # long enough for the window's own timer to look, and not close it
+            # Back inside the window for the end of the request: the audio's end is known to the
+            # segmenter's thread a moment before the loop sends its final, and a timer looking
+            # in that moment, with the window out of time, closes it a frame ahead of the words
+            # (5 runs of 150 under load; the request is delivered either way). What this test
+            # pins is that the window did not close WHILE the request was being spoken.
+            clock.step(-0.6)
             _say(connection)
             frames: list[dict[str, Any]] = []
             while not frames or frames[-1]["t"] != "reply":

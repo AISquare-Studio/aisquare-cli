@@ -143,7 +143,7 @@ def _seed(project: ProjectInfo, word: str) -> dict[str, str]:
             f"signal/{project.id}/phase": json.dumps({"value": word}),
             f"nudge:{session}": now.isoformat(),
             f"continuations:{session}:2026-10-25": "1",
-            f"distill_seq:{project.id}": "4",
+            f"unowned/{project.id}/x": "4",
         }
         for key, value in keys.items():
             store.set_meta(key, value)
@@ -247,9 +247,9 @@ def test_a_reset_clears_the_board_and_fleet_and_keeps_memory_prompts_and_every_o
     assert [row[0] for row in after["fleet_agent"]] == [report.manager.id if report.manager else ""]
     assert {table: after[table] for table in _KEPT} == alpha_kept
     assert _rows(beta.id) == beta_before
-    # Its signals and its sessions' marks went; the ``distill_seq`` key an earlier release
-    # left and every other key, beta's included, are as they were.
-    gone = {key for key in alpha_keys if not key.startswith("distill_seq:")}
+    # Its signals and its sessions' marks went; the ``unowned/`` key no board owns and every
+    # other key, beta's included, are as they were.
+    gone = {key for key in alpha_keys if not key.startswith("unowned/")}
     assert _meta() == {k: v for k, v in meta_before.items() if k not in gone}
     assert report.cleared.model_dump() == {
         "tasks": 3,

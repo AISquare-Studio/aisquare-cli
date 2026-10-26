@@ -22,17 +22,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the reset, naming each tree, its branch and the commit count, unless
   `--discard-unpushed`; a count git cannot give refuses it too, never reading as pushed.
   At a terminal the discard covers what the plan listed and you confirmed, at the tips
-  it showed, and work found since (asked again once the fleet is stopped) refuses it;
+  it showed (uncommitted changes in a listed tree go as they are when the reset runs),
+  and work found since (asked again once the fleet is stopped) refuses it;
   with `--yes`, the flag covers whatever the run finds. It prints the plan with its
   counts and asks at a terminal (a second time before discarding); `--dry-run` prints
   the plan and changes nothing, off a terminal it is a dry run unless `--yes`, and
   `--json` prints the plan, or with `--yes` the counts it planned and the counts it
   cleared: the stop writes an `agent_exited` for each agent it stops, which goes too and
-  is said apart ("11 notes and events (4 written during the reset)"), as is the tmux
-  session it killed. A reset that stops part-way (an agent or a tmux session left
-  standing, work found nobody agreed to discard, a store that would not take the lock)
-  removes no tree, clears nothing on the board, starts no manager, names the next step
-  (`fleet shutdown`) and, under `--json`, prints its partial report under the error. It
+  is said apart ("11 notes and events (4 written during the reset)"), as are the tmux
+  session it ended (killed, or gone with its last window) and the worktrees it removed.
+  A reset that stops part-way (an agent or a tmux session left standing, work found
+  nobody agreed to discard, a store that would not take the lock) clears nothing on the
+  board and starts no manager, removing no tree while the fleet still stands or such work
+  is found; it names the next step (`fleet shutdown`) and prints its partial report, in
+  text or under the error with `--json`, whose refusals all carry their detail. It
   is refused from inside one of the project's own fleet agents, from inside the fleet's
   tmux server when it has something to stop, and, as `project forget` is, while another
   project's fleet agents read its board. The service behind it (`services.fresh`:

@@ -2233,7 +2233,6 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             ),
             name=PROJECT_FRESH_WORKER,
             group=_fresh_group(target.id),
-            exclusive=True,
             thread=True,
             exit_on_error=False,
         )
@@ -2241,8 +2240,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def _fresh_running(self, project: ProjectInfo) -> bool:
         """Whether a Start fresh of ``project`` is still running, said when it is: a second
         run beside it would stop what the first just spawned, and both would start a manager.
-        Refused here, at the menu, the Settings button and the confirmation alike; the
-        worker is exclusive in its project's group as well."""
+        Refused here, at the menu, the Settings button and the confirmation alike: this is
+        the guard. The worker is not ``exclusive``, which guards nothing: it cancels the run
+        in flight, whose thread goes on regardless, and drops its report (review of #429,
+        round 2)."""
         group = _fresh_group(project.id)
         if not any(worker.group == group and not worker.is_finished for worker in self.workers):
             return False
@@ -2264,8 +2265,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             cleared = ", ".join(fresh_service.cleared_words(result))
             session = (result.manager.session_id or "")[:8] if result.manager else ""
             manager = f"; a new manager started (session {session})" if result.manager else ""
-            if result.sessions_killed:
-                manager = f"; its tmux session was killed{manager}"
+            if result.sessions_killed or result.sessions_gone:
+                manager = f"; its tmux session ended{manager}"
             self.notify(
                 f"✓ {name} started fresh — cleared {cleared}{manager}", timeout=10, markup=False
             )

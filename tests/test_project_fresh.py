@@ -41,6 +41,7 @@ from aisquare.core.entries import new_entry
 from aisquare.core.ids import new_agent_id, new_event_id, new_task_id
 from aisquare.core.orchestrator import FLEET_AGENT_ENV_VAR, team_project
 from aisquare.core.store import SqliteStore, store_session
+from aisquare.core.tmux import TmuxError, TmuxServer
 from aisquare.models import (
     FleetAgent,
     FreshReport,
@@ -517,7 +518,10 @@ def test_at_a_terminal_it_asks_and_asks_again_before_discarding(
 
     assert declined.exit_code == 0, declined.output
     assert "Start alpha fresh?" in declined.output
-    assert "Throw away the unpushed work in 1 place, as listed above?" in declined.output
+    assert "Throw away the unpushed work in 1 place, as listed above" in declined.output
+    assert "(uncommitted changes go as they are when the reset runs)?" in " ".join(
+        declined.output.split()
+    )
     assert "nothing cleared" in declined.output and tree.is_dir() and spawned == []
 
     agreed = runner.invoke(app, argv, input="y\ny\n")
@@ -607,7 +611,12 @@ def test_it_is_refused_from_inside_one_of_the_projects_own_fleet_agents(
     assert "can't start fresh from inside coder-1, one of alpha's own fleet agents" in said
     assert "Run it from the UI (asq) or from a terminal of your own" in said
     as_json = runner.invoke(app, ["--json", "project", "fresh", "-P", "alpha-x", "--yes"])
-    assert json.loads(as_json.stdout) == {"error": "inside_fleet_agent", "ref": alpha.id}
+    refused_json = json.loads(as_json.stdout)
+    assert {k: refused_json[k] for k in ("error", "ref")} == {
+        "error": "inside_fleet_agent",
+        "ref": alpha.id,
+    }
+    assert "from inside coder-1" in refused_json["detail"]
     assert _rows(alpha.id) == before and spawned == []
     # Another project's agent is not this project's pane: its plan is not refused for it.
     monkeypatch.setenv(FLEET_AGENT_ENV_VAR, theirs.id)
@@ -633,7 +642,12 @@ def test_a_board_another_projects_fleet_reads_is_refused_naming_them(
     assert "can't start fresh: alpha is the board beta's 2 live fleet agent(s) read:" in said
     assert "manager, coder-1 —" in said and "fleet stop --project beta-y <label>" in said
     as_json = runner.invoke(app, ["--json", "project", "fresh", "-P", "alpha-x", "--dry-run"])
-    assert json.loads(as_json.stdout) == {"error": "project_busy", "ref": alpha.id}
+    refused_json = json.loads(as_json.stdout)
+    assert {k: refused_json[k] for k in ("error", "ref")} == {
+        "error": "project_busy",
+        "ref": alpha.id,
+    }
+    assert "beta's 2 live fleet agent(s) read" in refused_json["detail"]
     assert _rows(alpha.id) == before and spawned == []
 
 
@@ -1023,7 +1037,7 @@ def test_the_success_report_says_the_tmux_session_was_killed(
     result = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--yes"])
 
     assert result.exit_code == 0, result.output
-    assert "killed tmux session asq:asq-alpha-x" in result.output
+    assert "tmux session asq:asq-alpha-x ended" in result.output
 
 
 def test_m2_a_count_git_will_not_give_is_never_read_as_none(
@@ -1035,3 +1049,204 @@ def test_m2_a_count_git_will_not_give_is_never_read_as_none(
 
     with pytest.raises(fleet_service.FleetError, match="could not count the commits"):
         fleet_service.unpushed_work(alpha, [], {"fleet/alpha-x/gone": "0" * 40})
+
+
+# --- review round 2 on #429 (#5) -----------------------------------------------------------
+
+
+def test_n1_a_tree_spawned_after_the_stop_is_not_removed_under_its_agent(
+    tmp_path: Path,
+    unpushed: tuple[ProjectInfo, Path, str],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """n1: the re-read after the stop took trees from live rows too, so a tree a spawn made
+    between the stop and the re-read was removed, forced, before the store refused the live
+    row. A live row stops the run before any tree is touched."""
+    alpha, tree, _ = unpushed
+    shown = fresh_service.plan(alpha)
+    late = tmp_path / "trees" / "coder-9"
+    _sessions_standing(monkeypatch, "asq:asq-alpha-x")
+
+    def shutdown(project: ProjectInfo, **_: Any) -> fleet_service.ShutdownReport:
+        # A spawn lands between the stop and the re-read (a respawn, a hand `fleet spawn`).
+        _git("worktree", "add", "-q", "-b", "fleet/alpha-x/coder-9", str(late), cwd=alpha.root)
+        with store_session() as store:
+            store.upsert_fleet_agent(_agent(alpha, "coder-9", cwd=late, worktree=True))
+        return fleet_service.ShutdownReport(sessions_killed=["asq:asq-alpha-x"])
+
+    monkeypatch.setattr(fleet_service, "shutdown", shutdown)
+    before = len(_rows(alpha.id)["team_task"])
+
+    with pytest.raises(fresh_service.FreshIncomplete) as stopped:
+        fresh_service.start_fresh(alpha, discard=shown.unpushed)
+
+    assert "started since its fleet was stopped: coder-9" in str(stopped.value)
+    assert stopped.value.report.worktrees_removed == []
+    assert late.exists() and tree.exists(), "no tree is touched while a row is live"
+    assert len(_rows(alpha.id)["team_task"]) == before and spawned == []
+
+
+def test_n2_a_session_tmux_cannot_be_asked_is_never_read_as_absent(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """n2: the read-only listing asked tmux leniently, so a session behind a socket that would
+    not answer read as none, and with no live row the stop was skipped. It says it could not
+    tell (``None``), and the plan asks ``fleet shutdown``'s, which lists strictly or refuses."""
+    alpha, _, _, _ = two
+
+    def unasked(self: TmuxServer, name: str) -> bool:
+        raise TmuxError("error connecting to /tmp/asq (Permission denied)")
+
+    monkeypatch.setattr(TmuxServer, "has_session_or_raise", unasked)
+    monkeypatch.setattr(TmuxServer, "has_session", lambda self, name: False)  # the lenient read
+    asked: list[str] = []
+
+    def shutdown_plan(project: ProjectInfo, **_: Any) -> fleet_service.ShutdownPlan:
+        asked.append(project.id)
+        return fleet_service.ShutdownPlan(sessions=["asq:asq-alpha-x"])
+
+    monkeypatch.setattr(fleet_service, "shutdown_plan", shutdown_plan)
+
+    assert fleet_service.project_sessions(alpha) is None
+    assert fresh_service.plan(alpha).sessions == ["asq:asq-alpha-x"] and asked == [alpha.id]
+
+
+def test_an_interrupted_stop_keeps_the_sessions_tmux_would_not_kill(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nit: the interrupted stop's report carried the sessions killed, not those that
+    failed."""
+    alpha, _, _, _ = two
+    _sessions_standing(monkeypatch, "asq:asq-alpha-x", "asq:asq-alpha-old")
+
+    def interrupted(*_: Any, **__: Any) -> fleet_service.ShutdownReport:
+        raise fleet_service.FleetInterrupted(
+            fleet_service.ShutdownReport(
+                sessions_killed=["asq:asq-alpha-old"],
+                sessions_failed=["asq:asq-alpha-x"],
+                interrupted="interrupted during the kill phase",
+            )
+        )
+
+    monkeypatch.setattr(fleet_service, "shutdown", interrupted)
+
+    with pytest.raises(fresh_service.FreshIncomplete) as stopped:
+        fresh_service.start_fresh(alpha)
+
+    assert stopped.value.report.sessions_killed == ["asq:asq-alpha-old"]
+    assert stopped.value.report.sessions_failed == ["asq:asq-alpha-x"]
+
+
+# --- tester-fresh-fix's notes at a14eafc1 (#5) ---------------------------------------------
+
+
+def test_a_session_that_ended_with_its_last_window_is_said_to_have_ended(
+    runner: CliRunner,
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every pane a live agent, the stop's window kills end the session before the kill
+    phase looks (``sessions_absent``): the success report said "stopped: manager" and
+    nothing of the session. It is ended all the same, and said so."""
+    alpha, _, _, _ = two
+    with store_session() as store:
+        live = store.upsert_fleet_agent(_agent(alpha, "coder-1"))
+    _sessions_standing(monkeypatch, "asq:asq-alpha-x")
+
+    def shutdown(project: ProjectInfo, **_: Any) -> fleet_service.ShutdownReport:
+        with store_session() as store:  # its window killed, the session went with it
+            store.end_fleet_agent(live.id, exit_status=0, ended_by="stopped")
+        return fleet_service.ShutdownReport(stopped=[live], sessions_absent=["asq:asq-alpha-x"])
+
+    monkeypatch.setattr(fleet_service, "shutdown", shutdown)
+
+    result = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "tmux session asq:asq-alpha-x ended" in result.output
+
+
+def test_work_found_after_the_stop_tells_a_terminal_user_to_run_it_again(
+    runner: CliRunner,
+    unpushed: tuple[ProjectInfo, Path, str],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal found once the fleet was stopped told someone who had passed
+    --discard-unpushed and confirmed the list to "pass --discard-unpushed"."""
+    _, tree, _ = unpushed
+    _sessions_standing(monkeypatch, "asq:asq-alpha-x")
+
+    def shutdown(project: ProjectInfo, **_: Any) -> fleet_service.ShutdownReport:
+        (tree / "late.txt").write_text("late\n", encoding="utf-8")
+        _git("add", "late.txt", cwd=tree)
+        _git("commit", "-q", "-m", "late", cwd=tree)
+        return fleet_service.ShutdownReport(sessions_killed=["asq:asq-alpha-x"])
+
+    monkeypatch.setattr(fleet_service, "shutdown", shutdown)
+    monkeypatch.setattr("aisquare.cli.project._stdin_is_a_terminal", lambda: True)
+
+    result = runner.invoke(
+        app, ["project", "fresh", "-P", "alpha-x", "--discard-unpushed"], input="y\ny\n"
+    )
+
+    assert result.exit_code == 1, result.output
+    said = " ".join(result.output.split())
+    assert "run it again to see and confirm the new list" in said
+    assert "2 commits on no remote" in said and "pass --discard-unpushed" not in said
+
+
+def test_a_partial_reset_in_text_lists_the_worktrees_it_already_removed(
+    runner: CliRunner,
+    unpushed: tuple[ProjectInfo, Path, str],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--json carried ``worktrees_removed`` for a reset that stopped part-way; the text said
+    nothing of the trees already gone."""
+    _, tree, _ = unpushed
+    real = SqliteStore.reset_project
+
+    def locked(self: SqliteStore, project_id: str, **kwargs: Any) -> dict[str, int]:
+        if kwargs.get("apply"):
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, project_id, **kwargs)
+
+    monkeypatch.setattr(SqliteStore, "reset_project", locked)
+
+    result = runner.invoke(
+        app, ["project", "fresh", "-P", "alpha-x", "--yes", "--discard-unpushed"]
+    )
+
+    assert result.exit_code == 1, result.output
+    said = " ".join(result.output.split())
+    assert f"🗑 removed worktree {tree}" in said and "database is locked" in said
+
+
+def test_json_refusals_carry_their_detail(
+    runner: CliRunner,
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--json refusals other than unpushed_work carried only {error, ref}: a script could
+    not read why (a fleet the stop cannot ask, a call from inside the fleet's server)."""
+    alpha, _, _, _ = two
+    with store_session() as store:
+        store.upsert_fleet_agent(_agent(alpha, "coder-1"))
+
+    def unusable(*_: Any, **__: Any) -> fleet_service.ShutdownPlan:
+        raise fleet_service.FleetUnavailable("tmux is not installed (or not on PATH)")
+
+    monkeypatch.setattr(fleet_service, "shutdown_plan", unusable)
+
+    result = runner.invoke(app, ["--json", "project", "fresh", "-P", "alpha-x", "--yes"])
+
+    assert result.exit_code == 2, result.output
+    said = json.loads(result.stdout)
+    assert said["error"] == "fleet_error" and said["ref"] == alpha.id
+    assert "tmux is not installed" in said["detail"]

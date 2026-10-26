@@ -1370,6 +1370,10 @@ class FreshReport(BaseModel):
     """Labels of the agents it stopped (or recorded gone) before clearing."""
     sessions_killed: list[str] = Field(default_factory=list)
     """``<socket>:<session>`` for each of the project's tmux sessions the stop killed."""
+    sessions_gone: list[str] = Field(default_factory=list)
+    """The project's sessions that ended with the last window the stop closed, gone before
+    the kill (``ShutdownReport.sessions_absent``): the common case, every pane a live agent.
+    Ended all the same, and said so with :attr:`sessions_killed`."""
     sessions_failed: list[str] = Field(default_factory=list)
     """The sessions tmux would not kill, with why: a reset with any is incomplete."""
     worktrees_removed: list[Path] = Field(default_factory=list)

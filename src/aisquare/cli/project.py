@@ -432,7 +432,7 @@ def fresh(
     try:
         planned = fresh_service.plan(target, memory=memory, prompts=prompts, branches=branches)
     except fresh_service.FreshRefused as exc:
-        fail(str(exc), error=exc.code, ref=target.id, exit_code=2)
+        fail(str(exc), error=exc.code, ref=target.id, detail=str(exc), exit_code=2)
     if dry_run or (get_state().json_output and not yes):
         _emit_fresh_plan(planned, discard=discard_unpushed)
         return
@@ -455,7 +455,8 @@ def fresh(
             return
         if planned.unpushed and not typer.confirm(
             f"Throw away the unpushed work in {len(planned.unpushed)} "
-            f"place{'s' if len(planned.unpushed) != 1 else ''}, as listed above?",
+            f"place{'s' if len(planned.unpushed) != 1 else ''}, as listed above "
+            "(uncommitted changes go as they are when the reset runs)?",
             default=False,
         ):
             stdout_console().print("nothing cleared")
@@ -478,15 +479,20 @@ def fresh(
             ack_wait=fleet_service.settings().prompt_ack_seconds,
         )
     except fresh_service.FreshRefused as exc:
-        fail(str(exc), error=exc.code, ref=target.id, exit_code=2)
+        fail(str(exc), error=exc.code, ref=target.id, detail=str(exc), exit_code=2)
     except fresh_service.FreshIncomplete as exc:
+        said = str(exc)
+        if exc.plan is not None and discard_unpushed:
+            # The list confirmed at the terminal did not cover what the stop left: naming
+            # the flag again would only ask about the same list.
+            said = fresh_service.found_after_stop(exc.plan, way=fresh_service.RUN_AGAIN)
         if get_state().json_output:
             # The partial report too, under the error: what was stopped and removed before
             # it stood still, which a script cannot read off a bare error object.
             payload: dict[str, object] = {
                 "error": "fresh_incomplete",
                 "ref": target.id,
-                "detail": str(exc),
+                "detail": said,
                 "report": exc.report.model_dump(mode="json"),
             }
             if exc.plan is not None:  # work found once the fleet was stopped: what it is
@@ -494,7 +500,7 @@ def fresh(
             typer.echo(json.dumps(payload))
             raise typer.Exit(code=1) from None
         _emit_fresh(exc.report)
-        fail(str(exc), error="fresh_incomplete", ref=target.id)
+        fail(said, error="fresh_incomplete", ref=target.id)
     _emit_fresh(report)
     if report.manager_error is not None:
         raise typer.Exit(code=1)
@@ -566,8 +572,13 @@ def _emit_fresh(report: FreshReport) -> None:
         console.print(f"✓ started {name} fresh — cleared {cleared}", markup=False)
     if report.stopped:
         console.print(f"  stopped: {', '.join(report.stopped)}", markup=False)
-    if report.sessions_killed:
-        console.print(f"  killed tmux session {', '.join(report.sessions_killed)}", markup=False)
+    ended = [*report.sessions_killed, *report.sessions_gone]
+    if ended:
+        console.print(f"  tmux session {', '.join(ended)} ended", markup=False)
+    for path in report.worktrees_removed:
+        console.print(f"  🗑 removed worktree {path}", markup=False)
+    for branch in report.branches_deleted:
+        console.print(f"  🗑 deleted branch {branch}", markup=False)
     for session in report.sessions_failed:
         console.print(f"  ⚠ tmux would not kill {session}", markup=False)
     for item in report.discarded:

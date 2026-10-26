@@ -24,8 +24,9 @@ import pytest
 from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widgets import Button, Checkbox, OptionList, Static
+from textual.worker import WorkerState
 
-from aisquare.cli.ui.app import _fresh_group
+from aisquare.cli.ui.app import FleetApp, _fresh_group
 from aisquare.cli.ui.board import BoardPanel
 from aisquare.cli.ui.fresh import EXTRAS, ConfirmDiscard, ConfirmFresh, FreshChoice, StartFresh
 from aisquare.cli.ui.project_menu import ProjectMenu
@@ -620,3 +621,71 @@ def test_start_fresh_is_refused_while_a_run_of_it_is_going(
     assert seen["reopened"] != "ConfirmFresh"
     assert str(seen["toasts"]).count("alpha is starting fresh already") == 2
     assert runs == ["prj_a"], "one run, however often it was asked for"
+
+
+def test_a_second_start_never_cancels_a_reset_in_flight(
+    alpha: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #429, round 2: the worker was ``exclusive`` in its project's group, which
+    guards nothing. It cancels the run in flight, whose thread goes on, and drops its report.
+    ``_fresh_running`` is the guard; with it out of the way here, a second start leaves the
+    first running, and both report."""
+    release = threading.Event()
+    runs: list[str] = []
+
+    def start_fresh(project: ProjectInfo, **_: Any) -> Any:
+        runs.append(project.id)
+        assert release.wait(30), "the test never released the run"
+        raise fresh_service.FreshRefused(f"stood in for run {len(runs)}", code="fleet_error")
+
+    monkeypatch.setattr(fresh_service, "start_fresh", start_fresh)
+    monkeypatch.setattr(FleetApp, "_fresh_running", lambda self, project: False)
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        app._start_fresh(FreshChoice("prj_a"))
+        for _ in range(20):  # not settle: it would wait for the held run
+            await pilot.pause()
+            if runs:
+                break
+        group = _fresh_group("prj_a")
+        first = next(w for w in app.workers if w.group == group)
+        app._start_fresh(FreshChoice("prj_a"))
+        for _ in range(5):
+            await pilot.pause()
+        state = first.state
+        release.set()
+        toasts = await _toasts(app)
+        return {"state": state, "toasts": toasts}
+
+    seen = drive(go, notifications=True)
+    assert seen["state"] is not WorkerState.CANCELLED
+    assert str(seen["toasts"]).count("stood in for run") == 2, seen["toasts"]
+
+
+def test_the_toast_says_the_tmux_session_ended(
+    alpha: ProjectInfo, applied: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """tester-fresh-fix: the success never said the session went, killed or gone with the
+    last window the stop closed (the common case, every pane a live agent)."""
+    monkeypatch.setattr(fleet_service, "project_sessions", lambda *_: ["asq:asq-amber-otter"])
+    monkeypatch.setattr(
+        fleet_service,
+        "shutdown_plan",
+        lambda *_, **__: fleet_service.ShutdownPlan(sessions=["asq:asq-amber-otter"]),
+    )
+    monkeypatch.setattr(
+        fleet_service,
+        "shutdown",
+        lambda *_, **__: fleet_service.ShutdownReport(sessions_absent=["asq:asq-amber-otter"]),
+    )
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        dialog = await _open_from_menu(pilot)
+        await settle(app)
+        dialog.query_one("#fresh-confirm", Button).press()
+        return await _toasts(app)
+
+    toasts = drive(go, notifications=True)
+    assert "; its tmux session ended; a new manager started (session sess-new)" in toasts, toasts

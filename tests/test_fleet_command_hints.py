@@ -148,6 +148,9 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fresh.py", "_stop"): (
         "the project being started fresh, whose fleet the stop left standing"
     ),
+    ("services/fresh.py", "_held_now"): (
+        "the project being started fresh, whose agents started again after its stop"
+    ),
     ("cli/ui/app.py", "FleetApp._project_freshened"): (
         "the project the Start fresh report is about, the one its dialog was opened on"
     ),

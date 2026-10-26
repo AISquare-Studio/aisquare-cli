@@ -355,7 +355,8 @@ class ConfirmDiscard(ModalScreen[bool]):
                 yield Static(
                     Text(
                         f"{display_name(self.project)}'s fleet holds work no remote has, in "
-                        f"{count} place{'s' if count != 1 else ''}. Throw it away?"
+                        f"{count} place{'s' if count != 1 else ''}. Throw it away? Uncommitted "
+                        "changes go as they are when the reset runs."
                     ),
                     id="discard-title",
                 )

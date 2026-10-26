@@ -2140,13 +2140,18 @@ def _countable_default(root: Path) -> str | None:
     return None
 
 
-def project_sessions(project: ProjectInfo) -> list[str]:
+def project_sessions(project: ProjectInfo) -> list[str] | None:
     """``<socket>:<session>`` for each of ``project``'s tmux sessions standing now, where a
     scoped ``fleet shutdown`` looks for them (:func:`_fleet_sessions`): read-only, and with
     none of its guards, so a caller can tell there is nothing to stop before it asks
     :func:`shutdown_plan`, which refuses from inside the fleet's own server whatever it
-    would stop (review of #429, m1). A server that cannot be asked, or no usable tmux, holds
-    none."""
+    would stop (review of #429, m1).
+
+    ``None`` when a session could not be asked: only what tmux says is absent is absent
+    (``has_session_or_raise``). Asked leniently, a session behind a socket that would not
+    answer read as none, and with no live row the stop was skipped, leaving a dead pane or a
+    stray process beside the new manager (review of #429, round 2, n2); the caller asks
+    :func:`shutdown_plan`, which lists strictly or refuses."""
     if not project.codename:
         return []
     config = settings()
@@ -2155,9 +2160,11 @@ def project_sessions(project: ProjectInfo) -> list[str]:
     for socket in _shutdown_sockets(targets, config):
         srv = _server_at(socket, config)
         for name, _, _ in _fleet_sessions(srv, targets, socket=socket, config=config, every=False):
-            with suppress(TmuxError, OSError):
-                if srv.has_session(name):
+            try:
+                if srv.has_session_or_raise(name):
                     found.append(f"{socket}:{name}")
+            except (TmuxError, OSError):
+                return None
     return found
 
 

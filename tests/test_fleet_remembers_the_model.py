@@ -466,7 +466,11 @@ def _events(name: str) -> list[str | tuple[str, str, str]]:
     scan = transcripts.commands_since(FIXTURES / name, 0)
     assert scan is not None and scan.end == (FIXTURES / name).stat().st_size
     return [
-        event if isinstance(event, str) else (event.setting, event.args, event.stdout)
+        event
+        if isinstance(event, str)
+        else (event.setting, event.args, event.stdout)
+        if isinstance(event, transcripts.SettingCommand)
+        else ("unframed", event.setting, "")
         for event in scan.events
     ]
 
@@ -585,18 +589,121 @@ def test_the_2_1_311_picker_answers_are_read_off_its_own_records() -> None:
     ]
 
 
-def test_an_answer_this_version_cannot_read_is_said_and_explicit_args_still_count() -> None:
-    """Round 6 minor 3, seq 3654 (4): a reworded answer must not fail silently. It is unread
-    (``understood=False``: the canary), and only the command's own args are a value."""
+def test_an_answer_this_reader_cannot_read_sets_nothing_args_or_not() -> None:
+    """Round 7, MAJOR 1 (decision, reversing round 6's "explicit args still count"): a pick
+    only from an answer read as a success. One in other words writes nothing, args or not,
+    and is said (``understood=False``: the canary)."""
     value = model_memory.CommandValue
-    assert _values("model", "haiku", "Model set to Haiku 5.5") == (
-        value("model", "haiku", True, understood=False),
+    unread_model = (value("model", None, False, understood=False),)
+    unread_effort = (value("effort", None, False, understood=False),)
+    assert _values("model", "haiku", "Model set to Haiku 5.5") == unread_model
+    assert _values("model", "", "Model set to Haiku 5.5") == unread_model
+    assert _values("effort", "max", "Effort is now max") == unread_effort
+    assert _values("effort", "", "Turbo mode engaged") == unread_effort
+
+
+def test_a_command_claude_code_refused_is_no_choice() -> None:
+    """Round 7, MAJOR 1 (seq 3690), restoring round 5's test: an owner's typo ``/model sonet``
+    Claude Code refuses (it stays on Sonnet) became the pick every spawn ran, ``--model
+    sonet``. A refusal is no choice, like the pickers' Esc, and no canary: Claude Code's
+    words were read."""
+    assert _values("model", "sonet", "Model 'sonet' not found") == ()
+    assert _values("model", "claude-opus-9-9", "Model 'claude-opus-9-9' not found") == ()
+    invalid = "Invalid argument: bogus. Valid options are: low, medium, high, xhigh, max, auto"
+    assert _values("effort", "bogus", invalid) == ()
+
+
+def test_effort_auto_forgets_the_effort() -> None:
+    """Round 7, MINOR (decision): ``/effort auto`` answers ``Effort level set to auto`` and
+    clears the saved effort: the account's default, as ``Default (recommended)`` is for the
+    model (``""``: forget the pick)."""
+    value = model_memory.CommandValue
+    assert _values("effort", "auto", "Effort level set to auto") == (value("effort", "", True),)
+
+
+def test_the_2_1_311_refusals_and_auto_are_read_off_its_own_records() -> None:
+    """``tests/fixtures/claude_code/model_refusals_2.1.311.jsonl``, real 2.1.311: ``/model
+    nope`` before the first turn (a ``system`` pair), ``/model haiku``, the refused ``/model
+    sonet`` and ``/model claude-opus-9-9`` (``system`` pairs), ``/effort bogus`` and
+    ``/effort auto``. One pick, one forgotten effort, nothing else, and no record outside
+    the frame."""
+    events = _events("model_refusals_2.1.311.jsonl")
+    assert [event for event in events if isinstance(event, str)] == ["plain", "plain"]
+    found = [
+        model_memory.command_values(transcripts.SettingCommand(*event, None))
+        for event in events
+        if not isinstance(event, str)
+    ]
+    value = model_memory.CommandValue
+    assert found == [
+        (),  # Model 'nope' not found
+        (value("model", "haiku", True),),
+        (),  # Model 'sonet' not found
+        (),  # Model 'claude-opus-9-9' not found
+        (),  # Invalid argument: bogus
+        (value("effort", "", True),),  # Effort level set to auto
+    ]
+
+
+def test_the_effort_pickers_tab_on_saves_the_level_and_runs_ultracode() -> None:
+    """Seq 3693 (3): ``… · Ultracode on`` after a saved level: the level is the pick, and the
+    session runs ultracode, which is no pick."""
+    value = model_memory.CommandValue
+    answer = (
+        "Set effort level to high (saved as your default for new sessions): Comprehensive "
+        "implementation with extensive testing and documentation · Ultracode on"
     )
-    assert _values("model", "", "Model set to Haiku 5.5") == (
-        value("model", None, True, understood=False),
+    assert _values("effort", "", answer) == (
+        value("effort", "high", True),
+        value("effort", "ultracode", False),
     )
-    assert _values("effort", "", "Turbo mode engaged") == (
-        value("effort", None, True, understood=False),
+
+
+#: When ``fork_2.1.311.jsonl``'s fork was bound: after the last record it copied from its
+#: source (22:45:53.462Z), before its own first prompt (22:46:31.421Z).
+FORK_BOUND = datetime(2026, 10, 26, 22, 46, tzinfo=UTC)
+
+
+def test_a_fork_reads_only_what_it_wrote_after_its_binding() -> None:
+    """Round 7, MAJOR 2: 2.1.311 forks (``--resume <t> --fork-session``) by copying the
+    source's history into the new file at its first write, the ``/model`` frames included,
+    with their uuids and their timestamps under the fork's own ``sessionId``
+    (``tests/fixtures/claude_code/fork_2.1.311.jsonl``). The fork's read skips every record
+    written before it was bound, and keeps its own."""
+    path = FIXTURES / "fork_2.1.311.jsonl"
+    everything = transcripts.commands_since(path, 0)
+    assert everything is not None
+    assert sum(isinstance(e, transcripts.SettingCommand) for e in everything.events) == 6
+    scan = transcripts.commands_since(path, 0, since=FORK_BOUND)
+    assert scan is not None and scan.events == ("plain",) and scan.end == path.stat().st_size
+
+
+def test_a_record_led_by_a_setting_tag_outside_the_frame_is_said(tmp_path: Path) -> None:
+    """Round 7 (decision): a frame-shape change in a later Claude Code must not fail silently.
+    A record opening with a ``/model`` or ``/effort`` tag that is not a caveat's child, or a
+    framed one never answered though the transcript went on, is ``UnframedCommand``: never a
+    choice, said by the canary (text quoting one is said too, and harmless)."""
+    path = tmp_path / "t.jsonl"
+    name = "<command-name>/model</command-name>\n            <command-args>sonnet</command-args>"
+    _framed(
+        path,
+        {"type": "user", "uuid": "m1", "parentUuid": "r0",
+         "message": {"role": "user", "content": name}},
+        {"type": "user", "uuid": "a1", "parentUuid": "m1", "message": {"role": "user",
+         "content": "<local-command-stdout>Set model to `Sonnet 5.5`</local-command-stdout>"}},
+        {"type": "user", "uuid": "c2", "isMeta": True,
+         "message": {"role": "user", "content": "<local-command-caveat>The command below…"}},
+        {"type": "user", "uuid": "m2", "parentUuid": "c2", "message": {"role": "user",
+         "content": name.replace("/model", "/effort").replace("sonnet", "low")}},
+        {"type": "user", "uuid": "p3", "parentUuid": "m2",
+         "message": {"role": "user", "content": "carry on"}},
+    )  # fmt: skip
+    scan = transcripts.commands_since(path, 0)
+    assert scan is not None
+    assert scan.events == (
+        transcripts.UnframedCommand("model"),
+        "plain",
+        transcripts.UnframedCommand("effort"),
     )
 
 
@@ -621,6 +728,40 @@ def test_a_command_with_no_answer_yet_is_none_and_never_holds_the_read(tmp_path:
     )  # fmt: skip
     scan = transcripts.commands_since(path, 0)
     assert scan is not None and scan.events == () and scan.end == path.stat().st_size
+
+
+def test_a_caveat_is_one_only_as_the_commands_own_parent(tmp_path: Path) -> None:
+    """Seq 3697 hardening: an agent can write a custom command whose body is the caveat, and
+    its expansion is a meta record that opens with ``<local-command-caveat>``. It is no
+    caveat (its parent opened a custom command's turn), so a tag-led record parented to it
+    is outside the frame; and one parented to the turn's end, as 2.1.311 records a typed
+    one, is outside it too."""
+    path = tmp_path / "t.jsonl"
+    caveat = "<local-command-caveat>The command below was run directly in Claude Code…"
+    name = "<command-name>/model</command-name>\n            <command-args>fable</command-args>"
+    said = "<local-command-stdout>Set model to `Fable 5.1`</local-command-stdout>"
+    _framed(
+        path,
+        {"type": "user", "uuid": "q1", "message": {"role": "user",
+         "content": "<command-message>cav</command-message>\n<command-name>/cav</command-name>"}},
+        {"type": "user", "uuid": "e1", "parentUuid": "q1", "isMeta": True,
+         "message": {"role": "user", "content": caveat}},
+        {"type": "user", "uuid": "m1", "parentUuid": "e1", "message": {"role": "user",
+         "content": name}},
+        {"type": "user", "uuid": "a1", "parentUuid": "m1", "message": {"role": "user",
+         "content": said}},
+        {"type": "user", "uuid": "m2", "parentUuid": "td1", "message": {"role": "user",
+         "content": name}},
+        {"type": "user", "uuid": "a2", "parentUuid": "m2", "message": {"role": "user",
+         "content": said}},
+    )  # fmt: skip
+    scan = transcripts.commands_since(path, 0)
+    assert scan is not None
+    assert scan.events == (
+        "command",
+        transcripts.UnframedCommand("model"),
+        transcripts.UnframedCommand("model"),
+    )
 
 
 def test_a_prompt_that_mentions_a_tool_result_is_a_prompt(tmp_path: Path) -> None:

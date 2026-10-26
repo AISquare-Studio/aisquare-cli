@@ -2211,13 +2211,21 @@ def _user(text: str, *, meta: bool = False) -> dict[str, object]:
 
 
 def _local_command(
-    transcript: Path, setting: str, args: str, stdout: str, *, system: bool = False
+    transcript: Path,
+    setting: str,
+    args: str,
+    stdout: str,
+    *,
+    system: bool = False,
+    at: str | None = None,
 ) -> None:
     """A built-in ``/model`` or ``/effort`` the owner typed, as Claude Code records it
     (``tests/fixtures/claude_code/model_commands_2.1.311.jsonl``): its caveat, its name and
     args (the caveat's child), its answer (the command's child); the picker's Esc as two
-    ``system`` ``local_command`` records, the answer the command's child."""
+    ``system`` ``local_command`` records, the answer the command's child. ``at``: their
+    ``timestamp``, as Claude Code writes it (``2026-10-26T22:45:21.475Z``)."""
     caveat, command, answer = (str(uuid.uuid4()) for _ in range(3))
+    when = {"timestamp": at} if at else {}
     name = (
         f"<command-name>/{setting}</command-name>\n            <command-message>{setting}"
         f"</command-message>\n            <command-args>{args}</command-args>"
@@ -2226,17 +2234,18 @@ def _local_command(
     if system:
         _write_records(
             transcript,
-            {"type": "system", "subtype": "local_command", "uuid": command, "content": name},
+            {"type": "system", "subtype": "local_command", "uuid": command, "content": name,
+             **when},
             {"type": "system", "subtype": "local_command", "uuid": answer,
-             "parentUuid": command, "content": said},
+             "parentUuid": command, "content": said, **when},
         )  # fmt: skip
         return
     caveat_text = "<local-command-caveat>The command below was run directly in Claude Code…"
     _write_records(
         transcript,
-        {**_user(caveat_text, meta=True), "uuid": caveat},
-        {**_user(name), "uuid": command, "parentUuid": caveat},
-        {**_user(said), "uuid": answer, "parentUuid": command},
+        {**_user(caveat_text, meta=True), "uuid": caveat, **when},
+        {**_user(name), "uuid": command, "parentUuid": caveat, **when},
+        {**_user(said), "uuid": answer, "parentUuid": command, **when},
     )
 
 
@@ -2287,17 +2296,19 @@ def _captured(
     _turn(agent, transcript, model, effort)
 
 
-def _started(agent: FleetAgent, model: str) -> None:
+def _started(agent: FleetAgent, model: str | None, *, transcript: Path | None = None) -> None:
     """The agent's session start as its hook reports it: the model its launch resolved to
-    (``opus`` runs ``claude-opus-5-5``) and its transcript, from where its commands are read.
-    No effort: Claude Code's SessionStart reports none (seq 3513)."""
+    (``opus`` runs ``claude-opus-5-5``) and its transcript (the board session's, unless
+    given: a ``/resume``, a ``/clear``, a fork's), from where its commands are read. No
+    effort: Claude Code's SessionStart reports none (seq 3513)."""
     assert agent.session_id is not None
-    with store_session() as store:
-        session = store.get_session(agent.session_id)
-    transcript = session.transcript_path if session is not None else None
-    model_memory.started(
-        agent.session_id, model=model, transcript_path=transcript, agent_id=agent.id
-    )
+    if transcript is None:
+        with store_session() as store:
+            session = store.get_session(agent.session_id)
+        given = session.transcript_path if session is not None else None
+    else:
+        given = str(transcript)
+    model_memory.started(agent.session_id, model=model, transcript_path=given, agent_id=agent.id)
 
 
 def test_a_restart_and_a_switch_start_what_the_agent_runs_now(
@@ -2847,6 +2858,9 @@ def test_choosing_the_default_forgets_the_model_pick(
 
 
 #: Text that only QUOTES Claude Code's record of a ``/model`` (round 6 review, MAJOR 1).
+SET = "Set model to `{}` and saved as your default for new sessions"
+
+
 QUOTED = (
     "FYI <command-name>/model</command-name>\n            <command-message>model"
     "</command-message>\n            <command-args>fable</command-args> "
@@ -3011,9 +3025,9 @@ def test_an_answer_this_version_cannot_read_trips_the_canary(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Round 6 minor 3: an answer whose words a later Claude Code changes must not fail
-    silently. Explicit args still count; the rest writes nothing, says one line, and doctor
-    shows it."""
+    """Round 6 minor 3, as round 7 decided it (seq 3690): an answer whose words a later Claude
+    Code changes writes NOTHING, args or not (they cannot tell a success from a refusal),
+    says one line, and doctor shows it."""
     from aisquare.services import diagnostics
 
     model_memory.remember(model="opus", effort="xhigh")
@@ -3023,11 +3037,277 @@ def test_an_answer_this_version_cannot_read_trips_the_canary(
     _local_command(transcript, "model", "haiku", "Model set to Haiku 5.5")
     _local_command(transcript, "effort", "", "Effort is now max")
     _turn(agent, transcript, "claude-haiku-5-5", "max")
-    assert model_memory.remembered() == model_memory.Pick("haiku", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
     said = capsys.readouterr().err
     assert said.count("aisquare:") == 1 and "Effort is now max" in said
     [check] = [c for c in diagnostics.doctor() if c.name == "fleet model pick"]
     assert check.status == "warn" and "Effort is now max" in check.detail
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _flag(_command(tmux), "--model") == "sonnet"
+
+
+def test_an_owners_typo_claude_code_refused_leaves_the_pick_alone(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Round 7, MAJOR 1 (seq 3690), end to end: ``/model sonet``, which Claude Code answers
+    ``Model 'sonet' not found`` and stays on Sonnet, made the pick ``sonet`` and every later
+    spawn ``--model sonet``. A refusal is no choice: no pick, no move, no canary."""
+    model_memory.remember(model="sonnet", effort="medium")
+    agent = _coder(
+        project, agent_args=["--model", "sonnet", "--effort", "medium"], spawned_by="ses_mgr1"
+    )
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-sonnet-5-5")
+    _local_command(transcript, "model", "sonet", "Model 'sonet' not found", system=True)
+    invalid = "Invalid argument: bogus. Valid options are: low, medium, high, xhigh, max, auto"
+    _local_command(transcript, "effort", "bogus", invalid)
+    _turn(agent, transcript, "claude-sonnet-5-5", "medium")
+    assert model_memory.remembered() == model_memory.Pick("sonnet", "medium")
+    assert "aisquare:" not in capsys.readouterr().err
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _model_flags(_command(tmux)) == ["--model", "sonnet", "--effort", "medium"]
+    _coder(project)
+    assert _model_flags(_command(tmux)) == ["--model", "sonnet", "--effort", "medium"]
+
+
+def test_effort_auto_forgets_the_effort_pick_and_the_replay_passes_none(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Round 7, MINOR (decision): ``/effort auto`` (``Effort level set to auto``) forgets the
+    effort pick, the account's default from then on, and the agent's replay passes no
+    ``--effort``, as ``Default (recommended)`` does for the model."""
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(project, agent_args=["--effort", "high"], spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-5-5")
+    _local_command(transcript, "effort", "auto", "Effort level set to auto")
+    _turn(agent, transcript, "claude-opus-5-5", "high")
+    assert model_memory.remembered() == model_memory.Pick("opus", None)
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _flag(_command(tmux), "--effort") is None
+
+
+def _runs(agent: FleetAgent) -> model_memory.Pick:
+    """What a replay of ``agent`` starts (``model_memory.replay_from``)."""
+    assert agent.session_id is not None
+    with store_session() as store:
+        session = store.get_session(agent.session_id)
+    running = model_memory.replay_from(agent, session)
+    assert running is not None
+    return running.now
+
+
+OLD = "2026-10-26T22:45:21.475Z"
+"""When an old conversation's ``/model sonnet`` was typed: before any test binds a row."""
+
+
+def test_a_fork_never_rereads_the_history_it_copied(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Round 7, MAJOR 2 (seq 3690): a fork's transcript is missing at its session start, and
+    Claude Code's first write copies the source's history into it, its ``/model sonnet``
+    included (``fork_2.1.311.jsonl``). Its first Stop read that from 0: the owner's newer pick
+    opus/xhigh became sonnet/xhigh. Only what the fork does after it was bound counts."""
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(project, agent_args=["--effort", "xhigh"], spawned_by="ses_mgr1")
+    transcript = tmp_path / "fork.jsonl"
+    _with_transcript(agent, transcript)
+    _started(agent, None, transcript=transcript)
+    assert not transcript.exists()
+    _write_records(transcript, {**_user("an old prompt"), "timestamp": "2026-10-26T22:45:01Z"})
+    _local_command(transcript, "model", "sonnet", SET.format("Sonnet 5.5"), at=OLD)
+    _turn(agent, transcript, "claude-opus-5-5", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+    assert _runs(agent).model == "claude-opus-5-5"
+    _local_command(transcript, "model", "haiku", SET.format("Haiku 5.5"))
+    _turn(agent, transcript, "claude-haiku-5-5", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("haiku", "xhigh")
+
+
+def test_a_resume_inside_an_agent_never_rereads_the_old_conversation(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Round 7, MAJOR 2 (seq 3690): ``/resume`` inside an agent rebinds its row to an old
+    transcript (SessionStart ``resume``, the file there), and its Stop read that file from 0,
+    the old ``/model sonnet`` included. The row re-anchors at the end of what it resumed."""
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(project, agent_args=["--effort", "xhigh"], spawned_by="ses_mgr1")
+    _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-5-5")
+    old = tmp_path / "old.jsonl"
+    _local_command(old, "model", "sonnet", SET.format("Sonnet 5.5"), at=OLD)
+    _started(agent, "claude-opus-5-5", transcript=old)
+    _turn(agent, old, "claude-opus-5-5", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+    assert _runs(agent).model == "claude-opus-5-5"
+    _local_command(old, "model", "haiku", SET.format("Haiku 5.5"))
+    _turn(agent, old, "claude-haiku-5-5", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("haiku", "xhigh")
+
+
+def test_a_transcript_a_stop_finds_changed_is_read_from_its_end(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Round 7, MAJOR 2: a Stop on a file the row was never bound to (its session start went
+    unread) never reads it from 0: it holds what another conversation did."""
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(project, spawned_by="ses_mgr1")
+    _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-5-5")
+    other = tmp_path / "other.jsonl"
+    _local_command(other, "model", "sonnet", SET.format("Sonnet 5.5"), at=OLD)
+    _turn(agent, other, "claude-opus-5-5", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+    _local_command(other, "model", "haiku", SET.format("Haiku 5.5"))
+    _turn(agent, other, "claude-haiku-5-5", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("haiku", "xhigh")
+
+
+@pytest.mark.parametrize("source", ["compact", "clear"])
+def test_a_compaction_and_a_clear_keep_the_command_typed_before_them(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, source: str
+) -> None:
+    """Round 7, MAJOR 2: re-anchoring is for a new transcript only. ``/compact`` keeps the file
+    (a ``/model`` typed just before it still counts); ``/clear`` starts a new one, missing at
+    its session start, read from its first record."""
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(project, spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-5-5")
+    if source == "compact":
+        _local_command(transcript, "model", "haiku", SET.format("Haiku 5.5"))
+        _started(agent, "claude-haiku-5-5", transcript=transcript)
+    else:
+        transcript = tmp_path / "cleared.jsonl"
+        _started(agent, "claude-opus-5-5", transcript=transcript)
+        _local_command(transcript, "model", "haiku", SET.format("Haiku 5.5"))
+    _turn(agent, transcript, "claude-haiku-5-5", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("haiku", "xhigh")
+
+
+def test_a_switch_whose_transcript_the_stop_falls_back_to_never_rereads_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Seq 3693 (1c), ``fleet switch --to 2``: the switched row's record began on the slot-2
+    path, which never exists, while Claude Code appends to the slot-1 file, whose old
+    ``/model haiku`` the Stop's fallback (the board session's path) read from 0. A file the
+    row was not bound to counts from the moment it is seen (seq 3697)."""
+    model_memory.remember(model="claude-opus-4-5", effort="xhigh")
+    agent = _coder(project, spawned_by="ses_mgr1")
+    slot2 = tmp_path / "slot2" / "s.jsonl"
+    _started(agent, "claude-opus-4-5", transcript=slot2)
+    slot1 = tmp_path / "slot1.jsonl"
+    _local_command(slot1, "model", "haiku", SET.format("Haiku 5.5"), at=OLD)
+    _with_transcript(agent, slot1)
+    _write_records(slot1, _user("carry on"))
+    assert agent.session_id is not None
+    model_memory.observe(agent.session_id, str(slot2), effort="xhigh", agent_id=agent.id)
+    assert model_memory.remembered() == model_memory.Pick("claude-opus-4-5", "xhigh")
+    _local_command(slot1, "model", "sonnet", SET.format("Sonnet 5.5"))
+    model_memory.observe(agent.session_id, str(slot2), effort="xhigh", agent_id=agent.id)
+    assert model_memory.remembered() == model_memory.Pick("sonnet", "xhigh")
+
+
+@pytest.mark.parametrize("bound", ["after the copy", "before the copy", "never"])
+def test_a_branch_never_rereads_the_history_it_copied(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, bound: str
+) -> None:
+    """Seq 3693 (1d): ``/branch`` (2.1.311: "Branched conversation. You are now in the new
+    branch") copies the history into a new file, same uuids and old stamps, and the row is
+    rebound to it. Whether its session start comes after the copy, before it, or goes
+    unread, the copied ``/model haiku`` is the conversation's past, never the pick."""
+    model_memory.remember(model="claude-opus-4-5", effort="xhigh")
+    agent = _coder(project, spawned_by="ses_mgr1")
+    _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-4-5")
+    branch = tmp_path / "branch.jsonl"
+    if bound == "before the copy":
+        _started(agent, "claude-opus-4-5", transcript=branch)
+    _local_command(branch, "model", "haiku", SET.format("Haiku 5.5"), at=OLD)
+    if bound == "after the copy":
+        _started(agent, "claude-opus-4-5", transcript=branch)
+    _turn(agent, branch, "claude-opus-4-5", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("claude-opus-4-5", "xhigh")
+    assert _runs(agent).model != "haiku"
+
+
+def test_an_opening_command_counts_from_the_rows_creation(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Seq 3697: a row's first binding is its creation, not its session start, so a
+    ``/model`` Claude Code stamped between the two (an owner's opening command, run as the
+    session comes up) still counts."""
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(project, spawned_by="ses_mgr1")
+    transcript = tmp_path / "new.jsonl"
+    _with_transcript(agent, transcript)
+    _started(agent, "claude-opus-5-5", transcript=transcript)
+    made = agent.created_at if agent.created_at.tzinfo else agent.created_at.replace(tzinfo=UTC)
+    stamp = (made + timedelta(milliseconds=1)).isoformat().replace("+00:00", "Z")
+    _local_command(transcript, "model", "haiku", SET.format("Haiku 5.5"), at=stamp)
+    _turn(agent, transcript, "claude-haiku-5-5", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("haiku", "xhigh")
+
+
+def test_the_effort_pickers_ultracode_with_a_saved_level_runs_ultracode(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Seq 3693 (3): the /effort picker's Tab-on, Left, Enter answers ``Set effort level to
+    high (saved as your default for new sessions): … · Ultracode on``. High is the pick, as
+    Claude Code saved it; the session runs ultracode, and a restart must not undo it with a
+    plain ``--effort high``."""
+    model_memory.remember(model="opus", effort="low")
+    agent = _coder(project, agent_args=["--effort", "low"], spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-5-5")
+    answer = (
+        "Set effort level to high (saved as your default for new sessions): Comprehensive "
+        "implementation with extensive testing and documentation · Ultracode on"
+    )
+    _local_command(transcript, "effort", "", answer)
+    _turn(agent, transcript, "claude-opus-5-5", "high")
+    assert model_memory.remembered() == model_memory.Pick("opus", "high")
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _flag(_command(tmux), "--effort") == "ultracode"
+
+
+def test_a_setting_record_outside_the_frame_trips_the_canary(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Round 7 (decision): if a later Claude Code drops the caveat, the reader reads no
+    command and the #338 symptom would come back unseen. A record led by a ``/model`` or
+    ``/effort`` tag outside the frame writes nothing, and is said, and doctor shows it."""
+    from aisquare.services import diagnostics
+
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(project, spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-5-5")
+    name = "<command-name>/model</command-name>\n            <command-args>sonnet</command-args>"
+    said = f"<local-command-stdout>{SET.format('Sonnet 5.5')}</local-command-stdout>"
+    _write_records(
+        transcript,
+        {**_user(name), "uuid": "m1", "version": "2.9.0"},
+        {**_user(said), "uuid": "a1", "parentUuid": "m1"},
+    )
+    _turn(agent, transcript, "claude-sonnet-5-5", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+    err = capsys.readouterr().err
+    assert err.count("aisquare:") == 1 and "2.9.0" in err and "/model" in err
+    [check] = [c for c in diagnostics.doctor() if c.name == "fleet model pick"]
+    assert check.status == "warn" and "/model" in check.detail
 
 
 @pytest.mark.parametrize("captain_on", [False, True])
@@ -8360,7 +8640,7 @@ def test_the_hook_cli_keeps_a_clearing_fleet_agents_claim_in_claude_codes_order(
     claimed = runner.invoke(app, ["task", "claim", mine.id, "--as", first])
     assert claimed.exit_code == 0, claimed.output
     hook("session-end", session_id=first, reason="clear")
-    started = hook("session-start", session_id="sess-cli-c2", source="clear")
+    started = hook("session-start", session_id="sess-cli-c2")
 
     assert "You are the one working it" in started, started
     assert _task_now(mine.id).claimed_by == "sess-cli-c2"

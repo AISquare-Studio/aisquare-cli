@@ -313,8 +313,9 @@ def remember_the_start(
     session_id: str, *, model: str | None, transcript_path: str | None = None
 ) -> None:
     """A fleet agent's session start: the model its launch runs, as the payload reports it,
-    which a restart compares what it runs later with (``model_memory.started``). Nothing for
-    a session no fleet window runs. Fails open, said on stderr: stdout is the agent's
+    which a restart compares what it runs later with, and the transcript its row is bound to
+    now, whose commands count from the binding on (``model_memory.started``). Nothing for a
+    session no fleet window runs. Fails open, said on stderr: stdout is the agent's
     context."""
     agent_id = orchestrator.env_fleet_agent()
     if agent_id is None:

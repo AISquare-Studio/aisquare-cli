@@ -3368,11 +3368,12 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
 
 
 def _check_model_pick_reader() -> DoctorCheck | None:
-    """Whether Claude Code answered an owner's ``/model`` or ``/effort`` in words the fleet's
-    pick reader cannot read (#16, round 6 of #441): no pick was written from it and a restart
-    starts the launch's values, so a reworded answer in a new Claude Code is said, not
-    silent. ``None`` while every answer read (the row stays out of the way), and for a home
-    not made yet, which doctor never makes."""
+    """Whether an owner's ``/model`` or ``/effort`` in a fleet agent went unread (#16, rounds
+    6 and 7 of #441): Claude Code answered in words the fleet's pick reader does not know, or
+    recorded one outside the frame it reads. No pick was written from it and a restart starts
+    the launch's values, so a newer Claude Code's change is said, not silent. ``None`` while
+    every one read (the row stays out of the way), and for a home not made yet, which doctor
+    never makes."""
     if _uncreated_home("fleet model pick") is not None:
         return None
     found = model_memory.unread()
@@ -3380,11 +3381,12 @@ def _check_model_pick_reader() -> DoctorCheck | None:
         return None
     return _warn(
         "fleet model pick",
-        f"{found.get('version', 'Claude Code')} answered {found.get('said', '?')} "
-        f"({found.get('at', '?')[:19]}) in words this aisquare cannot read: no pick was "
-        "written from it, and a restart starts the agent's launch model",
-        "update aisquare (`aisquare upgrade`); meanwhile name the model on the spawn "
-        "(`fleet spawn <role> --model …`) or the restart (`fleet restart <label> --model …`)",
+        f"{found.get('said', '?')} ({found.get('at', '?')[:19]}): not read as a choice, so no "
+        "pick was written, and a restart starts the agent's launch model",
+        "if Claude Code was updated, update aisquare (`aisquare upgrade`); a teammate's message "
+        "quoting a /model record also shows here, and is harmless. Meanwhile name the model on "
+        "the spawn (`fleet spawn <role> --model …`) or the restart (`fleet restart <label> "
+        "--model …`)",
     )
 
 

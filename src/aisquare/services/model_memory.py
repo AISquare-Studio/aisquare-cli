@@ -111,13 +111,13 @@ class CommandValue:
     setting: str
     value: str | None
     """The value; ``""`` the account's own default (the picker's ``Default (recommended)``,
-    which forgets the pick); ``None`` nothing (an answer this reader cannot read, and no
-    args)."""
+    ``/effort auto``: forget the pick); ``None`` nothing (an answer this reader cannot read)."""
     pick: bool
     """``False`` for a choice "for this session only": the agent runs it, the pick is left."""
     understood: bool = True
-    """``False`` when Claude Code's answer is in words this reader does not know: said once
-    (:func:`observe`) and shown by doctor, as a reworded answer must not fail silently."""
+    """``False`` when Claude Code's answer is in words this reader does not know: it writes
+    nothing, and is said once (:func:`observe`) and shown by doctor, as a reworded answer
+    must not fail silently."""
 
 
 #: Claude Code's answer to ``/model``: ``Set model to `Haiku 5.5` and saved as your default for
@@ -131,28 +131,38 @@ _WITH_EFFORT = re.compile(r"\bwith\s+`?([A-Za-z]+)`?\s+effort\b")
 _EFFORT_ANSWER = re.compile(r"^Set effort level to\s+([A-Za-z]+)\b(.*)$", re.S)
 _ULTRACODE_ANSWER = re.compile(r"^Ultracode (on|off)\b(.*)$", re.S)
 _EFFORT_STAYS = re.compile(r"\bEffort stays\s+([A-Za-z]+)\b")
-#: Answers that set nothing: the pickers' Esc. Opening a picker to look is no choice.
-_NO_CHOICE = ("Kept model as", "Cancelled")
+#: The /effort picker's Tab-on with a level (2.1.311): ``Set effort level to high (saved as
+#: your default for new sessions): … · Ultracode on``. The level is saved, and the session
+#: runs ultracode (seq 3693 (3)).
+_ULTRACODE_TOO = re.compile(r"·\s*Ultracode on\b")
+#: Its answer to ``/effort auto`` (2.1.311), which clears the saved effort.
+_EFFORT_AUTO = re.compile(r"^Effort level set to auto\b(.*)$", re.S)
+#: Answers that set nothing: the pickers' Esc (opening a picker to look is no choice), and
+#: Claude Code's refusals (2.1.311: ``Model 'sonet' not found``, ``Invalid argument: bogus.
+#: Valid options are: …``), as an owner's typo must not become the pick (seq 3690).
+_NO_CHOICE = re.compile(r"^(Kept model as|Cancelled|Model '.*' not found|Invalid argument\b)", re.S)
 #: A model's display name (``Sonnet 5.5``), whose id Claude Code spells ``claude-sonnet-5-5``.
 _DISPLAY_NAME = re.compile(r"^(Fable|Opus|Sonnet|Haiku)\s+(\d+)(?:\.(\d+))?$")
 
 
 def command_values(command: transcripts.SettingCommand) -> tuple[CommandValue, ...]:
-    """What ``command`` set: nothing for the pickers' Esc (``Kept model as``, ``Cancelled``;
-    opening a picker to look is no choice, seq 3629); else each setting its answer names, the
-    2.1.311 picker's model with its effort. A value is the command's args (``/model haiku``,
-    verbatim), else the answer's (``Set model to `Haiku 5.5``` is ``claude-haiku-5-5``); the
-    picker's ``Default (recommended)`` is ``""``, the account's default, which forgets the
-    pick. A choice "for this session only", and an ultracode toggle that is not saved, is the
-    agent's and no pick. An answer in other words is not understood (the canary): its explicit
-    args still count, and nothing else does."""
+    """What ``command`` set, read ONLY off an answer that says it succeeded (seq 3690):
+    nothing for the pickers' Esc (``Kept model as``, ``Cancelled``; opening a picker to look
+    is no choice, seq 3629) or a refusal (``Model 'sonet' not found``); else each setting
+    the answer names, the 2.1.311 picker's model with its effort. A value is the command's
+    args (``/model haiku``, verbatim), else the answer's (``Set model to `Haiku 5.5``` is
+    ``claude-haiku-5-5``); the picker's ``Default (recommended)`` and ``/effort auto`` are
+    ``""``, the account's default, which forgets the pick. A choice "for this session only",
+    and an ultracode toggle that is not saved, is the agent's and no pick. An answer in other
+    words is not understood: it writes nothing, args or not (they cannot tell a success from
+    a refusal), and is said (the canary)."""
     answer, args = command.stdout, command.args.strip()
-    if answer.startswith(_NO_CHOICE):
+    if _NO_CHOICE.match(answer):
         return ()
     if command.setting == "model":
         answered = _MODEL_ANSWER.match(answer)
         if answered is None:
-            return (CommandValue("model", harness.clean_model_id(args), True, understood=False),)
+            return (CommandValue("model", None, False, understood=False),)
         named, rest = answered.group(1).strip(), answered.group(2)
         pick = "this session only" not in rest
         if named.endswith("(default)") or args.lower() == "default":
@@ -176,15 +186,17 @@ def command_values(command: transcripts.SettingCommand) -> tuple[CommandValue, .
         )
         saved = "saved as your default" in rest
         return (CommandValue("effort", level, saved, level is not None),)
+    if (auto := _EFFORT_AUTO.match(answer)) is not None:
+        return (CommandValue("effort", "", "this session only" not in auto.group(1)),)
     answered = _EFFORT_ANSWER.match(answer)
     if answered is None:
-        return (CommandValue("effort", harness.clean_effort(args), True, understood=False),)
+        return (CommandValue("effort", None, False, understood=False),)
+    rest = answered.group(2)
     level = harness.clean_effort(args) if args else harness.clean_effort(answered.group(1))
-    return (
-        CommandValue(
-            "effort", level, "this session only" not in answered.group(2), level is not None
-        ),
-    )
+    chosen = CommandValue("effort", level, "this session only" not in rest, level is not None)
+    if _ULTRACODE_TOO.search(rest):  # the picker's Tab-on with a level: the session's own
+        return (chosen, CommandValue("effort", harness.ULTRACODE, False))
+    return (chosen,)
 
 
 def _model_id(display: str) -> str | None:
@@ -205,35 +217,62 @@ class _Record:
     plain turn's), the effort its own ``--effort`` gave it (else its first plain turn's Stop).
     ``live`` is what a recorded ``/model`` or ``/effort`` moved it to (``None``: the launch's;
     ``""``: the account's default). ``transcript`` and ``offset`` are where the next read of
-    its commands starts, ``turn`` the kind of the turn read last (``plain`` or ``command``)."""
+    its commands starts: where the row was bound to that transcript (:func:`started`), as
+    long as the file was then, or where the last read ended. ``since`` is when it was bound
+    (the row's creation, else the moment a rebind or a path change was seen): only frames
+    stamped then or later count, as what a fork, a ``/branch``, a ``/resume`` or a switch
+    brings in keeps its old stamps (manager decision, seq 3697). ``turn`` is the kind of
+    the turn read last (``plain`` or ``command``)."""
 
     launch: Pick = Pick()
     live: Pick = Pick()
     transcript: str | None = None
     offset: int = 0
     turn: str | None = None
+    since: datetime | None = None
 
 
 def started(
     session_id: str, *, model: str | None, transcript_path: str | None, agent_id: str | None
 ) -> None:
-    """At a fleet agent's session start: the model its launch runs, as the payload reports it
-    (``model``), and where its commands start (``transcript_path``, as long as it is now).
-    Once per row. Never an effort: Claude Code 2.1.310's SessionStart carries none, and its
-    hooks there see only the inherited ``CLAUDE_EFFORT`` (seq 3513). Only for the session the
-    row is bound to (:func:`_own_row`). Raises on a store that cannot be read: the caller
-    fails open."""
+    """At a fleet agent's session start: bind its row's record to the transcript, so only
+    commands made after the binding count (seq 3697). A row's first record is bound from its
+    creation and keeps the model its launch runs, as the payload reports it (``model``); a
+    new file later (a ``/resume``, a ``/clear``, a ``/branch``) is bound from now, read
+    from the end of what it holds. The same file (a compaction) reads on from where it was,
+    a ``/model`` typed just before ``/compact`` included. Never an effort: Claude Code
+    2.1.310's SessionStart carries none, and its hooks there see only the inherited
+    ``CLAUDE_EFFORT`` (seq 3513). Only for the session the row is bound to
+    (:func:`_own_row`). Raises on a store that cannot be read: the caller fails open."""
     with store_session() as store:
         agent = _own_row(store, session_id, agent_id)
-        if agent is not None and _record(agent, store) is None:
-            _first_record(store, agent, transcript_path, model=model)
+        if agent is None:
+            return
+        record = _record(agent, store)
+        if record is None:
+            launch = Pick(harness.clean_model_id(model), _launch_flags(agent).effort)
+            _bind(store, agent, _Record(launch=launch), transcript_path, since=_created(agent))
+        elif transcript_path and record.transcript != transcript_path:
+            _bind(store, agent, record, transcript_path, since=datetime.now(tz=UTC))
 
 
-def _first_record(
-    store: ContextStore, agent: FleetAgent, transcript: str | Path | None, *, model: str | None
+def _created(agent: FleetAgent) -> datetime:
+    """When ``agent``'s row was made, in UTC: its first binding, before its session began."""
+    made = agent.created_at
+    return made if made.tzinfo is not None else made.replace(tzinfo=UTC)
+
+
+def _bind(
+    store: ContextStore,
+    agent: FleetAgent,
+    record: _Record,
+    transcript: str | Path | None,
+    *,
+    since: datetime,
 ) -> None:
-    """A row's record, first: its launch's values as known now, its commands read from the
-    transcript's end on (nothing written before is this row's)."""
+    """Keep ``record`` bound to ``transcript`` from ``since``, its commands read from the
+    file's end as it is now (from its start when it is not there yet: a fork's copy lands
+    after its session start, and ``since`` alone keeps it out)."""
     path = Path(transcript) if transcript else None
     try:
         offset = path.stat().st_size if path is not None else 0
@@ -242,10 +281,12 @@ def _first_record(
     _keep(
         store,
         agent,
-        _Record(
-            launch=Pick(harness.clean_model_id(model), _launch_flags(agent).effort),
+        dataclasses.replace(
+            record,
             transcript=str(path) if path is not None else None,
             offset=offset,
+            turn=None,
+            since=since,
         ),
     )
 
@@ -315,25 +356,39 @@ def observe(
             return None
         live_model = harness.clean_model_id(transcripts.latest_model(path))
         record = _record(agent, store)
-        if record is None:
-            _first_record(store, agent, path, model=None)
+        if record is None:  # never seen: bound from the row's creation, read from now on
+            first = _Record(launch=Pick(None, _launch_flags(agent).effort))
+            _bind(store, agent, first, path, since=_created(agent))
             _board(store, session, live_model, live_effort)
             return None
-        same_file = record.transcript == str(path)
-        scan = transcripts.commands_since(path, record.offset if same_file else 0)
+        if record.transcript != str(path):
+            # A file no session start bound it to (a switch's, seq 3693 c): what it holds is
+            # another conversation's, so it is bound from the moment it is seen (seq 3697).
+            _bind(store, agent, record, path, since=datetime.now(tz=UTC))
+            _board(store, session, live_model, live_effort)
+            return None
+        scan = transcripts.commands_since(path, record.offset, since=record.since)
         if scan is None:
             return None
         live, turn = record.live, record.turn
         picks: dict[str, str] = {}
-        unread: list[transcripts.SettingCommand] = []
+        unread: list[str] = []
         understood = False
         for event in scan.events:
             if isinstance(event, str):
                 turn = event
                 continue
+            if isinstance(event, transcripts.UnframedCommand):
+                unread.append(
+                    f"{_version(event.version)} recorded a /{event.setting} outside its frame"
+                )
+                continue
             values = command_values(event)
             if any(not found.understood for found in values):
-                unread.append(event)
+                said = f"/{event.setting} {event.args}".rstrip()
+                unread.append(
+                    f"{_version(event.version)} answered {said} with {event.stdout[:120]!r}"
+                )
             else:
                 understood = True
             for found in values:
@@ -348,7 +403,7 @@ def observe(
                 launch.model or (live_model if live.model is None else None),
                 launch.effort or (live_effort if live.effort is None else None),
             )
-        _keep(store, agent, _Record(launch, live, str(path), scan.end, turn))
+        _keep(store, agent, _Record(launch, live, str(path), scan.end, turn, record.since))
         if unread:
             _say_unread(store, unread)
         elif understood and store.ui_state(_UNREAD_KEY) is not None:
@@ -373,25 +428,28 @@ _UNREAD_KEY = "fleet-model-unread"
 """The last answers to ``/model`` or ``/effort`` this reader could not read, for doctor."""
 
 
-def _say_unread(store: ContextStore, commands: list[transcripts.SettingCommand]) -> None:
-    """Say, once for the turn, that Claude Code answered in words this reader cannot read, and
-    keep it for doctor (:func:`unread`): the pick was not written from them, and a restart
-    starts the launch's values, the #338 symptom this reader exists to end."""
-    said = "; ".join(f"/{c.setting} {c.args}".rstrip() + f": {c.stdout[:120]!r}" for c in commands)
-    version = next((c.version for c in commands if c.version), None) or "this Claude Code"
+def _version(version: str | None) -> str:
+    return f"Claude Code {version}" if version else "Claude Code"
+
+
+def _say_unread(store: ContextStore, unread: list[str]) -> None:
+    """Say, once for the turn, what this reader could not read as a choice (an answer in
+    other words, a ``/model`` or ``/effort`` record outside Claude Code's frame), and keep
+    it for doctor (:func:`unread`): no pick was written from it, and a restart starts the
+    launch's values, the #338 symptom this reader exists to end."""
+    said = "; ".join(unread)
     store.set_ui_state(
-        _UNREAD_KEY,
-        json.dumps({"at": datetime.now(tz=UTC).isoformat(), "version": version, "said": said}),
+        _UNREAD_KEY, json.dumps({"at": datetime.now(tz=UTC).isoformat(), "said": said})
     )
     sys.stderr.write(
-        f"aisquare: {version} answered {said} in words this aisquare cannot read — that is no "
-        "pick (explicit args still are); run: aisquare doctor\n"
+        f"aisquare: {said}, which this aisquare cannot read as a choice — no pick was "
+        "written; run: aisquare doctor\n"
     )
 
 
 def unread() -> dict[str, str] | None:
-    """The last answers this reader could not read (``at``, ``version``, ``said``), or
-    ``None``; for doctor's ``fleet model pick`` row. Fail-open: nothing read is nothing."""
+    """What this reader last could not read as a choice (``at``, ``said``), or ``None``; for
+    doctor's ``fleet model pick`` row. Fail-open: nothing read is nothing."""
     try:
         with store_session() as store:
             raw = store.ui_state(_UNREAD_KEY)
@@ -400,7 +458,7 @@ def unread() -> dict[str, str] | None:
         return None
     if not isinstance(data, dict):
         return None
-    return {key: str(value) for key, value in data.items() if key in ("at", "version", "said")}
+    return {key: str(value) for key, value in data.items() if key in ("at", "said")}
 
 
 _LAUNCHED_KEY = "fleet-launched:{project}:{label}"
@@ -437,12 +495,17 @@ def _record(agent: FleetAgent, store: ContextStore) -> _Record | None:
         )
 
     offset, transcript, turn = data.get("offset"), data.get("transcript"), data.get("turn")
+    try:
+        since = datetime.fromisoformat(data["since"]) if data.get("since") else None
+    except (TypeError, ValueError):
+        since = None
     return _Record(
         launch=pick("launch"),
         live=pick("live"),
         transcript=transcript if isinstance(transcript, str) else None,
         offset=offset if isinstance(offset, int) and not isinstance(offset, bool) else 0,
         turn=turn if turn in ("plain", "command") else None,
+        since=since if since is None or since.tzinfo is not None else None,
     )
 
 
@@ -457,6 +520,7 @@ def _keep(store: ContextStore, agent: FleetAgent, record: _Record) -> None:
                 "transcript": record.transcript,
                 "offset": record.offset,
                 "turn": record.turn,
+                "since": record.since.isoformat() if record.since is not None else None,
             }
         ),
     )

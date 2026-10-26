@@ -170,7 +170,11 @@ def latest_model(path: Path, *, tail_bytes: int = _TAIL_BYTES) -> str | None:
 # - a typed prompt is the text itself, a long paste in it ``<pasted_content id=…>…
 #   </pasted_content id=…>`` (2.1.311);
 # - a ``/model`` typed while a turn runs switches the model and writes NO record (2.1.311):
-#   a known limit, no pick (seq 3654 (5)).
+#   a known limit, no pick (seq 3654 (5));
+# - a fork (``--resume <t> --fork-session``) has no file at its session start; its first
+#   write copies the source's history in, frames included, with their uuids and their
+#   timestamps under the fork's ``sessionId`` (``fork_2.1.311.jsonl``): only the timestamps
+#   tell that history from the fork's own (``since``).
 #
 # Text can quote all of this (a typed prompt, a Stop hook's feedback, which is how a board
 # note reaches an agent, a compaction summary) but cannot make the frame: no typed text is
@@ -200,29 +204,42 @@ class SettingCommand:
 
 
 @dataclasses.dataclass(frozen=True)
-class CommandScan:
-    """What :func:`commands_since` read: each built-in ``/model`` and ``/effort``, and each
-    turn's prompt as ``"plain"`` or ``"command"`` (a custom command, a skill or a typed
-    ``/…`` opened it), in the order written, and the offset the next read starts at."""
+class UnframedCommand:
+    """A record led by a ``/model`` or ``/effort`` tag outside Claude Code's frame (no caveat
+    its parent), or a framed one never answered though the transcript went on: text quoting
+    one, or a frame a later Claude Code shapes differently. Never a choice; said, so a
+    changed frame does not fail silently (review of #441, round 7)."""
 
-    events: tuple[SettingCommand | str, ...]
+    setting: str
+    version: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class CommandScan:
+    """What :func:`commands_since` read: each built-in ``/model`` and ``/effort``, each record
+    of one outside the frame, and each turn's prompt as ``"plain"`` or ``"command"`` (a
+    custom command, a skill or a typed ``/…`` opened it), in the order written, and the
+    offset the next read starts at."""
+
+    events: tuple[SettingCommand | UnframedCommand | str, ...]
     end: int
 
 
-def commands_since(path: Path, offset: int) -> CommandScan | None:
+def commands_since(path: Path, offset: int, *, since: datetime | None = None) -> CommandScan | None:
     """The built-in ``/model`` and ``/effort`` commands and the turn prompts written to
-    ``path`` since ``offset`` (a file shorter than that is read from its start); ``None``
+    ``path`` since ``offset`` (a file shorter than that is read from its start), and only
+    those stamped ``since`` or later when given (a fork's copied history is older); ``None``
     when it cannot be read.
 
     A command counts only in Claude Code's own frame, answered: the command the child of a
     caveat (or a ``system`` ``local_command`` record), its answer the command's child. Read
     once, forward, to the last complete line, whatever is pending there: a frame cut by the
-    read is lost, never held (a held one pinned every later read to it). Only lines that can
-    be a prompt or a frame are parsed: no tool result, no reply.
+    read is lost, never held (a held one pinned every later read to it), and its command may
+    read as :class:`UnframedCommand`. Only lines that can be a prompt or a frame are parsed:
+    no tool result, no reply.
     """
-    events: list[SettingCommand | str] = []
-    caveats: set[str] = set()
-    framed: dict[str, tuple[str, str]] = {}  # a framed command's uuid → its name and args
+    events: list[SettingCommand | UnframedCommand | str] = []
+    frames = _Frames()
     try:
         with path.open("rb") as handle:
             size = handle.seek(0, 2)
@@ -241,19 +258,59 @@ def commands_since(path: Path, offset: int) -> CommandScan | None:
                     entry = json.loads(raw)
                 except (ValueError, UnicodeDecodeError):
                     continue
-                event = _frame_step(entry, caveats, framed) if isinstance(entry, dict) else None
+                if not isinstance(entry, dict) or _written_before(entry, since):
+                    continue
+                event = _frame_step(entry, frames)
+                frames.parsed += 1
                 if event is not None:
                     events.append(event)
     except OSError:
         return None
+    events.extend(
+        UnframedCommand(name, version)
+        for name, _, version, before in frames.framed.values()
+        if name in SETTINGS and before < frames.parsed - 1
+    )
     return CommandScan(tuple(events), end)
 
 
+@dataclasses.dataclass
+class _Frames:
+    """What one read of :func:`commands_since` carries from a record to the next."""
+
+    caveats: set[str] = dataclasses.field(default_factory=set)
+    """Claude Code's caveats: meta, opening with ``<local-command-caveat>``, and none the
+    expansion of a custom command, which an agent can write (its parent opened that
+    command's turn: ``opened``; seq 3697)."""
+    opened: set[str] = dataclasses.field(default_factory=set)
+    """The prompts that opened a custom command's or a skill's turn."""
+    framed: dict[str, tuple[str, str, str | None, int]] = dataclasses.field(default_factory=dict)
+    """A framed command's uuid → its name, its args, its version, and how many records were
+    parsed before it (one parsed after it, and it went unanswered)."""
+    parsed: int = 0
+
+
+def _written_before(entry: dict[str, Any], since: datetime | None) -> bool:
+    """Whether ``entry`` is stamped before ``since`` (``"timestamp"``, as Claude Code writes
+    it: ``2026-10-26T22:45:21.475Z``). A record with no stamp to read is not."""
+    stamp = entry.get("timestamp")
+    if since is None or not isinstance(stamp, str):
+        return False
+    try:
+        written = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if written.tzinfo is None:
+        written = written.replace(tzinfo=UTC)
+    return written < since
+
+
 def _frame_step(
-    entry: dict[str, Any], caveats: set[str], framed: dict[str, tuple[str, str]]
-) -> SettingCommand | str | None:
+    entry: dict[str, Any], frames: _Frames
+) -> SettingCommand | UnframedCommand | str | None:
     """One record's part in :func:`commands_since`: a turn's prompt kind, an answered setting
-    command, or nothing (keeping ``caveats`` and ``framed`` for the records after it)."""
+    command, one outside the frame, or nothing (keeping ``frames`` for the records after
+    it)."""
     if entry.get("isSidechain") is True or entry.get("isCompactSummary") is True:
         return None
     system = entry.get("type") == "system"
@@ -271,30 +328,33 @@ def _frame_step(
     if not isinstance(text, str):
         return None
     uuid, parent = entry.get("uuid"), entry.get("parentUuid")
+    version = entry.get("version") if isinstance(entry.get("version"), str) else None
     if entry.get("isMeta") is True:
-        if text.startswith(_CAVEAT) and isinstance(uuid, str):
-            caveats.add(uuid)
+        if text.startswith(_CAVEAT) and isinstance(uuid, str) and parent not in frames.opened:
+            frames.caveats.add(uuid)
         return None  # a command's expansion, a hook's feedback: never a frame, never a prompt
     if (named := _COMMAND_NAME.match(text)) is not None:
-        if isinstance(uuid, str) and (system or parent in caveats):
+        if isinstance(uuid, str) and (system or parent in frames.caveats):
             args = _COMMAND_ARGS.search(text)
-            framed[uuid] = (named.group(1), args.group(1).strip() if args else "")
-        return None
+            frames.framed[uuid] = (
+                named.group(1),
+                args.group(1).strip() if args else "",
+                version,
+                frames.parsed,
+            )
+            return None
+        return UnframedCommand(named.group(1), version) if named.group(1) in SETTINGS else None
     if (answer := _COMMAND_STDOUT.match(text)) is not None:
-        command = framed.pop(parent, None) if isinstance(parent, str) else None
+        command = frames.framed.pop(parent, None) if isinstance(parent, str) else None
         if command is None or command[0] not in SETTINGS:
             return None
-        version = entry.get("version")
-        return SettingCommand(
-            command[0],
-            command[1],
-            answer.group(1).strip(),
-            version if isinstance(version, str) else None,
-        )
+        return SettingCommand(command[0], command[1], answer.group(1).strip(), version)
     if system:
         return None
     stripped = text.strip()
     if stripped.startswith(("<command-message>", "/")):
+        if isinstance(uuid, str):
+            frames.opened.add(uuid)
         return "command"
     if stripped.startswith("<pasted_content") or (
         stripped and not stripped.startswith(("[Request interrupted", "<"))

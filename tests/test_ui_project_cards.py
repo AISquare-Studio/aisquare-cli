@@ -498,6 +498,7 @@ def test_the_menu_opens_from_its_button_the_dot_key_and_a_right_click(
         "✎ Rename",
         "📌 Pin",
         f"{SETTINGS_ICON} Open settings",  # the sidebar's monotone gear, not the emoji
+        "↺ Start fresh…",
         "✗ Remove from fleet…",
     ]
     assert seen["width"] == MENU_WIDTH

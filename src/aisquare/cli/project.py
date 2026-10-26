@@ -492,23 +492,6 @@ def _stdin_is_a_terminal() -> bool:
     return sys.stdin.isatty()
 
 
-def _fresh_counts(counts: FreshCounts) -> list[str]:
-    """``3 tasks``, ``41 notes and events``, …: what ``counts`` holds, the extras chosen too."""
-    words = [
-        (counts.tasks, "task", "tasks"),
-        (counts.events, "note or event", "notes and events"),
-        (counts.sessions, "session", "sessions"),
-        (counts.meta, "signal or mark", "signals and marks"),
-        (counts.agents, "fleet agent", "fleet agents"),
-        (counts.worktrees, "worktree", "worktrees"),
-        (counts.entries, "context entry", "context entries"),
-        (counts.prompts, "prompt", "prompts"),
-        (counts.metrics, "turn metric", "turn metrics"),
-        (counts.branches, "fleet branch", "fleet branches"),
-    ]
-    return [f"{n} {one if n == 1 else many}" for n, one, many in words if n is not None]
-
-
 def _emit_fresh_plan(plan: FreshPlan, *, discard: bool) -> None:
     """``project fresh``'s plan — as JSON under ``--json``, lines otherwise."""
     if get_state().json_output:
@@ -521,7 +504,7 @@ def _emit_fresh_plan(plan: FreshPlan, *, discard: bool) -> None:
         f"at {project.root}",
         markup=False,
     )
-    console.print(f"  clears  {' · '.join(_fresh_counts(plan.counts))}", markup=False)
+    console.print(f"  clears  {' · '.join(fresh_service.count_words(plan.counts))}", markup=False)
     if plan.live_agents:
         console.print(f"  stops   {', '.join(plan.live_agents)} first", markup=False)
     for path in plan.worktrees:
@@ -558,10 +541,8 @@ def _emit_fresh(report: FreshReport) -> None:
     project = report.project
     name = project_service.display_name(project)
     if report.cleared != FreshCounts():
-        console.print(
-            f"✓ started {name} fresh — cleared {', '.join(_fresh_counts(report.cleared))}",
-            markup=False,
-        )
+        cleared = ", ".join(fresh_service.count_words(report.cleared))
+        console.print(f"✓ started {name} fresh — cleared {cleared}", markup=False)
     if report.stopped:
         console.print(f"  stopped: {', '.join(report.stopped)}", markup=False)
     for item in report.discarded:

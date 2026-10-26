@@ -170,6 +170,24 @@ def start_fresh(
     return report
 
 
+def count_words(counts: FreshCounts) -> list[str]:
+    """``3 tasks``, ``41 notes and events``, …: what ``counts`` holds, the extras chosen too,
+    as ``project fresh`` and the UI's Start fresh… say it."""
+    words = [
+        (counts.tasks, "task", "tasks"),
+        (counts.events, "note or event", "notes and events"),
+        (counts.sessions, "session", "sessions"),
+        (counts.meta, "signal or mark", "signals and marks"),
+        (counts.agents, "fleet agent", "fleet agents"),
+        (counts.worktrees, "worktree", "worktrees"),
+        (counts.entries, "context entry", "context entries"),
+        (counts.prompts, "prompt", "prompts"),
+        (counts.metrics, "turn metric", "turn metrics"),
+        (counts.branches, "fleet branch", "fleet branches"),
+    ]
+    return [f"{n} {one if n == 1 else many}" for n, one, many in words if n is not None]
+
+
 def unpushed_line(item: FreshUnpushed) -> str:
     """``<tree> on <branch>: <n> commit(s) on no remote, uncommitted changes``, or
     ``branch <name>: …`` for a branch no tree has out."""

@@ -24,7 +24,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or with `--yes` the counts it cleared. It is refused from inside one of the project's
   own fleet agents, and, as `project forget` is, while another project's fleet agents
   read its board. The service behind it (`services.fresh`: `plan`, then `start_fresh`)
-  is what the UI's Start fresh… calls.
+  is what the UI's Start fresh… calls. In `asq`, **↺ Start fresh…** is on a project
+  card's menu (just above *Remove from fleet…*) and on the project's *Settings* tab:
+  one dialog shows the plan's counts and that a new blank manager starts, with
+  *Project memory*, *Prompt log & metrics* and *Fleet git branches* off by default;
+  unpushed work is listed in a second dialog (*Discard and start fresh*), a refused
+  plan says why and cannot be confirmed, and the reset runs off the UI thread and
+  ends in a toast of what was cleared.
 - **Exact token usage per session** — `aisquare metrics tokens [--session S]
   [--project P | --all]` (`--json` too). The Stop, StopFailure and SessionEnd hooks
   read only the bytes the session's transcript gained since the last record, plus its

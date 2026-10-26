@@ -104,6 +104,8 @@ def test_linux_reads_its_processes_from_proc(
     monkeypatch.setattr(sys, "platform", "linux")
 
     assert procs.inspect(500) == procs.ProcInfo(1, "0a1b2c3d.424242", "/usr/bin/claude")
+    _fake_proc(root, 503, 1, 424400, "/home/dev/.local/bin/uv (deleted)")  # replaced while running
+    assert procs.inspect(503) == procs.ProcInfo(1, "0a1b2c3d.424400", "/home/dev/.local/bin/uv")
     assert procs.inspect(501) == procs.ProcInfo(500, "0a1b2c3d.424300", "")
     assert procs.inspect(502) is None, "a pid with no /proc entry"
     (root / "501" / "stat").write_text("garbage", encoding="utf-8")
@@ -132,17 +134,18 @@ def test_macos_asks_ps_with_the_locale_and_the_zone_pinned(
     same start whatever zone each runs in (a ``TZ`` in an MCP ``env`` entry, a laptop that
     moved between a registration and a server's first read)."""
     monkeypatch.setenv("TZ", "Asia/Kolkata")
-    asked: list[tuple[list[str], dict[str, str]]] = []
+    asked: list[tuple[list[str], dict[str, str], object]] = []
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        asked.append((argv, dict(kwargs["env"])))  # type: ignore[call-overload]
+        asked.append((argv, dict(kwargs["env"]), kwargs["stdin"]))  # type: ignore[call-overload]
         return subprocess.CompletedProcess(argv, 0, " 77 Mon Oct 26 00:01:10 2026 /bin/zsh\n", "")
 
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert procs.inspect(1234) == procs.ProcInfo(77, "Mon Oct 26 00:01:10 2026", "/bin/zsh")
-    argv, env = asked[0]
-    assert argv == ["ps", "-o", "ppid=,lstart=,comm=", "-p", "1234"]
+    argv, env, stdin = asked[0]
+    assert argv == ["/bin/ps", "-o", "ppid=,lstart=,comm=", "-p", "1234"], "not one from PATH"
+    assert stdin == subprocess.DEVNULL, "an MCP server's stdin is the protocol pipe"
     assert env["LC_ALL"] == "C"
     assert env["TZ"] == "UTC", "the reader's own zone would write its own start"
 

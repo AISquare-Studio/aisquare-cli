@@ -439,6 +439,28 @@ def test_a_recycled_pid_is_not_the_process_that_registered(
     assert "<aisquare-team>" in _prompt(runner, SOLO, work_dir)
 
 
+def test_a_server_asks_for_its_own_process_only_when_an_image_needs_it(
+    tree: Tree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server's own start is one more process lookup (a ``ps`` on macOS) before the
+    handshake: a plain parent, and a ``uv`` above one, are told without it."""
+    claude = tree.spawn(CLAUDE)
+    uv = tree.spawn(UV, claude)
+    asked: list[int] = []
+
+    def look(pid: int) -> procs.ProcInfo | None:
+        asked.append(pid)
+        return tree.look(pid)
+
+    monkeypatch.setattr(procs, "inspect", look)
+    for parent in (claude, uv):
+        with tree.child_of(parent, monkeypatch):
+            assert mcp_host.serving_process("aisquare") == procs.ProcessRef(
+                claude, tree.table[claude].started
+            )
+    assert os.getpid() not in asked
+
+
 def test_a_session_that_has_ended_is_not_a_host(
     runner: CliRunner, work_dir: Path, tree: Tree, monkeypatch: pytest.MonkeyPatch
 ) -> None:

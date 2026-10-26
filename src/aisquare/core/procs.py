@@ -120,7 +120,8 @@ def _inspect_proc(pid: int) -> ProcInfo | None:
     except OSError:
         boot = ""
     try:
-        image = os.readlink(where / "exe")
+        # a binary replaced while it runs (``uv self update``) reads ``/path/uv (deleted)``
+        image = os.readlink(where / "exe").removesuffix(" (deleted)")
     except OSError:  # another user's process, or a kernel thread
         image = ""
     return ProcInfo(ppid, f"{boot}.{ticks}", image)
@@ -140,9 +141,15 @@ def parse_ps(text: str) -> ProcInfo | None:
     return ProcInfo(int(words[0]), " ".join(words[1:6]), " ".join(words[6:]))
 
 
+#: Where macOS and the BSDs keep ``ps``. Not found on PATH: a ``procps`` a package manager put
+#: first writes its columns another way, and the token must read the same in every process.
+_PS = "/bin/ps"
+
+
 def _inspect_ps(pid: int) -> ProcInfo | None:
     result = subprocess.run(
-        ["ps", "-o", "ppid=,lstart=,comm=", "-p", str(pid)],
+        [_PS, "-o", "ppid=,lstart=,comm=", "-p", str(pid)],
+        stdin=subprocess.DEVNULL,  # an MCP server's own stdin is the protocol pipe
         capture_output=True,
         text=True,
         timeout=5,

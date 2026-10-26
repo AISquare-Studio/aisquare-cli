@@ -39,7 +39,7 @@ import logging
 import os
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from aisquare.core import procs
 from aisquare.core.store import ContextStore
@@ -210,7 +210,13 @@ def serving_process(
     first = pid
     if first in _serving:
         return _serving[first]
-    mine = inspect(os.getpid())
+    mine: list[procs.ProcInfo | None] = []  # this process, asked on the first need only
+
+    def me() -> procs.ProcInfo | None:
+        if not mine:
+            mine.append(inspect(os.getpid()))
+        return mine[0]
+
     own = procs.image_stem(script if script is not None else os.path.basename(sys.argv[0]))
     for _ in range(MAX_LAUNCHERS + 1):
         if pid <= 1:
@@ -218,7 +224,7 @@ def serving_process(
         info = inspect(pid)
         if info is None:
             return None
-        if _is_launcher(info, own, mine):
+        if _is_launcher(info, own, me):
             pid = info.ppid
             continue
         found = procs.ProcessRef(pid, info.started)
@@ -227,7 +233,7 @@ def serving_process(
     return None
 
 
-def _is_launcher(info: procs.ProcInfo, own: str, mine: procs.ProcInfo | None) -> bool:
+def _is_launcher(info: procs.ProcInfo, own: str, me: Callable[[], procs.ProcInfo | None]) -> bool:
     """Whether a process above the server only starts it: a ``uv``, ``uvx`` or ``pipx`` that
     stays alive above the command it runs, this server's own console script (the
     ``aisquare.exe`` a Windows install puts above ``python.exe``), or the venv launcher
@@ -240,10 +246,15 @@ def _is_launcher(info: procs.ProcInfo, own: str, mine: procs.ProcInfo | None) ->
     if name in LAUNCHERS or (own != "" and name == own):
         return True
     image = os.path.normcase(info.image)
-    if image == "" or (mine is not None and image == os.path.normcase(mine.image)):
+    launchers = {
+        os.path.normcase(path)
+        for path in (sys.executable, os.environ.get("__PYVENV_LAUNCHER__", ""))
+        if path
+    }
+    if image == "" or image not in launchers:
         return False
-    launchers = (sys.executable, os.environ.get("__PYVENV_LAUNCHER__", ""))
-    return image in {os.path.normcase(path) for path in launchers if path}
+    mine = me()
+    return mine is None or image != os.path.normcase(mine.image)
 
 
 def host_of(

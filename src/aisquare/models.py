@@ -1476,3 +1476,124 @@ class FleetAgentStatus(BaseModel):
     run on where no client reaches it. Its state is ``unknown`` whatever its board says, and
     its pane id is no pane of its own there: that server numbers its panes from ``%0``
     again."""
+
+
+class FreshUnpushed(BaseModel):
+    """Work a ``project fresh`` would throw away: a fleet agent's worktree, or a fleet branch
+    ``--branches`` would delete, holding what no remote and no default branch has."""
+
+    path: Path | None = None
+    """The worktree; ``None`` for a branch no tree has out."""
+    branch: str | None = None
+    """The branch the tree is on (``None`` on a detached HEAD), or the branch itself."""
+    tip: str | None = None
+    """The commit it was judged at: the tree's HEAD, or the branch's tip. A discard someone
+    confirmed covers this tip, and no commit made after it."""
+    commits: int = 0
+    """Commits on no remote-tracking branch and not on the default branch."""
+    uncommitted: bool = False
+    """The tree has changes not committed: modified, staged or untracked (not ignored)."""
+
+
+class FreshKept(BaseModel):
+    """What a ``project fresh`` meant to remove and could not, with why: an agent's worktree,
+    a fleet branch, the briefs' evidence folder, or the manager's state folder."""
+
+    path: Path | None = None
+    branch: str | None = None
+    reason: str
+
+
+class FreshCounts(BaseModel):
+    """What a ``project fresh`` clears (its plan) or cleared (its report). An extra not asked
+    for is ``None``: kept, not counted."""
+
+    tasks: int = 0
+    events: int = 0
+    """Board events: notes, decisions, claims, reviews, exits."""
+    sessions: int = 0
+    meta: int = 0
+    """``team_meta`` rows: the board's signals and the gone sessions' marks, with the
+    project's before-limit ``ui_state`` rows."""
+    agents: int = 0
+    """Fleet agent rows, live and ended."""
+    worktrees: int = 0
+    briefs: int = 0
+    """Work briefs, with their numbered requirements: the board's, as its tasks are."""
+    evidence: int = 0
+    """Files of the briefs' kept evidence, under ``~/.aisquare/briefs/<id>/``."""
+    manager_state: int = 0
+    """Files of the manager's own state (``~/.aisquare/projects/<id>/manager/``: its
+    ``state.md``, goal, decisions, open items, next step), which a blank manager must not
+    read back."""
+    entries: int | None = None
+    """``--memory``: the project's context entries."""
+    prompts: int | None = None
+    """``--prompts``: the prompt log."""
+    metrics: int | None = None
+    """``--prompts``: the turn metrics."""
+    branches: int | None = None
+    """``--branches``: local fleet branches."""
+
+
+class FreshPlan(BaseModel):
+    """What ``project fresh`` would do, read-only (``services.fresh.plan``): the counts it
+    clears, the agents it stops first, the trees and branches it removes, and the work in
+    them found nowhere else, which it refuses to discard unless told to."""
+
+    project: ProjectInfo
+    memory: bool = False
+    prompts: bool = False
+    branches: bool = False
+    counts: FreshCounts = Field(default_factory=FreshCounts)
+    live_agents: list[str] = Field(default_factory=list)
+    """Labels of the live agents it stops first, the manager first."""
+    sessions: list[str] = Field(default_factory=list)
+    """``<socket>:<session>`` for each of its tmux sessions the stop kills, live rows or none:
+    what a dead pane or a stray process outlives its row in."""
+    worktrees: list[Path] = Field(default_factory=list)
+    fleet_branches: dict[str, str] = Field(default_factory=dict)
+    """``--branches``: the local fleet branches it deletes, once no tree has them out, each
+    with the tip it was judged at (and is deleted at)."""
+    unpushed: list[FreshUnpushed] = Field(default_factory=list)
+
+
+class FreshReport(BaseModel):
+    """What ``project fresh`` did (``services.fresh.start_fresh``)."""
+
+    project: ProjectInfo
+    planned: FreshCounts = Field(default_factory=FreshCounts)
+    """What the run's own plan counted, before anything was stopped."""
+    cleared: FreshCounts = Field(default_factory=FreshCounts)
+    """What it deleted: past :attr:`planned` by what was written after the plan was read,
+    during the reset: the stop's own ``agent_exited`` and released claims, and anything an
+    agent posted before it was stopped, which go with the board too (:meth:`stop_events`)."""
+    stopped: list[str] = Field(default_factory=list)
+    """Labels of the agents it stopped (or recorded gone) before clearing."""
+    sessions_killed: list[str] = Field(default_factory=list)
+    """``<socket>:<session>`` for each of the project's tmux sessions the stop killed."""
+    sessions_gone: list[str] = Field(default_factory=list)
+    """The project's sessions that ended with the last window the stop closed, gone before
+    the kill (``ShutdownReport.sessions_absent``): the common case, every pane a live agent.
+    Ended all the same, and said so with :attr:`sessions_killed`."""
+    sessions_failed: list[str] = Field(default_factory=list)
+    """The sessions tmux would not kill, with why: a reset with any is incomplete."""
+    worktrees_removed: list[Path] = Field(default_factory=list)
+    branches_deleted: list[str] = Field(default_factory=list)
+    kept: list[FreshKept] = Field(default_factory=list)
+    """What it could not remove (:class:`FreshKept`): trees, branches, the evidence folder,
+    the manager's state folder. The rows went all the same; a manager's state
+    left in place withholds the new manager (:attr:`manager_error`)."""
+    discarded: list[FreshUnpushed] = Field(default_factory=list)
+    """The unpushed work it threw away, as asked: only what went (a tree removed, a branch
+    deleted), never what it was let discard and then kept."""
+    manager: FleetAgent | None = None
+    """The fresh manager it started; ``None`` when the spawn was refused."""
+    manager_error: str | None = None
+    """Why the fresh manager did not start: the board is clear all the same."""
+
+    def stop_events(self) -> int:
+        """The board events cleared that the plan did not count: written during the reset,
+        after the plan was read (the stop's ``agent_exited`` and released claims, and what
+        an agent posted before it was stopped)."""
+        return max(0, self.cleared.events - self.planned.events)

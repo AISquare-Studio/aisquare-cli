@@ -1788,6 +1788,18 @@ forget` does. Its folder and history are kept, and `aisquare project onboard
 live or stopped (a restart would start them under it again): a restart or a
 switch of one would add it back.
 
+*Start fresh…* — on the menu, just above *Remove from fleet…*, and on the
+project's *Settings* tab — clears the project for its next piece of work, as
+`aisquare project fresh` does: its agents stopped, their worktrees removed, its
+board (with its work briefs and their evidence) and fleet rows cleared (task and
+brief numbers start at #1 again), the manager's state file deleted, and a new
+blank manager started. The dialog reads the plan first and shows its counts,
+with three extras off by default that redraw it: *Project memory (context
+entries)*, *Prompt log & metrics* and *Fleet git branches*. Work a
+tree or branch holds that no remote has is listed in a second dialog, *Discard
+and start fresh* or Cancel; a refused plan (a board another project's agents
+read) says why and cannot be confirmed. Cancel has the focus, and Esc cancels.
+
 **Codename.** Every project that enters the fleet gets an `adjective-animal`
 codename — `amber-otter` — matching `^[a-z]{3,7}-[a-z]{3,7}$`, from two
 hand-curated, family-friendly word lists (96 by 96, so 9,216 pairs). It is

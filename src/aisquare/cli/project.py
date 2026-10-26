@@ -24,7 +24,8 @@ from aisquare.core.state import get_state
 from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import ContextStore, GroupSettings, store_session
 from aisquare.core.workspace import find_project_root, project_id_for
-from aisquare.models import ProjectGroup, ProjectInfo
+from aisquare.models import FreshCounts, FreshPlan, FreshReport, ProjectGroup, ProjectInfo
+from aisquare.services import fresh as fresh_service
 from aisquare.services import install_route
 from aisquare.services import parent as parent_service
 from aisquare.services import project as project_service
@@ -364,6 +365,251 @@ def prune(
             captured_older_than=captured,
         )
     )
+
+
+# --- start fresh ---------------------------------------------------------------------------
+
+
+def fresh(
+    project: Annotated[
+        str | None,
+        typer.Option(
+            "--project",
+            "-P",
+            help="Project by name, codename, id prefix, nickname or path "
+            "(default: the active project).",
+            metavar="PROJECT",
+        ),
+    ] = None,
+    memory: Annotated[
+        bool,
+        typer.Option(
+            "--memory",
+            help="Also clear its remembered context: its context entries.",
+        ),
+    ] = False,
+    prompts: Annotated[
+        bool, typer.Option("--prompts", help="Also clear its prompt log and turn metrics.")
+    ] = False,
+    branches: Annotated[
+        bool,
+        typer.Option(
+            "--branches",
+            help="Also delete the local fleet/<codename>/… branches its agents made (never a "
+            "remote one).",
+        ),
+    ] = False,
+    discard_unpushed: Annotated[
+        bool,
+        typer.Option(
+            "--discard-unpushed",
+            help="Throw away what its agents' worktrees and branches hold that no remote has; "
+            "without it such work refuses the reset. At a terminal only what the plan listed "
+            "and you confirmed goes (anything found since refuses); with --yes, whatever the "
+            "run finds.",
+        ),
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Start fresh without asking; required off a terminal."),
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Print what it would clear and change nothing.")
+    ] = False,
+) -> None:
+    """Start fresh: clear the project's board and fleet, then start a blank manager (alias: reset).
+
+    Every live agent is stopped as `fleet shutdown` stops it, each agent's worktree
+    is removed, and the board's tasks, notes, sessions, signals and work briefs (with
+    their kept evidence), the manager's state file and the fleet's rows are deleted;
+    task and brief numbers start at #1 again. The checkout, every other branch, the
+    registration and its settings, the symbol index and every other project are kept,
+    and so are its context entries, prompt log and fleet branches unless
+    --memory, --prompts or --branches says otherwise. No command report is deleted,
+    but with their briefs gone they are no longer pinned as evidence (unless another
+    board's brief cites one), and normal retention takes them. Work its worktrees or
+    branches hold that no remote has refuses the reset, named, unless
+    --discard-unpushed. It prints the plan and asks first at a terminal (twice when
+    discarding); off a terminal it is a dry run unless --yes, and under --json
+    without --yes it prints the plan and changes nothing. Refused from inside one
+    of the project's own fleet agents, and while another project's fleet agents
+    read its board.
+    """
+    target = _project_ref(project) if project is not None else project_service.info()
+    try:
+        planned = fresh_service.plan(target, memory=memory, prompts=prompts, branches=branches)
+    except fresh_service.FreshRefused as exc:
+        fail(str(exc), error=exc.code, ref=target.id, detail=str(exc), exit_code=2)
+    if dry_run or (get_state().json_output and not yes):
+        _emit_fresh_plan(planned, discard=discard_unpushed)
+        return
+    if planned.unpushed and not discard_unpushed:
+        fail(
+            fresh_service.unpushed_refusal(planned),
+            error="unpushed_work",
+            ref=target.id,
+            detail="; ".join(fresh_service.unpushed_line(item) for item in planned.unpushed),
+            exit_code=2,
+        )
+    if not yes:
+        _emit_fresh_plan(planned, discard=discard_unpushed)
+        if not _stdin_is_a_terminal():
+            stdout_console().print("dry run: nothing cleared — re-run with --yes to start fresh")
+            return
+        name = project_service.display_name(planned.project)
+        if not typer.confirm(f"Start {name} fresh?", default=False):
+            stdout_console().print("nothing cleared")
+            return
+        if planned.unpushed and not typer.confirm(
+            f"Throw away the unpushed work in {len(planned.unpushed)} "
+            f"place{'s' if len(planned.unpushed) != 1 else ''}, as listed above "
+            "(uncommitted changes go as they are when the reset runs)?",
+            default=False,
+        ):
+            stdout_console().print("nothing cleared")
+            return
+    from aisquare.services import fleet as fleet_service  # lazy: the fleet is heavy to import
+
+    # Asked at a terminal, the yes covers the list it was asked about, at the tips it showed;
+    # with --yes nothing was shown, and the flag is the whole of the consent.
+    discard: fresh_service.Discard = ()
+    if discard_unpushed:
+        discard = "all" if yes else list(planned.unpushed)
+    try:
+        report = fresh_service.start_fresh(
+            planned.project,
+            memory=memory,
+            prompts=prompts,
+            branches=branches,
+            discard=discard,
+            actor=fleet_service.acting_as(),
+            ack_wait=fleet_service.settings().prompt_ack_seconds,
+        )
+    except fresh_service.FreshRefused as exc:
+        said = str(exc)
+        if exc.code == "unpushed_work" and exc.plan is not None and discard_unpushed:
+            # Work found since the list confirmed at the terminal, before anything was
+            # stopped: the flag they passed, named again, would only ask about the same list.
+            said = fresh_service.unpushed_refusal(exc.plan, way=fresh_service.RUN_AGAIN)
+        fail(said, error=exc.code, ref=target.id, detail=said, exit_code=2)
+    except fresh_service.FreshIncomplete as exc:
+        said = str(exc)
+        if exc.plan is not None and discard_unpushed:
+            # The list confirmed at the terminal did not cover what the stop left: naming
+            # the flag again would only ask about the same list.
+            said = fresh_service.found_after_stop(exc.plan, way=fresh_service.RUN_AGAIN)
+        if get_state().json_output:
+            # The partial report too, under the error: what was stopped and removed before
+            # it stood still, which a script cannot read off a bare error object.
+            payload: dict[str, object] = {
+                "error": "fresh_incomplete",
+                "ref": target.id,
+                "detail": said,
+                "report": exc.report.model_dump(mode="json"),
+            }
+            if exc.plan is not None:  # work found once the fleet was stopped: what it is
+                payload["plan"] = exc.plan.model_dump(mode="json")
+            typer.echo(json.dumps(payload))
+            raise typer.Exit(code=1) from None
+        _emit_fresh(exc.report)
+        fail(said, error="fresh_incomplete", ref=target.id)
+    _emit_fresh(report)
+    if report.manager_error is not None:
+        raise typer.Exit(code=1)
+
+
+app.command("fresh")(fresh)
+app.command("reset", hidden=True, help="Alias of 'fresh'.")(fresh)
+
+
+def _stdin_is_a_terminal() -> bool:
+    """Whether there is somebody to ask, as ``fleet shutdown`` asks it: behind a name because
+    ``CliRunner`` replaces ``sys.stdin`` for an invocation, and the confirmations of a
+    destructive command would be out of a test's reach otherwise."""
+    return sys.stdin.isatty()
+
+
+def _emit_fresh_plan(plan: FreshPlan, *, discard: bool) -> None:
+    """``project fresh``'s plan — as JSON under ``--json``, lines otherwise."""
+    if get_state().json_output:
+        typer.echo(plan.model_dump_json())
+        return
+    console = stdout_console()
+    project = plan.project
+    console.print(
+        f"Start fresh: {project_service.display_name(project)} ({project.codename or project.id}) "
+        f"at {project.root}",
+        markup=False,
+    )
+    console.print(f"  clears  {' · '.join(fresh_service.count_words(plan.counts))}", markup=False)
+    if plan.live_agents:
+        console.print(f"  stops   {', '.join(plan.live_agents)} first", markup=False)
+    if plan.sessions:
+        console.print(f"  kills   tmux session {', '.join(plan.sessions)}", markup=False)
+    for path in plan.worktrees:
+        console.print(f"  🗑 {path}", markup=False)
+    for branch in plan.fleet_branches:
+        console.print(f"  🗑 branch {branch}", markup=False)
+    kept = [
+        what
+        for what, chosen in (
+            ("context entries (--memory)", plan.memory),
+            ("prompt log and metrics (--prompts)", plan.prompts),
+            ("fleet branches (--branches)", plan.branches),
+        )
+        if not chosen
+    ]
+    if kept:
+        console.print(f"  keeps   {', '.join(kept)}", markup=False)
+    console.print("  then    a new manager starts on the empty board", markup=False)
+    if plan.unpushed:
+        said = (
+            "thrown away (--discard-unpushed)" if discard else "refused without --discard-unpushed"
+        )
+        console.print(f"  ⚠ work found nowhere else — {said}:", markup=False)
+        for item in plan.unpushed:
+            console.print(f"    {fresh_service.unpushed_line(item)}", markup=False)
+
+
+def _emit_fresh(report: FreshReport) -> None:
+    """``project fresh``'s report — as JSON under ``--json``, lines otherwise."""
+    if get_state().json_output:
+        typer.echo(report.model_dump_json())
+        return
+    console = stdout_console()
+    project = report.project
+    name = project_service.display_name(project)
+    if report.cleared != FreshCounts():
+        cleared = ", ".join(fresh_service.cleared_words(report))
+        console.print(f"✓ started {name} fresh — cleared {cleared}", markup=False)
+    if report.stopped:
+        console.print(f"  stopped: {', '.join(report.stopped)}", markup=False)
+    ended = [*report.sessions_killed, *report.sessions_gone]
+    if ended:
+        console.print(f"  tmux session {', '.join(ended)} ended", markup=False)
+    for path in report.worktrees_removed:
+        console.print(f"  🗑 removed worktree {path}", markup=False)
+    for branch in report.branches_deleted:
+        console.print(f"  🗑 deleted branch {branch}", markup=False)
+    for session in report.sessions_failed:
+        console.print(f"  ⚠ tmux would not kill {session}", markup=False)
+    for item in report.discarded:
+        console.print(f"  ⚠ threw away {fresh_service.unpushed_line(item)}", markup=False)
+    for kept in report.kept:
+        where = str(kept.path) if kept.path is not None else f"branch {kept.branch}"
+        console.print(f"  ⚠ kept {where} — {kept.reason}", markup=False)
+    if report.manager is not None:
+        session = (report.manager.session_id or "")[:8]
+        console.print(
+            f"  ✓ a new manager started: {report.manager.id} · session {session} "
+            f"· pane {report.manager.pane_id}",
+            markup=False,
+        )
+    elif report.manager_error is not None:
+        spawn = project_service.fleet_command("spawn", project, "manager")
+        console.print(
+            f"  ✗ no manager started: {report.manager_error} — start one: {spawn}", markup=False
+        )
 
 
 # --- groups, pins and manual order (#140) ---------------------------------------------------

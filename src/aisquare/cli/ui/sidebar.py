@@ -812,7 +812,7 @@ class CardChips(Static):
 
 
 class CardMenuButton(Static):
-    """⋯ — the card's menu: Rename, Pin / Unpin, Open settings, Remove from fleet…"""
+    """⋯ — the card's menu: Rename, Pin / Unpin, Open settings, Start fresh…, Remove from fleet…"""
 
     DEFAULT_CSS = """
     CardMenuButton { width: 2; height: 1; content-align: right middle; color: $text-muted; }

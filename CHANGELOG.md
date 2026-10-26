@@ -35,6 +35,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   honouring a back-off; a kept reading moves nobody. The spawn records whether its account
   was named (`account_pinned` in the row's launch spec), which a restart, a switch and a fork
   keep; rows spawned before this read as not pinned.
+- **Start fresh: `aisquare project fresh`** (alias `project reset`) clears an onboarded
+  project's board and fleet and starts a blank manager, without onboarding it again.
+  Every live agent is stopped as `fleet shutdown` stops it, and the project's tmux
+  session is killed whenever it stands, a live row or none, so a dead pane or a process
+  whose row says it died goes with it; each agent's worktree is removed, and the
+  project's tasks, notes and events, sessions, signals and marks (a session's, and the
+  before-limit rows of its fleet labels), work briefs (with the evidence
+  they keep under `~/.aisquare/briefs/<id>/`) and fleet rows are deleted, with the
+  manager's state (`~/.aisquare/projects/<id>/manager/state.md`), so the next task and
+  brief are #1 again and the new manager does not read the old goal back (none is started
+  while that file cannot be removed). Its context entries, prompt log and turn
+  metrics and its local `fleet/<codename>/…` branches stay unless `--memory`, `--prompts`
+  or `--branches` says otherwise. The checkout, every other branch, the registration and
+  its settings, the symbol index, the captain and every other project are never touched.
+  Nor are the command reports, but once their briefs are gone none of them is pinned by
+  them as evidence any more (a report another board's brief cites stays pinned):
+  `asq reports prune`'s retention takes them as it takes any other.
+  A worktree or branch that holds uncommitted changes or commits no remote has refuses
+  the reset, naming each tree, its branch and the commit count, unless
+  `--discard-unpushed`; a count git cannot give refuses it too, never reading as pushed.
+  At a terminal the discard covers what the plan listed and you confirmed, at the tips
+  it showed (uncommitted changes in a listed tree go as they are when the reset runs),
+  and work found since refuses it before anything is stopped (work committed during the
+  stop itself is refused after it, with how to start the fleet again);
+  with `--yes`, the flag covers whatever the run finds. It prints the plan with its
+  counts and asks at a terminal (a second time before discarding); `--dry-run` prints
+  the plan and changes nothing, off a terminal it is a dry run unless `--yes`, and
+  `--json` prints the plan, or with `--yes` the counts it planned and the counts it
+  cleared: the stop writes an `agent_exited` for each agent it stops, which goes too and
+  is said apart ("11 notes and events (4 written during the reset)"), as are the tmux
+  session it ended (killed, or gone with its last window) and the worktrees it removed.
+  A reset that stops part-way (an agent or a tmux session left standing, work found
+  nobody agreed to discard, a store that would not take the lock) clears nothing on the
+  board and starts no manager, removing no tree while the fleet still stands or such work
+  is found; it names the next step (`fleet shutdown`) and prints its partial report, in
+  text or under the error with `--json`, whose refusals all carry their detail. It
+  is refused from inside one of the project's own fleet agents, from inside the fleet's
+  tmux server when it has something to stop, and, as `project forget` is, while another
+  project's fleet agents read its board. The service behind it (`services.fresh`:
+  `plan`, then `start_fresh`) is what the UI's Start fresh… calls. In `asq`, **↺ Start
+  fresh…** is on a project card's menu (just above *Remove from fleet…*) and on the
+  project's *Settings* tab: one dialog shows the plan's counts and that a new blank
+  manager starts, with *Project memory (context entries)*, *Prompt log &
+  metrics* and *Fleet git branches*
+  off by default; unpushed work is listed in a second dialog (*Discard and start
+  fresh*), and work found after it opens brings the dialog back on what was found; a
+  refused plan says why and cannot be confirmed; one run a project at a time, off the
+  UI thread, ending in a toast of what was cleared, with the project's open boards read
+  again from their start.
 
 ### Changed
 

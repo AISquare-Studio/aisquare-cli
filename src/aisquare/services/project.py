@@ -589,6 +589,13 @@ def reading_rows(store: ContextStore) -> dict[str, list[FleetAgent]]:
     return by_board
 
 
+def board_readers(store: ContextStore, project: ProjectInfo) -> list[BoardReader]:
+    """Every other project whose fleet agents read ``project``'s board, as a hub's, live or a
+    restart away (:func:`_board_readers`): what ``project fresh`` refuses over, as ``forget``
+    does, each named with what frees it in a :class:`ProjectBusyError`."""
+    return _board_readers(store, project)
+
+
 def _board_readers(
     store: ContextStore,
     project: ProjectInfo,

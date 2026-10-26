@@ -141,6 +141,26 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ),
     ("cli/fleet.py", "_emit_shutdown"): _TARGET,
     ("cli/fleet.py", "attach"): _TARGET,
+    ("cli/project.py", "_emit_fresh"): _TARGET,
+    ("services/fresh.py", "start_fresh"): (
+        "the project being started fresh, as its plan read it from the store"
+    ),
+    ("services/fresh.py", "_stop"): (
+        "the project being started fresh, whose fleet the stop left standing"
+    ),
+    ("services/fresh.py", "_held_now"): (
+        "the project being started fresh, whose agents started again after its stop"
+    ),
+    ("services/fresh.py", "_confirm_down"): (
+        "the project being started fresh, whose tmux session still stands, or cannot be asked"
+    ),
+    ("services/fresh.py", "found_after_stop"): (
+        "the project whose plan found the work, the one being started fresh, whose fleet the "
+        "stop left stopped"
+    ),
+    ("cli/ui/app.py", "FleetApp._project_freshened"): (
+        "the project the Start fresh report is about, the one its dialog was opened on"
+    ),
     ("cli/ui/views/project.py", "no_manager_text"): _SHOWN,
     ("cli/ui/views/welcome.py", "WelcomeView._paint_fleet"): _SHOWN,
     ("services/auto_mode.py", "_restart_off_auto"): (

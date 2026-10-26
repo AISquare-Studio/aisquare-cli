@@ -1,13 +1,14 @@
 # Handoff: rc/fixes-usage-onboard — usage reads that back off, moving before the limit, onboarding large repos
 
-> **Status, 2026-10-26 (the 0.9.1 audit of this handoff, board task #86): shipped. This file is now a
-> record.** Each item went into 0.9.0 or its own PR; the audit checked every "How to solve it" bullet and
-> every "Acceptance" line against `rc/0.9.1`, and found one gap, built here.
+> **Status, 2026-10-26 (the 0.9.1 audit of this handoff, board task #86): F1 and F3 shipped in 0.9.0; F2
+> is being built in #432 and is not shipped.** F1's and F3's sections below are a record; F2's is still
+> the live brief. The audit checked every "How to solve it" bullet and every "Acceptance" line of F1 and
+> F3 against `rc/0.9.1`, and found one gap, built here.
 >
 > | Item | Where it shipped | State |
 > | --- | --- | --- |
 > | F1: a rate-limited usage read backs off | 0.9.0, #408 (merged into #401) | Done, bar the statusline samples (#287) |
-> | F2: move an agent before it hits a limit | #432 | Out of this PR |
+> | F2: move an agent before it hits a limit | #432, being built there | Not shipped, and not in this PR; its section below is still the brief |
 > | F3: onboarding a large repo, no Repomix | 0.9.0, #399 (the snapshot and Repomix are gone) and the P2 train #297 (the code index, #285, built in #327 and #385) | Done, bar what is decided below |
 >
 > **What this PR adds.** This status block, and one sentence in `docs/fleet.md` (Accounts, usage): to hear
@@ -36,21 +37,37 @@
 >
 > - **#92 (phase B).** Retitle without "a tiered snapshot": *Code intelligence phase B: a budgeted repo map
 >   from the symbol index, `core/curator.py` with git signals, tiers 0 to 3, doc collapse and noise
->   detection (absorbs #93)*. Replace "Current state" with: the Repomix pack, `core/snapshot.py`,
->   `[snapshot]` and the doctor's packer rows are gone (#399, 0.9.0); session start names no snapshot
->   (#346) and its two `aisquare code` lines were withdrawn (owner call 26). Restate the output without a
->   pack on disk: tier 0 the repo map and entry points; tier 1 the signatures of every kept source file,
->   read from the code index (#285), not from a compressed pack; tier 2 the bodies of the top-ranked files,
->   read from the checkout, in rank order until the budget is spent; tier 3 one card per surviving doc.
->   Count the budget with an estimate that needs no tokenizer (`tiktoken` is not used any more). Drop
->   "Surfaces: the directive names the tiers" and say how an agent reaches the map (a session-start line,
->   or a command asked for on demand) is the owner's call, with the phase's measurements. The acceptance
->   keeps its numbers (under 150k tokens, byte-identical rebuild, under 60 s without an LLM) and gains: no
->   Node, no process but `git`.
+>   detection (absorbs #93)*. Replace "Current state" with: the Repomix pack, `core/snapshot.py` and the
+>   doctor's packer rows are gone (#399, 0.9.0); `[snapshot]` is no longer read, except its `ignore` list,
+>   which is read as `[code] ignore` (`aisquare config get/set snapshot.*` answer `unknown config key`);
+>   session start names no snapshot (#346) and its two `aisquare code` lines were withdrawn (owner call
+>   26). Restate the output without a pack on disk: tier 0 the repo map and entry points; tier 1 the
+>   signatures of every kept file the code index (#285) parses, read from the index and not from a
+>   compressed pack; tier 2 the bodies of the top-ranked files, read from the checkout, in rank order
+>   until the budget is spent; tier 3 one card per surviving doc.
+>   - **Config.** The curator's inputs read `[code] ignore` where #92 says `[snapshot] ignore`. The budget
+>     (`[snapshot] max_tokens`, 150000) and the tier caps and reserves lived in `[snapshot]`, which is no
+>     longer read: they need a new home, which is the owner's call. "Snapshot under 150k tokens" in the
+>     acceptance reads "the map". Count the budget with an estimate that needs no tokenizer (`tiktoken` is
+>     not used any more).
+>   - **Languages.** The index parses Python, and TypeScript and JavaScript with the `aisquare-cli[code]`
+>     extra; every other source file is counted as "not indexed" (`aisquare code index --status`), and the
+>     compressed pack that covered them is gone. A Go, Rust or Java repository, the large-repository case F3
+>     was about, would have an empty tier 1. Say what such a file gets (its path in tier 0 only, unless the
+>     index gains a parser), and make the acceptance "tier 1 covers every kept file the index parses, and the
+>     files it does not are counted" in place of "100% of kept source".
+>   - **Surfaces.** Drop "the directive names the tiers". How an agent reaches the map (a session-start
+>     line, or a command asked for on demand) is the owner's call, with the phase's measurements. The
+>     rest of the acceptance keeps its numbers (byte-identical rebuild, under 60 s without an LLM) and gains:
+>     no Node, no process but `git`.
 > - **#91 (umbrella).** Add a dated note: phase A shipped in 0.9.0 (#285; `aisquare code find|refs|similar`,
 >   the `code_lookup` MCP tool); the Repomix snapshot is gone (#399), so phase B no longer tiers a
 >   snapshot but builds a budgeted map from the index (#92); the "read this FIRST" directive is gone too
 >   (#346). Update the "Current state" bullets and the phase table's "Tiered snapshot" row to match.
+>   Phase A's row drops "the directive line", and its acceptance box drops "the directive names the
+>   commands (see #285)": owner call 26 withdrew the directive, so the box could never be ticked, and a
+>   reader must not rebuild the line to tick it. D7 ("beside `core/snapshot.py`") reads "beside
+>   `core/code_index.py`".
 
 Written 2026-10-24 as a draft handoff, against `main` @ 09f48563. Branch: `rc/fixes-usage-onboard`.
 Path when committed: `docs/plans/handoff-fixes-usage-onboard.md`.
@@ -110,14 +127,15 @@ green; docs and CHANGELOG updated; config keys documented in `docs/reference.md`
 > - [x] **Docs and CHANGELOG:** `docs/fleet.md`, `docs/reference.md` and CHANGELOG. There are no new config
 >       keys. `doctor` also gets a `claude-account-backoff` row listing the backed-off accounts.
 >
-> What's left: **prefer statusline samples** ("Spend fewer reads") is board task #11, blocked on #287, which
-> is still open (no feed exists). The other half of that bullet, pointing a scripter at `aisquare watch`,
-> was built in #400 (the status block above).
+> What's left: **prefer statusline samples** ("Spend fewer reads") is blocked on #287, which is still open
+> (no feed exists). The other half of that bullet, pointing a scripter at `aisquare watch`, was built in
+> #400 (the status block above).
 >
 > **Related since this was written:**
 > - #403: one shared verified TLS context for every HTTPS call, so macOS python.org Python can read usage.
-> - #406: Accounts page, where rank 1 is the default and there is no status or default column. Reasons
->   show in the session cell and its tooltip. Read F1's UI wording ("status", `—`) against that layout.
+> - #406 (closed, not merged; its layout shipped in 0.9.0 through #401's branch): Accounts page, where rank
+>   1 is the default and there is no status or default column. Reasons show in the session cell and its
+>   tooltip. Read F1's UI wording ("status", `—`) against that layout.
 
 ### Problem
 
@@ -176,7 +194,7 @@ wants to force a fresh login on a working slot has to run `aisquare accounts run
 
 ## F2 — Move an agent before it hits a usage limit
 
-> **Status: built in #432, not in this PR.** The text below is the original brief.
+> **Status: being built in #432, not shipped, and not part of this PR.** The text below is the brief.
 
 ### Problem
 

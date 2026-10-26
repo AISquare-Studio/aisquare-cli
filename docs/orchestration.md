@@ -344,8 +344,9 @@ started by that very process: `claude mcp add` of `aisquare serve --stdio` (or a
 `.mcp.json`, or `uv tool run`/`uvx`, `pipx`) qualifies; nothing about how you mount it
 changes. (Measured on macOS with Claude Code 2.1.310; Linux and Windows read the same facts
 from `/proc` and the Windows process interfaces and are covered by tests, not yet by a
-measurement: if the proof does not hold there, a server stays a teammate, as before.) Everything that cannot be proved is a teammate, so that no member of a team ever
-reads as solo: a Claude Desktop client, a server given `AISQUARE_SERVE_CLIENT` or
+measurement: if the proof does not hold there, a server stays a teammate, as before.)
+Everything that cannot be proved is a teammate, so that no member of a team ever reads as
+solo: a Claude Desktop client, a server given `AISQUARE_SERVE_CLIENT` or
 `AISQUARE_SERVE_ROLE`, `serve` over HTTP, a `serve` started from a shell (a session's Bash
 tool, a tmux pane, or a command string such as `bash -lc "cd … && aisquare serve --stdio"`,
 which keeps a shell above it), and a Claude Code session whose hooks never ran on this board.

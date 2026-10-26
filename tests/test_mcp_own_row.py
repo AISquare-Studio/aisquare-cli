@@ -336,6 +336,37 @@ def test_a_serve_started_from_a_claude_code_shell_is_a_team(
     assert "<aisquare-team>" in _start(runner, OTHER, work_dir)
 
 
+@pytest.mark.parametrize("gateway", ["another interpreter", "the server's own interpreter"])
+def test_a_python_client_that_starts_the_server_is_a_team(
+    runner: CliRunner,
+    work_dir: Path,
+    tree: Tree,
+    monkeypatch: pytest.MonkeyPatch,
+    gateway: str,
+) -> None:
+    """A Python program that starts a server is that server's client, and a client is not
+    skipped (``mcp_host._is_launcher``). A gateway or bridge that Claude Code mounts and that
+    starts ``aisquare serve --stdio`` for a remote teammate has the gateway, not Claude, as the
+    server's parent: no proof, a teammate. Two ways to get it wrong: reading any ``python`` as
+    a launcher, and reading the interpreter this server runs on as one (on Linux with a system
+    python ``sys.executable`` IS the gateway's image, so the path alone cannot tell the
+    interpreter's own launcher from a client: only a launcher that is NOT our image is one)."""
+    _team_on(runner)
+    claude = _claude_session(runner, tree, monkeypatch, SOLO, work_dir)
+    monkeypatch.delenv("__PYVENV_LAUNCHER__", raising=False)
+    client = tree.spawn("/usr/bin/python3", claude)
+    if gateway == "another interpreter":
+        monkeypatch.setattr(sys, "executable", "/work/.venv/bin/python")
+    else:
+        monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
+        tree.table[os.getpid()] = procs.ProcInfo(client, "t-me", "/usr/bin/python3")
+    _own_server_of(tree, monkeypatch, client, "relayed for a teammate")
+
+    assert any(row.startswith("mcp:remote:") for row in _rows())
+    assert _notes()["relayed for a teammate"] != SOLO, "not written as the session"
+    assert "<aisquare-team>" in _prompt(runner, SOLO, work_dir)
+
+
 def test_a_session_that_mounts_the_server_without_the_hooks_is_a_team(
     runner: CliRunner, work_dir: Path, tree: Tree, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -115,16 +115,18 @@ manager's spawns, the Spawn dialog) runs the model and the effort you last chose
 its own: a `--model` or `--effort` in the spawn's arguments, then the role's settings
 (`[fleet.roles.<role>] extra_args`, its binding's `--arg`), then your last pick, and with
 none no flag, so Claude Code runs the account's own saved default. The pick is one per
-home, for every role and persona; a spawn that names one, and a `/model` inside any
-running fleet agent (read at its next turn end, its own session's alone), make it the
-pick, and a role's settings never do. A restart, a switch and a hand-over start what the
-agent was moved to since its launch, and change no pick. 0.9.0 passed the ladder's top
+home, for every role and persona, and only your choices write it: a spawn of yours that
+names one (asq, your shell, the captain on your word) and a `/model` inside any running
+fleet agent (read at its next turn end, its own session's alone). A spawn an agent makes
+and a role's settings never do. A restart, a switch and a hand-over keep what the agent
+was actually running, the account default included, and change no pick. 0.9.0 passed the ladder's top
 rung here, which started every manager on Fable at high effort over the default you saved
 with `/model` (fixed in 0.9.1). See [docs/fleet.md, The roles](fleet.md#the-roles).
 
 Sessions report their model back to the board, which flags any session
-running off its role's ladder (`⚠ off-ladder`), unless it runs the pick you
-made for the fleet (above). That signal is advisory: the
+running off its role's ladder (`⚠ off-ladder`), unless it runs a model you
+chose for it: the fleet's pick, its spawn's args or its role's settings
+(above). That signal is advisory: the
 model field is optional in Claude Code's hook payload and absent on some
 surfaces (MCP teammates have none), and an in-session `/model` switch is
 re-read only for a fleet agent, at its next turn end — so a missing chip means

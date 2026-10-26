@@ -3323,16 +3323,19 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
             live = [s for s in store.team_sessions(project.id) if s.ended_at is None]
         interference = harness.interfering_env()
         mismatches: list[str] = []
-        # The owner's pick runs on every role's fleet agents: no session on it is off (#16).
-        chosen = model_memory.remembered().model if live else None
         for session in live:
             # `base_role`: a numbered seat (`coder1`, the shape README documents
             # for a parallel crew) rides its role's ladder, so it is judged
             # against it. Keyed on the raw role, `ROLE_PROFILES.get` missed and
             # every seat was silently exempt from the board's only tiering signal.
-            complaint = harness.model_mismatch(
-                team_service.base_role(session.role), session.model, chosen=chosen
-            )
+            complaint = harness.model_mismatch(team_service.base_role(session.role), session.model)
+            if complaint:
+                # A model the owner chose for it is off no ladder (#16, review of #441).
+                complaint = harness.model_mismatch(
+                    team_service.base_role(session.role),
+                    session.model,
+                    chosen=model_memory.chosen_models(session),
+                )
             if complaint:
                 mismatches.append(f"{session.id[:8]} ({session.role}): {complaint}")
         problems: list[str] = []

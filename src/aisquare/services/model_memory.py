@@ -101,7 +101,7 @@ def started(
     (``model``, the payload's; ``effort``, the payload's ``effort.level``, else
     ``CLAUDE_EFFORT``). Kept for the row, once: the id an alias like ``opus`` resolved to,
     and the account's own default for an agent launched with no pick, which a replay
-    compares what it runs later with (:func:`running`). Only for the session the row is
+    compares what it runs later with (:func:`replay_from`). Only for the session the row is
     bound to (:func:`_own_row`). Raises on a store that cannot be read: the caller fails
     open."""
     with store_session() as store:
@@ -136,7 +136,7 @@ def _launched_record(agent: FleetAgent, store: ContextStore) -> Pick | None:
     )
 
 
-def running(agent: FleetAgent, session: TeamSession | None) -> Running | None:
+def replay_from(agent: FleetAgent, session: TeamSession | None) -> Running | None:
     """What a replay of ``agent`` starts from (``fleet._model_choice``): the model and
     effort its session runs now, its hooks' last reading, and what its launch ran.
     ``None`` with no session; fail-open: a store that cannot be read says nothing was
@@ -155,7 +155,7 @@ def observe(
     session_id: str, transcript_path: str | None, *, effort: str | None, agent_id: str | None
 ) -> Pick | None:
     """At a fleet agent's turn end: what it runs now, kept on its board session (a restart,
-    a switch and a fork start it: :func:`running`) and, when that is a model or effort
+    a switch and a fork start it: :func:`replay_from`) and, when that is a model or effort
     other than it ran before, as the pick: a ``/model``. Returns what changed, ``None`` for
     nothing.
 
@@ -171,8 +171,8 @@ def observe(
     very id is the same model (``harness.same_reading``). With no reading before, the
     launch's flag decides (``harness.ran_another``): nothing is a pick on the first reading
     of an agent launched with no pick, which can only be the account's default. An agent
-    launched on a mode alias (``opusplan``) runs two models by mode, and none of its replies
-    is a pick of a model; its effort still is.
+    launched on a mode alias (``opusplan``) runs two models by mode: a reply of either
+    (``harness.runs_under``) is no pick, one of another family is.
 
     Only the session the row is bound to speaks for it (:func:`_own_row`): a ``claude -p``
     run from the agent's shell inherits ``AISQUARE_FLEET_AGENT`` and is no ``/model`` of the
@@ -198,8 +198,10 @@ def observe(
         recorded = _launched_record(agent, store)
         first = recorded or Pick()
         was = Pick(session.model or first.model, session.effort or first.effort)
-        if harness.is_mode_alias(flags.model):
-            new_model = False
+        if harness.runs_under(flags.model, live_model) and (
+            was.model is None or harness.runs_under(flags.model, was.model)
+        ):
+            new_model = False  # a reply of the mode alias it was launched on (opusplan)
         elif was.model is not None:
             new_model = not harness.same_reading(live_model, was.model)
         else:
@@ -253,6 +255,28 @@ def _own_row(store: ContextStore, session_id: str, agent_id: str | None) -> Flee
         if named is not None and named.ended_at is None and named.session_id == session_id:
             return named
     return store.fleet_agent_for_session(session_id)
+
+
+def chosen_models(session: TeamSession) -> list[str]:
+    """The models the owner chose for ``session``'s agent, which the board's ``⚠ off-ladder``
+    chip stands down for (#16, review of #441, 6): the pick, the agent's own launch flags
+    (its spawn's args, its role's ``extra_args`` as recorded, or what a replay started) and
+    its role's settings (``[fleet.roles.<role>] extra_args``, a binding's ``--arg``).
+    Fail-open: what cannot be read chose nothing, and the chip says what the ladder says."""
+    chosen: list[str | None] = []
+    try:
+        with store_session() as store:
+            agent = store.fleet_agent_for_session(session.id)
+            chosen += [remembered(store=store).model, _launch_flags(agent).model if agent else None]
+        from aisquare.core.config import load_config  # config imports harness back
+
+        roles = load_config().fleet.roles
+        settings = roles.get(session.role) or roles.get(harness.base_role(session.role))
+        own = settings.extra_args if settings is not None else []
+        chosen.append(harness.model_arg([*own, *harness.binding_args(session.role)]))
+    except Exception:  # an advisory chip: what cannot be read chose nothing
+        pass
+    return [model for model in chosen if model is not None]
 
 
 def _launch_flags(agent: FleetAgent) -> Pick:

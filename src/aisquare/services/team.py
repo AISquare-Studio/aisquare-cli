@@ -3792,9 +3792,6 @@ def _render_board(
         labels = labels() if accounts > 1 else None
     if live:
         lines.append("sessions:")
-        # The owner's pick, which a fleet spawn runs whatever the role: read once, and only
-        # for a session off its role's ladder (#16, review of #441).
-        chosen: list[str | None] = []
         for session in live:
             stale = now - session.last_seen_at > _STALE_AFTER
             parts = [f"  - {short_id(session.id)} {session.role}"]
@@ -3810,10 +3807,13 @@ def _render_board(
                 # model outside the coder ladder is flagged like `coder` is.
                 mismatch = harness.model_mismatch(base_role(session.role), session.model)
                 if mismatch:
-                    if not chosen:
-                        chosen.append(model_memory.remembered().model)
+                    # A model the owner chose for it (the pick, its spawn's args, its role's
+                    # settings) is on no ladder and off none: asked only for a session off
+                    # its role's ladder (#16, review of #441).
                     mismatch = harness.model_mismatch(
-                        base_role(session.role), session.model, chosen=chosen[0]
+                        base_role(session.role),
+                        session.model,
+                        chosen=model_memory.chosen_models(session),
                     )
                 if mismatch:
                     parts.append("⚠ off-ladder")

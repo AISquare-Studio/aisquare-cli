@@ -219,24 +219,32 @@ replaces the role's, the binding's included, so Claude Code is never given two. 
 one (`--model ""`) is refused: leave it out instead, and clear the dialog's field to
 forget your pick.
 
-**Your last pick is one per home**, for every role and persona alike. It is written by a
-spawn that names one itself (a cleared dialog field forgets it) and by a `/model` inside
-any running fleet agent, which its next turn end reads: the model off its transcript's
-last reply, the effort off the hook's `effort.level`, else its `CLAUDE_EFFORT`. A reading
+**Your last pick is one per home**, for every role and persona alike. Only your own choices
+write it: a spawn of yours that names one (from asq's dialog, your own shell, or the
+captain acting on your words; a cleared dialog field forgets it, unless the field showed
+the role's own pin) and a `/model` inside any running fleet agent, which its next turn end
+reads: the model off its transcript's last reply, the effort off the hook payload's
+`effort.level`, else its `CLAUDE_EFFORT`. A spawn an agent makes (`fleet spawn … --as
+<session>`, or from a fleet agent's own shell, such as a manager's) runs its flags for that
+one agent and leaves your pick alone. A reading
 is a `/model` when it names another id than the session's last one (its start's, or the
 previous turn's); an alias is only the id it resolved to, so `/model claude-opus-4-5` in
 an agent launched with `--model opus` (which runs `claude-opus-5-5`) is one. An agent
-launched on `opusplan` runs opus and sonnet by mode, so its replies say nothing of a pick.
+launched on `opusplan` runs opus and sonnet by mode, so a reply of either says nothing of
+a pick, and one of another family does.
 Only the agent's own session counts: a `claude -p` run from its shell is not the agent. A
 role's settings are that role's alone and never write the pick. A restart, a `fleet
-switch`, a hand-over and a fork start the model and effort the agent was moved to since
-its launch, over the recorded flag and the binding's; an agent you never moved comes back
-as it was launched, so one launched with no pick runs the default of whatever account it
-moves to. None of them changes your pick. Any model or effort Claude Code takes is kept
+switch`, a hand-over and a fork keep the model and effort the agent was actually running,
+the account default it started on included, on whatever account it moves to: that wins
+over the recorded flag and over a binding's pin too (`aisquare launch` drops the
+binding's flag beside it), and the recorded flag stays only where it already runs that
+model (an alias and the id it resolved to, `opusplan` and its two). None of them changes
+your pick. Any model or effort Claude Code takes is kept
 as written (`fable`, `claude-opus-5-5`, `opus[1m]`, `opusplan`; `low` to `max`,
 `ultracode`); another binary gets neither flag. `fleet ls --json` shows the flags a spawn
-added in each agent's `launch_spec` (`model`, `effort`) and its `command`. Since your pick
-runs on every role, the board's `⚠ off-ladder` chip stands down for a session on it.
+added in each agent's `launch_spec` (`model`, `effort`) and its `command`. The board's `⚠
+off-ladder` chip stands down for a session on a model you chose for it: your pick, its
+spawn's args or its role's settings.
 
 **One tester per task.** The manager spawns a tester for each task that reaches review:
 `fleet spawn tester --task <id>` (a ui-tester for a task titled "UI: …"). Its cycle takes

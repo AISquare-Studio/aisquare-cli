@@ -2309,17 +2309,16 @@ def test_an_empty_model_or_effort_in_a_spawns_args_is_refused(
     assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
 
 
-def test_an_agent_launched_with_no_pick_comes_back_with_none(
+def test_a_restart_and_a_switch_keep_what_an_agent_with_no_pick_ran(
     tmux: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Review of #441 (3): a restart or a switch of an agent nobody chose a model for pinned
-    the account default it read (``--model claude-opus-5-5 --effort high``), and a switch
-    carried it to an account with another default. Unchanged since its start, it comes
-    back as it was launched: no flag. And neither touches the pick (3386)."""
+    """Manager decision (seq 3428, a): a restart, a switch, a hand-over and a fork keep what
+    the agent was actually running, the account default it started on included, on any
+    account it moves to; and none of them writes the pick (3386)."""
     _two_slots_with_usage(monkeypatch, work=10, personal=10)
     agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
     transcript = _on_disk(agent, tmp_path)
@@ -2329,9 +2328,9 @@ def test_an_agent_launched_with_no_pick_comes_back_with_none(
 
     tmux.die(agent.pane_id, 0)
     restarted = fleet_service.restart(project, agent.label).started
-    assert _model_flags(_command(tmux)) == []
+    assert _model_flags(_command(tmux)) == ["--model", "claude-opus-5-5", "--effort", "high"]
     fleet_service.switch(project, restarted.label, to="3")
-    assert _model_flags(_command(tmux)) == []
+    assert _model_flags(_command(tmux)) == ["--model", "claude-opus-5-5", "--effort", "high"]
     assert model_memory.remembered() == model_memory.Pick()
 
 
@@ -2342,18 +2341,59 @@ def test_a_mode_alias_is_kept_by_its_turns_and_its_restart(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Review of #441 (2): ``opusplan`` runs opus in plan mode and sonnet otherwise, so an
-    ordinary sonnet reply is no ``/model``. It became the pick, and the restart dropped
-    opusplan for sonnet."""
+    """Review of #441 (2), manager decision (seq 3428, c): ``opusplan`` runs opus in plan
+    mode and sonnet otherwise, so a reply of either is no ``/model``; one of another family
+    is. The sonnet reply became the pick, and the restart dropped opusplan for sonnet."""
     agent = _coder(project, agent_args=["--model", "opusplan"])
     transcript = _on_disk(agent, tmp_path)
     _started(agent, "claude-opus-5-5", None)
     _captured(monkeypatch, agent, transcript, "claude-sonnet-5-5", "high")
+    _captured(monkeypatch, agent, transcript, "claude-opus-5-5", "high")
     assert model_memory.remembered().model == "opusplan"
 
     tmux.die(agent.pane_id, 0)
-    fleet_service.restart(project, agent.label)
+    restarted = fleet_service.restart(project, agent.label).started
     assert _flag(_command(tmux), "--model") == "opusplan"
+    _captured(monkeypatch, restarted, transcript, "claude-fable-5-1", "high")
+    assert model_memory.remembered().model == "claude-fable-5-1", "a /model off opusplan is one"
+
+
+def test_a_spawn_an_agent_makes_never_writes_the_owners_pick(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Manager decision (seq 3428, b): only the owner's choices write the pick. A spawn an
+    agent makes (``fleet spawn … --as <session>``, or one run from a fleet agent's own
+    shell) runs its flags for that one agent and leaves the pick; the captain acting on the
+    owner's words writes it, as the dialog and a shell of the owner's do."""
+    _settings(monkeypatch, max_agents_per_project=10)
+    model_memory.remember(model="opus", effort="xhigh")
+    _coder(project, agent_args=["--model", "haiku"], spawned_by="ses_manager_1")
+    assert _flag(_command(tmux), "--model") == "haiku"
+    monkeypatch.setenv(FLEET_AGENT_ENV_VAR, "agt_somemanager")
+    _coder(project, agent_args=["--model", "sonnet", "--effort", "low"])
+    assert _model_flags(_command(tmux)) == ["--model", "sonnet", "--effort", "low"]
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+
+    _coder(project, agent_args=["--model", "fable"], spawned_by=fleet_service.CAPTAIN_ROLE)
+    assert model_memory.remembered() == model_memory.Pick("fable", "xhigh")
+    monkeypatch.delenv(FLEET_AGENT_ENV_VAR)
+    _coder(project, effort="max")  # the dialog's field, from the owner's asq
+    assert model_memory.remembered() == model_memory.Pick("fable", "max")
+
+
+def test_a_cleared_field_on_a_role_its_settings_pin_leaves_the_pick(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #441 (8), seq 3427: the field showed the role's pin, not the pick, so
+    clearing it says nothing of the pick."""
+    _settings(
+        monkeypatch,
+        roles={"reviewer": FleetRoleSettings(worktree=False, extra_args=["--model", "haiku"])},
+    )
+    model_memory.remember(model="opus", effort="xhigh")
+    fleet_service.spawn(project, "reviewer", model="")
+    assert "--model" not in _command(tmux)
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
 
 
 def test_a_fork_starts_what_its_source_runs_now(

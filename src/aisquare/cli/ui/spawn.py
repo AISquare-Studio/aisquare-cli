@@ -44,7 +44,8 @@ shows its pin instead, and an untouched field follows the role between the two; 
 the owner typed stays. Untouched, each is sent as ``None`` and the service decides as for
 ``fleet spawn``: the Extra agent args, the role's settings, then the pick. A changed one is
 this spawn's pick and the next one, and a cleared one (``""``) runs the account's default
-and forgets the pick.
+and forgets the pick, unless it showed the role's own pin (that clears the pin, for this
+spawn). The pick is the owner's: the dialog is asq's, run from the owner's shell.
 
 **Presets** — ``SpawnDialog(project, persona=, role=, binary=, account=)`` — are
 applied at compose, never by poking widgets after mount: the persona-first flow
@@ -264,10 +265,10 @@ def read_launch_default(
     from the role's configured args and then the form's ``agent_args`` (a ``--model opus``
     typed into *Extra agent args*, or the Model field's, reads that family's week; review of
     #424). Neither naming one, the agent runs its account's default: no family."""
-    # As the spawn decides it (`fleet._model_choice`): the form's model replaces the role's,
-    # whose settings come before the account's default (review of #441, 4).
-    pin = fleet_service.role_pin(role)
-    family = harness.launch_family(agent_args) or harness.model_family(pin.model)
+    # As the spawn decides it (`fleet._model_choice`, review of #441, 4): the form's model
+    # (typed, or the Model field, which shows the pick when the role pins none) over the
+    # role's settings.
+    family = harness.launch_family(agent_args, pinned=fleet_service.role_pin(role).model)
     return accounts_service.launch_default(role, project=project, family=family)
 
 

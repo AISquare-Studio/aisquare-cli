@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import transcripts
+from aisquare.core.config import FleetRoleSettings, load_config, save_config
 from aisquare.core.orchestrator import FLEET_AGENT_ENV_VAR, team_project
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, LaunchSpec, ProjectInfo, TeamSession
@@ -326,6 +327,40 @@ def test_a_nested_claude_in_a_fleet_agents_shell_never_writes_the_pick(
     with store_session() as store:
         row = store.get_fleet_agent(AGENT)
     assert row is not None and row.session_id == SESSION, "the row stayed its own session's"
+
+
+def test_a_model_the_owner_chose_for_an_agent_is_never_off_its_ladder(
+    work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #441 (6), seq 3427: the chip stands down for the pick, the agent's own
+    spawn args and its role's settings: every one of them is the owner's choice."""
+    from aisquare.services import team as team_service
+
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    monkeypatch.setenv(FLEET_AGENT_ENV_VAR, AGENT)
+    launched = LaunchSpec(binary="claude", extra_args=["--model", "haiku"])
+    _manager(work, role="coder", model=None, effort=None, spec=launched)
+    board = team_service.hook_session_start(SESSION, work.root, "startup", model="claude-haiku-4-5")
+    assert "[claude-haiku-4-5]" in board and "off-ladder" not in board, "its spawn's args"
+
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(extra_args=["--model", "fable"])
+    save_config(config)
+    board = team_service.hook_session_start(SESSION, work.root, "resume", model="claude-fable-5-1")
+    assert "off-ladder" not in board, "its role's settings"
+    board = team_service.hook_session_start(SESSION, work.root, "resume", model="claude-oops-1")
+    assert "⚠ off-ladder" in board, "nobody chose that one"
+
+
+def test_the_family_a_launch_reads_has_the_spawns_precedence() -> None:
+    """Review of #441 (4), seq 3428 (d): typed (or the dialog's field) over the role's
+    settings over the pick."""
+    from aisquare.core import harness
+
+    assert harness.launch_family(["--model", "opus"], pinned="haiku", picked="sonnet") == "opus"
+    assert harness.launch_family([], pinned="haiku", picked="sonnet") == "haiku"
+    assert harness.launch_family([], picked="sonnet") == "sonnet"
+    assert harness.launch_family([]) is None
 
 
 @pytest.mark.parametrize(

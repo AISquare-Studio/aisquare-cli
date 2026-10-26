@@ -124,12 +124,16 @@ def without_flag(args: Sequence[str], flag: str) -> list[str]:
     return kept
 
 
-def launch_family(args: Sequence[str] = ()) -> str | None:
-    """The family a launch will run, for the account pick's per-family weeks (#277): the
-    ``--model`` its ``args`` name. ``None`` with none: the agent runs its account's own
-    default, which only Claude Code knows, and the pick reads no family's week. (Not the
-    role's ladder, which a fleet launch no longer runs: ``fleet._model_choice``.)"""
-    return model_family(model_arg(args))
+def launch_family(
+    args: Sequence[str] = (), *, pinned: str | None = None, picked: str | None = None
+) -> str | None:
+    """The family a launch will run, for the account pick's per-family weeks (#277), by the
+    precedence a fleet spawn runs (``fleet._model_choice``): the ``--model`` its ``args``
+    name (typed, or the Spawn dialog's field), else the one its role's settings pin
+    (``pinned``), else the owner's last pick (``picked``). ``None`` with none: the agent runs
+    its account's own default, which only Claude Code knows, and the pick reads no family's
+    week. Never the role's ladder, which a fleet launch no longer runs."""
+    return model_family(model_arg(args) or pinned or picked)
 
 
 #: A context-window suffix Claude Code accepts on a model (``opus[1m]``); a reply names the
@@ -145,9 +149,10 @@ def same_reading(one: str, other: str) -> bool:
     return first == second
 
 
-#: Model aliases that run more than one model, by mode: ``opusplan`` is opus in plan mode
-#: and sonnet otherwise, so no one reply names it, and a reply of either is no ``/model``.
-MODE_ALIASES: frozenset[str] = frozenset({"opusplan"})
+#: Model aliases that run more than one model, by mode, with the families each runs:
+#: ``opusplan`` is opus in plan mode and sonnet otherwise, so no one reply names it, and a
+#: reply of either is no ``/model`` (#16, seq 3428 c).
+MODE_ALIASES: dict[str, frozenset[str]] = {"opusplan": frozenset({"opus", "sonnet"})}
 
 #: The alias for the account's own default model: as good as no ``--model`` at all.
 DEFAULT_MODEL_ALIAS = "default"
@@ -158,19 +163,31 @@ def is_mode_alias(model: str | None) -> bool:
     return model is not None and _MODEL_SUFFIX.sub("", model.strip().lower()) in MODE_ALIASES
 
 
+def runs_under(alias: str | None, reading: str) -> bool:
+    """Whether ``reading`` is a model the mode alias ``alias`` runs (``opusplan``: an opus or
+    a sonnet id); never for anything that is no mode alias."""
+    if alias is None:
+        return False
+    families = MODE_ALIASES.get(_MODEL_SUFFIX.sub("", alias.strip().lower()))
+    return families is not None and model_family(reading) in families
+
+
 def ran_another(reading: str, flag: str | None) -> bool:
     """Whether ``reading``, the model a session reported with nothing read before it, is
     another model than the launch's ``--model`` ``flag`` started.
 
     Never for no flag (or ``default``): what it ran is the account's own default, which only
-    Claude Code knows. Never for a mode alias (:func:`is_mode_alias`). For a family's alias
+    Claude Code knows. For a mode alias, a reading of a family it does not run
+    (:func:`runs_under`). For a family's alias
     (``opus``), only a reading of another family: the id the alias resolved to is not known
     before the session says, so a same-family id is taken for it (the session's start
     reports it, and a ``/model`` after that is read against that report). For an id, any
     other id (:func:`same_reading`).
     """
-    if flag is None or flag.strip().lower() == DEFAULT_MODEL_ALIAS or is_mode_alias(flag):
+    if flag is None or flag.strip().lower() == DEFAULT_MODEL_ALIAS:
         return False
+    if is_mode_alias(flag):
+        return not runs_under(flag, reading)
     bare = _MODEL_SUFFIX.sub("", flag.strip().lower())
     if bare in MODEL_FAMILIES:
         return model_family(reading) != bare
@@ -931,13 +948,14 @@ def resolve_model(
     return None  # unreachable: the last rung always returns
 
 
-def model_mismatch(role: str, model: str | None, *, chosen: str | None = None) -> str | None:
+def model_mismatch(role: str, model: str | None, *, chosen: Sequence[str] = ()) -> str | None:
     """A warning when a session's captured model does not fit its role's tiering.
 
     ``None`` when there is nothing to say: untiered role, no capture, a
-    model that belongs to one of the ladder's families, or the model the owner
-    chose (``chosen``: the pick a fleet spawn runs whatever the role,
-    ``services.model_memory``; an alias of it is any id of its family here).
+    model that belongs to one of the ladder's families, or one the owner chose
+    (``chosen``: the pick a fleet spawn runs whatever the role, the agent's own
+    spawn args, its role's settings, ``services.model_memory.chosen_models``;
+    an alias there is any id of its family, a mode alias any it runs).
 
     Deliberately env-blind: this judges *other* sessions (from the shared
     store, in other processes), so reading this process's
@@ -951,9 +969,11 @@ def model_mismatch(role: str, model: str | None, *, chosen: str | None = None) -
     profile = ROLE_PROFILES.get(base_role(role))
     if profile is None:
         return None
-    if chosen is not None and (
-        same_reading(model, chosen)
-        or model_family(model) == _MODEL_SUFFIX.sub("", chosen.strip().lower())
+    if any(
+        same_reading(model, one)
+        or model_family(model) == _MODEL_SUFFIX.sub("", one.strip().lower())
+        or runs_under(one, model)
+        for one in chosen
     ):
         return None
     families = [MODEL_FAMILIES[alias] for alias in profile.ladder if alias in MODEL_FAMILIES]

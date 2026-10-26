@@ -1222,6 +1222,43 @@ def test_its_accounts_share_what_it_declares_through_the_code_every_agent_shares
         unregister(adapter.id)
 
 
+def test_accounts_share_words_each_line_by_the_agent_it_is_about(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """``aisquare accounts share`` printed every link as "linked to the plain claude's" and every
+    merged part as ``memory``: a line is its slot's agent's, with its plain home's name
+    (``AgentAccounts.plain_label``) and its own merged part's (``scratch``)."""
+    gemini, fake = GeminiShapedAdapter(), FakeAgentAdapter()
+    for adapter in (gemini, fake):
+        monkeypatch.delenv(adapter.home_env, raising=False)
+        register(adapter)
+    try:
+        (_home(gemini) / "skills").mkdir()
+        link = _signed_in_slot(gemini)
+        merged = accounts_core.create_account(fake.id)
+        notes = merged.config_dir / "projects" / "demo" / "notes"
+        notes.mkdir(parents=True)
+        (notes / "a.md").write_text("one\n", encoding="utf-8")
+        again = accounts_core.create_account(fake.id)
+        (again.config_dir / "projects" / "demo" / "notes").mkdir(parents=True)
+        (again.config_dir / "projects" / "demo" / "notes" / "a.md").write_text(
+            "two\n", encoding="utf-8"
+        )
+
+        result = runner.invoke(app, ["accounts", "share", "--enable", "skills,scratch"])
+
+        assert result.exit_code == 0, result.output
+        lines = [line.strip() for line in result.output.splitlines()]
+        [linked] = [line for line in lines if f"account {link.slot} skills:" in line]
+        assert linked == f"· account {link.slot} skills: linked to the plain gemini's", linked
+        [merge] = [line for line in lines if " scratch: " in line]
+        assert merge.startswith(f"· account {again.slot} scratch: merged (demo: a.md differed")
+        assert "memory" not in result.output
+    finally:
+        unregister(fake.id)
+        unregister(gemini.id)
+
+
 def test_a_merged_part_is_merged_once_and_handed_to_a_launch_by_its_agents_own_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1249,7 +1286,9 @@ def test_a_merged_part_is_merged_once_and_handed_to_a_launch_by_its_agents_own_s
         assert (root / "a.md").read_text(encoding="utf-8") == "from one\n"
         assert (root / f"a.slot{second.slot}.md").read_text(encoding="utf-8") == "from two\n"
         assert (root / f"{first.slot}.md").exists() and (root / f"{second.slot}.md").exists()
-        assert [c.outcome for c in changes] == ["merged"]
+        assert [(c.part, c.outcome) for c in changes] == [("scratch", "merged")], (
+            "the part is the agent's own, not Claude Code's `memory`"
+        )
         assert service.enable_share(["scratch"]) == [], "only the first enable merges"
 
         where = Path.cwd().name

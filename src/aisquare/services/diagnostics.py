@@ -166,6 +166,7 @@ def doctor(
             *_planned_agent_checks(),
             *_claude_accounts_checks(),
             *_other_accounts_checks(),
+            *_optional(_undeclared_share_check()),
             _check_tmux(),
             _check_gh(),
             # Never warns, so it moves no actionable row out of the sidebar's first three.
@@ -1624,7 +1625,7 @@ def _accounts_sharing_check(agent: str, managed: Sequence[ClaudeAccount]) -> Doc
                     problems.append(f"slot {account.slot}'s {entry.name} is its own")
                 elif state == "none":
                     problems.append(f"slot {account.slot} has no {entry.name} linked yet")
-        merged = next((part.name for part in kind.share_parts if part.how == "merge"), None)
+        merged = claude_accounts_service.merged_part(agent)
         memory = (
             f"; {merged} in {claude_accounts_service.shared_memory_root(agent)}"
             if merged in on
@@ -1642,6 +1643,28 @@ def _accounts_sharing_check(agent: str, managed: Sequence[ClaudeAccount]) -> Doc
         return _ok(name, detail)
     except Exception as exc:  # diagnostics must never crash
         return _ok(name, f"not evaluated ({exc})")
+
+
+def _undeclared_share_check() -> DoctorCheck | None:
+    """``accounts sharing``: a name in ``[accounts] share`` that no agent declares
+    (``AgentAccounts.share_parts``), a typo (``skils``) the per-agent rows cannot see, since
+    each reads only the names its own agent has. ``None`` when every name is some agent's.
+    Read-only."""
+    try:
+        knobs = claude_accounts_service.accounts_settings()
+        known = claude_accounts_service.share_part_names()
+        unknown = [name for name in knobs.share if name not in known]
+        if not unknown:
+            return None
+        return _warn(
+            "accounts sharing",
+            f"[accounts] share names {', '.join(unknown)}, which no agent here shares "
+            f"(parts are {', '.join(known)})",
+            "fix the name under [accounts] share in config.toml: "
+            "aisquare config set accounts.share <names>",
+        )
+    except Exception as exc:  # diagnostics must never crash
+        return _ok("accounts sharing", f"not evaluated ({exc})")
 
 
 def _arranges_an_account() -> bool:

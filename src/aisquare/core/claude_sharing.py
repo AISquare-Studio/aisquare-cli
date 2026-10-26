@@ -536,18 +536,29 @@ _platform: Callable[[], str] = lambda: os.name  # noqa: E731
 
 
 def _part(part: SharePart | str) -> SharePart:
-    """``part`` as the adapter declares it: a name is Claude Code's (``AgentAccounts.
-    share_parts``, ``agent_adapters.claude_shared``), as the operator writes it."""
-    if not isinstance(part, str):
-        return part
-    from aisquare.core.agent_adapters import get_adapter
-    from aisquare.core.claude_accounts import AGENT
+    """``part`` as the adapter declares it, and only if it is one that is linked: a name is
+    Claude Code's (``AgentAccounts.share_parts``, ``agent_adapters.claude_shared``), as the
+    operator writes it.
 
-    accounts = get_adapter(AGENT).accounts
-    found = next((p for p in (accounts.share_parts if accounts else ()) if p.name == part), None)
-    if found is None:
-        raise SharingError(f"Claude Code shares no part called {part}")
-    return found
+    A merged part (``how="merge"``, an entry of ``""``) is no entry of any home: let through
+    to :func:`link_part`, it would name the config dir itself and rename the slot's whole
+    home aside. So every function below refuses it here, whoever forgot to ask."""
+    if isinstance(part, str):
+        from aisquare.core.agent_adapters import get_adapter
+        from aisquare.core.claude_accounts import AGENT
+
+        accounts = get_adapter(AGENT).accounts
+        found = next(
+            (p for p in (accounts.share_parts if accounts else ()) if p.name == part), None
+        )
+        if found is None:
+            raise SharingError(f"Claude Code shares no part called {part}")
+        part = found
+    if part.how != "link":
+        raise SharingError(f"{part.name} is {part.how}d, not linked: it has no entry to link")
+    if not part.entry:
+        raise SharingError(f"{part.name} names no entry in the agent's home to link")
+    return part
 
 
 def part_entry(config_dir: Path, part: SharePart | str) -> Path:

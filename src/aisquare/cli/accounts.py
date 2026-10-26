@@ -1188,7 +1188,7 @@ def _parts(value: str | None, flag: str) -> list[str]:
 
 
 _PART_WORDS = {
-    "linked": "linked to the plain claude's",
+    "linked": "linked to the {plain}'s",
     "already": "already shared",
     "unlinked": "unlinked",
     "restored": "its own restored",
@@ -1202,7 +1202,64 @@ _PART_WORDS = {
 }
 
 
-@app.command("share")
+def _part_word(change: accounts_service.PartChange) -> str:
+    """What ``change`` did, in words; a link is to the plain home of the account's own agent."""
+    plain = core.kind(change.account.agent).plain_label
+    return _PART_WORDS[change.outcome].format(plain=plain)
+
+
+def _share_help() -> str:
+    """The ``share`` command's help, from what each agent's adapter declares
+    (``AgentAccounts.share_parts``): its parts, the merged one's directory and which are
+    experimental."""
+    agents = core.account_agents()
+    declared = [
+        f"{core.agent_label(agent)}: {', '.join(part.name for part in parts)}"
+        for agent in agents
+        if (parts := core.kind(agent).share_parts)
+    ]
+    merged = [
+        (part.name, memory.root_name)
+        for agent in agents
+        for part in core.kind(agent).share_parts
+        if part.how == "merge" and (memory := core.kind(agent).memory) is not None
+    ]
+    experimental = list(
+        dict.fromkeys(
+            part.name
+            for agent in agents
+            for part in core.kind(agent).share_parts
+            if part.experimental
+        )
+    )
+    paragraphs = [
+        "What every account of an agent has in common, by the parts its agent declares.",
+        ". ".join(declared) + ".",
+    ]
+    for name, root in merged:
+        paragraphs.append(
+            f"`{name}` gives every launch one auto-memory directory per project, under "
+            f"~/.aisquare/{root}/memory (merged from every account the first time)."
+        )
+    paragraphs.append(
+        "The others make each managed account's entry a link to the plain home's, its own "
+        "kept beside it as <entry>.own-<stamp> until --disable puts it back. A part an agent "
+        "does not declare is skipped for it; one that is on applies to every agent that "
+        "declares it, and --disable <part> is one switch for all of them."
+    )
+    if experimental:
+        names = ", ".join(f"`{name}`" for name in experimental)
+        paragraphs.append(
+            f"{names} {'is' if len(experimental) == 1 else 'are'} experimental: what it links "
+            "can be one account's alone (a login, a plugin store)."
+        )
+    paragraphs.append(
+        "Transcripts are never shared: a session moved to another account resumes by its path."
+    )
+    return "\n\n".join(paragraphs)
+
+
+@app.command("share", help=_share_help())
 def share(
     enable: Annotated[
         str | None,
@@ -1222,17 +1279,6 @@ def share(
         bool, typer.Option("--status", help="What every account holds; change nothing.")
     ] = False,
 ) -> None:
-    """What every account of an agent has in common, by the parts its agent declares.
-
-    Claude Code: memory, skills, agents, commands, claude_md and plugins. Codex: agents_md
-    and skills. `memory` gives every launch one auto-memory directory per project, under
-    ~/.aisquare/claude-shared/memory (merged from every account the first time). The
-    others make each managed account's entry a link to the plain home's, its own kept
-    beside it as <entry>.own-<stamp> until --disable puts it back. A part an agent does not
-    declare is skipped for it. `plugins` is experimental: MCP logins and the plugin store
-    are per account. Transcripts are never shared: a session moved to another account
-    resumes by its path.
-    """
     on = _parts(enable, "--enable")
     off = _parts(disable, "--disable")
     if set(on) & set(off):
@@ -1265,7 +1311,7 @@ def share(
         console = stdout_console()
         console.print(f"shared: {', '.join(knobs.share) or 'nothing'}", markup=False)
         for change in [*changes, *held]:
-            line = f"  · {core.label(change.account)} {change.part}: {_PART_WORDS[change.outcome]}"
+            line = f"  · {core.label(change.account)} {change.part}: {_part_word(change)}"
             if change.detail:
                 line += f" ({change.detail})"
             style = (

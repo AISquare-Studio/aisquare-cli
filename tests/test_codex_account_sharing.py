@@ -125,8 +125,8 @@ def test_enable_links_every_codex_slot_keeps_its_own_and_disable_restores_it_exa
         not (third.config_dir / "AGENTS.md").exists() and not (third.config_dir / "skills").exists()
     )
     assert load_config().accounts.share == []
-    assert {account.slot: _tree(account.config_dir) for account in (second, third)}.keys() == (
-        before.keys()
+    assert {account.slot: _tree(account.config_dir) for account in (second, third)} == before, (
+        "every file and folder of each slot is back, byte for byte"
     )
     again_off = service.disable_share(["skills"])
     assert [(c.account.slot, c.outcome) for c in again_off] == [

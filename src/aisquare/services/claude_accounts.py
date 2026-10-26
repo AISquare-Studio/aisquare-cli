@@ -3983,6 +3983,12 @@ def plain_entry_dir(agent: str) -> Path:
     return core.kind(agent).config_dir(core.default_account(agent=agent).config_dir)
 
 
+def merged_part(agent: str) -> str | None:
+    """The name of the part ``agent``'s accounts share by merging (Claude Code's ``memory``,
+    the fake agent's ``scratch``), or ``None`` for an agent that shares none that way."""
+    return next((p.name for p in core.kind(agent).share_parts if p.how == "merge"), None)
+
+
 def _memory_agent() -> str | None:
     """The agent whose accounts share a merged part, if any (one: Claude Code's)."""
     return next((a for a in core.account_agents() if core.kind(a).memory is not None), None)
@@ -4009,8 +4015,7 @@ def shared_memory_directory(agent: str, cwd: Path) -> Path | None:
         memory = core.kind(agent).memory if agent in core.account_agents() else None
         if memory is None:
             return None
-        merged = next(p.name for p in core.kind(agent).share_parts if p.how == "merge")
-        if merged not in accounts_settings().share:
+        if merged_part(agent) not in accounts_settings().share:
             return None
         return shared_memory_root(agent) / memory.key(cwd)
     except Exception:  # an unreadable config shares nothing
@@ -4119,9 +4124,9 @@ def _link_part(
     if found is None:
         return PartChange(account, name, "refused", f"{core.label(account)} shares no {name}")
     here = entry_dir(account)
-    if sharing.part_state(here, found, source) == "shared":
-        return PartChange(account, name, "already")
     try:
+        if sharing.part_state(here, found, source) == "shared":
+            return PartChange(account, name, "already")
         kept = sharing.link_part(here, found, source, now=now)
     except sharing.SharingError as exc:
         return PartChange(account, name, "refused", str(exc))
@@ -4133,7 +4138,8 @@ def _link_part(
 def _merge_memory(agent: str) -> list[PartChange]:
     """Every account's per-project memory into the shared root, once (:func:`enable_share`)."""
     memory = core.kind(agent).memory
-    if memory is None:
+    merged = merged_part(agent)
+    if memory is None or merged is None:
         return []
     root = shared_memory_root(agent)
     changes: list[PartChange] = []
@@ -4147,7 +4153,7 @@ def _merge_memory(agent: str) -> list[PartChange]:
         ]
         by_label = {f"slot{account.slot}": account for account in accounts}
         for label, note in sharing.merge_memory(sources, root / key):
-            changes.append(PartChange(by_label[label], "memory", "merged", f"{key}: {note}"))
+            changes.append(PartChange(by_label[label], merged, "merged", f"{key}: {note}"))
     return changes
 
 

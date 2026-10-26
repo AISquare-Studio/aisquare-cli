@@ -77,10 +77,19 @@ adapter.**
   CLAUDE.md, plugins). Codex's are `agents_md` and `skills`, each linked into a managed
   Codex slot from the plain `~/.codex` with the slot's own kept beside it (measured on
   0.164.0 and 0.162.1: both are read through a link). Codex has no `prompts` part
-  (neither release reads that folder) and no `memory`. `[accounts] share` is a list of
-  part names (an agent that does not declare one ignores it), the doctor's row is one per
-  agent (`claude-accounts sharing` as before, `codex-accounts sharing`), and a new agent
-  declares its parts in its own adapter.
+  (neither release reads that folder) and no `memory`. `[accounts] share` is one list of
+  part names for every agent: an agent that does not declare a name ignores it, and **a
+  part already on applies to every agent that declares it**, so a 0.9.0 config with
+  `skills` on also links every Codex slot's `skills/` (its own kept beside it) at the
+  slot's next launch, with a launch note; `aisquare accounts share --disable <part>` is
+  one switch for all of them. No Codex slot shipped before this release. The doctor's row
+  is one per agent (`claude-accounts sharing` as before, `codex-accounts sharing`), a name
+  in the list that no agent declares (`skils`) is a warning of its own (`accounts
+  sharing`), `accounts share` words each line by its slot's own agent (a Codex slot's
+  link is "linked to the plain codex's") and its help is read off the adapters, and only
+  a linked part can be linked: a merged one reaching the linking code is refused, never
+  a slot's whole config dir renamed aside. A new agent declares its parts in its own
+  adapter.
 - [Adding a terminal agent](docs/coding-agents.md#adding-a-terminal-agent):
   one adapter file and one registration line, held to a conformance suite
   that a synthetic third agent passes. A new agent's adapter touches nine files

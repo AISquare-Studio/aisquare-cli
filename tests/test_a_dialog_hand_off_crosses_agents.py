@@ -12,6 +12,7 @@ agents; The DONE note of the task lists the mutation each pin kills.
 
 from __future__ import annotations
 
+import json
 import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -327,3 +328,42 @@ def test_a_fork_onto_the_agent_it_already_runs_on_is_a_fork_of_its_own_session(
     assert ask["spec"] is not None and ask["agent"] == "claude-code"
     assert not any(note.startswith("hand-off brief: ") for note in receipt.notes)
     assert receipt.started.agent.agent == "claude-code"
+
+
+def test_a_key_the_human_pasted_reaches_neither_the_first_message_nor_the_brief_file(
+    tmux: FakeTmux,  # noqa: F811 - pytest resolves fixtures by NAME
+    codex_on_path: Path,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The conversation goes to another agent's vendor, so what is typed into it is scrubbed
+    first (the owner's decision on r22 f4): a key the human pasted into the source's session is
+    in the transcript, and in neither the new agent's first message nor the file."""
+    key = "sk-ant-api03-" + "Zq9xW3mK" * 6
+    leg = _spans(monkeypatch, tmp_path, project, tmux, "claude-code")
+    leg.transcript.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "uuid": "u9",
+                "timestamp": "2026-10-19T18:41:00.000Z",
+                "message": {"role": "user", "content": f"it fails: ANTHROPIC_API_KEY={key}"},
+            }
+        )
+        + "\n"
+        + leg.transcript.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    receipt = fleet_service.hand_off(
+        project, leg.agent.label, mode="take_over", fresh=True, to_agent="codex"
+    )
+
+    [prompt] = _first_lines(tmux, receipt.started.agent.pane_id)
+    [note] = [n for n in receipt.notes if n.startswith("hand-off brief: ")]
+    file_text = Path(note.removeprefix("hand-off brief: ")).read_text(encoding="utf-8")
+    assert "it fails: ANTHROPIC_API_KEY=[redacted]" in prompt
+    assert "it fails: ANTHROPIC_API_KEY=[redacted]" in file_text
+    assert key not in prompt and key not in file_text

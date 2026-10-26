@@ -21,11 +21,13 @@ import pytest
 from aisquare.core import claude_accounts as core
 from aisquare.core import launch_seal
 from aisquare.core.agent_adapters import get_adapter
-from aisquare.models import ProjectInfo
+from aisquare.core.config import load_config, save_config
+from aisquare.models import ProjectInfo, RedactionLevel
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import handoff
 from tests.test_adapter_contract import _moments, _written
+from tests.test_claude_accounts import NOW
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
 from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     FakeTmux,
@@ -99,6 +101,7 @@ def test_a_manual_switch_whose_other_agents_are_all_over_the_line_takes_its_own_
 
 
 def test_the_pick_across_reads_usage_now_not_through_the_minute_cache(
+    project: ProjectInfo,  # noqa: F811 - the store the readings are kept in
     monkeypatch: pytest.MonkeyPatch,
     claude_on_path: Path,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
@@ -108,9 +111,13 @@ def test_the_pick_across_reads_usage_now_not_through_the_minute_cache(
     hand-over."""
     full = _codex_slot(100)
     claude = _slot("c@example.com", "tok-c", expires_in=timedelta(days=3650))
+    monkeypatch.setattr(accounts_service, "_now", lambda: NOW)  # every window still open
     usage = _Usage({"tok-c": _payload(20)})
     monkeypatch.setattr(accounts_service, "_http_get", usage)
     assert accounts_service.cached_usage([claude])[claude.slot].session_used_percent == 20.0
+    primed = len(usage.calls)
+    accounts_service.cached_usage([claude], max_age=accounts_service.PICK_MAX_AGE_SECONDS)
+    assert len(usage.calls) == primed, "the minute-deep cache is what a live read bypasses"
     usage.by_token["tok-c"] = _payload(99)
     before = len(usage.calls)
 
@@ -242,7 +249,9 @@ def test_a_transcript_that_is_a_folder_or_a_relative_path_is_not_read(
     project: ProjectInfo,  # noqa: F811
     tmp_path: Path,
     reads: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.chdir(tmp_path)  # where "t.jsonl" is a file that exists: it is still no path
     folder = tmp_path / "a-folder"
     folder.mkdir()
     (tmp_path / "t.jsonl").write_text("{}\n", encoding="utf-8")
@@ -309,3 +318,30 @@ def test_the_automatic_hand_over_of_the_captain_never_crosses_agents(
 
     kept, agent = target("captain")
     assert agent == "codex" and kept.account is None
+
+
+# --- the level the brief is scrubbed at is the config's --------------------------------------
+
+
+def test_a_brief_is_built_at_the_redaction_level_the_config_holds(
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    agent = fleet_service.spawn(project, "coder", worktree=False).agent
+    record = launch_seal.read(agent.id)
+    assert isinstance(record, launch_seal.LaunchRecord)
+
+    def built() -> RedactionLevel:
+        return handoff.build(
+            label=agent.label, source=agent, record=record, target_agent="codex"
+        ).redaction
+
+    assert built() is RedactionLevel.standard
+    config = load_config()
+    config.redaction.level = RedactionLevel.strict
+    save_config(config)
+    assert built() is RedactionLevel.strict
+    config.redaction.level = RedactionLevel.off
+    save_config(config)
+    assert built() is RedactionLevel.off

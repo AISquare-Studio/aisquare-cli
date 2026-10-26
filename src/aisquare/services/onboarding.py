@@ -202,7 +202,8 @@ def validate_path(text: str, *, lookup: Lookup | None = None) -> PathVerdict:
 #: ``isatty()`` is already False in the child and the question could not be asked.
 #: The flag stays for two reasons that survive that correction: it holds if the
 #: runner ever stops setting DEVNULL, and it keeps the consent where §4.2 puts it —
-#: the ``explainability enable`` button — rather than at a prompt nobody sees.
+#: the user's own ``aisquare explainability enable`` (the Doctor page used to offer it as a
+#: button) — rather than at a prompt nobody sees.
 #: Declining is the one answer that changes nothing
 #: (``lifecycle._explainability_step``: "#50's first acceptance clause is that
 #: declining leaves ZERO behavioural change"), so a machine that already ships
@@ -466,7 +467,6 @@ KNOWN_FIXES: tuple[_KnownFix, ...] = (
         "project onboard", ("project", "onboard", "--refresh"), "project", frozenset({"--refresh"})
     ),
     _KnownFix("doctor --fix", ("doctor", "--fix", "--yes"), "machine", frozenset({"--yes", "-y"})),
-    _KnownFix("explainability enable", ("explainability", "enable"), "machine"),
 )
 
 _MENTION = re.compile(
@@ -522,10 +522,10 @@ def fix_commands(checks: Iterable[DoctorCheck]) -> list[FixCommand]:
     """The buttons: one per distinct runnable command among the non-ok checks' hints.
 
     A hint becomes a button only when it names one of :data:`KNOWN_FIXES` and
-    carries nothing beyond the flags that entry admits. ``aisquare explainability
-    enable --proxy-url <url>`` therefore stays text: the user has to supply the
-    URL, and a button cannot. Several checks pointing at the same command make
-    ONE button.
+    carries nothing beyond the flags that entry admits. ``aisquare project onboard
+    --depth 2``, say, therefore stays text: it carries a flag the entry does not admit,
+    and a button cannot supply what the user has to. Several checks pointing at the same
+    command make ONE button.
     """
     fixes: list[FixCommand] = []
     seen: set[tuple[str, ...]] = set()

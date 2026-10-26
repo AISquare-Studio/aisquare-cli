@@ -123,8 +123,8 @@ that mode, Claude Code's classifier, not you, approves each tool call.
   AISquare's hosted proxy, Claude Code's requests, with its Anthropic
   credential, and the responses pass through AISquare's server. Through the
   default local proxy (`127.0.0.1:9090`), requests go to Anthropic as usual, and
-  only the traces go to the gateway. Note that `aisquare doctor --fix` turns
-  Explainability on without asking.
+  only the traces go to the gateway. Note that `aisquare explainability doctor --fix
+  --target <name>` turns Explainability on without asking.
 - **The Collective Intelligence test bed, when on** (`AISQUARE_CI=1`, or
   `enabled` under `[experiment]`). Each prompt goes to the server you
   configure, scrubbed at your `redaction` level, with the repository, branch,

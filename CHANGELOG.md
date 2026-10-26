@@ -28,6 +28,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spent the product's 2 s on the capture, and failed it every time once sharding placed
   it beside a heavier test.
 
+- **Explainability and the CI test bed are dormant: out of `aisquare doctor` and out of
+  every UI, still there through their own commands.** Both are unmaintained and unused,
+  and a row or a tab each was noise. `aisquare doctor` has no `explainability…` row (nor
+  `explainability auto-mode`) and no `ci …` row, takes no `--target` or `--project`, and
+  its `--fix` only creates the home; `--yes` is still accepted. The section moved to
+  `aisquare explainability doctor [--live] [--target T] [--project P] [--fix] [--yes]`,
+  which runs the same checks and repairs and exits 1 on a failed row, and every hint that
+  said `doctor --live` for tracing names it. The test bed's rows are parked in
+  `services/ci_doctor.py`, which nothing imports; its `ci_*` modules, the `AISQUARE_CI`
+  gate, the hooks and the `ci_recall` tool are untouched. In the fleet UI a project has
+  the tabs Manager, Board, Settings and Personas (no AISquare tab), the Doctor page has no
+  "explainability enable" button, and nothing starts an explainability worker; the view
+  stays in `cli/ui/views/explainability.py`, unmounted, with how to mount it again. The
+  Remote page's agent view has Live and Transcript (no Card tab), and
+  `GET api/explainability/<agent>` still answers. `init` and its `--no-explainability`,
+  and the shipping line of `aisquare status`, are as they were.
+
 ### Removed
 
 - **The project brain (gbrain) is gone.** It was an optional third-party CLI that

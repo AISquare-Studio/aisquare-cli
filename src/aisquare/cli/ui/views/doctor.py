@@ -123,7 +123,7 @@ class DoctorView(VerticalScroll):
 
     ``cwd`` is the project root the fixes run in; the shell sets it through
     ``show(checks, cwd=…)`` (or the constructor). Without one, machine-level
-    fixes (``agents connect``, ``doctor --fix``, ``explainability enable``) still
+    fixes (``agents connect``, ``doctor --fix``) still
     run — they do not care where — and project-level ones (``project onboard``)
     render disabled rather than silently onboarding whatever directory the UI
     happens to have been started from.

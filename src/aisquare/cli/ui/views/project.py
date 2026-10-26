@@ -1,13 +1,13 @@
-"""The Project view: Manager · Board · AISquare · Settings tabs.
+"""The Project view: Manager · Board · Settings · Personas tabs.
 
 One ``TabbedContent`` per selected project (docs/plans/fleet-tui.md §4.2). The
 Manager tab is where goal intake happens — the user types to the manager's real
 Claude Code session exactly as they would to any other, so the tab is the
 manager's ``TerminalPane`` and nothing more, plus a **Start manager** button
 while the project has none. The Board tab is ``cli.ui.board.BoardPanel``, the
-widgets of ``aisquare board -w``; AISquare (``ExplainabilityView``, under its
-"Explainability" heading — the first of the tab's sections) and Settings are
-the two forms in this package.
+widgets of ``aisquare board -w``; Settings and Personas are the two forms in this
+package. (An AISquare tab, ``ExplainabilityView``, sat between Board and Settings
+until tracing went dormant: ``views/explainability.py`` says how to mount it again.)
 
 There is no Doctor tab: the doctor is the app's, on its own page, run at start
 and when that page opens — not once per project view, nor per tab activation.
@@ -37,7 +37,6 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli.ui.board import BoardPanel
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
 from aisquare.cli.ui.views.agent import InfoLine, SlotLabels, shown_pane
-from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core.tmux import TmuxServer
@@ -296,7 +295,7 @@ class ManagerTab(Vertical):
 
 
 class ProjectView(TabbedContent):
-    """One project: its manager's pane first, then the board, AISquare and settings.
+    """One project: its manager's pane first, then the board, settings and personas.
 
     ``usage`` is the shell's last per-slot session use (``HeadroomSummary.session_by_slot``),
     so a view opened between two headroom reads shows the figure at once.
@@ -305,7 +304,6 @@ class ProjectView(TabbedContent):
     TAB_IDS: ClassVar[tuple[str, ...]] = (
         "tab-manager",
         "tab-board",
-        "tab-explainability",
         "tab-settings",
         "tab-personas",
     )
@@ -335,14 +333,6 @@ class ProjectView(TabbedContent):
                 "Board",
                 BoardPanel(project, interval=refresh_seconds, id="board-panel"),
                 id="tab-board",
-            ),
-            TabPane(
-                "AISquare",
-                # ``project``: the key this tab shows and attaches is the one
-                # THIS page's launches use (#141) — the project they join from
-                # its root — not the ``project switch`` pin's.
-                ExplainabilityView(project, id="project-explainability"),
-                id="tab-explainability",
             ),
             TabPane("Settings", SettingsView(project, id="project-settings"), id="tab-settings"),
             # Personas live with the fleet they serve (spawn-personas.md §4.2): the

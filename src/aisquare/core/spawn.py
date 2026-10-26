@@ -387,7 +387,7 @@ SEAMS: dict[str, Seam] = {
         EXCLUDED,
         "our own CLI as a subprocess (`init`, `doctor`, `project onboard` for the "
         "fleet UI, run with cwd=<project>). Starts no model process. NOT stripped: "
-        "`doctor --live` needs the EXPLAINABILITY_* environment to diagnose the "
+        "`explainability doctor --live` needs the EXPLAINABILITY_* environment to diagnose the "
         "machine it is on, the same reason `sdk_doctor` is not",
     ),
     "aisquare/cli/fleet.py::_exec_attach": Seam(

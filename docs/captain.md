@@ -386,8 +386,8 @@ Three follow-ups are open:
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain's seats trace as their
   own projects.** A seat the captain spawns reads its own project's board (see
   the CHANGELOG), so its trace and its explainability key are its project's.
-  `aisquare explainability key set` and the Explainability tab in a shell with
-  the hub exported speak for the hub's project, and a key set there never
+  `aisquare explainability key set` and the other explainability commands in a shell
+  with the hub exported speak for the hub's project, and a key set there never
   reaches those seats. Set it for the seat's project with
   `aisquare explainability key set -P <project>`. Seats you spawn yourself follow
   the hub as before. Not fixed here: making one key cover both would change

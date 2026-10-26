@@ -1294,7 +1294,17 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   of the conversation, read off the old agent's transcript by its own reader. It is the
   new agent's first message, on its command line through the prompt file as any first
   message goes, and acknowledged by its first turn, cut to 6 000 bytes; the whole brief
-  is kept under `~/.aisquare/handoffs/` and the prompt names it. The old session ends,
+  is kept under `~/.aisquare/handoffs/` and the prompt names it. The cut keeps the
+  opening, the task and the brief's last two lines (where to start, and the file's
+  path), whatever the claims or the board hold: the conversation goes first, then the
+  board entries (the oldest first), the tree and the claims, and the brief says which;
+  a brief lists the first 8 claims and counts the rest. **The conversation goes to the
+  other agent's provider.** It is the human's and the agent's own words, so a hand-off
+  across agents sends the newest of them to Anthropic from Codex and to OpenAI from
+  Claude Code, which is why the switch can be turned off. They are scrubbed first, as
+  text leaving the machine is (`[redaction] level`: credentials at `standard`, who and
+  where as well at `strict`, nothing at `off`), in the prompt and in the file; a brief
+  file is removed after 14 days. The old session ends,
   `switched` names both agents, and the new launch record names the new agent, so a
   restart or Fork of it stays there. One switch per limit holds across agents too: the
   replacement the hand-over started is moved again only with `--force`. Switched off, a

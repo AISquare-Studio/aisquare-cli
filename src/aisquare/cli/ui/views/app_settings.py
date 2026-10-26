@@ -198,6 +198,14 @@ _INPUTS = (
 )
 _SELECTS = ("default-agent", "accounts-pick", "accounts-on-limit", "accounts-prefer")
 
+CROSS_AGENT_TIP = (
+    "When every account of an agent is full, hand its work to another agent's account "
+    "instead of waiting. A conversation cannot move between agents, so the other agent "
+    "starts fresh with a brief of the work: the task, the board, the tree and the newest of "
+    "the conversation, which goes to that agent's vendor (Anthropic or OpenAI), with "
+    "credentials scrubbed out first ([redaction] level). Off: a hand-over stays on its agent."
+)
+
 FALLBACK_AGENT_TIP = (
     "The agent a launch runs only when no account is usable (no one signed in, an API key, "
     "or the accounts unreadable). Otherwise it runs the agent of the first account with "
@@ -902,8 +910,12 @@ class AppSettingsView(Vertical):
                 id="accounts-wait-minutes",
             )
         with Horizontal(classes="row"):
-            yield Label("hand off across agents")
-            yield Switch(self.accounts.cross_agent_handover, id="accounts-cross-agent")
+            cross = Label("hand off across agents")
+            cross.tooltip = CROSS_AGENT_TIP
+            yield cross
+            switch = Switch(self.accounts.cross_agent_handover, id="accounts-cross-agent")
+            switch.tooltip = CROSS_AGENT_TIP
+            yield switch
         with Horizontal(classes="row"):
             yield Label("share folder trust")
             yield Switch(self.accounts.share_trust, id="accounts-share-trust")

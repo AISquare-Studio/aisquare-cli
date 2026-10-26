@@ -17,12 +17,22 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
-from textual.widgets import Button, Collapsible, Input, Select, Static, Switch, TabbedContent
+from textual.widgets import (
+    Button,
+    Collapsible,
+    Input,
+    Label,
+    Select,
+    Static,
+    Switch,
+    TabbedContent,
+)
 
 from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.views.app_settings import (
     AGENT_ADVANCED,
     AGENT_TAB,
+    CROSS_AGENT_TIP,
     ON_LIMIT_MODES,
     PREFERENCES_ADVANCED,
     PREFERENCES_TAB,
@@ -430,6 +440,24 @@ def test_settings_switches_the_hand_over_across_agents_off_and_on() -> None:
         return host.query_one("#accounts-cross-agent", Switch).value
 
     assert drive(reopened) is False
+
+
+def test_the_hand_off_across_agents_switch_says_the_conversation_goes_to_the_other_vendor() -> None:
+    """The default is on (the owner's call, r22 of #113), so the switch says what it sends and
+    where: on its label and on the switch itself."""
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[str, str, str]:
+        await pilot.pause()
+        switch = host.query_one("#accounts-cross-agent", Switch)
+        label = switch.parent.query_one(Label) if switch.parent is not None else switch
+        return str(switch.tooltip), str(label.tooltip), str(label.render())
+
+    switch_tip, label_tip, text = drive(scenario)
+
+    assert text == "hand off across agents"
+    assert switch_tip == label_tip == CROSS_AGENT_TIP
+    for said in ("conversation", "vendor", "Anthropic or OpenAI", "scrubbed", "Off:"):
+        assert said in CROSS_AGENT_TIP
 
 
 def test_settings_switch_the_daily_release_check_off_and_on() -> None:

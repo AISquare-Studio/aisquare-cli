@@ -2672,8 +2672,13 @@ class SqliteStore:
         500 sessions.
         """
         removed = self._conn.execute(
-            "DELETE FROM team_meta WHERE key = ? OR key GLOB ?",
-            (f"distill_seq:{project_id}", f"signal/{_glob_escape(project_id)}/*"),
+            "DELETE FROM team_meta WHERE key = ? OR key GLOB ? OR key GLOB ?",
+            (
+                f"distill_seq:{project_id}",
+                f"signal/{_glob_escape(project_id)}/*",
+                # the processes that run this board's sessions (``services.mcp_host``)
+                f"host/{_glob_escape(project_id)}/*",
+            ),
         ).rowcount
         for start in range(0, len(sessions), _META_BATCH):
             batch = sessions[start : start + _META_BATCH]

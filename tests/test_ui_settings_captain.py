@@ -10,6 +10,7 @@ shows or what the one door typed.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from pathlib import Path
 
@@ -37,6 +38,7 @@ from aisquare.services.captain import state as captain_state
 from tests import test_captain_say as say_suite
 from tests import test_ui_shell as ui_suite
 from tests.captain_screens import INPUT_BOX, REAL_TRUST
+from tests.fleet_fakes import list_agents_as
 from tests.test_captain_say import Captain, Clock
 from tests.test_captain_sidebar import until
 from tests.test_captain_view import _captain, _open_view, drive
@@ -171,6 +173,19 @@ def test_a_read_begun_before_the_tick_is_not_taken_for_no_captain(
     seed(tmp_path, ("prj_aaa", "alpha", "amber-otter"))
     home = captain_state.home_project()
     script[home.id] = [_captain("waiting")]
+    begun = threading.Event()
+    gate = threading.Event()  # shut while the read begun with the captain off is held in flight
+    gate.set()
+
+    def noting(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        """What the script answers for a project, as every frame's read asks it (a read that
+        asks is in it from its start, with the captain switch already read): says it began, and
+        waits at the gate."""
+        begun.set()
+        assert gate.wait(10), "a fleet read held past the test"
+        return list(script.get(project.id, []))
+
+    list_agents_as(monkeypatch, noting)
     scripted = fleet_service.list_agents
     permits = threading.Semaphore(1000)
 
@@ -184,11 +199,19 @@ def test_a_read_begun_before_the_tick_is_not_taken_for_no_captain(
         app = fleet_app(pilot)
         await refreshed(app)
         toggle = await _settings(pilot)
-        while permits.acquire(blocking=False):  # from here on, one read at a time
+        while permits.acquire(blocking=False):  # from here on, the captain's reads are held
             pass
+        gate.clear()
+        begun.clear()
         app.refresh_data()
         before = app._fleet_worker
         assert before is not None and not before.is_finished
+        # The read is "begun with the captain off" once it is reading the fleet: its thread
+        # takes the switch as it STARTS, and one that started after the tick took it on,
+        # asked about the captain, and rightly cleared the notice (CI run 40282058672, ubuntu
+        # py3.12 shard 1/4: the section said nothing, Start captain hidden). It is held there
+        # while the box is ticked, and let go after, so it is the frame painted AFTER the tick.
+        assert await asyncio.to_thread(begun.wait, 30), "the read never began"
         toggle.query_one("#captain-toggle", Checkbox).toggle()
         start_said: list[bool] = []
 
@@ -205,9 +228,9 @@ def test_a_read_begun_before_the_tick_is_not_taken_for_no_captain(
             section.query_one(StartCaptain),
         )
         mounted = shown(notice), start.display
-        permits.release()  # the read begun with the captain off: alpha alone
+        gate.set()  # the read begun with the captain off: alpha alone
         await until(pilot, lambda: app._fleet_worker is not before, what="its frame painted")
-        landed = shown(notice), start.display
+        landed = shown(notice), start.display  # the read the tick asked for is held, unpainted
         permits.release(1000)  # the read the tick asked for, and every one after it
         await refreshed(app)
         rows = [row.status.agent.label for row in section.query(AgentRow)]

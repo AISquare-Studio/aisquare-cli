@@ -236,7 +236,7 @@ def test_a_black_hole_endpoint_cannot_hang_the_checks(monkeypatch: pytest.Monkey
 
     def black_hole(request: Any, timeout: float) -> Any:
         seen.append(timeout)
-        time.sleep(3.0)
+        time.sleep(60.0)  # a minute, not three seconds: the deadline fires first, however slow
         raise AssertionError("unreachable: the deadline fires first")
 
     monkeypatch.setattr(ci_client, "urlopen", black_hole)
@@ -247,7 +247,7 @@ def test_a_black_hole_endpoint_cannot_hang_the_checks(monkeypatch: pytest.Monkey
     monkeypatch.setenv(ci_client.RUN_ENV_VAR, RUN)
     started = time.monotonic()
     checks = _ci_checks()
-    assert time.monotonic() - started < 2.0
+    assert time.monotonic() - started < 30.0  # half the black hole's minute
     assert checks["ci endpoint"].status is CheckStatus.warn
     assert checks["ci descriptor"].status is CheckStatus.warn
     assert seen and all(abs(t - 0.2) < 0.01 for t in seen)

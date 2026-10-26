@@ -571,15 +571,15 @@ def test_the_label_prefills_role_n_and_a_picked_task_re_prefills_it(
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
         seen = [label_input(dialog).value]
         select(dialog, "task").value = task.id
-        await pilot.pause()
+        await settle(pilot)
         seen.append(label_input(dialog).value)
         select(dialog, "role").value = "tester"
-        await pilot.pause()
+        await settle(pilot)
         seen.append(label_input(dialog).value)
         label_input(dialog).value = "tester-auth"  # touched: no longer the form's to change
-        await pilot.pause()
+        await settle(pilot)
         select(dialog, "task").value = NO_TASK
-        await pilot.pause()
+        await settle(pilot)
         seen.append(label_input(dialog).value)
         return seen
 
@@ -609,15 +609,19 @@ def test_the_task_field_lists_only_open_tasks_with_short_id_status_and_title(
 
 def test_a_bad_label_disables_spawn_and_shows_the_rule(git_project: ProjectInfo) -> None:
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        # Each edit is settled, not paused for once: Input.Changed is a message the dialog
+        # handles after the pause returns when the machine is loaded, and the form was read
+        # before its validation had run (windows-latest, CI run 40253680877; and 2 of 50
+        # runs under load on a Mac).
         seen: list[Any] = [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
         label_input(dialog).value = "Bad Label!"
-        await pilot.pause()
+        await settle(pilot)
         seen += [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
         label_input(dialog).value = "manager"
-        await pilot.pause()
+        await settle(pilot)
         seen += [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
         label_input(dialog).value = "coder-auth"
-        await pilot.pause()
+        await settle(pilot)
         seen += [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
         await pilot.click("#spawn-submit")  # disabled a moment ago: this press must not be lost
         await settle(pilot)
@@ -635,7 +639,7 @@ def test_a_disabled_spawn_button_sends_nothing(
 ) -> None:
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> bool:
         label_input(dialog).value = "Bad Label!"
-        await pilot.pause()
+        await settle(pilot)
         await pilot.click("#spawn-submit")
         await settle(pilot)
         return isinstance(host.screen, SpawnDialog)
@@ -650,7 +654,7 @@ def test_dice_offers_role_adjective_animal_matching_the_label_rule(
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> tuple[str, bool]:
         await open_advanced(pilot)
         await pilot.click("#spawn-dice")
-        await pilot.pause()
+        await settle(pilot)
         rolled = label_input(dialog).value
         enabled = not submit(dialog).disabled
         await pilot.click("#spawn-submit")
@@ -740,9 +744,9 @@ def test_spawn_sends_exactly_the_chosen_values_with_the_agent_args_shlex_split(
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> None:
         select(dialog, "role").value = "tester"
-        await pilot.pause()
+        await settle(pilot)
         select(dialog, "task").value = task.id
-        await pilot.pause()
+        await settle(pilot)
         label_input(dialog).value = "tester-auth"
         dialog.query_one("#spawn-worktree", Switch).value = True  # a tester's default is False
         select(dialog, "permission").value = "plan"
@@ -752,7 +756,7 @@ def test_spawn_sends_exactly_the_chosen_values_with_the_agent_args_shlex_split(
             "#spawn-args", Input
         ).value = '--model opus --append-system-prompt "be brief"'
         dialog.query_one("#spawn-prompt", TextArea).text = "start from the failing test"
-        await pilot.pause()
+        await settle(pilot)
         await pilot.click("#spawn-submit")
         await settle(pilot)
 
@@ -782,10 +786,10 @@ def test_a_quoting_error_in_the_agent_args_is_shown_inline_and_disables_spawn(
 ) -> None:
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         dialog.query_one("#spawn-args", Input).value = '--append-system-prompt "unclosed'
-        await pilot.pause()
+        await settle(pilot)
         seen: list[Any] = [submit(dialog).disabled, note(dialog, "#spawn-args-error")]
         dialog.query_one("#spawn-args", Input).value = '--append-system-prompt "closed"'
-        await pilot.pause()
+        await settle(pilot)
         seen += [submit(dialog).disabled, note(dialog, "#spawn-args-error")]
         return seen
 
@@ -809,12 +813,12 @@ def test_untouched_defaults_follow_the_role_and_touched_ones_stay(
         binary = dialog.query_one("#spawn-binary", Input)
         seen: list[Any] = [(mode.value, switch.value, binary.placeholder)]
         select(dialog, "role").value = "tester"
-        await pilot.pause()
+        await settle(pilot)
         seen.append((mode.value, switch.value))
         mode.value = "acceptEdits"  # touched
-        await pilot.pause()
+        await settle(pilot)
         select(dialog, "role").value = "reviewer"
-        await pilot.pause()
+        await settle(pilot)
         seen.append((mode.value, switch.value))
         seen.append(dialog.spawn_kwargs()["permission_mode"])
         return seen
@@ -983,9 +987,9 @@ def test_the_manager_role_locks_the_label_and_a_live_manager_greys_it_out(
         overlay = select(dialog, "role").query_one(OptionList)
         greyed = overlay.get_option_at_index(role_choices([]).index("manager"))
         label_input(dialog).value = "coder-auth"
-        await pilot.pause()
+        await settle(pilot)
         select(dialog, "role").value = "manager"
-        await pilot.pause()
+        await settle(pilot)
         seen: list[Any] = [
             greyed.disabled,
             label_input(dialog).value,
@@ -994,10 +998,10 @@ def test_the_manager_role_locks_the_label_and_a_live_manager_greys_it_out(
             note(dialog, "#spawn-role-note"),
         ]
         select(dialog, "role").value = "coder"
-        await pilot.pause()
+        await settle(pilot)
         seen.append(label_input(dialog).value)  # what was typed comes back with the role
         select(dialog, "role").value = "manager"
-        await pilot.pause()
+        await settle(pilot)
         await pilot.click("#spawn-submit")
         await settle(pilot)
         return seen
@@ -1614,7 +1618,7 @@ def test_the_persona_select_lists_none_and_the_catalogue_with_the_description_be
             note(dialog, "#spawn-persona-description"),
         ]
         select(dialog, "persona").value = "skeptic"
-        await pilot.pause()
+        await settle(pilot)
         seen.append(note(dialog, "#spawn-persona-description"))
         await pilot.click("#spawn-submit")
         await settle(pilot)
@@ -1653,16 +1657,16 @@ def test_the_roles_persona_is_preselected_and_follows_the_role_until_touched(
         persona_field = select(dialog, "persona")
         seen: list[Any] = [persona_field.value]
         select(dialog, "role").value = "tester"
-        await pilot.pause()
+        await settle(pilot)
         seen.append(persona_field.value)
         select(dialog, "role").value = "coder"
-        await pilot.pause()
+        await settle(pilot)
         seen.append(persona_field.value)
         seen.append(dialog.spawn_kwargs()["persona"])  # untouched: the role's default -> None
         persona_field.value = "mentor"  # touched
-        await pilot.pause()
+        await settle(pilot)
         select(dialog, "role").value = "tester"
-        await pilot.pause()
+        await settle(pilot)
         seen.append(persona_field.value)
         await pilot.click("#spawn-submit")
         await settle(pilot)
@@ -1681,7 +1685,7 @@ def test_an_explicit_none_over_a_roles_default_is_sent_as_an_empty_name(
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> None:
         select(dialog, "persona").value = ""
-        await pilot.pause()
+        await settle(pilot)
         await pilot.click("#spawn-submit")
         await settle(pilot)
 
@@ -1732,9 +1736,18 @@ def test_a_preset_account_shows_before_and_after_the_accounts_are_read(
 async def wait_for_screen(pilot: Pilot[Any], kind: type[Any], seconds: float = 5.0) -> Any:
     for _ in range(int(seconds / 0.05)):
         if isinstance(pilot.app.screen, kind):
+            # Its widgets are mounted by messages it has yet to handle: a test reading the
+            # question or the list the moment the screen was the active one found none
+            # ("No nodes match '#attach-question'": 2 runs in 60 under load). Settled for the
+            # messages alone, so that a test holding a worker on purpose is not waited on.
+            await settle_page(pilot.app, group=_NO_WORKER)
             return pilot.app.screen
         await pilot.pause(0.05)
     raise AssertionError(f"{kind.__name__} never opened; the screen is {pilot.app.screen!r}")
+
+
+_NO_WORKER = "no worker"
+"""A group no worker is in: a settle passed it waits for the messages alone."""
 
 
 def picker_ids(picker: AttachTargetScreen) -> list[str]:
@@ -1806,7 +1819,7 @@ def test_import_beside_the_persona_select_selects_what_it_imports(
         importer = await wait_for_screen(pilot, ImportPersonaScreen)
         await settle(pilot)
         importer.query_one("#import-source", Input).value = "./fresh-one"
-        await pilot.pause()
+        await settle(pilot)
         await pilot.click("#import-submit")
         await settle(pilot)
         seen = [
@@ -2142,7 +2155,7 @@ def test_on_the_label_captain_is_refused_in_the_dialog_as_the_fleet_refuses_it(
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         monkeypatch.setenv(experimental.CAPTAIN_ENV, "0")
         label_input(dialog).value = "captain"
-        await pilot.pause()
+        await settle(pilot)
         return [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
 
     disabled, rule = drive(git_project, scenario)
@@ -2156,7 +2169,7 @@ def test_off_the_label_captain_is_a_label_like_any_in_the_dialog(
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         label_input(dialog).value = "captain"
-        await pilot.pause()
+        await settle(pilot)
         return [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
 
     assert drive(git_project, scenario) == [False, None]
@@ -2174,12 +2187,12 @@ def test_a_declared_captain_role_shows_the_label_it_sends_and_gives_the_typed_on
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         label_input(dialog).value = "coder-auth"
-        await pilot.pause()
+        await settle(pilot)
         select(dialog, "role").value = "captain"
-        await pilot.pause()
+        await settle(pilot)
         seen: list[Any] = [label_input(dialog).value, label_input(dialog).disabled]
         select(dialog, "role").value = "coder"
-        await pilot.pause()
+        await settle(pilot)
         return [*seen, label_input(dialog).value]
 
     assert drive(git_project, scenario) == ["captain", True, "coder-auth"]

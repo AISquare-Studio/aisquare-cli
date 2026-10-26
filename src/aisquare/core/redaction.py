@@ -41,6 +41,7 @@ is a session that hangs.
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 
 from aisquare.models import RedactionLevel
 
@@ -52,16 +53,19 @@ MARKER = "[redacted]"
 #: Credential shapes, matched on shape rather than on context. Order matters
 #: only in that the structured forms (assignment, header, URL) run first so
 #: their key name survives into the output.
+#:
+#: NO LENGTH IS A CAP HERE. A credential is removed whole, however long: a rule that
+#: stopped at 200, 256 or 400 characters left the rest of a 283-character JWT, a
+#: 1,000-character bearer token and a 300-character key in the text it was written to
+#: remove them from (tester on #15), and Google's and Azure's access tokens run 1,000 to
+#: 1,500 characters. A minimum is a shape (a prefix and 16 more characters); a maximum is
+#: a leak. What keeps the cost linear instead is the match itself: every run of a token's
+#: characters is a POSSESSIVE quantifier (``{n,}+``: it takes the whole run and never gives
+#: a character back), so an attempt that fails costs the run it read and no more, and a
+#: rule starts only where its token could start (a prefix after ``\b``, a JWT after a
+#: character outside its alphabet), so two attempts never read the same run. The PEM
+#: rule is not a regular expression for this reason: see :func:`_without_pem_blocks`.
 _CREDENTIAL_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
-    # PEM blocks first: they contain base64 that later rules would shred into
-    # a dozen markers, losing the fact that it was ONE key.
-    (
-        re.compile(
-            r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----.*?-----END [A-Z ]{0,32}PRIVATE KEY-----",
-            re.DOTALL,
-        ),
-        MARKER,
-    ),
     # NAME=value / NAME: value where the name says "secret". The name is kept —
     # "EXPLAINABILITY_API_KEY=[redacted]" still tells a reader a key was in play,
     # which a bare marker does not.
@@ -70,39 +74,55 @@ _CREDENTIAL_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
             r"(?i)\b([A-Z0-9_.-]{0,48}?(?:api[_-]?key|secret|token|password|passwd|pwd"
             r"|credential|private[_-]?key|access[_-]?key)[A-Z0-9_.-]{0,24})"
             r"(\s*[:=]\s*)"
-            r"(\"[^\"\n]{4,200}\"|'[^'\n]{4,200}'|[^\s\"'\n]{4,200})"
+            r"(\"[^\"\n]{4,}+\"|'[^'\n]{4,}+'|[^\s\"'\n]{4,}+)"
         ),
         r"\1\2" + MARKER,
     ),
     # Authorization: Bearer <token> / Authorization: Basic <blob>
     (
-        re.compile(r"(?i)\b(authorization\s*:\s*|bearer\s+|basic\s+)([A-Za-z0-9_.+/=~-]{12,400})"),
+        re.compile(r"(?i)\b(authorization\s*:\s*|bearer\s+|basic\s+)([A-Za-z0-9_.+/=~-]{12,}+)"),
         r"\1" + MARKER,
     ),
     # user:password@host in a URL — the password is the point, but the whole
     # pair identifies the account, so both go.
-    (re.compile(r"(?<=://)[^/\s:@]{1,128}:[^/\s:@]{1,256}@"), MARKER + "@"),
-    # JWT: three base64url segments. Distinctive enough to match on shape.
+    (re.compile(r"(?<=://)[^/\s:@]++:[^/\s:@]++@"), MARKER + "@"),
+    # JWT: three base64url segments. Distinctive enough to match on shape. Starts only
+    # where the character before is outside the alphabet, so a run read once is not read
+    # again from a later `eyJ` inside it.
     (
-        re.compile(r"\beyJ[A-Za-z0-9_-]{8,600}\.[A-Za-z0-9_-]{8,2000}\.[A-Za-z0-9_-]{8,600}\b"),
+        re.compile(
+            r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}+"
+        ),
         MARKER,
     ),
     # Vendor-prefixed tokens. Prefixes chosen because they are issued, not
     # written: none of them occur in English or in code identifiers.
-    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,256}\b"), MARKER),
-    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,256}\b"), MARKER),
-    (re.compile(r"\bglpat-[A-Za-z0-9_-]{16,256}\b"), MARKER),
-    (re.compile(r"\bxox[baprse]-[A-Za-z0-9-]{10,256}\b"), MARKER),
-    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), MARKER),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}+"), MARKER),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}+"), MARKER),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{16,}+"), MARKER),
+    (re.compile(r"\bglpat-[A-Za-z0-9_-]{16,}+"), MARKER),
+    (re.compile(r"\bxox[baprse]-[A-Za-z0-9-]{10,}+"), MARKER),
+    (re.compile(r"\bxapp-[A-Za-z0-9-]{10,}+"), MARKER),
+    (re.compile(r"\bAKIA[0-9A-Z]{16,}+"), MARKER),
     # Our own sign-in tokens (services/iam.py). Issued, never typed by hand.
-    (re.compile(r"\baisqr?_[A-Za-z0-9_-]{16,256}\b"), MARKER),
+    (re.compile(r"\baisqr?_[A-Za-z0-9_-]{16,}+"), MARKER),
     # A RANGE, not the documented exact length. The published Google key shape
     # is AIza + 35, and a pattern pinned to 35 misses a key that is 36 long —
     # which is exactly how a scrubber passes its tests and leaks in the field.
-    # The prefix is what makes this specific; the length only bounds the match.
-    (re.compile(r"\bAIza[0-9A-Za-z_-]{30,128}\b"), MARKER),
-    (re.compile(r"\bwk_(?:live|test)_[A-Za-z0-9]{8,256}\b"), MARKER),
+    # The prefix is what makes this specific; the length is only a floor.
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{30,}+"), MARKER),
+    (re.compile(r"\bwk_(?:live|test)_[A-Za-z0-9]{8,}+"), MARKER),
 )
+
+#: A private-key block, the shape of one: ``-----BEGIN … PRIVATE KEY-----`` to the
+#: ``-----END … PRIVATE KEY-----`` that follows. Not applied with ``sub``: see
+#: :func:`_without_pem_blocks`. Kept as one pattern for whoever asks whether text holds one.
+PEM_BLOCK = re.compile(
+    r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----.*?-----END [A-Z ]{0,32}PRIVATE KEY-----",
+    re.DOTALL,
+)
+_PEM_BEGIN = re.compile(r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----")
+_PEM_END = re.compile(r"-----END [A-Z ]{0,32}PRIVATE KEY-----")
 
 #: ``strict`` only. Who typed it and where they were — identity, not secrets.
 _IDENTITY_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -125,7 +145,9 @@ def redact(text: str, level: RedactionLevel) -> str:
     if level is RedactionLevel.off:
         return text
     try:
-        scrubbed = text
+        # PEM blocks first: they contain base64 that later rules would shred into
+        # a dozen markers, losing the fact that it was ONE key.
+        scrubbed = _without_pem_blocks(text)
         for pattern, replacement in _CREDENTIAL_RULES:
             scrubbed = pattern.sub(replacement, scrubbed)
         if level is RedactionLevel.strict:
@@ -137,3 +159,32 @@ def redact(text: str, level: RedactionLevel) -> str:
         # stop, so the fallback is the safe direction: drop the body, keep the
         # fact that something was here.
         return MARKER
+
+
+def _without_pem_blocks(text: str) -> str:
+    """``text`` with each private-key block (:data:`PEM_BLOCK`) replaced by :data:`MARKER`.
+
+    Done in one pass over the BEGIN lines and the END lines, each found once, so the cost is
+    linear in the text: ``BEGIN .*? END`` as a regular expression reads to the end of the
+    text from every BEGIN that has no END after it, and a paste of 7,000 headers and no
+    footer took 16 s in 400 KB (tester on #15), on the hook path. A BEGIN with no END after
+    it removes nothing (a block cut short is only a header), and no later BEGIN has one
+    either, so the pass ends there."""
+    if "-----BEGIN " not in text:
+        return text
+    ends = [(found.start(), found.end()) for found in _PEM_END.finditer(text)]
+    if not ends:
+        return text
+    kept: list[str] = []
+    at = 0
+    nearest = 0
+    for begin in _PEM_BEGIN.finditer(text):
+        if begin.start() < at:
+            continue  # inside a block already taken out
+        nearest = bisect_left(ends, (begin.end(), 0), nearest)
+        if nearest == len(ends):
+            break
+        kept += [text[at : begin.start()], MARKER]
+        at = ends[nearest][1]
+    kept.append(text[at:])
+    return "".join(kept)

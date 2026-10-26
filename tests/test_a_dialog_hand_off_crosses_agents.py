@@ -472,3 +472,64 @@ def test_the_redaction_level_the_config_holds_is_the_one_a_hand_off_sends_at(
     assert (secret in prompt) is kept
     assert ("me@example.com" in prompt) is (level != "strict")
     assert ("/Users/anmol/Work/x" in prompt) is (level != "strict")
+
+
+@pytest.mark.parametrize(
+    ("kind", "length"),
+    [
+        ("bearer", 400),
+        ("bearer", 1_500),
+        ("jwt", 2_400),
+        ("assignment", 1_000),
+        ("sk", 300),
+        ("github", 400),
+        ("github-fine-grained", 400),
+        ("slack", 400),
+        ("aws", 200),
+        ("url-password", 400),
+    ],
+)
+def test_a_credential_of_any_length_reaches_neither_the_message_nor_the_file(
+    kind: str,
+    length: int,
+    tmux: FakeTmux,  # noqa: F811 - pytest resolves fixtures by NAME
+    codex_on_path: Path,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reader wraps a pasted token at 110 columns, over several lines (a bearer token over 108
+    characters is one the old rules also capped at 400): none of its windows of ten characters
+    reaches the first message or the file of a hand-off, whatever its kind and length (task #25)."""
+    import random
+
+    from tests.test_a_credential_is_removed_whole import KINDS, surviving
+
+    secret, pasted = KINDS[kind](random.Random(f"{kind}{length}"), length)
+    leg = _spans(monkeypatch, tmp_path, project, tmux, "claude-code")
+    leg.transcript.write_text(
+        "\n".join(
+            [
+                _talk("user", 1, f"it keeps failing: {pasted}"),
+                _talk("assistant", 2, "that one looks expired"),
+                *(
+                    _talk("user" if n % 2 else "assistant", 3 + n, "and so on " * 20)
+                    for n in range(6)
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    receipt = fleet_service.hand_off(
+        project, leg.agent.label, mode="take_over", fresh=True, to_agent="codex"
+    )
+
+    [prompt] = _first_lines(tmux, receipt.started.agent.pane_id)
+    [note] = [n for n in receipt.notes if n.startswith("hand-off brief: ")]
+    file_text = Path(note.removeprefix("hand-off brief: ")).read_text(encoding="utf-8")
+    assert "it keeps failing:" in prompt and "that one looks expired" in file_text
+    assert surviving(secret, prompt) == [], (kind, length, "the first message")
+    assert surviving(secret, file_text) == [], (kind, length, "the brief file")

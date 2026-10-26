@@ -41,6 +41,15 @@ adapter.**
   and the claims, and the brief lists the first 8 claims and counts the rest. A fork
   onto another agent is "a fork of coder-1", never "coder-1, a fork of coder-1", and a
   take-over is the previous session of the same agent, not its own predecessor.
+- **A credential is removed whole, however long it is.** Every rule of `redact` capped its
+  value (200, 256 or 400 characters, a JWT's segments at 600 and 2,000), so a 283-character
+  JWT kept 83 characters of its signature, a 1,000-character bearer token 619 and a
+  300-character key 176, and Google's and Azure's access tokens run 1,000 to 1,500. The caps
+  are gone (a floor stays: a prefix and 16 more characters), up to the 2 MB a hand-off reads
+  of a session; fine-grained GitHub (`github_pat_`) and Slack app (`xapp-`) tokens are
+  removed too. The private-key rule was quadratic (7,000 headers and no footer took 16 s in
+  400 KB, on the hook path); it is one linear pass now, with the same result. This is what
+  the hand-off across agents' promise rests on, and the insights spool's scrub.
 - On a machine with Codex alone, every step has a Codex path:
   `install.sh --agent codex`, Welcome, a manager and two coders on Codex,
   restart, switch, tell, stop, accounts and usage limits.

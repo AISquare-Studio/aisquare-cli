@@ -22,7 +22,13 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import insights, outbox
 from aisquare.core.config import AppConfig, save_config
-from aisquare.core.redaction import _CREDENTIAL_RULES, _IDENTITY_RULES, redact
+from aisquare.core.redaction import (
+    _CREDENTIAL_RULES,
+    _IDENTITY_RULES,
+    MARKER,
+    PEM_BLOCK,
+    redact,
+)
 from aisquare.models import RedactionLevel
 from aisquare.services import hooks as hooks_service
 
@@ -52,7 +58,11 @@ SECRETS = {
     "anthropic/openai key": _shaped("sk-", "ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII"),
     "github pat": _shaped("ghp", "_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"),
     "gitlab pat": _shaped("glpat", "-AbCdEfGhIjKlMnOpQrSt"),
+    "github fine-grained pat": _shaped(
+        "github", "_pat_11ABCDEFG0AbCdEfGhIjKl_mNoPqRsTuVwXyZ0123456789"
+    ),
     "slack bot token": _shaped("xox", "b-1234567890-ABCDEFGHIJKLMNOP"),
+    "slack app token": _shaped("xapp", "-1-A0123456789-1234567890-abcdef0123456789"),
     "aws access key id": _shaped("AKIA", "IOSFODNN7EXAMPLE"),
     "aisquare session token": _shaped("aisq_", "3kF9xQ2mVb8ZrT1cLw6nYp4sHd0eJu7gAi5oKf9qRc2"),
     "google api key": _shaped("AIza", "SyA1234567890abcdefghijklmnopqrstuvw"),
@@ -85,7 +95,9 @@ IDENTITIES = {
 #: Every rule collection in ``redaction`` and the samples that must exercise it.
 #: A third collection is registered here once and inherits both ratchets below.
 _COVERED = {
-    "credential": (_CREDENTIAL_RULES, SECRETS),
+    # The private-key block is not a ``sub`` rule (it is a linear pass), but its shape is a
+    # rule all the same: a sample must match it, and it must have one.
+    "credential": ((*_CREDENTIAL_RULES, (PEM_BLOCK, MARKER)), SECRETS),
     "identity": (_IDENTITY_RULES, IDENTITIES),
 }
 

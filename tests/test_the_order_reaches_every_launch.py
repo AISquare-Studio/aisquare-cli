@@ -46,8 +46,9 @@ def test_a_launch_runs_the_account_its_agent_rung_picked_on_one_usage_read(
 ) -> None:
     claude = _claude("c@example.com")
     codex = _codex("x@example.com")
-    service.move(str(codex.slot), "top")
-    reads = _usage(monkeypatch, {codex.slot: 10.0, claude.slot: 10.0})
+    other = _codex("y@example.com")  # two of its agent: a second pick would read usage again
+    service.reorder([str(codex.slot), str(other.slot)])
+    reads = _usage(monkeypatch, {codex.slot: 10.0, other.slot: 50.0, claude.slot: 10.0})
 
     result = CliRunner().invoke(app, ["launch", "coder"])
 
@@ -79,8 +80,9 @@ def test_the_manager_engine_takes_the_account_the_agent_rung_picked(
 ) -> None:
     claude = _claude("c@example.com")
     codex = _codex("x@example.com")
-    service.move(str(codex.slot), "top")
-    reads = _usage(monkeypatch, {codex.slot: 10.0, claude.slot: 10.0})
+    other = _codex("y@example.com")  # two of its agent: a second pick would read usage again
+    service.reorder([str(codex.slot), str(other.slot)])
+    reads = _usage(monkeypatch, {codex.slot: 10.0, other.slot: 50.0, claude.slot: 10.0})
     selected = persona_import.manager()
     assert selected.adapter.id == CODEX and selected.pick is not None
 

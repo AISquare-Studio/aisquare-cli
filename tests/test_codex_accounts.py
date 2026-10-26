@@ -815,6 +815,24 @@ def test_accounts_add_codex_runs_codex_login_in_the_slot_and_connects_its_hooks(
     assert unknown.exit_code == 1 and "choose claude-code, codex" in unknown.stderr
 
 
+def test_accounts_add_codex_names_no_agent_in_its_hint_even_with_claude_code_first(
+    home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, stub_codex: Path
+) -> None:
+    """The line that opens the new account as a role is asked for that account: it names its
+    agent, so no ``--agent`` follows even when the order's first usable account is Claude
+    Code's (asked without it, the role's agent is that one, and ``--agent codex`` is printed)."""
+    from tests.test_claude_accounts import _sign_in as claude_sign_in
+
+    monkeypatch.setattr(accounts_cli, "not_interactive_reason", lambda: None)
+    _installed(monkeypatch, claude="/opt/bin/claude")
+    claude_sign_in(core.create_account(), "c@example.com")
+
+    result = runner.invoke(app, ["accounts", "add", "--agent", "codex"])
+
+    assert result.exit_code == 0, result.output
+    assert "as a role: aisquare launch coder --account 3" in result.stderr, result.stderr
+
+
 def test_accounts_add_codex_discards_a_slot_nothing_signed_into(
     home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, stub_codex: Path
 ) -> None:

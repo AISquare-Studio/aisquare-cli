@@ -80,14 +80,19 @@ def context_tokens(file: Path) -> int | None:
 
 
 def compacted_since(file: Path, since: datetime) -> bool:
-    """Whether a ``compact_boundary`` was written at or after ``since``."""
-    row = SessionLedger(session_id="", role="")
-    for entry in ledger.entries(file, row):
-        if entry.get("type") == "system" and entry.get("subtype") == "compact_boundary":
-            stamp = ledger.stamped(entry)
-            if stamp is not None and stamp >= since:
-                return True
-    return False
+    """Whether a ``compact_boundary`` was written at or after ``since`` (the transcript's
+    tail is read: ``ledger.recorded_since``)."""
+    return ledger.recorded_since(
+        file,
+        since,
+        lambda entry: entry.get("type") == "system" and entry.get("subtype") == "compact_boundary",
+    )
+
+
+def delta_blocks(entry: dict[str, Any]) -> list[str]:
+    """The ``<aisquare-team-delta>`` blocks a hook's ``attachment`` entry carries, tags
+    included."""
+    return [block for text in _attachment_texts(entry) for block in ledger.delta_blocks(text)]
 
 
 def _entry_text(entry: dict[str, Any]) -> str:

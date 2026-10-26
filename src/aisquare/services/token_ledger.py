@@ -19,7 +19,6 @@ from collections import Counter
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from aisquare.core import harness
 from aisquare.core.agent_adapters import recorded_adapter
@@ -114,13 +113,3 @@ def _one(session: TeamSession, *, since: datetime | None, until: datetime | None
         return row
     counted = reader.ledger(path, since=since, until=until)
     return counted.model_copy(update={"session_id": session.id, "role": session.role})
-
-
-def _deltas(entry: dict[str, Any]) -> list[str]:
-    """The ``<aisquare-team-delta>`` blocks a Claude Code hook's attachment carries, tags
-    included (``agent_adapters.claude_ledger``)."""
-    from aisquare.core import ledger
-    from aisquare.core.agent_adapters import claude_ledger
-
-    return [block for text in claude_ledger._attachment_texts(entry)
-            for block in ledger.delta_blocks(text)]  # fmt: skip

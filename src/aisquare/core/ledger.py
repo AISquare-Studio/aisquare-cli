@@ -30,12 +30,17 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+from aisquare.core import transcripts
+
+#: How much of a transcript's end :func:`recorded_since` looks at first.
+_TAIL_BYTES = 256_000
 
 #: What every Stop-hook wake-up the fleet sends says (``services.team._render_wakeup``).
 WAKE_MARKER = "board update(s) from your fleet arrived while you were finishing this turn"
@@ -130,6 +135,34 @@ def stamped(entry: dict[str, Any]) -> datetime | None:
         return datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def recorded_since(
+    path: Path,
+    since: datetime,
+    wanted: Callable[[dict[str, Any]], bool],
+    *,
+    tail_bytes: int = _TAIL_BYTES,
+) -> bool:
+    """Whether an entry ``wanted`` accepts was stamped at or after ``since``: the transcript's
+    tail is looked at first and widened (four times over, up to the whole file) only while it
+    does not yet reach back to ``since``, so asking again every few seconds for as long as a
+    session lives reads its end, not its whole length."""
+    size_now = transcripts.size(path)
+    window = tail_bytes
+    while True:
+        reached = False
+        for entry in transcripts.tail_entries(path, window):
+            stamp = stamped(entry)
+            if stamp is None:
+                continue
+            if stamp < since:
+                reached = True
+            elif wanted(entry):
+                return True
+        if reached or window >= size_now:
+            return False
+        window *= 4
 
 
 def within(entry: dict[str, Any], since: datetime | None, until: datetime | None) -> bool:

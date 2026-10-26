@@ -23,7 +23,6 @@ from aisquare.core.ledger import DELTA_CLOSE, WAKE_MARKER
 from aisquare.models import TeamSession
 from aisquare.services import token_ledger
 from tests.fake_agent import FakeAgentAdapter
-from tests.gemini_shaped_agent import GeminiShapedAdapter
 
 _T0 = datetime(2026, 10, 25, 12, 0, tzinfo=UTC)
 _FIXTURES = Path(__file__).parent / "fixtures" / "agent_transcripts"
@@ -43,7 +42,9 @@ def _message(seconds: int, role: str, text: str) -> dict[str, Any]:
     return _rec(seconds, "response_item", {"type": "message", "role": role, "content": content})
 
 
-def _billed(seconds: int, rid: str, running: int, fresh: int, read: int, out: int) -> dict:
+def _billed(
+    seconds: int, rid: str, running: int, fresh: int, read: int, out: int
+) -> dict[str, Any]:
     usage = {
         "input_tokens": fresh + read,  # Codex's input HOLDS the cached ones
         "cached_input_tokens": read,
@@ -65,7 +66,9 @@ def _billed(seconds: int, rid: str, running: int, fresh: int, read: int, out: in
     )
 
 
-def _call(seconds: int, name: str, cmd: str | None = None, namespace: str = "functions") -> dict:
+def _call(
+    seconds: int, name: str, cmd: str | None = None, namespace: str = "functions"
+) -> dict[str, Any]:
     arguments = json.dumps({"cmd": cmd} if cmd is not None else {})
     payload = {
         "type": "function_call",
@@ -180,9 +183,9 @@ def test_a_session_of_an_agent_this_install_does_not_know_is_a_row_of_zeros(
     assert (row.transcript_found, row.requests) == (False, 0)
 
 
-@pytest.fixture(params=[FakeAgentAdapter, GeminiShapedAdapter], ids=lambda cls: cls.id)
-def third(request: pytest.FixtureRequest) -> Iterator[Any]:
-    adapter = request.param()
+@pytest.fixture
+def third() -> Iterator[FakeAgentAdapter]:
+    adapter = FakeAgentAdapter()
     register(adapter)
     try:
         yield adapter
@@ -190,29 +193,22 @@ def third(request: pytest.FixtureRequest) -> Iterator[Any]:
         unregister(adapter.id)
 
 
-def test_a_third_agents_session_is_counted_by_its_own_reader(third: Any, tmp_path: Path) -> None:
-    """Each synthetic agent's own records (``tests/fixtures/agent_transcripts/<id>.json``'s
-    shapes): one request of 30 fresh and 70 reused, 9 out, and one tool call."""
+def test_a_third_agents_session_is_counted_by_its_own_reader(
+    third: FakeAgentAdapter, tmp_path: Path
+) -> None:
+    """The synthetic agent's own records (``tests/fixtures/agent_transcripts/<id>.json``'s
+    shapes): one request of 30 fresh and 70 reused, 9 out, and one tool call. The other
+    synthetic agent's are counted in ``tests/test_third_agent_seams.py``."""
     path = tmp_path / "t.jsonl"
-    if third.id == FakeAgentAdapter.id:
-        records: list[dict[str, Any]] = [
-            {"kind": "brief", "text": DELTA},
-            {"kind": "billed", "model": "fake-1", "fresh": 30, "reused": 70, "out": 9},
-            {"kind": "run", "tool": "shell", "id": "c1"},
-        ]
-    else:
-        records = [
-            {
-                "type": "gemini",
-                "id": "g1",
-                "model": "gemini-x",
-                "tokens": {"input": 100, "cached": 70, "output": 9},
-                "toolCalls": [{"id": "c1", "name": "run_shell_command", "args": {}}],
-            }
-        ]
+    records: list[dict[str, Any]] = [
+        {"kind": "brief", "text": DELTA},
+        {"kind": "billed", "model": "fake-1", "fresh": 30, "reused": 70, "out": 9},
+        {"kind": "run", "tool": "shell", "id": "c1"},
+    ]
     path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
 
     (row,) = token_ledger.ledger([_session(path, third.id)])
 
     assert (row.requests, row.input_fresh, row.input_cache_read, row.output) == (1, 30, 70, 9)
     assert row.baseline == 100 and sum(row.tool_calls.values()) == 1
+    assert (row.delta_blocks, row.delta_chars) == (1, len(DELTA))

@@ -8,7 +8,8 @@ Where :mod:`aisquare.core.ledger`'s terms sit in a Codex rollout (measured on 0.
   running total, so one read twice counts once. Its ``usage.input_tokens`` HOLDS the cached
   ones, so fresh is ``input_tokens - cached_input_tokens - cache_write_input_tokens``,
   read is ``cached_input_tokens`` and written ``cache_write_input_tokens``; the context is
-  ``input_tokens``.
+  ``input_tokens``. The record is parsed once for every reader of it
+  (``codex_usage.record_tokens`` and ``record_key``).
 - **baseline** — the first record's ``input_tokens``.
 - **tool call** — a ``response_item`` call (``function_call``, ``custom_tool_call``,
   ``local_shell_call``) by name, an MCP tool's as ``<namespace>__<name>``; a board read is
@@ -28,7 +29,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from aisquare.core import ledger
+from aisquare.core import ledger, transcripts
+from aisquare.core.agent_adapters import codex_usage
 from aisquare.core.agent_adapters.codex_transcript import (
     _call_input,
     _call_name,
@@ -36,6 +38,7 @@ from aisquare.core.agent_adapters.codex_transcript import (
     _own,
 )
 from aisquare.core.ledger import SessionLedger
+from aisquare.core.pricing import RequestTokens
 
 #: The calls a response makes, each a tool run (``codex_usage``'s).
 _CALLS = frozenset({"function_call", "custom_tool_call", "local_shell_call"})
@@ -55,18 +58,18 @@ def read(file: Path, *, since: datetime | None, until: datetime | None) -> Sessi
         payload = record.get("payload")
         if not isinstance(payload, dict):
             continue
-        request = _request(payload) if kind == "token_usage_record" else None
+        request = codex_usage.record_tokens(payload) if kind == "token_usage_record" else None
         if request is not None and row.baseline is None:
-            row.baseline = sum(request[:3])  # the session's first, whatever the window
+            row.baseline = _context(request)  # the session's first, whatever the window
         if not ledger.within(record, since, until):
             continue
         if request is not None:
-            key = _key(payload)
+            key = codex_usage.record_key(payload)
             if key is not None and key in seen:
                 continue
             if key is not None:
                 seen.add(key)
-            window.request(*request)
+            window.request(request.input, request.cache_write, request.cache_read, request.output)
         elif kind == "compacted":
             window.compacted("unknown")
         elif kind == "event_msg" and payload.get("type") == "task_complete":
@@ -77,46 +80,28 @@ def read(file: Path, *, since: datetime | None, until: datetime | None) -> Sessi
 
 
 def context_tokens(file: Path) -> int | None:
-    """The context now: the newest ``token_usage_record``'s ``input_tokens``."""
-    row = SessionLedger(session_id="", role="")
-    latest: int | None = None
-    for record in ledger.entries(file, row):
-        payload = record.get("payload")
-        if record.get("type") == "token_usage_record" and isinstance(payload, dict):
-            request = _request(payload)
-            if request is not None:
-                latest = sum(request[:3])
-    return latest
+    """The context now: the newest ``token_usage_record``'s ``input_tokens``, read from the
+    rollout's tail (:func:`transcripts.latest_in_tail`), as Claude Code's is."""
+    return transcripts.latest_in_tail(file, _record_context)
 
 
 def compacted_since(file: Path, since: datetime) -> bool:
     """Whether a ``compacted`` record was written at or after ``since``: what a typed
-    ``/compact`` leaves, with no hook (measured on 0.164.0)."""
-    row = SessionLedger(session_id="", role="")
-    for record in ledger.entries(file, row):
-        if record.get("type") == "compacted":
-            stamp = ledger.stamped(record)
-            if stamp is not None and stamp >= since:
-                return True
-    return False
+    ``/compact`` leaves, with no hook at that moment (measured on 0.164.0: its
+    ``SessionStart`` comes with the next turn). Read from the rollout's tail."""
+    return ledger.recorded_since(file, since, lambda record: record.get("type") == "compacted")
 
 
-def _request(payload: dict[str, Any]) -> tuple[int, int, int, int] | None:
-    """``(fresh, written, read, output)`` of a ``token_usage_record``, or ``None``."""
-    usage = payload.get("usage")
-    if not isinstance(usage, dict):
+def _context(request: RequestTokens) -> int:
+    return request.input + request.cache_write + request.cache_read
+
+
+def _record_context(record: dict[str, Any]) -> int | None:
+    payload = record.get("payload")
+    if record.get("type") != "token_usage_record" or not isinstance(payload, dict):
         return None
-    read = ledger.tokens(usage.get("cached_input_tokens"))
-    written = ledger.tokens(usage.get("cache_write_input_tokens"))
-    fresh = max(0, ledger.tokens(usage.get("input_tokens")) - read - written)
-    return fresh, written, read, ledger.tokens(usage.get("output_tokens"))
-
-
-def _key(payload: dict[str, Any]) -> str | None:
-    response = payload.get("response_id")
-    thread = payload.get("thread_token_usage")
-    running = ledger.tokens(thread.get("total_tokens")) if isinstance(thread, dict) else 0
-    return f"{response}:{running}" if isinstance(response, str) and response else None
+    request = codex_usage.record_tokens(payload)
+    return _context(request) if request is not None else None
 
 
 def _item(payload: dict[str, Any], window: ledger.Window) -> None:

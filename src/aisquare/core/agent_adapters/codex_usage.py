@@ -105,27 +105,41 @@ def _turn(payload: Mapping[str, Any], tally: Tally) -> None:
         tally.turns[turn] = model  # last: the newest turn's model is the fallback
 
 
-def _response(payload: Mapping[str, Any], tally: Tally, found: Usage) -> None:
+def record_tokens(payload: Mapping[str, Any]) -> RequestTokens | None:
+    """The four billed kinds of a ``token_usage_record``'s ``usage``, or ``None`` when it has
+    none. One parse for every reader of the record (``codex_ledger`` reads the same): the
+    ``input_tokens`` hold the cached and the cache-written ones, billed apart."""
     raw = payload.get("usage")
     if not isinstance(raw, dict):
-        return
+        return None
     cached = _count(raw.get("cached_input_tokens"))
     written = _count(raw.get("cache_write_input_tokens"))
-    tokens = RequestTokens(
+    return RequestTokens(
         input=max(0, _count(raw.get("input_tokens")) - cached - written),
         cache_write_5m=written,
         cache_read=cached,
         output=_count(raw.get("output_tokens")),
     )
+
+
+def record_key(payload: Mapping[str, Any]) -> str | None:
+    """What a ``token_usage_record`` is counted once by: its ``response_id`` and the thread's
+    running total it brings, so a provider that reuses its ids has each response counted."""
+    response = _string(payload.get("response_id"))
+    thread = payload.get("thread_token_usage")
+    running = _count(thread.get("total_tokens")) if isinstance(thread, dict) else 0
+    return f"{response}:{running}" if response is not None else None
+
+
+def _response(payload: Mapping[str, Any], tally: Tally, found: Usage) -> None:
+    tokens = record_tokens(payload)
+    if tokens is None:
+        return
     turn = _string(payload.get("turn_id"))
     model = (tally.turns.get(turn) if turn is not None else None) or next(
         reversed(tally.turns.values()), UNKNOWN_MODEL
     )
-    response = _string(payload.get("response_id"))
-    thread = payload.get("thread_token_usage")
-    running = _count(thread.get("total_tokens")) if isinstance(thread, dict) else 0
-    key = f"{response}:{running}" if response is not None else None
-    tally.request(found, PRICE_TABLE, model, key, tokens)
+    tally.request(found, PRICE_TABLE, model, record_key(payload), tokens)
 
 
 def _item(payload: Mapping[str, Any], tally: Tally, found: Usage) -> None:

@@ -25,7 +25,7 @@ an entry of its own in place of the reply — ``"model": "<synthetic>"``,
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -112,14 +112,23 @@ def latest_context_tokens(path: Path, *, tail_bytes: int = _TAIL_BYTES) -> int |
     Read from the tail, which grows (four times over, up to the whole file) while it holds
     no request: one turn's tool results can outweigh ``tail_bytes``.
     """
+    return latest_in_tail(path, request_tokens, tail_bytes=tail_bytes)
+
+
+def latest_in_tail(
+    path: Path, read: Callable[[dict[str, Any]], int | None], *, tail_bytes: int = _TAIL_BYTES
+) -> int | None:
+    """What ``read`` gives the LAST entry it gives something for, looking at the tail first
+    and widening it (four times over, up to the whole file) while none does: the shape of
+    every agent's "how large is the context now"."""
     size_now = size(path)
     window = tail_bytes
     while True:
         latest: int | None = None
-        for entry in _tail_entries(path, window):
-            tokens = request_tokens(entry)
-            if tokens is not None:
-                latest = tokens
+        for entry in tail_entries(path, window):
+            found = read(entry)
+            if found is not None:
+                latest = found
         if latest is not None or window >= size_now:
             return latest
         window *= 4
@@ -144,7 +153,7 @@ def refusal_count(path: Path, *, tail_bytes: int = _TAIL_BYTES, since: int = 0) 
     replaced (#150).
     """
     count = 0
-    for entry in _tail_entries(path, tail_bytes, since):
+    for entry in tail_entries(path, tail_bytes, since):
         message = entry.get("message")
         if not isinstance(message, dict):
             continue
@@ -202,7 +211,9 @@ def _head_entries(path: Path) -> Iterator[dict[str, Any]]:
     yield from _entries(raw.split(b"\n"))
 
 
-def _tail_entries(path: Path, tail_bytes: int, since: int = 0) -> Iterator[dict[str, Any]]:
+def tail_entries(path: Path, tail_bytes: int, since: int = 0) -> Iterator[dict[str, Any]]:
+    """The entries in the last ``tail_bytes`` of the transcript (never before byte ``since``),
+    oldest first; the cut line at the front, and a line that does not parse, are left out."""
     try:
         with path.open("rb") as handle:
             handle.seek(0, 2)

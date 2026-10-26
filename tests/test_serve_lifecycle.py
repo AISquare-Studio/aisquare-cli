@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -49,6 +50,21 @@ def _stderr_of(daemon: subprocess.Popen[bytes]) -> bytes:
     assert daemon.stderr is not None
     data: bytes = daemon.stderr.read()
     return data
+
+
+def _first_line_of(daemon: subprocess.Popen[bytes], *, seconds: float = 120) -> bytes:
+    """The first line the daemon prints on stdout, once it is serving; a daemon that never
+    answers is killed and fails the test, rather than hanging it."""
+    assert daemon.stdout is not None
+    stdout = daemon.stdout
+    line: list[bytes] = []
+    reader = threading.Thread(target=lambda: line.append(stdout.readline()), daemon=True)
+    reader.start()
+    reader.join(seconds)
+    if reader.is_alive():
+        daemon.kill()
+        pytest.fail(f"the daemon answered nothing in {seconds:g} s: {_stderr_of(daemon)!r}")
+    return line[0]
 
 
 def test_abandoned_daemons_exit_at_the_idle_deadline(project: Path) -> None:
@@ -109,7 +125,14 @@ def test_close_after_flag_beats_env(project: Path) -> None:
 def test_eof_still_exits_immediately(project: Path) -> None:
     daemon = _spawn(project, env_extra={})  # default 300s deadline
     assert daemon.stdin is not None
+    # The daemon is up, and answering, before the clock starts: what is timed is the exit
+    # on EOF, not the interpreter's start-up and its imports, which took 12.9 s on a
+    # loaded windows-latest runner (CI run 40230136547) against a 10 s bound.
+    daemon.stdin.write(b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n')
+    daemon.stdin.flush()
+    assert _first_line_of(daemon).startswith(b'{"jsonrpc":"2.0","id":1,"result"')
     daemon.stdin.close()
     start = time.monotonic()
     assert daemon.wait(timeout=_WAIT) == 0
     assert time.monotonic() - start < 10  # EOF path, nowhere near the deadline
+    assert b"idle deadline" not in _stderr_of(daemon), "it left by its deadline, not on EOF"

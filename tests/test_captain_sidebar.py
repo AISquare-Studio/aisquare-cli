@@ -29,6 +29,7 @@ from aisquare.services.captain import state as captain_state
 from tests import test_ui_shell as ui_suite
 from tests.fleet_fakes import list_agents_as
 from tests.test_ui_shell import Script, drive, fleet_app, refreshed, row_for, seed, shown, status
+from tests.ui_workers import settle_until
 
 # The UI suite's fixtures, bound here so pytest finds them for this module's tests
 # (``no_real_tmux`` is autouse there: every tmux call held to a private socket).
@@ -233,15 +234,26 @@ def test_stopping_the_captain_goes_back_to_the_welcome_page_not_a_project_of_the
 
     async def body(pilot: Pilot[None]) -> tuple[str | None, str | None, list[str], list[str]]:
         app = fleet_app(pilot)
-        await ui_suite.open_stop_dialog(pilot, app, captain.agent.id)
+        dialog = await ui_suite.open_stop_dialog(pilot, app, captain.agent.id)
         script[home.id] = [FleetAgentStatus(agent=ui_suite.ended(captain.agent), state="exited")]
-        await pilot.click("#stop-confirm")
-        await ui_suite.settle(app)
-        await pilot.pause()
-        await pilot.pause()
-        toasts = [toast.render().plain for toast in app.screen.query(Toast)]
+        # Pressed on the dialog, and the shell waited for until it has left the agent's view
+        # and told of the stop: a click the moment the dialog was pushed was lost on
+        # windows-latest (no stop reached the service: CI run 40244987840), as the stop test's
+        # was (tests/test_ui_shell.py) and the take-over test's before it.
+        dialog.query_one("#stop-confirm", Button).press()
+
+        def toasts() -> list[str]:
+            return [toast.render().plain for toast in app.screen.query(Toast)]
+
+        await settle_until(
+            app,
+            lambda: (
+                f"✓ stopped captain ({captain.agent.id})" in toasts()
+                and app.content.current == "welcome"
+            ),
+        )
         pages = [view.project.id for view in app.query(ProjectView)]
-        return app.content.current, app.sidebar.selected_key, pages, toasts
+        return app.content.current, app.sidebar.selected_key, pages, toasts()
 
     current, selected, pages, toasts = drive(body, notifications=True)
     assert recorder.calls == [(home.id, "captain", False, captain.agent.id)], "Stop still works"

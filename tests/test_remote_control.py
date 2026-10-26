@@ -2814,8 +2814,11 @@ class LockedServer(FakeServer):
         super().__init__()
         self.free = threading.Event()
         self.waiting = threading.Event()
+        self.writers: list[int] = []
+        """The thread (``threading.get_ident``) of every write that began, in order."""
 
     def _write_remote_json(self) -> None:
+        self.writers.append(threading.get_ident())
         self.waiting.set()
         assert self.free.wait(10), "the lock was never let go"
         super()._write_remote_json()
@@ -2839,20 +2842,30 @@ def test_the_panels_controls_write_remote_json_on_a_thread_of_their_own() -> Non
     controller = RemoteController(server=server, tunnel_factory=factory, now=lambda: clock[0])
     done = heard_news(controller)
     controller.on_done, controller.on_news = controller.on_news, None
-    started = time.monotonic()
+    # Who waited for the lock is asked of the writes, not of a stopwatch: the lock is held
+    # until the test lets it go, so a control that waited for it on its caller's thread did
+    # not return, and its write is recorded under the caller's own id. (A bound of one
+    # second on the five calls went red on windows-latest, run 40232807941.)
     controller.turn_on(wait=False)
     controller.set_allow_write(True, wait=False)
     controller.set_auto_off(30, wait=False)
     assert controller.regenerate_password(wait=False) is None
     assert controller.revoke_device("dev_0000000a", wait=False) is False
-    assert time.monotonic() - started < 1.0, "a control waited for remote.json's lock"
     assert server.waiting.wait(5)
+    assert threading.get_ident() not in server.writers, "a control waited for remote.json's lock"
     assert controller.running and controller.message == remote_control.STARTING
     assert tunnels == [], "no ngrok before the start's deadline is written"
     assert controller.write_actions_allowed() is True, "the switch shows the press"
     assert controller.auto_off_at == clock[0] + timedelta(minutes=30)
     assert controller.adopt_server_deadline() == clock[0] + timedelta(minutes=30)
-    time.sleep(remote_control.SAVING_AFTER)
+    # Until it says so, not a sleep of its own length: a monotonic clock that steps by 15.6 ms
+    # reads a little short of it after one.
+    saving_by = time.monotonic() + 30
+    while (
+        remote_control.SAVING not in controller.status_line().splitlines()
+        and time.monotonic() < saving_by
+    ):
+        time.sleep(0.02)
     assert remote_control.SAVING in controller.status_line().splitlines()
     assert not controller.writes_done(0.1)
 

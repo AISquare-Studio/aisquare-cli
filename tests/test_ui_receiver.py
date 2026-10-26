@@ -985,16 +985,29 @@ def test_a_client_that_says_nothing_is_cut_off_in_time_for_the_next(
 @UNIX_SOCKETS
 @pytest.mark.needs_captain
 def test_quit_does_not_wait_out_a_client_that_says_nothing(
-    tmp_path: Path, script: Script, ui_path: Path
+    tmp_path: Path, script: Script, ui_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The wait a quit must not sit out is made a minute long, so that sitting it out and
+    not doing so differ by a hundred times what a loaded runner costs a thread to wake
+    (0.72 s against a bound of 0.25 s, from a wait of 0.5 s, on one). The receiver is
+    waited for until it holds the client's line open, not for a tenth of a second."""
     fleet(tmp_path, script)
+    monkeypatch.setattr(receiver, "READ_S", 60.0)
+    waiting = threading.Event()
+    read_line = receiver._read_line
+
+    def noted_read_line(conn: socket.socket, wake: int) -> bytes | None:
+        waiting.set()
+        return read_line(conn, wake)
+
+    monkeypatch.setattr(receiver, "_read_line", noted_read_line)
 
     async def body(pilot: Pilot[None]) -> tuple[float, dict[str, Any]]:
         app = fleet_app(pilot)
         with _unix_socket() as silent:
             silent.settimeout(5)
             silent.connect(str(ui_path))
-            await asyncio.sleep(0.1)  # let the receiver take it and start waiting for its line
+            assert await asyncio.to_thread(waiting.wait, 30), "the receiver never took the client"
             began = time.monotonic()
             receiver.stop_listening_for_ui(app)
             took = time.monotonic() - began

@@ -25,6 +25,7 @@ from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.models import TeamSession
 from aisquare.services import team as team_service
+from tests import ordered_ids
 
 pytestmark = pytest.mark.usefixtures("project_capture")
 
@@ -114,6 +115,7 @@ def test_the_pack_stays_within_its_budget_and_says_what_it_left_out(
     """A 12,000-char state file is clipped at 4,000, the cycle's own limit, with its path;
     200 open tasks of 150 chars cannot all fit, and the line that ends them says how many did
     not and where they are. Every line it keeps is whole."""
+    ordered_ids.install(monkeypatch)  # 200 tasks in a loop: the board lists them by id
     _start(monkeypatch, work, MANAGER, "manager", "startup")
     for n in range(200):
         team_service.add_task(f"t{n:03d} " + "x" * 145, session_ref=MANAGER)

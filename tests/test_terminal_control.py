@@ -701,14 +701,20 @@ def test_real_tmux_a_stalled_client_killed_waits_out_the_retry_before_another_st
 
 @_needs_tmux
 def test_real_tmux_the_followed_project_ending_does_not_cost_the_other_panes_their_client(
-    live: TmuxServer, tmp_path: Path
+    live: TmuxServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Stopping the last agent of the project on screen destroys its session, and tmux
     detaches a client from a destroyed session (``%exit``): every pane on the server then
     polled for :data:`~aisquare.cli.ui.terminal.CONTROL_RESTART`, after an ordinary stop
     (review of #272). The client asks to stay (``no-detach-on-destroy``, which tmux 3.8
     honours), and a plain detach is offered a new client at once (3.2a and 3.4 detach
-    whatever the flag says): the next pane shown is served within a second either way."""
+    whatever the flag says): the next pane shown is served at once either way, not after
+    that poll.
+
+    The poll is made ten minutes long, so what tells the two apart is whether the pane is
+    served at all, never how many milliseconds it took: it was a stopwatch on a runner
+    whose own start-up took seconds (1.5 s, red on a loaded one: run 40232807941)."""
+    monkeypatch.setattr(terminal_module, "CONTROL_RESTART", 600.0)
     gone = _window(live, "asq-ends", tmp_path, ["cat"])
     stays = _window(live, "asq-stays", tmp_path, ["cat"])
 
@@ -720,12 +726,13 @@ def test_real_tmux_the_followed_project_ending_does_not_cost_the_other_panes_the
             live.run("kill-window", "-t", gone)  # its session's last window
             ended = time.monotonic()
             pane.attach(stays)
-            await wait_until(pilot, lambda: _serving(pane), timeout=3.0)
+            # A failure is a pane that never comes: this wait is how long to look, not what
+            # is asserted, and a pane served after the poll would be 600 s away.
+            await wait_until(pilot, lambda: _serving(pane), timeout=30.0)
             return time.monotonic() - ended, list(host.notices)
 
     took, notices = run(drive())
     print(f"\nthe followed session ended: the next pane served again {took * 1000:.0f} ms later")
-    assert took < 1.5, took
     assert notices == [], notices
 
 
@@ -753,6 +760,7 @@ def test_real_tmux_keys_in_flight_when_the_client_dies_arrive_once_each_by_polli
     pane_id = _window(
         live, "asq-burst", tmp_path, ["sh", "-c", f"stty raw -echo; exec cat > {record}"]
     )
+    _until_created(record)
     monkeypatch.setattr(terminal_module, "CONTROL_RESTART", 0.0)  # a client again at once
     sent_over = ControlClient.send_literal
     kill_after = [0]
@@ -909,7 +917,19 @@ def _recording_pane(live: TmuxServer, tmp_path: Path, session: str) -> tuple[str
     """A pane whose program records what it reads, raw: what arrived, and in what order."""
     record = tmp_path / f"{session}.typed"
     pane_id = _window(live, session, tmp_path, ["sh", "-c", f"stty raw -echo; exec cat > {record}"])
+    _until_created(record)
     return pane_id, record
+
+
+def _until_created(record: Path) -> None:
+    """Wait until the pane's shell has opened ``record``: it has set the terminal raw by then
+    (``stty`` runs first), and a reader finds the file. The shell starts after ``spawn_window``
+    returns, and on a loaded runner a test read the record before it existed
+    (FileNotFoundError, ubuntu py3.13, CI run 40231765689), or typed ahead of ``stty``."""
+    deadline = time.monotonic() + 30
+    while not record.exists():
+        assert time.monotonic() < deadline, f"the pane's shell never opened {record.name}"
+        time.sleep(0.01)
 
 
 async def _settled(pilot: Any, record: Path, length: int, seconds: float = 3.0) -> str:

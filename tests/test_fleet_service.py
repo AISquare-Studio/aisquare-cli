@@ -91,7 +91,7 @@ from aisquare.services.fleet import (
     FleetUnavailable,
     NoSuchAgent,
 )
-from tests import bundled_personas, captain_screens, fakebin
+from tests import bundled_personas, captain_screens, fakebin, limit_notices
 from tests.captain_screens import INPUT_BOX, MARK
 from tests.cycles import unscoped
 from tests.fsperms import can_deny_reads, can_symlink, remove_tree
@@ -6050,7 +6050,7 @@ def test_a_usage_limit_reads_the_agents_row_once(hubbed: _Hubbed) -> None:
         return real(self, session_id)
 
     hubbed.monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", counted)
-    limit = "You've hit your session limit · resets 12:30am"
+    limit = limit_notices.session()
 
     team_service.hook_stop_failure(
         hubbed.coder_sid, error="rate_limit", message=limit, details=None
@@ -18979,7 +18979,7 @@ def test_a_refused_hand_over_is_handover_failed_and_wakes_the_manager(
         project,
         monkeypatch,
         tmp_path,
-        message="You've hit your weekly limit · resets Mon 12:00am (America/Toronto)",
+        message=limit_notices.weekly(),
     )
 
     assert _events(project, "switched") == []

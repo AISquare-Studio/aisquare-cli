@@ -214,7 +214,9 @@ def test_the_brief_keeps_every_section_and_cuts_the_oldest_of_the_conversation_t
     text = brief.text()
 
     assert len(text.encode("utf-8")) <= handoff.PROMPT_MAX
-    assert text.startswith("You are coder-1, taking over from coder-1, which ran on Codex")
+    assert text.startswith(
+        "You are coder-1, taking over from the previous session of this agent, which ran on Codex"
+    )
     assert "You run on Claude Code: a conversation does not move between agents" in text
     assert "Ship the router (tsk_brief)" in text and "Contract: objective" in text
     assert "Claims, now yours:\n- #7 Ship the router" in text
@@ -308,7 +310,10 @@ def test_a_codex_agent_switched_onto_claude_code_starts_fresh_there_with_the_bri
     assert new is not None and new != old and _flag(command, "--session-id") == new
     assert receipt.started.agent == "claude-code" and receipt.started.task_id == task.id
     prompt = _first_message(tmux, receipt)
-    assert prompt.startswith(f"You are {agent.label}, taking over from {agent.label}, which ran")
+    assert prompt.startswith(
+        f"You are {agent.label}, taking over from the previous session of this agent, which ran"
+    )
+    assert f"taking over from {agent.label}" not in prompt  # not its own predecessor (r22 f10)
     assert "on Codex" in prompt and "You run on Claude Code" in prompt
     assert "Claims, now yours:" in prompt and "Wire the auth flow" in prompt
     for line in _conversation_lines(rollout, "codex")[-3:]:
@@ -364,7 +369,9 @@ def test_a_claude_code_agent_switched_to_a_codex_account_takes_the_brief_as_its_
     assert _flag(command, "--account") == str(codex.slot)
     assert "--resume" not in command
     prompt = _first_message(tmux, receipt)
-    assert prompt.startswith(f"You are {agent.label}, taking over from {agent.label}")
+    assert prompt.startswith(
+        f"You are {agent.label}, taking over from the previous session of this agent"
+    )
     assert "ran on Claude Code (it stopped on 5h limit)" in prompt and "You run on Codex" in prompt
     for line in _conversation_lines(transcript, "claude-code")[-3:]:
         assert line.strip()[:60] in prompt

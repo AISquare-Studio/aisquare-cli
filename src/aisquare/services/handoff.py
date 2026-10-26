@@ -24,7 +24,13 @@ contract already asks (docs/coding-agents.md, "Adding a terminal agent"):
 
 The first prompt holds the brief cut to :data:`PROMPT_MAX` bytes; the whole brief, up to
 :data:`FILE_MAX`, is written under the aisquare home (:func:`brief_dir`), which a sandboxed
-agent may read and never write, and the prompt names it.
+agent may read and never write, and the prompt names it. The brief's last two lines, where to
+start and where the whole brief is kept, are never what a cut takes (:meth:`HandoffBrief.text`).
+
+The brief is the human's and the agent's own words on their way to ANOTHER agent's provider,
+so it is redacted as text leaving the machine is (``core.redaction.redact`` at
+``[redaction] level``) before it is written or sent, and the files are pruned after
+:data:`KEEP_DAYS` (:func:`prune`).
 """
 
 from __future__ import annotations
@@ -36,17 +42,19 @@ import stat
 import subprocess
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aisquare.core import atomic, paths
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.agent_adapters import get_adapter, recorded_adapter
 from aisquare.core.agent_adapters.transcripts import lines_backwards, lines_forward
+from aisquare.core.config import load_config
 from aisquare.core.launch_seal import LaunchRecord
+from aisquare.core.redaction import redact
 from aisquare.core.spawn import git_env
 from aisquare.core.workspace import git_argv
-from aisquare.models import FleetAgent, TeamEvent, TeamTask
+from aisquare.models import FleetAgent, RedactionLevel, TeamEvent, TeamTask
 from aisquare.services import claude_accounts as claude_accounts_service
 
 PROMPT_MAX = 6_000
@@ -79,10 +87,26 @@ ENTRY_MAX = 400
 CHANGED_MAX = 30
 """Most of the tree's uncommitted paths a brief lists."""
 
+CLAIMS_MAX = 8
+"""Most of the source's claims a brief lists, each cut to :data:`CLAIM_MAX`; the rest are
+counted (``+N more``) and are on the board. A manager can hold twenty."""
+
+CLAIM_MAX = 120
+"""Most characters of one claim's title a brief quotes."""
+
 COMMITS = 5
 """The newest commits of the tree a brief lists."""
 
 DIR_NAME = "handoffs"
+
+KEEP_DAYS = 14
+"""How long a brief file is kept: :func:`write` removes the ones older than this, by the
+time they were written. The prompt holds the brief's newest part and names the file for the
+rest, which a replacement reads in its first turns; two weeks outlasts a long task, and no
+conversation of the human's stays on the disk for longer than that for a hand-off."""
+
+_MIDDLE_ROOM = 200
+"""The bytes kept back for the conversation's own heading, or its pointer when none of it fits."""
 
 _GIT_TIMEOUT = 10.0
 _ESCAPES = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
@@ -130,58 +154,90 @@ class HandoffBrief:
     """The source keeps running, and the new agent has its own tree and no claims."""
     path: Path | None = None
     """Where :func:`write` kept the whole brief; ``None`` before, or when it could not."""
+    redaction: RedactionLevel = RedactionLevel.standard
+    """How hard :meth:`text` scrubs what it quotes (``[redaction] level``, which
+    :func:`build` reads). The default is the config's own, so a brief made by hand is scrubbed
+    as the default would."""
 
     def text(self, limit: int = PROMPT_MAX) -> str:
-        """The brief in at most ``limit`` UTF-8 bytes: every section but the conversation
-        whole (each already bounded), and as much of the conversation as fits, newest kept."""
-        head, tail = self._head(), self._tail()
-        fixed = _size("\n".join([*head, *tail])) + 1
-        lines, cut = _newest_that_fit(self.conversation, limit - fixed - 200)
+        """The brief in at most ``limit`` UTF-8 bytes, credentials scrubbed out of what it
+        quotes (``core.redaction.redact``).
+
+        The head (who, the task and contract, the claims, the board entries, the tree) is
+        each section bounded; the conversation fills what it leaves, newest kept. When the
+        head alone is over, the cut takes the conversation first (to a pointer), then the
+        board entries (the oldest first), the tree, and the claims, and says which; the
+        task and its contract go last. The last two lines, where to start and where the
+        whole brief is kept, are never what it takes: they are what lets the agent find the
+        rest."""
+        tail = self._tail()
+        room = limit - _size("\n".join(tail)) - 1
+        reserve = _MIDDLE_ROOM if self.conversation else 0
+        core, claims, entries, tree = (_scrubbed(part, self.redaction) for part in self._head())
+        head = _fit_head(core, claims, entries, tree, room - reserve)
+        # Only the newest lines that could fit are scrubbed: a long session is megabytes.
+        pool, before = _newest_that_fit(self.conversation, limit)
+        lines, cut = _newest_that_fit(
+            _scrubbed(pool, self.redaction), room - _size("\n".join(head)) - 1 - reserve
+        )
         middle: list[str] = []
         if lines:
             source = claude_accounts_core.agent_label(self.source_agent)
-            cut_note = ", its start cut to fit" if cut else ""
+            cut_note = ", its start cut to fit" if cut or before else ""
             middle = [f"{self.source}'s conversation on {source}, newest last{cut_note}:", *lines]
         elif self.conversation:
-            middle = [f"({self.source}'s conversation is in the brief file, too long for here)"]
-        body = "\n".join([*head, *middle, *tail])
-        return _cut_bytes(body, limit)
+            where = "in the brief file, too long for here" if self.path else "too long for here"
+            middle = [f"({self.source}'s conversation is {where})"]
+        return _cut_bytes("\n".join([*head, *middle, *tail]), limit)
 
-    def _head(self) -> list[str]:
+    def _head(self) -> tuple[list[str], list[str], list[str], list[str]]:
+        """The head's four sections, in the order they read: who and the task, the claims, the
+        board entries (a heading, then the oldest first), and the tree."""
         source = claude_accounts_core.agent_label(self.source_agent)
         target = claude_accounts_core.agent_label(self.target_agent)
         why = f" ({self.reason})" if self.reason else ""
         if self.fork:
             who = f"You are {self.label}, a fork" if self.label else "You are a fork"
-            lines = [
+            core = [
                 f"{who} of {self.source}, which keeps running on "
                 f"{source}. You run on {target}: a conversation does not move between agents, "
                 "so you start fresh, in your own worktree on your own branch with no claims, "
                 f"and this brief carries {self.source}'s work so far."
             ]
         else:
-            lines = [
-                f"You are {self.label}, taking over from {self.source}, which ran on {source}"
+            # A take-over keeps its source's label: it is the previous session of the same agent.
+            who = "the previous session of this agent" if self.label == self.source else self.source
+            core = [
+                f"You are {self.label}, taking over from {who}, which ran on {source}"
                 f"{why}. You run on {target}: a conversation does not move between agents, so "
                 "you start fresh, and this brief carries its work."
             ]
         if self.task is not None:
             whose = f"{self.source}'s task, not yours" if self.fork else "your task"
-            lines.append(f"Task ({whose}): {_single_line(self.task.title)} ({self.task.id}).")
+            title = _clip(_single_line(self.task.title), ENTRY_MAX)
+            core.append(f"Task ({whose}): {title} ({self.task.id}).")
             if self.task.detail and self.task.detail.strip():
-                lines.append(f"Contract: {_clip(self.task.detail.strip(), DETAIL_MAX)}")
+                core.append(f"Contract: {_clip(self.task.detail.strip(), DETAIL_MAX)}")
+        claims: list[str] = []
         if self.claims and not self.fork:
-            lines.append("Claims, now yours:")
-            lines.extend(f"- {_task_ref(task)} {_single_line(task.title)}" for task in self.claims)
+            claims.append("Claims, now yours:")
+            claims.extend(
+                f"- {_task_ref(task)} {_clip(_single_line(task.title), CLAIM_MAX)}"
+                for task in self.claims[:CLAIMS_MAX]
+            )
+            if len(self.claims) > CLAIMS_MAX:
+                claims.append(f"- (+{len(self.claims) - CLAIMS_MAX} more, on the board)")
+        entries: list[str] = []
         if self.entries:
-            lines.append(f"{self.source}'s last board entries:")
-            lines.extend(
+            entries.append(f"{self.source}'s last board entries:")
+            entries.extend(
                 f"- {event.kind}: {_clip(_single_line(event.text), ENTRY_MAX)}"
                 for event in self.entries
             )
-        if self.git is not None:
-            lines.extend(_git_lines(self.git, self.source if self.fork else None))
-        return lines
+        tree = (
+            _git_lines(self.git, self.source if self.fork else None) if self.git is not None else []
+        )
+        return core, claims, entries, tree
 
     def _tail(self) -> list[str]:
         task = f" and `aisquare task show {self.task.id}`" if self.task is not None else ""
@@ -229,6 +285,7 @@ def build(
         git=git_state(Path(record.cwd)),
         conversation=conversation(record),
         fork=fork,
+        redaction=_redaction_level(),
     )
 
 
@@ -283,7 +340,8 @@ def git_state(tree: Path) -> GitState | None:
 
 def write(brief: HandoffBrief, *, now: datetime | None = None) -> HandoffBrief:
     """``brief`` written whole (up to :data:`FILE_MAX`) under :func:`brief_dir`, owner-only,
-    with its :attr:`~HandoffBrief.path` set; as it was, with none, when it could not be."""
+    with its :attr:`~HandoffBrief.path` set; as it was, with none, when it could not be.
+    The briefs older than :data:`KEEP_DAYS` are removed first (:func:`prune`)."""
     moment = now or datetime.now(tz=UTC)
     named = brief.label or f"{brief.source}-fork"
     slug = _SLUG.sub("-", named).strip("-")[:40] or "agent"
@@ -296,7 +354,31 @@ def write(brief: HandoffBrief, *, now: datetime | None = None) -> HandoffBrief:
         atomic.write_replacing(target, kept.text(FILE_MAX) + "\n", owner_only=True)
     except OSError:
         return brief
+    prune(now=moment, spare=target)
     return kept
+
+
+def prune(*, now: datetime | None = None, spare: Path | None = None) -> tuple[Path, ...]:
+    """Remove the brief files in :func:`brief_dir` last written more than :data:`KEEP_DAYS`
+    ago, and say which: nothing else in that folder, no link, no folder, and not ``spare``,
+    the one just written. Never raises: a file that will not go is left for the next write."""
+    cutoff = ((now or datetime.now(tz=UTC)) - timedelta(days=KEEP_DAYS)).timestamp()
+    removed: list[Path] = []
+    try:
+        found = sorted(brief_dir().glob("*.md"))
+    except OSError:
+        return ()
+    for path in found:
+        if path == spare:
+            continue
+        try:
+            status = path.lstat()
+            if stat.S_ISREG(status.st_mode) and status.st_mtime < cutoff:
+                path.unlink()
+                removed.append(path)
+        except OSError:
+            continue
+    return tuple(removed)
 
 
 def prompt(brief: HandoffBrief) -> str:
@@ -440,6 +522,61 @@ def _git_lines(state: GitState, whose: str | None) -> list[str]:
     return lines
 
 
+def _redaction_level() -> RedactionLevel:
+    """``[redaction] level`` as the config holds it now; the default when it cannot be read."""
+    try:
+        return load_config().redaction.level
+    except Exception:  # a broken config keeps the default scrub, never costs the hand-off
+        return RedactionLevel.standard
+
+
+def _scrubbed(lines: Sequence[str], level: RedactionLevel) -> list[str]:
+    """``lines`` with credentials (at ``strict``, who and where) redacted. Scrubbed as one
+    text, so a key that spans lines (a PEM block, wrapped by the transcript) is one match."""
+    if not lines:
+        return []
+    return redact("\n".join(lines), level).split("\n")
+
+
+def _fit_head(
+    core: list[str], claims: list[str], entries: list[str], tree: list[str], room: int
+) -> list[str]:
+    """The head's sections in at most ``room`` bytes, with a line that says what was cut.
+
+    They give way in this order: the board entries (``entries`` is a heading, then the oldest
+    first: its oldest go one by one), the tree, the claims; what stays of ``core`` (who, the
+    task and its contract) is cut last, from its end, whole lines, and only a first line that
+    is itself over is cut mid-line. Each is on the board or in the tree for the agent to
+    read, which the brief's last lines tell it to."""
+    core, claims, entries, tree = list(core), list(claims), list(entries), list(tree)
+    gone: list[str] = []
+
+    def put() -> list[str]:
+        note = f"(cut to fit: {', '.join(gone)}; the board and the tree have them)"
+        return [*core, *claims, *entries, *tree, *([note] if gone else [])]
+
+    def over() -> bool:
+        return _size("\n".join(put())) > room
+
+    while over() and entries:
+        if not gone:
+            gone.append("the board entries")
+        entries.pop(1)  # the oldest: entries[0] is the heading
+        if len(entries) == 1:
+            entries.clear()  # a heading alone says nothing
+    if over() and tree:
+        gone.append("the tree")
+        tree.clear()
+    if over() and claims:
+        gone.append("the claims")
+        claims.clear()
+    while over() and len(core) > 1:
+        if gone[-1:] != ["the task"]:
+            gone.append("the task")
+        core.pop()
+    return [_cut_bytes("\n".join(put()), room)] if over() else put()
+
+
 def _newest_that_fit(lines: Sequence[str], room: int) -> tuple[list[str], bool]:
     """The newest of ``lines`` (each clipped) that fit in ``room`` bytes, oldest first, and
     whether any older one was left out."""
@@ -475,7 +612,9 @@ def _cut_bytes(text: str, most: int) -> str:
     raw = text.encode("utf-8")
     if len(raw) <= most:
         return text
-    return raw[: max(0, most - 4)].decode("utf-8", errors="ignore").rstrip() + " …"
+    if most <= len(" …".encode()):
+        return raw[: max(0, most)].decode("utf-8", errors="ignore")  # no room for the mark
+    return raw[: most - len(" …".encode())].decode("utf-8", errors="ignore").rstrip() + " …"
 
 
 def _task_ref(task: TeamTask) -> str:

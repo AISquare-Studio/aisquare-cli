@@ -58,6 +58,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that starts later, such as an MCP reconnect, proves its host and does not. The plan, with the
   measurements and the process trees, is docs/plans/mcp-own-row.md.
 
+- **`aisquare serve --stdio` no longer hands its protocol pipe to the `git` its tools run.** Every
+  tool call ran `git` twice with the server's stdin inherited, so a child held the pipe the client
+  writes its requests into. On Windows a process started with a pipe that another thread is
+  blocked reading can stall as it starts; that is the suspected cause of a stuck tool call there
+  (not yet confirmed on Windows). The three `git` calls a tool can reach now run with no stdin.
+
 ## [0.9.0] - 2026-10-25
 
 **The captain: an experimental voice-and-text agent that runs every project's fleet

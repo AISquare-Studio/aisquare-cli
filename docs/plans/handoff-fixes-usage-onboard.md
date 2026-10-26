@@ -1,6 +1,58 @@
 # Handoff: rc/fixes-usage-onboard — usage reads that back off, moving before the limit, onboarding large repos
 
-Status: draft handoff, 2026-10-24. Written against `main` @ 09f48563. Branch: `rc/fixes-usage-onboard`.
+> **Status, 2026-10-26 (the 0.9.1 audit of this handoff, board task #86): shipped. This file is now a
+> record.** Each item went into 0.9.0 or its own PR; the audit checked every "How to solve it" bullet and
+> every "Acceptance" line against `rc/0.9.1`, and found one gap, built here.
+>
+> | Item | Where it shipped | State |
+> | --- | --- | --- |
+> | F1: a rate-limited usage read backs off | 0.9.0, #408 (merged into #401) | Done, bar the statusline samples (#287) |
+> | F2: move an agent before it hits a limit | #432 | Out of this PR |
+> | F3: onboarding a large repo, no Repomix | 0.9.0, #399 (the snapshot and Repomix are gone) and the P2 train #297 (the code index, #285, built in #327 and #385) | Done, bar what is decided below |
+>
+> **What this PR adds.** This status block, and one sentence in `docs/fleet.md` (Accounts, usage): to hear
+> that an agent hit a usage limit, run `aisquare watch` instead of a loop around `accounts usage`. F1's
+> "Spend fewer reads" asked for it beside the polling floor, which 0.9.0 documented. It is the only gap the
+> audit found in code or docs. The test is `test_the_docs_point_a_scripter_at_watch_and_not_at_a_loop_of_accounts_usage`
+> in `tests/test_usage_backoff.py`.
+>
+> **Not built, and why.**
+>
+> - **Statusline samples (F1, "Spend fewer reads").** #287 is still open and shipped no feed: nothing
+>   ingests Claude Code's statusline, so there is nothing for a read to prefer. #287 owns it.
+> - **F3's budgeted repo map, and the session-start directive naming `aisquare code find|refs` (F3's
+>   "How to solve it" and its second acceptance line).** Decided, not missed. The owner gave the repo map
+>   to #92's phase B, the next train (call 22 in `docs/plans/handoff-p2-capacity-setup.md`), and withdrew
+>   the directive's two `aisquare code` lines (call 26: the live sample showed no token saving, and 0.9.0
+>   cut session start to about 130 characters for a solo repo). Session start names no snapshot and no
+>   file to read first, so the "never say read this FIRST" rule holds. Agents learn of the index from the
+>   `code_lookup` MCP tool. No `aisquare code map` is built for this either.
+> - **F3's "record the timing before and after in the PR".** No large-repository run was recorded. The
+>   only numbers are P2's, on this repository: onboard 9.47 s and 5.64 s before, 2.42 to 2.57 s after, with
+>   the index built in the background (`docs/plans/handoff-p2-capacity-setup.md`, W5's row).
+>
+> **For whoever edits the issues** (#92 and #91 still describe the Repomix snapshot as current; this PR
+> writes no issue). Proposed wording:
+>
+> - **#92 (phase B).** Retitle without "a tiered snapshot": *Code intelligence phase B: a budgeted repo map
+>   from the symbol index, `core/curator.py` with git signals, tiers 0 to 3, doc collapse and noise
+>   detection (absorbs #93)*. Replace "Current state" with: the Repomix pack, `core/snapshot.py`,
+>   `[snapshot]` and the doctor's packer rows are gone (#399, 0.9.0); session start names no snapshot
+>   (#346) and its two `aisquare code` lines were withdrawn (owner call 26). Restate the output without a
+>   pack on disk: tier 0 the repo map and entry points; tier 1 the signatures of every kept source file,
+>   read from the code index (#285), not from a compressed pack; tier 2 the bodies of the top-ranked files,
+>   read from the checkout, in rank order until the budget is spent; tier 3 one card per surviving doc.
+>   Count the budget with an estimate that needs no tokenizer (`tiktoken` is not used any more). Drop
+>   "Surfaces: the directive names the tiers" and say how an agent reaches the map (a session-start line,
+>   or a command asked for on demand) is the owner's call, with the phase's measurements. The acceptance
+>   keeps its numbers (under 150k tokens, byte-identical rebuild, under 60 s without an LLM) and gains: no
+>   Node, no process but `git`.
+> - **#91 (umbrella).** Add a dated note: phase A shipped in 0.9.0 (#285; `aisquare code find|refs|similar`,
+>   the `code_lookup` MCP tool); the Repomix snapshot is gone (#399), so phase B no longer tiers a
+>   snapshot but builds a budgeted map from the index (#92); the "read this FIRST" directive is gone too
+>   (#346). Update the "Current state" bullets and the phase table's "Tiered snapshot" row to match.
+
+Written 2026-10-24 as a draft handoff, against `main` @ 09f48563. Branch: `rc/fixes-usage-onboard`.
 Path when committed: `docs/plans/handoff-fixes-usage-onboard.md`.
 
 **Build this after `main` settles.** Many PRs are merging, and the P0–P3 trains (#295–#298) touch the
@@ -58,7 +110,9 @@ green; docs and CHANGELOG updated; config keys documented in `docs/reference.md`
 > - [x] **Docs and CHANGELOG:** `docs/fleet.md`, `docs/reference.md` and CHANGELOG. There are no new config
 >       keys. `doctor` also gets a `claude-account-backoff` row listing the backed-off accounts.
 >
-> What's left: **prefer statusline samples** ("Spend fewer reads") is board task #11, blocked on #287.
+> What's left: **prefer statusline samples** ("Spend fewer reads") is board task #11, blocked on #287, which
+> is still open (no feed exists). The other half of that bullet, pointing a scripter at `aisquare watch`,
+> was built in #400 (the status block above).
 >
 > **Related since this was written:**
 > - #403: one shared verified TLS context for every HTTPS call, so macOS python.org Python can read usage.
@@ -122,6 +176,8 @@ wants to force a fresh login on a working slot has to run `aisquare accounts run
 
 ## F2 — Move an agent before it hits a usage limit
 
+> **Status: built in #432, not in this PR.** The text below is the original brief.
+
 ### Problem
 
 With `[accounts] on_limit = "switch"`, an agent moves to another account only after its turn has already
@@ -166,6 +222,12 @@ tokens and usage reads (and feeds F1's rate limiting).
 ---
 
 ## F3 — Onboarding a large repository: the Repomix snapshot runs out of Node heap
+
+> **Status: shipped in 0.9.0.** #399 removed the snapshot and Repomix completely (`docs/plans/remove-repomix.md`:
+> the packer, its doctor rows, the Node check, `[snapshot]`, and the old packs are deleted once), and the P2
+> train's code index (#285, `aisquare code find|refs|similar`, the `code_lookup` MCP tool) answers "where is
+> this, who uses it" in Python. The budgeted repo map and the directive lines were decided against (status
+> block at the top). The text below is the original brief.
 
 ### Problem
 

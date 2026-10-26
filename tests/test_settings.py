@@ -118,3 +118,65 @@ def test_an_edit_keeps_what_the_form_does_not_show(runner: CliRunner, tmp_path: 
     )
     assert profile.env == {"Y": "2"} and profile.env_files == {"GH_TOKEN": str(token)}
     assert profile.account == "2" and profile.bin is None
+
+
+def test_the_no_role_agents_defaults_can_be_read_and_set(runner: CliRunner) -> None:
+    """The Spawn dialog's *(none)* role is ``agent``, which is not one of the built-in roles:
+    ``config set fleet.roles.agent.*`` was refused as an unknown key, so its permission mode
+    and worktree could not be set. It reads as spawn's fallback and sets as any role does."""
+    from aisquare.core.harness import PLAIN_ROLE
+    from aisquare.services import fleet as fleet_service
+
+    before = runner.invoke(app, ["config", "get", f"fleet.roles.{PLAIN_ROLE}.worktree"])
+    assert before.exit_code == 0, before.output
+    assert f"fleet.roles.{PLAIN_ROLE}.worktree = false" in before.stdout
+    for key, value in (("permission_mode", "acceptEdits"), ("worktree", "true")):
+        written = runner.invoke(app, ["config", "set", f"fleet.roles.{PLAIN_ROLE}.{key}", value])
+        assert written.exit_code == 0, written.output
+        assert f"fleet.roles.{PLAIN_ROLE}.{key} = {value}" in written.stdout
+    shape = fleet_service.role_settings(PLAIN_ROLE)  # what a spawn of it reads
+    assert shape.permission_mode == "acceptEdits" and shape.worktree is True
+    assert fleet_service.role_settings("coder").permission_mode == "auto"  # its table alone
+
+
+def test_a_role_nobody_has_is_still_an_unknown_key(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["config", "set", "fleet.roles.coderr.worktree", "true"])
+    assert result.exit_code == 1
+    assert "unknown config key" in result.output
+
+
+def test_an_unrelated_set_and_unset_leaves_no_agent_table_and_holds_no_setting(
+    runner: CliRunner,
+) -> None:
+    """Review of #405, M1: ``set`` seeded ``fleet.roles.agent`` into every save, so a file set
+    and set back held ``[fleet.roles.agent]`` and ``holds_a_setting()`` read True — the
+    reset/backup rule of #261 then backed up and reset a file that changed nothing."""
+    from aisquare.core import config as core_config
+    from aisquare.core import paths
+    from aisquare.core.harness import PLAIN_ROLE
+
+    for value in ("user", "project"):  # project is the default: set, then unset
+        result = runner.invoke(app, ["config", "set", "default_pool", value])
+        assert result.exit_code == 0, result.output
+    written = paths.config_path().read_text(encoding="utf-8")
+    assert f"[fleet.roles.{PLAIN_ROLE}]" not in written
+    assert core_config.holds_a_setting() is False
+    # The control: the agent's own table is written once it is set, and holds a setting.
+    runner.invoke(app, ["config", "set", f"fleet.roles.{PLAIN_ROLE}.worktree", "true"])
+    assert f"[fleet.roles.{PLAIN_ROLE}]" in paths.config_path().read_text(encoding="utf-8")
+    assert core_config.holds_a_setting() is True
+    runner.invoke(app, ["config", "set", f"fleet.roles.{PLAIN_ROLE}.worktree", "false"])
+    assert f"[fleet.roles.{PLAIN_ROLE}]" not in paths.config_path().read_text(encoding="utf-8")
+    assert core_config.holds_a_setting() is False
+
+
+def test_config_list_shows_the_agent_role_as_get_does(runner: CliRunner) -> None:
+    """Review of #405, m1: ``get`` knew ``fleet.roles.agent`` and ``list`` did not."""
+    from aisquare.core.config import FleetRoleSettings
+    from aisquare.core.harness import PLAIN_ROLE
+
+    result = runner.invoke(app, ["--json", "config", "list"])
+    assert result.exit_code == 0, result.output
+    roles = _json(result.stdout)["fleet"]["roles"]
+    assert roles[PLAIN_ROLE] == FleetRoleSettings().model_dump(mode="json")  # spawn's fallback
+    assert set(roles) >= {"coder", "reviewer"}  # beside the built-in roles, not instead

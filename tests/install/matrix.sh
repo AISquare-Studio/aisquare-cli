@@ -13,8 +13,8 @@
 # other image has:
 #
 #   debian:12     apt, and /bin/sh is dash. The Node it ships is 18, BELOW
-#                 Repomix's floor, so it is the cell that exercises the
-#                 too-old-system-package branch.
+#                 the Chrome DevTools extra's floor, so it is the cell that
+#                 exercises the too-old-system-package branch.
 #   ubuntu:22.04  apt on an older base; ships Node 12.
 #   fedora:41     dnf5 (`config-manager addrepo`), the syntax RHEL's dnf4 does
 #                 not have.

@@ -213,7 +213,7 @@ def onboard(
         bool, typer.Option("--refresh", help="Re-scan even if already onboarded.")
     ] = False,
 ) -> None:
-    """Pack the codebase into a snapshot and seed its context pool."""
+    """Add the project and seed its context pool from what its files say."""
     # Looked up as `create_group` stores it: ' team ' found no group, and the create,
     # which strips, collided with `team` after the onboard (review of #203, round 3).
     name = group.strip() if group is not None else None
@@ -248,7 +248,7 @@ def onboard(
 
 _PURGE_HELP = (
     "Also delete the project's context entries, prompt history, board rows, turn "
-    "metrics and snapshot. Without it they stay in the store, hidden, and come back if the "
+    "metrics and brain. Without it they stay in the store, hidden, and come back if the "
     "root is registered again."
 )
 

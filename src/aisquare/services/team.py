@@ -1910,7 +1910,16 @@ def _finish_task(
             if wakes
             else task.project_id
         )
-        updated = store.set_task_status(task.id, status)
+        if status == "done":
+            # The evidence gate (docs/work-briefs.md): a task linked to a requirement needs
+            # a fresh pass from it for each, and the check's briefs are compared again in
+            # the status write's own transaction. A task no brief links is not gated.
+            from aisquare.services import briefs as briefs_service  # lazy: it imports this
+
+            read = briefs_service.gate(store, task)
+            updated = store.complete_task_if_unchanged(task.id, read)
+        else:
+            updated = store.set_task_status(task.id, status)
         if status in CLOSED_STATUSES:
             # Rule 3 of the fleet-row section: the rows spawned for this task
             # have nothing left to be told about it.
@@ -2262,6 +2271,15 @@ def _board_reading(store: ContextStore, session: TeamSession) -> tuple[bool, Rel
     return True, Relevance(task_ids=tuple(sorted(tasks)), names=names)
 
 
+#: What Claude Code keeps of a hook's output, in characters; it cuts the rest (see
+#: :class:`StopDecision`).
+HOOK_OUTPUT_CAP = 10_000
+
+#: Held back under :data:`HOOK_OUTPUT_CAP` for what joins the parts of a session start
+#: and the line ending ``hook session-start`` prints after them.
+_HOOK_MARGIN = 64
+
+
 def hook_session_start(
     session_id: str,
     cwd: Path | None,
@@ -2270,6 +2288,7 @@ def hook_session_start(
     transcript_path: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    reserve: int = 0,
 ) -> str:
     """Register this session with the orchestrator and return the board injection.
 
@@ -2382,7 +2401,7 @@ def hook_session_start(
             )
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
-        return collision + _render_board(
+        board = collision + _render_board(
             project,
             store.team_sessions(project.id),
             store.team_tasks(project.id),
@@ -2396,6 +2415,31 @@ def hook_session_start(
             fleet=fleet,
             links=_link_marks(project.id, store),
         )
+        # The block takes only the room the session start has left: ``reserve`` is what
+        # the caller puts before the board. Given a fixed share, it took a busy board's
+        # session start past the cap, and Claude Code cut the block's own tail.
+        room = HOOK_OUTPUT_CAP - _HOOK_MARGIN - reserve - len(board)
+        return board + _requirements_block(store, session, assigned, room)
+
+
+def _requirements_block(
+    store: ContextStore, session: TeamSession, assigned: Assignment | None, room: int
+) -> str:
+    """The requirements linked to this session's task, for its session start
+    (``briefs.session_requirements``), in at most ``room`` characters. Fails open on its
+    own, as :func:`_assignment` does: an unreadable brief costs this block, never the
+    board above it."""
+    try:
+        from aisquare.services import briefs as briefs_service  # lazy: it imports this
+
+        budget = min(briefs_service.REQUIREMENTS_BUDGET, room)
+        if budget <= 0:
+            return ""
+        return briefs_service.session_requirements(
+            store, session, assigned.task if assigned is not None else None, budget=budget
+        )
+    except Exception:
+        return ""
 
 
 #: The task states that are work someone may pick up or is doing: a board holding one is

@@ -73,16 +73,12 @@ narrowing their environment would be change without a reason:
   * ``core/agents.py::hook_binary_version`` — ``<hook's aisquare> --version``,
     a string: doctor asking another install of this CLI what version it is,
     so hooks that name a stale binary stop grading as healthy (#84).
-  * ``core/snapshot.py::node_version`` — ``node --version``, a string. Backs the
-    doctor's repomix line, which has to gate on the floor repomix declares
-    (``node >= 22``) rather than on whether ``npx`` exists.
-  * ``core/snapshot.py::head_sha`` and ``core/workspace.py::git_common_root`` —
-    ``git rev-parse``; stripped, as every git seam is (:func:`git_env`).
+  * ``core/workspace.py::git_common_root`` — ``git rev-parse``; stripped, as every
+    git seam is (:func:`git_env`).
   * ``services/ci_snapshot.py::_git`` — the CI test bed's snapshot plumbing
     (``stash create``, ``update-ref``, ``rev-parse``, ``remote get-url``). No
     model; stripped anyway because it runs inside a traced session's hook and
     a child of a hook is not the agent.
-  * ``core/snapshot.py::_run_repomix`` — repomix packs files; no model.
   * ``core/editor.py::edit_text`` — the operator's ``$EDITOR``. It is theirs,
     and it should get their environment.
   * ``core/clipboard.py::write`` — the platform's clipboard tool (``pbcopy``,
@@ -139,9 +135,14 @@ Excluded, the fleet's own plumbing (docs/plans/fleet-tui.md §3.4):
     text on stdin or as one argument; no model process, and stripped anyway:
     a synthesiser has no use for an identity, and ``powershell.exe`` is a shell.
 
-Checked and NOT a seam, recorded so the next reader does not re-derive it:
-  * ``services/project.py`` — catches ``subprocess.SubprocessError`` but starts
-    nothing itself; it is a caller of ``core/snapshot.py``'s seams.
+Excluded, command reports (docs/command-reports.md):
+  * ``services/command_reports.py::run_command`` — ``asq exec``'s command, the
+    operator's or agent's own, with its environment unchanged: running it through
+    the wrapper must not change what it does. Not stripped; it is the caller's
+    action, under the caller's identity, exactly as if run directly.
+  * ``core/source_revision.py::_git`` — ``git rev-parse`` and ``git ls-files``
+    for the per-file source identity a ``--project`` report records; no model,
+    stripped, as every git seam is (:func:`git_env`).
 
 NOT a spawn seam, and not fixable here: Claude Code subagents (``Task``) and
 Workflow agents run IN-PROCESS inside one agent and inherit its environment
@@ -320,13 +321,9 @@ SEAMS: dict[str, Seam] = {
         "grading as healthy (#84). An eager callback that exits before any command "
         "runs; no model process",
     ),
-    "aisquare/core/snapshot.py::head_sha": Seam(
+    "aisquare/core/ignore.py::head_sha": Seam(
         EXCLUDED, "`git rev-parse HEAD`, in `git_env()`", strips_identity=True
     ),
-    "aisquare/core/snapshot.py::node_version": Seam(
-        EXCLUDED, "`node --version`, a string — the floor repomix declares"
-    ),
-    "aisquare/core/snapshot.py::_run_repomix": Seam(EXCLUDED, "repomix packs files; no model"),
     "aisquare/core/code_index.py::_git_files": Seam(
         EXCLUDED,
         "`git ls-files -co --exclude-standard` for the symbol index's file list (#285), in "
@@ -472,6 +469,17 @@ SEAMS: dict[str, Seam] = {
         "`spd-say`) with the text on stdin or as one argument (T3). No model process; "
         "stripped anyway — a synthesiser has no use for an identity, and powershell "
         "is a shell",
+        strips_identity=True,
+    ),
+    "aisquare/services/command_reports.py::run_command": Seam(
+        EXCLUDED,
+        "`asq exec`'s command, the caller's own, with its environment and semantics "
+        "unchanged; not stripped — it runs under the caller's identity, as if run directly",
+    ),
+    "aisquare/core/source_revision.py::_git": Seam(
+        EXCLUDED,
+        "`git rev-parse` / `git ls-files` for a command report's per-file source identity; "
+        "no model, stripped, as every git seam is (`git_env()`)",
         strips_identity=True,
     ),
 }

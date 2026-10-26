@@ -14,7 +14,7 @@ In the order an agent receives them:
 | --- | --- | --- | --- |
 | 1 | Claude Code's system prompt | Claude Code's own instructions, plus the agent's **persona** when `[persona] system_prompt = true` (the default): aisquare passes it with `--append-system-prompt-file` | the system prompt |
 | 2 | Your `CLAUDE.md` files | `~/.claude/CLAUDE.md`, the project's `CLAUDE.md` and the rest of the hierarchy, which Claude Code loads itself | a user message after the system prompt |
-| 3 | aisquare's `SessionStart` hook | the `<aisquare-team>` briefing: the role's standing cycle, the board, the snapshot pointer, and the persona block (shown here too when the persona also rides the system prompt) | a system reminder at session start |
+| 3 | aisquare's `SessionStart` hook | the `<aisquare-team>` briefing: the role's standing cycle, the board, and the persona block (shown here too when the persona also rides the system prompt) | a system reminder at session start |
 | 4 | aisquare's per-prompt hook | the teammate delta (what changed on the board), and for a manager the Stop hook's wake-up reason | a system reminder at each prompt |
 | 5 | aisquare's memory | entries from your user pool and the project's pool, injected with the briefing. `aisquare agents connect` copied each section of `~/.claude/CLAUDE.md` into the user pool once, so those sections can arrive a second time through this channel | inside the session-start output (3) |
 

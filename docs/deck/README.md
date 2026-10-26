@@ -6,6 +6,9 @@ the terminal captures and the three typefaces are all inside it — so it opens
 from `file://`, from a locked-down laptop, or in three years, and looks the same.
 Open one in a browser; there is nothing to build and nothing to serve.
 
+> **The PDFs are stale until rebuilt:** they still sell the codebase snapshot and list
+> Node in the one-liner (#399). Send or print the HTML until then.
+
 | | Read it | Send it | What it is |
 | --- | --- | --- | --- |
 | **One-pager** | [`aisquare-one-pager.html`](aisquare-one-pager.html) | [`.pdf`](aisquare-one-pager.pdf) — 1 page, A3 landscape | The leave-behind. Claim, the loop, one capture, eight assurances, roadmap, the ask. |
@@ -16,8 +19,9 @@ Open one in a browser; there is nothing to build and nothing to serve.
 
 Each HTML carries its own print stylesheet, so the browser's Print dialog is not
 paginating the scroll layout — it is following a layout authored for paper. For
-the short deck and the pitch deck, printing the HTML reproduces the committed PDF
-exactly: one leaf or one slide per page, no element straddling a fold.
+the short deck and the pitch deck, printing the HTML gives one leaf or one slide
+per page, no element straddling a fold, and once the PDFs are rebuilt it will
+reproduce them exactly.
 
 **The one-pager is the exception, and deliberately.** Its web page is ~3,700 px
 tall at full measure, which is four A-series pages — no honest single sheet holds

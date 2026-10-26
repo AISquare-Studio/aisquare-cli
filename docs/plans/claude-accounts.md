@@ -261,8 +261,9 @@ starts (on no default) rather than dying; `doctor` reports the cost. Writers
 **Surface.** `aisquare accounts default [REF] [--project P] [--role R]
 [--clear]`, `alias <slot> <name> [--clear]`, `order <ref>…`, `move <ref>
 up|down|top|bottom`, `disable`/`enable <ref>`; `team bind <role> --account A |
---clear-account`; `accounts list` stars the default and lists in priority order;
-the Accounts page rows carry ★ *Default*, ↑/↓ and *Disable*; the Settings tab
+--clear-account`; `accounts list` lists in priority order;
+the Accounts page rows carry ↑/↓ and *Disable* (since #8 on the board, rank 1 IS
+the machine default: the ★ and *Default* are gone, everywhere); the Settings tab
 binds an account per role; the agent header and `fleet ls` show the resolved
 slot (`fleet_agent.account_slot`, recorded at spawn). `doctor` gains
 `claude-account-default` and `claude-account-bindings`.

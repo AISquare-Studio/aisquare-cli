@@ -33,7 +33,7 @@ from tests.captain_screens import INPUT_BOX, REAL_IDLE_AFTER_STOP, REAL_TRUST, R
 from tests.test_captain_say import Captain, Clock
 from tests.test_captain_sidebar import agent_opened, quiet, until
 from tests.test_ui_shell import Script, fleet_app, refreshed, row_for, seed, shown, status
-from tests.ui_workers import settle_page
+from tests.ui_workers import released, settle_page
 
 # The UI suite's fixtures, bound here so pytest finds them for this module's tests
 # (``no_real_tmux`` is autouse there: every tmux call held to a private socket).
@@ -502,7 +502,7 @@ async def _clicked(pilot: Pilot[None], selector: str) -> None:
     await pilot.click(selector)
     await pilot.pause()
     await settle_page(fleet_app(pilot))
-    await pilot.pause(0.3)
+    await released(pilot, fleet_app(pilot).query_one(selector, Button))
 
 
 def _label(pilot: Pilot[None], selector: str) -> str:

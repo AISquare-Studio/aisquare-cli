@@ -3486,8 +3486,16 @@ def test_the_agent_view_offers_stop_exactly_while_there_is_a_process(
         app = fleet_app(pilot)
         offered: set[str] = set()
         for state in states:
-            await pilot.click(row_for(app, f"agt_a_agent-{state}"))
-            await pilot.pause()
+            wanted = f"agt_a_agent-{state}"
+
+            def opened(wanted: str = wanted) -> bool:
+                view = app.current_view()
+                return isinstance(view, AgentView) and view.status.agent.id == wanted
+
+            await pilot.click(row_for(app, wanted))
+            # The row's own view, waited for: a pause after the click read the button of
+            # the view the last row had opened, on windows-latest (run 40208805943).
+            await settle_until_held(app, opened, what=f"the view of {wanted}")
             view = app.current_view()
             assert isinstance(view, AgentView)
             if view.query_one("#agent-stop", Button).display:

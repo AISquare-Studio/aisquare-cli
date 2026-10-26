@@ -513,7 +513,7 @@ def test_a_slow_endpoint_returns_within_the_ceiling_and_records_the_breach(
     """
     import time
 
-    delay_s = 1.5
+    delay_s = 60.0  # a minute, so what is asked is that the ceiling ended it, not how fast
     wired.descriptor_json(live_descriptor(client_safety_ms=300))
     wired.respond(status=200, body=json.dumps(_response()), delay_s=delay_s)
     took: list[float] = []

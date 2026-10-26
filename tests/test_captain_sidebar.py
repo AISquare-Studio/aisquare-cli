@@ -16,7 +16,6 @@ from pathlib import Path
 import pytest
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
-from textual.widgets._toast import Toast
 
 from aisquare.cli.ui.sidebar import Activatable, AgentRow, ProjectCard
 from aisquare.cli.ui.terminal import TerminalPane
@@ -27,8 +26,10 @@ from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services.captain import state as captain_state
 from tests import test_ui_shell as ui_suite
+from tests import toast_log
 from tests.fleet_fakes import list_agents_as
 from tests.test_ui_shell import Script, drive, fleet_app, refreshed, row_for, seed, shown, status
+from tests.ui_workers import settle_until
 
 # The UI suite's fixtures, bound here so pytest finds them for this module's tests
 # (``no_real_tmux`` is autouse there: every tmux call held to a private socket).
@@ -233,15 +234,24 @@ def test_stopping_the_captain_goes_back_to_the_welcome_page_not_a_project_of_the
 
     async def body(pilot: Pilot[None]) -> tuple[str | None, str | None, list[str], list[str]]:
         app = fleet_app(pilot)
-        await ui_suite.open_stop_dialog(pilot, app, captain.agent.id)
+        told = toast_log.record(app)  # as each is raised: see tests/toast_log.py
+        dialog = await ui_suite.open_stop_dialog(pilot, app, captain.agent.id)
         script[home.id] = [FleetAgentStatus(agent=ui_suite.ended(captain.agent), state="exited")]
-        await pilot.click("#stop-confirm")
+        # Pressed on the dialog, and the shell waited for until it has left the agent's view
+        # and told of the stop: a click the moment the dialog was pushed was lost on
+        # windows-latest (no stop reached the service: CI run 40244987840), as the stop test's
+        # was (tests/test_ui_shell.py) and the take-over test's before it.
+        dialog.query_one("#stop-confirm", Button).press()
+        await settle_until(
+            app,
+            lambda: (
+                f"✓ stopped captain ({captain.agent.id})" in told
+                and app.content.current == "welcome"
+            ),
+        )
         await ui_suite.settle(app)
-        await pilot.pause()
-        await pilot.pause()
-        toasts = [toast.render().plain for toast in app.screen.query(Toast)]
         pages = [view.project.id for view in app.query(ProjectView)]
-        return app.content.current, app.sidebar.selected_key, pages, toasts
+        return app.content.current, app.sidebar.selected_key, pages, list(told)
 
     current, selected, pages, toasts = drive(body, notifications=True)
     assert recorder.calls == [(home.id, "captain", False, captain.agent.id)], "Stop still works"

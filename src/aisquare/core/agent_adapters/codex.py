@@ -17,6 +17,7 @@ from typing import Any
 from aisquare.core import harness
 from aisquare.core.agent_adapters import codex_config
 from aisquare.core.agent_adapters.codex_shared import SHARE_PARTS
+from aisquare.core.agent_adapters.mcp_servers import DEVTOOLS_NAME, DEVTOOLS_PACKAGE, CodexMcp
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     AgentEvent,
@@ -564,6 +565,7 @@ class CodexAdapter:
     key_spellings: Mapping[str, str] = MappingProxyType({"S-Enter": "C-j"})
     accounts = CodexAccounts(SHARE_PARTS)
     plugin = CodexPlugin()
+    mcp_registration = CodexMcp()
     screen: AgentScreen | None = AgentScreen(
         idle_prompt_mark=IDLE_PROMPT_MARK,
         idle_on_screen=idle_on_screen,
@@ -1022,8 +1024,9 @@ class CodexAdapter:
 
     def browser_tools(self, home: Path) -> list[str] | None:
         """Codex's own browser, as ``config.toml`` in ``home`` has it: the ``browser_use``
-        feature (stable and on unless ``[features] browser_use = false``, 0.162.1) and each
-        enabled ``browser@<marketplace>`` plugin (``browser@openai-bundled``)."""
+        feature (stable and on unless ``[features] browser_use = false``, 0.162.1), each
+        enabled ``browser@<marketplace>`` plugin (``browser@openai-bundled``), and the Chrome
+        DevTools MCP server ``install.sh --with chrome-devtools`` registers (``codex mcp add``)."""
         config = codex_config.read_layer(home / "config.toml")
         features = config.get("features")
         found = []
@@ -1035,6 +1038,8 @@ class CodexAdapter:
                 continue
             if isinstance(table, dict) and table.get("enabled", True) is not False:
                 found.append(f"the {plugin_id} plugin")
+        if self.mcp_registration.registered(home, DEVTOOLS_NAME, DEVTOOLS_PACKAGE):
+            found.append(f"the {DEVTOOLS_NAME} MCP server")
         return found
 
     def validate(self, model: str | None, effort: str | None) -> None:

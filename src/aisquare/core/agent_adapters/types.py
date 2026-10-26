@@ -893,6 +893,26 @@ class AgentPlugin(Protocol):
         ...
 
 
+class AgentMcpRegistration(Protocol):
+    """An MCP server the agent keeps in its own config and its own CLI puts there at user
+    scope: what ``install.sh --with chrome-devtools`` registers with every agent the run sets
+    up (``core.agent_adapters.mcp_servers``). The CLI writes the file, never aisquare, so its
+    layout stays the agent's; :meth:`registered` only reads it. Never raises."""
+
+    def add_args(self, name: str, command: Sequence[str]) -> tuple[str, ...]:
+        """The arguments after the agent's binary that register ``command`` as ``name``."""
+        ...
+
+    def remove_args(self, name: str) -> tuple[str, ...]:
+        """The arguments after its binary that take ``name`` out again."""
+        ...
+
+    def registered(self, home: Path, name: str, package: str) -> bool:
+        """Whether config dir ``home`` has a server called ``name``, or one that starts
+        ``package`` under another name: an install then leaves it as it is."""
+        ...
+
+
 CallAsk = Literal["tool", "question", "plan", "subagent"]
 """What a pending call waits on the human for (:meth:`AgentTranscript.call_asks`)."""
 
@@ -1150,7 +1170,7 @@ class AgentAdapter(Protocol):
     ``exit_command``, ``dismiss_key``, :meth:`queue_args`,
     :meth:`mcp_args`, :meth:`tools_only_args`, :meth:`instruction_files`,
     :meth:`disable_native_teams`, :meth:`fleet_settings`, :meth:`settings_layer`,
-    :meth:`unattended_env`,
+    :meth:`unattended_env`, ``mcp_registration``,
     :meth:`telemetry_args` with ``telemetry_reader``. Personas: :meth:`system_prompt_args`,
     :meth:`skill_dirs`, :meth:`headless_call` with :meth:`headless_answer`. Accounts:
     ``accounts``.
@@ -1201,6 +1221,13 @@ class AgentAdapter(Protocol):
     @property
     def plugin(self) -> AgentPlugin | None:
         """The aisquare plugin route for this agent; ``None`` when there is none."""
+        ...
+
+    @property
+    def mcp_registration(self) -> AgentMcpRegistration | None:
+        """How the agent's own CLI registers an MCP server at user scope, and how its config
+        says one is there (:class:`AgentMcpRegistration`); ``None`` for an agent whose
+        install registers none."""
         ...
 
     @property

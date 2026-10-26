@@ -508,6 +508,7 @@ class FakeAgentAdapter:
     key_spellings: Mapping[str, str] = {"M-Enter": "C-o"}
     accounts = FakeAccounts()
     plugin = None
+    mcp_registration = None
     telemetry_reader: TelemetryReader | None = None
     transcript_reader: AgentTranscript | None = FakeTranscript()
     price_table: PriceTable | None = PRICES

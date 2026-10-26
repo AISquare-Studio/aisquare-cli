@@ -34,6 +34,7 @@ from aisquare.core import (
 from aisquare.core import ignore as ignore_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters.mcp_servers import DEVTOOLS_COMMAND, DEVTOOLS_NAME
 from aisquare.core.agent_adapters.types import AgentAdapter, PluginInstall
 from aisquare.core.config import RETIRED_SECTIONS, load_config, retired_sections
 from aisquare.core.injection import load_last
@@ -3388,14 +3389,20 @@ def _agents_own_browser(cwd: Path) -> DoctorCheck | None:
         return _ok(
             name,
             f"the ui-tester runs {where}: {' and '.join(tools)} — it browses with "
-            f"{selected.adapter.label}'s own browser (no --chrome)",
+            f"{selected.adapter.label}'s own browser tools (no --chrome)",
         )
     config = selected.config_dir / "config.toml"
+    registration = selected.adapter.mcp_registration
+    register = ""
+    if registration is not None:
+        add = [selected.adapter.binary, *registration.add_args(DEVTOOLS_NAME, DEVTOOLS_COMMAND)]
+        register = f"; or register the Chrome DevTools MCP with `{' '.join(add)}`"
     return _ok(
         name,
         f"the ui-tester runs {where} with no browser of its own (browser_use is off in "
         f"{_short_path(config)}) — it reopens UI tasks as 'not browser-verified' rather "
-        "than passing them on code alone; set `browser_use = true` under [features] there",
+        "than passing them on code alone; set `browser_use = true` under [features] there"
+        + register,
     )
 
 

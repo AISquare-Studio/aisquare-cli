@@ -35,6 +35,7 @@ from typing import Any
 from aisquare.core import agents, harness, ledger
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.agent_adapters.lasting import fetches_aisquare, runs_aisquare
+from aisquare.core.agent_adapters.mcp_servers import runs_package
 from aisquare.core.agent_adapters.transcripts import (
     YOU,
     PendingTool,
@@ -436,6 +437,24 @@ def _pending(call: Mapping[str, Any], at: datetime | None) -> PendingTool:
     return PendingTool(str(call.get("id")), name, name, kept, at, input_dropped=dropped)
 
 
+class GeminiShapedMcp:
+    """``gemini mcp add --scope user NAME COMMAND…``: a server of ``settings.json``'s
+    ``mcpServers``. A third agent registers an MCP server by declaring this, and nothing
+    shared names it."""
+
+    def add_args(self, name: str, command: Sequence[str]) -> tuple[str, ...]:
+        return ("mcp", "add", "--scope", "user", name, *command)
+
+    def remove_args(self, name: str) -> tuple[str, ...]:
+        return ("mcp", "remove", "--scope", "user", name)
+
+    def registered(self, home: Path, name: str, package: str) -> bool:
+        servers = agents.read_json(home / "settings.json").get("mcpServers")
+        return isinstance(servers, dict) and (
+            name in servers or any(runs_package(entry, package) for entry in servers.values())
+        )
+
+
 class GeminiShapedTelemetry:
     """Its OpenTelemetry (docs/cli/telemetry.md): an exporter its ``settings.json`` names
     (``telemetry.otlpEndpoint``) is the operator's, and of each log record the receiver keeps
@@ -627,6 +646,7 @@ class GeminiShapedAdapter:
     key_spellings: Mapping[str, str] = {}
     accounts = GeminiShapedAccounts()
     plugin = None
+    mcp_registration = GeminiShapedMcp()
     telemetry_reader: TelemetryReader | None = GeminiShapedTelemetry()
     transcript_reader: AgentTranscript | None = GeminiShapedTranscript()
     price_table: PriceTable | None = PRICES

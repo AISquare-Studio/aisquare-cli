@@ -15,6 +15,7 @@ from aisquare.core.agent_adapters.claude_screen import (
     prompt_showing,
 )
 from aisquare.core.agent_adapters.claude_shared import SHARE_PARTS, ClaudeSharedMemory
+from aisquare.core.agent_adapters.mcp_servers import ClaudeCodeMcp
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     AgentEvent,
@@ -164,6 +165,7 @@ class ClaudeCodeAdapter:
     key_spellings: Mapping[str, str] = MappingProxyType({})
     accounts = ClaudeCodeAccounts(SHARE_PARTS, ClaudeSharedMemory())
     plugin = ClaudeCodePlugin()
+    mcp_registration = ClaudeCodeMcp()
     screen: AgentScreen | None = AgentScreen(
         start_dialog_mark="Enter to confirm",
         screen_prompt=prompt_showing,

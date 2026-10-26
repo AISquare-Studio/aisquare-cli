@@ -91,7 +91,7 @@ from aisquare.services.fleet import (
     FleetUnavailable,
     NoSuchAgent,
 )
-from tests import bundled_personas, captain_screens, fakebin, limit_notices
+from tests import bundled_personas, captain_screens, fakebin
 from tests.captain_screens import INPUT_BOX, MARK
 from tests.cycles import unscoped
 from tests.fsperms import can_deny_reads, can_symlink, remove_tree
@@ -6050,7 +6050,7 @@ def test_a_usage_limit_reads_the_agents_row_once(hubbed: _Hubbed) -> None:
         return real(self, session_id)
 
     hubbed.monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", counted)
-    limit = limit_notices.session()
+    limit = "You've hit your session limit · resets 12:30am"
 
     team_service.hook_stop_failure(
         hubbed.coder_sid, error="rate_limit", message=limit, details=None
@@ -18973,13 +18973,14 @@ def test_a_refused_hand_over_is_handover_failed_and_wakes_the_manager(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    from tests.test_usage_aware_accounts import WEEKLY_LIMIT_DAYS_OUT
+
     _two_slots_with_usage(monkeypatch, work=95, personal=99)  # nowhere under the line
 
+    # Days out, not `Mon 12:00am`: every Sunday from 23:45 that lifts inside the wait window,
+    # the hook waits instead of handing over, and no hand-over is refused.
     _agent, nudges = _limit_handed_over_inline(
-        project,
-        monkeypatch,
-        tmp_path,
-        message=limit_notices.weekly(),
+        project, monkeypatch, tmp_path, message=WEEKLY_LIMIT_DAYS_OUT
     )
 
     assert _events(project, "switched") == []

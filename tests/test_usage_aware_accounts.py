@@ -31,6 +31,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from typer.testing import CliRunner
@@ -55,7 +56,6 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import hooks as hooks_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services import team as team_service
-from tests import limit_notices
 from tests.test_claude_accounts import LIVE_USAGE, NOW, _sign_in
 
 #: ``NOW`` is the sibling file's clock (the credentials its ``_sign_in`` writes expire
@@ -64,6 +64,19 @@ SUNDAY = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)  # 08:00 in Toronto (EDT)
 TORONTO_MIDNIGHT_UTC = datetime(2026, 9, 13, 4, 30, tzinfo=UTC)  # 00:30 EDT that Sunday
 SESSION_LIMIT = "You've hit your session limit · resets 12:30am (America/Toronto)"
 WEEKLY_LIMIT = "You've hit your weekly limit · resets Mon 12:00am (America/Toronto)"
+#: The same message with a reset three days out, whatever the clock says. ``WEEKLY_LIMIT`` lifts
+#: in ten minutes at 23:50 every Sunday in Toronto, inside ``wait_if_reset_within_minutes``, so
+#: the hook waits instead of switching and each test that fires it for a hand-over failed in that
+#: quarter hour (the CI run of #433). The parser's tests pass their own ``now`` and keep
+#: ``WEEKLY_LIMIT``; every test that fires the hook on the real clock fires this.
+WEEKLY_LIFTS = (datetime.now(ZoneInfo("America/Toronto")) + timedelta(days=3)).replace(
+    second=0, microsecond=0
+)
+_WEEKDAY = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[WEEKLY_LIFTS.weekday()]
+_CLOCK = WEEKLY_LIFTS.strftime("%I:%M%p").lstrip("0").lower()
+WEEKLY_LIMIT_DAYS_OUT = (
+    f"You've hit your weekly limit · resets {_WEEKDAY} {_CLOCK} (America/Toronto)"
+)
 API_KEY_429 = "API Error: Request rejected (429) · this may be a temporary capacity issue."
 
 
@@ -266,7 +279,7 @@ def test_a_rate_limit_stop_failure_parks_the_session_limited_once_and_wakes_the_
             "hook_event_name": "StopFailure",
             "error": "rate_limit",
             "error_details": "429 Too Many Requests",
-            "last_assistant_message": limit_notices.session(),
+            "last_assistant_message": SESSION_LIMIT,
         }
     )
 
@@ -316,7 +329,7 @@ def test_a_limited_fleet_agent_is_named_by_its_label_with_the_switch_command(
             "session_id": "sess-fleet",
             "cwd": str(work.root),
             "error": "rate_limit",
-            "last_assistant_message": limit_notices.session(),
+            "last_assistant_message": SESSION_LIMIT,
         }
     )
 
@@ -397,7 +410,7 @@ def test_a_board_write_that_fails_still_closes_the_turn_and_hands_nothing_over(
 
     with pytest.raises(sqlite3.OperationalError, match="locked"):
         hooks_service.turn_failed(
-            session_id="sess-coder", error="rate_limit", message=limit_notices.session()
+            session_id="sess-coder", error="rate_limit", message=SESSION_LIMIT
         )
 
     [turn] = metrics_service.recent(session_id="sess-coder")
@@ -433,7 +446,7 @@ def test_claude_codes_routine_notices_leave_a_parked_or_handed_over_row_as_it_is
     monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     _session(work, "sess-coder")
     team_service.hook_stop_failure(
-        "sess-coder", error="rate_limit", message=limit_notices.session(), details=None
+        "sess-coder", error="rate_limit", message=SESSION_LIMIT, details=None
     )
     parked = _state("sess-coder")
     assert parked[0] == "limited" and parked[1] is not None  # control: it is parked
@@ -506,7 +519,6 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
     output is one detached ``aisquare hook hand-over``; nothing is switched in
     this process, and ``fleet.switch`` must not be reached from here at all.
     """
-    weekly_limit = limit_notices.weekly()  # one notice, however often it is fired
     monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
@@ -526,13 +538,13 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
 
     # Set to wait: nothing is started however far the reset is.
     _settings(on_limit="wait")
-    _fire_limit(runner, work, weekly_limit, "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
     assert started == []
 
     # Switch, the default since 0.8.1: a limit whose reset is far away starts the worker…
     _settings(wait_if_reset_within_minutes=15)
     unpark()
-    _fire_limit(runner, work, weekly_limit, "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
     assert len(started) == 1
     argv = started[0]
     assert argv[:4] == selfcli.argv_for([])  # this interpreter, -P, -m aisquare
@@ -549,7 +561,7 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
 
     # …and a session that is not a fleet agent is the operator's to move.
     _session(work, "sess-hand")
-    _fire_limit(runner, work, weekly_limit, "sess-hand")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-hand")
     assert len(started) == 1
 
     # A worker that cannot be started is a board line, not a silent stall.
@@ -558,7 +570,7 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
 
     monkeypatch.setattr(hooks_service, "_detach", refuse)
     unpark()
-    _fire_limit(runner, work, weekly_limit, "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
     assert any(
         "not switched — could not start the hand-over worker (no fork for you)" in text
         for _, text in _events(work)
@@ -614,7 +626,6 @@ def test_with_no_other_account_a_limit_starts_no_hand_over_and_posts_nothing_of_
     every limit there started a hand-over that could only refuse and said "not switched" on
     the board, and Remote held the limit's push 90 s for it (review of #259, round 13). With
     no other enabled, signed-in account it is ``wait``; a second one makes it ``switch``."""
-    weekly_limit = limit_notices.weekly()  # one notice, however often it is fired
     monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
@@ -629,7 +640,7 @@ def test_with_no_other_account_a_limit_starts_no_hand_over_and_posts_nothing_of_
         assert row is not None
         store.upsert_fleet_agent(row.model_copy(update={"account_slot": mine.slot}))
 
-    _fire_limit(runner, work, weekly_limit, "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
 
     assert started == []
     assert not any("switch" in text for kind, text in _events(work) if kind != "limited")
@@ -640,7 +651,7 @@ def test_with_no_other_account_a_limit_starts_no_hand_over_and_posts_nothing_of_
     assert service.somewhere_to_hand_over(mine.slot)
     with store_session() as store:
         store.touch_session("sess-fleet", state="working")
-    _fire_limit(runner, work, weekly_limit, "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
     assert len(started) == 1
 
 
@@ -667,7 +678,7 @@ def test_with_the_registry_unreadable_a_limit_still_reaches_the_worker_that_says
     monkeypatch.setattr(service, "_read_arranged", lambda: (core.list_accounts(), unreadable))
 
     assert service.somewhere_to_hand_over(mine.slot)
-    _fire_limit(runner, work, limit_notices.weekly(), "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
 
     assert len(started) == 1, "the worker is started, to say why it switched nothing"
     hooks_service.hand_over("sess-fleet", reason="weekly limit")
@@ -698,7 +709,7 @@ def test_with_the_registry_unreadable_and_no_other_slot_a_limit_starts_no_hand_o
 
     assert not service.somewhere_to_hand_over(mine.slot)
     assert not service.somewhere_to_hand_over(None), "one slot is not two"
-    _fire_limit(runner, work, limit_notices.weekly(), "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
 
     assert started == []
     assert not any("switch" in text for kind, text in _events(work) if kind != "limited")
@@ -724,7 +735,7 @@ def test_with_the_slot_directories_unlistable_the_worker_says_why_rather_than_dy
 
     monkeypatch.setattr(service, "_read_arranged", unlistable)
 
-    _fire_limit(runner, work, limit_notices.weekly(), "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
     assert len(started) == 1, "the worker is started, to say why it switched nothing"
     hooks_service.hand_over("sess-fleet", reason="weekly limit")
 
@@ -753,7 +764,7 @@ def test_remote_holds_the_limit_of_an_agent_the_hook_hands_over_from_an_account_
         row = row.model_copy(update={"account_slot": mine.slot})
         store.upsert_fleet_agent(row)
 
-    _fire_limit(runner, work, limit_notices.weekly(), "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
     assert len(started) == 1, "the hook hands it over"
 
     with store_session() as store:
@@ -779,7 +790,6 @@ def test_a_re_fire_for_the_same_window_starts_no_second_worker(
     """Claude Code re-fires ``StopFailure`` for one window; the second firing found the row
     already ``limited`` and still started a second worker — two switches of one agent at
     once (review of #205, second round). ``TurnFailure.already_limited`` now says so."""
-    weekly_limit = limit_notices.weekly()  # one notice, however often it is fired
     monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
     started: list[list[str]] = []
     monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
@@ -789,14 +799,14 @@ def test_a_re_fire_for_the_same_window_starts_no_second_worker(
     _session(work, "sess-fleet")
     _fleet_row(work, "agt_refire", "coder-db", "sess-fleet")
 
-    _fire_limit(runner, work, weekly_limit, "sess-fleet")
-    _fire_limit(runner, work, weekly_limit, "sess-fleet")
-    _fire_limit(runner, work, weekly_limit, "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
 
     assert len(started) == 1
     # The record itself carries the fact, for any other caller.
     again = team_service.hook_stop_failure(
-        "sess-fleet", error="rate_limit", message=weekly_limit, details=None
+        "sess-fleet", error="rate_limit", message=WEEKLY_LIMIT_DAYS_OUT, details=None
     )
     assert again is not None and again.limited and again.already_limited
 
@@ -804,11 +814,11 @@ def test_a_re_fire_for_the_same_window_starts_no_second_worker(
     # mark `fleet switch` set is not written over — its SessionEnd must still park.
     with store_session() as store:
         store.touch_session("sess-fleet", state=team_service.HANDOVER_STATE)
-    _fire_limit(runner, work, weekly_limit, "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
     assert len(started) == 1
     assert _state("sess-fleet")[0] == team_service.HANDOVER_STATE
     mid = team_service.hook_stop_failure(
-        "sess-fleet", error="rate_limit", message=weekly_limit, details=None
+        "sess-fleet", error="rate_limit", message=WEEKLY_LIMIT_DAYS_OUT, details=None
     )
     assert mid is not None and mid.already_limited
 
@@ -1107,7 +1117,7 @@ def test_under_a_hub_the_limit_is_handed_over_from_the_agents_own_row(
     _fleet_row(work, "agt_hub1", "coder-db", "sess-fleet")
     switch = f"aisquare fleet switch --project {work.id} coder-db"
 
-    _fire_limit(runner, work, limit_notices.weekly(), "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
 
     limited = [text for kind, text in _events(hub) if kind in team_service.LIMITED_KINDS]
     assert len(limited) == 1 and limited[0].startswith("coder-db hit its weekly limit"), limited
@@ -2129,8 +2139,7 @@ def test_an_account_that_refused_weekly_is_skipped_until_its_reset(
         store.upsert_fleet_agent(row.model_copy(update={"account_slot": 2}))
     fetch = _Usage({"tok-refused": _payload(5, week=10), "tok-other": _payload(50, week=50)})
 
-    weekly_limit = limit_notices.weekly()
-    _fire_limit(runner, work, weekly_limit, "sess-fleet")
+    _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
 
     picked, notes = service.headroom_choice(service.list_accounts(), switch_at=85, fetch=fetch)
     assert picked is not None and picked.slot == 3
@@ -2143,9 +2152,10 @@ def test_an_account_that_refused_weekly_is_skipped_until_its_reset(
 
     with store_session() as store:
         [mark] = store.list_meta("account_limit:2:").values()
-    until = datetime.fromisoformat(json.loads(mark)["until"]).astimezone(limit_notices.TORONTO)
-    named = weekly_limit.split("resets ")[1][:3]  # the weekday the notice named, in Toronto
-    assert limit_notices.DAYS[until.weekday()] == named
+    until = datetime.fromisoformat(json.loads(mark)["until"]).astimezone(
+        ZoneInfo("America/Toronto")
+    )
+    assert until.weekday() == WEEKLY_LIFTS.weekday()  # the weekday named
 
     # Past the reset it named, the account is a candidate again (the mark re-set to an hour
     # from this suite's clock, which the test tokens outlive).

@@ -1007,14 +1007,13 @@ def test_quit_does_not_wait_out_a_client_that_says_nothing(
     (0.72 s against a bound of 0.25 s, from a wait of 0.5 s, on one). The receiver is
     waited for until it holds the client's line open, not for a tenth of a second.
 
-    The quit's own join is lengthened to 30 s, too: at its 1 s it gives up on a thread
-    that has not ended and the quit moves on, so a time taken could not tell a quit that
-    woke the read from one that sat it out. Held for the thread, the receiver is gone
-    right after the quit exactly when the quit woke the read, and one that sat it out
-    is still there, however slow the runner."""
+    What a quit that sat the read out leaves behind is the receiver's thread, still in its
+    minute: the quit's own join gives up on it after ``JOIN_S`` (1 s) and moves on, so a
+    time taken by the quit cannot tell that from a slow runner. The thread is what is
+    asserted: gone (waited for, half a minute as a hang guard) once the quit has told it
+    to end, which a quit that woke the read is within milliseconds."""
     fleet(tmp_path, script)
     monkeypatch.setattr(receiver, "READ_S", 60.0)
-    monkeypatch.setattr(receiver, "JOIN_S", 30.0)
     waiting = threading.Event()
     read_line = receiver._read_line
 
@@ -1031,13 +1030,11 @@ def test_quit_does_not_wait_out_a_client_that_says_nothing(
             silent.settimeout(5)
             silent.connect(str(ui_path))
             assert await asyncio.to_thread(waiting.wait, 30), "the receiver never took the client"
-            began = time.monotonic()
             receiver.stop_listening_for_ui(app)
-            took = time.monotonic() - began
             # Before the client reads: a quit that sat out the read has no answer for it, and
             # the client's own timeout would end the test before this said why.
-            assert not listening.alive, (
-                f"quit left the receiver in the read of a line that never came ({took:.1f}s)"
+            assert listening.join(30.0), (
+                "quit left the receiver in the read of a line that never came"
             )
             with silent.makefile("rb") as stream:
                 told: dict[str, Any] = json.loads(stream.readline(64 * 1024))

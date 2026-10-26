@@ -149,13 +149,11 @@ def doctor(
         bool, typer.Option("--yes", "-y", help="Answer yes to every --fix prompt.")
     ] = False,
 ) -> None:
-    """Run diagnostics and suggest fixes for common problems.
-
-    ``--fix`` creates the aisquare home when it is missing (looking never does) and then
-    checks again. It asks nothing today, so ``--yes`` changes nothing yet: it is the flag
-    the fleet UI's one-click fix passes.
-    """
-    del yes  # accepted for the UI's fix button (services.onboarding.KNOWN_FIXES); nothing asks
+    """Run diagnostics and suggest fixes for common problems."""
+    # --fix creates the aisquare home when it is missing (looking never does), then checks
+    # again. It asks nothing, so --yes changes nothing: the fleet UI's one-click fix passes it
+    # (services.onboarding.KNOWN_FIXES).
+    del yes
     if fix:
         for action in diagnostics_service.apply_fixes():
             typer.echo(f"fix: {action}")

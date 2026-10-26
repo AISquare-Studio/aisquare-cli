@@ -1320,7 +1320,7 @@ def prune(
     tool call, and a claim released under a working agent hands its lane to a
     second one. ``--release-claims`` frees them at the presence threshold when
     you know the sessions are dead. Data-safe either way: only presence +
-    orphaned claims change — tasks, notes, events and the brain are untouched.
+    orphaned claims change — tasks, notes and events are untouched.
     """
     try:
         report = team_service.prune_sessions(
@@ -1384,58 +1384,6 @@ def prune(
             f"🧹 retired {count} ghost session{plural}{tail} — "
             f"board's aligned.{receipt_suffix(delivery)}"
         )
-
-
-@app.command("distill")
-def distill(
-    rescan: Annotated[
-        bool,
-        typer.Option(
-            "--all", help="Backfill: re-distill the whole pipe from the beginning (idempotent)."
-        ),
-    ] = False,
-    board: Annotated[
-        str | None,
-        typer.Option(
-            "--board",
-            hidden=True,
-            help="The board to drain, by project id, whatever this directory resolves: "
-            "the detached drain a board write spawns is told the board it wrote to.",
-        ),
-    ] = None,
-) -> None:
-    """Push undistilled notes/decisions/outcomes into the project brain now."""
-    try:
-        count = team_service.distill_now(rescan=rescan, board=board)
-    except STORE_ERRORS as exc:
-        _fail_team(exc)
-    if get_state().json_output:
-        typer.echo(json.dumps({"distilled": count}))
-    elif count is None:
-        stdout_console().print("… another distill is already running — it has the brain")
-    else:
-        noun = "page" if count == 1 else "pages"
-        stdout_console().print(f"✓ distilled {count} {noun} into the project brain")
-
-
-def recall(
-    query: Annotated[str, typer.Argument(help="What to look up in the project brain.")],
-) -> None:
-    """Search the team's long-term memory (decisions, results, outcomes)."""
-    try:
-        output = team_service.recall(query)
-    except STORE_ERRORS as exc:
-        _fail_team(exc)
-    if output is None:
-        fail(
-            "project brain unavailable — gbrain missing, brain busy, or nothing "
-            "distilled yet (try `aisquare team distill`)",
-            error="brain_unavailable",
-        )
-    if get_state().json_output:
-        typer.echo(json.dumps({"query": query, "output": output}))
-    else:
-        stdout_console().print(output.rstrip("\n"), markup=False)
 
 
 def note(

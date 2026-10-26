@@ -75,7 +75,7 @@ walking up to the nearest marker.
 Registrations accumulate — every directory a command once ran in is one, and
 the fleet UI loads state for all of them. `aisquare project forget` drops one
 (its context, prompt history and board rows stay in the store, hidden, until
-the root is registered again; `--purge` deletes them and its brain too), and
+the root is registered again; `--purge` deletes them and its data directory too), and
 `aisquare project prune` sweeps the stale ones: roots that no longer exist, and
 worktrees of a repository that is itself registered. It shows the plan and asks
 before dropping anything; off a terminal it is a dry run unless `--yes`. Both

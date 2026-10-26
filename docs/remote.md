@@ -269,8 +269,7 @@ The screens, along the bottom bar:
 - **An agent** — **Live** (its pane, colours included, the cursor where the
   program shows one, with Fit width), **Transcript** (the conversation, wrapped
   to the phone, each turn's time in the phone's own time zone, older pages on
-  demand) and **Card** (model, tokens and the explainability verdict). Under Live
-  and Transcript sit the input bar and the key pad. Live, Transcript and a Needs
+  demand). Under both sit the input bar and the key pad. Live, Transcript and a Needs
   card's pane strip stay dark with the phone in light mode too: an agent's colours
   are picked for its own theme, dark in Claude Code by default, so an agent on a
   light theme draws its dark text on that ground as well.
@@ -757,7 +756,7 @@ from `POST api/unlock`) except unlock itself; every non-GET request needs an
 | GET | `api/remote` | `{allow_write, auto_off_at, version}` |
 | POST | `api/remote/extend` | another hour before auto-off |
 | GET | `api/projects`, `api/fleet`, `api/board`, `api/tasks`, `api/memory` | what `aisquare --json` prints for each (the board with its newest 200 events, not 5; each project with its agents counted by state), `?project=` for one project |
-| GET | `api/panes/<agent>`, `api/transcript/<agent>`, `api/explainability/<agent>` | one agent's screen (`?history=` adds that many lines of scrollback, 5 000 at most), conversation (`?limit=` turns, `?before=`, `?width=` 20 to 200 columns) and card; `?project=` for another project's agent, the current project's otherwise |
+| GET | `api/panes/<agent>`, `api/transcript/<agent>`, `api/explainability/<agent>` | one agent's screen (`?history=` adds that many lines of scrollback, 5 000 at most), conversation (`?limit=` turns, `?before=`, `?width=` 20 to 200 columns) and tracing card (dormant: the page no longer draws it); `?project=` for another project's agent, the current project's otherwise |
 | GET | `api/needs` | `{"items", "scanned_at"}` |
 | POST | `api/needs/answer`, `api/needs/dismiss` | a quick answer; hide a card |
 | GET, POST, DELETE | `api/push`, `api/push/subscribe`, `api/push/subscription`, `api/push/test` | notifications for this device |

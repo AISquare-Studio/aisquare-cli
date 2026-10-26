@@ -8,7 +8,8 @@ reached doctor". Every clause is false, and was false when the task was filed:
 * ``sdk_presence()`` calls it and stores the result as ``SdkPresence.shadowing``
 * ``_check_sdk()`` reads ``presence.shadowing`` and returns a **warn** with a
   symptom and a remediation line
-* that check is in ``doctor``'s results list, and the row shows up as
+* that check is in the results of ``explainability doctor`` (``doctor``'s own list until
+  tracing went dormant), and the row shows up as
   ``explainability sdk`` once tracing is configured — which is exactly the
   state an operator is in after §4 of the cutover runbook
 
@@ -73,7 +74,8 @@ def configured_home(isolated_home: Path, runner: CliRunner) -> Path:
 
 
 def _rows(runner: CliRunner) -> dict[str, dict[str, Any]]:
-    """Every doctor row by name.
+    """Every row of ``aisquare explainability doctor`` by name (the section left
+    ``aisquare doctor`` when tracing went dormant; it is the same ``_check_sdk``).
 
     The exit code is deliberately not asserted: a configured home with no key
     exported and no proxy running has two legitimate ``fail`` rows, so doctor
@@ -82,7 +84,7 @@ def _rows(runner: CliRunner) -> dict[str, dict[str, Any]]:
     shadow check. What IS asserted is that the payload parses and is
     non-empty — a doctor that died would satisfy neither.
     """
-    result = runner.invoke(app, ["--json", "doctor"], catch_exceptions=False)
+    result = runner.invoke(app, ["--json", "explainability", "doctor"], catch_exceptions=False)
     payload = json.loads(result.stdout)
     assert payload, "doctor produced no checks at all"
     return {row["name"]: row for row in payload}

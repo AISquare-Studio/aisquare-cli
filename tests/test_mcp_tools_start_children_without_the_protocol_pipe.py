@@ -99,8 +99,7 @@ def test_a_child_started_on_stdin_reads_end_of_file_while_the_server_still_gets_
         process.stdin.write('{"jsonrpc": "2.0", "id": 1, "method": "initialize"}\n')
         process.stdin.flush()
         out = process.stdout.readline()  # printed once the child has read, with the pipe open
-        process.stdin.close()
-        _, err = process.communicate(timeout=120)
+        _, err = process.communicate(timeout=120)  # closes stdin: now the script may end
     finally:
         process.kill()
         process.wait()

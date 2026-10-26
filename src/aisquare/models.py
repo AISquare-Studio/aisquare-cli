@@ -1752,15 +1752,16 @@ class SharingStatus(BaseModel):
     install_id: str | None = None
     """The random id of this installation; ``None`` until sharing was first turned on."""
     signed_in: bool = False
-    """Whether the next ship carries the AISquare sign-in, so that the server links it."""
+    """Whether the next shipment carries the AISquare sign-in, so that the server links it."""
     linked: bool | None = None
-    """Whether the server linked the last ship to an AISquare account; ``None`` before any."""
+    """Whether the server linked the last shipment to an AISquare account; ``None`` before any."""
     last_sent_at: datetime | None = None
-    next_due_at: datetime | None = None
+    """When a shipment last SUCCEEDED. A failed one is not reported anywhere a person reads
+    (see ``debug``): sharing fails silently, whatever the server's state."""
     days_acknowledged: int = 0
-    failures: int = 0
-    last_error: str | None = None
-    endpoint: str | None = None
+    debug: dict[str, Any] = Field(default_factory=dict)
+    """For ``--json`` only, never shown: when the next shipment is due, the failures in a row and
+    the last error, the first day shared, the endpoint."""
 
 
 class ShipReport(BaseModel):

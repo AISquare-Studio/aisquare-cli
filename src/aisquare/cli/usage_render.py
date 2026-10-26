@@ -150,12 +150,6 @@ def sharing_lines(status: SharingStatus) -> list[str]:
         sent = _when(status.last_sent_at) if status.last_sent_at else "never"
         linked = "" if status.linked is None else f" (linked: {'yes' if status.linked else 'no'})"
         lines.append(f"last sent      {sent}{linked}")
-    if status.enabled:
-        lines.append(f"next           {_when(status.next_due_at) if status.next_due_at else 'due'}")
-        if status.endpoint:
-            lines.append(f"endpoint       {status.endpoint}")
-    if status.last_error:
-        lines.append(f"last error     {status.last_error} (tried {status.failures}x)")
     lines.append("See exactly what is sent: aisquare metrics share preview")
     return lines
 
@@ -167,13 +161,11 @@ def emit_sharing_status(status: SharingStatus) -> None:
 
 
 def emit_ship_report(report: ShipReport) -> None:
+    """What a shipment did, when it did something: sharing says nothing of failing, and a
+    shipment that went nowhere is silent here as everywhere (``--json`` has the whole report)."""
     console = stdout_console()
     if report.sent and report.opt_out:
         console.print("Sent the opt-out notice. Nothing is sent from now on.")
     elif report.sent:
         linked = "" if report.linked is None else f", linked: {'yes' if report.linked else 'no'}"
         console.print(f"Sent {report.days} day(s){linked}.")
-    elif report.error:
-        console.print(f"Not sent: {report.error}. It is tried again after a wait.")
-    else:
-        console.print(f"Nothing sent: {report.skipped}.")

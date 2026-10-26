@@ -54,6 +54,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   appended line, never an argument. A repository is its normalised git remote (else its
   root), so the clones of one project count once. Schema v40. Everything stays on this
   machine (`docs/usage-stats.md`).
+- **Optional, off-by-default anonymous usage sharing** (`docs/usage-telemetry.md`). A one-time
+  question in the UI after you have set up a project (*Share anonymous usage* / *No thanks* /
+  *See exactly what's sent*), a one-click button at the top of Settings ▸ Usage & stats, and
+  `aisquare metrics share on|off|status|preview|reset-id` send AISquare **daily counts** of how
+  aisquare is used - tokens, sessions, which commands and pages, agents started, and a salted
+  hash with four coarse traits per repository - and **never** names, paths, remotes, prompts,
+  emails, aliases or command arguments. `preview` prints the exact body the next shipment posts.
+  Sharing starts from the day it is turned on; a signed-in user's counts carry their AISquare
+  token so the server links them (a refused token is retried without it). A shipment never runs
+  on a command or hook's path (a detached `aisquare metrics ship`, at most every 6 h, 5 s
+  timeouts), and **a failed one is silent**: no message and no change to any output, tried again
+  after a backoff that stops at 6 h, the days rebuilt from the local record and sent oldest
+  first in batches of 31, so a server that is not deployed yet loses nothing. `DO_NOT_TRACK=1`,
+  `AISQUARE_NO_TELEMETRY=1` and any `CI` run force it off and skip the question; turning it off
+  purges what was kept and sends one opt-out notice. The server end is a separate change.
 
 ### Changed
 

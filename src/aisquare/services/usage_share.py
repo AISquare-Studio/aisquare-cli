@@ -28,6 +28,7 @@ import contextlib
 import hashlib
 import hmac
 import json
+import logging
 import platform
 import re
 import secrets
@@ -46,9 +47,12 @@ from aisquare.services import iam, install_route, usage_stats
 from aisquare.services import settings as settings_service
 
 SCHEMA_VERSION = 1
+log = logging.getLogger("aisquare.usage_share")
 ENDPOINT_PATH = "/api/v1/cli/metrics/"
 WINDOW_DAYS = 31
 """A batch holds at most this many days: today and the 30 before."""
+MAX_BATCHES = 14
+"""Batches one shipment sends: 14 of 31 days reach back the 400 days the server takes."""
 MAX_FEATURES = 200
 MAX_REPOS = 25
 MAX_BODY_BYTES = 250_000
@@ -196,22 +200,30 @@ def _local_today(moment: datetime, tz: tzinfo | None) -> date:
     return moment.astimezone(tz).date()
 
 
-def build_batch(
+def build_batches(
     *,
     now: datetime | None = None,
     tz: tzinfo | None = None,
     store: ContextStore | None = None,
     state: SharingState | None = None,
     identity: tuple[str, str] | None = None,
-) -> Batch:
-    """The body the next shipment would post: ``days`` holds today and the days of the last 31
-    that are not yet acknowledged as they stand now, oldest first, as many as fit
-    :data:`MAX_BODY_BYTES`.
+    sample: bool | None = None,
+) -> list[Batch]:
+    """Everything that is to be sent, in batches of at most 31 days and :data:`MAX_BODY_BYTES`,
+    oldest first: each day since sharing was turned on that the server does not have as it
+    stands now, and today (which is sent every time, as it grows). The last batch ends with
+    today. Empty when there is nothing to send.
+
+    ``sample`` builds what the batches WOULD be had sharing been turned on a month ago: for
+    showing a person what is sent before they agree to it (it is the default while sharing was
+    never on). A real shipment is never a sample.
 
     ``identity`` is ``(install id, salt)``; without it the installation's own is read, and one
     sharing never minted gets placeholders (nothing is stored by building a batch)."""
     moment = now or datetime.now(UTC)
     held = state if state is not None else sharing.read()
+    if sample is None:
+        sample = held.since is None and not sharing.switch_on()
     if identity is None:
         identity = (
             (held.install_id, held.salt)
@@ -220,23 +232,66 @@ def build_batch(
         )
     install_id, salt = identity
     today = _local_today(moment, tz)
-    rollups = usage_stats.daily_rollups(
-        today - timedelta(days=WINDOW_DAYS - 1), today, now=moment, tz=tz, store=store
-    )
+    first = _first_day(held, today, sample=sample)
+    settled = held.settled_through or ""
+    rollups = usage_stats.daily_rollups(first, today, now=moment, tz=tz, store=store)
     signed_in = iam.signed_in_quietly() is not None
-    days: list[dict[str, Any]] = []
-    digests: dict[str, str] = {}
+    wanted: list[tuple[str, dict[str, Any], str]] = []
     for rollup in rollups:
+        if rollup.date <= settled:
+            continue
         body = day_body(rollup, salt, signed_in=signed_in)
         digest = _digest(body)
-        if rollup.date == today.isoformat() or held.acked.get(rollup.date) != digest:
-            days.append(body)
-            digests[rollup.date] = digest
-    batch = _batch(moment, install_id, days)
-    while len(days) > 1 and len(json.dumps(batch)) > MAX_BODY_BYTES:
-        digests.pop(days.pop(0)["date"], None)  # the oldest wait for the next shipment
-        batch = _batch(moment, install_id, days)
-    return Batch(body=batch, digests=digests)
+        if rollup.date == today.isoformat() or held.acked.get(rollup.date) != digest[:12]:
+            wanted.append((rollup.date, body, digest))
+    return _chunks(moment, install_id, wanted)
+
+
+def _first_day(held: SharingState, today: date, *, sample: bool) -> date:
+    """The first day a shipment looks at: the day sharing was turned on, or at most 399 days
+    back (the server takes dates back to today minus 400); a sample, 30 days back."""
+    if sample:
+        return today - timedelta(days=WINDOW_DAYS - 1)
+    oldest = today - timedelta(days=sharing.MAX_BACKLOG_DAYS)
+    try:
+        since = date.fromisoformat(held.since) if held.since else today
+    except ValueError:
+        since = today
+    return max(since, oldest)
+
+
+def _chunks(
+    moment: datetime, install_id: str, wanted: list[tuple[str, dict[str, Any], str]]
+) -> list[Batch]:
+    """``wanted`` (date, day, digest), oldest first, cut into bodies of at most
+    :data:`WINDOW_DAYS` days that fit :data:`MAX_BODY_BYTES`."""
+    batches: list[Batch] = []
+    days: list[dict[str, Any]] = []
+    digests: dict[str, str] = {}
+    size = len(json.dumps(_batch(moment, install_id, [])))
+    for date_text, body, digest in wanted:
+        cost = len(json.dumps(body)) + 2
+        if days and (len(days) >= WINDOW_DAYS or size + cost > MAX_BODY_BYTES):
+            batches.append(Batch(_batch(moment, install_id, days), digests))
+            days, digests, size = [], {}, len(json.dumps(_batch(moment, install_id, [])))
+        days.append(body)
+        digests[date_text] = digest
+        size += cost
+    if days:
+        batches.append(Batch(_batch(moment, install_id, days), digests))
+    return batches
+
+
+def build_batch(**kwargs: Any) -> Batch:
+    """The body the next POST would carry: the first of :func:`build_batches`, or a body with no
+    days when there is nothing to send."""
+    batches = build_batches(**kwargs)
+    if batches:
+        return batches[0]
+    moment = kwargs.get("now") or datetime.now(UTC)
+    held = kwargs.get("state") or sharing.read()
+    install_id = (kwargs.get("identity") or (held.install_id or PLACEHOLDER_ID, ""))[0]
+    return Batch(_batch(moment, install_id, []), {})
 
 
 def _batch(moment: datetime, install_id: str, days: list[dict[str, Any]]) -> dict[str, Any]:
@@ -251,7 +306,8 @@ def _batch(moment: datetime, install_id: str, days: list[dict[str, Any]]) -> dic
 
 
 def preview(**kwargs: Any) -> str:
-    """The batch the next shipment would post, as the JSON it is."""
+    """The body the next POST would carry, as the JSON it is: with sharing on, exactly it; with
+    it off, a sample of the last 31 days (nothing before the day it is turned on is ever sent)."""
     return json.dumps(build_batch(**kwargs).body, indent=2)
 
 
@@ -279,6 +335,8 @@ def reset_identity() -> tuple[str, str]:
         state.install_id = str(uuid.uuid4())
         state.salt = secrets.token_hex(32)
         state.acked = {}
+        state.settled_through = None
+        state.since = datetime.now().astimezone().date().isoformat()  # not what went before
         state.linked = None
         state.last_sent_at = None
 
@@ -315,8 +373,11 @@ def ship(
     transport: Transport | None = None,
     force: bool = False,
 ) -> ShipReport:
-    """Post the next batch, unless sharing is off or forced off, a shipment is not due (``force``
-    ignores that), another one is running, or there is nothing to send. Never raises."""
+    """Post what is waiting, unless sharing is off or forced off, a shipment is not due (``force``
+    ignores that), another one is running, or there is nothing to send. Never raises, and never
+    makes a sound about failing: the days stay unsent and go next time, however long the server
+    takes to answer (the report says what happened, for ``--json`` and the tests; nothing else
+    reads it aloud)."""
     reason = sharing.forced_off_reason()
     if reason is not None:
         return ShipReport(skipped=f"sharing is off: {reason}")
@@ -329,6 +390,7 @@ def ship(
     except TimeoutError:
         return ShipReport(skipped="another shipment is running")
     except Exception as exc:  # a shipment may fail; it may not raise into whoever asked
+        log.debug("usage shipment failed: %r", exc)
         return ShipReport(error=f"{type(exc).__name__}: {exc}"[:200])
 
 
@@ -339,35 +401,52 @@ def _ship(
     if not force and not sharing.due(state, moment):
         return ShipReport(skipped=f"not due until {state.next_due_at}")
     identity = ensure_identity()
-    state = sharing.read()
-    batch = build_batch(now=moment, tz=tz, store=store, state=state, identity=identity)
-    if not batch.days:
-        _schedule(moment, success=True)
+    state = _begin(moment, tz)
+    batches = build_batches(now=moment, tz=tz, store=store, state=state, identity=identity)
+    if not batches:
+        _schedule(moment)
         return ShipReport(skipped="nothing to send")
     try:
         url = endpoint()
     except iam.IamError as exc:
         return _failed(moment, str(exc))
     token = _bearer(iam.resolve_api_url())
-    retried = False
-    try:
-        result = post(url, batch.body, token, TIMEOUT_S)
-        if result.status == 401 and token is not None:
-            # A token the server will not take must not cost the shipment: it is accepted
-            # anonymously. The days stay unlinked until the user signs in again.
-            result = post(url, batch.body, None, TIMEOUT_S)
-            retried = True
-    except iam.IamError as exc:
-        return _failed(moment, str(exc))
-    if result.status == 200 and isinstance(result.body, dict):
-        linked = bool(result.body.get("linked"))
-        _acknowledge(moment, batch, linked)
-        accepted = result.body.get("accepted_days")
-        days = accepted if isinstance(accepted, int) else len(batch.days)
-        return ShipReport(sent=True, days=days, linked=linked, retried_anonymously=retried)
-    wait = result.retry_after() if result.status == 429 else None
-    detail = _detail(result)
-    return _failed(moment, f"HTTP {result.status}{detail}", retry_after=wait, retried=retried)
+    report = ShipReport()
+    for batch in batches[:MAX_BATCHES]:
+        try:
+            result = post(url, batch.body, token, TIMEOUT_S)
+            if result.status == 401 and token is not None:
+                # A token the server will not take must not cost the shipment: it is accepted
+                # anonymously, and the rest of this shipment goes the same way. The days stay
+                # unlinked until the user signs in again.
+                token, report.retried_anonymously = None, True
+                result = post(url, batch.body, None, TIMEOUT_S)
+        except iam.IamError as exc:
+            return _failed(moment, str(exc), report=report)
+        if result.status == 200 and isinstance(result.body, dict):
+            linked = bool(result.body.get("linked"))
+            _acknowledge(moment, batch, linked)
+            accepted = result.body.get("accepted_days")
+            report.sent, report.linked = True, linked
+            report.days += accepted if isinstance(accepted, int) else len(batch.days)
+            continue
+        wait = result.retry_after() if result.status == 429 else None
+        return _failed(
+            moment, f"HTTP {result.status}{_detail(result)}", retry_after=wait, report=report
+        )
+    return report
+
+
+def _begin(moment: datetime, tz: tzinfo | None) -> SharingState:
+    """The state, with the first day shared set if a switch turned on by hand left it unset."""
+
+    def first(state: SharingState) -> None:
+        if state.since is None:
+            state.since = _local_today(moment, tz).isoformat()
+
+    with contextlib.suppress(Exception):
+        return sharing.update(first)
+    return sharing.read()
 
 
 def _detail(result: iam.HttpResult) -> str:
@@ -379,11 +458,15 @@ def _detail(result: iam.HttpResult) -> str:
 
 def _acknowledge(moment: datetime, batch: Batch, linked: bool) -> None:
     def record(state: SharingState) -> None:
-        state.acked.update(batch.digests)
+        state.acked.update({day: digest[:12] for day, digest in batch.digests.items()})
         cutoff = (
             moment.astimezone(UTC).date() - timedelta(days=sharing.KEEP_ACKED_DAYS)
         ).isoformat()
-        state.acked = {day: digest for day, digest in state.acked.items() if day >= cutoff}
+        old = [day for day in state.acked if day < cutoff]
+        if old:  # settled: the server has them, and nothing looks at them again
+            state.settled_through = max([state.settled_through or "", *old])
+            for day in old:
+                del state.acked[day]
         state.last_sent_at = moment.isoformat(timespec="seconds")
         state.linked = linked
         state.failures = 0
@@ -394,7 +477,7 @@ def _acknowledge(moment: datetime, batch: Batch, linked: bool) -> None:
         sharing.update(record)
 
 
-def _schedule(moment: datetime, *, success: bool) -> None:
+def _schedule(moment: datetime) -> None:
     def record(state: SharingState) -> None:
         state.next_due_at = (moment + sharing.SHIP_EVERY).isoformat(timespec="seconds")
 
@@ -403,8 +486,16 @@ def _schedule(moment: datetime, *, success: bool) -> None:
 
 
 def _failed(
-    moment: datetime, error: str, *, retry_after: int | None = None, retried: bool = False
+    moment: datetime,
+    error: str,
+    *,
+    retry_after: int | None = None,
+    report: ShipReport | None = None,
 ) -> ShipReport:
+    """A shipment that did not go (or not all of it): tried again after a backoff that grows to
+    six hours and stays there, for as long as it takes. Logged at debug level and nowhere else."""
+    log.debug("usage shipment not sent: %s", error)
+
     def record(state: SharingState) -> None:
         state.failures += 1
         state.last_error = error[:200]
@@ -415,7 +506,9 @@ def _failed(
 
     with contextlib.suppress(Exception):
         sharing.update(record)
-    return ShipReport(error=error[:200], retried_anonymously=retried)
+    kept = report or ShipReport()
+    kept.error = error[:200]
+    return kept
 
 
 # --- the switch ----------
@@ -435,6 +528,10 @@ def enable(*, now: datetime | None = None) -> SharingStatus:
         if state.consent_answer is None:
             state.consent_asked_at = moment.isoformat(timespec="seconds")
             state.consent_answer = "share"
+        # Only what happens from now on is shared: a day before this one was not agreed to.
+        state.since = moment.astimezone().date().isoformat()
+        state.acked = {}
+        state.settled_through = None
         state.failures = 0
         state.last_error = None
         state.next_due_at = None
@@ -454,6 +551,8 @@ def disable(*, now: datetime | None = None, transport: Transport | None = None) 
 
     def purge(old: SharingState) -> None:
         old.acked = {}
+        old.settled_through = None
+        old.since = None
         old.next_due_at = None
         old.spawned_at = None
         old.failures = 0
@@ -477,17 +576,18 @@ def disable(*, now: datetime | None = None, transport: Transport | None = None) 
     post = transport or default_transport
     try:
         result = post(endpoint(), body, None, TIMEOUT_S)
-    except iam.IamError as exc:
-        return ShipReport(error=str(exc)[:200], opt_out=True)
-    except Exception as exc:
+    except Exception as exc:  # best effort, and silent: the switch is off either way
+        log.debug("usage opt-out notice not sent: %r", exc)
         return ShipReport(error=f"{type(exc).__name__}: {exc}"[:200], opt_out=True)
     if result.status == 200:
         return ShipReport(sent=True, opt_out=True)
+    log.debug("usage opt-out notice not sent: HTTP %s", result.status)
     return ShipReport(error=f"HTTP {result.status}", opt_out=True)
 
 
 def status() -> SharingStatus:
-    """Where sharing stands: the switch, what forces it off, the last shipment, the sign-in."""
+    """Where sharing stands: the switch, what forces it off, the last shipment that WENT, the
+    sign-in. Failures are in ``debug`` and nowhere a person reads (sharing fails silently)."""
     state = sharing.read()
     reason = sharing.forced_off_reason()
     switch = sharing.switch_on()
@@ -505,11 +605,14 @@ def status() -> SharingStatus:
         signed_in=iam.signed_in_quietly() is not None,
         linked=state.linked,
         last_sent_at=sharing.parse_time(state.last_sent_at),
-        next_due_at=sharing.parse_time(state.next_due_at),
         days_acknowledged=len(state.acked),
-        failures=state.failures,
-        last_error=state.last_error,
-        endpoint=where,
+        debug={
+            "since": state.since,
+            "next_due_at": state.next_due_at,
+            "failures": state.failures,
+            "last_error": state.last_error,
+            "endpoint": where,
+        },
     )
 
 

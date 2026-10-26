@@ -16,9 +16,10 @@ minute the first time: when it ends, the page reads again whatever range it is o
 catches up by itself. With nothing in a range the page says so (and, when other ranges have
 something, that they do), instead of a page of zeros.
 
-**The slot at the top** (``#usage-sharing-slot``, between the title and the range switcher) is
-where the opt-in sharing switch goes (the next task of this feature). It is empty here: this
-page records and shows, and nothing it does leaves the machine.
+**The box at the top** (``#usage-sharing-slot``, between the title and the range switcher) is
+the opt-in sharing switch (:class:`~aisquare.cli.ui.views.usage_sharing.SharingBox`): off by
+default, one click either way, with what is shared one click away. The page itself only records
+and shows; nothing leaves the machine unless that switch is on.
 
 ``loader`` is how the page asks for a range: ``(range, sweep, progress) -> UsageStats``,
 raising for "no answer" (the page keeps what it showed and says why). Tests hand it a fake.
@@ -40,6 +41,7 @@ from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli import usage_format as fmt
+from aisquare.cli.ui.views.usage_sharing import Sharing, SharingBox
 from aisquare.models import USAGE_RANGES, UsageRange, UsageStats
 from aisquare.services import usage_stats as usage_service
 
@@ -73,9 +75,23 @@ TILES: tuple[tuple[str, str], ...] = (
 
 EMPTY_RANGE = (
     "Nothing in {range} — Claude Code was not used in it.\n\n"
-    "{turns:,} turns are recorded in all: press 4 for Lifetime, or 2 / 3 for a longer range."
+    "{turns:,} turns are recorded in all: {hint}."
 )
 """What an empty range says when another range has something."""
+
+
+def longer_ranges_hint(range_: UsageRange) -> str:
+    """Which keys show a longer range than ``range_``: ``press 2, 3 or 4 for a longer range``
+    from Today, ``press 3 or 4`` from 7 days, ``press 4 for Lifetime`` from 30 days. Never the
+    key of the range on show."""
+    longer = USAGE_RANGES[USAGE_RANGES.index(range_) + 1 :]
+    keys = [KEYS[r] for r in longer]
+    if not keys:
+        return "this is the longest range"
+    if len(keys) == 1:
+        return f"press {keys[0]} for {fmt.RANGE_LABELS[longer[0]]}"
+    return f"press {', '.join(keys[:-1])} or {keys[-1]} for a longer range"
+
 
 EMPTY = (
     "No usage recorded yet.\n\n"
@@ -255,18 +271,23 @@ class UsageStatsView(VerticalScroll):
         Binding("r", "reload", "refresh", show=False),
     ]
 
-    def __init__(self, *, loader: Loader = default_loader, id: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        loader: Loader = default_loader,
+        sharing: Sharing | None = None,
+        id: str | None = None,
+    ) -> None:
         super().__init__(id=id)
         self._loader = loader
+        self._sharing = sharing
         self.range: UsageRange = DEFAULT_RANGE
         self.stats: UsageStats | None = None
         """The newest stats painted, for the range :attr:`range` or the one before it."""
 
     def compose(self) -> ComposeResult:
         yield Static(Text("Usage & stats"), id="usage-title")
-        # SHARING SLOT: the opt-in anonymous-sharing switch (task #5) mounts here, above the
-        # figures. Left empty by design: nothing this page does sends anything anywhere.
-        yield Vertical(id="usage-sharing-slot")
+        yield SharingBox(sharing=self._sharing, id="usage-sharing-slot")
         with Horizontal(id="usage-ranges"):
             for range_ in USAGE_RANGES:
                 yield Button(
@@ -298,8 +319,10 @@ class UsageStatsView(VerticalScroll):
 
     def on_show(self) -> None:
         """The page is opened: read what is recorded now, and sweep the transcripts (at most
-        every ten minutes), on whatever range it was left on."""
+        every ten minutes), on whatever range it was left on; and ask where sharing stands (the
+        shell's question may have been answered since)."""
         self.reload(sweep=True)
+        self.query_one(SharingBox).refresh_status()
 
     # --- reading -----------------------------------------------------------------------
 
@@ -410,7 +433,9 @@ class UsageStatsView(VerticalScroll):
             self.query_one("#usage-empty", Static).update(
                 Text(
                     EMPTY_RANGE.format(
-                        range=fmt.RANGE_LABELS[stats.range].lower(), turns=stats.recorded_turns
+                        range=fmt.RANGE_LABELS[stats.range].lower(),
+                        turns=stats.recorded_turns,
+                        hint=longer_ranges_hint(stats.range),
                     )
                     if elsewhere
                     else EMPTY

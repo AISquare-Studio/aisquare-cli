@@ -36,7 +36,11 @@ BACKOFF_MAX = SHIP_EVERY
 """A failed shipment is tried again after 5 minutes, then twice as long each time, up to 6 h."""
 SPAWN_EVERY = timedelta(minutes=30)
 """Between two detached shippers started from commands, however many commands run meanwhile."""
-KEEP_ACKED_DAYS = 70
+KEEP_ACKED_DAYS = 60
+"""Days whose acknowledged digest is kept; older ones are settled
+(:attr:`SharingState.settled_through`)."""
+MAX_BACKLOG_DAYS = 399
+"""How far back an unsent day is still sent: the server takes dates back to today minus 400."""
 
 ENV_DO_NOT_TRACK = "DO_NOT_TRACK"
 ENV_NO_TELEMETRY = "AISQUARE_NO_TELEMETRY"
@@ -50,9 +54,15 @@ class SharingState(BaseModel):
     salt: str | None = None
     consent_asked_at: str | None = None
     consent_answer: Literal["share", "declined"] | None = None
+    since: str | None = None
+    """The local day sharing was turned on: the first day that is ever sent. A day before it
+    was not agreed to and is never sent; a day since it is sent until the server has it."""
     acked: dict[str, str] = Field(default_factory=dict)
-    """Local day → digest of the day as the server last accepted it: a day is sent again when its
-    content changes, and today always is."""
+    """Local day → digest of the day as the server last accepted it (the last
+    :data:`KEEP_ACKED_DAYS`): a day is sent again when its content changes, and today always is."""
+    settled_through: str | None = None
+    """Every day up to this one was acknowledged and is not looked at again: acknowledged days
+    older than :data:`KEEP_ACKED_DAYS` are forgotten into it, which keeps this file small."""
     last_sent_at: str | None = None
     linked: bool | None = None
     next_due_at: str | None = None
@@ -138,7 +148,9 @@ def due(state: SharingState, now: datetime) -> bool:
 
 def backoff(failures: int) -> timedelta:
     """How long after the ``failures``-th failure in a row the next try waits."""
-    delay: timedelta = BACKOFF_FIRST * (2 ** max(0, failures - 1))
+    # The exponent stops at 10 (5 min x 1024 is past the cap): an unbounded one overflowed a
+    # timedelta after ~40 failures in a row, and a server that stays away for a week is 28.
+    delay: timedelta = BACKOFF_FIRST * (2 ** min(10, max(0, failures - 1)))
     return min(BACKOFF_MAX, delay)
 
 

@@ -21,8 +21,9 @@ from aisquare.core import state_file as state_core
 from aisquare.core.store import store_session
 from aisquare.models import DailyRollup, DayAccounts, TokenCounts
 from aisquare.services import iam, usage_share, usage_stats
+from aisquare.services import settings as settings_service
 from tests.projects import add_project
-from tests.usage_share_support import Server, check_contract, status, unreachable
+from tests.usage_share_support import Server, check_contract, ok, status, unreachable
 from tests.usage_stats_support import IST, NOW, Machine, pin_clock, prompt, request, tokens
 
 pytestmark = pytest.mark.usefixtures("sharing_allowed")
@@ -98,8 +99,9 @@ def _build(**kwargs: Any) -> usage_share.Batch:
     return usage_share.build_batch(now=NOW, tz=IST, **kwargs)
 
 
-def _on() -> None:
-    usage_share.enable(now=NOW)
+def _on(days_back: int = 10) -> None:
+    """Turn sharing on as of ``days_back`` days before NOW (days since then are shared)."""
+    usage_share.enable(now=NOW - timedelta(days=days_back))
 
 
 # --- off, and forced off ----------
@@ -325,16 +327,23 @@ def test_a_batch_holds_at_most_31_days_oldest_first_and_fits_256_kb(
             request(_day(-offset, 9) + timedelta(minutes=1), f"m{offset}", cwd=repo),
         )  # fmt: skip
     usage_stats.sweep(tz=IST)
-    _on()
+    _on(days_back=45)  # shared since 45 days ago: all 40 days of activity are to go
 
-    days = _build().days
-    assert days[0]["date"] == "2026-09-26" and days[-1]["date"] == "2026-10-26"
-    assert len(days) == 31
+    batches = usage_share.build_batches(now=NOW, tz=IST)
+    dates = [day["date"] for batch in batches for day in batch.days]
+
+    assert [len(batch.days) for batch in batches] == [31, 9]
+    assert dates == sorted(dates) and dates[0] == "2026-09-17" and dates[-1] == "2026-10-26"
+    assert usage_share.build_batch(now=NOW, tz=IST).days[0]["date"] == "2026-09-17"
+    for batch in batches:
+        check_contract(batch.body)
 
     monkeypatch.setattr(usage_share, "MAX_BODY_BYTES", 6_000)
-    cut = _build()
-    assert len(json.dumps(cut.body)) <= 6_000 and cut.days[-1]["date"] == "2026-10-26"
-    assert len(cut.days) < 31 and list(cut.digests) == [d["date"] for d in cut.days]
+    cut = usage_share.build_batches(now=NOW, tz=IST)
+    assert len(cut) > 2 and all(len(json.dumps(b.body)) <= 6_000 for b in cut)
+    flat = [day["date"] for batch in cut for day in batch.days]
+    assert flat == dates  # the same days, in more bodies: none dropped
+    assert list(cut[-1].digests)[-1] == "2026-10-26"  # today is the last of the last
 
 
 # --- the shipment ----------
@@ -499,6 +508,7 @@ def test_the_backoff_doubles_to_six_hours(machine: Machine) -> None:
         timedelta(minutes=40), timedelta(minutes=80), timedelta(minutes=160),
     ]  # fmt: skip
     assert sharing.backoff(30) == timedelta(hours=6)
+    assert sharing.backoff(100_000) == timedelta(hours=6)  # a server away for years: no overflow
 
 
 def test_a_throttled_or_rejected_batch_is_kept_for_later_and_says_why(machine: Machine) -> None:
@@ -659,7 +669,7 @@ def test_a_command_starts_one_shipper_when_due_and_none_for_half_an_hour(
     first = sharing.start_background_ship(NOW)
     second = sharing.start_background_ship(NOW + timedelta(minutes=5))
     third = sharing.start_background_ship(NOW + timedelta(minutes=31))
-    usage_share._schedule(NOW + timedelta(minutes=31), success=True)  # a shipment went through
+    usage_share._schedule(NOW + timedelta(minutes=31))  # a shipment went through
     fourth = sharing.start_background_ship(NOW + timedelta(hours=2))
 
     assert (first, second, third, fourth) == (True, False, True, False)
@@ -743,7 +753,9 @@ def test_metrics_share_on_status_preview_off(
     sent = server.calls[0].body
     check_contract(sent)
     assert shipped.exit_code == 0 and f"Sent {len(sent['days'])} day(s)" in shipped.output
-    assert len(sent["days"]) >= 3 and sent["install_id"] == on["install_id"]
+    assert sent["install_id"] == on["install_id"]
+    # `share on` turns it on as of NOW: the days before it were not agreed to and do not go
+    assert [day["date"] for day in sent["days"]] == ["2026-10-26"]
     assert "Sharing is ON" in text and "not signed in: batches are anonymous" in text
     assert json.loads(off.output)["opt_out"] is True and len(server.calls) == 2
     assert server.calls[1].body["opt_out"] is True
@@ -779,3 +791,225 @@ def test_the_shipper_command_reads_the_transcripts_first_and_prints_what_it_did(
     assert (
         report["sent"] is True and server.calls[0].body["days"][-1]["tokens"]["total"] == tokens()
     )
+
+
+# --- failing silently, retrying forever, losing nothing (the owner's decision) ----------
+
+BACKLOG_DAYS = 70
+
+
+def _backlog(m: Machine) -> None:
+    """70 days of activity, to be shared since 80 days ago: more than one batch's worth."""
+    repo = m.repo("backlog")
+    for offset in range(BACKLOG_DAYS):
+        m.session(
+            1, repo, f"b{offset}", prompt(_day(-offset, 9), cwd=repo),
+            request(_day(-offset, 9) + timedelta(minutes=1), f"bm{offset}", cwd=repo),
+        )  # fmt: skip
+    usage_stats.sweep(tz=IST)
+    _on(days_back=80)
+
+
+def _dates(server: Server) -> list[list[str]]:
+    return [[day["date"] for day in call.body["days"]] for call in server.calls]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(status(404, {"detail": "Not Found"}), id="the endpoint is not deployed (404)"),
+        pytest.param(unreachable(), id="connection refused"),
+        pytest.param(status(502, "bad gateway"), id="5xx"),
+        pytest.param(status(400, {"errors": {"days": "no"}}), id="4xx"),
+        pytest.param(status(429, None, **{"Retry-After": "60"}), id="throttled"),
+        pytest.param(status(200, "not json at all"), id="a reply that is not json"),
+        pytest.param(iam.IamError("unreachable", "TLS handshake failed"), id="TLS / DNS"),
+    ],
+)
+def test_a_shipment_that_fails_makes_no_sound_and_leaves_the_days_queued(
+    machine: Machine,
+    answer: Any,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _history(machine)
+    _on()
+
+    with caplog.at_level("DEBUG", logger="aisquare.usage_share"):
+        report = usage_share.ship(now=NOW, tz=IST, transport=Server(answer), force=True)
+    out = capsys.readouterr()
+
+    assert report.sent is False and report.error is not None
+    assert (out.out, out.err) == ("", "")  # no stdout, no stderr
+    assert any(r.levelname == "DEBUG" and "not sent" in r.getMessage() for r in caplog.records)
+    assert all(r.levelno <= 10 for r in caplog.records if r.name == "aisquare.usage_share")
+    state = sharing.read()
+    assert state.acked == {} and state.settled_through is None  # nothing is marked as sent
+    assert state.failures == 1
+    # and what was queued is all still there to go
+    assert len(_build().days) == 3
+
+
+def test_the_commands_say_nothing_of_a_failed_shipment(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pin_clock(monkeypatch, usage_share, sharing)
+    _history(machine)
+    _on()
+    monkeypatch.setattr(usage_share, "default_transport", Server(status(404), unreachable()))
+    runner = CliRunner()
+
+    plain = runner.invoke(app, ["metrics", "ship", "--force"])
+    as_json = runner.invoke(app, ["--json", "metrics", "ship", "--force"])
+    shown = runner.invoke(app, ["metrics", "share", "status"])
+    debug = json.loads(runner.invoke(app, ["--json", "metrics", "share", "status"]).output)
+
+    assert (plain.exit_code, plain.output) == (0, "")
+    assert json.loads(as_json.output)["error"] is not None  # --json is the debug view
+    text = shown.output.lower()
+    for word in ("fail", "error", "retry", "404", "unreach", "could not", "refused"):
+        assert word not in text, word
+    assert "sharing is on" in text and "last sent      never" in text
+    assert debug["debug"]["failures"] == 2 and debug["debug"]["last_error"]
+    assert {"enabled", "switch", "last_sent_at", "linked", "debug"} <= set(debug)
+
+
+def test_the_retry_goes_on_for_ever_with_a_capped_backoff_and_never_gives_up(
+    machine: Machine,
+) -> None:
+    _history(machine)
+    _on()
+    server = Server(*([status(404)] * 40))
+    moment = NOW
+    waits = []
+
+    for _ in range(40):
+        usage_share.ship(now=moment, tz=IST, transport=server)
+        state = sharing.read()
+        waits.append(sharing.parse_time(state.next_due_at) - moment)  # type: ignore[operator]
+        moment = sharing.parse_time(state.next_due_at)  # type: ignore[assignment]
+
+    assert len(server.calls) == 40  # not one skipped: it is tried at every due time
+    assert waits[0] == timedelta(minutes=5) and max(waits) == timedelta(hours=6)
+    assert waits[-1] == timedelta(hours=6) and all(w <= timedelta(hours=6) for w in waits)
+    assert sharing.read().failures == 40 and sharing.read().acked == {}  # no dead-letter either
+
+
+def test_a_later_200_delivers_the_whole_backlog_oldest_first_in_batches_of_31(
+    machine: Machine,
+) -> None:
+    _backlog(machine)
+    server = Server(status(404), unreachable(), status(503))
+    moment = NOW
+    for _ in range(3):
+        usage_share.ship(now=moment, tz=IST, transport=server)  # the endpoint is not there yet
+        moment = sharing.parse_time(sharing.read().next_due_at)  # type: ignore[assignment]
+    assert sharing.read().acked == {} and sharing.read().failures == 3
+
+    delivered = usage_share.ship(now=moment, tz=IST, transport=server)  # it is deployed now
+
+    sent = _dates(server)[3:]
+    flat = [date for batch in sent for date in batch]
+    assert delivered.sent and delivered.days == BACKLOG_DAYS
+    assert [len(batch) for batch in sent] == [31, 31, 8]  # oldest first, 31 days at most
+    assert flat == sorted(flat) and len(flat) == len(set(flat)) == BACKLOG_DAYS
+    assert flat[-1] == "2026-10-26"  # the last batch ends with today
+    for call in server.calls[3:]:
+        check_contract(call.body)
+        assert call.url.endswith("/api/v1/cli/metrics/")
+    after = sharing.read()
+    assert after.failures == 0 and after.last_error is None and after.last_sent_at is not None
+    # none of it is sent again, and the file that tracks it stays small
+    again = usage_share.ship(now=moment + timedelta(hours=7), tz=IST, transport=server)
+    assert (again.sent and _dates(server)[-1] == []) or _dates(server)[-1] == ["2026-10-26"]
+    assert len(after.acked) <= 61 and after.settled_through is not None
+
+
+def test_a_failure_in_the_middle_of_a_backlog_keeps_what_went_and_resumes_where_it_stopped(
+    machine: Machine,
+) -> None:
+    _backlog(machine)
+    server = Server(ok(31), status(503))
+
+    first = usage_share.ship(now=NOW, tz=IST, transport=server)
+    resumed = usage_share.ship(now=NOW + timedelta(hours=7), tz=IST, transport=server)
+
+    sent = _dates(server)
+    assert first.sent and first.days == 31 and first.error is not None  # 31 went, then 503
+    assert len(sent) == 4 and sent[0][0] < sent[1][0]  # first batch, the failed one, then retried
+    assert sent[2] == sent[1]  # the batch that failed is the one that is sent again
+    assert resumed.sent and sum(len(batch) for batch in (sent[0], *sent[2:])) == BACKLOG_DAYS
+
+
+def test_a_month_of_downtime_loses_no_day_even_beyond_the_old_31_day_window(
+    machine: Machine,
+) -> None:
+    _backlog(machine)  # 70 days of activity, shared since 80 days ago
+    moment = NOW
+    outage = Server(*([status(404)] * 30))
+    for _ in range(30):
+        usage_share.ship(now=moment, tz=IST, transport=outage)
+        moment = sharing.parse_time(sharing.read().next_due_at)  # type: ignore[assignment]
+    working = Server()
+
+    usage_share.ship(now=moment, tz=IST, transport=working)
+
+    dates = {date for batch in _dates(working) for date in batch}
+    assert len(dates) == BACKLOG_DAYS and "2026-08-18" in dates  # 69 days before today is sent
+
+
+def test_nothing_older_than_the_servers_400_days_is_attempted(machine: Machine) -> None:
+    repo = machine.repo("ancient")
+    machine.session(
+        1, repo, "old", prompt(_day(-450, 9), cwd=repo),
+        request(_day(-450, 9) + timedelta(minutes=1), "old", cwd=repo),
+    )  # fmt: skip
+    usage_stats.sweep(tz=IST)
+    _on(days_back=500)
+
+    assert usage_share.build_batches(now=NOW, tz=IST) == []  # the server would answer 400
+
+
+# --- only what happens from the moment it is agreed to ----------
+
+
+def test_the_days_before_sharing_was_turned_on_are_never_sent(machine: Machine) -> None:
+    _history(machine)  # activity on Oct 24, 25 and 26
+    usage_share.enable(now=NOW - timedelta(days=1))  # turned on on the 25th
+    server = Server()
+
+    usage_share.ship(now=NOW, tz=IST, transport=server)
+
+    assert _dates(server) == [["2026-10-25", "2026-10-26"]]  # not the 24th
+    usage_share.disable(now=NOW, transport=server)
+    usage_share.enable(now=NOW + timedelta(days=3))  # off for days, then on again
+    state = sharing.read()
+    assert state.since == "2026-10-29" and state.acked == {}  # the gap in between is not shared
+
+
+def test_while_sharing_is_off_the_preview_is_a_sample_of_the_last_31_days(
+    machine: Machine,
+) -> None:
+    _history(machine)
+
+    sample = usage_share.build_batch(now=NOW, tz=IST)
+    _on(days_back=0)  # turned on today
+    real = usage_share.build_batch(now=NOW, tz=IST)
+
+    assert [d["date"] for d in sample.days] == ["2026-10-24", "2026-10-25", "2026-10-26"]
+    assert [d["date"] for d in real.days] == ["2026-10-26"]  # the body that would be posted
+    assert sample.body["install_id"] == usage_share.PLACEHOLDER_ID
+    assert real.body["install_id"] == sharing.read().install_id
+    check_contract(sample.body)
+
+
+def test_a_switch_turned_on_by_hand_in_the_config_shares_from_its_first_shipment(
+    machine: Machine,
+) -> None:
+    _history(machine)
+    settings_service.set_value("sharing.enabled", "true")  # no `share on`: no `since` yet
+    server = Server()
+
+    usage_share.ship(now=NOW, tz=IST, transport=server)
+
+    assert _dates(server) == [["2026-10-26"]] and sharing.read().since == "2026-10-26"

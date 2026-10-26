@@ -5,7 +5,7 @@ tokens, cost at list prices, sessions, repositories, accounts, models — for **
 **30 days** or **Lifetime** (keys `1`–`4`). `aisquare metrics stats --range today|7d|30d|lifetime
 [--json]` prints the same figures.
 
-Everything here is recorded and shown **on this machine only**. Nothing is sent anywhere.
+Everything here is recorded and shown **on this machine only**. Nothing is sent anywhere unless you turn on the separate, optional [usage sharing](usage-telemetry.md) (off by default; the switch is at the top of the page).
 
 ## What is recorded
 

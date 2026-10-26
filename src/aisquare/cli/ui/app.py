@@ -118,6 +118,7 @@ from aisquare.cli.ui.update import (
     REFRESH_WORKER,
     UpdateScreen,
 )
+from aisquare.cli.ui.views import usage_sharing
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, UsageRead, read_session
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.app_settings import AppSettingsView, UiSettingsChanged
@@ -132,6 +133,7 @@ from aisquare.cli.ui.views.settings_remote import RemoteChip
 from aisquare.cli.ui.views.usage_stats import UsageStatsView
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core import clipboard, experimental, feature_use, paths
+from aisquare.core import sharing as usage_share_core
 from aisquare.core.console import stderr_console
 from aisquare.core.feature_use import view_feature
 from aisquare.core.store import ContextStore, store_session
@@ -210,6 +212,14 @@ USAGE_SWEEP_WORKER = "usage-sweep"
 (``services.usage_stats.maybe_sweep``), off the UI thread, at most every ten minutes."""
 USAGE_SWEEP_FIRST_SECONDS = 45.0
 """How long after start the first sweep waits: the first frame and the first reads go first."""
+SHIP_FIRST_SECONDS = 60.0
+"""How long after start the usage shipper first looks at whether a shipment is due."""
+SHIP_CHECK_SECONDS = 300.0
+"""How often after that: the shipment itself is due only every 6 h (``core.sharing``)."""
+CONSENT_WORKER = "usage-share-consent"
+"""The worker that records the answer to the sharing question (and ships, on a yes)."""
+CONSENT_DUE_WORKER = "usage-share-consent-due"
+"""The worker that reads whether the sharing question is still to be asked."""
 HEADROOM_SECONDS = 60.0
 """How often the status line's headroom is re-read — never on the two-second tick. A read
 goes to the network only for an account whose cached usage is over five minutes old."""
@@ -896,8 +906,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         release_check: ReleaseCheck | None = None,
         after_update: bool = False,
         scope: Collection[str] | None = None,
+        sharing: usage_sharing.Sharing | None = None,
     ) -> None:
         super().__init__()
+        self._sharing = sharing
+        """How the sharing switch, its dialogs and the shipper reach ``services.usage_share``
+        (``None``: the real service); a test hands in a fake."""
+        self._sharing_asked = False
+        """The consent question was put (or found already answered) in this run."""
+        self._ship_at = time.monotonic() + SHIP_FIRST_SECONDS
+        """When the housekeeping tick next lets the usage shipper try (``time.monotonic``)."""
         self.scope = None if scope is None else frozenset(scope)
         """The projects ``aisquare ui --project/--group`` listed; ``None`` lists every one."""
         self._workers = self._worker_threads = _WorkerThreads(self)
@@ -1256,8 +1274,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def _housekeeping(self) -> None:
         """Every :data:`HOUSEKEEPING_SECONDS`: Remote's auto-off, the release check's ask
         once :data:`~aisquare.services.updates.ASK_EVERY_SECONDS` have passed since the last,
-        and the usage sweep (:meth:`_sweep_usage`) once :data:`USAGE_SWEEP_FIRST_SECONDS` after
-        start and every ``SWEEP_EVERY`` after that.
+        the usage sweep (:meth:`_sweep_usage`) once :data:`USAGE_SWEEP_FIRST_SECONDS` after
+        start and every ``SWEEP_EVERY`` after that, and the usage shipper's look
+        (:meth:`_ship_usage`) once :data:`SHIP_FIRST_SECONDS` after start and every
+        :data:`SHIP_CHECK_SECONDS`.
 
         One tick for all, not a timer each: on Windows every pending Textual timer holds a
         thread of asyncio's default executor for as long as it sleeps (``textual._win_sleep``),
@@ -1273,6 +1293,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if time.monotonic() >= self._usage_sweep_at:
             self._usage_sweep_at = time.monotonic() + usage_service.SWEEP_EVERY.total_seconds()
             self._sweep_usage()
+        if time.monotonic() >= self._ship_at:
+            self._ship_at = time.monotonic() + SHIP_CHECK_SECONDS
+            self._ship_usage()
 
     def _remote_auto_off(self) -> None:
         """The 30 s auto-off check; a Remote whose timer ran out stops without this thread."""
@@ -1837,6 +1860,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.worker.name == USAGE_SWEEP_WORKER:
             self._usage_swept(event)
             return
+        if event.worker.name == CONSENT_DUE_WORKER:
+            self._consent_due(event)
+            return
+        if event.worker.name == CONSENT_WORKER:
+            self._consent_saved(event)
+            return
         if event.worker.name == CHECK_WORKER:
             self._release_checked(event)
             return
@@ -1933,6 +1962,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         else:
             switcher.current = view_id
         feature_use.record(view_feature(view_id))
+        self.call_after_refresh(self._maybe_ask_sharing)  # once, after onboarding: see there
 
     async def on_add_project(self, event: AddProject) -> None:
         await self._show("onboard", lambda: OnboardView(id="onboard"))
@@ -2871,6 +2901,83 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             exit_on_error=False,
         )
 
+    def _ship_usage(self) -> None:
+        """Send the usage shipment if sharing is on and one is due: off the UI thread, nothing
+        at all when it is off or forced off (the first thing the worker looks at, and the tick
+        does not even start it then)."""
+        if not usage_share_core.enabled():
+            return
+        if any(
+            worker.name == usage_sharing.SHIP_WORKER and not worker.is_finished
+            for worker in self.workers
+        ):
+            return
+        ship = (self._sharing or usage_sharing.Sharing()).ship_due
+        self.run_worker(
+            ship,
+            name=usage_sharing.SHIP_WORKER,
+            group=usage_sharing.SHIP_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _maybe_ask_sharing(self) -> None:
+        """Ask once whether to share anonymous usage: after onboarding (there is a project to
+        be working in), where nothing forces sharing off, if it was not answered before, and
+        never over another dialog."""
+        if self._sharing_asked or len(self.screen_stack) > 1:
+            return
+        snapshot = self.snapshot
+        if snapshot is None or not snapshot.projects or self.content.current == "welcome":
+            return
+        self._sharing_asked = True
+        if usage_share_core.forced_off_reason() is not None:
+            return
+        self.run_worker(
+            (self._sharing or usage_sharing.Sharing()).consent_due,
+            name=CONSENT_DUE_WORKER,
+            group=CONSENT_DUE_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _consent_due(self, event: Worker.StateChanged) -> None:
+        """The read of whether the question is still due came back: ask it, if so."""
+        asked = event.state is WorkerState.SUCCESS and event.worker.result is True
+        if asked and len(self.screen_stack) == 1:
+            self.push_screen(usage_sharing.ConsentDialog(self._sharing), self._consent_answered)
+
+    def _consent_answered(self, answer: str | None) -> None:
+        """Record the answer (``None`` is a dialog closed some other way: *No thanks*) and, on a
+        yes, send the first shipment."""
+        yes = answer == "share"
+        sharing = self._sharing or usage_sharing.Sharing()
+        self.run_worker(
+            lambda: sharing.answer(yes),
+            name=CONSENT_WORKER,
+            group=CONSENT_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _consent_saved(self, event: Worker.StateChanged) -> None:
+        if event.state is WorkerState.ERROR:
+            self.notify(
+                f"could not record the answer: {event.worker.error}",
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
+            return
+        if event.state is not WorkerState.SUCCESS:
+            return
+        for box in self.query(usage_sharing.SharingBox):
+            box.refresh_status()
+        # The answer is all this says. Whether the first shipment went is nothing a person is
+        # told: sharing fails silently, and the days go whenever the server answers.
+        if event.worker.result is not None:  # a yes: a no returns nothing
+            self.notify("sharing is on: thank you", timeout=5, markup=False)
+
     def _usage_swept(self, event: Worker.StateChanged) -> None:
         """A sweep recorded sessions: the Usage & stats page, if it is the one showing, reads
         again so that its figures follow."""
@@ -2887,7 +2994,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     async def on_usage_stats_selected(self, event: UsageStatsSelected) -> None:
         """The hub's *Usage & stats*: the page of what the Claude Code sessions on this machine
         spent; *⚙ Settings* stays the highlighted row, the page being one of Settings' own."""
-        await self._show("usage-stats", lambda: UsageStatsView(id="usage-stats"))
+        await self._show(
+            "usage-stats", lambda: UsageStatsView(sharing=self._sharing, id="usage-stats")
+        )
         self.sidebar.select(SETTINGS_KEY)
         self._remember_selection("usage-stats")
 
@@ -3237,6 +3346,8 @@ def _writing_workers() -> dict[str, str]:
         accounts.REMOVE_WORKER: "an account's removal",
         accounts.ARRANGE_WORKER: "an account change",
         accounts.RENAME_WORKER: "an account's rename",
+        usage_sharing.SHARE_WORKER: "the usage-sharing switch",
+        CONSENT_WORKER: "the answer to the usage-sharing question",
         PROJECT_REMOVE_WORKER: "a project's removal",
         REATTACH_WORKER: "the update's restart of the agents it kept",
         PRESS_WORKER: "the update's record of the running agents",
@@ -3324,6 +3435,9 @@ def _cut_off_workers() -> frozenset[str]:
             USAGE_SWEEP_WORKER,
             usage_stats.LOAD_WORKER,
             usage_stats.SWEEP_WORKER,
+            usage_sharing.SHIP_WORKER,
+            usage_sharing.PREVIEW_WORKER,
+            CONSENT_DUE_WORKER,
         }
     )
 

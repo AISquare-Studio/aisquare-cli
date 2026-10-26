@@ -13,7 +13,6 @@ import time
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from functools import partial
-from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
@@ -33,6 +32,7 @@ from aisquare.cli.ui.views.usage_stats import (
     SWEEP_WORKER,
     UsageStatsView,
     chart_text,
+    longer_ranges_hint,
 )
 from aisquare.core.store import store_session
 from aisquare.models import USAGE_RANGES, UsageDay, UsageRange, UsageStats, UsageTokens
@@ -257,17 +257,17 @@ def test_a_sweep_that_recorded_sessions_makes_the_open_page_read_again(
     assert opened >= 1 and after == opened + 1
 
 
-def test_the_page_names_itself_and_has_the_sharing_slot_above_the_range_switcher() -> None:
-    async def go(pilot: Pilot[None], view: UsageStatsView) -> tuple[list[str], int, str]:
+def test_the_page_names_itself_and_has_the_sharing_box_above_the_range_switcher() -> None:
+    async def go(pilot: Pilot[None], view: UsageStatsView) -> tuple[list[str], str, str]:
         order = [child.id or "" for child in view.children]
         slot = view.query_one("#usage-sharing-slot")
-        return order, len(slot.children), _text(view.query_one("#usage-title", Static))
+        return order, type(slot).__name__, _text(view.query_one("#usage-title", Static))
 
-    order, slot_children, title = _drive_page(real_loader(), go)
+    order, slot_type, title = _drive_page(real_loader(), go)
 
     assert title == "Usage & stats"
     assert order[:4] == ["usage-title", "usage-sharing-slot", "usage-ranges", "usage-status"]
-    assert slot_children == 0, "empty until the sharing task fills it; nothing here sends anything"
+    assert slot_type == "SharingBox"  # the opt-in switch: tests/test_ui_usage_share.py
 
 
 # --- each range ----------------------------------------------------------------------------------
@@ -477,6 +477,11 @@ def test_each_range_with_nothing_in_it_is_the_empty_state_not_a_page_of_zeros(
         assert said[quiet].startswith(f"Nothing in {fmt.RANGE_LABELS[quiet].lower()}")
         assert "1 turns are recorded in all" in said[quiet]
         assert "backfill" not in said[quiet]
+    # and the keys it names are the ones that show a LONGER range, never the one on show
+    assert said["today"].endswith("press 2, 3 or 4 for a longer range.")
+    assert said["7d"].endswith("press 3 or 4 for a longer range.")
+    assert longer_ranges_hint("30d") == "press 4 for Lifetime"
+    assert longer_ranges_hint("lifetime") == "this is the longest range"
 
 
 def test_a_range_key_pressed_during_the_first_long_sweep_does_not_lose_the_sweeps_repaint(
@@ -641,9 +646,3 @@ def test_the_figures_are_written_the_same_in_the_page_and_the_command() -> None:
     assert fmt.rebucket([1] * 400, 10) == ([90, 90, 90, 90, 40], 90)
     assert fmt.column_chart([1, 4], height=2, gap=0) == [" █", "▄█"]
     assert fmt.column_chart([0, 0], height=2) == ["", ""]
-
-
-@pytest.mark.parametrize("path", ["src/aisquare/cli/ui/views/usage_stats.py"])
-def test_the_sharing_slot_is_marked_in_the_source_for_the_next_task(path: str) -> None:
-    source = (Path(__file__).resolve().parents[1] / path).read_text(encoding="utf-8")
-    assert "SHARING SLOT" in source and 'id="usage-sharing-slot"' in source

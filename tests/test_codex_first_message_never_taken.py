@@ -322,7 +322,7 @@ class _Pane:
 
 
 def test_a_huge_rollout_beside_the_row_is_read_at_its_ends_and_in_time(
-    spawned: Spawned, tmp_path: Path
+    spawned: Spawned, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A 64 MB rollout of this folder, begun after the spawn (another agent on the same
     account home, working in the same folder), and 1,500 old ones in the days before: the
@@ -336,6 +336,14 @@ def test_a_huge_rollout_beside_the_row_is_read_at_its_ends_and_in_time(
         handle.truncate(64 * 1024 * 1024)  # the rest is the working agent's, nothing readable
     spawned.later(46)
     codex_prompts._KEPT.clear()
+    listed: list[str] = []
+    real_listdir = os.listdir
+
+    def listdir(folder: Any) -> list[str]:
+        listed.append(str(folder))
+        return real_listdir(folder)
+
+    monkeypatch.setattr(os, "listdir", listdir)
 
     tracemalloc.start()
     started = os.times()[4]
@@ -347,6 +355,12 @@ def test_a_huge_rollout_beside_the_row_is_read_at_its_ends_and_in_time(
         tracemalloc.stop()
 
     assert spawned.row().first_prompt == "acked", "the message is in its head"
+    today = datetime.now().astimezone()
+    days = [f for f in listed if f.count(os.sep) > str(spawned.home).count(os.sep) + 3]
+    assert all(f.endswith(f"{today:%Y}/{today:%m}/{today:%d}") for f in days), (
+        "a day before the spawn was listed",
+        days,
+    )
     assert peak < 16 * 1024 * 1024, f"a whole rollout was read ({peak:,} bytes held at once)"
     assert elapsed < budget(2.0), f"the check took {elapsed:.2f} s"
 

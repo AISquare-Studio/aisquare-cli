@@ -11,8 +11,8 @@ the review is passed.
 Read for a listing, so bounded (review r22 of #113, finding 2):
 
 - **Which rollouts.** Codex writes ``sessions/YYYY/MM/DD/rollout-<local time>-<id>.jsonl``;
-  only the day directories from ``since`` on are listed, and of those only the rollouts
-  whose name says they began at or after it. A session that began before the message was
+  only the day directories that exist from ``since`` on are listed, and of those only the
+  rollouts whose name says they began at or after it. A session that began before the message was
   given cannot have run it as its first. The tree is never walked, and a rollout of any age
   or size outside that window is never opened.
 - **How much of one.** Its first line is its ``session_meta``, which names the folder; one
@@ -27,8 +27,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from collections import OrderedDict
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,7 @@ _NAME = re.compile(r"^rollout-(\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d)-.+\.jsonl$")
 _KEPT: OrderedDict[tuple[str, str], tuple[tuple[int, int], tuple[str, ...]]] = OrderedDict()
 """``(rollout, folder)`` to the ``(size, mtime)`` it was read at and the prompts it gave."""
 _KEPT_MAX = 256
+_LOCK = threading.Lock()
 
 
 def prompts_since(home: Path, cwd: Path, since: datetime) -> list[str]:
@@ -58,21 +60,33 @@ def prompts_since(home: Path, cwd: Path, since: datetime) -> list[str]:
 
 def _begun_since(root: Path, since: datetime) -> list[Path]:
     """The rollouts under ``root`` whose names say they began at or after ``since``, oldest
-    first, from the day directories of ``since`` to today's."""
-    if not root.is_dir():
-        return []
+    first. Only the year, month and day directories that exist from ``since``'s on are listed,
+    so a row that waits for days lists no more than the days Codex wrote."""
     cutoff = since.astimezone() - SLACK
-    today = datetime.now().astimezone().date()
+    first = (cutoff.year, cutoff.month, cutoff.day)
     named: list[tuple[datetime, Path]] = []
-    day = cutoff.date()
-    while day <= today + timedelta(days=1):  # a clock a little ahead writes tomorrow's
-        named.extend(_in_day(root, day, cutoff))
-        day += timedelta(days=1)
+    for year in _numbered(root):
+        if year < first[0]:
+            continue
+        for month in _numbered(root / f"{year:04d}"):
+            if (year, month) < first[:2]:
+                continue
+            for day in _numbered(root / f"{year:04d}" / f"{month:02d}"):
+                if (year, month, day) >= first:
+                    folder = root / f"{year:04d}" / f"{month:02d}" / f"{day:02d}"
+                    named.extend(_in_day(folder, cutoff))
     return [path for _, path in sorted(named)]
 
 
-def _in_day(root: Path, day: date, cutoff: datetime) -> list[tuple[datetime, Path]]:
-    folder = root / f"{day.year:04d}" / f"{day.month:02d}" / f"{day.day:02d}"
+def _numbered(folder: Path) -> list[int]:
+    """The directories of ``folder`` named by a number (Codex's year, month and day)."""
+    try:
+        return sorted(int(name) for name in os.listdir(folder) if name.isdecimal())
+    except OSError:
+        return []
+
+
+def _in_day(folder: Path, cutoff: datetime) -> list[tuple[datetime, Path]]:
     named: list[tuple[datetime, Path]] = []
     try:
         names = os.listdir(folder)
@@ -99,14 +113,16 @@ def _prompts_of(path: Path, folder: str) -> tuple[str, ...]:
     except OSError:
         return ()
     key, seen = (str(path), folder), (stat.st_size, stat.st_mtime_ns)
-    kept = _KEPT.get(key)
-    if kept is not None and kept[0] == seen:
-        _KEPT.move_to_end(key)
-        return kept[1]
+    with _LOCK:
+        kept = _KEPT.get(key)
+        if kept is not None and kept[0] == seen:
+            _KEPT.move_to_end(key)
+            return kept[1]
     prompts = tuple(_read(path, folder, stat.st_size))
-    _KEPT[key] = (seen, prompts)
-    while len(_KEPT) > _KEPT_MAX:
-        _KEPT.popitem(last=False)
+    with _LOCK:
+        _KEPT[key] = (seen, prompts)
+        while len(_KEPT) > _KEPT_MAX:
+            _KEPT.popitem(last=False)
     return prompts
 
 

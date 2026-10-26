@@ -2211,7 +2211,7 @@ DOCTOR_AMBER=""
 # flags asked for. A row expected and not amber is good news: the caller asks
 # "nothing amber that we did not expect", never for an equal set.
 expected_amber() {
-    # Alphabetical, to read the same way as doctor_amber's sorted output.
+    # In no order: callers ask membership (`is_expected_amber`), never the sequence.
     _exp=""
     if [ "$WANT_AGENT" = 0 ]; then
         # `--no-agent` asked for Claude Code to be left alone, and the run touches

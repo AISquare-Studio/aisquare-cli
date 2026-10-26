@@ -140,9 +140,15 @@ adapter.**
 - **Main's reliability (#295) and token-diet (#296) trains reach Codex agents too.** A spawn's first message,
   a `--task` kickoff included, goes on Codex's command line from the same file Claude
   Code's does, never in the window's command, and Codex's `UserPromptSubmit`
-  acknowledges it. One that never starts a turn stays `pending`, not `attention`: Codex's
-  `SessionStart` comes with its first prompt, so such an agent has no board session for
-  the listing to ask (an open item).
+  acknowledges it. One that never starts a turn reads `attention` with one `prompt_unsent`,
+  as Claude Code's does, though Codex's `SessionStart` comes with its first prompt (and
+  never, with its hooks untrusted), so its row has no board session for the listing to ask:
+  the listing asks Codex's rollout, which records every prompt it ran, hooks or not. A prompt
+  there that reads as the message is taken, whatever held it (the hook review, passed with
+  Esc, runs it); none, past `prompt_ack_seconds` with the pane idle at its empty prompt, is
+  not going to be. The read is bounded for a listing: the day directories from the spawn on,
+  the rollouts begun after it, a megabyte at each end of one in this folder, kept against
+  its size and modification time (`AgentAdapter.first_prompts_since`).
   A quiet `working` Codex row whose pane shows its empty prompt reads *idle (the board
   said working)*, by Codex's own screen. A note to a busy Codex agent reaches it through
   its `Stop`, as its next turn's prompt. Its usage limit (read off its rollout) leaves
@@ -154,10 +160,17 @@ adapter.**
   Code's flags (`AgentAdapter.tool_policy`), withheld for a Codex role with a note, since
   what Codex's tools may do is its sandbox's and approvals'; a role's `board_context`
   reaches a Codex window and its launch record; the fleet's model ladder gives a Codex
-  spawn its own pins and none of Claude Code's. The quiet-point compaction types Claude
-  Code's `/compact` and is armed only for an agent that `capabilities.compacts_on_command`
-  says takes it, and `metrics ledger` reads Claude Code's transcripts: both are Claude
-  Code's alone for now (open items).
+  spawn its own pins and none of Claude Code's. The quiet-point
+  compaction of a manager types the agent's own command (`capabilities.compact`): Claude
+  Code's `/compact` with instructions, and for a Codex manager the bare `/compact`, which
+  compacts it at its idle prompt (`/compact <text>` is run as a prompt, so Codex's summary
+  is its own). Codex fires no hook at the compaction, so the rollout's `compacted` record
+  acknowledges it, and its `SessionStart` (source `compact`), which comes with the next
+  turn, hands the manager's start pack back in front of whatever is typed then. `metrics
+  ledger` reads every agent's sessions through its own transcript reader
+  (`AgentTranscript.ledger`), a Codex rollout's `token_usage_record` lines under the
+  same rules, and `metrics usage` shares their parse; both agents' context size and
+  compaction checks read the transcript's tail.
 
 **Upgrading:**
 - The store migrates to schema v45 on first open, from main's v39 (0.9.0's: 0.8.2's v32

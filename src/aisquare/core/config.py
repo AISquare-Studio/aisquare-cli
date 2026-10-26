@@ -186,7 +186,7 @@ class ExperimentalSettings(BaseModel):
     """``[experimental]`` — features that ship OFF until the owner turns them on.
 
     ``captain``: the home-level agent (``docs/captain.md``). Off, ``aisquare captain``
-    refuses, the fleet UI shows no Start captain or captain view, the bundled ``captain``
+    refuses, the fleet UI shows no insignia or captain view, the bundled ``captain``
     persona is absent and the voice page does not serve. ``AISQUARE_EXPERIMENTAL_CAPTAIN``
     wins over this field either way; ``core.experimental.captain_enabled`` is the one
     reader of both.

@@ -103,7 +103,7 @@ def test_the_captain_slot_leads_the_actions_block_under_a_header_with_no_star(
             "captain-section",
             "spawn-agent",
         ]
-        assert shown(_start(pilot)) == "▶ Start captain"
+        assert shown(_start(pilot)) == "▶  Start captain"
 
     drive(body)
 
@@ -490,7 +490,7 @@ def test_the_view_ticks_the_flag_on_its_own(tmp_path: Path, script: Script) -> N
 
 @pytest.mark.needs_captain
 def test_the_captain_row_is_still_an_ordinary_agent_row(tmp_path: Path, script: Script) -> None:
-    """T2's section is untouched: the insignia is an extra door, not a second row."""
+    """T2's slot is untouched: the captain's row is an ordinary agent row, and the only one."""
     captain = _captain()
     script[captain_state.home_project().id] = [captain]
 

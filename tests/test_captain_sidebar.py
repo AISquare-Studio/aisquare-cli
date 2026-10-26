@@ -137,7 +137,7 @@ def test_with_no_captain_the_section_says_how_to_start_one(tmp_path: Path, scrip
         assert not section.query(AgentRow)
         start = app.query_one("#captain-empty")
         # A Start captain line now (#33), and the command it stands for under the pointer.
-        assert shown(start) == "▶ Start captain"  # type: ignore[arg-type]
+        assert shown(start) == "▶  Start captain"  # type: ignore[arg-type]
         assert "aisquare captain" in str(start.tooltip)
 
     drive(body)

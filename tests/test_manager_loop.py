@@ -218,7 +218,10 @@ def test_a_coders_review_keeps_the_manager_going(
     assert set(decision) == {"decision", "reason"}, "the documented Stop shape, nothing extra"
     reason = decision["reason"]
     assert reason, "an empty reason continues the turn with no instruction"
-    assert "bbbb2222 (coder) review:" in reason and task_id in reason and "tests green" in reason
+    # One short line per event (P1 WS-2, #279): its seq, the author, the kind, the board's
+    # task number for the task's id, and the text.
+    assert " coder review #1: " in reason and "tests green" in reason
+    assert task_id not in reason, "the board number stands for the task"
     assert reason.endswith(team_service.WAKEUP_CLOSE)
     assert result.stderr.strip() == "", "a healthy wake-up says nothing on stderr"
     after = _session(MANAGER)
@@ -274,7 +277,7 @@ def test_stop_hook_active_defers_the_wakeup_to_the_next_prompt(
     _fleet(runner, monkeypatch, work_dir)
     project_id = _manager_row(work_dir)
     before = _session(MANAGER)
-    task_id = _coder_reviews(work_dir)
+    _coder_reviews(work_dir)
     no_nudge.clear()  # the coder's own write-time nudge is not what is under test
 
     result = _stop(runner, MANAGER, work_dir, stop_hook_active=True)
@@ -285,7 +288,7 @@ def test_stop_hook_active_defers_the_wakeup_to_the_next_prompt(
     assert _meta(_counter_key(MANAGER)) is None
     assert no_nudge == [(project_id, "deferred:task_review")]
     delta = _prompt(runner, MANAGER, work_dir).stdout
-    assert task_id in delta and "review" in delta, "the deferred events reached the next prompt"
+    assert " coder review #1: " in delta, "the deferred events reached the next prompt"
 
 
 def test_a_deferring_stop_with_nothing_pending_nudges_nobody(
@@ -488,11 +491,18 @@ def test_the_wake_kinds_are_the_plans() -> None:
         "task_reopened",
         "result",
         "question",
-        "agent_exited",
-        # #146: an agent parked on a usage limit, and the hand-over that moved one.
+        # #146: an agent parked on a usage limit. Since #277 a hand-over that moved one
+        # (`switched`) is news, not a decision, and one that could not is `handover_failed`;
+        # a limit the hand-over is already moving is `limited_handing_over`, no wake kind.
         "limited",
-        "switched",
+        "handover_failed",
+        # P0-W1a (#122): an agent whose first message never started a turn.
+        "prompt_unsent",
     } == team_service.MANAGER_WAKE_KINDS
+    assert team_service.LIMITED_HANDING_OVER not in team_service.MANAGER_WAKE_KINDS
+    # An exit wakes by its details, not its kind (P1 WS-2, #279: `wake_class`), and a
+    # switch is news: the manager asked for it, or the hand-over did.
+    assert not {"agent_exited", "switched", "restarted"} & team_service.MANAGER_WAKE_KINDS
 
 
 @pytest.mark.parametrize("kind", sorted(team_service.MANAGER_WAKE_KINDS))
@@ -560,7 +570,7 @@ def test_notification_lines_do_not_ride_along(
 
     reason = _decision(_stop(runner, MANAGER, work_dir))["reason"]
 
-    assert task_id in reason
+    assert task_id and "tests green" in reason
     assert "A sub-agent finished" not in reason
 
 
@@ -1262,11 +1272,12 @@ def test_every_harness_role_is_a_registered_identity() -> None:
     assert set(harness.ROLE_PROFILES) <= set(ExplainabilitySettings().roles)
 
 
-def test_each_wakeup_line_names_its_board(
+def test_the_wakeup_names_its_board_once(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
 ) -> None:
     """Fix 5 of the fleet-board card (tsk_01m3k89bkhpj): the Stop reason is the delta
-    delivered a turn early, so its lines name their board as the prompt hook's do."""
+    delivered a turn early, so it names its board as the prompt hook's does: once, in its
+    head, since one reason reads one board (P1 WS-2, #279), not on every line."""
     _fleet(runner, monkeypatch, work_dir)
     _coder_reviews(work_dir)
 
@@ -1276,4 +1287,210 @@ def test_each_wakeup_line_names_its_board(
         board = store.get_project(_session(MANAGER).project_id)
     assert board is not None
     lines = [line for line in reason.splitlines() if line.startswith("- ")]
-    assert lines and all(line.startswith(f"- [{board.root.name}] ") for line in lines), lines
+    assert f"(board {board.root.name}):" in reason.splitlines()[0]
+    assert lines and all(line.startswith("- #") for line in lines), lines
+    assert not any(f"[{board.root.name}]" in line for line in lines), lines
+
+
+# --- P1 WS-2 (#279): one classifier, exits by their details, short lines, board context ---
+
+
+def _coder_row(work: Path, *, exit_status: int | None, label: str = "coder-x") -> FleetAgent:
+    """The coder's fleet row, ended with ``exit_status``, as a stop or a listing ends it."""
+    session = _session(CODER)
+    with store_session() as store:
+        row = store.upsert_fleet_agent(
+            FleetAgent(
+                id=f"agt_{label}", project_id=session.project_id, label=label, role="coder",
+                pane_id="%3", session_id=CODER, cwd=work, board=session.project_id,
+                created_at=datetime.now(tz=UTC),
+            )
+        )  # fmt: skip
+        return store.end_fleet_agent(row.id, exit_status=exit_status, ended_by="stopped")
+
+
+def _exits(
+    work: Path,
+    *,
+    status: int | None,
+    actor: str | None = None,
+    released: int = 0,
+    force: bool = False,
+) -> bool:
+    """The coder's ``agent_exited``, as the fleet writes it; whether it wakes a manager."""
+    row = _coder_row(work, exit_status=status)
+    with store_session() as store:
+        return fleet_service._emit_exit(store, row, actor=actor, force=force, released=released)
+
+
+def test_a_managers_own_stop_does_not_wake_it(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
+) -> None:
+    """A manager's `fleet stop coder-x` is written under the stopped coder's session, so
+    `exclude_session` never left it out: it woke the manager at its next Stop to act on
+    its own command. The event now names its actor, and the manager's own is `own`."""
+    _fleet(runner, monkeypatch, work_dir)
+    before = _session(MANAGER)
+
+    _exits(work_dir, status=None, actor=MANAGER, force=True)  # killed: would wake anyone else
+
+    exited = [e for e in team_service.log_events(work_dir) if e.kind == "agent_exited"][-1]
+    assert exited.actor == MANAGER
+    assert exited.meta == {"status": None, "force": True, "released": 0, "why": None}
+    assert exited.text == "coder-x exited (?) — stopped by manager (--force)"
+    assert team_service.wake_class(exited, before) == "own"
+    result = _stop(runner, MANAGER, work_dir, stop_hook_active=False)
+    assert result.exit_code == 0 and result.stdout == "", "its own stop blocked its Stop"
+    assert _session(MANAGER).cursor == before.cursor
+    delta = _prompt(runner, MANAGER, work_dir).stdout
+    assert "coder-x exited" not in delta, "its own act is never shown to it"
+
+
+@pytest.mark.parametrize(
+    ("status", "released", "wakes"),
+    [(0, 0, False), (1, 0, True), (None, 0, True), (0, 2, True)],
+    ids=["clean", "failed", "killed-or-lost", "clean-left-a-claim"],
+)
+def test_an_exit_wakes_by_its_status_and_what_it_left(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    work_dir: Path,
+    status: int | None,
+    released: int,
+    wakes: bool,
+) -> None:
+    """Owner Q4: a clean exit that released an open claim wakes too (an orphaned task)."""
+    _fleet(runner, monkeypatch, work_dir)
+
+    assert _exits(work_dir, status=status, released=released) is wakes
+
+    result = _stop(runner, MANAGER, work_dir, stop_hook_active=False)
+    if wakes:
+        assert _decision(result)["decision"] == BLOCK
+    else:
+        assert result.stdout == "", "a clean exit is news, not a turn"
+        assert "coder-x exited (0)" in _prompt(runner, MANAGER, work_dir).stdout
+
+
+@pytest.mark.parametrize("kind", ["switched", "restarted", "task_claimed"])
+def test_a_switch_or_a_restart_rides_along_with_the_next_wake(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path, kind: str
+) -> None:
+    _fleet(runner, monkeypatch, work_dir)
+    _emit_from_coder(kind, "coder-x moved")
+
+    assert _stop(runner, MANAGER, work_dir, stop_hook_active=False).stdout == ""
+    _coder_reviews(work_dir)
+    reason = _decision(_stop(runner, MANAGER, work_dir, stop_hook_active=False))["reason"]
+    assert "coder-x moved" in reason and " coder review #1: " in reason
+
+
+def test_a_long_note_reaches_others_as_one_line_and_team_show_prints_it_all(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
+) -> None:
+    """A 2 KB note, in a script JSON escapes (`_output_cost`), is one short line in the
+    delta, ending in the command that prints it; that command prints every character."""
+    _fleet(runner, monkeypatch, work_dir)
+    note = "Проверка: " + "результаты тестов зелёные; " * 80
+    assert len(note) > 2000
+    seq = _emit_from_coder("note", note)
+
+    delta = _prompt(runner, MANAGER, work_dir).stdout
+    [line] = [line for line in delta.splitlines() if line.startswith("- ")]
+    assert len(line) <= 220, len(line)
+    assert line.startswith(f"- #{seq} coder note: Проверка") and line.endswith(
+        f"… → aisquare team show {seq}"
+    )
+
+    shown = runner.invoke(app, ["team", "show", str(seq), "--as", MANAGER])
+    assert shown.exit_code == 0, shown.output
+    assert note.strip() in shown.stdout and f"seq {seq}" in shown.stdout
+    as_json = runner.invoke(app, ["--json", "team", "show", str(seq), "--as", MANAGER])
+    assert json.loads(as_json.stdout)["payload"]["text"] == note
+
+
+def test_team_show_refuses_a_seq_on_another_board_naming_it(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path, tmp_path: Path
+) -> None:
+    _fleet(runner, monkeypatch, work_dir)
+    other = tmp_path / "other"
+    other.mkdir()
+    add_project(other)
+    elsewhere = team_service.add_note("theirs", cwd=other)
+    refused = runner.invoke(app, ["team", "show", str(elsewhere.seq), "--as", MANAGER])
+    assert refused.exit_code == 1
+    assert "it exists on board other" in refused.stderr
+
+
+def test_a_reviewer_with_the_default_reads_no_board_and_all_restores_it(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
+) -> None:
+    """`none` (the reviewer's default): no recent updates at start, an empty delta, the
+    cursor still moving past what it did not read, so `all` later is not a backlog."""
+    _fleet(runner, monkeypatch, work_dir)
+    _coder_reviews(work_dir)
+    reviewer = "cccc3333-0000-0000-0000-000000000000"
+    monkeypatch.setenv("AISQUARE_BOARD_CONTEXT", "none")
+    started = _start(runner, monkeypatch, reviewer, work_dir, "reviewer")
+    assert "recent updates" not in started.stdout
+    assert "Your standing cycle (reviewer)" in started.stdout, "its cycle stays"
+    _emit_from_coder("note", "a verdict it must not read first")
+    assert "aisquare-team-delta" not in _prompt(runner, reviewer, work_dir).stdout
+    assert _session(reviewer).cursor == _latest_seq(_session(reviewer).project_id)
+
+    monkeypatch.setenv("AISQUARE_BOARD_CONTEXT", "all")
+    _emit_from_coder("note", "news after the switch")
+    delta = _prompt(runner, reviewer, work_dir).stdout
+    assert "news after the switch" in delta and "a verdict it must not read" not in delta
+
+
+def test_relevant_keeps_its_own_tasks_and_what_is_addressed_to_it_however_much_else(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
+) -> None:
+    """Filtered in the query: forty irrelevant events must not hide the relevant one behind
+    the page's limit (review of #240, finding 11's rule)."""
+    _fleet(runner, monkeypatch, work_dir)
+    tester = "dddd4444-0000-0000-0000-000000000000"
+    monkeypatch.setenv("AISQUARE_BOARD_CONTEXT", "relevant")
+    _start(runner, monkeypatch, tester, work_dir, "tester")
+    _prompt(runner, tester, work_dir)
+    for n in range(40):
+        _emit_from_coder("note", f"noise {n}")
+    team_service.add_note("tester: check the login flow", to_role="tester", cwd=work_dir)
+    team_service.add_note("we ship on Friday", kind="decision", cwd=work_dir)
+
+    delta = _prompt(runner, tester, work_dir).stdout
+    assert "tester: check the login flow" in delta and "we ship on Friday" in delta
+    assert "noise" not in delta
+
+
+def test_a_manager_reads_the_whole_board_whatever_the_variable_says(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
+) -> None:
+    _fleet(runner, monkeypatch, work_dir)
+    monkeypatch.setenv("AISQUARE_BOARD_CONTEXT", "none")
+    _emit_from_coder("note", "for the manager")
+    assert "for the manager" in _prompt(runner, MANAGER, work_dir).stdout
+
+
+@pytest.mark.parametrize(
+    ("text", "wakes"),
+    [
+        ("coder-1 exited (0)", False),
+        ("coder-1 exited (1)", True),
+        ("coder-1 exited (?)", True),
+        ("coder-1 exited (0): its replacement did not start", True),
+        ("something else entirely", True),
+    ],
+)
+def test_an_exit_from_before_its_details_is_read_from_its_text(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path, text: str, wakes: bool
+) -> None:
+    """Review of #336, 4: an `agent_exited` written before `meta` existed reads its status
+    from its text, so an upgrade does not wake the manager once for each clean exit."""
+    _fleet(runner, monkeypatch, work_dir)
+    seq = _emit_from_coder("agent_exited", text)
+    with store_session() as store:
+        event = store.get_event_by_seq(seq)
+    assert event is not None and event.meta is None
+    assert (team_service.wake_class(event, _session(MANAGER)) == "wake") is wakes

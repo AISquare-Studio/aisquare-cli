@@ -25,59 +25,101 @@ concurrency:
 permissions:
   contents: read
 
+# THE LAYOUT: THE SUITE IN SHARDS (2026-10-25). The suite is ~13k tests and about
+# 65 minutes of one core, with a long tail (6,122 tests of 0.1 s or more hold 96.5%
+# of the time), so no single test or fixture is the problem. Measured on main
+# 82e293b9 (run 40218362245): a 4-vCPU standard runner with `pytest -n auto` took
+# 21-24 minutes per Linux leg and 53 on Windows (61 median, 138 at worst), and the
+# two ambient legs ran the suite SERIALLY for 63-64, so the full matrix took 64
+# minutes and a sub-PR's one leg 22 (run 40220936072). The same suite takes 6
+# minutes on 14 cores: the CPU is the bottleneck, and standard runners are free on
+# this public repo (owner decision: no larger runners). So each leg's suite is split
+# across runners:
+#
+#   lint     ruff check, ruff format --check, mypy and `uv lock --check`, once. They
+#            ran on every leg, and mypy checks python_version 3.11 whatever runs it.
+#   test     each leg's suite in shards: pytest-split (`--splits N --group k`) splits
+#            it by the per-test times in .test_durations (CI's own, from the
+#            shards' notes), and each shard runs on every core (`-n auto`). 4 shards
+#            per Linux leg, 10 on Windows, where the suite takes about three times as
+#            long (61 minutes of test time on 4 cores, against 19 on Linux, run
+#            40226083784). The two ambient legs are folded in
+#            (owner decision): py3.11 runs in the proxy-down ambient and py3.13 in
+#            proxy-up, sharded and parallel like the rest, so the full matrix runs
+#            the suite 5 times rather than 7.
+#   shards   reads what every shard collected and ran, and fails unless each leg's
+#            shards ran its collection exactly once (tests/shards.py).
+#   package  the sdist and wheel, built and smoke-tested.
+#   ci-ok    passes only when every job above did: the one check for branch
+#            protection to require, whatever the number of legs or shards.
+#
+# Measured after: a sub-PR's slowest job ended 8.2 minutes after its run started,
+# against 22 (run 40230232483, green: its 4 shards 4.6-8.1). The full matrix's
+# slowest job ran 12.1 and ci-ok ended at 12.3, against 64 (run 40246673512 on
+# 1f23b826, green on its first attempt: Linux shards 4.8-8.2, Windows 7.4-12.1); in
+# 40244987840, on the same commit, the slowest ended at 10.3 and the run was green on
+# its second attempt, after a flaky UI test.
+# pytest-split's shards are even, each within about 5% of the others by the last
+# run's times; what spreads them is the runners, 0.6 to 1.8 times as fast as each
+# other within one run. Windows has 10 shards for that: at 8, a runner 1.78 times
+# slower than its tests' last run took 16.2 (run 40240227553); at 10, the slowest
+# Windows shard ran 12.1 (run 40246673512).
+#
+# Every job has a timeout of about twice its usual time, so a hung shard fails in
+# minutes, not at GitHub's six hours. Installs are uv's, not pip's, compiled as
+# pip compiles them: 3-5 s against 13 on Linux and 26-38 against 50 on Windows
+# (run 40246673512 against 40218362245). ci/constraints.txt still pins ruff and mypy.
+#
+# LEAN CI FOR A TRAIN'S SUB-PRS (owner decision 2026-10-23). A pull request into
+# rc/** — one workstream of a release train — runs lint, the py3.12 leg (captain
+# on, no ambient) in its 4 shards, the shard check, the Linux package job and
+# ci-ok; demo.yml does not render for it at all. Shared runners give about 21
+# concurrent jobs, and ten-job runs of 45-minute legs per sub-PR queued for hours.
+# Everything else keeps the FULL matrix: a push to rc/** or main (every sub-PR's
+# merge, so the full matrix runs on the train branch as each lands), a PR into main
+# (the train itself), the nightly, and a run by hand.
+#
+# The test is spelled the same in every job, as `LEAN` in
+# tests/test_ci_is_lean_for_sub_prs.py, which pins the split:
+#   github.event_name == 'pull_request' && startsWith(github.base_ref, 'rc/')
+# A matrix is chosen with fromJSON(<lean> && '<lean legs>' || '<full legs>'), so a
+# leg a sub-PR skips never starts a runner, rather than starting and skipping.
+# Contexts in `strategy` are github, needs, vars and inputs only: no `env` to
+# name the test once.
+
 jobs:
-  check:
-    name: check (${{ matrix.os }}, py${{ matrix.python-version }}${{ matrix.captain == 'off' && ', captain off' || '' }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-        python-version: ["3.11", "3.12", "3.13"]
-        # The suite runs with the experimental captain ON (tests/conftest.py's autouse
-        # captain_on), so every leg above tests the captain as it is when turned on. A
-        # user who never turns it on gets it OFF, so one more leg runs the whole suite
-        # that way (AISQUARE_SUITE_CAPTAIN=off): every test must pass, bar those marked
-        # needs_captain, which it skips and says why (review of #240).
-        captain: ["on"]
-        include:
-          # Windows on one interpreter rather than the full cross-product: the
-          # platform-specific branches read sys.platform at call time, so a
-          # second Python version re-runs the same branches for ~3x the minutes.
-          - os: windows-latest
-            python-version: "3.12"
-            captain: "on"
-          - os: ubuntu-latest
-            python-version: "3.12"
-            captain: "off"
+  lint:
+    # Once, not per leg: none of these depends on the platform or the interpreter
+    # the suite runs on. Python 3.11 because mypy checks python_version 3.11
+    # (pyproject.toml): the third-party packages it reads resolve as for that user.
+    name: lint (ruff, format, mypy, uv.lock)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.11
         uses: actions/setup-python@v7
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: |
+          python-version: "3.11"
+
+      # Pinned to a commit, not a major: astral-sh/setup-uv publishes no floating
+      # major tags past v7, so `@v10` does not resolve and the job dies at "Set up
+      # job" (review of #307). uv itself is pinned, so a uv release cannot turn the
+      # lock check red on its own; a relock with a newer uv still checks.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.0"
+          enable-cache: true
+          cache-dependency-glob: |
             pyproject.toml
             ci/constraints.txt
 
       # ruff and mypy at the versions ci/constraints.txt pins, the ones
       # `make install` puts in a local venv.
       - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -c ci/constraints.txt -e ".[dev]"
-
-      # Linux only, and the guard is load-bearing now that `check` has a
-      # windows-latest leg: `sudo apt-get` is not a thing on that runner, so an
-      # unconditional step fails the job before a single test runs. tmux has no
-      # Windows build either — the fleet's live tests skip without it, which is
-      # the documented behaviour this step exists to avoid ON LINUX, not a gap
-      # to paper over here.
-      - name: Install tmux (the fleet's live tests skip without it)
-        if: runner.os == 'Linux'
-        run: sudo apt-get install -y tmux
+        run: uv pip install --system -c ci/constraints.txt -e ".[dev]"
 
       - name: Lint (ruff)
         run: ruff check src tests
@@ -88,74 +130,152 @@ jobs:
       - name: Type check (mypy)
         run: mypy
 
-      - name: Test (pytest)
-        run: pytest -ra
-        env:
-          AISQUARE_SUITE_CAPTAIN: ${{ matrix.captain }}
+      # And as the Windows leg ran it, when every leg ran mypy: mypy reads a
+      # `sys.platform` check as the platform it runs on, so the Windows branches were
+      # type-checked only there.
+      - name: Type check as Windows (mypy --platform win32)
+        run: mypy --platform win32
 
-  ambient:
-    # WHY THIS JOB EXISTS.
-    #
-    # `check` installs `.[dev]` into a pristine runner: no ~/.aisquare, nothing
-    # listening on any port, no optional extra. A developer who has followed
-    # docs/connecting-your-agents-to-explainability.md has all three. Three
-    # separate bugs in this repo were green here and red for them, and the third
-    # was introduced while fixing the second — so the class is worth a job rather
-    # than vigilance:
-    #
-    #   * a module-scoped fixture read the developer's REAL ~/.aisquare, while
-    #     its docstring claimed "a machine with nothing configured";
-    #   * a "proxy is down" premise was asserted against the CONFIGURED proxy
-    #     URL, which is 9090 — the port its own docstring says to avoid because
-    #     something is usually on it;
-    #   * a fixture patched the PATH lookup for a console script and not the
-    #     lookup beside the interpreter, so the real script won over the stub.
-    #
-    # TWO OF THE THREE CONDITIONS ARE REPRODUCED HERE, not three. This job
-    # installs `.[dev]`, so "no optional extra" is NOT one of them: the extra
-    # shadows an editable checkout (tests/test_contributing_editable_extra.py) and
-    # conftest.pytest_sessionstart refuses to grade a non-editable one, so the
-    # suite cannot run with the extra installed. The `package` job covers that
-    # axis at IMPORT level instead — both distributions importable, the six
-    # subcommands present — which is where the bug it caused actually lived. The
-    # visible consequence of the gap: test_live_checks_say_what_they_skipped skips
-    # in all six jobs, so test_the_local_sdk_rows_survive_a_gateway_failure
-    # asserts nothing on CI. Said out loud because a reader who counts three
-    # conditions above will otherwise assume three are covered.
-    #
-    # TWO VARIANTS, BECAUSE THE LEAKS NEED OPPOSITE PROXY STATES. Measured, not
-    # assumed: with a configured home and the proxy DOWN the first bug fires and
-    # the second does not; with it UP the second fires and the first does not. A
-    # single ambient configuration would have caught one of the two and looked
-    # like it covered the class.
-    #
-    # A properly isolated suite is green in both. Anything that reads ambient
-    # machine state fails in one of them.
-    name: ambient (${{ matrix.ambient }})
-    runs-on: ubuntu-latest
+      # The suite installs with ci/constraints.txt, so nothing else here reads
+      # uv.lock, and it drifted from pyproject.toml unnoticed: `uv run --frozen` then
+      # raised `ModuleNotFoundError: yaml` on every persona path (#278). It was a job
+      # of its own; it is OS- and Python-independent, so it is a step of this one.
+      - name: Check the lock
+        run: uv lock --check
+
+  test:
+    name: test (${{ matrix.leg }}, shard ${{ matrix.shard }}/${{ matrix.shards }})
+    runs-on: ${{ matrix.os }}
+    # About twice a shard's time on a slow runner: 5-9 minutes on Linux, 7-9 on
+    # Windows, whose runners vary more (1.8 times, run 40240227553). A test past
+    # pyproject's faulthandler_timeout prints every thread's stack first, and
+    # --durations names each shard's slowest tests.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 25 || 15 }}
     strategy:
       fail-fast: false
-      matrix:
-        ambient: [proxy-down, proxy-up]
+      # Each leg's suite as `shards` jobs: `leg` x `shard`, each leg's settings added
+      # by `include`, and Windows' shards past 4 as entries of their own (an `include`
+      # entry extends a leg x shard combination only, never one another entry added).
+      #
+      # Full: ubuntu on 3.11-3.13, plus two legs. The suite runs with the experimental
+      # captain ON (tests/conftest.py's autouse captain_on), so every leg tests the
+      # captain as it is when turned on. A user who never turns it on gets it OFF, so
+      # one more leg runs the whole suite that way (AISQUARE_SUITE_CAPTAIN=off): every
+      # test must pass, bar those marked needs_captain, which it skips and says why
+      # (review of #240). Windows on one interpreter rather than the full
+      # cross-product: the platform-specific branches read sys.platform at call time,
+      # so a second Python version re-runs the same branches for ~3x the minutes.
+      # `ambient` is `none`, or the ambient environment a leg runs in (the steps
+      # below say what that is): proxy-down on py3.11, proxy-up on py3.13.
+      # Lean (a sub-PR into rc/**): ubuntu, py3.12, captain on, no ambient.
+      matrix: >-
+        ${{ fromJSON((github.event_name == 'pull_request' && startsWith(github.base_ref, 'rc/'))
+        && '{"leg": ["py3.12"], "shard": [1, 2, 3, 4],
+        "include": [{"leg": "py3.12", "os": "ubuntu-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 4}]}'
+        || '{"leg": ["py3.11-ambient-proxy-down", "py3.12", "py3.13-ambient-proxy-up", "py3.12-captain-off", "windows-py3.12"],
+        "shard": [1, 2, 3, 4],
+        "include": [{"leg": "py3.11-ambient-proxy-down", "os": "ubuntu-latest", "python": "3.11", "captain": "on", "ambient": "proxy-down", "shards": 4},
+        {"leg": "py3.12", "os": "ubuntu-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 4},
+        {"leg": "py3.13-ambient-proxy-up", "os": "ubuntu-latest", "python": "3.13", "captain": "on", "ambient": "proxy-up", "shards": 4},
+        {"leg": "py3.12-captain-off", "os": "ubuntu-latest", "python": "3.12", "captain": "off", "ambient": "none", "shards": 4},
+        {"leg": "windows-py3.12", "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 10},
+        {"leg": "windows-py3.12", "shard": 5, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 10},
+        {"leg": "windows-py3.12", "shard": 6, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 10},
+        {"leg": "windows-py3.12", "shard": 7, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 10},
+        {"leg": "windows-py3.12", "shard": 8, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 10},
+        {"leg": "windows-py3.12", "shard": 9, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 10},
+        {"leg": "windows-py3.12", "shard": 10, "os": "windows-latest", "python": "3.12", "captain": "on", "ambient": "none", "shards": 10}]}') }}
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: |
+          python-version: ${{ matrix.python }}
+
+      # Pinned as in `lint`, and why is said there.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.0"
+          enable-cache: true
+          cache-dependency-glob: |
             pyproject.toml
             ci/constraints.txt
 
-      # ruff and mypy at the versions ci/constraints.txt pins, the ones
-      # `make install` puts in a local venv.
+      # The same install as `lint`'s: ruff and mypy are not run here, but `.[dev]`
+      # with ci/constraints.txt is the environment `make install` gives a developer.
+      # Compiled as pip compiles it. uv does not by default, and then a fresh runner's
+      # first import of each dependency compiles it, inside whichever test spawns it
+      # first: a `python -m aisquare serve` that exits in 4 s took over 15 on Windows
+      # and failed its timeout (run 40228630575).
       - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -c ci/constraints.txt -e ".[dev]"
+        run: uv pip install --system --compile-bytecode -c ci/constraints.txt -e ".[dev]"
 
+      # Linux only, and the guard is load-bearing now that `test` has a
+      # windows-latest leg: `sudo apt-get` is not a thing on that runner, so an
+      # unconditional step fails the job before a single test runs. tmux has no
+      # Windows build either — the fleet's live tests skip without it, which is
+      # the documented behaviour this step exists to avoid ON LINUX, not a gap
+      # to paper over here.
+      - name: Install tmux (the fleet's live tests skip without it)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y tmux
+
+      # This shard of the suite, on every core (`make test` runs it so, #129 d), split
+      # by least duration: the slowest tests first, each to the shard with the least
+      # so far, so a run of slow tests in one module cannot land in one shard. The
+      # note is for the `shards` job. Every leg but the two ambient ones; theirs is
+      # below, and runs the same pytest line, which
+      # tests/test_ci_covers_the_ambient_environment.py pins.
+      - name: Test (pytest)
+        if: matrix.ambient == 'none'
+        run: pytest -n auto -ra --durations=20 --splits ${{ matrix.shards }} --group ${{ matrix.shard }} --splitting-algorithm least_duration --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json"
+        env:
+          AISQUARE_SUITE_CAPTAIN: ${{ matrix.captain }}
+
+      # THE AMBIENT ENVIRONMENT: WHY TWO LEGS RUN IN ONE.
+      #
+      # A leg installs `.[dev]` into a pristine runner: no ~/.aisquare, nothing
+      # listening on any port, no optional extra. A developer who has followed
+      # docs/connecting-your-agents-to-explainability.md has all three. Three
+      # separate bugs in this repo were green there and red for them, and the third
+      # was introduced while fixing the second — so the class is worth legs of their
+      # own rather than vigilance:
+      #
+      #   * a module-scoped fixture read the developer's REAL ~/.aisquare, while
+      #     its docstring claimed "a machine with nothing configured";
+      #   * a "proxy is down" premise was asserted against the CONFIGURED proxy
+      #     URL, which is 9090 — the port its own docstring says to avoid because
+      #     something is usually on it;
+      #   * a fixture patched the PATH lookup for a console script and not the
+      #     lookup beside the interpreter, so the real script won over the stub.
+      #
+      # TWO OF THE THREE CONDITIONS ARE REPRODUCED HERE, not three. These legs
+      # install `.[dev]`, so "no optional extra" is NOT one of them: the extra
+      # shadows an editable checkout (tests/test_contributing_editable_extra.py) and
+      # conftest.pytest_sessionstart refuses to grade a non-editable one, so the
+      # suite cannot run with the extra installed. The `package` job covers that
+      # axis at IMPORT level instead — both distributions importable, the six
+      # subcommands present — which is where the bug it caused actually lived. The
+      # visible consequence of the gap: test_live_checks_say_what_they_skipped skips
+      # in every leg, so test_the_local_sdk_rows_survive_a_gateway_failure asserts
+      # nothing on CI. Said out loud because a reader who counts three conditions
+      # above will otherwise assume three are covered.
+      #
+      # TWO VARIANTS, BECAUSE THE LEAKS NEED OPPOSITE PROXY STATES. Measured, not
+      # assumed: with a configured home and the proxy DOWN the first bug fires and
+      # the second does not; with it UP the second fires and the first does not. A
+      # single ambient configuration would have caught one of the two and looked
+      # like it covered the class.
+      #
+      # A properly isolated suite is green in both. Anything that reads ambient
+      # machine state fails in one of them. They were jobs of their own, running
+      # the suite serially for over an hour; they are the py3.11 and py3.13 legs now,
+      # sharded and on every core like the rest (owner decision 2026-10-25), and
+      # EVERY SHARD sets up the ambient and asserts its premise before and after its
+      # part of the suite: a shard is a runner of its own, with nothing of another's.
+      # Not on a sub-PR into rc/** (lean CI, above): its merge runs both on rc/**.
       # ONE definition of the ambient environment, and $GITHUB_ENV rather than a
       # job-level `env:` block for a measured reason: `runner.temp` is NOT
       # available in a job-level env — only `github`, `needs`, `strategy`,
@@ -170,6 +290,7 @@ jobs:
       # with a listener", green, with every guard still passing. That is the
       # home-axis twin of the proxy bug this job exists for.
       - name: Declare the ambient environment
+        if: matrix.ambient != 'none'
         run: |
           {
             echo "AMBIENT=${{ matrix.ambient }}"
@@ -206,6 +327,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Configure an aisquare home, the way a developer's machine is
+        if: matrix.ambient != 'none'
         run: |
           # Deliberately NOT the default location: the point is a POPULATED home
           # that the suite must ignore, and a runner's real ~ stays empty so a
@@ -249,7 +371,8 @@ jobs:
       # Proven in CI before it was fixed: both variants failed IDENTICALLY on the
       # same commit. Starting the listener and running the suite in one shell is
       # what keeps them in the same process group.
-      - name: Test (pytest)
+      - name: Test (pytest, in the ambient environment)
+        if: matrix.ambient != 'none'
         run: |
           # THE VARIANT NAME, checked before anything dispatches on it. Every
           # dispatch below is `if [ "$AMBIENT" = "proxy-up" ] … else <proxy-down>`,
@@ -259,12 +382,14 @@ jobs:
           # reached through a different door.
           #
           # Two ordinary edits produce the empty string: deleting the `AMBIENT=`
-          # line from the Declare step, or renaming the matrix key without updating
-          # it. Neither is caught by anything else — an unknown `matrix` property
+          # line from the Declare step, or renaming the legs' `ambient` field without
+          # updating it. Neither is caught by anything else — an unknown `matrix` property
           # expands to "" with NO error, and `check-jsonschema` does not type
           # matrix properties. Measured: with `$AMBIENT` empty the step runs
           # proxy-down, logs `ambient premise holds: , port 9090` on both sides,
-          # and exits 0. A closed set is the only thing that catches both edits.
+          # and exits 0. A closed set is the only thing that catches both edits;
+          # a leg with no `ambient` at all lands here too, as `''`, because this
+          # step runs for anything that is not `none`.
           case "$AMBIENT" in
             proxy-up|proxy-down) ;;
             *)
@@ -331,7 +456,7 @@ jobs:
             # otherwise silent, and "did this variant test the ambient its name
             # claims?" is precisely the question this job exists to make
             # answerable — from the log, without re-deriving it.
-            echo "ambient premise holds: $AMBIENT, port $port, $1 the suite"
+            echo "ambient premise holds: $AMBIENT, port $port, $1 the suite (shard ${{ matrix.shard }}/${{ matrix.shards }})"
           }
 
           if [ "$AMBIENT" = "proxy-up" ]; then
@@ -349,19 +474,61 @@ jobs:
           fi
 
           assert_proxy before
-          pytest -ra
+          pytest -n auto -ra --durations=20 --splits ${{ matrix.shards }} --group ${{ matrix.shard }} --splitting-algorithm least_duration --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json"
           # Re-asserted on the far side, because a listener that died mid-suite
           # would otherwise leave a GREEN run that silently tested the other
           # ambient — and a job cannot notice that it tested the wrong thing.
           assert_proxy after
+        env:
+          AISQUARE_SUITE_CAPTAIN: ${{ matrix.captain }}
+
+      # Whatever the suite did, so a red shard's split is checked too. Its own
+      # artifact per shard: the `shards` job merges them, one folder per leg.
+      - name: Keep this shard's note for the shards job
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: shard-${{ matrix.leg }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/shards/
+          if-no-files-found: error
+          retention-days: 7
+
+  shards:
+    # A split that drops a test is green: nothing fails for a test that never ran.
+    # So every shard notes what it collected and what it ran (tests/shards.py), and
+    # this fails unless, for each leg, every shard reported, all of them collected
+    # the same suite, and between them they ran each collected test exactly once.
+    # After the shards whatever they did (`!cancelled()`), so a red shard's split is
+    # still checked. The runner's own python3: the check is stdlib only.
+    name: shards (complete and disjoint)
+    needs: test
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Fetch every shard's note
+        uses: actions/download-artifact@v8
+        with:
+          pattern: shard-*
+          path: ${{ runner.temp }}/shards
+          merge-multiple: true
+
+      - name: Check that each leg's shards ran its suite exactly once
+        run: python3 -m tests.shards check "$RUNNER_TEMP/shards"
 
   package:
     name: package (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     strategy:
       fail-fast: false
+      # Lean (a sub-PR into rc/**): Linux only; Windows on its merge.
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: >-
+          ${{ fromJSON((github.event_name == 'pull_request' && startsWith(github.base_ref, 'rc/'))
+          && '["ubuntu-latest"]' || '["ubuntu-latest", "windows-latest"]') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -414,6 +581,26 @@ jobs:
               [f"aisquare{suffix}", "--help"],
           ):
               subprocess.run([str(bindir / argv[0]), *argv[1:]], check=True)
+
+          # Remote works out of the box (#34): with no extra, the bundled ngrok
+          # imports and the server starts and serves its page, in a home of its own.
+          remote = (
+              "import socket, urllib.request\n"
+              "from aisquare.services import ngrok_sdk, remote_server\n"
+              "assert ngrok_sdk.sdk() is not None, 'the bundled ngrok'\n"
+              "probe = socket.socket(); probe.bind(('127.0.0.1', 0))\n"
+              "port = probe.getsockname()[1]; probe.close()\n"
+              "info = remote_server.start_remote_server(port=port)\n"
+              "try:\n"
+              "    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))\n"
+              "    assert opener.open(info.url_local, timeout=30).status == 200\n"
+              "finally:\n"
+              "    remote_server.stop_remote_server()\n"
+          )
+          home = Path(os.environ["RUNNER_TEMP"]) / "remote-home"
+          python = bindir / f"python{suffix}"
+          env = {**os.environ, "AISQUARE_HOME": str(home)}
+          subprocess.run([str(python), "-c", remote], check=True, env=env, cwd=os.environ["RUNNER_TEMP"])
 
       # THE INSTALL LINE THE SETUP GUIDE ACTUALLY GIVES PEOPLE, which nothing
       # tested until now. It is a different environment from every other job
@@ -490,3 +677,26 @@ jobs:
                   check=True,
                   stdout=subprocess.DEVNULL,
               )
+
+  ci-ok:
+    # The one check for branch protection to require: its name does not move with
+    # the legs, the shards or a sub-PR's lean set, and it passes only when every job
+    # it needs passed. `always()`, so a failed or cancelled job makes it FAIL rather
+    # than skip: a skipped job satisfies a required check. Anything but `success`
+    # fails it, a skipped job included: nothing here is skipped on purpose.
+    name: ci-ok
+    needs: [lint, test, shards, package]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check that every job this run needs passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          failed=$(echo "$NEEDS" | jq -r '[to_entries[] | select(.value.result != "success") | .key] | join(", ")')
+          if [ -n "$failed" ]; then
+            echo "::error::not every job passed: $failed"
+            exit 1
+          fi

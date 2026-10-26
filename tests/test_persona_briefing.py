@@ -53,9 +53,11 @@ PINNED = "\n".join(
         "`aisquare task done <id> --as 11111111`. Share decisions/results:",
         '`aisquare note "…" --as 11111111`. Full board: `aisquare board`.',
         "Every ✓ prints a receipt (seq N); `aisquare team verify <seq>` re-checks it.",
+        "Updates arrive one line each (#seq …); `aisquare team show <seq>` prints one in full.",
         "Your standing cycle (coder): `aisquare task next --role coder --claim --as 11111111`;",
         "if nothing is available, tell the user and stop. Read the task's contract and",
-        "any reopen feedback first — if the contract is missing or ambiguous, don't",
+        "any reopen feedback first — the claim prints both; `aisquare task show <id>` is",
+        "the whole task. If the contract is missing or ambiguous, don't",
         'guess: `aisquare task block <id> --reason "needs spec: …" --as 11111111` and note',
         "it to the planner. Otherwise do the work, self-check against the acceptance",
         'criteria, then `aisquare task review <id> --note "how to verify + evidence" '

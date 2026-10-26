@@ -40,6 +40,7 @@ from aisquare.services.remote_server import (
     live_sources,
     live_writes,
 )
+from tests.fleet_fakes import list_agents_as
 from tests.remote_kit_helpers import frame_within, make_client
 
 PASSWORD = "Test1234"
@@ -671,7 +672,7 @@ def test_projects_rows_carry_agent_state_counts(
             return [_status("a", "working"), _status("b", "attention")]
         return [_status("c", "exited")]
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake_list_agents)
+    list_agents_as(monkeypatch, fake_list_agents)
     rows = live_sources().projects()
     assert isinstance(rows, list)
     by_id = {row["id"]: row for row in rows}
@@ -709,7 +710,7 @@ def test_a_project_with_no_agent_within_the_day_is_counted_without_reading_its_h
         listed.append(project.id)
         return [_status("a", "working")]
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake_list_agents)
+    list_agents_as(monkeypatch, fake_list_agents)
     rows = live_sources().projects()
     assert isinstance(rows, list)
     by_id = {row["id"]: row for row in rows}

@@ -31,6 +31,7 @@ aisquare-cli[serve]``); the CLI imports it lazily and explains if missing.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -41,10 +42,11 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
+from aisquare.core import code_index, paths
 from aisquare.core import credentials as credentials_store
-from aisquare.core import paths
-from aisquare.core.store import is_locked_error
+from aisquare.core.store import BriefChangedError, is_locked_error
 from aisquare.models import TaskStatus, TeamSession
+from aisquare.services import code as code_service
 from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError, DeliveryUnconfirmedError, TeamDisabledError
@@ -58,6 +60,12 @@ _TOKEN_KEY = "serve_token"
 DEFAULT_PORT = 8747
 DEFAULT_CLOSE_AFTER = 300
 """Idle seconds before a stdio server closes itself (0 = run forever)."""
+
+CALL_CAP_S = 900.0
+"""How long one tool call still in flight keeps a stdio server awake (review of #240,
+R1-F4): longer than any tool either server answers (the captain's ``ask_manager`` waits at
+most 600 s), so a real call is never cut, and a hung one plus an orphaned client no longer
+keeps the process alive for ever: its deadline runs from the cap on."""
 
 LOOPBACK_BINDS = ("127.0.0.1", "localhost", "::1")
 """The exact three spellings mcp 2's ``streamable_http_app`` keys on.
@@ -163,6 +171,11 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
         ) from exc
     except (ClaimLostError, project_service.NotAdded) as exc:
         raise _tool_error(f"error: {exc}") from exc
+    except BriefChangedError as exc:
+        # A correction that lands while `task done` runs (the evidence gate): a RuntimeError,
+        # so without this it reached the client as a raw tool exception, not the stable
+        # wording remote agents correct themselves from (review of #341, finding 5).
+        raise _tool_error(f"error: {exc}; run task_update done again") from exc
     except DeliveryUnconfirmedError as exc:
         # The #20 contract crosses the remote surface too: an unconfirmed
         # write must reach the agent as the error wording, never a raw
@@ -379,6 +392,39 @@ def recall(query: str) -> str:
     return _guard(run)
 
 
+def code_lookup(query: str, mode: str = "find", limit: int = 20) -> str:
+    """Ask the project's symbol index before you grep.
+
+    ``mode``: ``find`` (where ``query`` is defined), ``refs`` (every use of it),
+    ``similar`` (definitions with like names: run it before writing a new helper;
+    ``query`` may be ``path:line``). Returns JSON.
+    """
+
+    def run() -> str:
+        if mode == "find":
+            return json.dumps(
+                {"symbols": [s.as_json() for s in code_service.find_symbols(query, limit=limit)]}
+            )
+        if mode == "refs":
+            return json.dumps(
+                {"refs": [r.as_json() for r in code_service.find_refs(query, limit=limit)]}
+            )
+        if mode == "similar":
+            anchor, found = code_service.find_similar(query, limit=limit)
+            return json.dumps(
+                {
+                    "anchor": anchor.as_json() if anchor is not None else None,
+                    "similar": [item.as_json() for item in found],
+                }
+            )
+        raise _tool_error(f"error: mode must be find, refs or similar, not {mode!r}")
+
+    try:
+        return _guard(run)
+    except code_service.CodeIndexError as exc:
+        raise _tool_error(f"error: {exc}") from exc
+
+
 # --- server assembly ------------------------------------------------------------
 
 
@@ -402,8 +448,58 @@ def serve_token() -> str:
     return token
 
 
-def build_server() -> MCPServer:
-    """An ``MCPServer`` exposing the orchestrator tools."""
+#: What the server's instructions say where there is a team to coordinate with
+#: (:func:`_serves_a_team`), and to every HTTP client.
+TEAM_INSTRUCTIONS = (
+    "The shared task board and working memory of a team of coding-agent "
+    "sessions. Check team_board first; add work with task_add (idempotent); "
+    "claim before working (task_next with claim=true); report outcomes with "
+    "task_update and note_add. Every write's success names a seq receipt — "
+    "verify(receipt) re-proves it landed; team_log(by_session='me') reads "
+    "back your own recent writes; signal(name, value?) sets or reads named "
+    "board states with structured events — key on payload fields, not text."
+)
+
+#: What they say to a solo session: the tools are there, the protocol is not needed.
+SOLO_INSTRUCTIONS = "aisquare's shared task board (team_board) and saved project context."
+
+
+def _serves_a_team() -> bool:
+    """Whether the session this server starts for has a team: a member by its environment
+    (:func:`~aisquare.services.team.member_by_env`, as the hooks ask it), or, on an active
+    board, an open task, a live fleet agent or ANY
+    live session (:func:`~aisquare.services.team.board_has_team`): the server has no
+    session id, so it cannot tell its own row from a teammate's, and counts it as one.
+    The instructions are read once, at the client's start, and rode every request of a
+    solo session for nothing.
+
+    Fail-open: any doubt, a read that fails included, is a team."""
+    from aisquare.core import orchestrator
+    from aisquare.core.store import store_session
+
+    if team_service.member_by_env(orchestrator.env_role()):
+        return True
+    try:
+        with store_session() as store:
+            project = orchestrator.team_project(None)
+            return store.team_active(project.id) and team_service.board_has_team(store, project.id)
+    except Exception:
+        _log.debug("could not tell whether this session has a team", exc_info=True)
+        return True
+
+
+def server_instructions(*, team: bool | None = None) -> str:
+    """The board's protocol when there is a team (``None``: ask), one line otherwise."""
+    if team is None:
+        team = _serves_a_team()
+    return TEAM_INSTRUCTIONS if team else SOLO_INSTRUCTIONS
+
+
+def build_server(*, team: bool | None = None) -> MCPServer:
+    """An ``MCPServer`` exposing the orchestrator tools.
+
+    ``team`` decides whether the instructions describe the board (:func:`server_instructions`);
+    ``None`` asks the store, as a stdio server started by a client does."""
     from mcp.server.mcpserver import MCPServer
 
     from aisquare.core.version import __version__
@@ -415,15 +511,7 @@ def build_server() -> MCPServer:
     server = MCPServer(
         "aisquare-team",
         version=__version__,
-        instructions=(
-            "The shared task board and working memory of a team of coding-agent "
-            "sessions. Check team_board first; add work with task_add (idempotent); "
-            "claim before working (task_next with claim=true); report outcomes with "
-            "task_update and note_add. Every write's success names a seq receipt — "
-            "verify(receipt) re-proves it landed; team_log(by_session='me') reads "
-            "back your own recent writes; signal(name, value?) sets or reads named "
-            "board states with structured events — key on payload fields, not text."
-        ),
+        instructions=server_instructions(team=team),
     )
     for tool in (
         team_board,
@@ -446,6 +534,12 @@ def build_server() -> MCPServer:
 
     if ci_recall.available():
         server.add_tool(ci_recall.collective_intelligence_recall)
+
+    # The symbol index's tool (#285), only where it has something to answer: a tool
+    # every call of which says "no index" is noise in every client's tool list.
+    with contextlib.suppress(Exception):
+        if code_index.ready(code_service.project_here().id):
+            server.add_tool(code_lookup)
 
     exact_error_results(server)
     return server
@@ -522,30 +616,48 @@ class IdleClock:
     on a worker thread while the loop reads nothing, so a call longer than the
     deadline — the captain's ``ask_manager(timeout=400)`` under the default 300 —
     was killed mid-flight, its answer orphaned. A call in flight is activity, and
-    so is the answer going out. Touched only from the event loop (the stdin reader
-    and the ``tools/call`` handler both run there), so it needs no lock.
+    so is the answer going out — for at most ``cap`` seconds a call (:data:`CALL_CAP_S`).
+    Touched only from the event loop (the stdin reader and the ``tools/call`` handler
+    both run there), so it needs no lock.
     """
 
-    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self, clock: Callable[[], float] = time.monotonic, *, cap: float = CALL_CAP_S
+    ) -> None:
         self._clock = clock
+        self._cap = cap
         self._last = clock()
-        self.in_flight = 0
+        self._running: list[float] = []
+
+    @property
+    def in_flight(self) -> int:
+        return len(self._running)
 
     def heard(self) -> None:
         """The client said something."""
         self._last = self._clock()
 
-    def started(self) -> None:
-        self.in_flight += 1
+    def started(self) -> float:
+        """A call began; returns its start, for :meth:`finished`."""
         self._last = self._clock()
+        self._running.append(self._last)
+        return self._last
 
-    def finished(self) -> None:
-        self.in_flight = max(0, self.in_flight - 1)
+    def finished(self, started_at: float | None = None) -> None:
+        """A call ended: the one started at ``started_at``, or the oldest."""
+        # `del`, not .remove()/.pop(): the config-write guard (tests/test_config_writes_stay_in
+        # _the_cli.py) resolves calls by bare name, and a `remove` that writes config exists.
+        if started_at in self._running:
+            del self._running[self._running.index(started_at)]
+        elif self._running:
+            del self._running[0]
         self._last = self._clock()
 
     def idle_for(self) -> float:
-        """Seconds of idleness — zero while any call is still running."""
-        return 0.0 if self.in_flight else self._clock() - self._last
+        """Seconds of idleness — zero while any call is still running, up to its cap."""
+        now = self._clock()
+        busy = max((min(now, start + self._cap) for start in self._running), default=self._last)
+        return now - max(self._last, busy)
 
 
 def track_tool_calls(server: MCPServer, idle: IdleClock) -> None:
@@ -562,11 +674,11 @@ def track_tool_calls(server: MCPServer, idle: IdleClock) -> None:
     inner = entry.handler
 
     async def tracked(ctx: Any, params: Any) -> Any:
-        idle.started()
+        started_at = idle.started()
         try:
             return await inner(ctx, params)
         finally:
-            idle.finished()
+            idle.finished(started_at)
 
     low.add_request_handler("tools/call", entry.params_type, tracked)
 
@@ -600,8 +712,9 @@ async def _serve_stdio_until_idle(
     """Run the stdio transport with an idle deadline (#19).
 
     The deadline counts seconds since the last inbound client message or the
-    end of the last tool call, and does not run while a call is in flight
-    (:class:`IdleClock`); any protocol traffic (handshake included) resets it.
+    end of the last tool call, and does not run while a call is in flight, up to
+    :data:`CALL_CAP_S` a call (:class:`IdleClock`); any protocol traffic (handshake
+    included) resets it.
     A busy server never exits; an abandoned one — including a client killed
     mid-handshake with the pipe write end still open, so EOF never comes —
     always does.
@@ -704,7 +817,7 @@ def run_http(*, bind: str, port: int) -> None:
     import uvicorn
 
     token = serve_token()
-    server = build_server()
+    server = build_server(team=True)  # remote clients join a board
     # mcp 2 moved transport settings off the server object. ``host`` goes to
     # the app factory, whose only use for it is deciding whether DNS-rebinding
     # protection auto-enables; the port is uvicorn's alone, which is what

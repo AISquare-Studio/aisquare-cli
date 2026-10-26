@@ -33,7 +33,15 @@ from aisquare.core.ids import new_agent_id, new_event_id, new_task_id
 from aisquare.core.state_file import StateUnwritableError, read_state
 from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.workspace import _is_dir, pinned_project_id, project_id_for, worktree_principal
-from aisquare.models import FleetAgent, ProjectInfo, TeamEvent, TeamSession, TeamTask
+from aisquare.models import (
+    FleetAgent,
+    ProjectInfo,
+    SessionUsage,
+    TeamEvent,
+    TeamSession,
+    TeamTask,
+    TurnUsage,
+)
 from tests.fsperms import can_deny_reads
 from tests.test_worktree import _git
 
@@ -207,7 +215,7 @@ def test_forget_refuses_a_project_with_live_fleet_agents(
     assert _listed(runner) == {alpha}
 
     with store_session() as store:
-        store.end_fleet_agent(agent.id, exit_status=0)
+        store.end_fleet_agent(agent.id, exit_status=0, ended_by="stopped")
     assert runner.invoke(app, ["project", "forget", "alpha"]).exit_code == 0
     assert _listed(runner) == set()
 
@@ -229,7 +237,7 @@ def test_forget_refuses_a_hub_whose_board_another_projects_live_agents_read(
         ended = store.upsert_fleet_agent(
             _agent(beta, "coder0").model_copy(update={"board": alpha, "created_at": earlier})
         )
-        store.end_fleet_agent(ended.id, exit_status=0)
+        store.end_fleet_agent(ended.id, exit_status=0, ended_by="stopped")
         store.upsert_fleet_agent(_agent(beta, "coder0"))  # its label's newest, on beta's board
         for label in ("manager", "coder1"):
             store.upsert_fleet_agent(_agent(beta, label).model_copy(update={"board": alpha}))
@@ -262,7 +270,7 @@ def test_forget_refuses_a_hub_a_restart_of_another_projects_stopped_agent_reads_
     with store_session() as store:
         for label in ("manager", "coder1"):
             row = store.upsert_fleet_agent(_agent(beta, label).model_copy(update={"board": alpha}))
-            store.end_fleet_agent(row.id, exit_status=0)
+            store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
         live = store.upsert_fleet_agent(_agent(beta, "coder2").model_copy(update={"board": alpha}))
 
     refused = runner.invoke(app, ["project", "forget", "alpha"])
@@ -271,7 +279,7 @@ def test_forget_refuses_a_hub_a_restart_of_another_projects_stopped_agent_reads_
     assert "alpha is the board beta's 3 fleet agent(s) read: manager (stopped), coder1 " in said
     assert "(stopped), coder2 — stop the live ones first" in said, said
     with store_session() as store:
-        store.end_fleet_agent(live.id, exit_status=0)
+        store.end_fleet_agent(live.id, exit_status=0, ended_by="stopped")
     for purge in ([], ["--purge"]):
         refused = runner.invoke(app, ["project", "forget", "alpha", *purge])
         assert refused.exit_code == 2, refused.output
@@ -310,7 +318,7 @@ def test_what_reads_a_board_is_looked_up_by_the_board_not_over_every_row(
         manager = store.upsert_fleet_agent(
             _agent(api, "manager").model_copy(update={"board": tools})
         )
-        store.end_fleet_agent(manager.id, exit_status=0)
+        store.end_fleet_agent(manager.id, exit_status=0, ended_by="stopped")
         store.upsert_fleet_agent(_agent(web, "coder1").model_copy(update={"board": tools}))
         for other in others:
             store.upsert_fleet_agent(_agent(other, "coder1"))
@@ -350,7 +358,7 @@ def test_forget_of_a_hub_two_projects_read_names_both_with_what_frees_each(
         manager = store.upsert_fleet_agent(
             _agent(api, "manager").model_copy(update={"board": tools})
         )
-        store.end_fleet_agent(manager.id, exit_status=0)
+        store.end_fleet_agent(manager.id, exit_status=0, ended_by="stopped")
         coder = store.upsert_fleet_agent(_agent(web, "coder1").model_copy(update={"board": tools}))
         known = {each.id: each for each in store.list_projects(all=True)}
 
@@ -380,7 +388,9 @@ def test_forget_of_a_hub_two_projects_read_names_both_with_what_frees_each(
 
     assert runner.invoke(app, ["project", "forget", "api"]).exit_code == 0
     with store_session() as store:
-        store.end_fleet_agent(coder.id, exit_status=0)  # a forgotten project's stopped row: none
+        store.end_fleet_agent(
+            coder.id, exit_status=0, ended_by="stopped"
+        )  # a forgotten project's stopped row: none
     assert runner.invoke(app, ["project", "forget", "tools"]).exit_code == 0
 
 
@@ -415,7 +425,7 @@ def test_forget_of_a_hub_a_running_reader_holds_gives_its_stop_and_then_its_forg
         assert runner.invoke(app, ["project", "onboard", str(work_dir / "web")]).exit_code == 0
 
     with store_session() as store:
-        store.end_fleet_agent(coder.id, exit_status=0)  # its stop
+        store.end_fleet_agent(coder.id, exit_status=0, ended_by="stopped")  # its stop
     refused = runner.invoke(app, ["project", "forget", "tools"])
     assert refused.exit_code == 2, "a stopped row holds the hub, as the forget step said"
     assert f"forget web first if you are done with its agents ({forget})" in " ".join(
@@ -528,16 +538,35 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
             TeamEvent(id=new_event_id(), project_id=alpha, text="an event", created_at=now)
         )
         ended = store.upsert_fleet_agent(_agent(alpha))
-        store.end_fleet_agent(ended.id, exit_status=0)
+        store.end_fleet_agent(ended.id, exit_status=0, ended_by="stopped")
         store.set_meta(f"distill_seq:{alpha}", "3")
         store.set_meta(f"signal/{alpha}/phase", "{}")
         store.set_meta(f"nudge:{session.id}", now.isoformat())
         store.set_meta(f"distill_seq:{beta}", "7")
+        for project in (alpha, beta):
+            usage = SessionUsage(
+                session_id=f"use-{project}",
+                project_id=project,
+                started_at=now,
+                updated_at=now,
+            )
+            store.record_usage(
+                usage,
+                TurnUsage(
+                    id=f"use_{project}",
+                    session_id=usage.session_id,
+                    project_id=project,
+                    seq=1,
+                    trigger="stop",
+                    recorded_at=now,
+                ),
+                previous_state=None,
+            )
     _record_turn("trc_alpha", alpha)
     _record_turn("trc_beta", beta)
     data_dir = paths.project_data_dir(alpha)
-    (data_dir / "snapshot").mkdir(parents=True)
-    (data_dir / "snapshot" / "pack.xml").write_text("<pack/>", encoding="utf-8")
+    (data_dir / "brain").mkdir(parents=True)
+    (data_dir / "brain" / "page.md").write_text("a page", encoding="utf-8")
 
     result = runner.invoke(app, ["--json", "project", "forget", "alpha", "--purge"])
 
@@ -552,6 +581,9 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
         "team_session": 1,
         "fleet_agent": 1,
         "metric": 1,
+        "usage_turn": 1,
+        "usage_session": 1,
+        "brief": 0,
         "project_setting": 0,
         "project_explainability": 0,
         "project_destination": 0,
@@ -573,8 +605,41 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
     # The bystander kept everything.
     assert _listed(runner) == {beta}
     assert _raw("SELECT COUNT(*) FROM entry WHERE project_id = ?", (beta,)) == [(1,)]
+    assert _raw("SELECT COUNT(*) FROM usage_session WHERE project_id = ?", (beta,)) == [(1,)]
     assert _raw("SELECT value FROM team_meta WHERE key = ?", (f"distill_seq:{beta}",)) == [("7",)]
     assert _raw("SELECT COUNT(*) FROM metric WHERE project_id = ?", (beta,)) == [(1,)]
+
+
+def test_forget_purge_deletes_brief_rows(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``project forget --purge`` deletes the project's work briefs, counted, and leaves a
+    bystander's. The table carries no foreign key, so the purge has to name it."""
+    from aisquare.services import briefs, team
+
+    alpha = _register(runner, monkeypatch, work_dir / "alpha")
+    beta = _register(runner, monkeypatch, work_dir / "beta")
+    for directory in ("alpha", "alpha", "beta"):
+        monkeypatch.chdir(work_dir / directory)
+        assert runner.invoke(app, ["team", "on"]).exit_code == 0
+        created = briefs.create(f"{directory} brief", ["a requirement"])
+        task, _ = team.add_task(f"{directory} task")
+        (work_dir / directory / "shot.png").write_bytes(b"a screenshot")
+        briefs.finding(created.id, "R1", task_ref=task.id, summary="broken",
+                       artifact=work_dir / directory / "shot.png")  # fmt: skip
+    monkeypatch.chdir(work_dir)
+    kept = paths.aisquare_home() / "briefs"
+    assert len(list((kept / alpha).iterdir())) == 2 and (kept / beta).is_dir()
+    assert _raw("SELECT COUNT(*) FROM brief WHERE project_id = ?", (alpha,)) == [(2,)]
+
+    result = runner.invoke(app, ["--json", "project", "forget", "alpha", "--purge"])
+
+    assert result.exit_code == 0, result.output
+    assert _json(result.stdout)["removed"]["brief"] == 2
+    assert _raw("SELECT COUNT(*) FROM brief WHERE project_id = ?", (alpha,)) == [(0,)]
+    assert _raw("SELECT COUNT(*) FROM brief WHERE project_id = ?", (beta,)) == [(1,)]
+    assert not (kept / alpha).exists(), "the purged project's kept artifacts went with it"
+    assert len(list((kept / beta).iterdir())) == 1
 
 
 def test_purge_copes_with_hundreds_of_recorded_sessions(
@@ -607,7 +672,10 @@ def test_purge_copes_with_hundreds_of_recorded_sessions(
 #: Values a CHECK needs that no made-up value meets, per table and column. A table a
 #: migration adds whose CHECK refuses the made-up row fails the test below with the
 #: constraint named; its values go here.
-_CHECKED_VALUES: dict[str, dict[str, object]] = {"entry": {"pool": "project"}}
+_CHECKED_VALUES: dict[str, dict[str, object]] = {
+    "entry": {"pool": "project"},
+    "usage_turn": {"trigger": "stop"},
+}
 
 #: Distinct made-up values, so a UNIQUE column takes every one.
 _MADE_UP = itertools.count(1)
@@ -1130,7 +1198,7 @@ def test_a_prune_says_why_it_kept_a_row_as_the_run_read_it_not_the_plan(
         plan = real(**kwargs)
         with store_session() as store:
             if own is not None:
-                store.end_fleet_agent(own.id, exit_status=0)
+                store.end_fleet_agent(own.id, exit_status=0, ended_by="stopped")
             store.upsert_fleet_agent(_agent(beta, "coder1").model_copy(update={"board": hub}))
         return plan
 
@@ -1401,7 +1469,7 @@ def test_a_prune_of_a_hub_and_its_reader_decides_every_hold_before_either_goes(
             row = store.upsert_fleet_agent(
                 _agent(project_id, "manager").model_copy(update={"board": board})
             )
-            store.end_fleet_agent(row.id, exit_status=0)
+            store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
 
     plan = project_service.prune_candidates(missing=True, worktrees=False)
     by_id = {c.project.id: c for c in plan}
@@ -1482,7 +1550,7 @@ def test_forget_purge_completes_and_reports_a_pin_it_could_not_move(
     alpha = _register(runner, monkeypatch, work_dir / "alpha")
     beta = _register(runner, monkeypatch, work_dir / "beta")  # cwd is beta: active, unpinned
     data_dir = paths.project_data_dir(beta)
-    (data_dir / "snapshot").mkdir(parents=True)
+    (data_dir / "brain").mkdir(parents=True)
     body = _corrupt_state()
 
     result = runner.invoke(app, ["--json", "project", "forget", "beta", "--purge"])
@@ -1523,7 +1591,7 @@ def test_forget_purge_of_the_last_project_reports_a_state_file_it_can_no_longer_
     the data directory was never removed. The refusal names the file, as a write's does."""
     alpha = _register(runner, monkeypatch, work_dir / "alpha")  # the cwd's: active, unpinned
     data_dir = paths.project_data_dir(alpha)
-    (data_dir / "snapshot").mkdir(parents=True)
+    (data_dir / "brain").mkdir(parents=True)
     real_purge = SqliteStore.purge_project
     unreadable = False
 

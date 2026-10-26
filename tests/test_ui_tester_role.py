@@ -49,6 +49,7 @@ from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services.fleet import FLEET_ROLES
 from tests.cycles import unscoped
+from tests.role_policy import policy_args
 
 ROLE = "ui-tester"
 
@@ -175,7 +176,7 @@ def test_the_manager_names_the_build_when_it_spawns_a_ui_tester() -> None:
     measures a page instead of running a suite, so it fails SILENTLY against the
     wrong tree."""
     text = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
-    assert "fleet spawn ui-tester --prompt" in text
+    assert "fleet spawn ui-tester --task <id> --prompt" in text
     assert "branch or worktree" in text and "URL" in text
 
 
@@ -301,18 +302,18 @@ def test_launch_adds_chrome_for_the_ui_tester_and_for_nobody_else(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any]
 ) -> None:
     assert runner.invoke(app, ["launch", ROLE]).exit_code == 0
-    assert spy["argv"] == ["claude", "--chrome"]
+    assert spy["argv"] == ["claude", "--chrome", *policy_args(ROLE)]
     assert runner.invoke(app, ["launch", "coder"]).exit_code == 0
-    assert spy["argv"] == ["claude"]
+    assert spy["argv"] == ["claude", *policy_args("coder")]
 
 
 def test_launch_keeps_the_operators_word_on_chrome(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any]
 ) -> None:
     assert runner.invoke(app, ["launch", ROLE, "--no-chrome"]).exit_code == 0
-    assert spy["argv"] == ["claude", "--no-chrome"], "an opt-out is never overridden"
+    assert spy["argv"] == ["claude", *policy_args(ROLE), "--no-chrome"], "an opt-out wins"
     assert runner.invoke(app, ["launch", ROLE, "--chrome", "--resume"]).exit_code == 0
-    assert spy["argv"] == ["claude", "--chrome", "--resume"], "never twice"
+    assert spy["argv"] == ["claude", *policy_args(ROLE), "--chrome", "--resume"], "never twice"
 
 
 def test_launch_adds_nothing_to_another_agent_binary_and_says_so(
@@ -377,7 +378,7 @@ def test_the_identity_planner_sees_the_roles_own_args(
     assert "--session-id" not in spy["argv"], (
         f"pinned an id onto a role-supplied --continue: {spy['argv']}"
     )
-    assert spy["argv"] == ["claude", "--continue"], spy["argv"]
+    assert spy["argv"] == ["claude", "--continue", *policy_args(ROLE)], spy["argv"]
 
 
 def test_the_harness_matrix_shows_the_roles_own_flags(
@@ -839,9 +840,9 @@ def test_doctor_is_ok_not_amber_when_nothing_is_declared(
     assert check.status is CheckStatus.ok, "advice, not a defect"
     assert check.fix is None, "an ok row carries no fix; the guidance is the detail"
     assert "not browser-verified" in check.detail
-    assert "claude mcp add -s user chrome-devtools npx chrome-devtools-mcp" in check.detail, (
-        "settings.json is not where Claude Code reads mcpServers"
-    )
+    assert (
+        "claude mcp add -s user chrome-devtools npx chrome-devtools-mcp@latest" in check.detail
+    ), "settings.json is not where Claude Code reads mcpServers"
     assert "settings.json" not in check.detail, "the old fix line was a dead-end loop"
 
 

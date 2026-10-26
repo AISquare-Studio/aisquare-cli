@@ -324,8 +324,8 @@ def notice(view: AccountsView) -> str:
 
 def painted(view: AccountsView, *slots: int) -> bool:
     """Whether the rows of ``slots`` show what their usage reading answered, not the
-    ``reading usage…`` of a reading still owed: what the usage tests wait for (``settle_until``)."""
-    return all(cells(view, slot)["status"] != "reading usage…" for slot in slots)
+    ``…`` of a reading still owed: what the usage tests wait for (``settle_until``)."""
+    return all(cells(view, slot)["session"] != "…" for slot in slots)
 
 
 # --- pure helpers --------------------------------------------------------------------------------
@@ -343,7 +343,7 @@ def test_usage_bar_fills_five_cells_and_colours_by_pressure() -> None:
     assert styles[12] == "green" and styles[60] == "yellow" and styles[95] == "bold red"
 
 
-def test_account_cells_say_who_what_plan_how_much_and_what_is_wrong() -> None:
+def test_account_cells_say_who_how_much_what_is_wrong_and_the_plan_last() -> None:
     usage = ClaudeUsage(
         available=True,
         session_percent=12,
@@ -353,42 +353,45 @@ def test_account_cells_say_who_what_plan_how_much_and_what_is_wrong() -> None:
     )
     cut = account_cells(_status(2, "two@example.com"), usage, now=NOW)
     signed = {key: text.plain for key, text in cut.items()}
-    assert signed["default"] == "" and signed["slot"] == "2" and signed["name"] == "account 2"
+    assert signed["slot"] == "2" and signed["name"] == "account 2"
     assert signed["email"] == "two@example.com" and signed["plan"] == "max 5x"
     assert signed["session"] == "▮▯▯▯▯ 12%" and signed["week"] == "▮▮▯▯▯ 40%"  # USED
     assert signed["session-resets"].startswith("in 3h 10m")
     assert signed["week-resets"].startswith("in 6d 12h (")
-    assert signed["status"] == ""  # nothing wrong, and no pace to project
     assert list(signed) == [column.key for column in COLUMNS]
+    # Rank 1 is the default (#8 on the board): no ★ column, and no status column either.
+    assert "default" not in signed and "status" not in signed
 
-    def status_of(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> str:
-        return account_cells(status, reading)["status"].plain
+    def reason_of(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> tuple[str, str]:
+        cut = account_cells(status, reading)
+        return cut["session"].plain, cut["week"].plain
 
     pending = account_cells(_status(2, "two@example.com"), None)
-    assert pending["session"].plain == "…" and pending["status"].plain == "reading usage…"
+    assert pending["session"].plain == "…" and pending["week"].plain == "…"
     unavailable = ClaudeUsage(available=False, reason="HTTP 503 from the usage endpoint")
-    assert status_of(_status(2, "two@example.com"), unavailable) == (
-        "usage: HTTP 503 from the usage endpoint"
+    # What the status column said reads where the usage would be.
+    assert reason_of(_status(2, "two@example.com"), unavailable) == (
+        "HTTP 503 from the usage endpoint",
+        "—",
     )
-    assert account_cells(_status(2, "two@example.com"), unavailable)["session"].plain == "—"
 
     absent = {k: t.plain for k, t in account_cells(_status(3, None), usage).items()}
-    assert absent["name"] == "account 3" and absent["status"] == "not signed in"
-    assert absent["email"] == absent["plan"] == absent["session"] == absent["week"] == ""
+    assert absent["name"] == "account 3" and absent["session"] == "not signed in"
+    assert absent["email"] == absent["plan"] == "" and absent["week"] == "—"
 
     expired = _status(1, "me@example.com", token_state="expired")
-    assert status_of(expired, None) == "⚠ token expired"
+    assert reason_of(expired, None) == ("⚠ token expired", "—")
     logged_out = _status(2, "two@example.com", signed_in=False)
-    assert status_of(logged_out, usage) == "⚠ token missing"
+    assert reason_of(logged_out, usage)[0] == "⚠ token missing"
     assert "▮" not in "".join(t.plain for t in account_cells(logged_out, usage).values())
     rejected = ClaudeUsage(available=False, reason="the token was rejected", needs_login=True)
-    assert status_of(_status(2, "two@example.com"), rejected) == "⚠ token rejected"
+    assert reason_of(_status(2, "two@example.com"), rejected)[0] == "⚠ token rejected"
     off = _arranged(_status(2, "two@example.com", token_state="expired"), disabled=True)
-    assert status_of(off, None) == "⚠ token expired · disabled"  # the thing to fix first
-    starred = _arranged(_status(1, "me@example.com"), is_default=True, alias="Work laptop")
-    assert account_cells(starred, usage)["default"].plain == "★"
-    assert account_cells(starred, usage)["name"].plain == "Work laptop"
-    for text in account_cells(starred, usage).values():  # ellipsised in its cell, never wrapped
+    assert reason_of(off, None)[0] == "⚠ token expired"  # the thing to fix first
+    assert "dim" in str(account_cells(off, None)["name"].style)  # disabled reads dimmed
+    named = _arranged(_status(1, "me@example.com"), alias="Work laptop")
+    assert account_cells(named, usage)["name"].plain == "Work laptop"
+    for text in account_cells(named, usage).values():  # ellipsised in its cell, never wrapped
         assert text.no_wrap and text.overflow == "ellipsis"
 
 
@@ -604,9 +607,9 @@ def test_tick_frames_that_paint_after_the_accounts_wait_still_cost_one_read_afte
     counting = threading.Lock()
     read_fleet = shell_module._read_fleet
 
-    def slow_fleet(show_captured: bool) -> Any:
+    def slow_fleet(show_captured: bool, *args: Any, **kwargs: Any) -> Any:
         frames.wait(HOLD_S)
-        return read_fleet(show_captured)
+        return read_fleet(show_captured, *args, **kwargs)
 
     def reader() -> AccountsOverview:
         with counting:
@@ -676,9 +679,9 @@ def test_a_frame_orders_its_calls_and_the_accounts_reads_by_count_not_by_the_clo
     frames.set()
     read_fleet = shell_module._read_fleet
 
-    def slow_fleet(show_captured: bool) -> Any:
+    def slow_fleet(show_captured: bool, *args: Any, **kwargs: Any) -> Any:
         frames.wait(HOLD_S)
-        return read_fleet(show_captured)
+        return read_fleet(show_captured, *args, **kwargs)
 
     def reader() -> AccountsOverview:
         reads[0] += 1  # one read at a time
@@ -783,6 +786,202 @@ def offered(view: AccountsView, slot: int, stem: str) -> bool:
     return button.visible and not button.disabled
 
 
+def login_label(view: AccountsView, slot: int) -> str:
+    """What the row's login button says: *Log in* where one is needed, else *Log in again*."""
+    return str(row(view, slot).query_one(f"#account-login-{slot}", Button).label)
+
+
+@pytest.mark.parametrize(
+    ("percent", "hours", "shown"),
+    [(33, 149, "▮▮▯▯▯ 33% · 6d"), (100, 100, "▮▮▮▮▮ 100% · 4d")],
+    ids=["six-days", "full-100h"],
+)
+def test_a_kept_readings_age_fits_the_session_cell_without_an_ellipsis(
+    no_network: dict[str, Any], percent: int, hours: int, shown: str
+) -> None:
+    """The tester's real-UI check of #408: at 12 wide the session cell read '▮▮▯▯▯ 33% ·…',
+    so a kept reading's age never showed. 16 wide (#406's width) holds a six-day-old one, and
+    a full account's: '▮▮▮▮▮ 100% · 100h' was 17 wide until ages over a day read in days
+    (review of #408, n6)."""
+    taken = datetime.now(tz=UTC) - timedelta(hours=hours, minutes=5)
+    no_network["usage"] = ClaudeUsage(
+        available=True,
+        session_percent=percent,
+        week_percent=10,
+        fetched_at=taken,
+        last_failed_at=datetime.now(tz=UTC),
+        last_failed_reason="HTTP 503 from the usage endpoint",
+    )
+    overview = _overview(_status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, int, int]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: f"{percent}%" in cells(view, 2)["session"])
+        cell = row(view, 2).cell("session")
+        column = next(c.width for c in accounts_view.COLUMNS if c.key == "session")
+        return cell.render_line(0).text, cell.region.width, column
+
+    rendered, width, column = drive(go, overview=overview)
+    assert column == 16 and width == 16
+    assert rendered.rstrip() == shown, rendered
+    assert "…" not in rendered
+
+
+def test_a_rate_limit_that_ends_between_ticks_never_shows_a_past_until(
+    no_network: dict[str, Any],
+) -> None:
+    """TUI-401b check 5 at e28697f1: after a short Retry-After passed, the session cell's
+    tooltip still said 'rate-limited until <a time already past>' until the page's next
+    re-read, a minute on: it printed the reason frozen at the read. The row now repaints
+    the moment the wait ends, and the wait is written from its end time as of then."""
+    no_network["usage"] = ClaudeUsage(available=True, session_percent=40, week_percent=10)
+    overview = _overview(_status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: "40%" in cells(view, 2)["session"])
+        until = datetime.now(tz=UTC) + timedelta(seconds=1)
+        kept = ClaudeUsage(
+            available=True,
+            session_percent=40,
+            week_percent=10,
+            fetched_at=datetime.now(tz=UTC) - timedelta(minutes=12),
+            last_failed_at=datetime.now(tz=UTC),
+            last_failed_reason=accounts_service.backoff_reason(until),
+            rate_limited=True,
+            rate_limited_until=until,
+        )
+        line = row(view, 2)
+        line.show(line.status, kept)  # a read that was refused, as the page paints it
+        during = str(line.cell("session").tooltip)
+        await pilot.pause(1.5)  # the wait is over; the page's next re-read is a minute away
+        return until.astimezone().strftime("%H:%M"), during, str(line.cell("session").tooltip)
+
+    clock, during, after = drive(go, overview=overview)
+    assert f"reading from 12m ago · rate-limited until {clock}" in during, during
+    assert "rate-limited until" not in after, after
+    assert "the rate limit has ended" in after, after
+
+
+def test_a_backed_off_row_with_no_reading_repaints_when_its_wait_ends(
+    no_network: dict[str, Any],
+) -> None:
+    """Review of #401, m1, on the page: a backed-off account with no kept reading says its
+    wait in the session cell, and says it has ended the moment it does, with no re-read."""
+    no_network["usage"] = ClaudeUsage(available=True, session_percent=40, week_percent=10)
+    overview = _overview(_status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: "40%" in cells(view, 2)["session"])
+        until = datetime.now(tz=UTC) + timedelta(seconds=1)
+        line = row(view, 2)
+        line.show(
+            line.status,
+            accounts_service.UsageBackoff(
+                slot=2, until=until, attempts=1, since=datetime.now(tz=UTC)
+            ).reading(datetime.now(tz=UTC)),
+        )
+        during = cells(view, 2)["session"]
+        await pilot.pause(1.5)  # the wait is over; the page's next re-read is a minute away
+        return until.astimezone().strftime("%H:%M"), during, cells(view, 2)["session"]
+
+    clock, during, after = drive(go, overview=overview)
+    assert during.startswith(f"rate-limited until {clock}"), during
+    assert "until" not in after and after.startswith("the rate limit has ended"), after
+
+
+@pytest.fixture
+def windows_timers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Textual's timers as they sleep on Windows (``textual._win_sleep``), on any OS.
+
+    Each timer's sleep is a blocking wait in asyncio's default executor, and its cancel is
+    set from that executor too; the executor has 8 threads, a 4-vCPU runner's
+    ``min(32, cpu + 4)``. So a pending timer holds a thread for its whole interval.
+    """
+    import concurrent.futures
+
+    import textual.timer as textual_timer
+
+    real_init = concurrent.futures.ThreadPoolExecutor.__init__
+
+    def eight(
+        self: Any, max_workers: Any = None, thread_name_prefix: str = "", *a: Any, **k: Any
+    ) -> None:
+        if max_workers is None and thread_name_prefix == "asyncio":
+            max_workers = 8
+        real_init(self, max_workers, thread_name_prefix, *a, **k)
+
+    async def win_sleep(secs: float) -> None:
+        sleep_for = max(0.0, secs - 0.001)
+        if sleep_for < 0.0005:
+            return
+        cancel = threading.Event()
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, cancel.wait, sleep_for)
+        except asyncio.CancelledError:
+            await loop.run_in_executor(None, cancel.set)
+            raise
+
+    async def sleep(secs: float) -> None:
+        await asyncio.create_task(win_sleep(secs))
+
+    monkeypatch.setattr(concurrent.futures.ThreadPoolExecutor, "__init__", eight)
+    monkeypatch.setattr(textual_timer, "sleep", sleep)
+
+
+@pytest.mark.usefixtures("windows_timers")
+def test_rows_in_a_rate_limit_wait_hold_no_timer_thread(no_network: dict[str, Any]) -> None:
+    """Review of #401, MAJOR-1: check 5's fix gave every rate-limited row a Textual timer for
+    its whole wait (up to 30 min, 6 h with a Retry-After). On Windows a pending Textual timer
+    holds one of the default executor's 8 threads, so two such rows starved every other
+    timer in asq, toasts and the page's re-read included, and quitting waited for the
+    waits. With four rows in a 30 s wait, another 0.2 s timer fires at once, and the app
+    quits at once."""
+    rows = range(2, 6)
+    no_network["usage"] = ClaudeUsage(available=True, session_percent=40, week_percent=10)
+    overview = _overview(*[_status(slot, f"a{slot}@example.com") for slot in rows])
+    quit_at: list[float] = []
+
+    async def go(pilot: Pilot[None]) -> float | None:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: "40%" in cells(view, 2)["session"])
+        until = datetime.now(tz=UTC) + timedelta(seconds=30)
+        for slot in rows:
+            line = row(view, slot)
+            line.show(
+                line.status,
+                ClaudeUsage(
+                    available=True,
+                    session_percent=40,
+                    week_percent=10,
+                    fetched_at=datetime.now(tz=UTC) - timedelta(minutes=12),
+                    last_failed_at=datetime.now(tz=UTC),
+                    last_failed_reason=accounts_service.backoff_reason(until),
+                    rate_limited=True,
+                    rate_limited_until=until,
+                ),
+            )
+        await pilot.pause(0.3)
+        fired: list[float] = []
+        start = time.monotonic()
+        app.set_timer(0.2, lambda: fired.append(time.monotonic() - start))
+        while not fired and time.monotonic() - start < 4:
+            await asyncio.sleep(0.05)
+        quit_at.append(time.monotonic())
+        return fired[0] if fired else None
+
+    took = drive(go, overview=overview)
+    quitting = time.monotonic() - quit_at[0]
+    assert took is not None and took < 2, f"a 0.2 s timer fired after {took} s"
+    assert quitting < 5, f"quitting took {quitting:.1f} s: it waited for the rows' waits"
+
+
 def test_buttons_follow_each_slots_state(no_network: dict[str, Any]) -> None:
     no_network["usage"] = lambda account: (
         ClaudeUsage(available=False, reason="the token was rejected", needs_login=True)
@@ -798,22 +997,27 @@ def test_buttons_follow_each_slots_state(no_network: dict[str, Any]) -> None:
         _status(6, "six@example.com", signed_in=False),
     )
 
-    async def go(pilot: Pilot[None]) -> dict[int, tuple[bool, bool]]:
+    async def go(pilot: Pilot[None]) -> dict[int, tuple[bool, str, bool]]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         await settle_until(app, lambda: painted(view, 1, 2, 4, 5))
         return {
-            slot: (offered(view, slot, "login"), offered(view, slot, "remove"))
+            slot: (
+                offered(view, slot, "login"),
+                login_label(view, slot),
+                offered(view, slot, "remove"),
+            )
             for slot in range(1, 7)
         }
 
     buttons = drive(go, overview=overview)
-    assert buttons[1] == (False, False)  # signed in, and never ours to remove
-    assert buttons[2] == (False, True)  # signed in, ours
-    assert buttons[3] == (True, True)  # never signed in
-    assert buttons[4] == (True, True)  # signed in, but the endpoint rejected the token (401)
-    assert buttons[5] == (True, True)  # signed in, the token expired
-    assert buttons[6] == (True, True)  # a login recorded, its token gone
+    # A healthy row offers *Log in again* (F1 of #400): the same flow, as a secondary action.
+    assert buttons[1] == (True, "Log in again", False)  # signed in, never ours to remove
+    assert buttons[2] == (True, "Log in again", True)  # signed in, ours
+    assert buttons[3] == (True, "Log in", True)  # never signed in
+    assert buttons[4] == (True, "Log in", True)  # signed in, but the token was rejected (401)
+    assert buttons[5] == (True, "Log in", True)  # signed in, the token expired
+    assert buttons[6] == (True, "Log in", True)  # a login recorded, its token gone
 
 
 def test_without_claude_code_the_page_says_how_to_install_and_add_is_disabled() -> None:
@@ -869,7 +1073,7 @@ def test_usage_that_cannot_be_read_says_why_on_the_row(no_network: dict[str, Any
         await settle_until(app, lambda: painted(view, 1))
         return line(view, 1)
 
-    assert "usage: the stored token has expired" in drive(go)
+    assert "the stored token has expired" in drive(go)
 
 
 def test_an_account_in_a_locked_keychain_is_asked_and_its_row_says_why(
@@ -887,7 +1091,7 @@ def test_an_account_in_a_locked_keychain_is_asked_and_its_row_says_why(
 
     calls, first = drive(go, overview=overview)
     assert calls == [1]  # asked, although its token could not be read
-    assert "usage: the login Keychain is locked — unlock it" in first
+    assert "the login Keychain is locked — unlock it" in first
     assert "reading usage…" not in first
 
 
@@ -933,7 +1137,7 @@ def test_a_page_on_screen_before_its_first_frame_reads_the_usage_when_the_frame_
     shown_first, calls, first = asyncio.run(run())
     assert shown_first, "precondition: the page was on screen before it had a frame"
     assert calls == [1]  # read when the frame came, not at the minute tick
-    assert "usage: scripted: no fetch" in first
+    assert "scripted: no fetch" in first
 
 
 def test_a_slot_that_signs_in_on_a_later_frame_is_read_when_that_frame_comes(
@@ -971,7 +1175,7 @@ def test_a_slot_that_signs_in_on_a_later_frame_is_read_when_that_frame_comes(
     assert before == [1]
     assert sorted(signed_in) == [1, 1, 2]  # every signed-in slot, read when slot 2 came
     assert again == signed_in  # a frame with no new signed-in slot asked nothing
-    assert "usage: scripted: no fetch" in two
+    assert "scripted: no fetch" in two
 
 
 def test_a_page_shown_before_its_first_frame_reads_the_usage_when_the_frame_lands(
@@ -1955,15 +2159,17 @@ def test_log_in_over_a_rejected_token_waits_for_a_fresh_login_and_the_row_recove
             view._poll_login()
             await settle(app)
             await accounts_read(app)
-            await settle_until(app, lambda: painted(view, 2) and not offered(view, 2, "login"))
-            out["after"] = (cells(view, 2), offered(view, 2, "login"), view.login is None)
+            await settle_until(
+                app, lambda: painted(view, 2) and login_label(view, 2) == "Log in again"
+            )
+            out["after"] = (cells(view, 2), login_label(view, 2), view.login is None)
             out["notice"] = notice(view)
             return out
 
     out = asyncio.run(run())
     before, offered_before = out["before"]
-    assert before["status"] == "⚠ token rejected" and before["session"] == "—"
-    assert offered_before  # Log in, beside the status that says why
+    assert before["session"] == "⚠ token rejected" and before["week"] == "—"
+    assert offered_before  # Log in, beside the usage cells that say why
     assert opened == [2]  # the row's own slot, in the login pane
     assert out["header"].startswith("Logging in to Work laptop")
     assert "type /login if Claude Code does not prompt you" in out["header"]
@@ -1971,8 +2177,8 @@ def test_log_in_over_a_rejected_token_waits_for_a_fresh_login_and_the_row_recove
     assert out["stale"] == (True, True)  # the window stayed open over the stale token
     after, offered_after, closed = out["after"]
     assert closed  # the fresh login closed the window…
-    assert after["status"] == "" and after["session"] == "▮▮▯▯▯ 40%"  # …and the row is itself
-    assert not offered_after
+    assert after["session"] == "▮▮▯▯▯ 40%"  # …and the row is itself again
+    assert offered_after == "Log in again"  # no login needed: only the secondary action
     assert "✓ Work laptop: two@example.com · hooks installed" in out["notice"]
 
 
@@ -2005,13 +2211,12 @@ def test_remove_runs_the_service_and_reports_where_the_directory_went(
     assert "role coder was bound to slot 2; it now names two@example.com" in said  # third round
 
 
-# --- arranging (#145): the default badge, the order arrows, disable -----------------------------
+# --- arranging (#145): the order arrows, disable ------------------------------------------------
 
 
 def _arranged(
     status: ClaudeAccountStatus,
     *,
-    is_default: bool = False,
     disabled: bool = False,
     alias: str | None = None,
     position: int | None = None,
@@ -2019,7 +2224,6 @@ def _arranged(
     """``status`` with its registry arrangement set, as ``services.claude_accounts`` folds it."""
     account = status.account.model_copy(
         update={
-            "is_default": is_default,
             "disabled": disabled,
             "alias": alias,
             "position": position,
@@ -2028,34 +2232,58 @@ def _arranged(
     return status.model_copy(update={"account": account, "label": core.label(account)})
 
 
-def test_the_default_is_starred_named_by_its_alias_and_its_row_hides_the_default_button() -> None:
+def test_the_row_starts_with_its_arrows_ends_with_its_plan_and_has_no_default_or_status() -> None:
+    """Rank 1 is the default (#8 on the board): no ★ column, no *Default* button and no status
+    column. *↑*/*↓* are the first columns of the header and of every row, before ``#``; the
+    plan is the last."""
     overview = _overview(
-        _arranged(_status(2, "two@example.com"), is_default=True, alias="work", position=1),
+        _arranged(_status(2, "two@example.com"), alias="work", position=1),
         _arranged(_status(1, "me@example.com"), position=2),
         _arranged(_status(3, "three@example.com"), disabled=True, position=3),
     )
 
-    async def go(pilot: Pilot[None]) -> tuple[list[str], dict[int, tuple[bool, bool, bool, str]]]:
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[str], list[str], list[str], list[str], dict[int, tuple[bool, bool, str]]]:
         view = await open_accounts(pilot)
+        header = view.query_one(accounts_view.AccountsHeader)
+        titles = [shown(cell) for cell in header.query(".cell").results(Static)]
+        first = row(view, 2)
+        # The row's columns as drawn, left to right: each child's column class.
+        drawn = [
+            next(c[4:] for c in child.classes if c.startswith("col-"))
+            for child in first.children
+            if any(c.startswith("col-") for c in child.classes)
+        ]
+        ids = [button.id or "" for button in view.query(Button)]
+        # After the plan: the arranging buttons, and nothing else.
+        tail = list(first.children)[-1]
+        drawn.append("|" + " ".join(str(b.label) for b in tail.query(Button)))
         order = [r.slot for r in view.rows()]
         buttons = {
             slot: (
-                offered(view, slot, "default"),
                 row(view, slot).query_one(f"#account-up-{slot}", Button).disabled,
                 row(view, slot).query_one(f"#account-down-{slot}", Button).disabled,
                 str(row(view, slot).query_one(f"#account-toggle-{slot}", Button).label),
             )
             for slot in (2, 1, 3)
         }
-        return [line(view, slot) for slot in order], buttons
+        return [line(view, slot) for slot in order], titles, drawn, ids, buttons
 
-    lines, buttons = drive(go, overview=overview)
-    assert lines[0].startswith("★  2  work") and "two@example.com" in lines[0]  # the default, first
-    assert lines[1].startswith("1  plain claude")  # no star: not the default
-    assert lines[2].startswith("3  account 3") and "disabled" in lines[2]
-    assert buttons[2] == (False, True, False, "Disable")  # no Default; first: ↑ disabled
-    assert buttons[1] == (True, False, False, "Disable")  # middle: both arrows live
-    assert buttons[3] == (True, False, True, "Enable")  # last: ↓ disabled; disabled → Enable
+    lines, titles, drawn, ids, buttons = drive(go, overview=overview)
+    assert titles[:3] == ["↑", "↓", "#"], titles
+    assert drawn[:3] == ["up", "down", "slot"], drawn
+    # ↑ ↓ # name … resets … plan [Disable] [Remove] — the owner's order.
+    assert drawn[-2:] == ["plan", "|Disable Remove"] and titles[-1] == "plan", drawn
+    assert "default" not in drawn and "status" not in drawn and "status" not in titles
+    assert not any(i.startswith("account-default-") for i in ids)  # no Default button
+    assert lines[0].startswith("2  work") and "two@example.com" in lines[0]  # rank 1, first
+    assert "★" not in "".join(lines)
+    assert lines[1].startswith("1  plain claude")
+    assert lines[2].startswith("3  account 3")
+    assert buttons[2] == (True, False, "Disable")  # first: ↑ disabled
+    assert buttons[1] == (False, False, "Disable")  # middle: both arrows live
+    assert buttons[3] == (False, True, "Enable")  # last: ↓ disabled; disabled → Enable
 
 
 def test_an_emoji_name_shows_whole_and_every_column_stays_under_its_header() -> None:
@@ -2088,7 +2316,7 @@ def test_an_emoji_name_shows_whole_and_every_column_stays_under_its_header() -> 
     assert rows == {1: columns, 2: columns, 3: columns}, "every column under its header"
 
 
-def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
+def test_move_and_disable_buttons_write_through_the_service_and_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The row never paints optimistically: the service is called, the shell re-reads."""
@@ -2096,14 +2324,10 @@ def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
     frames: list[AccountsOverview] = [
         _overview(_status(1, "me@example.com"), _status(2, "two@example.com")),
         _overview(
-            _arranged(_status(2, "two@example.com"), is_default=True, position=1),
+            _arranged(_status(2, "two@example.com"), position=1),
             _arranged(_status(1, "me@example.com"), position=2),
         ),
     ]
-
-    def set_default(ref: str | None, *, project: Any = None) -> Any:
-        calls.append(("default", str(ref)))
-        return None
 
     def move(ref: str, direction: str) -> list[Any]:
         calls.append(("move", ref, direction))
@@ -2113,17 +2337,16 @@ def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
         calls.append(("disable", ref, str(disabled)))
         raise accounts_service.AccountsUnreadable("the accounts registry cannot be written (x)")
 
-    monkeypatch.setattr(accounts_service, "set_default", set_default)
     monkeypatch.setattr(accounts_service, "move", move)
     monkeypatch.setattr(accounts_service, "set_disabled", set_disabled)
 
     async def go(pilot: Pilot[None]) -> tuple[str, list[int], str]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
-        await press(pilot, "#account-default-2")
+        await press(pilot, "#account-up-2")
         await settle(app)
         await pilot.pause()
-        after_default = notice(view)
+        after_up = notice(view)
         # The shell's next frame is the arranged one; the page follows it.
         frames.pop(0)
         app.refresh_accounts()
@@ -2134,7 +2357,7 @@ def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
         await press(pilot, "#account-toggle-1")
         await settle(app)
         await pilot.pause()
-        return after_default, order, notice(view)
+        return after_up, order, notice(view)
 
     async def run() -> tuple[str, list[int], str]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: frames[0])
@@ -2142,10 +2365,10 @@ def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
             await settle(app)  # the start-up doctor, painted before the click, as `drive` does
             return await go(pilot)
 
-    after_default, order, last = asyncio.run(run())
-    assert after_default == "✓ slot 2 is the machine default"
-    assert order == [2, 1]  # the page re-read the shell's frame: the default moved up
-    assert ("default", "2") in calls
+    after_up, order, last = asyncio.run(run())
+    assert after_up == "✓ slot 2 moved up in the priority order"
+    assert order == [2, 1]  # the page re-read the shell's frame: slot 2 is rank 1 now
+    assert ("move", "2", "up") in calls
     assert ("move", "2", "down") in calls
     assert ("disable", "1", "True") in calls
     assert last.startswith("✗ the accounts registry cannot be written")  # the error, not a crash
@@ -2796,14 +3019,14 @@ def test_a_slot_removed_while_its_field_is_open_is_said_and_its_row_leaves(
 def test_a_rename_waits_its_turn_behind_an_arrange_write_still_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """*Rename* takes the same lock as *Default* and the arrows, so a rename pressed while an
+    """*Rename* takes the same lock as the arrows and *Disable*, so a rename pressed while an
     arrangement is still writing writes after it, not beside it, and both report.
 
     The negative half waits for the rename to ASK for the lock, not for a sleep to pass: after
     200 ms a rename that took no lock and had not reached ``set_alias`` yet read the same as
     one held at the lock (review of #258, round 3). Asked, it cannot write before ``release``.
     """
-    default_in, release = threading.Event(), threading.Event()
+    move_in, release = threading.Event(), threading.Event()
     order: list[str] = []
 
     class SpyLock:
@@ -2812,7 +3035,7 @@ def test_a_rename_waits_its_turn_behind_an_arrange_write_still_running(
         def __init__(self, lock: threading.Lock) -> None:
             self.lock = lock
             self.attempts = 0
-            self.second = threading.Event()  # the rename's, behind Default's
+            self.second = threading.Event()  # the rename's, behind the arrow's
 
         def __enter__(self) -> None:
             self.attempts += 1
@@ -2823,23 +3046,22 @@ def test_a_rename_waits_its_turn_behind_an_arrange_write_still_running(
         def __exit__(self, *exc: object) -> None:
             self.lock.release()
 
-    def set_default(ref: str | None, *, project: Any = None) -> None:
-        order.append(f"default {ref}: start")
-        default_in.set()
+    def move(ref: str, direction: str) -> list[Any]:
+        order.append(f"move {ref}: start")
+        move_in.set()
         # Held until the test lets go (its ``finally``), however slow the runner. Held 5 s, it
         # ended by itself on windows-latest while the name was still being typed, and the
         # rename wrote behind it before the test looked (CI run 38571988017). The bound only
         # keeps a broken test from hanging, and says so.
         let_go = release.wait(timeout=HOLD_S)
-        order.append(
-            f"default {ref}: end" if let_go else f"default {ref}: gave up after {HOLD_S:.0f} s"
-        )
+        order.append(f"move {ref}: end" if let_go else f"move {ref}: gave up after {HOLD_S:.0f} s")
+        return []
 
     def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
         order.append(f"alias {ref} {alias}")
         return _status(2, "two@example.com").account.model_copy(update={"alias": alias})
 
-    monkeypatch.setattr(accounts_service, "set_default", set_default)
+    monkeypatch.setattr(accounts_service, "move", move)
     monkeypatch.setattr(accounts_service, "set_alias", set_alias)
     overview = _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
 
@@ -2850,8 +3072,8 @@ def test_a_rename_waits_its_turn_behind_an_arrange_write_still_running(
         spy = SpyLock(view._arranging)
         monkeypatch.setattr(view, "_arranging", spy)
         try:
-            await press(pilot, "#account-default-2")
-            assert await asyncio.to_thread(default_in.wait, HOLD_S)  # Default is writing…
+            await press(pilot, "#account-up-2")
+            assert await asyncio.to_thread(move_in.wait, HOLD_S)  # ↑ is writing…
             await rename(pilot, 2)
             await pilot.press(*"work", "enter")
             asked = await asyncio.to_thread(
@@ -2865,11 +3087,11 @@ def test_a_rename_waits_its_turn_behind_an_arrange_write_still_running(
         return asked, waiting, said
 
     asked, waiting, said = drive(go, overview=overview)
-    assert asked  # the rename went to the lock Default held…
-    assert waiting == ["default 2: start"]  # …and had not written when Default let go
-    assert order == ["default 2: start", "default 2: end", "alias 2 work"]
+    assert asked  # the rename went to the lock ↑ held…
+    assert waiting == ["move 2: start"]  # …and had not written when ↑ let go
+    assert order == ["move 2: start", "move 2: end", "alias 2 work"]
     assert said == [
-        ("✓ slot 2 is the machine default", "ok"),
+        ("✓ slot 2 moved up in the priority order", "ok"),
         ("✓ slot 2 is now called work", "ok"),
     ]
 
@@ -2996,10 +3218,10 @@ def test_escape_closes_the_field_and_writes_nothing(monkeypatch: pytest.MonkeyPa
 
 
 def _table_frame() -> AccountsOverview:
-    """Rows whose values differ in every length a cell can: a long name and email, no plan, the
-    star, a disabled slot, an unsigned slot, an expired token."""
+    """Rows whose values differ in every length a cell can: a long name and email, no plan,
+    a disabled slot, an unsigned slot, an expired token."""
     return _overview(
-        _arranged(_status(1, "me@example.com"), is_default=True, position=1),
+        _arranged(_status(1, "me@example.com"), position=1),
         _arranged(
             _status(2, "a.very.long.address@subdomain.example.com", subscription=None),
             alias="Work laptop — the one on the desk upstairs",
@@ -3022,19 +3244,27 @@ def _table_usage(account: ClaudeAccount) -> ClaudeUsage:
     )
 
 
+_BUTTON_COLUMNS = ("up", "down", "login")
+"""The columns of :data:`accounts_view.LAYOUT` a row fills with a button, not a cell."""
+
+
 def _columns_at(view: AccountsView) -> dict[str, list[tuple[int, int]]]:
     """Each line's ``(x, width)`` per data column — the header's first, then each row's — and
-    every button's, by id stem, so *Log in*'s column and the arranging buttons are held to
-    the same rule (``header-login`` is the header's gap over *Log in*)."""
+    every button's, by id stem, so the columns of buttons (*↑*, *↓*, *Log in*) and the
+    arranging buttons are held to the same rule (``header-up`` is the header's ``↑`` over the
+    *↑* buttons, ``header-login`` its gap over *Log in*)."""
     header = view.query_one("#claude-header")
     lines: dict[str, list[tuple[int, int]]] = {
         "header": [
             (cell.region.x, cell.region.width)
             for cell in header.query(".cell")
-            if not cell.has_class("col-login")
+            if not any(cell.has_class(f"col-{key}") for key in _BUTTON_COLUMNS)
         ],
-        "header-login": [(cell.region.x, cell.region.width) for cell in header.query(".col-login")],
     }
+    for key in _BUTTON_COLUMNS:
+        lines[f"header-{key}"] = [
+            (cell.region.x, cell.region.width) for cell in header.query(f".col-{key}")
+        ]
     for account_row in view.rows():
         spans = [
             (cell.region.x, cell.region.width)
@@ -3086,25 +3316,27 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
 
     out = asyncio.run(run())
     closed = out["closed"]
-    widths = [column.width for column in accounts_view.LAYOUT if column.key != "login"]
+    widths = [column.width for column in accounts_view.LAYOUT if column.key not in _BUTTON_COLUMNS]
     for name, spans in closed.items():
         if name.startswith("account-"):  # one button on every row that offers it
             assert len(set(spans)) == 1, name  # the action column lines up too
-        elif name == "header-login":  # the gap over Log in is where Log in is
-            assert spans == closed["account-login"][:1], name
+        elif name.startswith("header-"):  # the header's ↑, ↓ and gap are over their buttons
+            assert spans == closed[f"account-{name.removeprefix('header-')}"][:1], name
         else:
             assert spans == closed["header"], name  # every column at the header's x
             assert [width for _, width in spans] == widths, name
     starts = [x for x, _ in closed["header"]]
     assert starts == sorted(starts) and len(set(starts)) == len(starts)  # left to right
     assert out["heights"] == [1, 1, 1, 1]  # never wrapped onto a second line
-    assert out["header"][5:9] == ["session used", "week used", "status", ""]  # USED; Log in
-    assert out["header"][9:] == ["session resets", "week resets"]  # then when each resets
+    assert out["header"][:3] == ["↑", "↓", "#"]  # the arrows first (#8 on the board)
+    assert out["header"][5:8] == ["session used", "week used", ""]  # USED; Log in
+    assert out["header"][8:] == ["session resets", "week resets", "plan"]  # the plan last
     assert out["name 2"].rstrip().endswith("…") and out["email 2"].rstrip().endswith("…")
     assert out["open"] == closed  # the open field moved no column on any row…
     field_region, name_box = out["field"]
     assert field_region == name_box  # …and sits exactly in the name's cell
-    assert len(closed["account-login"]) == 3  # rejected, unsigned and expired: Log in on each
+    # Log in on the rejected, unsigned and expired rows; Log in again on the healthy one.
+    assert len(closed["account-login"]) == 4
     for name, spans in out["scrolled"].items():  # scrolled sideways, all lines moved as one
         if name.startswith("row "):
             assert spans == out["scrolled"]["header"], name
@@ -3114,13 +3346,14 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
         assert out["scrolls"] > 0 and out["scrolled"] != closed
 
 
-def test_an_expired_rows_status_and_log_in_are_on_screen_at_160_columns_unscrolled(
+def test_an_expired_rows_reason_and_log_in_are_on_screen_at_160_columns_unscrolled(
     no_network: dict[str, Any],
 ) -> None:
     """The human: "it does tell me when something is logged out or login has expired etc,
     make that also surface a login button next to it". At 160 columns with the sidebar at
     its default width the status and *Log in* sat past the right edge, behind both resets
-    columns (the tester's measure). They come before the resets now: on screen, no scroll."""
+    columns (the tester's measure). The reason reads in the usage cells now (#8 on the
+    board: no status column), *Log in* right after them, before the resets: no scroll."""
     no_network["usage"] = _table_usage
 
     async def run() -> dict[str, Any]:
@@ -3132,16 +3365,17 @@ def test_an_expired_rows_status_and_log_in_are_on_screen_at_160_columns_unscroll
             table = view.query_one("#claude-table")
             seen = table.scrollable_content_region
             expired = row(view, 4)  # slot 4: the token expired
-            status, login = expired.cell("status"), expired.query_one("#account-login-4", Button)
+            reason, week = expired.cell("session"), expired.cell("week")
+            login = expired.query_one("#account-login-4", Button)
             return {
                 "sidebar": app.sidebar.outer_size.width,
                 "scroll": table.scroll_x,
-                "status": (shown(status), seen.contains_region(status.region)),
+                "status": (shown(reason), seen.contains_region(reason.region)),
                 "login": (
                     offered(view, 4, "login"),
                     seen.contains_region(login.region),
                     login.region.right <= app.size.width,
-                    login.region.x - status.region.right,
+                    login.region.x - week.region.right,
                 ),
             }
 
@@ -3151,7 +3385,104 @@ def test_an_expired_rows_status_and_log_in_are_on_screen_at_160_columns_unscroll
     assert text.startswith("⚠ token expired") and status_seen
     offered_here, login_seen, on_screen, gap = out["login"]
     assert offered_here and login_seen and on_screen
-    assert gap == 1  # right beside the status: one cell apart
+    assert gap == 1  # right beside the usage cells: one cell apart
+
+
+def test_log_in_again_reads_whole_on_screen_at_160_columns_unscrolled(
+    no_network: dict[str, Any],
+) -> None:
+    """The tester on #408: with the status column still there *Log in again* read
+    'Log in ag' at 160 columns. Without it (#406), the 14-wide login column shows the
+    whole label on a healthy row, on screen, with nothing scrolled."""
+    no_network["usage"] = _table_usage
+
+    async def run() -> dict[str, Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_table_frame)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 4))
+            table = view.query_one("#claude-table")
+            login = row(view, 1).query_one("#account-login-1", Button)
+            line = "".join(login.render_line(y).text for y in range(login.region.height))
+            return {
+                "scroll": table.scroll_x,
+                "label": login_label(view, 1),
+                "line": line,
+                "seen": table.scrollable_content_region.contains_region(login.region),
+                "on_screen": login.region.right <= app.size.width,
+            }
+
+    out = asyncio.run(run())
+    assert out["scroll"] == 0 and out["label"] == "Log in again"
+    assert "Log in again" in out["line"] and "…" not in out["line"], out["line"]
+    assert out["seen"] and out["on_screen"]
+
+
+@pytest.mark.parametrize("size", [(160, 50), (100, 40)], ids=["160x50", "100x40"])
+def test_408s_cells_and_login_read_whole_with_301s_update_row_in_the_sidebar(
+    no_network: dict[str, Any], size: tuple[int, int]
+) -> None:
+    """Merged in #401 for 0.9.0: #408's 16-wide session cell (a kept reading's age) and 14-wide
+    *Log in again* on #406's layout, with #301's ⬆ row in the sidebar. The row takes no width
+    from the page: the sidebar is as wide with it as without, the session cell reads whole,
+    and *Log in again*, focused, is whole and in view (scrolled to at 100 columns)."""
+    from aisquare.cli.ui.sidebar import UpdateRow
+    from aisquare.services import updates
+
+    taken = datetime.now(tz=UTC) - timedelta(hours=149, minutes=5)
+
+    def usage(account: ClaudeAccount) -> ClaudeUsage:
+        if account.slot != 1:
+            return _table_usage(account)
+        return ClaudeUsage(
+            available=True,
+            session_percent=33,
+            week_percent=10,
+            fetched_at=taken,
+            last_failed_at=datetime.now(tz=UTC),
+            last_failed_reason="HTTP 503 from the usage endpoint",
+        )
+
+    no_network["usage"] = usage
+    offer = updates.Offer("0.9.1", "0.9.0", runnable=True, announce=False)
+
+    async def run(offered: bool) -> dict[str, Any]:
+        app = FleetApp(
+            refresh_seconds=3600,
+            doctor=lambda: [],
+            accounts=_table_frame,
+            release_check=(lambda: offer) if offered else None,
+        )
+        async with app.run_test(size=size) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: "33%" in cells(view, 1)["session"])
+            table = view.query_one("#claude-table")
+            session = row(view, 1).cell("session")
+            login = row(view, 1).query_one("#account-login-1", Button)
+            login.focus()
+            await pilot.pause()
+            await pilot.wait_for_scheduled_animations()
+            line = "".join(login.render_line(y).text for y in range(login.region.height))
+            return {
+                "update row": app.query_one(UpdateRow).display,
+                "sidebar": app.sidebar.outer_size.width,
+                "session": (session.region.width, session.render_line(0).text.rstrip()),
+                "login": (login_label(view, 1), line),
+                "in view": table.scrollable_content_region.contains_region(login.region)
+                and login.region.right <= view.region.right,
+            }
+
+    without = asyncio.run(run(False))
+    out = asyncio.run(run(True))
+
+    assert (without["update row"], out["update row"]) == (False, True)
+    assert out["sidebar"] == without["sidebar"], "the ⬆ row widens nothing"
+    assert out["session"] == (16, "▮▮▯▯▯ 33% · 6d"), out["session"]
+    label, line = out["login"]
+    assert label == "Log in again" and "Log in again" in line and "…" not in line, line
+    assert out["in view"]
 
 
 @pytest.mark.parametrize(
@@ -3200,7 +3531,7 @@ def test_every_button_can_be_reached_at_any_width(
     width, scrolls, unreachable, reached = asyncio.run(run())
     if sidebar is not None:
         assert width == sidebar  # the precondition: the sidebar really was that wide
-    assert reached >= 15  # Log in on three rows, Default on three, both arrows, Remove…
+    assert reached >= 15  # both arrows on four rows, Log in on three, Disable, Remove…
     assert unreachable == []  # every button, focused, is wholly in view
     if size[0] >= 240:
         assert scrolls == 0
@@ -3251,7 +3582,10 @@ def test_the_row_says_how_long_the_window_has_at_the_current_pace(
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         await settle_until(app, lambda: len(recorded) >= 2 and painted(view, 1, 2))
-        return line(view, 1), line(view, 2)
+        # The projection is the session cell's tooltip: there is no status column (#8).
+        return tuple(  # type: ignore[return-value]
+            f"{line(view, slot)}\n{row(view, slot).cell('session').tooltip}" for slot in (1, 2)
+        )
 
     one, two = drive(go, overview=overview)
     assert sorted(recorded) == [1, 2]  # every signed-in slot was read…

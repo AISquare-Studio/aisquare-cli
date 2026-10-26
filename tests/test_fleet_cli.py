@@ -34,6 +34,8 @@ from typer.testing import CliRunner
 
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.app import app
+from aisquare.core.store import store_session
+from aisquare.core.workspace import project_id_for
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
 from aisquare.services import install_route
@@ -54,7 +56,7 @@ from aisquare.services.fleet import (
     TellResult,
     Typed,
 )
-from tests.cli_tree import NEEDED_UNLESS, root_command
+from tests.cli_tree import NEEDED_UNLESS, _placeholder, root_command
 from tests.rendered import ANSI
 from tests.rendered import plain as _plain
 
@@ -263,7 +265,16 @@ def test_spawn_json_carries_the_documented_keys(
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert set(payload) == {"agent", "asked_label", "tmux_session", "notes"}
+    assert set(payload) == {
+        "agent",
+        "asked_label",
+        "tmux_session",
+        "notes",
+        # How the first message went (P0-W1a): as restart and switch say it.
+        "prompt_typed",
+        "prompt_delivery",
+        "prompt_acked",
+    }
     assert payload["asked_label"] == "coder-auth"
     assert payload["tmux_session"] == SESSION
     assert payload["notes"] == receipt.notes
@@ -330,6 +341,8 @@ def test_spawn_consumes_its_own_options_and_forwards_nothing_else(
         "spawned_by": "mgr-session",
         "account": None,
         "persona": None,
+        "ack_wait": 45.0,  # [fleet] prompt_ack_seconds: the CLI waits for the first turn
+        "board_context": None,
     }
 
 
@@ -806,11 +819,11 @@ def test_stop_confirms_and_passes_force_through(
     gentle = runner.invoke(app, ["fleet", "stop", "coder-auth"])
     assert gentle.exit_code == 0, gentle.output
     assert "✓ stopped coder-auth (agt_coderauth)" in _plain(gentle.stdout)
-    assert stop.calls[-1] == ((PROJECT, "coder-auth"), {"force": False})
+    assert stop.calls[-1] == ((PROJECT, "coder-auth"), {"force": False, "actor": "user"})
 
     forced = runner.invoke(app, ["fleet", "stop", "coder-auth", "--force"])
     assert forced.exit_code == 0, forced.output
-    assert stop.calls[-1] == ((PROJECT, "coder-auth"), {"force": True})
+    assert stop.calls[-1] == ((PROJECT, "coder-auth"), {"force": True, "actor": "user"})
 
 
 @pytest.mark.parametrize("worktree", [True, False], ids=["worktree", "no-worktree"])
@@ -847,7 +860,7 @@ def test_stop_json_returns_the_agent_row(
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert set(payload) == {"agent", "claims_released", "release_failed"}
+    assert set(payload) == {"agent", "claims_released", "release_failed", "marked_only"}
     assert payload["agent"]["label"] == "coder-auth"
     assert payload["agent"]["ended_at"] is not None
     assert payload["agent"]["exit_status"] == 0
@@ -1133,7 +1146,8 @@ def test_each_all_receipt_s_json_is_the_one_agent_command_s(
 
     [receipt] = every["receipts"]
     assert {key: receipt[key] for key in one} == one
-    assert set(receipt) - set(one) == {"project", "outcome", "why"} | (
+    # `was`: running or dead when the plan was read (#38), a bulk receipt's own field.
+    assert set(receipt) - set(one) == {"project", "outcome", "why", "was"} | (
         {"agent"} if action == "restart" else set()
     )
 
@@ -1284,11 +1298,19 @@ def test_an_argument_needed_unless_a_flag_stands_in_is_refused_without_either(
     code; an entry the command no longer needs would fill a word it reads as something
     else."""
     argument, flag = NEEDED_UNLESS[path]
-    command = root_command().commands[path[0]].commands[path[1]]  # type: ignore[attr-defined]
+    command: Any = root_command()
+    for word in path:  # a path of any depth (`project group parent`)
+        command = command.commands[word]
     param = next(p for p in command.params if p.name == argument)
     assert not param.required and any(flag in p.opts for p in command.params)
 
-    result = runner.invoke(app, ["--json", *path])
+    # Every other required argument given (`project group parent <group>`), this one not.
+    others = [
+        _placeholder(p)
+        for p in command.params
+        if p.required and p.param_type_name == "argument" and p.name != argument
+    ]
+    result = runner.invoke(app, ["--json", *path, *others])
 
     assert result.exit_code == 2
     assert json.loads(result.stdout)["message"] == f"Missing argument '{argument}'."
@@ -1312,9 +1334,12 @@ def test_restart_and_stop_of_one_label_are_as_they_were(
     assert runner.invoke(app, ["fleet", "stop", "coder-auth"]).exit_code == 0
 
     assert restart.calls == [
-        ((PROJECT, "coder-auth"), {"fresh": False, "spawned_by": "user", "permission_mode": None})
+        (
+            (PROJECT, "coder-auth"),
+            {"fresh": False, "spawned_by": "user", "permission_mode": None, "ack_wait": 45.0},
+        )
     ]
-    assert stop.calls == [((PROJECT, "coder-auth"), {"force": False})]
+    assert stop.calls == [((PROJECT, "coder-auth"), {"force": False, "actor": "user"})]
     assert bulk.calls == []
 
 
@@ -1389,7 +1414,10 @@ def test_shutdown_asks_at_a_terminal_and_stops_nothing_when_the_answer_is_no(
     agreed = runner.invoke(app, ["fleet", "shutdown"])
 
     assert agreed.exit_code == 0, agreed.output
-    assert shutdown.calls[-1] == ((PROJECT,), {"force": False, "forget": False})
+    assert shutdown.calls[-1] == (
+        (PROJECT,),
+        {"force": False, "forget": False, "actor": "user"},
+    )
 
 
 def test_shutdown_asks_about_the_sessions_when_no_agent_is_live(
@@ -1492,7 +1520,7 @@ def test_shutdown_reports_each_row_with_the_reason_the_service_gave(
     assert "fleet-paused signal on api was cleared" in out
     assert "were NOT ended" in out, "the operator is told which rows they still own"
     assert "was not running" not in out, "the CLI never asserts a cause the service did not give"
-    assert shutdown.calls[-1] == ((PROJECT,), {"force": True, "forget": False})
+    assert shutdown.calls[-1] == ((PROJECT,), {"force": True, "forget": False, "actor": "user"})
 
 
 def test_shutdown_all_never_resolves_a_project_and_a_clean_run_exits_zero(
@@ -1663,7 +1691,7 @@ def test_shutdown_forget_shows_every_row_ended_unchecked_and_passes_the_word_on(
     assert plan.calls[0] == ((PROJECT,), {"forget": True})
     assert json.loads(as_json.stdout)["tmux_unusable"] == "tmux is not installed"
     assert ran.exit_code == 0, ran.output
-    assert shutdown.calls == [((PROJECT,), {"force": False, "forget": True})]
+    assert shutdown.calls == [((PROJECT,), {"force": False, "forget": True, "actor": "user"})]
 
 
 def test_shutdown_maps_a_refusal_onto_the_fail_contract(
@@ -2122,7 +2150,7 @@ def ui_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     import aisquare.cli.ui.app as ui_app
 
     calls: list[str] = []
-    monkeypatch.setattr(ui_app, "run_ui", lambda: calls.append("run_ui"))
+    monkeypatch.setattr(ui_app, "run_ui", lambda **options: calls.append("run_ui"))
     return calls
 
 
@@ -2178,6 +2206,36 @@ def test_ui_runs_the_app_at_an_interactive_terminal(
     assert result.exit_code == 0, result.output
     assert ui_spy == ["run_ui"]
     assert result.output == ""
+
+
+def test_ui_project_and_group_scope_the_app_to_those_projects(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``ui --project a --project b --group g`` hands the app those projects' ids (#83)."""
+    import aisquare.cli.ui.app as ui_app
+
+    monkeypatch.setattr(fleet_cli, "interactive_terminal", lambda: True)
+    scopes: list[object] = []
+    monkeypatch.setattr(ui_app, "run_ui", lambda **options: scopes.append(options["scope"]))
+    with store_session() as store:
+        made = []
+        for name in ("alpha", "beta", "gamma", "delta"):
+            root = (tmp_path / name).resolve()
+            root.mkdir()
+            made.append(store.onboard_project(ProjectInfo(id=project_id_for(root), root=root)))
+        group = store.create_project_group("ops")
+        store.update_project_layout(made[3].id, group_id=group.id)
+
+    result = runner.invoke(app, ["ui", "--project", "alpha", "-P", "beta", "--group", "ops"])
+    assert result.exit_code == 0, result.output
+    assert scopes == [frozenset({made[0].id, made[1].id, made[3].id})]
+
+    scopes.clear()
+    assert runner.invoke(app, ["ui"]).exit_code == 0 and scopes == [None]
+
+    refused = runner.invoke(app, ["ui", "--group", "nope"])
+    assert refused.exit_code == 1 and "no project group named 'nope'" in _plain(refused.stderr)
+    assert scopes == [None]
 
 
 def test_ui_help_exists(runner: CliRunner) -> None:
@@ -2268,3 +2326,135 @@ def test_ls_shows_the_persona_on_its_row_and_json_carries_it(
     assert "tester-1 tester ⏸ waiting %9" in out
     payload = json.loads(as_json.stdout)
     assert [entry["agent"]["persona"] for entry in payload["agents"]] == ["skeptic", None]
+
+
+# --- capacity and the test-run gate (#283) ---------------------------------------------
+
+
+def _headroom(monkeypatch: pytest.MonkeyPatch, *answers: int | None) -> list[float]:
+    """Each probe answers the next of ``answers`` (the last repeats); time passes only
+    when the gate sleeps, so a 15-minute wait is instant."""
+    from aisquare.core import memory
+
+    queue = list(answers)
+    slept: list[float] = []
+    clock = [0.0]
+
+    def probe() -> memory.Headroom:
+        value = queue.pop(0) if len(queue) > 1 else queue[0]
+        return memory.Headroom(value, 16_384, "normal", None, "test")
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(memory, "headroom", probe)
+    monkeypatch.setattr(fleet_service, "_sleep", sleep)
+    monkeypatch.setattr(fleet_service, "_monotonic", lambda: clock[0])
+    return slept
+
+
+def test_capacity_json_names_the_headroom_and_every_limit(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _headroom(monkeypatch, 1500)
+    result = runner.invoke(app, ["--json", "fleet", "capacity"])
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    assert report["available_mb"] == 1500 and report["min_free_mb"] == 2048
+    assert report["admits"] is False and report["reason"] == "1500 MB available, 2048 MB needed"
+    assert report["live_total"] == 0 and report["max_agents_per_project"] == 4
+
+
+def test_gate_at_the_deadline_runs_nothing_and_exits_75(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    slept = _headroom(monkeypatch, 900)
+    marker = tmp_path / "ran"
+    result = runner.invoke(
+        app,
+        ["fleet", "gate", "--min-free-mb", "2048", "--wait", "12s", "--", "touch", str(marker)],
+    )
+    assert result.exit_code == 75, result.output
+    assert "not run: 900 MB available, 2048 MB needed for 12s" in result.output
+    assert not marker.exists()
+    assert slept == [5.0, 5.0, 2.0], "every 5 s, and no further than the deadline"
+
+
+def test_gate_with_headroom_returns_the_commands_exit_code(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    _headroom(monkeypatch, 900, 900, 4000)
+    result = runner.invoke(
+        app,
+        ["--json", "fleet", "gate", "--min-free-mb", "2048", "--wait", "1m", "--",
+         sys.executable, "-c", "raise SystemExit(3)"],
+    )  # fmt: skip
+    assert result.exit_code == 3, result.output
+    [line] = result.output.strip().splitlines()
+    report = json.loads(line)
+    assert report["passed"] is True and report["exit_code"] == 3
+    assert report["waited_seconds"] == 10.0
+
+
+def test_gate_json_at_the_deadline_is_one_object(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _headroom(monkeypatch, 900)
+    result = runner.invoke(app, ["--json", "fleet", "gate", "--wait", "1s"])
+    assert result.exit_code == 75
+    [line] = result.output.strip().splitlines()
+    assert json.loads(line) == {
+        "passed": False,
+        "ran": None,
+        "available_mb": 900,
+        "needed_mb": 2048,
+        "waited_seconds": 1.0,
+        "pressure": "normal",
+    }
+
+
+def test_gate_takes_test_gate_mb_over_min_free_mb(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core.config import FleetSettings
+
+    monkeypatch.setattr(fleet_service, "settings", lambda: FleetSettings(test_gate_mb=6000))
+    _headroom(monkeypatch, 4000)
+    result = runner.invoke(app, ["--json", "fleet", "gate", "--wait", "0s"])
+    assert json.loads(result.output)["needed_mb"] == 6000
+
+
+def test_a_capacity_refusal_carries_its_own_json_code(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise fleet_service.CapacityRefused("capacity_memory", "1500 MB available, 2048 MB needed")
+
+    monkeypatch.setattr(fleet_service, "spawn", refuse)
+    monkeypatch.setattr(fleet_cli, "_project", lambda _ref: None)
+    result = runner.invoke(app, ["--json", "fleet", "spawn", "coder"])
+    assert result.exit_code == 1
+    assert json.loads(result.output)["error"] == "capacity_memory"
+
+
+def test_gate_json_with_a_command_is_still_one_object_on_stdout(tmp_path: Path) -> None:
+    """Review of #323 (minor): the child inherited stdout, so `--json fleet gate -- pytest`
+    printed pytest's output and then the object. Under --json the child's stdout goes
+    to stderr. A real process: CliRunner cannot see what a child writes to fd 1."""
+    import subprocess
+    import sys
+
+    from aisquare.core import selfcli
+
+    child = [sys.executable, "-c", "print('the child speaks'); raise SystemExit(4)"]
+    argv = selfcli.argv_for(
+        ["--json", "fleet", "gate", "--min-free-mb", "0", "--wait", "0s", "--", *child]
+    )
+    done = subprocess.run(argv, capture_output=True, text=True, timeout=120, cwd=tmp_path)
+    assert done.returncode == 4, done.stderr
+    [line] = done.stdout.strip().splitlines()
+    assert json.loads(line)["exit_code"] == 4
+    assert "the child speaks" in done.stderr

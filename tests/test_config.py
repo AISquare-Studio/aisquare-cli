@@ -7,10 +7,11 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import tomli_w
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import snapshot
+from aisquare.core import harness
 from aisquare.core.config import (
     CONFIG_VERSION,
     REVIEWER_ARGS,
@@ -19,8 +20,8 @@ from aisquare.core.config import (
     ExperimentSettings,
     FleetSettings,
     RedactionSettings,
-    SnapshotSettings,
     load_config,
+    retired_sections,
     save_config,
 )
 from aisquare.core.paths import aisquare_home, cache_dir, config_path, ensure_home, log_dir
@@ -264,63 +265,122 @@ def test_ensure_home_creates_layout(isolated_home: Path) -> None:
     assert log_dir().is_dir()
 
 
-# --- [snapshot] max_tokens (#82) -----------------------------------------------------------
+# --- [snapshot], retired ---------------------------------------------------------------
 
 
-def test_snapshot_budget_defaults_to_the_packers_constant() -> None:
-    """The knob exists, and its default IS the 150 000 the packer used to hardcode.
-
-    Nobody who has not set it sees a change: ``core.snapshot.MAX_TOKENS`` is now
-    read off this default rather than the other way round, so the two cannot
-    drift.
-    """
-    assert AppConfig().snapshot == SnapshotSettings(max_tokens=150_000)
-    assert AppConfig().snapshot.max_tokens == snapshot.MAX_TOKENS
-
-
-def test_snapshot_budget_loads_from_the_file_and_round_trips(tmp_path: Path) -> None:
-    target = tmp_path / "config.toml"
-    target.write_text("[snapshot]\nmax_tokens = 300000\n", encoding="utf-8")
-    loaded = load_config(target)
-    assert loaded.snapshot.max_tokens == 300_000
-    save_config(loaded, target)
-    assert load_config(target).snapshot.max_tokens == 300_000
-    assert "[snapshot]" in target.read_text(encoding="utf-8")
-
-
-def test_config_set_writes_the_snapshot_budget_and_rejects_a_non_number(
-    runner: CliRunner,
+def test_a_config_with_the_retired_snapshot_section_loads_and_the_next_save_drops_it(
+    tmp_path: Path,
 ) -> None:
-    """The command the failure message names, typed the way it names it."""
-    result = runner.invoke(app, ["config", "set", "snapshot.max_tokens", "300000"])
-    assert result.exit_code == 0, result.output
-    assert load_config().snapshot.max_tokens == 300_000
-    shown = runner.invoke(app, ["config", "get", "snapshot.max_tokens"])
-    assert shown.stdout.strip() == "snapshot.max_tokens = 300000"
+    """The codebase snapshot is gone, and so is its ``[snapshot]`` section: a file that
+    still has one loads as before, with everything else in it, and doctor's config row
+    names it (:func:`retired_sections`). An unknown section is kept by a save, since a
+    newer build may read it; this one is dropped, since no build will."""
+    target = tmp_path / "config.toml"
+    target.write_text(
+        "[snapshot]\nmax_tokens = 300000\nignore = ['**/fixtures/**']\n\n"
+        "[fleet]\nmax_agents_per_project = 6\n\n[future]\nknob = 1\n",
+        encoding="utf-8",
+    )
+    loaded = load_config(target)
+    assert loaded.fleet.max_agents_per_project == 6
+    assert retired_sections(target) == ["snapshot"]
 
-    rejected = runner.invoke(app, ["config", "set", "snapshot.max_tokens", "lots"])
-    assert rejected.exit_code != 0
-    assert load_config().snapshot.max_tokens == 300_000, "a rejected value must not land"
+    save_config(loaded, target)
+    saved = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert "snapshot" not in saved
+    assert saved["future"] == {"knob": 1}, "an unknown section is still kept"
+    assert retired_sections(target) == []
+    assert load_config(target).fleet.max_agents_per_project == 6
 
 
-def test_config_set_takes_the_snapshot_ignore_list_comma_separated(runner: CliRunner) -> None:
-    """A list key is settable from a shell at all — comma-separated, the way repomix's own flag is.
+@pytest.mark.parametrize("code_ignore", [None, ["vendor/**"]], ids=["carried", "code-set-wins"])
+def test_a_snapshot_ignore_list_is_carried_into_code(
+    tmp_path: Path, code_ignore: list[str] | None
+) -> None:
+    """The code index (#285, from main's P2) read its extra ignore patterns from
+    ``[snapshot] ignore``, a section #399 retired with the pack: dropped at the next save,
+    the user's patterns were lost. They are read as ``[code] ignore`` and written there by
+    that save; a ``[code] ignore`` already set wins."""
+    code = "" if code_ignore is None else f"\n[code]\nignore = {code_ignore!r}\n"
+    target = tmp_path / "config.toml"
+    target.write_text(
+        "[snapshot]\nmax_tokens = 300000\nignore = ['**/fixtures/**', 'docs/generated/**']\n"
+        + code,
+        encoding="utf-8",
+    )
+    expected = code_ignore or ["**/fixtures/**", "docs/generated/**"]
+
+    assert load_config(target).code.ignore == expected
+    save_config(load_config(target), target)
+    saved = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert "snapshot" not in saved
+    assert saved["code"]["ignore"] == expected
+    assert load_config(target).code.ignore == expected, "and read back from [code] alone"
+
+
+def test_doctor_says_once_that_the_snapshot_section_is_no_longer_read(
+    isolated_home: Path,
+) -> None:
+    """The one-time note: doctor's config row, green, names the section until the save
+    that drops it, then says nothing of it (review of #399, m6: an empty ``retired``
+    failed no test)."""
+    from aisquare.models import CheckStatus
+    from aisquare.services import diagnostics
+
+    ensure_home()
+    config_path().write_text("[snapshot]\nmax_tokens = 300000\n", encoding="utf-8")
+
+    row = diagnostics._check_config()
+    assert row.status is CheckStatus.ok, "nothing is wrong: the section is ignored"
+    assert row.detail == (
+        "config.toml is valid; [snapshot] is no longer read (aisquare no longer packs a "
+        "codebase; an ignore list in it moves to [code]), and the next save drops it"
+    )
+    save_config(load_config())
+    assert diagnostics._check_config().detail == "config.toml is valid"
+
+
+def test_the_retired_snapshot_keys_are_unknown_to_config_get_and_set(runner: CliRunner) -> None:
+    for argv in (["get", "snapshot.max_tokens"], ["set", "snapshot.ignore", "**/x/**"]):
+        result = runner.invoke(app, ["--json", "config", *argv])
+        assert result.exit_code == 1, result.output
+        assert '"unknown_key"' in result.stdout
+
+
+def test_config_set_takes_a_list_key_comma_separated(runner: CliRunner) -> None:
+    """A list key is settable from a shell at all: comma-separated.
 
     Whitespace around items is trimmed, ``get`` prints the same shape ``set``
     accepts, and an empty string clears the list.
     """
-    assert AppConfig().snapshot.ignore == []
-    result = runner.invoke(
-        app, ["config", "set", "snapshot.ignore", "**/fixtures/**, docs/generated/**"]
-    )
+    result = runner.invoke(app, ["config", "set", "explainability.roles", "coder, reviewer"])
     assert result.exit_code == 0, result.output
-    assert load_config().snapshot.ignore == ["**/fixtures/**", "docs/generated/**"]
-    shown = runner.invoke(app, ["config", "get", "snapshot.ignore"])
-    assert shown.stdout.strip() == "snapshot.ignore = **/fixtures/**,docs/generated/**"
+    assert load_config().explainability.roles == ["coder", "reviewer"]
+    shown = runner.invoke(app, ["config", "get", "explainability.roles"])
+    assert shown.stdout.strip() == "explainability.roles = coder,reviewer"
 
-    cleared = runner.invoke(app, ["config", "set", "snapshot.ignore", ""])
+    cleared = runner.invoke(app, ["config", "set", "explainability.roles", ""])
     assert cleared.exit_code == 0, cleared.output
-    assert load_config().snapshot.ignore == []
+    assert load_config().explainability.roles == []
+
+
+def test_config_get_and_set_cover_the_ui_preference(runner: CliRunner) -> None:
+    """``[ui] always_show_project_path`` — App settings ▸ User preferences — is off by
+    default, and ``config get`` and ``config set`` reach it as they reach every other key."""
+    assert AppConfig().ui.always_show_project_path is False
+    shown = runner.invoke(app, ["config", "get", "ui.always_show_project_path"])
+    assert shown.stdout.strip() == "ui.always_show_project_path = false"
+
+    result = runner.invoke(app, ["config", "set", "ui.always_show_project_path", "true"])
+    assert result.exit_code == 0, result.output
+    assert load_config().ui.always_show_project_path is True
+    assert tomllib.loads(config_path().read_text(encoding="utf-8"))["ui"] == {
+        "always_show_project_path": True
+    }
+
+    rejected = runner.invoke(app, ["config", "set", "ui.always_show_project_path", "maybe"])
+    assert rejected.exit_code != 0
+    assert load_config().ui.always_show_project_path is True, "a rejected value must not land"
 
 
 def test_experiment_is_off_by_default() -> None:
@@ -393,28 +453,39 @@ def test_a_reviewer_saved_with_the_former_restricted_default_loads_with_a_shell(
     """0.6.0 and 0.7.0 launched the reviewer `--restricted`, which removes Bash, and any
     `config set` wrote that default into the file. A new default alone would leave
     every such file launching a reviewer that cannot run `gh` — this machine's did.
-    The old default is replaced by today's, so the reviewer still cannot edit files."""
+    The old default is replaced by today's: none, the deny being the role's own
+    (`RoleProfile.denied_tools`), so the reviewer still cannot edit files."""
     target = tmp_path / "config.toml"
     target.write_text(_SAVED_BY_0_7_0_REVIEWER, encoding="utf-8")
     loaded = load_config(target)
     reviewer = loaded.fleet.roles["reviewer"]
-    assert reviewer.extra_args == list(REVIEWER_ARGS)
+    assert reviewer.extra_args == []
     assert reviewer.worktree is True, "only the old default goes; the rest stays as saved"
     save_config(loaded, target)
     saved = tomllib.loads(target.read_text(encoding="utf-8"))
-    assert saved["fleet"]["roles"]["reviewer"]["extra_args"] == list(REVIEWER_ARGS), (
+    assert saved["fleet"]["roles"]["reviewer"]["extra_args"] == [], (
         "today's default, in the reviewer's table written whole for older builds"
     )
-    assert load_config(target).fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
+    policy = harness.tool_policy(
+        "reviewer", binary="claude", args=[], fleet=load_config(target).fleet
+    )
+    assert {"Edit", "Write", "NotebookEdit"} <= set(policy.denied)
 
 
 def test_the_built_in_reviewer_keeps_its_shell_and_is_denied_the_tools_that_edit() -> None:
     """Bash is what `gh pr diff` and `gh pr review` run on; Edit, Write and NotebookEdit
     are what a prompt injected through the PR it reads would edit the tree with. One
-    token: a separate list would swallow the next plain word on the command line."""
+    token: a separate list would swallow the next plain word on the command line. The
+    deny is the role's own, so no `extra_args` stands in for it (#280)."""
     reviewer = FleetSettings().roles["reviewer"]
-    assert reviewer.extra_args == ["--disallowedTools=Edit Write NotebookEdit"]
-    assert "--restricted" not in reviewer.extra_args
+    assert reviewer.extra_args == []
+    assert harness.ROLE_PROFILES["reviewer"].denied_tools == ["Edit", "Write", "NotebookEdit"]
+    policy = harness.tool_policy("reviewer", binary="claude", args=[], fleet=FleetSettings())
+    tokens = [arg for arg in policy.args if arg.startswith("--disallowedTools")]
+    assert len(tokens) == 1 and {"Edit", "Write", "NotebookEdit"} <= set(
+        tokens[0].partition("=")[2].split()
+    )
+    assert "--restricted" not in policy.args
 
 
 def test_the_former_reviewer_default_is_replaced_once_and_chosen_afterwards_is_kept(
@@ -427,7 +498,7 @@ def test_the_former_reviewer_default_is_replaced_once_and_chosen_afterwards_is_k
     target = tmp_path / "config.toml"
     target.write_text(_SAVED_BY_0_7_0_REVIEWER, encoding="utf-8")
     loaded = load_config(target)
-    assert loaded.fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
+    assert loaded.fleet.roles["reviewer"].extra_args == []
     save_config(loaded, target)
     assert tomllib.loads(target.read_text(encoding="utf-8"))["config_version"] == CONFIG_VERSION
 
@@ -476,10 +547,12 @@ def test_config_set_of_the_former_reviewer_default_takes_effect() -> None:
     assert load_config().fleet.roles["reviewer"].extra_args == ["--restricted"]
 
 
-def test_the_reviewer_default_set_by_config_set_round_trips() -> None:
+def test_the_former_reviewer_default_set_by_config_set_round_trips() -> None:
     """`config set` splits a list on commas and `config get` joins one with them, so the
-    default's tool names are apart by spaces: what `get` prints, `set` takes back whole."""
+    0.8.0-0.8.2 default's tool names are apart by spaces: set back by hand, for an older
+    build sharing the home, what `get` prints `set` takes back whole."""
     key = "fleet.roles.reviewer.extra_args"
+    assert settings_service.set_value(key, REVIEWER_ARGS[0]) == REVIEWER_ARGS[0]
     printed = settings_service.get_value(key)
     assert settings_service.set_value(key, printed) == printed
     assert load_config().fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
@@ -494,3 +567,52 @@ def test_a_reviewer_given_more_than_the_former_default_keeps_it(tmp_path: Path) 
     )
     reviewer = load_config(target).fleet.roles["reviewer"]
     assert reviewer.extra_args == ["--restricted", "--tools", "Bash"]
+
+
+def _v2_reviewer(target: Path, extra_args: list[str]) -> None:
+    """``target`` as 0.8.1/0.8.2 saved it: version 2, the reviewer's table written whole."""
+    target.write_text(
+        tomli_w.dumps(
+            {
+                "config_version": 2,
+                "fleet": {
+                    "roles": {
+                        "reviewer": {
+                            "permission_mode": "auto",
+                            "worktree": True,
+                            "extra_args": extra_args,
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_the_v2_reviewer_default_leaves_once_and_a_list_chosen_afterwards_stays(
+    tmp_path: Path,
+) -> None:
+    """Every 0.8.1/0.8.2 save holds :data:`REVIEWER_ARGS` for the reviewer, chosen or not.
+    Kept, it stayed on the command line, where ``allow_tools`` cannot reach. The 2 -> 3
+    step drops it once; set again afterwards, it is a choice and stays."""
+    target = tmp_path / "config.toml"
+    _v2_reviewer(target, list(REVIEWER_ARGS))
+    loaded = load_config(target)
+    assert loaded.fleet.roles["reviewer"].extra_args == []
+    save_config(loaded, target)
+    assert tomllib.loads(target.read_text(encoding="utf-8"))["config_version"] == CONFIG_VERSION
+
+    chosen = load_config(target)
+    chosen.fleet.roles["reviewer"].extra_args = list(REVIEWER_ARGS)
+    save_config(chosen, target)
+    save_config(load_config(target), target)  # any later save, of any key
+    assert load_config(target).fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
+
+
+def test_the_2_to_3_step_keeps_a_reviewer_list_someone_wrote(tmp_path: Path) -> None:
+    """Only the exact 0.8.0-0.8.2 default is dropped; one more word makes it the user's."""
+    target = tmp_path / "config.toml"
+    written = [*REVIEWER_ARGS, "--model", "opus"]
+    _v2_reviewer(target, written)
+    assert load_config(target).fleet.roles["reviewer"].extra_args == written

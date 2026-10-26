@@ -27,6 +27,9 @@ TASK_PREFIX = "tsk_"
 EVENT_PREFIX = "evt_"
 AGENT_PREFIX = "agt_"
 TRACE_PREFIX = "trc_"
+USAGE_PREFIX = "use_"
+BRIEF_PREFIX = "brf_"
+EVIDENCE_PREFIX = "evd_"
 
 
 def _encode(value: int, length: int) -> str:
@@ -65,6 +68,16 @@ def new_event_id() -> str:
     return _new_id(EVENT_PREFIX)
 
 
+def new_brief_id() -> str:
+    """Return a fresh, time-sortable work-brief id (``brf_…``)."""
+    return _new_id(BRIEF_PREFIX)
+
+
+def new_evidence_id() -> str:
+    """Return a fresh, time-sortable brief evidence id (``evd_…``)."""
+    return _new_id(EVIDENCE_PREFIX)
+
+
 def new_agent_id() -> str:
     """Return a fresh, time-sortable fleet-agent id (``agt_…``)."""
     return _new_id(AGENT_PREFIX)
@@ -82,3 +95,8 @@ def new_trace_id() -> str:
     client that generated its own would fork the run space silently.
     """
     return _new_id(TRACE_PREFIX)
+
+
+def new_usage_id() -> str:
+    """Return a fresh, time-sortable id for one turn's token usage (``use_…``)."""
+    return _new_id(USAGE_PREFIX)

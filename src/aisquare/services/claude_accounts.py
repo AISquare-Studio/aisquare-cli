@@ -50,8 +50,9 @@ from typing import Any, Literal
 
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing as sharing
-from aisquare.core import paths
-from aisquare.core.config import AccountsSettings, FleetSettings, load_config
+from aisquare.core import paths, tls
+from aisquare.core.config import AccountsSettings, FleetSettings, load_config, save_config
+from aisquare.core.harness import MODEL_FAMILIES, model_family
 from aisquare.core.names import name_key
 from aisquare.core.spawn import untraced_env
 from aisquare.core.store import ContextStore, store_session
@@ -86,8 +87,13 @@ SIGN_IN_SESSION = "asq-accounts"
 AGENT = "claude-code"
 """The agent name ``aisquare agents`` knows Claude Code by."""
 
-Fetch = Callable[[str, Mapping[str, str], float], tuple[int, bytes]]
-"""``(url, headers, timeout) -> (status, body)``: how :func:`usage` reaches the network."""
+Fetch = Callable[
+    [str, Mapping[str, str], float],
+    tuple[int, bytes] | tuple[int, bytes, Mapping[str, str]],
+]
+"""``(url, headers, timeout) -> (status, body[, headers])``: how :func:`usage` reaches the
+network. The answer's headers are optional, so a fetch that has none to give (a test's
+fake) still works; :func:`_http_get` gives them, for ``Retry-After``."""
 
 
 class AccountsError(RuntimeError):
@@ -152,7 +158,7 @@ def overview() -> AccountsOverview:
     """The install plus every slot in priority order, offline. Usage is a separate, slower question.
 
     "Offline" still holds: the registry is a local SQLite read. A store that
-    cannot be opened costs the ARRANGEMENT (order, aliases, the default badge)
+    cannot be opened costs the ARRANGEMENT (order, aliases, disabled flags)
     and never the listing — see :func:`list_accounts`.
     """
     return AccountsOverview(
@@ -179,7 +185,7 @@ def overview() -> AccountsOverview:
 PROJECT_ACCOUNT_KEY = "claude_account"
 """The ``project_setting`` key holding a project's default account (a slot number)."""
 
-ChoiceSource = Literal["flag", "role binding", "project default", "headroom", "machine default"]
+ChoiceSource = Literal["flag", "role binding", "project default", "headroom", "preferred"]
 
 
 class AccountsUnreadable(AccountsError):
@@ -196,10 +202,9 @@ class AccountsUnreadable(AccountsError):
 class AccountChoice:
     """What :func:`choose` decided: an account and WHY, or no decision at all.
 
-    ``account is None`` means nothing chose — no flag, no binding, no project or
-    machine default — and the caller must leave the launch environment exactly
-    as it found it. That is the pre-#145 behaviour, byte for byte, and it is the
-    case every machine that never ran ``accounts default`` is in. It is
+    ``account is None`` means nothing chose — no flag, no binding, no project
+    default and no enabled, signed-in account to prefer — and the caller must
+    leave the launch environment exactly as it found it. It is
     deliberately distinct from "slot 1 was chosen": an EXPLICIT slot 1 restores
     this shell's own variables over a role binding's (``core.apply_launch_env``),
     which a silent default must never do to a binding someone wrote by hand.
@@ -212,11 +217,15 @@ class AccountChoice:
     the launch line's dim notes, never a reason to refuse."""
 
     def describe(self) -> str:
-        """``account 2`` for a flag; ``work · machine default`` when a default decided."""
+        """``account 2`` for a flag; ``work · preferred (rank 1)`` when the order decided."""
         if self.account is None:
             return ""
         name = core.label(self.account)
-        return name if self.source == "flag" else f"{name} · {self.source}"
+        if self.source == "flag":
+            return name
+        if self.source == "preferred":
+            return f"{name} · preferred (rank {self.account.position})"
+        return f"{name} · {self.source}"
 
 
 def _arranged(store: ContextStore) -> list[ClaudeAccount]:
@@ -226,6 +235,8 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
     slots and dropped for vanished ones, so the table can never describe an
     account that is not there.
     """
+    # A machine default an older build set becomes rank 1, once (#8 on the board).
+    store.promote_retired_claude_account_default()
     on_disk = {account.slot: account for account in core.list_accounts()}
     rows: dict[int, ClaudeAccountRecord] = {
         record.slot: record for record in store.claude_accounts()
@@ -245,7 +256,6 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
             update={
                 "alias": record.alias,
                 "position": record.position,
-                "is_default": record.is_default,
                 "disabled": record.disabled,
             }
         )
@@ -296,7 +306,7 @@ def _read_for_handover() -> tuple[list[ClaudeAccount] | None, str | None]:
 
 
 def list_accounts() -> list[ClaudeAccount]:
-    """The accounts in priority order, each carrying its alias, rank, default and disabled flags.
+    """The accounts in priority order, each carrying its alias, rank and disabled flag.
 
     Fails open to ``core.list_accounts()`` — slot order, no arrangement — when
     the store cannot be opened, so the Accounts page and ``accounts list`` keep
@@ -418,6 +428,7 @@ def choose(
     exclude: Iterable[int] = (),
     spread: bool | None = None,
     fetch: Fetch | None = None,
+    family: str | None = None,
 ) -> AccountChoice:
     """THE account resolver: which Claude account a launch runs under, and why.
 
@@ -426,7 +437,10 @@ def choose(
         --account <ref>            the flag (a slot, alias or email)
         team bind <role> --account the role's binding
         accounts default --project the project's default
-        accounts default           the machine default
+        accounts order / move      the preferred account: the first enabled,
+                                   signed-in one in priority order (rank 1) —
+                                   unless the role's binding sets
+                                   CLAUDE_CONFIG_DIR by hand, which keeps it
         (nothing)                  the launch environment is left untouched
 
     ``launch``, ``fleet spawn`` and App settings all ask here and nowhere
@@ -443,12 +457,15 @@ def choose(
     that cannot be read costs its rung and leaves a note, never the launch.
 
     One rung is optional (#146): with ``[accounts] pick = "headroom"`` — or
-    ``spread=True``, which a hand-over passes — the machine default gives way to
+    ``spread=True``, which a hand-over passes — the preferred account gives way to
     :func:`headroom_choice`, the account with room in both of its windows,
     ``exclude`` naming the slot a hand-over is leaving. When no account's usage
-    can be read, the machine default decides exactly as before. A launch reads
+    can be read, the preferred account decides exactly as before. A launch reads
     usage through the cache, a minute deep (:data:`PICK_MAX_AGE_SECONDS`); a
     hand-over (``spread=True``) reads it live.
+
+    ``family`` is the launch's model family (``core.harness.launch_family``), for the
+    headroom rung's per-family weeks and limit marks (#277).
 
     ``exclude`` is honoured on EVERY rung: a binding or a project default that
     names the account being left is skipped with a note and the ladder goes on,
@@ -521,6 +538,8 @@ def choose(
             exclude=skip,
             fetch=fetch,
             max_age=PICK_MAX_AGE_SECONDS if spread is None else None,
+            family=family,
+            prefer=settings.prefer,
         )
         if spread is None:
             # The default rung since 0.8.1, so every machine walks it: one with no account
@@ -530,20 +549,60 @@ def choose(
         notes.extend(more)
         if picked is not None:
             return AccountChoice(picked, "headroom", notes)
-    default = next((a for a in accounts if a.is_default), None)
-    if default is not None:
-        if default.disabled:
-            notes.append(f"{core.label(default)} (machine default) is disabled — skipped")
-        elif default.slot in skip:
-            # Said like the two rungs above: skipped in silence, a hand-over that
-            # found nothing was refused with no word that the last rung named the
-            # account being left (review of #205, fourth round).
-            notes.append(
-                f"{core.label(default)} (machine default) is the account being left — skipped"
-            )
-        else:
-            return AccountChoice(default, "machine default", notes)
+    if _binding_names_a_directory(role):
+        # The preferred rung is a SILENT default: it must not restore this shell's
+        # variables over a `team bind <role> --env CLAUDE_CONFIG_DIR=…` someone wrote
+        # by hand, which is what applying slot 1 does (core.apply_launch_env). That
+        # binding launched on its own directory before rank 1 was the default, and
+        # still does (review of #406, M1). A flag, an account binding, a project
+        # default or a headroom pick still win over it, as they always did.
+        return AccountChoice(None, None, notes)
+    preferred = preferred_account(accounts, skip, notes)
+    if preferred is not None:
+        return AccountChoice(preferred, "preferred", notes)
     return AccountChoice(None, None, notes)
+
+
+def _binding_names_a_directory(role: str | None) -> bool:
+    """Whether ``role``'s binding sets Claude Code's directory itself (``env`` or ``env_files``).
+
+    An unreadable config names nothing: the binding is not applied either, so the
+    preferred rung is all that is left to decide (``harness.resolve_profile``).
+    """
+    if role is None:
+        return False
+    try:
+        profile = load_config().team.profiles.get(role)
+    except Exception:  # a broken config.toml costs the binding, never the launch
+        return False
+    if profile is None:
+        return False
+    return any(var in profile.env or var in profile.env_files for var in core.LAUNCH_VARS)
+
+
+def preferred_account(
+    accounts: Sequence[ClaudeAccount], skip: Iterable[int] = (), notes: list[str] | None = None
+) -> ClaudeAccount | None:
+    """The machine default: the first enabled, signed-in account in priority order.
+
+    There is no separate default to pick (#8 on the board): rank 1 IS the
+    default, and an account that cannot run a launch — disabled, or with no
+    login — hands the place to the next. One in ``skip`` (the account a
+    hand-over is leaving) is passed over with a note, said as the rungs above
+    say it (review of #205, fourth round).
+    """
+    for account in accounts:
+        if account.disabled or not core.signed_in(account):
+            continue
+        if account.slot in skip:
+            if notes is not None:
+                notes.append(
+                    f"{core.label(account)} (preferred, rank {account.position}) is the "
+                    "account being left — skipped"
+                )
+            continue
+        return account
+    return None
 
 
 # --- arranging: the writers ---------------------------------------------------------------------
@@ -555,12 +614,19 @@ def choose(
 
 
 def set_default(ref: str | None, *, project: ProjectInfo | None = None) -> ClaudeAccount | None:
-    """Make ``ref`` the machine default — or ``project``'s — and return it; ``None`` clears.
+    """Make ``ref`` ``project``'s default and return it (``None`` clears) — or, with no
+    project, move ``ref`` to rank 1, which is what the machine default is.
 
     A project default is stored as the SLOT NUMBER, resolved now: the project
     table is ours, and a number cannot go stale the way a typed alias could.
-    ``remove`` clears every project default that names the slot it removes.
+    ``remove`` clears every project default that names the slot it removes. The
+    machine's cannot be cleared: some account is always first in the order.
     """
+    if project is None and ref is None:
+        raise AccountsError(
+            "the machine default is rank 1 of the priority order and cannot be cleared — "
+            "reorder instead: aisquare accounts move <slot|alias|email> top"
+        )
     account = resolve(ref) if ref is not None else None
     if account is not None and account.disabled:
         # Accepted silently, the default was a rung `choose` skipped on every
@@ -571,7 +637,8 @@ def set_default(ref: str | None, *, project: ProjectInfo | None = None) -> Claud
         )
     try:
         with store_session() as store:
-            _arranged(store)  # the row must exist before it can be the default
+            # The row must exist before it can be the default.
+            arranged = {each.slot for each in _arranged(store)}
             if project is not None:
                 if account is None:
                     # A delete, which needs no row: registering the directory first
@@ -583,8 +650,12 @@ def set_default(ref: str | None, *, project: ProjectInfo | None = None) -> Claud
                     # add --project` there. Clearing that choice adds nothing.
                     store.onboard_project(project)
                     store.set_project_setting(project.id, PROJECT_ACCOUNT_KEY, str(account.slot))
-            else:
-                store.set_claude_account_default(account.slot if account else None)
+            elif account is not None:
+                # order_claude_accounts ignores an unknown slot, so a slot removed since
+                # resolve() would print "moved to rank 1" over an order nothing changed.
+                if account.slot not in arranged:
+                    raise KeyError(account.slot)
+                store.order_claude_accounts([account.slot])
     except KeyError as exc:
         raise NoSuchAccount(_vanished(account)) from exc
     except sqlite3.Error as exc:
@@ -616,7 +687,9 @@ def project_default(project: ProjectInfo) -> ClaudeAccount | None:
 
 
 def machine_default() -> ClaudeAccount | None:
-    return next((a for a in list_accounts() if a.is_default), None)
+    """What a launch runs under when nothing more specific says: :func:`preferred_account`."""
+    accounts, note = _read_arranged()
+    return None if note is not None else preferred_account(accounts)
 
 
 def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
@@ -725,25 +798,33 @@ def forget_arrangement(slot: int) -> None:
         # The readings too: keyed on the slot alone, they would rate the next
         # occupant's first window against this login's history (third round).
         store.delete_usage_samples(slot)
+        store.set_ui_state(_BACKOFF_KEY.format(slot=slot), None)  # and its wait (F1 of #400)
+        store.set_ui_state(_FAMILY_KEY.format(slot=slot), None)  # and its family weeks
 
 
 # --- usage ------------------------------------------------------------------------------
 
 
-def _http_get(url: str, headers: Mapping[str, str], timeout: float) -> tuple[int, bytes]:
-    """One GET; an HTTP error status is an answer, not an exception."""
+def _http_get(
+    url: str, headers: Mapping[str, str], timeout: float
+) -> tuple[int, bytes, Mapping[str, str]]:
+    """One GET; an HTTP error status is an answer, not an exception. The answer's headers
+    come back too: a 429's ``Retry-After`` says how long to wait (F1 of #400)."""
     import urllib.error
     import urllib.request
 
     request = urllib.request.Request(url, headers=dict(headers), method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return int(response.status), bytes(response.read())
+        with tls.urlopen(request, timeout=timeout) as response:
+            return int(response.status), bytes(response.read()), dict(response.headers.items())
     except urllib.error.HTTPError as exc:
-        return int(exc.code), bytes(exc.read() or b"")
+        sent = dict(exc.headers.items()) if exc.headers is not None else {}
+        return int(exc.code), bytes(exc.read() or b""), sent
 
 
 def _window(raw: Any) -> tuple[float | None, datetime | None]:
+    """One window's percent USED and its reset; a non-null ``locked_reason`` reads 100 %: the
+    endpoint says the window refuses requests, whatever its figure (#277)."""
     if not isinstance(raw, dict):
         return None, None
     percent = raw.get("utilization")
@@ -755,13 +836,132 @@ def _window(raw: Any) -> tuple[float | None, datetime | None]:
         except ValueError:
             when = None
     value = float(percent) if isinstance(percent, int | float) else None
+    if raw.get("locked_reason") is not None:
+        value = 100.0
     return value, when
+
+
+def _retry_after(headers: Mapping[str, str], now: datetime) -> float | None:
+    """The seconds an answer's ``Retry-After`` asks to wait — a number, or an HTTP date —
+    clamped to [1 s, :data:`RETRY_AFTER_MAX_SECONDS`]; ``None`` when it sent none we read."""
+    raw = next((value for key, value in headers.items() if key.lower() == "retry-after"), None)
+    if raw is None or not raw.strip():
+        return None
+    seconds: float | None
+    try:
+        seconds = float(raw.strip())
+    except ValueError:
+        from email.utils import parsedate_to_datetime
+
+        try:
+            when = parsedate_to_datetime(raw.strip())
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - now).total_seconds()
+    if seconds != seconds:  # NaN
+        return None
+    return min(RETRY_AFTER_MAX_SECONDS, max(1.0, seconds))
+
+
+_FAMILY_WEEK = "seven_day_"
+"""The prefix of a per-family weekly window in the usage payload: ``seven_day_opus``…"""
+_FAMILIES = frozenset(MODEL_FAMILIES.values())
+"""The model families a per-family window or limit can name (``opus``, ``sonnet``…)."""
+_SESSION_KINDS = frozenset({"session", "five_hour"})
+_WEEK_KINDS = frozenset({"weekly", "weekly_all", "week", "seven_day"})
+_SCOPED_KIND = "weekly_scoped"
+"""The ``limits[]`` kind of a per-family week (P0-W0, Claude Code 2.1.309): its
+``scope.model.display_name`` names the family ("Fable", "Opus")."""
+
+
+def _fuller(a: float | None, b: float | None) -> float | None:
+    return b if a is None else a if b is None else max(a, b)
+
+
+@dataclass(frozen=True)
+class _Limit:
+    """One ``limits[]`` entry: its kind, percent USED, the model family a ``weekly_scoped``
+    entry is scoped to (``None`` otherwise, or when the name is no family), and its reset."""
+
+    kind: str
+    percent: float
+    family: str | None = None
+    resets_at: datetime | None = None
+
+
+def _family_weeks(payload: Mapping[str, Any]) -> tuple[dict[str, float], dict[str, datetime]]:
+    """Every per-family week in ``payload``, keyed by family, the fuller figure winning.
+
+    Two places can say it. ``limits[]`` entries of kind ``weekly_scoped``, scoped to a
+    model by ``scope.model.display_name``, are where the endpoint really sends it (P0-W0:
+    every ``seven_day_<family>`` key was null). A top-level ``seven_day_<family>`` window
+    is read too, but only for a known family: ``seven_day_breakdown`` and its like are
+    ``seven_day_*`` dicts that are no window (#277, P0-W3c). A ``limits[]`` kind named
+    after a family (``opus``, ``seven_day_opus``) counts as that family's week as well.
+    """
+    percents: dict[str, float] = {}
+    resets: dict[str, datetime] = {}
+    for key, raw in payload.items():
+        family = key.removeprefix(_FAMILY_WEEK)
+        if not key.startswith(_FAMILY_WEEK) or family not in _FAMILIES:
+            continue
+        percent, when = _window(raw)
+        if percent is not None:
+            percents[family] = percent
+        if when is not None:
+            resets[family] = when
+    for limit in _limits(payload):
+        named = limit.kind.removeprefix(_FAMILY_WEEK)
+        scoped = limit.family or (named if named in _FAMILIES else None)
+        if scoped is None:
+            continue
+        percents[scoped] = max(percents.get(scoped, limit.percent), limit.percent)
+        if limit.resets_at is not None and scoped not in resets:
+            resets[scoped] = limit.resets_at
+    return percents, resets
+
+
+def _limits(payload: Mapping[str, Any]) -> list[_Limit]:
+    """``limits[]`` as :class:`_Limit`: an entry without a string kind or a number is
+    skipped — the field is undocumented, and an unknown shape costs it, never the reading."""
+    raw = payload.get("limits")
+    found: list[_Limit] = []
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        kind, percent = entry.get("kind"), entry.get("percent", entry.get("utilization"))
+        if not isinstance(kind, str) or not isinstance(percent, int | float):
+            continue
+        family = _scoped_family(entry) if kind.lower() == _SCOPED_KIND else None
+        _percent, when = _window({"resets_at": entry.get("resets_at")})
+        found.append(_Limit(kind.lower(), float(percent), family, when))
+    return found
+
+
+def _scoped_family(entry: Mapping[str, Any]) -> str | None:
+    """The family a ``weekly_scoped`` entry's ``scope.model.display_name`` names, or ``None``."""
+    scope = entry.get("scope")
+    model = scope.get("model") if isinstance(scope, dict) else None
+    name = model.get("display_name") if isinstance(model, dict) else None
+    return model_family(name) if isinstance(name, str) else None
+
+
+def _limit_of(payload: Mapping[str, Any], kinds: frozenset[str]) -> float | None:
+    return max((limit.percent for limit in _limits(payload) if limit.kind in kinds), default=None)
 
 
 def usage(
     account: ClaudeAccount, *, now: datetime | None = None, fetch: Fetch | None = None
 ) -> ClaudeUsage:
     """The account's five-hour and seven-day windows, or why they cannot be read.
+
+    Every window the endpoint sends is read (#277): the per-family weeks
+    (``seven_day_opus``, ``seven_day_sonnet``: :attr:`ClaudeUsage.family_week_percent`),
+    the ``limits[]`` entries, folded into the window of their kind as the fuller figure,
+    and a ``locked_reason``, which reads that window 100 % used. Keys it does not know
+    are ignored.
 
     Reads the token where Claude Code keeps it (``core.stored_login``: the
     credentials file, or on macOS the login Keychain) and sends it to
@@ -793,10 +993,32 @@ def usage(
         "User-Agent": f"aisquare-cli/{__version__}",
     }
     try:
-        status, body = (fetch or _http_get)(USAGE_URL, headers, USAGE_TIMEOUT_SECONDS)
+        answer = (fetch or _http_get)(USAGE_URL, headers, USAGE_TIMEOUT_SECONDS)
     except OSError as exc:  # URLError, a refused connection, a timeout
+        if isinstance(exc, tls.CABundleError):
+            return ClaudeUsage(
+                available=False,
+                reason=f"TLS: the CA bundle could not be loaded — {tls.BUNDLE_FIX}",
+            )
+        if tls.cert_failure(exc):
+            return ClaudeUsage(
+                available=False,
+                reason=f"TLS certificate could not be verified — {tls.CERT_HINT}",
+            )
         return ClaudeUsage(
             available=False, reason=f"could not reach the usage endpoint ({type(exc).__name__})"
+        )
+    status, body = answer[0], answer[1]
+    answered: Mapping[str, str] = answer[2] if len(answer) == 3 else {}
+    wait = _retry_after(answered, now or _now())
+    if status == 429 or (status == 503 and wait is not None):
+        # Not a login problem: the wait is recorded by `read_usage` (F1 of #400).
+        moment = now or _now()
+        return ClaudeUsage(
+            available=False,
+            reason=f"HTTP {status} from the usage endpoint — rate-limited",
+            rate_limited=True,
+            rate_limited_until=moment + timedelta(seconds=wait) if wait is not None else None,
         )
     if status == 401:
         return ClaudeUsage(
@@ -820,12 +1042,15 @@ def usage(
         return ClaudeUsage(
             available=False, reason="the usage endpoint answered without the two windows"
         )
+    family_percent, family_resets = _family_weeks(payload)
     return ClaudeUsage(
         available=True,
-        session_percent=session_percent,
+        session_percent=_fuller(session_percent, _limit_of(payload, _SESSION_KINDS)),
         session_resets_at=session_resets,
-        week_percent=week_percent,
+        week_percent=_fuller(week_percent, _limit_of(payload, _WEEK_KINDS)),
         week_resets_at=week_resets,
+        family_week_percent=family_percent,
+        family_week_resets_at=family_resets,
         fetched_at=now or _now(),
     )
 
@@ -842,7 +1067,7 @@ def usage(
 # `switch_at`; failing that, the one with the most room. Best effort at
 # every step, because the endpoint is undocumented (§5): an account that does
 # not answer is skipped with a note, and when none answers the caller's next
-# rung (the machine default) decides exactly as it did before #146.
+# rung (the preferred account, rank 1) decides exactly as it did before #146.
 
 TREND_WINDOW = timedelta(minutes=60)
 """How far back `usage_trend` looks for the reading it rates against."""
@@ -930,26 +1155,87 @@ def sample_usage(
     The row is the only side effect, and it is best effort: a store that cannot
     be opened costs the trend line, never the reading the caller asked for.
     """
-    result = usage(account, now=now, fetch=fetch)
-    if result.available:
-        with contextlib.suppress(sqlite3.Error), store_session() as store:
-            _record_sample(store, account, result, now)
-    return result
+    # Through `read_usage`, so a slot the endpoint asked to wait is not asked (review of
+    # #408, N5): it records the answered reading the same way.
+    return read_usage([account], now=now, fetch=fetch)[account.slot]
+
+
+_FAMILY_KEY = "usage-family:{slot}"
+"""The ``ui_state`` row that holds a slot's newest reading's per-family weeks, which the usage
+history has no columns for (:func:`_record_sample`, :func:`_with_family_weeks`)."""
 
 
 def _record_sample(
     store: ContextStore, account: ClaudeAccount, result: ClaudeUsage, now: datetime | None
 ) -> None:
-    store.add_usage_sample(
-        UsageSample(
-            slot=account.slot,
-            fetched_at=result.fetched_at or now or _now(),
-            session_percent=result.session_percent,
-            session_resets_at=result.session_resets_at,
-            week_percent=result.week_percent,
-            week_resets_at=result.week_resets_at,
-            token_fingerprint=_token_fingerprint(account),
+    """The reading's row — and a limit mark for each family week it reads spent, which the
+    row has no column for: a launch picks from the cache, and without the mark it would put
+    an Opus agent on an account whose Opus week a live reading saw spent (#277).
+
+    The family weeks themselves go in one ``ui_state`` row per slot, stamped with the
+    sample they came with (:data:`_FAMILY_KEY`, no schema step). Served from the store, a
+    reading had none, so ``accounts usage`` without ``--refresh``, nearly every read while
+    asq runs, showed no family week, a spent one included (tester's pass on #401, (a))."""
+    for family, percent in result.family_week_percent.items():
+        resets = result.family_week_resets_at.get(family)
+        if percent >= 100 and resets is not None:
+            _write_limit(store, account.slot, family, resets, how="read", now=now)
+    sample = UsageSample(
+        slot=account.slot,
+        fetched_at=result.fetched_at or now or _now(),
+        session_percent=result.session_percent,
+        session_resets_at=result.session_resets_at,
+        week_percent=result.week_percent,
+        week_resets_at=result.week_resets_at,
+        token_fingerprint=_token_fingerprint(account),
+    )
+    store.add_usage_sample(sample)
+    families = None
+    if result.family_week_percent or result.family_week_resets_at:
+        families = json.dumps(
+            {
+                "fetched_at": sample.fetched_at.isoformat(),
+                "token": sample.token_fingerprint,
+                "percent": result.family_week_percent,
+                "resets": {
+                    family: when.isoformat()
+                    for family, when in result.family_week_resets_at.items()
+                },
+            }
         )
+    store.set_ui_state(_FAMILY_KEY.format(slot=account.slot), families)
+
+
+def _with_family_weeks(
+    store: ContextStore, slot: int, sample: UsageSample, reading: ClaudeUsage, now: datetime
+) -> ClaudeUsage:
+    """``reading`` (built from ``sample``) with the family weeks recorded with that very
+    sample (:data:`_FAMILY_KEY`); as it was when the row is another sample's, or unreadable.
+
+    A family week whose reset has passed by ``now`` comes back without its figure, its reset
+    time kept, as :func:`_without_reset_windows` empties a kept reading's: given back whole,
+    a pick read the old figure for the cache's window after the reset, skipped the account
+    as "its opus week is spent" and ranked it on it (review of #401, m2)."""
+    raw = store.ui_state(_FAMILY_KEY.format(slot=slot))
+    if not raw:
+        return reading
+    try:
+        data = json.loads(raw)
+        if (
+            datetime.fromisoformat(data["fetched_at"]) != sample.fetched_at
+            or data.get("token") != sample.token_fingerprint
+        ):
+            return reading
+        percent = {str(family): float(value) for family, value in data["percent"].items()}
+        resets = {
+            str(family): datetime.fromisoformat(when) for family, when in data["resets"].items()
+        }
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return reading
+    over = {family for family, when in resets.items() if when <= now}
+    percent = {family: used for family, used in percent.items() if family not in over}
+    return reading.model_copy(
+        update={"family_week_percent": percent, "family_week_resets_at": resets}
     )
 
 
@@ -1043,6 +1329,211 @@ def describe_trend(trend: UsageTrend | None) -> str:
     return f"≈ {minutes / 60:.1f} h to the limit"
 
 
+# --- backing off a rate-limited read (F1 of #400) ----------------------------------------------
+#
+# A 429 (or a 503 that says when to come back) is the endpoint asking this
+# account's reads to stop for a while. They used to keep coming: the wait was
+# dropped with the headers, failures were remembered only in the process that
+# saw them, and `--refresh` skipped even that, so a script, a manager's loop or
+# a few terminals kept the account rate-limited. Now the wait is recorded per
+# slot in the store (a `ui_state` row, so no schema step), and `read_usage` —
+# the one fetcher every surface reads through — sends nothing for a slot before
+# it ends, whichever process asks, forced or not. The wait is the endpoint's
+# `Retry-After`, or, when it gave none, an exponential default that doubles
+# with each 429 in a row and starts over after a good read. A gated read is
+# answered with the reason and the moment the wait ends; the cache then shows
+# the last good reading beside it (`cached_usage`), and a headroom pick decides
+# by it only while it is fresh (`headroom_choice`).
+
+RETRY_AFTER_MAX_SECONDS = 6 * 3600.0
+"""The longest ``Retry-After`` honoured: a header asking for days is a broken header."""
+USAGE_BACKOFF_FIRST_SECONDS = 60.0
+"""The wait after a 429 that named none: one minute, doubled for each 429 in a row."""
+USAGE_BACKOFF_MAX_SECONDS = 1800.0
+"""Where the doubling stops: half an hour."""
+_BACKOFF_KEY = "usage-backoff:{slot}"
+"""The ``ui_state`` row a slot's wait is recorded in."""
+
+
+@dataclass(frozen=True)
+class UsageBackoff:
+    """One slot's recorded wait: no usage request before ``until``.
+
+    ``attempts`` counts the 429s in a row that led here (the exponential default's
+    exponent); ``since`` is when the latest came back. ``token`` is whose wait it is
+    (:func:`_login_key`): a wait is the login's, not the slot's, so a slot signed into
+    another login since is not held to it (review of #408, N3), and a token refresh or a
+    *Log in again* to the same account is (m1). ``raw`` is the row as read, for the
+    compare-and-set that clears or replaces it (N2).
+    """
+
+    slot: int
+    until: datetime
+    attempts: int
+    since: datetime
+    token: str | None = None
+    raw: str | None = field(default=None, compare=False)
+
+    def active(self, now: datetime) -> bool:
+        return self.until > now
+
+    def holds(self, token: str | None) -> bool:
+        """Whether this wait is the login ``token`` (:func:`_login_key`) names."""
+        return self.token == token
+
+    @property
+    def reason(self) -> str:
+        return backoff_reason(self.until)
+
+    def reading(self, now: datetime) -> ClaudeUsage:
+        """What a read of this slot answers while the wait runs: nothing, and why."""
+        # Stamped with when the 429 came back, not ``now``: a gated read sends nothing, and
+        # "last try failed just now" said a try was made (review of #408, N1).
+        return ClaudeUsage(
+            available=False,
+            reason=self.reason,
+            rate_limited=True,
+            rate_limited_until=self.until,
+            fetched_at=min(self.since, now),
+        )
+
+    def dump(self) -> str:
+        return json.dumps(
+            {
+                "until": self.until.isoformat(),
+                "attempts": self.attempts,
+                "since": self.since.isoformat(),
+                "token": self.token,
+            }
+        )
+
+    @classmethod
+    def load(cls, slot: int, raw: str | None) -> UsageBackoff | None:
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+            return cls(
+                slot=slot,
+                until=datetime.fromisoformat(data["until"]),
+                attempts=int(data.get("attempts", 1)),
+                since=datetime.fromisoformat(data["since"]),
+                token=data.get("token"),
+                raw=raw,
+            )
+        except (ValueError, TypeError, KeyError):
+            return None  # a row this version cannot read waits for nothing
+
+
+def _login_key(account: ClaudeAccount, now: datetime) -> str | None:
+    """Whose wait a slot is held to: the account signed into it, by the uuid and email its
+    ``.claude.json`` records, which a token refresh and a *Log in again* to the same account
+    keep; the token's fingerprint when the file names no login.
+
+    Keyed to the token alone, every OAuth refresh and every *Log in again* lifted the wait,
+    restarted the doubling and sent a request at once, while the row said logging in again
+    does not clear it (review of #408, m1). Another account signed into the slot is still
+    not held to the last one's wait (N3).
+    """
+    who = core.identity(account)
+    if who is not None:
+        return f"login:{who.account_uuid or ''}:{who.email}"
+    return _token_fingerprint(account, now)
+
+
+def rate_limited_until_text(until: datetime | None) -> str:
+    """``rate-limited until 14:32`` (local time), or ``rate-limited`` with no time known."""
+    if until is None:
+        return "rate-limited"
+    return f"rate-limited until {until.astimezone().strftime('%H:%M')}"
+
+
+def backoff_reason(until: datetime) -> str:
+    """``rate-limited until 14:32 — logging in again does not clear it``."""
+    return f"{rate_limited_until_text(until)} — logging in again does not clear it"
+
+
+def _next_backoff(
+    slot: int,
+    reading: ClaudeUsage,
+    before: UsageBackoff | None,
+    now: datetime,
+    token: str | None = None,
+) -> UsageBackoff:
+    """The wait a rate-limited answer starts: its ``Retry-After`` (already turned into
+    ``rate_limited_until`` by :func:`usage`), else the doubling default. A 429 long after
+    the last wait ended, or for another login, starts the doubling over."""
+    attempts = 1
+    if (
+        before is not None
+        and before.holds(token)
+        and before.until > now - timedelta(seconds=USAGE_BACKOFF_MAX_SECONDS)
+    ):
+        attempts = before.attempts + 1
+    until = reading.rate_limited_until
+    if until is None or until <= now:
+        seconds = min(
+            USAGE_BACKOFF_MAX_SECONDS, USAGE_BACKOFF_FIRST_SECONDS * 2 ** min(attempts - 1, 16)
+        )
+        until = now + timedelta(seconds=seconds)
+    return UsageBackoff(slot=slot, until=until, attempts=attempts, since=now, token=token)
+
+
+def _record_backoff(store: ContextStore, held: UsageBackoff, seen: UsageBackoff | None) -> None:
+    """Write ``held`` unless the row changed since ``seen`` was read and now holds a longer
+    wait for the same login: a stale write never shortens a newer wait (review of #408, N2).
+
+    A row this version cannot read (another version's shape, a truncated write) is replaced:
+    compared as absent, it was never, and that slot was asked on every read (n1). Replaced as
+    it was just read, never blindly: a valid, longer wait another process wrote meanwhile
+    stands (review of #401, n1)."""
+    key = _BACKOFF_KEY.format(slot=held.slot)
+    expected = seen.raw if seen is not None else None
+    if store.replace_ui_state(key, expected, held.dump()):
+        return
+    raw = store.ui_state(key)
+    current = UsageBackoff.load(held.slot, raw)
+    if current is None:
+        store.replace_ui_state(key, raw, held.dump())
+        return
+    if current.holds(held.token) and current.until >= held.until:
+        return  # another process recorded a wait at least as long: keep it
+    store.replace_ui_state(key, current.raw, held.dump())
+
+
+def _read_backoffs(store: ContextStore, slots: Iterable[int]) -> dict[int, UsageBackoff]:
+    found: dict[int, UsageBackoff] = {}
+    for slot in slots:
+        held = UsageBackoff.load(slot, store.ui_state(_BACKOFF_KEY.format(slot=slot)))
+        if held is not None:
+            found[slot] = held
+    return found
+
+
+def usage_backoffs(
+    accounts: Sequence[ClaudeAccount], *, now: datetime | None = None
+) -> dict[int, UsageBackoff]:
+    """The waits still running for ``accounts``, by slot: doctor's line, and a test's look.
+    A store that cannot be opened reads as none.
+
+    Whose login a slot holds is read only for a slot with a wait recorded: on macOS that read
+    can be the Keychain, once per slot on every doctor run (review of #408, n2)."""
+    moment = now or _now()
+    try:
+        with store_session() as store:
+            held = _read_backoffs(store, [account.slot for account in accounts])
+    except sqlite3.Error:
+        return {}
+    logins = {
+        account.slot: _login_key(account, moment) for account in accounts if account.slot in held
+    }
+    return {
+        slot: backoff
+        for slot, backoff in held.items()
+        if backoff.active(moment) and backoff.holds(logins.get(slot))
+    }
+
+
 def read_usage(
     accounts: Sequence[ClaudeAccount],
     *,
@@ -1063,26 +1554,71 @@ def read_usage(
     concurrent writers on ``context.db``'s one write lock, on the launch path
     (review of #205, fourth round). Best effort, as :func:`sample_usage` is: a
     store that cannot be opened costs the history, never the readings.
+
+    A slot the endpoint asked to wait (:class:`UsageBackoff`, F1 of #400) is not
+    asked before the wait ends — whoever reads, forced or not — and is answered
+    with the reason and ``rate_limited_until``. A rate-limited answer records the
+    wait, a good one clears it, in that same store session.
     """
     if not accounts:
         return {}
+    moment = now or _now()
     readings: dict[int, ClaudeUsage] = {}
-    with ThreadPoolExecutor(max_workers=min(HEADROOM_WORKERS, len(accounts))) as pool:
-        futures = {
-            pool.submit(usage, account, now=now, fetch=fetch): account.slot for account in accounts
-        }
-        for future, slot in futures.items():
-            try:
-                readings[slot] = future.result()
-            except Exception as exc:  # one account's failure must not cost the rest
-                readings[slot] = ClaudeUsage(
-                    available=False, reason=f"usage read failed ({type(exc).__name__})"
-                )
-    answered = [account for account in accounts if readings[account.slot].available]
-    if answered:
+    backoffs: dict[int, UsageBackoff] = {}
+    with contextlib.suppress(sqlite3.Error), store_session() as store:
+        backoffs = _read_backoffs(store, [account.slot for account in accounts])
+    logins: dict[int, str | None] = {}
+
+    def _login_of(account: ClaudeAccount) -> str | None:
+        """:func:`_login_key`, read once per slot, and only for a slot a wait concerns. A name
+        of its own: the call-graph guards resolve a call by its name, and ``login`` is the
+        accounts command's (``tests/test_config_writes_stay_in_the_cli.py``)."""
+        if account.slot not in logins:
+            logins[account.slot] = _login_key(account, moment)
+        return logins[account.slot]
+
+    asked: list[ClaudeAccount] = []
+    for account in accounts:
+        held = backoffs.get(account.slot)
+        if held is not None and held.active(moment) and held.holds(_login_of(account)):
+            readings[account.slot] = held.reading(moment)
+        else:
+            asked.append(account)
+    if asked:
+        with ThreadPoolExecutor(max_workers=min(HEADROOM_WORKERS, len(asked))) as pool:
+            futures = {
+                pool.submit(usage, account, now=now, fetch=fetch): account.slot for account in asked
+            }
+            for future, slot in futures.items():
+                try:
+                    readings[slot] = future.result()
+                except Exception as exc:  # one account's failure must not cost the rest
+                    readings[slot] = ClaudeUsage(
+                        available=False, reason=f"usage read failed ({type(exc).__name__})"
+                    )
+    answered = [account for account in asked if readings[account.slot].available]
+    cleared = [account.slot for account in answered if account.slot in backoffs]
+    started = {
+        account.slot: _next_backoff(
+            account.slot,
+            readings[account.slot],
+            backoffs.get(account.slot),
+            moment,
+            _login_of(account),
+        )
+        for account in asked
+        if readings[account.slot].rate_limited
+    }
+    for slot, held in started.items():
+        readings[slot] = held.reading(moment)
+    if answered or started or cleared:
         with contextlib.suppress(sqlite3.Error), store_session() as store:
             for account in answered:
                 _record_sample(store, account, readings[account.slot], now)
+            for slot in cleared:  # only the row this round read: never a newer wait (N2)
+                store.replace_ui_state(_BACKOFF_KEY.format(slot=slot), backoffs[slot].raw, None)
+            for slot, held in started.items():
+                _record_backoff(store, held, backoffs.get(slot))
     return readings
 
 
@@ -1111,6 +1647,9 @@ def read_usage(
 
 USAGE_MAX_AGE_SECONDS = 300.0
 """How old a recorded reading may be and still be served instead of a fetch: five minutes."""
+LAST_GOOD_LOOKBACK = timedelta(days=7)
+"""How far back a failed read looks for the last good reading to show: the history's
+whole retention (``core.store._USAGE_RETENTION``)."""
 
 _UNANSWERED: dict[tuple[str, str], ClaudeUsage] = {}
 """Fetches that went out and failed, by (config dir, fingerprint of the token sent): see above."""
@@ -1169,13 +1708,16 @@ def _recorded_usage(
     *,
     since: datetime,
     now: datetime,
+    current: bool = True,
 ) -> dict[int, ClaudeUsage]:
     """Each account's newest reading recorded at or after ``since`` WITH the token it holds
     now (``tokens``, by slot), in one store session.
 
     A reading another token took is not served: a slot signed into another login
-    since would show the last one's figure. Nor is one of whose windows has reset
-    since: the window it describes is over, and the new one starts near 0 %.
+    since would show the last one's figure. Nor, while ``current``, is one of whose
+    windows has reset since: the window it describes is over, and the new one starts
+    near 0 %. ``current=False`` is the last good reading a failed read shows, aged
+    (F1 of #400): an old figure, said to be old, beats ``—``.
     """
     found: dict[int, ClaudeUsage] = {}
     try:
@@ -1190,15 +1732,21 @@ def _recorded_usage(
                     continue
                 newest = taken[-1]
                 resets = (newest.session_resets_at, newest.week_resets_at)
-                if any(when is not None and when <= now for when in resets):
+                if current and any(when is not None and when <= now for when in resets):
                     continue
-                found[account.slot] = ClaudeUsage(
-                    available=True,
-                    session_percent=newest.session_percent,
-                    session_resets_at=newest.session_resets_at,
-                    week_percent=newest.week_percent,
-                    week_resets_at=newest.week_resets_at,
-                    fetched_at=newest.fetched_at,
+                found[account.slot] = _with_family_weeks(
+                    store,
+                    account.slot,
+                    newest,
+                    ClaudeUsage(
+                        available=True,
+                        session_percent=newest.session_percent,
+                        session_resets_at=newest.session_resets_at,
+                        week_percent=newest.week_percent,
+                        week_resets_at=newest.week_resets_at,
+                        fetched_at=newest.fetched_at,
+                    ),
+                    now,
                 )
     except sqlite3.Error:
         return {}
@@ -1214,6 +1762,10 @@ def _served(
 ) -> dict[int, ClaudeUsage]:
     """What the cache answers for each account, from ``since`` on: the reading recorded with
     the token it holds now, or the failed fetch with that token, by :func:`_preferred`.
+
+    A remembered wait that has ended is not served: after a short ``Retry-After`` the row
+    said "rate-limited until" a time already past, and nothing was asked until the five
+    minutes were up (review of #408, n5).
     """
     recorded = _recorded_usage(accounts, tokens, since=since, now=now)
     served: dict[int, ClaudeUsage] = {}
@@ -1225,9 +1777,16 @@ def _served(
             failed = _UNANSWERED.get((str(account.config_dir), token))
         if failed is not None and (failed.fetched_at is None or failed.fetched_at < since):
             failed = None
+        if failed is not None and failed.rate_limited and _wait_over(failed, now):
+            failed = None
         if (answer := _preferred(recorded.get(account.slot), failed)) is not None:
             served[account.slot] = answer
     return served
+
+
+def _wait_over(reading: ClaudeUsage, now: datetime) -> bool:
+    """Whether the wait a rate-limited ``reading`` names has ended by ``now``."""
+    return reading.rate_limited_until is not None and reading.rate_limited_until <= now
 
 
 def _preferred(good: ClaudeUsage | None, failed: ClaudeUsage | None) -> ClaudeUsage | None:
@@ -1241,16 +1800,29 @@ def _preferred(good: ClaudeUsage | None, failed: ClaudeUsage | None) -> ClaudeUs
     answer: applied to the plain read alone, a forced refresh that failed showed the
     failure, and the next plain read showed the figure with no word of it (review of
     #261, m4, reopened).
+
+    A wait (``rate_limited``) marks the figure whatever order the two came in: a gated read
+    is stamped with the moment its 429 came back, so a reading another process recorded
+    just after that was served as live for the whole wait, with no age and no wait, and the
+    fleet's dot counted it (review of #408, MAJOR-1).
     """
     if failed is None or good is None:
         return good or failed
-    if failed.fetched_at is None or (
-        good.fetched_at is not None and failed.fetched_at <= good.fetched_at
+    if not failed.rate_limited and (
+        failed.fetched_at is None
+        or (good.fetched_at is not None and failed.fetched_at <= good.fetched_at)
     ):
         return good  # the latest try read it
     if failed.needs_login:
         return failed
-    return good.model_copy(update={"last_failed_at": failed.fetched_at})
+    return good.model_copy(
+        update={
+            "last_failed_at": failed.fetched_at,
+            "last_failed_reason": failed.reason,
+            "rate_limited": failed.rate_limited,
+            "rate_limited_until": failed.rate_limited_until,
+        }
+    )
 
 
 def cached_usage(
@@ -1294,7 +1866,7 @@ def cached_usage(
     readings = {} if force else _served(accounts, tokens, since=since, now=moment)
     stale = [account for account in accounts if account.slot not in readings]
     if not stale:
-        return {account.slot: readings[account.slot] for account in accounts}
+        return _with_last_good(accounts, readings, tokens, moment)
     with _fetching(stale, seen) as moved:
         if moved and not force:  # another call fetched meanwhile: what it read serves
             readings.update(_served(stale, tokens, since=since, now=moment))
@@ -1303,7 +1875,8 @@ def cached_usage(
         for account in stale:
             reading = fetched[account.slot]
             token = tokens.get(account.slot)
-            if not reading.available:
+            if not reading.available and not reading.rate_limited:
+                # A wait keeps the moment its 429 came back: nothing was tried now (N1).
                 reading = reading.model_copy(update={"fetched_at": moment})
             if token is not None:
                 with _UNANSWERED_LOCK:
@@ -1313,19 +1886,83 @@ def cached_usage(
                     else:
                         _UNANSWERED[key] = reading
             readings[account.slot] = reading
-        # A try that failed, forced or due, against a good reading still in the window:
-        # the same rule as a served read, so the row keeps its figure (_preferred).
-        failed = [
-            account
-            for account in stale
-            if not readings[account.slot].available and account.slot in tokens
-        ]
-        if failed:
-            recorded = _recorded_usage(failed, tokens, since=since, now=moment)
-            for account in failed:
-                answer = _preferred(recorded.get(account.slot), readings[account.slot])
-                readings[account.slot] = answer or readings[account.slot]
-    return {account.slot: readings[account.slot] for account in accounts}
+    return _with_last_good(accounts, readings, tokens, moment)
+
+
+def is_kept(reading: ClaudeUsage) -> bool:
+    """Whether ``reading`` is not a live one: a slot the endpoint asked to wait, or the last
+    good figure a failed read is showing (``last_failed_reason``). Shown, aged; never
+    picked by or counted in the fleet's dot unless fresh (review of #408, MAJ-1)."""
+    return reading.kept
+
+
+def _has_reset(reading: ClaudeUsage, now: datetime) -> bool:
+    """Whether any window of ``reading`` has reset by ``now``, a family week included (review
+    of #401, m2): the figure is over."""
+    resets = (
+        reading.session_resets_at,
+        reading.week_resets_at,
+        *reading.family_week_resets_at.values(),
+    )
+    return any(when is not None and when <= now for when in resets)
+
+
+def _without_reset_windows(reading: ClaudeUsage, now: datetime) -> ClaudeUsage:
+    """A kept reading with each window that has reset since emptied: its percentage
+    describes a window that is over, so it is shown as reset (``reset 1h ago``, the reset
+    time kept), never as the old figure with ``resets now`` (review of #408, MAJ-1)."""
+    update: dict[str, Any] = {}
+    for window in ("session", "week"):
+        when = getattr(reading, f"{window}_resets_at")
+        if when is not None and when <= now:
+            update[f"{window}_percent"] = None
+    over = {
+        family
+        for family, when in reading.family_week_resets_at.items()
+        if when <= now and family in reading.family_week_percent
+    }
+    if over:  # a family week that has reset since: its figure goes the same way
+        update["family_week_percent"] = {
+            family: percent
+            for family, percent in reading.family_week_percent.items()
+            if family not in over
+        }
+    return reading.model_copy(update=update) if update else reading
+
+
+def _with_last_good(
+    accounts: Sequence[ClaudeAccount],
+    readings: Mapping[int, ClaudeUsage],
+    tokens: Mapping[int, str],
+    moment: datetime,
+) -> dict[int, ClaudeUsage]:
+    """``readings`` in ``accounts``' order, each failed one replaced by the last good reading
+    on record for the token the slot holds, marked with the failure (:func:`_preferred`).
+
+    A try that failed — forced, due, gated by a back-off, or served from this process's
+    memory of one — keeps the row's figure at whatever age (F1 of #400): the reading is
+    shown with how old it is and why the newer try read nothing; ``—`` only when nothing
+    was ever read for this token. A failure that is about the token (``needs_login``) is
+    shown as it is: the figure belongs to a login that no longer reads.
+    """
+    shown = dict(readings)
+    failed = [
+        account
+        for account in accounts
+        if not readings[account.slot].available
+        and not readings[account.slot].needs_login
+        and account.slot in tokens
+    ]
+    if failed:
+        recorded = _recorded_usage(
+            failed, tokens, since=moment - LAST_GOOD_LOOKBACK, now=moment, current=False
+        )
+        for account in failed:
+            answer = _preferred(recorded.get(account.slot), shown[account.slot])
+            if answer is not None and answer.available:
+                answer = _without_reset_windows(answer, moment)
+            shown[account.slot] = answer or shown[account.slot]
+    return {account.slot: shown[account.slot] for account in accounts}
 
 
 def cached_usage_with_trends(
@@ -1343,12 +1980,18 @@ def cached_usage_with_trends(
     which every fetch here still records, in ONE store session after the
     readings. A store that cannot be opened costs the trends, never the
     readings.
+
+    A kept reading (:func:`is_kept`) has no trend: its pace, "≈ N min to the limit", was
+    worked out for a moment that can be hours ago (review of #408, n4).
     """
     readings = cached_usage(accounts, max_age=max_age, force=force, now=now, fetch=fetch)
     try:
         with store_session() as store:
             return {
-                slot: (reading, usage_trend(slot, reading, now=now, store=store))
+                slot: (
+                    reading,
+                    None if is_kept(reading) else usage_trend(slot, reading, now=now, store=store),
+                )
                 for slot, reading in readings.items()
             }
     except sqlite3.Error:
@@ -1372,17 +2015,25 @@ def usage_is_readable(status: ClaudeAccountStatus, reading: ClaudeUsage | None) 
 
 
 def describe_age(fetched_at: datetime, *, now: datetime | None = None) -> str:
-    """``just now`` / ``3m ago`` / ``2h ago``: how old a reading is, for a "refreshed …" line."""
+    """``just now`` / ``3m ago`` / ``2h ago`` / ``4d ago``: how old a reading is, for a
+    "refreshed …" line. Days from a day on: a kept reading can be a week old, and a full
+    account's ``▮▮▮▮▮ 100% · 100h`` did not fit its 16-wide cell (review of #408, n6)."""
     minutes = max(0, int(((now or _now()) - fetched_at).total_seconds() // 60))
     if minutes == 0:
         return "just now"
     if minutes < 60:
         return f"{minutes}m ago"
-    return f"{minutes // 60}h ago"
+    if minutes < 24 * 60:
+        return f"{minutes // 60}h ago"
+    return f"{minutes // (24 * 60)}d ago"
 
 
-def headroom_percent(reading: ClaudeUsage) -> float | None:
+def headroom_percent(reading: ClaudeUsage, family: str | None = None) -> float | None:
     """How full an account reads for a pick: the FULLER of its two windows, or ``None``.
+
+    Given the agent's model ``family`` (``core.harness.model_family``), that family's
+    week counts too (#277): an Opus limit refuses an Opus agent exactly as a weekly one
+    does, and refuses no other family's.
 
     A weekly limit refuses requests exactly as a five-hour one does, and an
     account that has spent its week builds no five-hour usage, so its
@@ -1397,12 +2048,16 @@ def headroom_percent(reading: ClaudeUsage) -> float | None:
     """
     if not reading.available or reading.session_percent is None:
         return None
-    if reading.week_percent is None:
-        return reading.session_percent
-    return max(reading.session_percent, reading.week_percent)
+    used = reading.session_percent
+    if reading.week_percent is not None:
+        used = max(used, reading.week_percent)
+    own = reading.family_week_percent.get(family) if family is not None else None
+    return used if own is None else max(used, own)
 
 
-def describe_headroom(account: ClaudeAccount, reading: ClaudeUsage) -> str:
+def describe_headroom(
+    account: ClaudeAccount, reading: ClaudeUsage, family: str | None = None
+) -> str:
     """``account 2 40% used (60% left)`` — ``account 2 5% used (week 100% used, 0% left)`` when
     the week is the fuller window.
 
@@ -1416,9 +2071,13 @@ def describe_headroom(account: ClaudeAccount, reading: ClaudeUsage) -> str:
     session = reading.session_percent
     if session is None:
         return name
-    left = percent_left(reading)
+    left = percent_left(reading, family)
     spare = "" if left is None else f"{left:.0f}% left"
     week = reading.week_percent
+    own = reading.family_week_percent.get(family) if family is not None else None
+    if own is not None and own > session and (week is None or own > week):
+        detail = f"{family} week {own:.0f}% used" + (f", {spare}" if spare else "")
+        return f"{name} {session:.0f}% used ({detail})"
     if week is not None and week > session:
         detail = f"week {week:.0f}% used" + (f", {spare}" if spare else "")
         return f"{name} {session:.0f}% used ({detail})"
@@ -1433,9 +2092,10 @@ HEADROOM_LOW_FROM = 5.0
 """From this share left up to :data:`HEADROOM_FAIR_FROM`, ``low``; over 0 below it, ``critical``."""
 
 
-def percent_left(reading: ClaudeUsage) -> float | None:
-    """The share of an account LEFT for a pick: ``100 - max(session used, week used)``, 0-100."""
-    used = headroom_percent(reading)
+def percent_left(reading: ClaudeUsage, family: str | None = None) -> float | None:
+    """The share of an account LEFT for a pick: ``100 - max(session used, week used)``, 0-100
+    (and the ``family`` week's, given one: :func:`headroom_percent`)."""
+    used = headroom_percent(reading, family)
     return None if used is None else min(100.0, max(0.0, 100.0 - used))
 
 
@@ -1453,7 +2113,10 @@ def headroom_level(left: float | None) -> HeadroomLevel:
 
 
 def fleet_headroom(
-    accounts: Sequence[ClaudeAccount], readings: Mapping[int, ClaudeUsage]
+    accounts: Sequence[ClaudeAccount],
+    readings: Mapping[int, ClaudeUsage],
+    *,
+    now: datetime | None = None,
 ) -> HeadroomSummary:
     """How much room the fleet has LEFT, from readings already taken. Pure: no disk, no network.
 
@@ -1475,7 +2138,10 @@ def fleet_headroom(
 
     ``accounts`` are the accounts to summarise (disabled ones are skipped);
     ``readings`` is slot → reading, and an account without one has not been
-    read yet.
+    read yet. A kept reading (:func:`is_kept`: the last good figure a failed read
+    shows) counts only while it is under :data:`USAGE_MAX_AGE_SECONDS` old at
+    ``now``; an older one is not the fleet's room (review of #408, MAJ-1). Its
+    windows that have reset are already empty (``_without_reset_windows``).
     """
     enabled = [account for account in accounts if not account.disabled]
     read = [readings[account.slot] for account in enabled if account.slot in readings]
@@ -1487,10 +2153,13 @@ def fleet_headroom(
     left_by_slot: dict[int, float] = {}
     session_by_slot: dict[int, float] = {}
     taken: list[datetime] = []
+    oldest = (now or _now()) - timedelta(seconds=USAGE_MAX_AGE_SECONDS)
     for account in enabled:
         reading = readings.get(account.slot)
         left = percent_left(reading) if reading is not None else None
         if reading is None or left is None or reading.session_percent is None:
+            continue
+        if is_kept(reading) and (reading.fetched_at is None or reading.fetched_at < oldest):
             continue
         left_by_slot[account.slot] = left
         session_by_slot[account.slot] = reading.session_percent
@@ -1529,7 +2198,108 @@ def read_fleet_headroom(
         if not account.disabled and core.signed_in(account)
     ]
     readings = cached_usage(candidates, max_age=max_age, force=force, now=now, fetch=fetch)
-    return fleet_headroom(candidates, readings)
+    return fleet_headroom(candidates, readings, now=now)
+
+
+# --- the refusal memory (#277) -------------------------------------------------------------------
+#
+# A 429 is an answer the usage endpoint may not give: a family week it does not send, a
+# window it reads under the line while the account refuses. So every ``rate_limit``
+# StopFailure leaves a mark in ``team_meta`` — ``account_limit:<slot>:<window>`` = the reset
+# the message named — and :func:`headroom_choice` skips an account whose mark is still in
+# the future: always for the windows every model shares (``session``, ``weekly``), and for a
+# family's (``opus``, ``sonnet``) when the agent is of that family. No migration: a mark is
+# a ``team_meta`` row, and one whose reset has passed is simply not read.
+
+LIMIT_MARK_PREFIX = "account_limit:"
+"""``team_meta`` key prefix of a limit mark: ``account_limit:<slot>:<window>``."""
+
+
+@dataclass(frozen=True)
+class LimitMark:
+    """One remembered limit: the account refused (``how = "refused"``) or a live reading saw
+    a family week spent (``"read"``) at ``at``, until ``until``."""
+
+    slot: int
+    window: str
+    until: datetime
+    at: datetime
+    how: str = "refused"
+
+    def blocks(self, family: str | None) -> bool:
+        """Whether it shuts the account to an agent of ``family``: a window every model
+        shares blocks everyone; a family's only that family (an unknown word is shared)."""
+        return self.window not in _FAMILIES or self.window == family
+
+    def describe(self, *, now: datetime) -> str:
+        """``weekly limit until Mon 00:00 (in 2d 4h), refused 10:42``."""
+        until = self.until.astimezone()
+        at = self.at.astimezone().strftime("%H:%M")
+        distance = core.format_reset(self.until, now=now, clock=False)
+        return (
+            f"{self.window} limit until {until.strftime('%a %H:%M')} ({distance}), {self.how} {at}"
+        )
+
+
+def _write_limit(
+    store: ContextStore,
+    slot: int,
+    window: str,
+    until: datetime,
+    *,
+    how: str,
+    now: datetime | None = None,
+) -> None:
+    value = {"until": until.isoformat(), "at": (now or _now()).isoformat(), "how": how}
+    store.set_meta(f"{LIMIT_MARK_PREFIX}{slot}:{window.lower()}", json.dumps(value))
+
+
+def remember_limit(
+    slot: int | None,
+    window: str | None,
+    until: datetime | None,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Remember that account ``slot`` refused with a ``window`` limit lifting at ``until``.
+
+    Called on every ``rate_limit`` StopFailure (``services.hooks.turn_failed``). Nothing
+    to remember without all three: a 429 that names no reset (an API key's throttle)
+    leaves no mark, as it leaves no reset on the row. Best effort: a store that cannot be
+    written costs the memory, never the hook.
+    """
+    if slot is None or not window or until is None:
+        return
+    with contextlib.suppress(sqlite3.Error), store_session() as store:
+        _write_limit(store, slot, window, until, how="refused", now=now)
+
+
+def limit_marks(*, now: datetime | None = None) -> dict[int, list[LimitMark]]:
+    """Every limit mark still in force at ``now``, by slot; ``{}`` when the store cannot be
+    read (a pick then reads usage as it did before #277)."""
+    moment = now or _now()
+    try:
+        with store_session() as store:
+            rows = store.list_meta(LIMIT_MARK_PREFIX)
+    except sqlite3.Error:
+        return {}
+    marks: dict[int, list[LimitMark]] = {}
+    for key, raw in rows.items():
+        slot_text, _, window = key.removeprefix(LIMIT_MARK_PREFIX).partition(":")
+        try:
+            data = json.loads(raw)
+            mark = LimitMark(
+                slot=int(slot_text),
+                window=window,
+                until=datetime.fromisoformat(data["until"]),
+                at=datetime.fromisoformat(data["at"]),
+                how=str(data.get("how", "refused")),
+            )
+        except (ValueError, KeyError, TypeError):
+            continue
+        if mark.until > moment:
+            marks.setdefault(mark.slot, []).append(mark)
+    return marks
 
 
 _NOTHING_TO_PICK = "headroom: no enabled, signed-in account to pick from"
@@ -1556,8 +2326,16 @@ def headroom_choice(
     now: datetime | None = None,
     least_bad: bool = True,
     max_age: float | None = None,
+    family: str | None = None,
+    prefer: str = "priority",
 ) -> tuple[ClaudeAccount | None, list[str]]:
     """The account with headroom, and the notes that say how it was picked.
+
+    ``family`` is the agent's model family, when known: that family's week counts
+    (:func:`headroom_percent`), and so does its limit mark. An account with a limit
+    mark still in force (:func:`limit_marks`) is skipped with a note and never read.
+    ``prefer = "reset-soonest"`` takes, among the accounts under ``switch_at``, the one
+    whose week resets first, priority breaking ties (#277).
 
     ``least_bad=False`` withholds the "every account is over the line, take
     the one with the most room" answer: right for a spawn, it is what made two
@@ -1579,6 +2357,12 @@ def headroom_choice(
     still has a least bad answer. An account whose usage cannot be read is
     skipped and named; ``None`` when nothing could be measured, so the
     caller's next rung decides.
+
+    An account the usage endpoint asked to wait (F1 of #400) is not asked
+    again, by a launch or a hand-over: the pick decides by its newest reading
+    recorded in the last :data:`USAGE_MAX_AGE_SECONDS`, and says so, or skips
+    it with a note naming the wait when that reading is older or missing. The
+    cache's older figure, shown on the page with its age, is never picked by.
     """
     skip = set(exclude)
     candidates = [
@@ -1588,18 +2372,101 @@ def headroom_choice(
     ]
     if not candidates:
         return None, [_NOTHING_TO_PICK]
+    moment = now or _now()
+    marks = limit_marks(now=moment)
+    notes: list[str] = []
+    open_ones: list[ClaudeAccount] = []
+    for account in candidates:
+        mark = next((m for m in marks.get(account.slot, []) if m.blocks(family)), None)
+        if mark is None:
+            open_ones.append(account)
+        else:
+            notes.append(f"headroom: {core.label(account)} skipped — {mark.describe(now=moment)}")
+    if not open_ones:
+        notes.append("headroom: every account is at a limit it named — the default decides")
+        return None, notes
+    candidates = open_ones
     if max_age is None:
         readings = read_usage(candidates, now=now, fetch=fetch)
     elif len(candidates) == 1 and least_bad:
-        return candidates[0], _over_the_line(candidates[0], switch_at, now=now)
+        return candidates[0], [*notes, *_over_the_line(candidates[0], switch_at, now=now)]
     else:
         readings = cached_usage(candidates, max_age=max_age, now=now, fetch=fetch)
+    readings = dict(readings)
+    # A kept reading — the last good figure a failed read shows (F1 of #400), or a slot the
+    # endpoint asked to wait — is never taken for a live one: the pick decides by it only
+    # while it is inside the pick's own window and neither window has reset since, and
+    # otherwise skips it with a note that says how old it is (review of #408, MAJ-1).
+    # A hand-over reads live, so its failure arrives bare (no kept figure on it): the same
+    # rule applies to the reading on record behind it.
+    kept = [
+        account
+        for account in candidates
+        if is_kept(readings[account.slot])
+        or not (readings[account.slot].available or readings[account.slot].needs_login)
+    ]
+    if kept:
+        moment = now or _now()
+        window = timedelta(seconds=max_age if max_age is not None else USAGE_MAX_AGE_SECONDS)
+        tokens = {
+            account.slot: token
+            for account in kept
+            if (token := _token_fingerprint(account, moment)) is not None
+        }
+        on_record = _recorded_usage(
+            kept, tokens, since=moment - LAST_GOOD_LOOKBACK, now=moment, current=False
+        )
+        for account in kept:
+            reading = readings[account.slot]
+            why = (
+                rate_limited_until_text(reading.rate_limited_until)
+                if reading.rate_limited
+                else reading.last_failed_reason or reading.reason or "the last read failed"
+            )
+            last = on_record.get(account.slot)
+            taken = last.fetched_at if last is not None else None
+            if (
+                last is not None
+                and taken is not None
+                and taken >= moment - window
+                and not (_has_reset(last, moment))
+            ):
+                readings[account.slot] = last
+                notes.append(
+                    f"headroom: {core.label(account)} {why} — picked by its reading from "
+                    f"{describe_age(taken, now=moment)}"
+                )
+                continue
+            if taken is None and not is_kept(reading):
+                continue  # a bare failure with nothing on record: its own reason says it all
+            if taken is None:
+                age = "no reading on record to pick by"
+            elif last is not None and _has_reset(last, moment):
+                age = (
+                    f"its last reading is from {describe_age(taken, now=moment)}, "
+                    "and a window has reset since"
+                )
+            else:
+                age = (
+                    f"its last reading is from {describe_age(taken, now=moment)}, "
+                    "too old to pick by"
+                )
+            readings[account.slot] = ClaudeUsage(
+                available=False,
+                reason=f"{why}; {age}",
+                rate_limited=reading.rate_limited,
+                rate_limited_until=reading.rate_limited_until,
+            )
     measured: list[tuple[ClaudeAccount, float]] = []
-    notes: list[str] = []
     for account in candidates:
         reading = readings[account.slot]
-        percent = headroom_percent(reading)
-        if percent is not None:
+        percent = headroom_percent(reading, family)
+        own = reading.family_week_percent.get(family) if family is not None else None
+        if own is not None and own >= 100:
+            # Spent for this agent's family: it refuses the first request, so it is no
+            # answer at all, not even the least bad one a switch by hand takes (P0-W3c).
+            notes.append(f"headroom: {core.label(account)} skipped — its {family} week is spent")
+        elif percent is not None:
             measured.append((account, percent))
         else:
             notes.append(
@@ -1608,8 +2475,18 @@ def headroom_choice(
     if not measured:
         notes.append("headroom: no account's usage could be read — the default decides")
         return None, notes
-    summary = " · ".join(describe_headroom(a, readings[a.slot]) for a, _pct in measured)
-    under = next((a for a, pct in measured if pct < switch_at), None)
+    summary = " · ".join(describe_headroom(a, readings[a.slot], family) for a, _pct in measured)
+    under_line = [a for a, pct in measured if pct < switch_at]
+    if prefer == "reset-soonest" and len(under_line) > 1:
+        never = datetime.max.replace(tzinfo=UTC)
+        soonest = min(under_line, key=lambda a: readings[a.slot].week_resets_at or never)
+        if soonest is not under_line[0]:
+            notes.append(
+                f"headroom: {summary} — {core.label(soonest)}'s week resets first of those "
+                f"under the {switch_at}%-used line (prefer = reset-soonest)"
+            )
+            return soonest, notes
+    under = under_line[0] if under_line else None
     if under is not None:
         notes.append(
             f"headroom: {summary} — {core.label(under)} is first under the {switch_at}%-used line"
@@ -1660,8 +2537,13 @@ def choose_for_handover(
     exclude: Iterable[int],
     automatic: bool = False,
     fetch: Fetch | None = None,
+    family: str | None = None,
 ) -> AccountChoice:
     """The target of a hand-over: HEADROOM FIRST; the ladder only when nothing can be measured.
+
+    ``family`` is the agent's model family (its session's model), so an account whose
+    week for that family is spent, or that refused it with that family's limit, is no
+    target (#277).
 
     A switch exists to move an agent to the account with room, so the binding
     and project-default rungs — explicit choices for a *launch* — do not get to
@@ -1672,8 +2554,9 @@ def choose_for_handover(
     (no least-bad answer, see :func:`headroom_choice`) and otherwise refuses,
     which leaves the agent parked with Claude Code's own wait intact; a manual
     switch keeps the least-bad answer and, when no usage can be read at all,
-    falls back to the ladder minus the account being left. Either reads every
-    candidate's usage live, never from the cache a launch uses: it is moving an
+    falls back to the ladder minus the account being left — and minus an account
+    with a limit mark still in force for the agent (#277): only ``--to`` names one.
+    Either reads every candidate's usage live, never from the cache a launch uses: it is moving an
     agent off an account that just filled, and a figure even a minute old could
     send it to another that has filled since.
 
@@ -1698,13 +2581,32 @@ def choose_for_handover(
         exclude=skip,
         fetch=fetch,
         least_bad=not automatic,
+        family=family,
+        prefer=settings.prefer,
     )
     notes.extend(more)
     if picked is not None:
         return AccountChoice(picked, "headroom", notes)
     if automatic:
         return AccountChoice(None, None, notes)
-    fallback = choose(None, role=role, project=project, exclude=skip, spread=False, fetch=fetch)
+    fallback = choose(
+        None, role=role, project=project, exclude=skip, spread=False, fetch=fetch, family=family
+    )
+    # The ladder's rungs read no marks: on a hand-over they are not a choice someone made for
+    # THIS move, and with every other account marked the machine default moved the agent
+    # back onto the account that had just refused it (review of #304, reviewer-a, major 2).
+    # Only `--to` (``explicit``, above) may name a marked account.
+    if fallback.account is not None:
+        moment = _now()
+        mark = next(
+            (m for m in limit_marks(now=moment).get(fallback.account.slot, []) if m.blocks(family)),
+            None,
+        )
+        if mark is not None:
+            said = f"{core.label(fallback.account)} ({fallback.source}) skipped — "
+            return AccountChoice(
+                None, None, [*notes, *fallback.notes, said + mark.describe(now=moment)]
+            )
     return AccountChoice(fallback.account, fallback.source, [*notes, *fallback.notes])
 
 
@@ -2136,7 +3038,7 @@ def share_for_launch(
     """
     try:
         knobs = accounts_settings()
-        if not (knobs.share_trust or knobs.share_settings):
+        if not (knobs.share_trust or knobs.share_settings or knobs.share):
             return []
         accounts = list_accounts()
         if len(accounts) < 2:
@@ -2158,6 +3060,7 @@ def share_for_launch(
             notes += _share_trust_into(target, scope, accounts)
         if knobs.share_settings and target.managed:
             notes += _share_settings_into(target)
+        notes += _share_parts_into(target)
         return notes
     except Exception as exc:  # an observer of the launch: it costs the sharing, never the launch
         return [f"nothing was shared into this launch's account ({exc})"]
@@ -2389,3 +3292,197 @@ def unshare_settings() -> tuple[Path, list[SettingsChange]]:
         state = sharing.settings_state(account, source)
         changes.append(SettingsChange(account, "unshared" if unlinked else state))
     return source, changes
+
+
+# --- [accounts] share: memory, skills, agents, commands, CLAUDE.md, plugins (P2-W7) -------
+
+
+@dataclass(frozen=True)
+class PartChange:
+    """What ``accounts share`` did to one part on one account, or what it holds there."""
+
+    account: ClaudeAccount
+    part: sharing.SharePart
+    outcome: Literal[
+        "linked",
+        "already",
+        "unlinked",
+        "restored",
+        "refused",
+        "failed",
+        "shared",
+        "own",
+        "none",
+        "elsewhere",
+        "merged",
+    ]
+    detail: str | None = None
+    """The kept copy's name, the reason a part was refused, or what a memory merge noted."""
+
+    def as_json(self) -> dict[str, object]:
+        return {
+            "slot": self.account.slot,
+            "account": core.label(self.account),
+            "part": self.part,
+            "outcome": self.outcome,
+            "detail": self.detail,
+        }
+
+
+def shared_memory_root() -> Path:
+    """Where ``memory`` keeps each project's auto memory: under the aisquare home, outside
+    every ``.claude`` path on purpose (anthropics/claude-code#98044: since 2.1.280 every
+    auto-memory write prompts when it lands under a linked ``.claude`` directory)."""
+    return paths.aisquare_home() / "claude-shared" / "memory"
+
+
+def memory_settings_args(cwd: Path) -> list[str]:
+    """``--settings`` pointing Claude Code's auto memory at the shared directory for the
+    project in ``cwd``, when ``[accounts] share`` names ``memory``; else nothing.
+
+    ``autoMemoryDirectory`` is read from any settings scope, ``--settings`` included
+    (Claude Code, Memory). Every launch gets it, the plain claude's too, so all of them
+    read and write one directory per project."""
+    try:
+        if "memory" not in accounts_settings().share:
+            return []
+    except Exception:  # an unreadable config shares nothing
+        return []
+    directory = shared_memory_root() / sharing.memory_key(cwd)
+    return ["--settings", json.dumps({"autoMemoryDirectory": str(directory)})]
+
+
+def share_status() -> list[PartChange]:
+    """What every account holds for every part: the linked parts per managed slot, and
+    ``memory`` as on (``shared``) or off (``none``) for the machine."""
+    knobs = accounts_settings()
+    source = core.default_account().config_dir
+    held: list[PartChange] = []
+    for account in list_accounts():
+        for part in sharing.SHARE_PARTS:
+            if part == "memory":
+                held.append(
+                    PartChange(account, part, "shared" if "memory" in knobs.share else "none")
+                )
+            elif account.managed:
+                held.append(
+                    PartChange(account, part, sharing.part_state(account.config_dir, part, source))
+                )
+    return held
+
+
+def enable_share(
+    parts: Sequence[sharing.SharePart], *, now: datetime | None = None
+) -> list[PartChange]:
+    """Turn ``parts`` on: write them into ``[accounts] share`` and apply them now.
+
+    Linked parts link every managed slot's entry (its own kept beside it); one linked
+    anywhere else is refused and left as it is. ``memory`` merges every account's
+    ``projects/<key>/memory/`` into the shared directory the first time it is turned on
+    (nothing overwritten; a file that differs is kept as ``<name>.slot<N>.md``).
+    Idempotent: a part already on changes nothing.
+    """
+    config = load_config()
+    first_memory = "memory" in parts and "memory" not in config.accounts.share
+    config.accounts.share = list(dict.fromkeys([*config.accounts.share, *parts]))
+    save_config(config)
+    moment = now or _now()
+    source = core.default_account().config_dir
+    changes: list[PartChange] = []
+    for part in parts:
+        if part == "memory":
+            changes += _merge_memory() if first_memory else []
+            continue
+        for account in list_accounts():
+            if account.managed:
+                changes.append(_link_part(account, part, source, moment))
+    return changes
+
+
+def disable_share(parts: Sequence[sharing.SharePart]) -> list[PartChange]:
+    """Turn ``parts`` off: out of ``[accounts] share``, and every linked entry back to the
+    slot's own copy (the one :func:`enable_share` kept), exactly as it was. ``memory``
+    stops being passed to launches; the shared directory stays where it is."""
+    config = load_config()
+    config.accounts.share = [part for part in config.accounts.share if part not in parts]
+    save_config(config)
+    source = core.default_account().config_dir
+    changes: list[PartChange] = []
+    for part in parts:
+        if part == "memory":
+            continue
+        for account in list_accounts():
+            if not account.managed:
+                continue
+            was = sharing.part_state(account.config_dir, part, source)
+            if was != "shared":  # nothing of ours to undo: say what it holds
+                changes.append(PartChange(account, part, was))
+                continue
+            try:
+                restored = sharing.unlink_part(account.config_dir, part, source)
+            except OSError as exc:
+                changes.append(PartChange(account, part, "failed", exc.strerror or str(exc)))
+                continue
+            if restored is not None:
+                changes.append(PartChange(account, part, "restored", restored.name))
+            else:
+                changes.append(PartChange(account, part, "unlinked"))
+    return changes
+
+
+def _link_part(
+    account: ClaudeAccount, part: sharing.SharePart, source: Path, now: datetime
+) -> PartChange:
+    if sharing.part_state(account.config_dir, part, source) == "shared":
+        return PartChange(account, part, "already")
+    try:
+        kept = sharing.link_part(account.config_dir, part, source, now=now)
+    except sharing.SharingError as exc:
+        return PartChange(account, part, "refused", str(exc))
+    except OSError as exc:
+        return PartChange(account, part, "failed", exc.strerror or str(exc))
+    return PartChange(account, part, "linked", kept.name if kept is not None else None)
+
+
+def _merge_memory() -> list[PartChange]:
+    """Every account's per-project memory into the shared root, once (:func:`enable_share`)."""
+    root = shared_memory_root()
+    changes: list[PartChange] = []
+    accounts = list_accounts()
+    keys = sorted(
+        {
+            memory.parent.name
+            for account in accounts
+            for memory in (account.config_dir / "projects").glob("*/memory")
+            if memory.is_dir()
+        }
+    )
+    for key in keys:
+        sources = [
+            (f"slot{account.slot}", account.config_dir / "projects" / key / "memory")
+            for account in accounts
+        ]
+        by_label = {f"slot{account.slot}": account for account in accounts}
+        for label, note in sharing.merge_memory(sources, root / key):
+            changes.append(PartChange(by_label[label], "memory", "merged", f"{key}: {note}"))
+    return changes
+
+
+def _share_parts_into(target: ClaudeAccount) -> list[str]:
+    """``[accounts] share`` at a launch: link the parts ``target`` does not have yet (a slot
+    made after they were turned on), saying what changed or why it could not."""
+    knobs = accounts_settings()
+    linked = [part for part in knobs.share if part in sharing.LINKED_PARTS]
+    if not linked or not target.managed:
+        return []
+    source = core.default_account().config_dir
+    notes: list[str] = []
+    for part in linked:
+        change = _link_part(target, part, source, _now())
+        name = core.label(target)
+        if change.outcome == "linked":
+            kept = f" (its own kept as {change.detail})" if change.detail else ""
+            notes.append(SharedNote(f"{name} now shares the plain claude's {part}{kept}"))
+        elif change.outcome in ("refused", "failed"):
+            notes.append(f"{part} is not shared into {name}: {change.detail}")
+    return notes

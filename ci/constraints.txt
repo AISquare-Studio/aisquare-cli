@@ -1,6 +1,6 @@
 # The lint and type-check tools, pinned for CI and for local venvs alike:
-#   pip install -c ci/constraints.txt -e ".[dev]"     (what `make install` and CI run)
-#   uv pip install -c ci/constraints.txt -e ".[dev]"
+#   pip install -c ci/constraints.txt -e ".[dev]"     (what `make install` runs)
+#   uv pip install -c ci/constraints.txt -e ".[dev]"  (what ci.yml runs, with --system)
 #
 # `.[dev]` asks for ruff>=0.5 and mypy>=1.10, so every install resolved the newest
 # release, and a new release could turn lint or the type check red on a tree nobody
@@ -10,3 +10,10 @@
 # Move them on purpose, in a commit of their own, with a green run.
 ruff==0.17.0
 mypy==2.4.0
+
+# The TLS trust (#403): what uv.lock holds, so CI verifies HTTPS with the versions a uv
+# sync gets. ci.yml installs with `uv pip install` and installers-check.yml with pip, and
+# neither reads uv.lock: pip resolved truststore 0.10.5 against the lock's 0.10.4 (review
+# of #403, n8). Both installs take this file. Move them with the lock.
+truststore==0.10.4
+certifi==2026.10.19

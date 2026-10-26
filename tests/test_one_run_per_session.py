@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shlex
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -772,7 +773,9 @@ def test_a_malformed_gateway_url_keeps_the_launch_fail_open(bad_url: str) -> Non
 @pytest.mark.parametrize(
     "bad_url", ["https://gateway.example:badport", "https://gateway example/ingest"]
 )
-def test_an_http_client_rejected_url_is_a_failed_receipt(bad_url: str) -> None:
+def test_an_http_client_rejected_url_is_a_failed_receipt(
+    bad_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Review of #107, round 4: `http.client.InvalidURL` (a nonnumeric port, an
     unescaped space) is raised by urllib BEFORE any network call and is not a
     `URLError`, so it escaped `_request()` and aborted the launch."""
@@ -782,11 +785,10 @@ def test_an_http_client_rejected_url_is_a_failed_receipt(bad_url: str) -> None:
     assert verdict.ok is False and verdict.status is None
     assert "unreachable" in verdict.detail or "not a usable URL" in verdict.detail
 
-    wiring = wire_session(
-        _settings(), "coder", session_id="sess-1", api_key="k", gateway_url=bad_url, prober=_healthy
-    )
-    assert wiring.traced is True and wiring.owns_trace is False
-    assert "X-Pipeline-Id: sess-1" in wiring.env["ANTHROPIC_CUSTOM_HEADERS"]
+    # The post runs in the detached worker now (#129 e): there it is a verdict too,
+    # and a 4xx-free failure retried, never an exception.
+    monkeypatch.setattr(ops, "_root_retry_sleep", lambda _s: None)
+    assert ops.post_run_root(bad_url, "k", "aisquare-coder", "sess-1").ok is False
 
 
 def _truncated(
@@ -843,15 +845,10 @@ def test_a_truncated_gateway_response_is_a_failed_receipt_not_an_exception(
     verdict = ops.open_run_root("https://gateway.example", "k", "aisquare-coder", "sess-1")
     assert verdict.ok is False and verdict.status == 503
 
-    wiring = wire_session(
-        _settings(),
-        "coder",
-        session_id="sess-1",
-        api_key="k",
-        gateway_url="https://gateway.example",
-        prober=_healthy,
-    )
-    assert wiring.traced is True and wiring.owns_trace is False, "the launch stays fail-open"
+    # ...and in the detached worker that makes the post now (#129 e), retried and
+    # still a verdict: the launch it posts for has long started.
+    monkeypatch.setattr(ops, "_root_retry_sleep", lambda _s: None)
+    assert ops.post_run_root("https://gateway.example", "k", "aisquare-coder", "sess-1").ok is False
 
 
 @pytest.mark.parametrize(
@@ -885,15 +882,8 @@ def test_a_stalled_or_reset_error_body_is_a_failed_receipt_with_its_status(
     assert accepted.ok is True and accepted.status == 202
 
     monkeypatch.setattr(ops, "urlopen", _raise_503)
-    wiring = wire_session(
-        _settings(),
-        "coder",
-        session_id="sess-1",
-        api_key="k",
-        gateway_url="https://gateway.example",
-        prober=_healthy,
-    )
-    assert wiring.traced is True and wiring.owns_trace is False, "the launch stays fail-open"
+    monkeypatch.setattr(ops, "_root_retry_sleep", lambda _s: None)
+    assert ops.post_run_root("https://gateway.example", "k", "aisquare-coder", "sess-1").ok is False
 
 
 def test_the_sdk_inbox_lives_in_our_home_not_the_cwd(
@@ -1332,6 +1322,9 @@ def test_the_printed_spawn_command_owns_its_run_through_a_real_shell(
         with healthy_proxy() as proxy_url:
             _owning_machine(proxy_url=proxy_url, gateway_url=gateway_url)
             code, stderr, seen = _paste(_printed_spawn(runner), tmp_path)
+        # The root is posted by a detached worker off the launch path (#129 e):
+        # the agent started without it, and it lands moments later.
+        _wait_for(lambda: any(hit["path"] == "/v1/traces/ingest" for hit in posted))
     finally:
         server.shutdown()
 
@@ -1354,27 +1347,41 @@ def test_the_printed_spawn_command_owns_its_run_through_a_real_shell(
 
 
 def test_the_printed_spawn_command_still_launches_when_the_gateway_refuses(
-    runner: CliRunner, tmp_path: Path
+    runner: CliRunner, tmp_path: Path, isolated_home: Path
 ) -> None:
     """The paste path's fail-open, for real: the gateway says no, the agent
-    still starts — traced on the pre-ownership form, no run key exported."""
+    still starts. Since #129 (e) it starts BEFORE the gateway is asked: the
+    detached worker gets the 409, does not retry an answer, and leaves the
+    reason in the root log, since it has no terminal to say it on."""
     from tests.proxy_stub import healthy_proxy
     from tests.test_explainability_ops import _gateway
 
-    server, gateway_url, _ = _gateway({"/v1/traces/ingest": (409, {"detail": "not registered"})})
+    server, gateway_url, posted = _gateway(
+        {"/v1/traces/ingest": (409, {"detail": "not registered"})}
+    )
+    log = isolated_home / "log" / "explainability-root.log"
     try:
         with healthy_proxy() as proxy_url:
             _owning_machine(proxy_url=proxy_url, gateway_url=gateway_url)
             code, stderr, seen = _paste(_printed_spawn(runner), tmp_path)
+        _wait_for(lambda: log.is_file() and "HTTP 409" in log.read_text(encoding="utf-8"))
     finally:
         server.shutdown()
 
     assert code == 0, stderr
-    assert f"X-Pipeline-Id: {seen['pipeline']}" in seen["headers"]
-    assert "traceparent" not in seen["headers"]
-    assert seen["run"] == "", "a key nobody posted would misfile the hook's join"
     assert f"--session-id {seen['pipeline']}" in seen["argv"]
-    assert "root not posted" in stderr, stderr
+    assert "root posting in the background" in stderr, stderr
+    assert [hit["path"] for hit in posted].count("/v1/traces/ingest") == 1, "an answer: no retry"
+    assert f"pipeline {seen['pipeline']}" in log.read_text(encoding="utf-8")
+
+
+def _wait_for(condition: Callable[[], bool], seconds: float = 20.0) -> None:
+    import time
+
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, "the detached root worker never got there"
+        time.sleep(0.05)
 
 
 def test_spawn_exec_still_posts_the_root_it_is_about_to_fill(

@@ -10,7 +10,13 @@ from pydantic import ValidationError
 
 from aisquare.core import config as core_config
 from aisquare.core import paths
-from aisquare.core.config import AppConfig, RoleLaunchProfile, load_config, save_config
+from aisquare.core.config import (
+    AppConfig,
+    RoleLaunchProfile,
+    UiSettings,
+    load_config,
+    save_config,
+)
 from aisquare.models import RedactionLevel
 
 
@@ -32,6 +38,16 @@ def reset_settings() -> Path | None:
     ``core.config.reset_config``.
     """
     return core_config.reset_config()
+
+
+def ui_settings() -> UiSettings:
+    """The ``[ui]`` section; defaults when the config is unreadable (fail-open), as
+    ``fleet.settings`` reads ``[fleet]``: a broken file costs a display preference, never
+    the UI."""
+    try:
+        return load_config().ui
+    except Exception:
+        return UiSettings()
 
 
 def anything_to_reset() -> bool:
@@ -60,6 +76,18 @@ def set_value(key: str, value: str) -> str:
         raise ValueError(f"invalid value for {key!r}: {value!r}") from exc
     save_config(config)
     return get_value(key)
+
+
+def what_it_changes(key: str, stored: str) -> str | None:
+    """One line on what a change does, for a key whose name says less than it means:
+    ``capture.enabled`` off stops storing prompts but not the board or the CI experiment
+    (#268). ``None`` for every other key."""
+    if key == "capture.enabled" and stored == "false":
+        return (
+            "Prompts are no longer stored or spooled; turn metrics (no text), teammate "
+            "updates and the CI experiment, if you turned it on, carry on."
+        )
+    return None
 
 
 def set_redaction(level: RedactionLevel) -> str:
@@ -192,9 +220,9 @@ def _assign(data: dict[str, Any], key: str, value: str) -> None:
         node = node[part]
     if not isinstance(node, dict) or parts[-1] not in node:
         raise KeyError(key)
-    # A list-valued key takes its items comma-separated — the shape repomix's own
-    # `--ignore` uses, and the one `config get` prints for it — so a list can be
-    # set from a shell at all; pydantic would refuse the bare string.
+    # A list-valued key takes its items comma-separated — the shape `config get`
+    # prints for it — so a list can be set from a shell at all; pydantic would
+    # refuse the bare string.
     node[parts[-1]] = _split_list(value) if isinstance(node[parts[-1]], list) else value
 
 

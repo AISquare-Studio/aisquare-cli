@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import sys
+import traceback
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -23,6 +25,7 @@ from aisquare.core.state import get_state
 from aisquare.core.version import __version__
 from aisquare.services import install_route
 from aisquare.services import lifecycle as lifecycle_service
+from aisquare.services import updates as updates_service
 
 
 def _stdin_is_a_terminal() -> bool:
@@ -78,6 +81,8 @@ def _plan_json(plan: lifecycle_service.UpgradePlan) -> dict[str, Any]:
         "remote": plan.remote,
         # The roles a move back ignores the file-bound variables of, each with its keys.
         "env_files_dropped": list(plan.env_files_dropped),
+        # The roles a move back launches with tools their safety list denies here.
+        "tools_regained": list(plan.tools_regained),
         # The settings a move back reads from that release's defaults, not this one's.
         "config_defaults_lost": list(plan.config_defaults_lost),
     }
@@ -196,18 +201,26 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
     _fleet_lines(plan)
 
 
-def _fleet_lines(plan: lifecycle_service.UpgradePlan) -> None:
+def _fleet_lines(plan: lifecycle_service.UpgradePlan, *, one_click: bool = False) -> None:
     """The live fleet, a Remote on elsewhere, the role bindings a move back ignores and what
     it reads otherwise in config.toml, said before anything is installed: in the plan, and
-    under --yes."""
-    if plan.fleet_warning is not None:
+    under --yes.
+
+    Under ``--one-click`` the fleet and a Remote on elsewhere are said as facts, with no advice
+    to stop, shut down or turn off anything: keeping the agents running is what asq's ⬆ update
+    is for, and its dialog said so before the press (review of #301)."""
+    if one_click:
+        _one_click_lines(plan)
+    elif plan.fleet_warning is not None:
         _say(f"⚠ {plan.fleet_warning}")
     elif plan.fleet_error is not None:
         _say(f"⚠ the fleet's agents could not be counted ({plan.fleet_error}); make sure none run")
-    if plan.remote_warning is not None:
+    if plan.remote_warning is not None and not one_click:
         _say(f"⚠ {plan.remote_warning}")
     if plan.env_files_warning is not None:
         _say(f"⚠ {plan.env_files_warning}")
+    if plan.tools_warning is not None:
+        _say(f"⚠ {plan.tools_warning}")
     if plan.config_warning is not None:
         _say(f"⚠ {plan.config_warning}")
 
@@ -239,6 +252,7 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
                 "live_agents": list(plan.live_agents),
                 "remote": plan.remote,
                 "env_files_dropped": list(plan.env_files_dropped),
+                "tools_regained": list(plan.tools_regained),
                 "config_defaults_lost": list(plan.config_defaults_lost),
                 "notes": list(report.notes),
             }
@@ -273,7 +287,53 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
         _say(f"· {note}")
 
 
-def _reopen(reopen: bool) -> None:
+def _by_hand(version: str | None) -> str:
+    """The command a person runs instead of ``--one-click``: asq's own flag is never told."""
+    return install_route.command_line(
+        ["aisquare", "upgrade", *(["--version", version] if version else [])]
+    )
+
+
+class _HooksFailed(typer.Exit):
+    """Exit 1 after an install that worked, whose hooks then failed to re-connect: the update is
+    done, which a reopen that cannot start says (review of #301, n5)."""
+
+    def __init__(self) -> None:
+        super().__init__(1)
+
+
+#: What ``upgrade --one-click`` opens asq as: the asq that reattaches the agents the press
+#: recorded (``services.updates``), and says how that went.
+ONE_CLICK_REOPEN = ("ui", "--after-update")
+
+
+def _one_click_lines(plan: lifecycle_service.UpgradePlan) -> None:
+    """The fleet and a Remote on elsewhere, as ``--one-click`` says them: facts only."""
+    if plan.live_agents:
+        count = len(plan.live_agents)
+        keeps = f"{count} agent{'s keep' if count != 1 else ' keeps'} running"
+        fires = "they fire" if count != 1 else "it fires"
+        _say(f"· {keeps}; a hook {fires} during the install is lost")
+    elif plan.fleet_error is not None:
+        _say(
+            f"· the fleet's agents could not be counted ({plan.fleet_error}); whatever runs "
+            "keeps running"
+        )
+    if plan.remote is not None:
+        _say(
+            f"· Remote is on ({plan.remote}): it can fail while the install is replaced, and "
+            f"runs {plan.current} until it is started again"
+        )
+
+
+def _reopen(
+    reopen: bool,
+    *,
+    one_click: bool = False,
+    failed: bool = False,
+    installed: bool = False,
+    started: datetime | None = None,
+) -> None:
     """Hand the terminal back to asq (``--reopen``: what asq's Update and Uninstall run).
 
     Only at a terminal, never under ``--json``, and only where the caller says
@@ -282,14 +342,73 @@ def _reopen(reopen: bool) -> None:
     the notes) would vanish unread. Ctrl-C or a closed stdin stays here. The asq
     that opens is a new process of THIS install, so after an upgrade it is the
     version just installed.
+
+    ``one_click`` is asq's ⬆ *Restart & update* (``--one-click``): asq opens at once, as
+    :data:`ONE_CLICK_REOPEN`, its toast the account of the run. Only a run that ``failed``
+    waits for Enter, so the failure is read first, and it opens asq all the same: the
+    version that was installed, whose agents were never touched. ``installed`` is a run that
+    installed the new release, which a reopen that cannot start then says. A one-click run
+    that stays in the shell drops the press's record (:func:`_drop_press`); one that reopens
+    renews it, as the run that began at ``started`` (:func:`_renew_press`).
     """
     if not reopen or get_state().json_output or not _stdin_is_a_terminal():
         return
+    if not one_click or failed:
+        try:
+            input("Press Enter to go back to asq ")
+        except (EOFError, KeyboardInterrupt):
+            if one_click:
+                _drop_press()
+            return
+    if one_click:
+        _reopen_after_one_click(failed=failed, installed=installed, started=started)
+    else:
+        selfcli.exec_self(["ui"])
+
+
+def _reopen_after_one_click(*, failed: bool, installed: bool, started: datetime | None) -> None:
+    """Open asq again as :data:`ONE_CLICK_REOPEN`. A reopen that cannot start says so as itself:
+    after a run that installed the update is done and only the reopen failed, which an error
+    raised from here reported as the upgrade's own; after one with nothing newer to install,
+    nothing was (review of #301)."""
+    if started is not None:
+        _renew_press(started)
     try:
-        input("Press Enter to go back to asq ")
-    except (EOFError, KeyboardInterrupt):
+        selfcli.exec_self(list(ONE_CLICK_REOPEN))
+    except OSError as exc:
+        _drop_press()
+        if installed:
+            said = "the update is done, but asq could not be opened again"
+        elif failed:
+            said = "asq could not be opened again"
+        else:
+            said = "nothing was installed, and asq could not be opened again"
+        stderr_console().print(
+            f"✗ {said} ({exc}). Type `asq` to open it.",
+            markup=False,
+        )
+
+
+def _drop_press() -> None:
+    """Forget the record *Restart & update* wrote (``updates.forget_press``): the asq it was
+    for did not open, and a ``ui --after-update`` typed later must restart nothing from it
+    (tester's review of #301). A store that will not take it leaves a record that
+    :data:`~aisquare.services.updates.PRESS_KEEPS` ages out."""
+    try:
+        updates_service.forget_press()
+    except Exception:
         return
-    selfcli.exec_self(["ui"])
+
+
+def _renew_press(started: datetime) -> None:
+    """Start the press's ten minutes again as the run hands over to the reopen
+    (``updates.renew_press``): a failed run's "Press Enter" can be read for longer, and the
+    reopen then said nothing of the agents (review of #301, N3). A store that will not take
+    it leaves the press's own time."""
+    try:
+        updates_service.renew_press(started)
+    except Exception:
+        return
 
 
 def _fallback(plan: lifecycle_service.UpgradePlan) -> str:
@@ -329,6 +448,15 @@ def upgrade(
             help="Open asq again afterwards, unless something failed (asq's Update button).",
         ),
     ] = False,
+    one_click: Annotated[
+        bool,
+        typer.Option(
+            "--one-click",
+            hidden=True,
+            help="Upgrade without asking and open asq again at once, after Enter when "
+            "something failed (asq's ⬆ Restart & update).",
+        ),
+    ] = False,
 ) -> None:
     """Upgrade aisquare in place, then re-connect its Claude Code hooks.
 
@@ -341,6 +469,58 @@ def upgrade(
     already runs is nothing to do on every install. Asks first at a terminal;
     off a terminal it is a dry run unless --yes.
     """
+    if not one_click:
+        _upgrade(check=check, version=version, yes=yes, dry_run=dry_run, reopen=reopen)
+        return
+    # Every way the run can end goes back to asq: a failure the command reports, a Ctrl-C in
+    # uv's run and an error nobody expected alike, said first and read before Enter. Left
+    # to the exception, the last two ended in a shell with no asq (review of #301, m2).
+    started = datetime.now(UTC)  # the press hands over at once: a record fresh now is ours
+    try:
+        _upgrade(
+            check=False,
+            version=version,
+            yes=True,
+            dry_run=False,
+            reopen=True,
+            one_click=True,
+            started=started,
+        )
+    except typer.Exit as exc:
+        if exc.exit_code:
+            installed = isinstance(exc, _HooksFailed)
+            _reopen(True, one_click=True, failed=True, installed=installed, started=started)
+        raise
+    except KeyboardInterrupt:
+        stderr_console().print(
+            f"✗ the upgrade was interrupted. Run it again by hand: {_by_hand(version)}",
+            markup=False,
+        )
+        _reopen(True, one_click=True, failed=True, started=started)
+        raise
+    except Exception as exc:
+        stderr_console().print(traceback.format_exc().rstrip(), markup=False, highlight=False)
+        stderr_console().print(
+            f"✗ the upgrade stopped on an error: {type(exc).__name__}: {exc}. Run it again "
+            f"by hand: {_by_hand(version)}",
+            markup=False,
+        )
+        _reopen(True, one_click=True, failed=True, started=started)
+        raise
+
+
+def _upgrade(
+    *,
+    check: bool,
+    version: str | None,
+    yes: bool,
+    dry_run: bool,
+    reopen: bool,
+    one_click: bool = False,
+    started: datetime | None = None,
+) -> None:
+    """:func:`upgrade`, its flags read. ``one_click`` reopens asq at once on success, as the
+    run that began at ``started``."""
     json_output = get_state().json_output
     try:
         plan = lifecycle_service.upgrade_plan(version, check=check)
@@ -392,7 +572,7 @@ def upgrade(
                 f"aisquare {plan.current} is up to date (PyPI's latest is "
                 f"{plan.latest_version}) — nothing to do"
             )
-        _reopen(reopen)
+        _reopen(reopen, one_click=one_click, started=started)
         return
     if dry_run or not yes:
         _emit_plan(plan)
@@ -413,10 +593,10 @@ def upgrade(
         )
         if not typer.confirm(f"{move}{during}?", default=False):
             _say("nothing changed")
-            _reopen(reopen)
+            _reopen(reopen, one_click=one_click, started=started)
             return
     elif not json_output:
-        _fleet_lines(plan)  # --yes skips the plan, not what it costs the fleet
+        _fleet_lines(plan, one_click=one_click)  # --yes skips the plan, not what it costs the fleet
         move = (
             f"moving aisquare {plan.current} back to {plan.destination}"
             if plan.backwards
@@ -451,8 +631,8 @@ def upgrade(
         )
     _emit_report(report)
     if any(not hook.ok for hook in report.hooks):
-        raise typer.Exit(1)
-    _reopen(reopen)
+        raise _HooksFailed()
+    _reopen(reopen, one_click=one_click, installed=True, started=started)
 
 
 # --- uninstall ---------------------------------------------------------------------------

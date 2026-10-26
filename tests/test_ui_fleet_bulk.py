@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Awaitable, Callable, Iterator, Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -25,7 +26,7 @@ from aisquare.cli.ui import sidebar
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.click_guard import GuardedButton
 from aisquare.cli.ui.sidebar import SettingsRow
-from aisquare.cli.ui.views.fleet_bulk import BULK_WORKER, ConfirmBulk
+from aisquare.cli.ui.views.fleet_bulk import BULK_WORKER, TITLE, ConfirmBulk
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
 from aisquare.core import tmux as tmux_core
 from aisquare.core.store import store_session
@@ -33,6 +34,7 @@ from aisquare.core.tmux import Completed
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from tests import toast_log
+from tests.fleet_fakes import list_agents_as
 from tests.test_ui_shell import seed, settle, shown, status
 from tests.ui_workers import settle_page
 
@@ -76,7 +78,7 @@ def script(monkeypatch: pytest.MonkeyPatch) -> Script:
         found = next((status for status in listed if status.agent.id == agent.id), None)
         return found or FleetAgentStatus(agent=agent, state="lost")
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
     monkeypatch.setattr(fleet_service, "status_of", one)
     return agents
 
@@ -224,19 +226,33 @@ def test_each_dialog_lists_its_agents_by_project_with_cancel_focused(
         )
 
     listed, label, disabled, focused, title = drive(go)
-    assert listed == [
-        "alpha",
-        "  manager · manager · ⏸ waiting",
-        "  coder-1 · coder · ▶ working",
-        "",
-        "beta",
-        "  manager · manager · ▶ working",
-        "  coder-1 · coder · ⏸ waiting",
-        "  tester-1 · tester · 💤 exited — left: exited",
-    ]
+    if action == "stop":
+        assert listed == [
+            "alpha",
+            "  manager · manager · ⏸ waiting",
+            "  coder-1 · coder · ▶ working",
+            "",
+            "beta",
+            "  manager · manager · ▶ working",
+            "  coder-1 · coder · ⏸ waiting",
+            "  tester-1 · tester · 💤 exited — left: exited",
+        ]
+    else:
+        # A restart brings each manager back after its team (#38), and leaves an agent that
+        # exited 0, which ended by itself.
+        assert listed == [
+            "alpha",
+            "  coder-1 · coder · ▶ working",
+            "  manager · manager · ⏸ waiting",
+            "",
+            "beta",
+            "  coder-1 · coder · ⏸ waiting",
+            f"  tester-1 · tester · 💤 exited — left: {fleet_service.ENDED_CLEANLY}",
+            "  manager · manager · ▶ working",
+        ]
     assert (label, disabled) == (confirm, False)
     assert focused == "bulk-cancel", "an Enter that came too fast acts on nobody"
-    assert title == f"{action.capitalize()} every running agent?"
+    assert title == TITLE["restart" if action == "restart" else "stop"]
 
 
 def test_the_managers_only_switch_redraws_the_list_and_the_count(two_projects: Script) -> None:
@@ -504,3 +520,45 @@ def test_a_failing_agent_is_toasted_and_named_in_the_summary_and_the_rest_go_on(
         "skipped: tester-1 (beta) — exited",
         "failed: coder-1 (alpha) — tmux refused the kill",
     ]
+
+
+def _ended(scripted: FleetAgentStatus, how: str) -> FleetAgentStatus:
+    """``scripted``'s row, ended a minute ago ``how`` (``FleetAgent.ended_by``, #38): within
+    the days a Restart all brings a dead agent back for."""
+    ended = datetime.now(UTC) - timedelta(minutes=1)
+    agent = scripted.agent.model_copy(update={"ended_by": how, "ended_at": ended})
+    return scripted.model_copy(update={"agent": agent})
+
+
+def test_restart_all_brings_back_an_agent_that_died_and_leaves_one_stopped_on_purpose(
+    acted: Acted, two_projects: Script
+) -> None:
+    """#38, acceptance 2: an outside SIGTERM killed every agent (exit 143) and Restart all
+    listed them as exited and restarted none. Driven in the real app: the dead coder is
+    listed apart, "will be started again", the count says how many are dead, and Confirm
+    restarts it; the coder ``fleet stop`` ended is left, and says why."""
+    two_projects["prj_a"] = [
+        *two_projects["prj_a"],
+        _ended(status("prj_a", "coder-2", "coder", "exited", minute=2, exit_status=143), "died"),
+    ]
+    two_projects["prj_b"] = [
+        *two_projects["prj_b"],
+        _ended(status("prj_b", "coder-2", "coder", "exited", minute=3, exit_status=143), "stopped"),
+    ]
+    _ROWS[:] = [row for rows in two_projects.values() for row in rows]
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], str]:
+        app = _app(pilot)
+        dialog = await _open(pilot, "restart")
+        listed, label = _listed(dialog), str(_confirm(dialog).label)
+        _confirm(dialog).press()
+        await settle(app)
+        return listed, label
+
+    listed, label = drive(go)
+    assert "  coder-2 · coder · 💤 exited (143) — will be started again" in listed
+    assert f"  coder-2 · coder · 💤 exited — left: {fleet_service.STOPPED_ON_PURPOSE}" in listed
+    assert label == "Restart 5 agents (4 running, 1 dead)"
+    restarted = [agent_id for verb, _, agent_id in acted.calls if verb == "restart"]
+    assert "agt_a_coder-2" in restarted, "the agent that died is started again"
+    assert "agt_b_coder-2" not in restarted, "the agent stopped on purpose is left"

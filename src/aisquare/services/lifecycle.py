@@ -28,14 +28,15 @@ from typing import Any
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import credentials as credentials_store
-from aisquare.core import paths
-from aisquare.core import snapshot as snapshot_core
+from aisquare.core import harness, paths
 from aisquare.core.config import (
+    LAST_ARGS_ONLY_DENY,
     AppConfig,
     ExplainabilitySettings,
     defaults_a_whole_file_reader_lacks,
     load_config,
     save_config,
+    split_denied_tools,
 )
 from aisquare.core.store import store_session
 from aisquare.core.tmux import (
@@ -117,7 +118,7 @@ def initialize(
     assume_yes: bool,
     explainability: bool | None = None,
 ) -> SetupReport:
-    """Set up ``~/.aisquare``, register & snapshot the project, and connect agents.
+    """Set up ``~/.aisquare``, register the project, and connect agents.
 
     Idempotent and non-interactive: safe to re-run (``assume_yes`` is therefore
     moot for now). ``reinit`` resets ``config.toml`` to defaults. Agents named via
@@ -154,9 +155,11 @@ def initialize(
 
     project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
     with store_session() as store:
-        store.onboard_project(project)  # init is the deliberate add (#139)
+        _, warning = project_service.onboard_on_purpose(store, project)  # deliberate (#139)
 
     notes: list[str] = []
+    if warning is not None:
+        notes.append(f"Warning: {warning}.")
     if unreadable is not None:
         notes.append(f"reset replaced a config.toml it could not read ({unreadable})")
     if discarded:
@@ -193,15 +196,8 @@ def initialize(
     if onboard:
         report = project_service.onboard(path, refresh=False)
         onboarded = len(report.seeded)
-        if report.snapshot is not None and report.snapshot.status == "ready":
-            notes.append(
-                f"Snapshot: {report.snapshot.file_count} files, "
-                f"{report.snapshot.token_count} tokens packed for fast agent context."
-            )
-        elif report.snapshot is None:
-            # Off (no Node, or no packer: optional, not a fault) or a pack that
-            # failed and why -- the same sentence `project onboard` prints, from one place.
-            notes.append(f"Snapshot: {report.snapshot_note or snapshot_core.skipped_detail()}.")
+        if report.code_index is not None:
+            notes.append(f"Code index: {report.code_index}.")
 
     for agent in agents:
         try:
@@ -353,6 +349,10 @@ class UpgradePlan:
     """The roles bound to a file (``RoleLaunchProfile.env_files``) that a move back to a
     release before :data:`FIRST_ENV_FILES` ignores, each with its variables:
     ``reviewer (GH_TOKEN)``."""
+    tools_regained: tuple[str, ...] = ()
+    """The roles a move back to a release up to :data:`LAST_ARGS_ONLY_DENY` launches with
+    tools their safety list denies here, each with those tools:
+    ``reviewer (Edit, NotebookEdit, Write)``."""
 
     @property
     def runnable(self) -> bool:
@@ -445,6 +445,31 @@ class UpgradePlan:
         )
 
     @property
+    def tools_warning(self) -> str | None:
+        """What a move back costs the roles whose safety list denies tools, or ``None``.
+
+        Here a role's safety list is its own (``harness.RoleProfile.denied_tools``: the
+        reviewer's Edit, Write and NotebookEdit), and the config leaves the reviewer's
+        ``extra_args`` empty. A release up to :data:`LAST_ARGS_ONLY_DENY` denies a role only
+        what those ``extra_args`` say, so its reviewer would launch able to edit the tree it
+        reviews (#280). Said, as :attr:`env_files_warning` is, rather than refused: the fix
+        is one ``config set``, which reads the same in both.
+        """
+        if not self.tools_regained:
+            return None
+        one = len(self.tools_regained) == 1
+        role, _, tools = self.tools_regained[0].partition(" (")
+        names = " ".join(tools.rstrip(")").split(", "))
+        whose = "its" if one else "each role's"
+        return (
+            f"{self.target} denies a role only the tools its extra_args name, which your "
+            f"config leaves without them: {', '.join(self.tools_regained)} would launch there "
+            f"with {'those tools' if one else 'theirs'}. To keep them denied there, add the "
+            f"deny to {whose} extra_args before the move (`aisquare config set "
+            f"fleet.roles.{role}.extra_args '--disallowedTools={names}'`)"
+        )
+
+    @property
     def command(self) -> str:
         return install_route.command_line(self.argv)
 
@@ -461,11 +486,7 @@ class UpgradePlan:
     @property
     def update_available(self) -> bool | None:
         """Whether PyPI has something newer; ``None`` when PyPI could not say."""
-        latest = self.latest_version
-        if latest is None:
-            return None
-        newer = install_route.is_newer(latest, self.current)
-        return (latest.strip() != self.current.strip()) if newer is None else newer
+        return newer_release(self.latest_version, self.current)
 
     @property
     def up_to_date(self) -> bool:
@@ -515,13 +536,41 @@ class UpgradeReport:
         return self.installed and self.problem is None and self.version is not None
 
 
-def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePlan:
+def newer_release(latest: str | None, current: str) -> bool | None:
+    """Whether ``latest`` is something newer than ``current``; ``None`` when there is no
+    ``latest``. Two versions this cannot order are told apart by their text, so a release
+    named in a way it does not read is still offered. The one rule
+    :attr:`UpgradePlan.update_available` and asq's release check (``services.updates``) ask.
+    """
+    if latest is None:
+        return None
+    newer = install_route.is_newer(latest, current)
+    return (latest.strip() != current.strip()) if newer is None else newer
+
+
+def latest_release() -> install_route.LatestRelease:
+    """PyPI's newest release for THIS install, asked as ``aisquare upgrade --check`` asks it
+    (:func:`_latest_for`): asq's daily release check, which must not be a second lookup with
+    rules of its own (``services.updates``)."""
+    return _latest_for(install_route.detect())
+
+
+def upgrade_plan(
+    target: str | None = None,
+    *,
+    check: bool = False,
+    known_latest: install_route.LatestRelease | None = None,
+) -> UpgradePlan:
     """Decide what ``aisquare upgrade`` would do. Reads only; starts nothing.
 
     PyPI is asked only when its answer is used: by ``--check``, and by a run
     that targets the latest release on a route that runs. A refused route is
     refused offline, and a pin needs no lookup; ``--check`` with one also says
     whether the reinstall's Python can take it.
+
+    ``known_latest`` is an answer already in hand (asq's release check, which asked
+    :func:`latest_release`), taken where a run for the latest release would ask PyPI: asq's
+    update dialog builds its plan with it, offline, and asks nothing twice.
     """
     if target is not None:
         pinned = install_route.version_argument(target)
@@ -540,7 +589,8 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
     latest: install_route.LatestRelease | None = None
     pin_unmet: str | None = None
     if check or (reason is None and target is None):
-        latest = _latest_for(route, target)
+        known = known_latest if target is None else None
+        latest = known if known is not None else _latest_for(route, target)
         if target is not None:
             pin_unmet = _pin_unmet(route, target, latest)
         # uv refuses a pin its Python or its cutoff excludes, and the run named it again
@@ -557,6 +607,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
     fleet_error: str | None = None
     remote: str | None = None
     lost: tuple[str, ...] = ()
+    regained: tuple[str, ...] = ()
     if reason is None:
         refresh, left = refresh_sites(route.facts)
         if target is not None and lacks_refresh_hooks(target):
@@ -570,6 +621,8 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
             lost = _config_defaults_lost()
         if target is not None and lacks_env_files(target):
             dropped = _env_file_bindings()
+        if target is not None and denies_by_extra_args_only(target):
+            regained = _tools_regained()
         live, _unlistened, fleet_error = running_fleet()
         remote = running_remote()
     return UpgradePlan(
@@ -589,6 +642,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         remote=remote,
         config_defaults_lost=lost,
         env_files_dropped=dropped,
+        tools_regained=regained,
     )
 
 
@@ -638,6 +692,34 @@ def _config_defaults_lost() -> tuple[str, ...]:
         f"{key} {theirs} (here {ours})"
         for key, ours, theirs in defaults_a_whole_file_reader_lacks(config)
     )
+
+
+def denies_by_extra_args_only(release: str) -> bool:
+    """Whether ``release`` denies a role only the tools its ``extra_args`` name, with no
+    safety list of the role's own: :data:`LAST_ARGS_ONLY_DENY` and earlier."""
+    return install_route.is_newer(release, LAST_ARGS_ONLY_DENY) is False
+
+
+def _tools_regained() -> tuple[str, ...]:
+    """Each role whose safety-listed tools a release that :func:`denies_by_extra_args_only`
+    hands back, with those tools (:attr:`UpgradePlan.tools_regained`): what the role denies
+    here as its own, less ``allow_tools`` and less what its ``extra_args`` deny, which that
+    release denies too. None when the config cannot be read, which says nothing either way.
+    """
+    try:
+        fleet = load_config().fleet
+    except Exception:
+        return ()
+    regained: list[str] = []
+    for role, settings in sorted(fleet.roles.items()):
+        profile = harness.ROLE_PROFILES.get(harness.base_role(role))
+        if profile is None:
+            continue
+        kept, _rest = split_denied_tools(settings.extra_args)
+        tools = set(profile.denied_tools) - set(settings.allow_tools) - kept
+        if tools:
+            regained.append(f"{role} ({', '.join(sorted(tools))})")
+    return tuple(regained)
 
 
 def lacks_env_files(release: str) -> bool:

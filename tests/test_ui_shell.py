@@ -98,6 +98,7 @@ from aisquare.models import (
     FleetAgent,
     FleetAgentStatus,
     HeadroomSummary,
+    LaunchSpec,
     ProjectInfo,
     TeamSession,
 )
@@ -105,9 +106,11 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project_groups as groups_service
+from aisquare.services.captain import state as captain_state
 from tests import guard_clock, toast_log
+from tests.fleet_fakes import list_agents_as
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
-from tests.ui_workers import settle_page
+from tests.ui_workers import settle_page, settle_until, settle_until_held
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -145,7 +148,13 @@ def status(
     minute: int = 0,
     exit_status: int | None = None,
 ) -> FleetAgentStatus:
-    """A scripted agent; the id is derived so a test can address its row."""
+    """A scripted agent; the id is derived so a test can address its row. A ``captain`` row
+    is launched as the captain's start launches it (``fleet.is_the_captains_row``)."""
+    spec = (
+        LaunchSpec(binary="claude", extra_args=["--strict-mcp-config", "--tools", ""])
+        if role == "captain"
+        else None
+    )
     agent = FleetAgent(
         id=f"agt_{project_id.removeprefix('prj_')}_{label}",
         project_id=project_id,
@@ -157,6 +166,7 @@ def status(
         created_at=T0 + timedelta(minutes=minute),
         ended_at=T0 + timedelta(minutes=minute + 1) if exit_status is not None else None,
         exit_status=exit_status,
+        launch_spec=spec,
     )
     return FleetAgentStatus(agent=agent, state=state)
 
@@ -194,7 +204,7 @@ def script(monkeypatch: pytest.MonkeyPatch) -> Script:
     def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         return list(agents.get(project.id, []))
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
     return agents
 
 
@@ -659,11 +669,16 @@ def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
     # Slots 1 and 4 unaliased: the registry's built-in names, "plain claude" and "account 4".
     monkeypatch.setattr(accounts_service, "slot_labels", lambda store=None: {2: "work", 3: "max"})
 
-    async def bar(pilot: Pilot[None], agent_id: str) -> tuple[int, str]:
+    async def bar(pilot: Pilot[None], agent_id: str, *, wider_than: int = 0) -> tuple[int, str]:
         app = fleet_app(pilot)
         await pilot.click(row_for(app, agent_id))
         await settle(app)
         header = app.query_one(f"#agent-{agent_id} #agent-header", Static)
+        # A resize reaches the screen from a 1/120 s timer that settle() does not wait for:
+        # on windows-latest the 140-column read measured the 90-column header (#401).
+        await settle_until_held(
+            app, lambda: header.content_size.width > wider_than, what="the header's new width"
+        )
         (strip,) = header.render_lines(Region(0, 0, header.outer_size.width, 1))
         return header.content_size.width, strip.text.strip()
 
@@ -681,7 +696,7 @@ def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
         }
         await pilot.resize_terminal(140, 30)
         await settle(app)
-        seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
+        seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m", wider_than=60)
         return seen
 
     seen = drive(
@@ -1273,10 +1288,10 @@ def test_the_hubs_doctor_link_opens_the_doctor_page_and_runs_the_checks(
         return [
             DoctorCheck(name="python", status=CheckStatus.ok, detail="Python 3.14"),
             DoctorCheck(
-                name="repomix",
+                name="tmux",
                 status=CheckStatus.warn,
-                detail="repomix not found",
-                fix="npm install -g repomix",
+                detail="tmux not found",
+                fix="brew install tmux",
             ),
             DoctorCheck(
                 name="home", status=CheckStatus.fail, detail="~/.aisquare is missing", fix="init"
@@ -1308,7 +1323,7 @@ def test_the_hubs_doctor_link_opens_the_doctor_page_and_runs_the_checks(
     assert before == "welcome"
     assert total == 2  # …and opening the page runs them again
     assert current == "doctor" and selected == "settings"  # a page of Settings'
-    assert "repomix not found" in report and "→ npm install -g repomix" in report
+    assert "tmux not found" in report and "→ brew install tmux" in report
     assert "Python 3.14" in report and "~/.aisquare is missing" in report
 
 
@@ -1338,13 +1353,14 @@ def test_a_crashing_doctor_is_reported_not_raised(tmp_path: Path, script: Script
     assert "crashed" not in drive(healthy)  # a working doctor reports no such thing
 
 
-SNAPSHOT_WARN = DoctorCheck(
-    name="snapshot",
+FACTS_WARN = DoctorCheck(
+    name="facts",
     status=CheckStatus.warn,
-    detail="no codebase snapshot",
-    fix="Pack one: aisquare project onboard",
+    detail="no project facts seeded",
+    fix="Seed them: aisquare project onboard",
 )
-"""A finding whose fix is one of ours and is PROJECT-scoped — the button needs a cwd."""
+"""A finding whose fix is one of ours and is PROJECT-scoped — the button needs a cwd. No
+doctor row offers one today; this stands in for one."""
 CONNECT_WARN = DoctorCheck(
     name="claude-code",
     status=CheckStatus.warn,
@@ -1395,7 +1411,7 @@ def test_the_doctor_page_arms_project_fixes_for_the_project_it_ran_for(
             len(app.query(DoctorView)),
         )
 
-    checks = [SNAPSHOT_WARN, CONNECT_WARN]
+    checks = [FACTS_WARN, CONNECT_WARN]
     global_buttons, global_cwd, selected_buttons, selected_cwd, page_buttons, page_cwd, views = (
         drive(go, doctor=lambda: list(checks))
     )
@@ -1424,7 +1440,7 @@ def test_a_doctor_refreshed_message_updates_the_shells_report(
 
     def doctor() -> list[DoctorCheck]:
         calls.append(1)
-        return [SNAPSHOT_WARN]
+        return [FACTS_WARN]
 
     def counts(app: FleetApp) -> str:
         """The report the shell holds (its Doctor page shows it), as ``✓ n  ⚠ n``."""
@@ -1440,11 +1456,7 @@ def test_a_doctor_refreshed_message_updates_the_shells_report(
         # The report the view was handed is about the scope on screen: adopt it.
         app.post_message(
             DoctorRefreshed(
-                [
-                    DoctorCheck(
-                        name="snapshot", status=CheckStatus.ok, detail="packed 2 minutes ago"
-                    )
-                ],
+                [DoctorCheck(name="facts", status=CheckStatus.ok, detail="seeded 2 minutes ago")],
                 None,
             )
         )
@@ -2783,11 +2795,18 @@ def test_the_tick_reads_the_store_and_the_agents_off_the_ui_thread(
     is still painted. The first frame, read at mount before anything is drawn, is not
     the tick's and is not counted."""
     seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
+    # The captain's home board too, so its read lists the home's agents as well (review
+    # of #272, m4): without it, the captain's read found no home and asked nothing.
+    home = captain_state.home_project()
     threads: dict[str, list[threading.Thread]] = {"store": [], "list_agents": []}
+    listed: list[str] = []
     answer = ["waiting"]
 
     def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         threads["list_agents"].append(threading.current_thread())
+        listed.append(project.id)
+        if project.id == home.id:
+            return []
         return [status(project.id, "manager", "manager", answer[0])]
 
     @contextmanager
@@ -2796,12 +2815,13 @@ def test_the_tick_reads_the_store_and_the_agents_off_the_ui_thread(
         with store_session() as store:
             yield store
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> tuple[str, str, bool]:
         app = fleet_app(pilot)
         for seen in threads.values():
             seen.clear()
+        listed.clear()
         monkeypatch.setattr(app_mod, "store_session", recorded)
         answer[0] = "working"
         app.refresh_data()  # what the two-second timer runs
@@ -2810,12 +2830,56 @@ def test_the_tick_reads_the_store_and_the_agents_off_the_ui_thread(
         return *rows, app.captain_on
 
     row_a, row_b, captain = drive(go)
-    # With the captain on, the read also looks up its home board, in a session of its own
-    # (``_read_captain``): one more, off the UI thread as well.
-    assert len(threads["store"]) == 1 + captain and len(threads["list_agents"]) == 2, threads
+    # With the captain on, the read also looks up its home board, in the fleet's own store
+    # session (review of #272, m5: it was a second one), and lists the home's agents
+    # (``_read_captain``): one more list_agents, off the UI thread as well (m4).
+    assert len(threads["store"]) == 1, threads
+    assert sorted(listed) == sorted(["prj_a", "prj_b", *([home.id] if captain else [])])
     main = threading.main_thread()
     assert all(t is not main for seen in threads.values() for t in seen), threads
     assert row_a.rstrip().endswith("▶") and row_b.rstrip().endswith("▶")  # …and painted
+
+
+def test_a_tick_that_changed_nothing_repaints_no_row_and_a_change_repaints_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With 50 listed projects every tick repainted every card, 15 ms of the UI thread at
+    50 (#83): a card shown what it already shows is skipped, and one agent's change costs
+    that agent's row."""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None), ("prj_c", "gamma", None))
+    answer = {"prj_a": "waiting", "prj_b": "waiting", "prj_c": "waiting"}
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        return [status(project.id, "manager", "manager", answer[project.id])]
+
+    list_agents_as(monkeypatch, fake)
+    painted: list[str] = []
+    show = AgentRow.show
+
+    def counting(row: AgentRow, fresh: FleetAgentStatus) -> None:
+        painted.append(fresh.agent.id)
+        show(row, fresh)
+
+    monkeypatch.setattr(AgentRow, "show", counting)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str]:
+        app = fleet_app(pilot)
+        app.refresh_data()
+        await settle(app)
+        painted.clear()
+        app.refresh_data()  # the same answer
+        await settle(app)
+        same = list(painted)
+        painted.clear()
+        answer["prj_b"] = "working"
+        app.refresh_data()
+        await settle(app)
+        return same, list(painted), shown(row_for(app, "agt_b_manager"))
+
+    same, changed, row_b = drive(go)
+    assert same == []
+    assert changed == ["agt_b_manager"]
+    assert row_b.rstrip().endswith("▶")
 
 
 def test_ticks_while_a_fleet_read_is_in_flight_start_no_second_read_and_cost_one_after_it(
@@ -2849,7 +2913,7 @@ def test_ticks_while_a_fleet_read_is_in_flight_start_no_second_read_and_cost_one
             with counting:
                 running[0] -= 1
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> tuple[int, str, str]:
         app = fleet_app(pilot)
@@ -2915,7 +2979,7 @@ def test_a_frame_painted_late_leaves_the_owed_read_to_the_read_in_flight(
             with counting:
                 running[0] -= 1
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> int:
         app = fleet_app(pilot)
@@ -2962,9 +3026,13 @@ def test_a_fleet_read_that_hangs_labels_the_frame_kept_once_it_has_waited_long_e
     and nothing raised to label the frame (review of #272). Before the read moved off
     the UI thread the whole UI froze, which was worse but obvious. Once a read has been
     in flight :data:`~aisquare.cli.ui.app.FLEET_STALE_AFTER`, a tick says the frame shown
-    is an old one; the read's own frame takes the notice away."""
+    is an old one; the read's own frame takes the notice away.
+
+    The bound is a minute and the read's start is moved back past it, not a 0.3 s bound
+    raced in real time: under load the "before" tick came after 0.3 s and was labelled
+    (the local gate at cc8d5e0c, and 1 in 3 alone)."""
     seed(tmp_path, ("prj_a", "alpha", None))
-    monkeypatch.setattr(app_mod, "FLEET_STALE_AFTER", 0.3)
+    monkeypatch.setattr(app_mod, "FLEET_STALE_AFTER", 60.0)
     hold, asked, gate = threading.Event(), threading.Event(), threading.Event()
 
     def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
@@ -2974,7 +3042,7 @@ def test_a_fleet_read_that_hangs_labels_the_frame_kept_once_it_has_waited_long_e
             gate.wait(FLEET_HOLD_S)
         return [status(project.id, "manager", "manager", "working")]
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> tuple[bool, str, str, bool]:
         app = fleet_app(pilot)
@@ -2986,7 +3054,7 @@ def test_a_fleet_read_that_hangs_labels_the_frame_kept_once_it_has_waited_long_e
             app.refresh_data()  # a tick before the bound: nothing to say yet
             await pilot.pause()
             early = bool(notice.display)
-            await asyncio.sleep(0.4)
+            app._fleet_since -= 61.0  # the read has now been in flight past the bound
             app.refresh_data()  # a tick after it
             await pilot.pause()
             late = shown(notice) if notice.display else ""
@@ -3014,7 +3082,7 @@ def test_agent_errors_fail_open_with_the_cost_shown(
             raise fleet_service.FleetUnavailable("tmux 3.1 is too old (need 3.2)")
         return list(healthy)
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> tuple[int, bool, str, int, bool, dict[str, str]]:
         app = fleet_app(pilot)
@@ -3058,7 +3126,7 @@ def test_a_fleet_read_that_failed_open_keeps_the_live_manager_pane(
             raise failure[0]
         return list(live)
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
     State = tuple[str | None, bool, bool, str]
 
     async def go(pilot: Pilot[None]) -> tuple[State, State, str, State]:
@@ -3297,6 +3365,7 @@ class StopRecorder:
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         self.calls.append((project.id, label, force, agent_id))
         if self.refuse is not None:
@@ -3358,7 +3427,7 @@ def test_stop_from_an_agent_view_still_asks_after_its_projects_read_failed(
             raise failing[0]
         return list(live)
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> tuple[str, list[str]]:
         app = fleet_app(pilot)
@@ -3555,25 +3624,31 @@ def test_a_successful_stop_toasts_the_ended_row_re_reads_and_leaves_its_view(
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         stopped.append(True)
         return fleet_service.StopReceipt(ended(live.agent), [])
 
-    monkeypatch.setattr(fleet_service, "list_agents", list_agents)
+    list_agents_as(monkeypatch, list_agents)
     monkeypatch.setattr(fleet_service, "stop", stop)
 
     async def go(pilot: Pilot[None]) -> tuple[list[str], int, str | None]:
         app = fleet_app(pilot)
-        await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        dialog = await open_stop_dialog(pilot, app, "agt_a_coder-auth")
         before = len(reads)
-        await pilot.click("#stop-confirm")
-        await settle(app)
-        await pilot.pause()
-        await pilot.pause()
-        # Every toast, not the first: the scripted pane has no tmux behind it and
-        # raises its own "(pane gone)" here, which is the harness, not the claim.
-        toasts = [toast.render().plain for toast in app.screen.query(Toast)]
-        return toasts, len(reads) - before, app.content.current
+        # Pressed on the dialog, and the toast waited for: a click the moment the dialog
+        # was pushed, then a settle and two pauses, saw no toast on windows-latest (run
+        # 40234523081 at e28697f1), as the take-over test's click once did (c6adca04).
+        dialog.query_one("#stop-confirm", Button).press()
+        wanted = f"✓ stopped coder-auth ({live.agent.id})"
+
+        def toasts() -> list[str]:
+            # Every toast, not the first: the scripted pane has no tmux behind it and
+            # raises its own "(pane gone)" here, which is the harness, not the claim.
+            return [toast.render().plain for toast in app.screen.query(Toast)]
+
+        await settle_until(app, lambda: wanted in toasts())
+        return toasts(), len(reads) - before, app.content.current
 
     toasts, re_reads, current = drive(go, notifications=True)
     assert f"✓ stopped coder-auth ({live.agent.id})" in toasts
@@ -3781,6 +3856,7 @@ def test_the_app_stays_live_while_a_stop_is_in_flight(
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         entered.set()
         if not release.wait(10):
@@ -3831,10 +3907,11 @@ def test_a_refusal_re_reads_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         raise fleet_service.FleetError("tmux did not answer, so its row is left live")
 
-    monkeypatch.setattr(fleet_service, "list_agents", list_agents)
+    list_agents_as(monkeypatch, list_agents)
     monkeypatch.setattr(fleet_service, "stop", refusing_stop)
 
     async def go(pilot: Pilot[None]) -> tuple[int, bool]:

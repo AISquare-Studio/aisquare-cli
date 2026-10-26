@@ -62,6 +62,7 @@ from aisquare.core.tmux import (
 )
 from tests import fakebin
 from tests.fsperms import can_deny_reads, can_deny_writes
+from tests.private_fleets import end_private_servers, private_folder
 
 OK = Completed(0, "", "")
 FACTS_FIELDS = len(tmux_module._FACTS_FIELDS)  # what display-message is asked for
@@ -2093,8 +2094,10 @@ def test_live_a_new_server_reuses_pane_ids_and_says_when_it_started(live: TmuxSe
 def test_live_socket_path_is_where_tmux_put_it_and_outlives_the_server(live: TmuxServer) -> None:
     assert live.server_socket_path() is None, "no server, so nothing says where it listens"
     _spawn(live, "asq-test-fox", "w0", CAT)
-    assert live.run("display-message", "-p", "#{socket_path}").strip() == str(live.socket_path())
-    assert live.server_socket_path() == live.socket_path(), "what a spawn records"
+    # tmux says the resolved path: macOS's /tmp is /private/tmp, so compare realpaths.
+    said = live.run("display-message", "-p", "#{socket_path}").strip()
+    assert said == str(live.socket_path().resolve())
+    assert live.server_socket_path() == Path(said), "what a spawn records"
     assert live.socket_path().is_socket()
     live.kill_server()
     assert live.list_sessions() == []
@@ -2108,27 +2111,27 @@ def test_live_a_server_under_another_tmux_tmpdir_is_reached_at_the_path_it_said(
     """Round 28 of #257: ``-L`` from a shell without the spawning shell's ``TMUX_TMPDIR`` asks
     another directory; the path the server said it listens on (what a spawn records) reaches
     it from any shell."""
-    import tempfile
-
     # An AF_UNIX path is short; resolved, as tmux reports it (macOS's /tmp is /private/tmp).
-    elsewhere = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp")).resolve()
+    # Named for this process, so tests/conftest.py's session-start sweep ends what a killed
+    # run left here: neither `live` nor no_real_fleet looks under this TMUX_TMPDIR.
+    elsewhere = private_folder().resolve()
     # This shell's own directory: another private one, never the owner's /tmp/tmux-<uid>,
     # which tests/conftest.py's no_real_fleet refuses every test (board 13220).
-    here = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp"))
-    monkeypatch.setenv("TMUX_TMPDIR", str(elsewhere))
-    window = _spawn(live, "asq-test-elk", "w0", CAT)
-    recorded = live.server_socket_path()
-    monkeypatch.setenv("TMUX_TMPDIR", str(here))
-    assert recorded is not None and recorded.parent.parent == elsewhere
-    there = live.at(recorded)
+    here = private_folder()
     try:
+        monkeypatch.setenv("TMUX_TMPDIR", str(elsewhere))
+        window = _spawn(live, "asq-test-elk", "w0", CAT)
+        recorded = live.server_socket_path()
+        monkeypatch.setenv("TMUX_TMPDIR", str(here))
+        assert recorded is not None and recorded.parent.parent == elsewhere
+        there = live.at(recorded)
         assert live.reachable() is False, "-L asks this shell's directory, where none is"
         assert there.reachable() is True
         facts = there.pane_facts_or_raise(window.pane_id)
         assert facts is not None and facts.pane_id == window.pane_id
     finally:
-        with contextlib.suppress(TmuxError):
-            there.kill_server()
+        # Every server under `elsewhere`, whatever failed: one left here outlived its run.
+        end_private_servers(elsewhere)
         shutil.rmtree(elsewhere, ignore_errors=True)
         shutil.rmtree(here, ignore_errors=True)
     assert there.reachable() is False, "no server at the path: tmux says none"
@@ -2308,6 +2311,7 @@ def test_the_seam_strips_the_team_variables_a_server_must_never_hold(
         "AISQUARE_FLEET_AGENT",
         "AISQUARE_ROLE",
         "AISQUARE_PERSONA",
+        "AISQUARE_BOARD_CONTEXT",
     }
     for name in spawn.TEAM_ENV_VARS:
         monkeypatch.setenv(name, f"parent-{name}")
@@ -2337,3 +2341,57 @@ def test_a_server_the_fleet_starts_holds_no_team_variable(
     names = {line.partition("=")[0] for line in held if "=" in line and not line.startswith("-")}
     assert not names & set(spawn.TEAM_ENV_VARS), held
     assert "AISQUARE_HOME=/tmp/asq-home-kept" in held
+
+
+# --- [fleet] pane_clipboard and mouse on (#83's tmux residuals: #100, #101) ----------------
+
+#: A pane program's OSC 52 copy of "hello": what #101 measured tmux dropping.
+_OSC52 = ["sh", "-c", "printf '\\033]52;c;aGVsbG8=\\007'; exec cat"]
+
+
+def _pane_clipboard(value: str) -> None:
+    from aisquare.core.config import load_config, save_config
+
+    config = load_config()
+    config.fleet.pane_clipboard = value  # type: ignore[assignment]
+    save_config(config)
+
+
+def test_the_bundled_conf_turns_the_mouse_on_and_keeps_the_clipboard_off() -> None:
+    lines = BUNDLED_CONF.splitlines()
+    assert "set -g mouse on" in lines and "set -g mouse off" not in lines
+    assert "set -g set-clipboard off" in lines
+    on = tmux_module.bundled_conf(pane_clipboard=True).splitlines()
+    assert [line for line in on if line not in lines] == ["set -g set-clipboard on"]
+
+
+@requires_tmux
+@pytest.mark.parametrize(("setting", "kept"), [("off", False), ("on", True)])
+def test_live_a_panes_osc52_copy_is_kept_only_with_pane_clipboard_on(
+    live: TmuxServer, setting: str, kept: bool
+) -> None:
+    """Off (the default), a program's clipboard write is dropped (#101, measured on 3.2a);
+    ``pane_clipboard = "on"`` keeps it as tmux's paste buffer, which an attached terminal
+    is handed."""
+    _pane_clipboard(setting)
+    _spawn(live, "asq-test-osc", "w0", _OSC52)
+    assert live.run("show-options", "-gv", "set-clipboard").strip() == setting
+
+    def buffered() -> bool:
+        return any(live.show_buffer(name) == "hello" for name in live.list_buffers())
+
+    assert _wait(buffered, timeout=3.0) is kept
+
+
+@requires_tmux
+def test_live_with_the_mouse_on_the_wheel_goes_to_a_program_that_asked_for_it(
+    live: TmuxServer,
+) -> None:
+    """``fleet attach`` with ``mouse on`` (#100): tmux's own wheel binding hands a notch to
+    the pane when its program asked for the mouse (``mouse_any_flag``, which Claude Code
+    sets), and enters copy mode over tmux's history otherwise. Asserted on the server's
+    binding, which the bundled conf leaves as tmux ships it."""
+    _spawn(live, "asq-test-wheel", "w0", CAT)
+    assert live.run("show-options", "-gv", "mouse").strip() == "on"
+    binding = live.run("list-keys", "-T", "root", "WheelUpPane")
+    assert "mouse_any_flag" in binding and "send-keys -M" in binding, binding

@@ -33,7 +33,7 @@ from tests.captain_screens import INPUT_BOX, REAL_IDLE_AFTER_STOP, REAL_TRUST, R
 from tests.test_captain_say import Captain, Clock
 from tests.test_captain_sidebar import agent_opened, quiet, until
 from tests.test_ui_shell import Script, fleet_app, refreshed, row_for, seed, shown, status
-from tests.ui_workers import settle_page
+from tests.ui_workers import released, settle_page
 
 # The UI suite's fixtures, bound here so pytest finds them for this module's tests
 # (``no_real_tmux`` is autouse there: every tmux call held to a private socket).
@@ -502,7 +502,7 @@ async def _clicked(pilot: Pilot[None], selector: str) -> None:
     await pilot.click(selector)
     await pilot.pause()
     await settle_page(fleet_app(pilot))
-    await pilot.pause(0.3)
+    await released(pilot, fleet_app(pilot).query_one(selector, Button))
 
 
 def _label(pilot: Pilot[None], selector: str) -> str:
@@ -778,3 +778,149 @@ def test_page_serving_is_the_voice_page_itself_not_any_listener() -> None:
         finally:
             server.shutdown()
             server.server_close()
+
+
+# --- #267 review, item (a): Textual already dispatches up the MRO ----------------------------
+
+
+@pytest.mark.needs_captain
+def test_the_captain_view_runs_the_agent_views_mount_and_restart_handlers_once(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Textual calls ``on_mount`` and ``on_worker_state_changed`` on every class of the MRO
+    that defines one; an explicit ``super()`` on top ran AgentView's twice: its actions
+    painted twice, its labels asked twice, and a failed restart said twice."""
+    from types import SimpleNamespace
+
+    from textual.worker import Worker, WorkerState
+
+    from aisquare.cli.ui.views import agent as agent_view
+
+    mounts: list[str] = []
+    real_mount = AgentView.on_mount
+
+    def counted_mount(self: AgentView) -> None:
+        mounts.append(type(self).__name__)
+        real_mount(self)
+
+    monkeypatch.setattr(AgentView, "on_mount", counted_mount)
+    script[captain_state.home_project().id] = [_captain("waiting")]
+
+    async def body(pilot: Pilot[None]) -> list[str]:
+        app = fleet_app(pilot)
+        await refreshed(app)
+        view = await _open_view(pilot)
+        said: list[str] = []
+        monkeypatch.setattr(view, "notify", lambda message, **_: said.append(str(message)))
+        failed = SimpleNamespace(
+            name=agent_view.RESTART_WORKER,
+            group=agent_view.RESTART_WORKER,
+            error=RuntimeError("no"),
+            result=None,
+        )
+        view.post_message(Worker.StateChanged(failed, WorkerState.ERROR))  # type: ignore[arg-type]
+        await pilot.pause()
+        return said
+
+    said = drive(body)
+    assert mounts == ["CaptainView"], mounts
+    assert len(said) == 1, said
+
+
+@pytest.mark.needs_captain
+def test_the_bar_reads_nothing_while_the_view_is_hidden(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#267 review, item (d): the 1 s interval read state.json behind any other view."""
+    from aisquare.cli.ui.views import captain as captain_view
+
+    reads: list[int] = []
+    real = captain_view.read_bar
+
+    def counted() -> Any:
+        reads.append(1)
+        return real()
+
+    monkeypatch.setattr(captain_view, "read_bar", counted)
+    script[captain_state.home_project().id] = [_captain("waiting")]
+
+    async def body(pilot: Pilot[None]) -> tuple[int, int]:
+        app = fleet_app(pilot)
+        await refreshed(app)
+        await _open_view(pilot)
+        app.content.current = "welcome"
+        await pilot.pause()
+        await settle_page(app)
+        hidden_from = len(reads)
+        await pilot.pause(captain_view.THINKING_TICK_S * 2.5)
+        await settle_page(app)
+        return hidden_from, len(reads)
+
+    hidden_from, after = drive(body)
+    assert after == hidden_from, "no read while hidden"
+
+
+@pytest.mark.needs_captain
+def test_the_homes_card_shows_its_own_agents_and_the_captain_stays_in_its_section(
+    tmp_path: Path, script: Script
+) -> None:
+    """The owner's decision D5: added on purpose, the home is a project with its own card.
+    The frame's home agents were replaced by ``[captain]`` when painted, so the card showed
+    the captain and lost every other agent (found by #33 on f9baaaad)."""
+    from aisquare.core.store import store_session
+
+    home = captain_state.home_project()
+    with store_session() as store:
+        store.onboard_project(home, explicit=True)
+    captain, coder = _captain(), status(home.id, "coder-1", "coder", "waiting")
+    script[home.id] = [captain, coder]
+
+    async def body(pilot: Pilot[None]) -> tuple[list[str], list[str]]:
+        app = fleet_app(pilot)
+        await refreshed(app)
+        card = app.query_one(f"#card-{home.id}")
+        section = app.query_one("#captain-section")
+        return (
+            [row.id or "" for row in card.query(AgentRow)],
+            [row.id or "" for row in section.query(AgentRow)],
+        )
+
+    on_card, in_section = drive(body)
+    assert on_card == [f"agent-row-{coder.agent.id}"], on_card
+    assert f"agent-row-{captain.agent.id}" in in_section
+
+
+@pytest.mark.needs_captain
+def test_a_declared_captain_role_in_the_home_is_no_captain_in_the_ui(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review of #274, m3: ``_read_captain`` took any home row whose role was ``captain``,
+    so with the home added (D5) and a declared ``captain`` role spawned there while the
+    captain was off, the Captain section showed that plain agent, with the captain's view."""
+    from aisquare.core.store import store_session
+
+    home = captain_state.home_project()
+    with store_session() as store:
+        store.onboard_project(home, explicit=True)
+    declared = _captain()
+    declared = declared.model_copy(
+        update={"agent": declared.agent.model_copy(update={"launch_spec": None})}
+    )
+    script[home.id] = [declared]
+
+    async def body(pilot: Pilot[None]) -> tuple[list[str], list[str], type]:
+        app = fleet_app(pilot)
+        await refreshed(app)
+        card = app.query_one(f"#card-{home.id}")
+        section = app.query_one("#captain-section")
+        view = app._agent_view(declared, "view-x")
+        return (
+            [row.id or "" for row in card.query(AgentRow)],
+            [row.id or "" for row in section.query(AgentRow)],
+            type(view),
+        )
+
+    on_card, in_section, view = drive(body)
+    assert on_card == [f"agent-row-{declared.agent.id}"], "an agent of the home's own"
+    assert in_section == [], "no captain"
+    assert view is AgentView

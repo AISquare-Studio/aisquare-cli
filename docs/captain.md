@@ -9,7 +9,8 @@ work, and says every refusal as it came.
 Three ideas carry the feature:
 
 - **One captain, on the home board.** The captain lives on the project row for
-  `$AISQUARE_HOME` (captured, never onboarded, so it never joins your projects),
+  `$AISQUARE_HOME` (captured, not onboarded, so it joins your projects only if
+  you add it yourself),
   runs from `$AISQUARE_HOME/captain/brain`, and has no tool but its own
   Actions server. `aisquare captain` starts it or attaches to it.
 - **Every effect is a tool call with a receipt.** The captain's hands are the
@@ -50,23 +51,37 @@ The captain ships **off**. While it is off:
   capture off, it registers nothing and is briefed on no board.
 - `aisquare doctor` shows one ok row, `captain: off (experimental)`.
 
-Whatever the switch says, the home's own row is never added as a project, and
-`aisquare project prune` and doctor's captured row leave it alone: it is the
-captain's home board.
+Whatever the switch says, the home is hidden by default: nothing adds its own row
+as a project by itself, and `aisquare project prune` and doctor's captured row
+leave it alone: it is the captain's home board. You can add it on purpose with
+`aisquare init` or `aisquare project onboard` there, or `+` in asq. It then has
+its own card, which leaves out the captain's row (the captain stays in its own
+section), and the add warns once that this folder holds aisquare's settings, the
+fleet database and every Claude account's login data, which agents working there
+can read and change. Removing it from the fleet hides it again.
 
-Turn it on for this home:
+Turn it on for this home in `asq`: *⚙ Settings ▸ Captain* (the box at the top of
+*App settings ▸ Agent settings*), tick *Captain (experimental)*. The ★ beside Fleet and the Captain section above the projects
+show at once, with no restart, and so does the captain's part of the sidebar's
+read and the receiver for its `ui` actions; untick, and they all go at once. From a
+shell, the same setting:
 
 ```sh
 aisquare config set experimental.captain true
 ```
 
-To turn it on for one shell only, set `AISQUARE_EXPERIMENTAL_CAPTAIN=1`. The
-variable wins over the config either way, and `0` turns it off. The captain's
-own window is started with the variable as that shell has it, at every start and
-restart, so the captain runs with the switch on even when the fleet's tmux
-server was started without it. `asq` reads the switch when it starts, so restart
-it to see the insignia. Turning it off stops nothing that is already running.
-On, everything below holds exactly as written.
+A running `asq` follows its own box at once, and a `config set` from a shell
+at its next start. To turn it on for one shell only, set
+`AISQUARE_EXPERIMENTAL_CAPTAIN=1`. The variable wins over the config either way,
+and `0` turns it off; while it is set, Settings shows the box in the state it
+forces, greyed, with a line saying why. The captain's own window is started with
+the variable as that shell has it, at every start and restart, so the captain
+runs with the switch on even when the fleet's tmux server was started without
+it. Turning it off stops nothing that is already running. On, everything below
+holds exactly as written.
+
+With no captain running, the Captain section's *▶ Start captain* does what the
+dim ★ does: it opens the Spawn dialog with the captain chosen.
 
 ## Setup, once
 
@@ -98,6 +113,11 @@ On, everything below holds exactly as written.
    headset there.
 
 ## Talking to the captain
+
+In `asq`, the captain's view has a one-line box under its bar: type, and Enter
+types the line into the captain's pane the way *What's up* does, through the one
+guarded door that reads the pane first and refuses any dialog by name. The box
+clears; a send that is refused says why, and the line comes back into the box.
 
 Typed, from any terminal:
 
@@ -350,7 +370,7 @@ aisquare captain
 
 ## Known limits
 
-Two follow-ups are open, each on its own card:
+Three follow-ups are open:
 
 - **After a reboot, a project agent's row still reads `waiting`.** The fleet
   reads an agent's state from its last hook, not from tmux. So an agent whose
@@ -363,6 +383,15 @@ Two follow-ups are open, each on its own card:
   loads on the first utterance, which takes a few seconds on a CPU. A mode
   switch or a hold-to-talk press in those seconds is answered late. Speak once
   and wait for the first transcript before you switch.
+- **Under an exported `AISQUARE_TEAM_HUB`, the captain's seats trace as their
+  own projects.** A seat the captain spawns reads its own project's board (see
+  the CHANGELOG), so its trace and its explainability key are its project's.
+  `aisquare explainability key set` and the Explainability tab in a shell with
+  the hub exported speak for the hub's project, and a key set there never
+  reaches those seats. Set it for the seat's project with
+  `aisquare explainability key set -P <project>`. Seats you spawn yourself follow
+  the hub as before. Not fixed here: making one key cover both would change
+  which project a hub's key is for, everywhere.
 
 The captain reads Claude Code's own screens: the input box, the trust dialog
 and the permission chooser. Every capture it was built and tested on is from
@@ -375,8 +404,10 @@ is, compare `claude --version` with these.
 
 Named here so nobody re-derives them:
 
-- **Pull requests waiting on you** through a `gh` provider in the queue's
-  sources (the queue has the item kind; the provider is not wired).
+- **Pull requests waiting on you** through a `gh` provider: **done** in `aisquare
+  watch` (P2-W2). With `[watch] github = true`, the queue's `pr` items are the
+  approved pull requests of each project's GitHub repository, read through `gh api`
+  with ETags ([fleet](fleet.md#watching-the-fleet)).
 - **The captain persona in project pickers**: today every bundled persona shows
   in a project's spawn dialog, the captain's included; hiding a captain-only
   persona is a catalogue rule for every picker.

@@ -148,9 +148,13 @@ PUSH_HOST_SUFFIXES = (".push.apple.com", ".notify.windows.com")
 """Apple's and Windows' services, which shard by subdomain. The leading dot is the point:
 ``evilpush.apple.com`` ends in ``push.apple.com`` and is somebody else's."""
 
-PUSH_INSTALL_HINT = f"Web Push needs the cryptography package — {remote_install_hint()}"
-"""Said in the one command that fits how aisquare-cli was installed: ``pip install`` reaches
-neither a uv tool's environment nor a pipx one."""
+PUSH_INSTALL_HINT = (
+    "Web Push needs the cryptography package, which this damaged install is missing — "
+    f"repair it: {remote_install_hint()}"
+)
+"""Only a damaged install's: cryptography is core since #34. Said in the one command that fits
+how aisquare-cli was installed: ``pip install`` reaches neither a uv tool's environment nor a
+pipx one."""
 
 AUTO_OFF_TITLE = "Remote turns off in {minutes} min"
 """With the minutes left, rounded up: 10 when the first check inside :data:`AUTO_OFF_WARNING`
@@ -712,8 +716,9 @@ def push_https_transport(endpoint: str, headers: dict[str, str], body: bytes) ->
     the timeout is 10 s, and at most 4 KiB of the answer is read.
     """
     import http.client
-    import ssl
     from urllib.parse import urlsplit
+
+    from aisquare.core import tls
 
     if not push_host_allowed(endpoint):
         raise ValueError(f"not an allowed push service: {endpoint[:80]!r}")
@@ -723,7 +728,7 @@ def push_https_transport(endpoint: str, headers: dict[str, str], body: bytes) ->
         parts.hostname or "",
         443,
         timeout=PUSH_TIMEOUT_SECONDS,
-        context=ssl.create_default_context(),
+        context=tls.ssl_context(),
     )
     try:
         connection.request("POST", target, body=body, headers=headers)

@@ -12,10 +12,9 @@ import contextlib
 import os
 import shlex
 import shutil
-import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as metadata_version
@@ -27,10 +26,14 @@ from typer.testing import CliRunner
 
 import aisquare
 from aisquare.core import agents as agent_core
-from aisquare.core import experimental
+from aisquare.core import experimental, insights
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
+from aisquare.models import ProjectInfo
 from aisquare.services import ci_client
+from aisquare.services import hooks as hooks_service
+from aisquare.services import project as project_service
+from tests import private_fleets, shards
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -103,6 +106,10 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     reason = _foreign_package_reason(aisquare.__file__, SRC)
     if reason is not None:
         pytest.exit(reason, returncode=4)
+    # Once per run, in the process that starts it: an xdist worker's siblings are alive,
+    # so a sweep there would find nothing more, only race the others for it.
+    if not hasattr(session.config, "workerinput"):
+        private_fleets.sweep_orphans()
 
 
 def _sdk_installed() -> bool:
@@ -137,6 +144,11 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     per-test failures are already loud, and this is the sentence that explains
     them.
     """
+    # An xdist worker notes what it saw outside every test's home in its own process,
+    # and only the controller prints the summary: hand it over (pytest_testnodedown).
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if workeroutput is not None:
+        workeroutput["outside_a_test"] = dict(_OUTSIDE_A_TEST)
     if _sdk_installed() and not _SDK_AT_START:
         session.exitstatus = max(exitstatus, 1)
         print(
@@ -178,12 +190,9 @@ AMBIENT_ENV_VARS = (
     # uv its cache (`install_route`). Left set, a test of `uninstall --purge` would
     # plan, and delete, the developer's own answers file.
     "XDG_CACHE_HOME",
-    # The uvx the plugin's launcher ran a hook with, which session start names to the
-    # agent (`services.hooks._log_command`). Set in a hook's own environment only.
-    "AISQUARE_PLUGIN_UVX",
-    # The build the launcher runs in place of the pinned release, which session start
-    # names to the agent too. Left set by a developer checking a wheel, the log-command
-    # tests would read their wheel where the pinned release is expected.
+    # The build the plugin's launcher runs in place of the pinned release. Left set by a
+    # developer checking a wheel, the launcher tests would run their wheel where the
+    # pinned release is expected.
     "AISQUARE_PLUGIN_FROM",
     # The copies of the shell's own two a launch onto a managed slot keeps
     # (`core.claude_accounts.PLAIN_VARS`). `plain_environment` reads them
@@ -198,10 +207,17 @@ AMBIENT_ENV_VARS = (
     # (`core.claude_accounts.keychain_service`), which it hands to the teammates it
     # spawns: a suite run from one of those would name every account's item after it.
     "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+    # Claude Code hands it to the MCP servers it starts, and to every shell a session runs:
+    # a suite run from inside Claude Code would name every virtual MCP row after that
+    # session (`mcp_server.client_session_id`, #48).
+    "CLAUDE_CODE_SESSION_ID",
     "AISQUARE_TEAM",
     "AISQUARE_ROLE",
     # Exported by `launch --persona`; a fleet agent running the suite has one.
     "AISQUARE_PERSONA",
+    # Exported on every fleet window since P1 WS-2 (#279): a reviewer running the suite
+    # reads the board as `none`, and every delta test read nothing.
+    "AISQUARE_BOARD_CONTEXT",
     # Read off the ambient env by `services/mcp_server.py` to attribute remote
     # calls — same family as the two above, and missed for the same reason.
     "AISQUARE_SERVE_CLIENT",
@@ -222,6 +238,9 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_REMOTE_PORT",
     "AISQUARE_REMOTE_AUTO_OFF",
     "AISQUARE_REMOTE_NGROK_URL",
+    # The token Remote's bundled ngrok signs in with first (`services.ngrok_sdk`). Left
+    # set by a developer who uses ngrok, a test that starts a tunnel had it to sign in with.
+    "NGROK_AUTHTOKEN",
     "AISQUARE_TEAM_HUB",
     "AISQUARE_TEAM_DELTA",
     "AISQUARE_TEAM_LEASE_MIN",
@@ -423,8 +442,8 @@ def home_outside_a_test(tmp_path_factory: pytest.TempPathFactory) -> Path:
     none of them, for module-scoped fixtures and for what outlives a test. Left set at
     the end on purpose: the panel's writer thread is joined at the interpreter's exit,
     and what it still had to write lands here, not in the developer's home. A home the
-    shell named is kept: the CI ``ambient`` job names a configured one, and a fixture
-    reading it outside a test is the leak that job exists to catch.
+    shell named is kept: CI's two ambient legs (py3.11 and py3.13) name a configured one,
+    and a fixture reading it outside a test is the leak those legs exist to catch.
     """
     if SHELL_HOME is not None:
         return Path(SHELL_HOME)
@@ -447,6 +466,14 @@ def pytest_runtest_logfinish(nodeid: str, location: tuple[str, int | None, str])
     ]
     for path in appeared:
         _OUTSIDE_A_TEST.setdefault(str(path), nodeid)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node: object, error: object) -> None:
+    """Take in what an xdist worker saw outside every test's home (its sessionfinish)."""
+    seen = getattr(node, "workeroutput", {}).get("outside_a_test", {})
+    for path, nodeid in seen.items():
+        _OUTSIDE_A_TEST.setdefault(path, nodeid)
 
 
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
@@ -490,21 +517,18 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("AISQUARE_API_URL", "http://127.0.0.1:9")
     # The experiment settings are read once per process (ci_client._settings is
     # lru_cached, like core.insights._config), so a cached read from the previous
-    # test's HOME would outlive the home it came from.
+    # test's HOME would outlive the home it came from. So is the insights config,
+    # and a test that never turned shipping on passed only after one that had, in the
+    # same process: green in a whole run, red alone or in a CI shard without it.
     ci_client.reset_cache()
+    insights.reset_cache()
     # Cached once per process (core.agents.current_install), and tests change what it
     # reads: the interpreter (sys.executable) and the distribution's RECORD on sys.path.
     agent_core.current_install.cache_clear()
     return home
 
 
-def _uid() -> int:
-    """This user's id — the ``tmux-<uid>`` folder. Windows has neither, nor tmux; a test
-    that removes ``os.getuid`` (to stand for Windows) reads as uid 0 here, never a crash."""
-    if sys.platform == "win32":
-        return 0
-    getuid = getattr(os, "getuid", None)
-    return getuid() if callable(getuid) else 0
+_uid = private_fleets.uid
 
 
 #: Where tmux keeps the OWNER's sockets — read once, at import, before any fixture
@@ -580,7 +604,7 @@ def _sweep_private_fleets() -> Iterator[None]:
     tmux = shutil.which("tmux")
     for folder in _PRIVATE_FLEETS:
         if folder.exists():
-            _kill_private_servers(folder, _uid(), tmux)
+            private_fleets.end_private_servers(folder, _uid(), tmux)
             shutil.rmtree(folder, ignore_errors=True)
 
 
@@ -616,7 +640,7 @@ def no_real_fleet(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
     from aisquare.core import tmux as tmux_core
     from aisquare.core.tmux import Completed
 
-    private = Path(tempfile.mkdtemp(prefix="asqtx", dir="/tmp"))
+    private = private_fleets.private_folder()
     _PRIVATE_FLEETS.append(private)
     # Read once, now: a test may remove os.getuid, or patch sys.platform, to stand for
     # Windows (test_tmux.py, test_windows_contention.py) — and teardown runs under it.
@@ -655,25 +679,10 @@ def no_real_fleet(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
         # raised TypeError here and ERRORED the test. Whatever this pass cannot do, the
         # session's sweep does, with nothing patched.
         with contextlib.suppress(Exception):
-            _kill_private_servers(private, guard.uid, guard.tmux)
+            private_fleets.end_private_servers(private, guard.uid, guard.tmux)
             shutil.rmtree(private, ignore_errors=True)
     if verdict is not None:
         pytest.fail(verdict)
-
-
-def _kill_private_servers(private: Path, uid: int, tmux: str | None) -> None:
-    """End every tmux server a test left under its private ``TMUX_TMPDIR``, with its panes."""
-    folder = private / f"tmux-{uid}"
-    if tmux is None or not folder.is_dir():
-        return
-    for socket in folder.iterdir():
-        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-            subprocess.run(
-                [tmux, "-S", str(socket), "kill-server"],
-                capture_output=True,
-                timeout=10,
-                check=False,
-            )
 
 
 @pytest.fixture
@@ -684,6 +693,46 @@ def project_capture(monkeypatch: pytest.MonkeyPatch) -> None:
     from aisquare.services import project as project_service
 
     monkeypatch.setattr(project_service, "capture_on", lambda: True)
+
+
+@pytest.fixture(autouse=True)
+def no_real_ngrok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test reaches ngrok's service, or reads the developer's own ngrok config (#34).
+
+    - **the bundled ngrok is a stand-in** (``tests/fake_ngrok_sdk``) that refuses every
+      sign-in: Remote's tunnel, and Settings' token check, are the SDK's, in this process. A
+      test that wants a tunnel puts its own stand-in in ``sys.modules["ngrok"]``.
+    - **ngrok's own configs are the test's**: ``~/.config/ngrok/ngrok.yml`` (or macOS's, or
+      ``%LocalAppData%``'s) and ``~/.ngrok2/ngrok.yml`` hold the developer's authtoken, and a
+      tunnel's start reads them. Asked for with the developer's home in force, they are looked
+      for in a folder of the test's; a test that names a home of its own (``HOME``, or
+      ``home=``) gets that one's, as ever.
+    """
+    from aisquare.services import ngrok_sdk, ngrok_tunnel
+    from tests.fake_ngrok_sdk import Script, fake_sdk
+
+    monkeypatch.setitem(sys.modules, "ngrok", fake_sdk(Script(refuse="ERR_NGROK_TEST")))
+    stand_in = tmp_path / "ngrok-home"
+    real_config, real_ngrok2 = ngrok_tunnel.ngrok_default_config, ngrok_sdk.ngrok2_config
+
+    def config(
+        *,
+        platform: str = sys.platform,
+        environ: Mapping[str, str] = os.environ,
+        home: Path | None = None,
+    ) -> Path:
+        if home is None and Path.home() == _DEVELOPERS_HOME:
+            home = stand_in
+            environ = {k: v for k, v in environ.items() if k not in ("LOCALAPPDATA",)}
+        return real_config(platform=platform, environ=environ, home=home)
+
+    def ngrok2() -> Path:
+        return (
+            stand_in / ".ngrok2" / "ngrok.yml" if Path.home() == _DEVELOPERS_HOME else real_ngrok2()
+        )
+
+    monkeypatch.setattr(ngrok_tunnel, "ngrok_default_config", config)
+    monkeypatch.setattr(ngrok_sdk, "ngrok2_config", ngrok2)
 
 
 @pytest.fixture(autouse=True)
@@ -738,11 +787,7 @@ def private_ui_socket_root(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     def private() -> Path:
         if not made:
-            made.append(
-                Path(
-                    tempfile.mkdtemp(prefix="asq", dir=None if sys.platform == "win32" else "/tmp")
-                )
-            )
+            made.append(private_fleets.private_folder())
             _PRIVATE_UI_ROOTS.append(made[0])
         root = real()
         return made[0] / root.relative_to(root.anchor)
@@ -779,7 +824,7 @@ def isolated_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     ``~/.claude/settings.json`` — and since #84 it also globs ``~/.claude*`` for
     sibling installs and grades the binary each one's hooks name. A doctor row
     that depends on how the author's own machine is hooked is the ambient leak
-    ``.github/workflows/ci.yml``'s ``ambient`` job exists to catch; green there
+    ``.github/workflows/ci.yml``'s two ambient legs exist to catch; green there
     and red on a hooked laptop, or the reverse. Tests that want Claude Code
     detected build the tree under their own fixture (``fake_home`` in
     test_agents.py) and re-point ``_home`` at it, which overrides this.
@@ -834,6 +879,92 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+#: The detached start of an index build (#285), as written, for the tests of it:
+#: ``no_detached_code_index_build`` replaces it for every other test.
+REAL_START_CODE_INDEX = hooks_service.start_code_index
+
+
+@pytest.fixture(autouse=True)
+def no_detached_code_index_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No ``init`` or ``project onboard`` in the suite starts a detached ``aisquare code
+    index``: it would run in a session of its own that outlives the test. A test that wants
+    an index builds one (``code_service.build_index``)."""
+    monkeypatch.setattr(hooks_service, "start_code_index", lambda _project, *, full=False: None)
+
+
+#: The session-start refresh of the symbol index (#285), as written, for the tests of it:
+#: ``no_detached_code_refresh`` replaces it for every other test.
+REAL_REFRESH_CODE_INDEX = hooks_service._refresh_code_index
+
+
+@pytest.fixture(autouse=True)
+def no_detached_code_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No session start in the suite starts a detached ``aisquare code index`` (#285).
+
+    ``init`` and ``project onboard`` build an index now, so every later session-start
+    hook would start one, in a session of its own that outlives the test.
+    """
+    monkeypatch.setattr(hooks_service, "_refresh_code_index", lambda _project: None)
+
+
+REAL_ENSURE_CODE_INDEX = project_service._ensure_code_index
+
+
+@pytest.fixture(autouse=True)
+def no_index_of_this_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """``init`` and ``project onboard`` build a symbol index only under pytest's temp dirs.
+
+    A test that runs either where it stands onboards this repository, and a full index of
+    it per test (a fresh home each time, so never incremental) took rc/p2's CI from ~20 to
+    60-90 minutes. Elsewhere the onboard reports no index, as with ``[code] enabled`` off.
+    """
+    base = tmp_path_factory.getbasetemp().resolve()
+
+    def ensure(project: ProjectInfo, *, refresh: bool) -> str | None:
+        if not project.root.resolve().is_relative_to(base):
+            return None
+        return REAL_ENSURE_CODE_INDEX(project, refresh=refresh)
+
+    monkeypatch.setattr(project_service, "_ensure_code_index", ensure)
+
+
+@pytest.fixture(autouse=True)
+def roomy_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every spawn in the suite sees plenty of memory, whatever the runner has (#283).
+
+    ``min_free_mb`` is on by default, so a CI runner short of 2 GB would otherwise refuse
+    the spawn a test is about. A test of admission sets its own headroom; the probes'
+    own tests call ``linux_headroom`` / ``darwin_headroom`` with their fixtures.
+    """
+    from aisquare.core import memory
+
+    monkeypatch.setattr(
+        memory, "headroom", lambda: memory.Headroom(65_536, 131_072, "normal", None, "test")
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_detached_root_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No in-process test starts the detached worker that posts a Run's root (#129 e).
+
+    It runs in a session of its own and outlives the test, retrying a gateway the test
+    has already shut down. A test of the worker patches ``_start_root_worker`` itself; a
+    test of a traced launch patches ``_post_run_root``. Reaching this is a test that did
+    neither, and it fails loudly rather than leave a process behind.
+    """
+    from aisquare.services import explainability
+
+    def refuse(argv: list[str], key: bytes) -> None:
+        raise AssertionError(
+            "a test started a detached root worker: patch explainability._post_run_root "
+            f"or _start_root_worker ({' '.join(argv[-5:])})"
+        )
+
+    monkeypatch.setattr(explainability, "_start_root_worker", refuse)
+
+
 @pytest.fixture(autouse=True)
 def no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Never read the macOS Keychain of the machine the suite runs on.
@@ -875,6 +1006,71 @@ def no_native_clipboard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(clipboard, "osc52_terminal", lambda env: "accepts")
 
 
+PYPI_CLOSED = "PyPI is not asked from the test suite"
+"""What :func:`no_pypi` answers for every PyPI lookup a test did not supply its own for."""
+
+
+@pytest.fixture(autouse=True)
+def no_pypi(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """Never ask PyPI from a test; answer as an offline machine does.
+
+    ``install_route.fetch_latest`` is the one request to PyPI in the package: ``aisquare
+    upgrade`` and asq's daily release check (``services.updates``) both ask it. Every
+    ``FleetApp`` a test builds runs that check, and only the route kept it offline: a
+    checkout is never checked, and the suite runs editable. From a non-editable install
+    (``pip install .``, a uv tool, a packager's run) the UI tests asked PyPI twenty
+    times in two files, and waited out a timeout each where the network is firewalled
+    (review of #301, M1). The answer is the one an offline machine gets, which every
+    caller already takes as "no answer". Tests of the lookup and the upgrade put their own
+    over this one (``tests/installer_seams.py``, ``machine`` in test_lifecycle_upgrade.py)
+    or call the real function they took at import. Each ask is kept, for a probe.
+    """
+    from aisquare.services import install_route
+
+    asked: list[dict[str, object]] = []
+
+    def offline(timeout: float = 0.0, **kwargs: object) -> install_route.LatestRelease:
+        asked.append(dict(kwargs))
+        return install_route.LatestRelease(None, PYPI_CLOSED)
+
+    monkeypatch.setattr(install_route, "fetch_latest", offline)
+    return asked
+
+
+TLS_CLOSED = "the suite makes no TLS handshake off this machine"
+"""What :func:`no_tls_probe` answers for a handshake to any host but this machine's own."""
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+@pytest.fixture(autouse=True)
+def no_tls_probe(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Never shake hands with a real host from a test; answer as a refused connection does.
+
+    ``core.tls.handshake`` is ``doctor --live``'s ``tls`` row (#403): a verified handshake to
+    api.anthropic.com. Every test that ran ``doctor --live`` sent a TCP connect and a TLS
+    ClientHello there, eight of them, and waited out the 10 s timeout where a firewall drops
+    rather than refuses (REVIEW-403, MAJOR-1). Refused, the row warns "could not reach", as
+    an offline machine's does. A handshake to this machine (a test's own TLS server) runs
+    for real; a test of the row puts its own stand-in over this one. Each refused host is
+    kept, for a probe.
+    """
+    from aisquare.core import tls
+
+    real = tls.handshake
+    refused: list[str] = []
+
+    def handshake(host: str, *, port: int = 443, timeout: float = 10.0) -> None:
+        if host in _LOOPBACK_HOSTS:
+            real(host, port=port, timeout=timeout)
+            return
+        refused.append(host)
+        raise ConnectionRefusedError(TLS_CLOSED)
+
+    monkeypatch.setattr(tls, "handshake", handshake)
+    return refused
+
+
 @pytest.fixture(autouse=True)
 def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never run a hook's aisquare for its version; answer as this install.
@@ -883,29 +1079,14 @@ def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     ``_aisquare_command`` resolves: the console script beside this interpreter
     when there is one, otherwise the machine's ``aisquare`` — a pyenv shim on the
     author's box. Which one is ambient state, and running it would grade the
-    developer's PATH rather than this tree. Same shape as ``no_repomix`` below.
-    Tests of the probe itself capture the real function at import and call it
-    against fake scripts they write (test_doctor_stale_hook_binary.py).
+    developer's PATH rather than this tree. Tests of the probe itself capture the
+    real function at import and call it against fake scripts they write
+    (test_doctor_stale_hook_binary.py).
     """
     from aisquare.core import agents
     from aisquare.core.version import __version__
 
     monkeypatch.setattr(agents, "hook_binary_version", lambda argv, **_kwargs: __version__)
-
-
-@pytest.fixture(autouse=True)
-def no_repomix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Disable the repomix subprocess by default so tests never shell out.
-
-    Snapshot generation degrades to "skipped". Tests that exercise the packing
-    logic override ``snapshot._run_repomix`` with a fake returning synthetic XML.
-    """
-    from aisquare.core import snapshot
-
-    def _unavailable(*_args: object, **_kwargs: object) -> tuple[str, str]:
-        raise snapshot.RepomixUnavailableError("repomix disabled in tests")
-
-    monkeypatch.setattr(snapshot, "_run_repomix", _unavailable)
 
 
 @pytest.fixture(autouse=True)
@@ -972,12 +1153,26 @@ carry it: a test that fails with the captain off and is not about the captain is
 of the off path, to be fixed in the code (review of #240)."""
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    shards.add_option(parser)
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         f"{NEEDS_CAPTAIN}: needs the experimental captain on; skipped when "
         f"{SUITE_CAPTAIN_ENV}=off runs the suite with it off, as it ships",
     )
+    config.addinivalue_line(
+        "markers",
+        "e2e: drives a real, signed-in Claude Code (and spends tokens); skipped unless the "
+        "test's own variables name what to drive",
+    )
+    # A CI shard notes what it collected and ran, for the `shards` job's check that a
+    # leg's shards ran its suite exactly once (tests/shards.py).
+    manifest = config.getoption(shards.OPTION)
+    if manifest:
+        config.pluginmanager.register(shards.plugin(Path(manifest), config), "shard-manifest")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

@@ -30,6 +30,7 @@ from aisquare.services import team as team_service
 from aisquare.services.captain import brain
 from aisquare.services.captain import state as captain_state
 from tests import test_fleet_service as fleet_suite
+from tests.fleet_fakes import list_agents_as
 from tests.test_fleet_service import FakeTmux
 
 # The fleet suite's fixtures, bound here so pytest finds them for this module's tests.
@@ -392,9 +393,8 @@ def test_a_dead_captain_the_listing_could_not_end_is_still_not_found(
         id="agt_dead", project_id=home.id, label="captain", role="captain",
         pane_id="%9", cwd=brain.brain_dir(), created_at=datetime.now(tz=UTC),
     )  # fmt: skip
-    monkeypatch.setattr(
-        fleet_service,
-        "list_agents",
+    list_agents_as(
+        monkeypatch,
         lambda project, **kw: [FleetAgentStatus(agent=row, state="exited")],
     )
     assert brain.find() is None
@@ -577,3 +577,27 @@ def test_the_captains_session_start_is_the_captains_briefing(
     with store_session() as store:
         session = store.get_session("captain-claude-1")
     assert session is not None and session.project_id == home.id, "on the home board"
+
+
+@pytest.mark.needs_captain
+def test_the_captain_alone_on_the_home_board_still_gets_the_captains_briefing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#346 gives a session with nobody to coordinate with no team block (#42 merged it).
+    The captain is a member by its role, whoever else is on the home board: with the board
+    read as holding no team, its start is still the captain's briefing, never the solo
+    silence, and it is not left unbriefed."""
+    home = captain_state.home_project()
+    brain.brain_dir().mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AISQUARE_ROLE", "captain")
+    monkeypatch.setenv("AISQUARE_PERSONA", "captain")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(home.root))
+    captain_state.ensure_session(home)
+    monkeypatch.setattr(team_service, "_has_team", lambda *args, **kwargs: False)
+
+    text = team_service.hook_session_start("captain-claude-1", brain.brain_dir(), "startup")
+
+    assert "attention()" in text, "its role cycle"
+    assert "act as the owner" in text.lower(), "its persona"
+    with store_session() as store:
+        assert store.get_meta(team_service._unbriefed("captain-claude-1")) is None

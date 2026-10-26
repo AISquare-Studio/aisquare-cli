@@ -240,8 +240,8 @@ class ClaudeAccount(BaseModel):
     # --- what the REGISTRY says about the slot (``claude_account`` in the store) ---
     #
     # The directories stay the record of WHICH accounts exist and who is signed in
-    # (core.claude_accounts). These four fields are the operator's ARRANGEMENT of
-    # them — a name, an order, a choice — which no directory can carry, so they
+    # (core.claude_accounts). These three fields are the operator's ARRANGEMENT of
+    # them — a name, an order, a veto — which no directory can carry, so they
     # live in SQLite and are folded onto the account by
     # ``services.claude_accounts.list_accounts``. A ``ClaudeAccount`` built by the
     # core alone has the defaults below, which read as "no arrangement": that is
@@ -250,10 +250,8 @@ class ClaudeAccount(BaseModel):
     """The operator's name for the slot (``work``, ``personal``), unique; ``None`` when unnamed."""
     position: int | None = None
     """Its rank in the priority order, 1 first; ``None`` before the registry has seen it."""
-    is_default: bool = False
-    """The machine default — what a launch runs under when nothing more specific says."""
     disabled: bool = False
-    """Never chosen automatically (default, priority, headroom); still usable by name."""
+    """Never chosen automatically (priority, headroom); still usable by name."""
 
 
 class ClaudeAccountRecord(BaseModel):
@@ -270,6 +268,8 @@ class ClaudeAccountRecord(BaseModel):
     alias: str | None = None
     position: int
     is_default: bool = False
+    """The retired machine-default flag: rank 1 is the default (#8 on the board), and the
+    registry's read promotes a slot still flagged to rank 1 and clears it."""
     disabled: bool = False
     created_at: datetime
 
@@ -309,12 +309,41 @@ class ClaudeUsage(BaseModel):
     week_percent: float | None = None
     """The rolling seven-day window: percent USED (0-100)."""
     week_resets_at: datetime | None = None
+    family_week_percent: dict[str, float] = Field(default_factory=dict)
+    """The per-family weeks (``seven_day_opus`` → ``opus``…): percent USED (0-100). Such a
+    limit applies only to requests to that model family (#277), so a pick counts it for an
+    agent of that family alone (``services.claude_accounts.headroom_percent``). Live
+    readings only: the cache keeps the two shared windows, and a spent family week is
+    remembered as a limit mark instead (``remember_limit``)."""
+    family_week_resets_at: dict[str, datetime] = Field(default_factory=dict)
+    """When each family week resets, where the endpoint said."""
     fetched_at: datetime | None = None
     """When the reading was taken — or, when nothing could be read, when that was found out."""
     last_failed_at: datetime | None = None
     """When a later try to read failed without replacing this reading: an unreachable
     endpoint or an HTTP error after it, while it is still within the five-minute cache.
-    The figure stands; the line that says how old it is says the try failed too."""
+    The figure stands; the line that says how old it is says the try failed too. Since
+    F1 of #400 the figure stands whatever its age: a reading on record is shown, with
+    its age and :attr:`last_failed_reason`, rather than ``—``."""
+    last_failed_reason: str | None = None
+    """Why the try at :attr:`last_failed_at` read nothing ("rate-limited until 14:32",
+    "could not reach the usage endpoint …"), shown beside the older figure it kept."""
+    rate_limited: bool = False
+    """The usage endpoint answered HTTP 429 (or 503 with ``Retry-After``) for this account,
+    now or on a try still being waited out: logging in again does not clear it."""
+    rate_limited_until: datetime | None = None
+    """No usage request is sent for this account before then: the endpoint's
+    ``Retry-After``, or an exponential default when it sent none. Recorded on disk, so
+    every ``aisquare`` process, the Accounts page and ``--refresh`` wait it out too."""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def kept(self) -> bool:
+        """Not a live reading: the endpoint asked to wait (:attr:`rate_limited`), or a failed
+        read is showing the last good figure (:attr:`last_failed_reason`). Shown with its age;
+        never counted as live. In ``--json`` so a reader need not work it out from the two
+        (review of #408, n3)."""
+        return self.rate_limited or self.last_failed_reason is not None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -639,6 +668,85 @@ class MetricsSummary(BaseModel):
     measured yet" rather than as "no tokens were used"."""
 
 
+UsageTrigger = Literal["stop", "stop_failure", "session_end"]
+"""The hook that recorded a stretch of a session's usage."""
+
+
+class SessionUsage(BaseModel):
+    """What one agent session has spent so far, read off its transcript.
+
+    ``usage`` is ``core.usage.Usage`` as a dict (per-model tokens, tool calls by
+    name, tool-result characters, lookups, characters aisquare injected) plus
+    ``first_edit`` — the tokens and tool calls before the session's first
+    Edit/Write/NotebookEdit. ``state`` is the scan's position in the transcript,
+    opaque to every reader but ``services.metrics``.
+    """
+
+    session_id: str
+    project_id: str
+    transcript_path: str | None = None
+    state: str = "{}"
+    usage: dict[str, Any] = Field(default_factory=dict)
+    turns: int = 0
+    total_tokens: int = 0
+    weighted: float = 0.0
+    cost_usd: float = 0.0
+    started_at: datetime
+    updated_at: datetime
+    ended_at: datetime | None = None
+
+
+class TurnUsage(BaseModel):
+    """One Stop-delimited stretch of a session: what that turn added."""
+
+    id: str
+    session_id: str
+    project_id: str
+    trace_id: str | None = None
+    """The ``metric`` row this turn closed, when the prompt hook opened one."""
+    seq: int
+    trigger: UsageTrigger
+    recorded_at: datetime
+    usage: dict[str, Any] = Field(default_factory=dict)
+    total_tokens: int = 0
+    weighted: float = 0.0
+    cost_usd: float = 0.0
+    scan_ms: float | None = None
+    """How long reading the transcript took on the hook's path."""
+
+
+class TokenSummary(BaseModel):
+    """``aisquare metrics tokens``: what recorded sessions spent, summed on read."""
+
+    project_id: str | None = None
+    session_id: str | None = None
+    sessions: int = 0
+    turns: int = 0
+    requests: int = 0
+    input_tokens: int = 0
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    weighted_tokens: float = 0.0
+    """Cost-weighted tokens over the PRICED models only (``core.pricing``)."""
+    cost_usd: float = 0.0
+    """List price over the priced models only."""
+    unpriced_models: list[str] = Field(default_factory=list)
+    unpriced_tokens: int = 0
+    models: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    tool_calls: int = 0
+    tools: dict[str, int] = Field(default_factory=dict)
+    tool_result_chars: int = 0
+    lookup_calls: int = 0
+    injected_chars: int = 0
+    sessions_with_edit: int = 0
+    median_tokens_before_edit: int | None = None
+    median_tool_calls_before_edit: int | None = None
+    prices_as_of: str = ""
+    prices_source: str = ""
+
+
 TaskStatus = Literal["todo", "doing", "review", "blocked", "done", "dropped"]
 """Lifecycle of a shared team task: todo → doing → review → done (or parked)."""
 
@@ -689,6 +797,11 @@ class TeamSession(BaseModel):
     persona: str | None = None
     """The persona the session was launched as (``AISQUARE_PERSONA``), recorded at start —
     what was ASKED, even when it could not be loaded (docs/plans/spawn-personas.md §3.7)."""
+    prompted_at: datetime | None = None
+    """When its last prompt started a turn (``UserPromptSubmit``), however the prompt came:
+    typed, on the command line, or from another session's inbox. ``None`` before the first,
+    and on rows from before schema 36. What a typed delivery's acknowledgement asks
+    (``services.delivery``)."""
 
 
 class TeamTask(BaseModel):
@@ -736,6 +849,13 @@ class TeamEvent(BaseModel):
     task_id: str | None = None
     to_role: str | None = None
     created_at: datetime
+    actor: str | None = None
+    """Who caused it, when not the author (P1 WS-2, #279): a session id, ``user`` (asq or
+    a shell with no session), ``usage-limit`` or ``auto-stop``. ``None``: the author's own
+    act, or unknown."""
+    meta: dict[str, object] | None = None
+    """Its details, by kind: ``agent_exited`` carries ``status``, ``force``, ``released``
+    and ``why``."""
 
     def as_envelope(self) -> DataEnvelope:
         """This event as a capture-pipe envelope (``kind`` namespaced ``team.*``).
@@ -753,6 +873,8 @@ class TeamEvent(BaseModel):
             "text": self.text,
             "task_id": self.task_id,
             "to_role": self.to_role,
+            "actor": self.actor,
+            "meta": self.meta,
         }
         if self.kind == "signal":
             decoded = _SIGNAL_TEXT.match(self.text)
@@ -774,39 +896,174 @@ class TeamEvent(BaseModel):
         )
 
 
-class Snapshot(BaseModel):
-    """A packed snapshot of a project's codebase (Repomix full pack + skeleton)."""
+EvidenceVerdict = Literal["pass", "fail"]
+"""What a recorded check found (``asq brief evidence --verdict``)."""
 
+EvidenceKind = Literal["manual", "report"]
+"""What backs a check. ``manual``: an artifact, such as a screenshot, that only the
+validator can judge, and labelled so everywhere. ``report``: a saved command report
+(``asq exec``), checked against the source it ran on; recorded by a later build."""
+
+RequirementState = Literal["pass", "fail", "stale", "missing", "blocked", "unlinked"]
+"""Where one requirement, or one linked task's part of it, stands (``asq brief show``)."""
+
+
+class RequirementVersion(BaseModel):
+    """A requirement as it read before a correction superseded it: kept, never rewritten."""
+
+    revision: int
+    text: str
+    check: str | None = None
+    superseded_at: datetime
+    superseded_by: str | None = None
+    """The session (``--as``) whose correction superseded it."""
+
+
+class BriefRequirement(BaseModel):
+    """One numbered requirement of a brief. ``id`` (``R1``, ``R2``, …) is stable for the
+    brief's life; ``revision`` counts the corrections that changed what it asks, and a
+    check recorded against an older revision is stale."""
+
+    id: str
+    text: str = Field(min_length=1, max_length=2000)
+    check: str | None = Field(default=None, max_length=2000)
+    """The expected check, as the brief's author wrote it: what proves this one."""
+    revision: int = 1
+    task_ids: list[str] = Field(default_factory=list)
+    """The board tasks linked to it, each of which proves its own contribution."""
+    history: list[RequirementVersion] = Field(default_factory=list)
+
+
+class BriefEvidence(BaseModel):
+    """One recorded check of one requirement by one linked task. Appended, never edited."""
+
+    id: str
+    requirement_id: str
+    requirement_revision: int
+    """The requirement's revision when this was recorded: a correction makes it stale."""
+    task_id: str
+    verdict: EvidenceVerdict
+    kind: EvidenceKind = "manual"
+    finding: bool = False
+    """Recorded by ``asq brief finding``: a failure someone found, not a check run."""
+    summary: str = Field(min_length=1, max_length=4000)
+    artifact: str | None = None
+    """The kept copy of the artifact, for ``manual`` evidence: under the store's home
+    (``briefs/<project>/<brief>/``), owner-only. What the check is judged against."""
+    artifact_source: str | None = None
+    """Where the artifact was when it was recorded. Provenance only: the original may
+    go, and the check stands on its copy."""
+    artifact_sha256: str | None = None
+    report_id: str | None = None
+    """The command report behind ``report`` evidence."""
+    report_sha256: str | None = None
+    """That report's digest when recorded: a report changed since no longer backs it."""
+    source_root: str | None = None
+    """The checkout the check ran in, for ``report`` evidence."""
+    source_fingerprint: str | None = None
+    """That checkout's source identity when the check ran, for ``report`` evidence."""
+    recorded_at: datetime
+    session_id: str | None = None
+
+
+class BriefCorrection(BaseModel):
+    """One write that changed what a brief asks: what changed, and what it made stale."""
+
+    revision: int
+    """The brief revision this correction produced."""
+    changes: list[str]
+    stale: list[str] = Field(default_factory=list)
+    """The requirement ids whose recorded checks it made stale."""
+    at: datetime
+    session_id: str | None = None
+
+
+class WorkBrief(BaseModel):
+    """One user request as numbered requirements, linked to ordinary board tasks.
+
+    ``revision`` counts every write, which is how two writers never overwrite each other
+    (the store compares it). ``number`` is its number on its board (``B1``), given by the
+    store at insert, and not part of the stored document.
+    """
+
+    id: str
     project_id: str
-    head_sha: str | None = None
-    generated_at: datetime
-    pack_path: Path
-    skeleton_path: Path
-    index_path: Path
-    token_count: int = 0
-    skeleton_token_count: int = 0
-    file_count: int = 0
-    compressed: bool = False
-    status: str = "ready"
-    # What a ``too_large`` verdict was made of, so the failure can say what it
-    # measured: the full pack's size and the budget it was held to
-    # (``token_count`` is the pack that was kept — or, when none was, the
-    # compressed pack's size). Both are None on a snapshot.json written before
-    # they were recorded (0.6.0 and earlier); see ``core.snapshot.too_large_detail``.
-    full_token_count: int | None = None
-    max_tokens: int | None = None
+    number: int | None = None
+    title: str = Field(min_length=1, max_length=500)
+    revision: int = 1
+    requirements: list[BriefRequirement] = Field(min_length=1, max_length=64)
+    assumptions: list[str] = Field(default_factory=list)
+    boundaries: list[str] = Field(default_factory=list)
+    evidence: list[BriefEvidence] = Field(default_factory=list, max_length=1024)
+    corrections: list[BriefCorrection] = Field(default_factory=list)
+    created_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    @property
+    def label(self) -> str:
+        """``B1`` once stored; the id before."""
+        return f"B{self.number}" if self.number is not None else self.id
+
+
+class TaskProof(BaseModel):
+    """One live linked task's part of a requirement: its latest check, and what it is worth."""
+
+    task_id: str
+    task_number: int | None = None
+    task_status: TaskStatus
+    state: RequirementState
+    reason: str
+    evidence_id: str | None = None
+    kind: EvidenceKind | None = None
+    command: str | None = None
+    """The command whose report backs this check, as run: shown beside the requirement's
+    expected check, so a report of ``true`` cannot pass for ``pytest`` unseen."""
+
+
+class RequirementStatus(BaseModel):
+    """Where a requirement stands: the worst of its live linked tasks' proofs."""
+
+    id: str
+    state: RequirementState
+    reason: str
+    manual: bool = False
+    """A pass here rests on manual evidence, which only the validator can judge."""
+    tasks: list[TaskProof] = Field(default_factory=list)
+
+
+class BriefView(BaseModel):
+    """A brief with each requirement's standing, as ``asq brief show`` reads it."""
+
+    brief: WorkBrief
+    requirements: list[RequirementStatus]
+
+
+class BriefCheck(BriefView):
+    """``asq brief check``: every pass checked against the source now."""
+
+    complete: bool
+    """Every requirement is a pass: what makes ``brief check`` exit 0."""
+    source_root: str | None = None
+    """The one checkout every pass was compared with (``--source-root``), if any."""
 
 
 class OnboardReport(BaseModel):
-    """Outcome of ``project onboard``: seeded facts and the codebase snapshot."""
+    """Outcome of ``project onboard``: the facts it seeded."""
 
     seeded: list[ContextEntry] = Field(default_factory=list)
-    snapshot: Snapshot | None = None
-    snapshot_note: str | None = None
-    """Why this run packed nothing, as ``init`` and ``onboard`` say it: off, or the
-    pack failed and why. ``None`` when a pack was made or reused. Set beside a
-    ``snapshot``, it is a ``--refresh`` that failed: that is the last pack, kept,
-    and agents still get it."""
+    markers_read: bool = True
+    """``False`` for a plain run on a project already onboarded: the markers were not
+    read, so "no new facts" would be a claim nobody checked. ``--refresh`` reads them."""
+    restored: bool = False
+    """``True`` when this run added a forgotten project again: the facts forget kept,
+    hidden, are back. Such a run reads the markers, as a first one does."""
+    warning: str | None = None
+    """``project_service.HOME_WARNING`` when this onboarding made the aisquare home a
+    project (D5), said once; else ``None``."""
+    code_index: str | None = None
+    """The symbol index's line (#285): what this onboard (or ``init``) started, or why
+    not. ``None`` with ``[code] enabled = false``."""
 
 
 class ProjectForgetReport(BaseModel):
@@ -910,11 +1167,18 @@ class AgentConnection(BaseModel):
     until that key goes. ``agents connect`` leaves the key alone. ``None`` otherwise."""
 
 
+EndedBy = Literal["stopped", "died"]
+"""How a fleet agent's row ended (``FleetAgent.ended_by``, #38): ``stopped`` on aisquare's
+word — ``fleet stop``, Stop all, ``shutdown``, a hand-over's old row — or ``died``, a death
+a read or ``reap`` recorded that nobody asked for."""
 FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited", "lost", "unknown"]
 """What a fleet agent is doing, DERIVED at read time and never stored: a fresh
 ``TeamSession`` row wins (working / waiting / attention); otherwise the tmux
 pane's facts (exited with a status, or lost when the pane is gone); ``unknown``
 when neither source can answer."""
+
+FirstPromptState = Literal["pending", "acked", "unsent"]
+"""Where a fleet agent's first message stands (:attr:`FleetAgent.first_prompt`)."""
 
 
 class ProjectGroup(BaseModel):
@@ -1062,6 +1326,15 @@ class LaunchSpec(BaseModel):
     (``core.orchestrator.window_team_hub``). A restart or switch gives the replacement's
     window the same, whoever runs it (``services.fleet._board_and_hub``). ``None`` on a spec
     recorded before 0.8.1 kept it."""
+    model: str | None = None
+    """The ``--model`` the spawn resolved down the role's ladder (#129 b), ``None`` when it
+    passed none: another binary, a model already in the arguments, or an untiered role."""
+    effort: str | None = None
+    """The ``--effort`` passed beside ``model``."""
+    board_context: str | None = None
+    """What of the board the agent reads (``all``, ``relevant``, ``none``; P1 WS-2, #279),
+    as its spawn resolved it, so a restart or switch keeps it. ``None`` on a spec recorded
+    before it: the role's setting applies."""
 
 
 class FleetAgent(BaseModel):
@@ -1124,6 +1397,20 @@ class FleetAgent(BaseModel):
     persona: str | None = None
     """The persona the agent was spawned with: ``--persona``, else the role's
     ``[fleet.roles.<role>].persona``, else none."""
+    ended_by: EndedBy | None = None
+    """How the row ended (v34, #38): ``stopped`` when aisquare ended it on purpose, ``died``
+    when a read or ``reap`` recorded a death nobody asked for. ``None`` while it runs, and on
+    a row ended before the column, which is read by its exit status (Restart all)."""
+    first_prompt: FirstPromptState | None = None
+    """Whether the first message it was given started a turn (P0-W1a, #122): ``pending``
+    from the spawn until its ``UserPromptSubmit``, then ``acked``; ``unsent`` once a
+    listing found it still pending past ``[fleet] prompt_ack_seconds`` at an idle input
+    box, or a typed delivery left it in the box. ``None`` when it was given none, and on
+    rows from before schema 36 ("not tracked")."""
+    first_prompt_at: datetime | None = None
+    """When ``first_prompt`` last changed: given (``pending``), taken (``acked``), found
+    not taken (``unsent``). An ``acked`` row's ``first_prompt_at - created_at`` is how long
+    the agent took to start its first turn (doctor's ``fleet-delivery`` row)."""
 
 
 class FleetAgentStatus(BaseModel):

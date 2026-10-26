@@ -20,15 +20,21 @@ byte-identical to what it always was.
 The environment has one more decision in it since #145: WHICH CLAUDE ACCOUNT.
 ``--account`` names one for this launch; without it the role's binding, the
 project's default and the machine's default are consulted in that order
-(``aisquare accounts default``), and with none of those set the environment is
-exactly what it always was. One resolver, ``services.claude_accounts.choose``,
-answers for ``launch`` and ``fleet spawn`` alike.
+(``aisquare accounts default``). The machine's default is the preferred account,
+the first enabled, signed-in one in the priority order (#406), so with an account
+signed in a launch runs on one. The exception is a role whose binding sets Claude
+Code's directory itself (``team bind --env``/``--env-file``): it keeps that directory
+unless a flag, an account binding, a project default or a headroom pick names an
+account. With no account signed in, the environment is exactly what it always was.
+One resolver, ``services.claude_accounts.choose``, answers for ``launch`` and
+``fleet spawn`` alike.
 """
 
 from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -44,14 +50,12 @@ from rich.text import Text
 from aisquare.cli.common import fail
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import experimental, harness, orchestrator, paths, personas
-from aisquare.core.config import load_config
+from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
-from aisquare.core.workspace import git_common_root
-from aisquare.models import ProjectInfo
 from aisquare.services import claude_accounts as claude_accounts_service
+from aisquare.services import delivery, explainability_ops
 from aisquare.services import explainability as explainability_service
-from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
@@ -109,58 +113,47 @@ def _declared_roles() -> set[str]:
         return set()
 
 
-UNSEATED = ("captain",)
-"""Roles with a standing cycle that never take a numbered seat: the captain is one per HOME
-(services.captain, T2), so ``captain1`` is not a seat of anything — and ``ROLES`` stays
-the list whose every member has a harness profile (``_SEAT`` is built from it)."""
-
-
 def _role_ok(role: str) -> bool:
-    """First-class role, a numbered seat of one, or declared in config.
+    """First-class role, a numbered seat of one, declared in config, or no role at all.
 
     The whitelist earns its keep by catching typos — ``codr`` silently
     producing an unattached session was the original footgun — so this stays a
     check rather than becoming free-form. It just stops rejecting the two
     shapes real crews use: numbered seats, and roles the operator has already
-    written down.
+    written down. ``agent`` (:data:`harness.PLAIN_ROLE`) is the one word for "no
+    role": a plain Claude Code session on the board, with no cycle to brief.
 
-    The captain (:data:`UNSEATED`) is a role only while the experimental captain is on.
+    The captain (``experimental.captain_role``, the one definition) is a role only while the
+    experimental captain is on, and never a numbered seat: it is one per HOME (T2), so
+    ``captain1`` is not a seat of anything, and ``ROLES`` stays the list whose every
+    member has a harness profile (``_SEAT`` is built from it).
     Off, it is the unknown role main calls it: ``launch captain`` in a fleet window
     started an agent under a role that does not exist, and ``fleet spawn captain`` named
     the off feature in its refusal (review of #240, F2).
     """
     return (
         role in ROLES
-        or (role in UNSEATED and experimental.captain_enabled())
+        or role == harness.PLAIN_ROLE
+        or experimental.captain_role(role)
         or bool(_SEAT.match(role))
         or role in _declared_roles()
     )
 
 
-def _persona_root(project: ProjectInfo | None) -> Path | None:
-    """Where a launch resolves its persona: the working directory's own project
-    (``orchestrator.directory_project``), the one ``fleet spawn`` checked the name against
-    and the session-start hook briefs from, never the board's. Under ``AISQUARE_TEAM_HUB``
-    the board is the hub's, and a seat spawned with a persona from its own repository's
-    layer died at launch on "no persona named …" (review of #201, F1). With no answer from
-    the directory (a symlink loop) it is the board's, else the git repository around it.
+def _check_persona(name: str, root: Path | None) -> None:
+    """Refuse a persona this project cannot resolve, before anything starts (§3.7).
 
-    One rule for the check and the system-prompt file both: the file resolved at the
-    board's root, so under a hub the launch the check had passed ended in a traceback, or
-    wrote the HUB's persona of that name into the system prompt while the hook briefed the
+    ``root`` is ``personas.project_root()``, the working directory's own project: the one
+    ``fleet spawn`` checked the name against and the session-start hook briefs from, never
+    the board's. Under ``AISQUARE_TEAM_HUB`` the board is the hub's, and a seat spawned
+    with a persona from its own repository's layer died at launch on "no persona named …"
+    (review of #201, F1). The system-prompt file is resolved at the same root: at the
+    board's, under a hub the launch the check had passed ended in a traceback, or wrote
+    the HUB's persona of that name into the system prompt while the hook briefed the
     repository's (review of #240, F1).
     """
     try:
-        return orchestrator.directory_project(Path.cwd()).root
-    except OSError:
-        return project.root if project is not None else git_common_root(Path.cwd())
-
-
-def _check_persona(name: str, project: ProjectInfo | None) -> None:
-    """Refuse a persona this project cannot resolve, before anything starts (§3.7), in the
-    layer :func:`_persona_root` names."""
-    try:
-        personas.resolve(name, _persona_root(project))
+        personas.resolve(name, root)
     except personas.PersonaError as exc:
         fail(str(exc), error="unknown_persona", ref=name)
 
@@ -171,8 +164,42 @@ never sits in argv, which ``ps`` shows (the name travels as ``AISQUARE_PERSONA``
 _SYSTEM_PROMPT_FLAGS = (SYSTEM_PROMPT_FLAG, "--append-system-prompt")
 
 
+def _with_shared_memory(
+    binary: str, role_args: Sequence[str], operator_args: Sequence[str]
+) -> list[str]:
+    """``role_args`` with ``[accounts] share = ["memory"]``'s shared auto-memory directory for
+    this folder in their ``--settings`` (P2-W7, #198). Claude Code only.
+
+    ONE ``--settings`` for every key aisquare sets: the role's skill listing (P1 WS-1,
+    ``harness.tool_policy``) and the memory directory merge into one JSON. Two flags are not
+    two settings: Claude Code reads one, and the memory stood down on the role's own flag,
+    so a coder or a tester shared no memory at all (sync #367). An ``--settings`` the
+    operator's line carries (``operator_args``: a binding's ``--arg``, a fleet
+    ``extra_args``, what was typed) still wins, as each feature says; the memory's
+    stand-down is said in one dim line.
+    """
+    out = list(role_args)
+    wanted = claude_accounts_service.memory_settings_args(Path.cwd())
+    if not wanted:
+        return out
+    if any(arg == "--settings" or arg.startswith("--settings=") for arg in operator_args):
+        stderr_console().print(
+            "accounts: memory is not shared into this launch — its own --settings wins",
+            style="dim",
+        )
+        return out
+    if not harness.is_default_agent(binary):
+        return out
+    memory = json.loads(wanted[1])
+    for index, arg in enumerate(out[:-1]):
+        if arg == "--settings":
+            out[index + 1] = json.dumps({**json.loads(out[index + 1]), **memory})
+            return out
+    return [*out, *wanted]
+
+
 def _persona_system_prompt(
-    name: str, project: ProjectInfo | None, binary: str, args: Sequence[str]
+    name: str, root: Path | None, binary: str, args: Sequence[str]
 ) -> list[str]:
     """The persona in the agent's system prompt too, where the binary has a seam for it.
 
@@ -215,7 +242,7 @@ def _persona_system_prompt(
         )
         return []
     try:
-        persona = personas.resolve(name, _persona_root(project))
+        persona = personas.resolve(name, root)
     except personas.PersonaError as exc:
         # Checked a moment ago (``_check_persona``), in the same layer: one removed or broken
         # since costs the seam, never the launch, and the hook says what it finds.
@@ -250,7 +277,19 @@ def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
     os.execve(binary, argv, env)
 
 
-def _await_fleet_row() -> None:
+def _fleet() -> FleetSettings:
+    """The ``[fleet]`` settings the role's tool policy reads; the built-in ones, said, when the
+    config cannot be read. A role's safety list is code, so it holds either way."""
+    try:
+        return load_config().fleet
+    except Exception as exc:  # the same fail-open bar as tracing's config read
+        stderr_console().print(
+            f"tool policy: config unreadable ({exc}) — the built-in deny list", style="dim"
+        )
+        return FleetSettings()
+
+
+def _await_fleet_row(*, say: bool = True) -> None:
     """Under a fleet window, wait for the row ``AISQUARE_FLEET_AGENT`` names to exist.
 
     ``fleet spawn`` starts the window and writes the row after — the row
@@ -277,6 +316,8 @@ def _await_fleet_row() -> None:
     any other failure of the store ends the wait, never the launch. The
     deadline bounds the looks: one open that is itself waiting out a lock holds
     for the store's own retry budget first (:data:`FLEET_ROW_TIMEOUT`).
+    ``say=False`` is a caller that refuses on a missing row: its fail-open line, which
+    says the launch starts anyway, is not said.
     """
     agent_id = orchestrator.env_fleet_agent()
     if agent_id is None:
@@ -293,17 +334,47 @@ def _await_fleet_row() -> None:
                     return
             except sqlite3.OperationalError as exc:
                 if not is_locked_error(exc):
-                    _starting_unbriefed(agent_id, f"the store could not be read ({exc})")
+                    if say:
+                        _starting_unbriefed(agent_id, f"the store could not be read ({exc})")
                     return
             except Exception as exc:  # an unreadable store costs the wait, never the launch
-                _starting_unbriefed(
-                    agent_id, f"the store could not be read ({type(exc).__name__}: {exc})"
-                )
+                if say:
+                    _starting_unbriefed(
+                        agent_id, f"the store could not be read ({type(exc).__name__}: {exc})"
+                    )
                 return
             if _monotonic() >= deadline:
-                _starting_unbriefed(agent_id, f"not recorded after {_monotonic() - started:.0f}s")
+                if say:
+                    _starting_unbriefed(
+                        agent_id, f"not recorded after {_monotonic() - started:.0f}s"
+                    )
                 return
             _sleep(FLEET_ROW_POLL)
+
+
+def _in_the_captains_window() -> bool:
+    """Whether this window is the captain's own: its fleet row is the captain's, on the home
+    board (review of #240, R1-F6). Any fleet window carries ``AISQUARE_FLEET_AGENT``, so
+    ``launch captain`` in a coder's window started a full-tool claude briefed as the captain
+    and bound the coder's row to it. Waits for the row as the launch does; a row that never
+    shows, or a store that cannot be read, is no captain's — this fails closed."""
+    agent_id = orchestrator.env_fleet_agent()
+    if agent_id is None:
+        return False
+    # Quiet: a row that never shows refuses the captain, so "starting anyway" would be
+    # wrong (review of #274, n1); the refusal is the one line said.
+    _await_fleet_row(say=False)
+    try:
+        with store_session() as store:
+            row = store.get_fleet_agent(agent_id)
+    except Exception:
+        return False
+    # One test of what the captain's row is, the fleet's (review of #274, m4): on the home
+    # board AND launched as the captain's start launches it, so a role declared `captain`
+    # in the home added as a project (D5) is no captain's window.
+    from aisquare.services.fleet import is_the_captains_row  # lazy: launch stays lean
+
+    return row is not None and row.role == "captain" and is_the_captains_row(row)
 
 
 def _starting_unbriefed(agent_id: str, why: str) -> None:
@@ -319,7 +390,10 @@ def launch(
     ctx: typer.Context,
     role: Annotated[
         str,
-        typer.Argument(help=f"Team role for this session: {', '.join(ROLES)}."),
+        typer.Argument(
+            help=f"Team role for this session: {', '.join(ROLES)}, "
+            f"or {harness.PLAIN_ROLE} for none."
+        ),
     ],
     command: Annotated[
         str | None,
@@ -362,6 +436,16 @@ def launch(
             metavar="NAME",
         ),
     ] = None,
+    first_prompt_file: Annotated[
+        Path | None,
+        typer.Option(
+            delivery.FIRST_PROMPT_FLAG,
+            help="A file holding the agent's first message: read, deleted, and passed to the "
+            "agent as its prompt, after `--` (what `fleet spawn` gives a Claude Code agent).",
+            metavar="PATH",
+            hidden=True,
+        ),
+    ] = None,
 ) -> None:
     """Launch an agent session already attached to this project's team board.
 
@@ -379,11 +463,11 @@ def launch(
     if not _role_ok(role):
         fail(
             f"unknown role {role!r} — expected one of: {', '.join(ROLES)}, "
-            "a numbered seat of one (coder1, coder2), or a role you have "
-            "bound with `aisquare team bind`",
+            "a numbered seat of one (coder1, coder2), a role you have "
+            f"bound with `aisquare team bind`, or {harness.PLAIN_ROLE!r} for no role",
             error="unknown_role",
         )
-    if experimental.captain_role(role) and orchestrator.env_fleet_agent() is None:
+    if experimental.captain_role(role) and not _in_the_captains_window():
         # Only the window `aisquare captain` starts is the captain: its brain folder,
         # its one server, no other tool. By hand in a project this was plain claude
         # with every tool, briefed as the one captain that has no shell.
@@ -425,8 +509,10 @@ def launch(
             style="dim",
         )
 
+    # Asked once, for the check and the system-prompt file both: one git call.
+    persona_root = personas.project_root() if persona is not None else None
     if persona is not None:
-        _check_persona(persona, project)
+        _check_persona(persona, persona_root)
 
     env = {**os.environ, "AISQUARE_ROLE": role}
     if persona is not None:
@@ -464,8 +550,11 @@ def launch(
     # the role's standing shape. For slot 1 that means RESTORING this shell's
     # own two variables (or their absence) over whatever the binding set — a
     # launch announced as `[plain claude]` must not run on the binding's other
-    # login. When NOTHING chose (no flag, no binding, no default — every
-    # machine before #145), the environment is left exactly as it was.
+    # login. The machine's default is the first enabled, signed-in account
+    # (#406), so something chooses whenever one is signed in. Nothing chooses
+    # when none is, or when the role's binding sets Claude Code's directory
+    # itself and no flag, account binding, project default or headroom pick
+    # names an account: then the environment is left as the binding made it.
     try:
         choice = claude_accounts_service.choose(account, role=role, project=project)
     except claude_accounts_service.NoSuchAccount as exc:
@@ -509,8 +598,16 @@ def launch(
     defaults = harness.role_defaults(
         role, binary=resolution.binary, args=[*profile.args, *ctx.args]
     )
-    role_args = defaults.args
-    for note in defaults.notes:
+    # The role's tools and skill listing (`harness.tool_policy`), here as in `team spawn`
+    # and every fleet window (whose `extra_args` arrive in `ctx.args`): its safety list
+    # holds whatever the config says, and every `--disallowedTools` the binding or this
+    # line carries is merged into ONE token beside the role's own flags.
+    policy = harness.tool_policy(
+        role, binary=resolution.binary, args=[*profile.args, *ctx.args], fleet=_fleet()
+    )
+    role_args = [*defaults.args, *policy.args]
+    binding_args, agent_args = policy.strip(profile.args), policy.strip(ctx.args)
+    for note in [*defaults.notes, *policy.notes]:
         # A withheld flag is otherwise invisible: the launch succeeds and the
         # role degrades silently (a ui-tester with no browser reopens every UI
         # task). Same surface and style as the tracing notes below.
@@ -543,7 +640,7 @@ def launch(
             )
         # The EFFECTIVE argument list, not just what this invocation typed.
         # `argv` below is
-        # `[binary, *profile.args, *role_args, *ctx.args, *pinned_id]`, so a
+        # `[binary, *binding_args, *role_args, *agent_args, *pinned_id]`, so a
         # role bound with `--session-id`, `--resume` or `--continue` via
         # `team bind --arg` — or handed one by its own `RoleProfile.default_args`
         # — carries it here without appearing in `ctx.args`.
@@ -555,7 +652,7 @@ def launch(
         # board row and one Run. `team spawn` already passes its profile args
         # (cli/team.py), so this path was the asymmetric one.
         identity = explainability_service.plan_session_identity(
-            resolution.binary, [*profile.args, *role_args, *ctx.args]
+            resolution.binary, [*binding_args, *role_args, *agent_args]
         )
         # The ACTIVE target's overrides folded onto the settings the wiring
         # reads. `explainability enable --target prod --proxy-url …` writes
@@ -613,12 +710,35 @@ def launch(
     # resolve inside cannot fail here.
     persona_args = (
         _persona_system_prompt(
-            persona, project, resolution.binary, [*profile.args, *role_args, *ctx.args]
+            persona, persona_root, resolution.binary, [*binding_args, *role_args, *agent_args]
         )
         if persona is not None
         else []
     )
-    argv = [resolution.binary, *profile.args, *role_args, *persona_args, *ctx.args, *pinned_id]
+    role_args = _with_shared_memory(resolution.binary, role_args, [*binding_args, *agent_args])
+    argv = [resolution.binary, *binding_args, *role_args, *persona_args, *agent_args, *pinned_id]
+    # The first message (P0-W1a, #122), last: Claude Code's positional prompt, after `--`.
+    # Read from a file and the file deleted, so the window's command, which tmux carries and
+    # the row records, never holds the text, and a replay of that command finds no file and
+    # starts without one: a restart is given a line of its own.
+    if first_prompt_file is not None:
+        try:
+            first = delivery.take_prompt_file(first_prompt_file)
+        except delivery.NotAPromptFile as exc:
+            stderr_console().print(
+                f"first prompt: {exc} — not read, not deleted; starting without one",
+                style="dim",
+                markup=False,
+            )
+            first = ""
+        if first is None:
+            stderr_console().print(
+                f"first prompt: {first_prompt_file} is not there (read by an earlier launch) "
+                "— starting without one",
+                style="dim",
+            )
+        elif first:
+            argv += delivery.argv_tail(first)
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling

@@ -18,6 +18,11 @@ under the header:
   when it may not (13478). A fresh real captain reads working until its first
   Stop, and a view that asked for waiting did nothing on the owner's first click.
 
+- **the message box** — one line under the bar (#33): Enter types it into the pane by
+  What's up's path, ``brain.send``, and clears the box. A send that fails says why, and
+  the line comes back into the box unless something else was typed there meanwhile.
+  The two share one worker (:data:`TELL_WORKER`): one line on its way at a time.
+
 - **the voice controls**, over T3's page (``services.captain.voice`` and
   ``speaker``), each writing the one key in state.json the page and the CLI write
   too, so the three always agree and a connected page follows within a second:
@@ -36,6 +41,7 @@ under the header:
 
 from __future__ import annotations
 
+import functools
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -48,7 +54,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.timer import Timer
-from textual.widgets import Button, Static
+from textual.widgets import Button, Input, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.views.agent import AgentView
@@ -58,6 +64,8 @@ _log = logging.getLogger(__name__)
 
 WHAT_IS_UP = "what is up"
 """The quick action's words: the captain's persona answers them from the attention queue."""
+
+SAY_PLACEHOLDER = "Message the captain — Enter sends"
 
 THINKING_TICK_S = 1.0
 """How often the view reads the busy flag — T3's page polls state at the same pace."""
@@ -204,9 +212,14 @@ class MicScreen(ModalScreen[None]):
 def _send_whats_up() -> datetime:
     """Type the quick action through T2's one guarded door; on a worker (it may wait for a
     busy captain, and reads the pane)."""
+    return _send_line(WHAT_IS_UP)
+
+
+def _send_line(text: str) -> datetime:
+    """Type ``text`` through T2's one guarded door, as What's up is typed; on a worker."""
     from aisquare.services.captain import brain
 
-    return brain.send(WHAT_IS_UP)
+    return brain.send(text)
 
 
 @dataclass(frozen=True)
@@ -253,6 +266,7 @@ class CaptainView(AgentView):
     CaptainView #captain-thinking { width: 14; height: 1; padding: 0 1; }
     CaptainView #captain-state { width: auto; height: 1; padding: 0 1; display: none; }
     CaptainView #captain-bar Button { min-width: 11; margin: 0 1 0 0; }
+    CaptainView #captain-say { margin: 0 1; }
     """
 
     def __init__(self, status: FleetAgentStatus, **options: Any) -> None:
@@ -260,6 +274,11 @@ class CaptainView(AgentView):
         self.thinking_timer: Timer | None = None
         self.bar: Bar | None = None
         """The last read of state.json; ``None`` until the first one answers."""
+        self._telling: str | None = None
+        """The line the tell in flight types: What's up's, or the message box's."""
+        self._typed = False
+        """Whether that line was typed in the box. By the door it came through, never by
+        its words: a typed "what is up" is a message like any (review of #274, n2)."""
 
     def compose_bars(self) -> ComposeResult:
         with Horizontal(id="captain-bar"):
@@ -289,12 +308,26 @@ class CaptainView(AgentView):
                 compact=True,
                 tooltip="Whether the captain's replies are spoken",
             )
+        yield Input(placeholder=SAY_PLACEHOLDER, id="captain-say", compact=True)
 
     def on_mount(self) -> None:
-        super().on_mount()
+        # No super(): Textual calls AgentView's own on_mount after this one, as it calls
+        # every class's handler up the MRO; called here too, it ran twice (#267 review, (a)).
         self.tick()
         self._paint_quick_action()
         self.thinking_timer = self.set_interval(THINKING_TICK_S, self.tick)
+
+    def on_show(self) -> None:
+        """Back on screen: the bar reads again at once, then on its interval."""
+        if self.thinking_timer is not None:
+            self.thinking_timer.resume()
+            self.tick()
+
+    def on_hide(self) -> None:
+        """Off screen (another view, or the captain closed): no read of state.json a second
+        for a bar nobody sees (#267 review, (d))."""
+        if self.thinking_timer is not None:
+            self.thinking_timer.pause()
 
     def refresh_status(self, status: FleetAgentStatus) -> None:
         super().refresh_status(status)
@@ -334,21 +367,49 @@ class CaptainView(AgentView):
         self.bar = bar
         self.paint_bar()
 
-    def _paint_quick_action(self) -> None:
-        busy = any(
+    def _tell_in_flight(self) -> bool:
+        return any(
             worker.node is self and worker.name == TELL_WORKER and not worker.is_finished
             for worker in self.workers
         )
+
+    def _paint_quick_action(self) -> None:
+        busy = self._tell_in_flight()
         button = self.query_one("#captain-whats-up", Button)
         # No copy of send's readiness here (13478): the row being live is enough to ask,
         # and brain.send types, waits or refuses, and the notification says which.
         button.disabled = busy or self.status.state in DEAD_STATES
+        # The box stays open while a line is on its way, so the next one can be written.
+        self.query_one("#captain-say", Input).disabled = self.status.state in DEAD_STATES
 
     @on(Button.Pressed, "#captain-whats-up")
     def _whats_up(self, event: Button.Pressed) -> None:
         event.stop()
+        self._tell(WHAT_IS_UP, _send_whats_up, typed=False)
+
+    @on(Input.Submitted, "#captain-say")
+    def _say(self, event: Input.Submitted) -> None:
+        """Enter in the message box: the line to the captain by What's up's path, the box
+        cleared. One line at a time: while one is on its way, the next waits in the box."""
+        event.stop()
+        line = event.value.strip()
+        if not line:
+            return
+        if self._tell_in_flight():
+            self.notify(
+                "a line to the captain is still on its way — Enter again in a moment",
+                severity="warning",
+                timeout=5,
+                markup=False,
+            )
+            return
+        event.input.value = ""
+        self._tell(line, functools.partial(_send_line, line), typed=True)
+
+    def _tell(self, line: str, send: Any, *, typed: bool) -> None:
+        self._telling, self._typed = line, typed
         self.run_worker(
-            _send_whats_up,
+            send,
             name=TELL_WORKER,
             group=TELL_WORKER,
             exclusive=True,
@@ -432,13 +493,19 @@ class CaptainView(AgentView):
             self._voice_answered(event)
             return
         if event.worker.name != TELL_WORKER:
-            super().on_worker_state_changed(event)
-            return
+            return  # AgentView's restart: Textual calls its handler itself (#267 review, (a))
         if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
             return
         from aisquare.services.captain import brain
 
+        line, self._telling = self._telling or WHAT_IS_UP, None
+        typed, self._typed = self._typed, False
         error = event.worker.error
+        failed = event.state is not WorkerState.SUCCESS
+        if failed and typed:
+            box = self.query_one("#captain-say", Input)
+            if not box.value:  # unless something else was typed there meanwhile
+                box.value = line
         if event.state is WorkerState.ERROR and isinstance(error, brain.NoReply):
             # The guard's own words: a dialog named, how to answer it, a captain not running.
             self.notify(f"nothing typed — {error}", severity="warning", timeout=10, markup=False)
@@ -446,8 +513,10 @@ class CaptainView(AgentView):
             self.notify(
                 f"could not ask the captain: {error}", severity="error", timeout=8, markup=False
             )
-        elif event.state is WorkerState.SUCCESS:
+        elif event.state is WorkerState.SUCCESS and not typed:
             self.notify(f"asked the captain: {WHAT_IS_UP}", timeout=4, markup=False)
+        elif event.state is WorkerState.SUCCESS:
+            self.notify(f"sent to the captain: {line}", timeout=4, markup=False)
         self._paint_quick_action()
 
     def _voice_answered(self, event: Worker.StateChanged) -> None:

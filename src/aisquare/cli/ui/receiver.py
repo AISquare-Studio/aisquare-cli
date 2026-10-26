@@ -88,6 +88,7 @@ from aisquare.cli.ui.sidebar import (
 )
 from aisquare.core import experimental
 from aisquare.models import FleetAgentStatus, ProjectInfo
+from aisquare.services import fleet as fleet_service
 from aisquare.services.captain import state as captain_state
 
 if TYPE_CHECKING:
@@ -289,7 +290,12 @@ def _selected_project(app: FleetApp, snapshot: FleetSnapshot) -> ProjectInfo:
     if kind == "agent":
         rows = [row for listed in snapshot.agents.values() for row in listed]
         row = next((row for row in rows if row.agent.id == ident), None)
-        if row is not None and snapshot.is_home(row.agent.project_id):
+        # By role: the home, added as a project (D5), holds its own agents beside it.
+        if (
+            row is not None
+            and snapshot.is_home(row.agent.project_id)
+            and fleet_service.is_the_captains_row(row.agent)
+        ):
             raise UiRefusal(
                 "which project? the captain is selected, and its home board takes no spawns — "
                 "say open_spawn <project>"

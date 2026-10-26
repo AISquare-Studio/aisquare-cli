@@ -257,7 +257,7 @@ def test_start_captain_opens_the_spawn_dialog_with_the_captain_chosen(
         app = fleet_app(pilot)
         await refreshed(app)
         start = app.query_one("#captain-empty", Static)
-        assert start.display and shown(start) == "▶ Start captain"
+        assert start.display and shown(start) == "▶  Start captain"
         await pilot.click(start)
         await pilot.pause()
         dialog = app.screen

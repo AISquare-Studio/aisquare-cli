@@ -1246,6 +1246,20 @@ SPAWN_AGENT_KEY = "spawn-agent"
 opens a dialog or a view that has its own row)."""
 
 
+ACTION_ICON_CELLS = 2
+"""The cells an action's icon column takes: the fullwidth plus and the captain row's emoji are two
+cells wide, so ``▶`` is padded to it and the three labels start in one column. The padding is
+measured (``cell_len``), not assumed: ``▶`` (U+25B6) is East-Asian-ambiguous."""
+
+
+def action_text(icon: str, label: str) -> Text:
+    """``▶  Start captain`` / ``+ Spawn agent`` (the fullwidth plus): the icon padded to
+    :data:`ACTION_ICON_CELLS`, a space, the label."""
+    text = Text(no_wrap=True, overflow="ellipsis")
+    text.append(icon + " " * (ACTION_ICON_CELLS - cell_len(icon)) + " " + label)
+    return text
+
+
 class ActionRow(Activatable):
     """One action at the top of the sidebar: a full-width, one-line button in the accent.
 
@@ -1265,9 +1279,7 @@ class StartCaptain(ActionRow):
     type, and the owner did not find how to start one (#33)."""
 
     def __init__(self) -> None:
-        super().__init__(
-            Text("▶ Start captain", no_wrap=True, overflow="ellipsis"), id="captain-empty"
-        )
+        super().__init__(action_text("▶", "Start captain"), id="captain-empty")
         self.selection_key = START_CAPTAIN_KEY
         self.tooltip = "No captain running — start one (aisquare captain)"
 
@@ -1280,9 +1292,7 @@ class SpawnButton(ActionRow):
 
     def __init__(self) -> None:
         # U+FF0B, the fullwidth plus of the plan's mockup (§4): visibly not the header's +.
-        super().__init__(
-            Text("\uff0b Spawn agent", no_wrap=True, overflow="ellipsis"), id="spawn-agent"
-        )
+        super().__init__(action_text("\uff0b", "Spawn agent"), id="spawn-agent")
         self.selection_key = SPAWN_AGENT_KEY
         self.tooltip = "Spawn an agent — you choose the project in the dialog"
 

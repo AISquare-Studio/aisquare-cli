@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from rich.cells import cell_len
 from textual.pilot import Pilot
 from textual.widgets import Select, Static
 
@@ -25,6 +26,7 @@ from aisquare.cli.ui.sidebar import (
 )
 from aisquare.cli.ui.spawn import SpawnDialog
 from aisquare.cli.ui.views.captain import CaptainView
+from aisquare.core import experimental
 from aisquare.core.store import store_session
 from aisquare.services import project_groups
 from aisquare.services.captain import state as captain_state
@@ -137,7 +139,7 @@ def test_captain_on_and_none_live_the_block_is_start_captain_over_spawn_agent(
     ids, keys, lines = drive(body)
     assert ids == ["captain-section", "spawn-agent"]
     assert keys == ["add", "start-captain", "spawn-agent"]
-    assert lines == ["▶ Start captain", SPAWN_AGENT]
+    assert lines == ["▶  Start captain", SPAWN_AGENT]
 
 
 @pytest.mark.needs_captain
@@ -178,7 +180,7 @@ def test_an_exited_captains_row_stays_with_its_exit_status_and_a_start_under_it(
     keys, lines = drive(body)
     assert keys == ["add", f"agent:{captain.agent.id}", "start-captain", "spawn-agent"]
     assert lines[0].startswith("🤖 captain") and "exited" in lines[0]
-    assert lines[1:] == ["▶ Start captain", SPAWN_AGENT]
+    assert lines[1:] == ["▶  Start captain", SPAWN_AGENT]
 
 
 @pytest.mark.needs_captain
@@ -215,7 +217,61 @@ def test_the_actions_fit_the_sidebar_at_its_default_and_minimum_widths(
         await pilot.pause()
         return actions_lines(app)
 
-    assert drive(body) == ["▶ Start captain", SPAWN_AGENT]
+    assert drive(body) == ["▶  Start captain", SPAWN_AGENT]
+
+
+@pytest.mark.parametrize("width", [30, 24])
+@pytest.mark.parametrize(
+    "state",
+    [
+        "off",
+        pytest.param("none", marks=pytest.mark.needs_captain),
+        pytest.param("live", marks=pytest.mark.needs_captain),
+        pytest.param("exited", marks=pytest.mark.needs_captain),
+    ],
+)
+def test_every_label_in_the_block_starts_in_one_column_by_measured_cell_width(
+    tmp_path: Path,
+    script: Script,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    width: int,
+) -> None:
+    """``▶`` is one cell, the fullwidth plus and the captain row's emoji two (rich ``cell_len``);
+    ``▶`` is East-Asian-ambiguous, so it is padded by its measured width, not assumed to be one.
+    Whatever the state and the width, *Start captain*, *Spawn agent* and the captain's own row
+    put their label at the same cell, and show it whole."""
+    seed(tmp_path, *THREE)
+    if state == "off":
+        monkeypatch.delenv(experimental.CAPTAIN_ENV, raising=False)
+    elif state != "none":
+        script[captain_state.home_project().id] = [
+            _captain("working" if state == "live" else state)
+        ]
+    labels = {"live": ["captain", "Spawn agent"], "none": ["Start captain", "Spawn agent"]}
+    expected = labels.get(
+        state,
+        ["Spawn agent"] if state == "off" else ["captain", "Start captain", "Spawn agent"],
+    )
+
+    async def body(pilot: Pilot[None]) -> tuple[int, list[tuple[str, int]]]:
+        app = fleet_app(pilot)
+        app.query_one("#sidebar").styles.width = width
+        await refreshed(app)
+        await pilot.pause()
+        await pilot.pause()
+        columns: list[tuple[str, int]] = []
+        for line in actions_lines(app):
+            label = max(
+                (name for name in expected if name in line), key=len
+            )  # not 'captain' in 'Start captain'
+            columns.append((label, cell_len(line[: line.index(label)])))
+        return app.sidebar.size.width, columns
+
+    got_width, columns = drive(body)
+    assert got_width == width
+    assert [label for label, _ in columns] == expected  # each row shows its label whole
+    assert {column for _, column in columns} == {3}, columns  # icon (2 cells) + a space
 
 
 @pytest.mark.needs_captain

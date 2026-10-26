@@ -590,7 +590,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     def _header(self) -> Text:
         text = Text()
         text.append("Start the captain" if self._captain else "Spawn an agent", style="bold")
-        text.append(f"  {self.project.root.name or self.project.id}", style="bold cyan")
+        text.append(f"  {display_name(self.project)}", style="bold cyan")
         if self.project.codename:
             text.append(f" · {self.project.codename}", style="cyan")
         return text
@@ -799,7 +799,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                 exit_on_error=False,
             )
         self._read_default()
-        self.query_one("#spawn-role", Select).focus()
+        # Where the agent goes comes first, when the form asks.
+        self.query_one("#spawn-project" if self._choices else "#spawn-role", Select).focus()
 
     def _read_default(self) -> None:
         """Read what the no-account option runs on for the project, the role and the extra args
@@ -843,7 +844,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     def _validate(self) -> bool:
         """Show every rule the form breaks right now; *Spawn* is enabled only when there is none."""
-        name = self.project.root.name or self.project.id
+        name = display_name(self.project)
         replaces_manager = (
             self._take_over() and self._source is not None and self._source.agent.role == "manager"
         )
@@ -1053,9 +1054,27 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         if self._persona_value() != self._persona_shown:
             self._persona_touched = True  # a pick whose Changed is still on the way
             self._persona_shown = self._persona_value()
-        self._put_persona(
-            self._persona_shown if self._persona_touched else self._persona_default(self._role),
-            rebuild=True,
+        # A pick this project does not have is not carried over for the spawn to refuse: the
+        # role's default takes its place, and the status line says so (Advanced may be folded).
+        lost = self._persona_shown
+        if (
+            self._persona_touched
+            and lost != NO_PERSONA
+            and self._personas_unavailable is None
+            and all(persona.name != lost for persona in self._personas)
+        ):
+            self._persona_touched = False
+        else:
+            lost = NO_PERSONA
+        default = self._persona_default(self._role)
+        self._put_persona(self._persona_shown if self._persona_touched else default, rebuild=True)
+        self._note(
+            "#spawn-status",
+            f"persona {lost} is not one of {display_name(project)}'s personas — "
+            f"using the role's default ({default or 'none'})"
+            if lost
+            else None,
+            style="dim",
         )
         switch = self.query_one("#spawn-worktree", Switch)
         switch.disabled = not self._git

@@ -2517,3 +2517,171 @@ def test_the_project_field_waits_while_a_spawn_runs(
 
     assert drive(git_project, scenario, projects=[git_project, other_project]) == [True]
     assert [call[0] for call in spawns.calls] == [git_project.id]
+
+
+@pytest.fixture
+def second_git_project(tmp_path: Path) -> ProjectInfo:
+    """A second git checkout, for a switch that keeps the worktree switch on."""
+    (tmp_path / "repo2" / ".git").mkdir(parents=True)
+    return register(tmp_path / "repo2", project_id="prj_repo2", codename="jade-lynx")
+
+
+def test_a_switch_frees_every_field_a_take_over_had_locked(
+    git_project: ProjectInfo,
+    second_git_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    spawns: SpawnRecorder,
+    hand_offs: HandOffRecorder,
+) -> None:
+    """A take-over keeps its teammate's label, task, tree and launch, so those fields are locked.
+    The teammate belongs to the project left behind: the switch returns to the plain spawn
+    and unlocks all of them, as picking *(none)* does."""
+    task = add_task(git_project, "Wire the auth flow")
+    listed = {
+        git_project.id: [teammate(git_project, task_id=task.id)],
+        second_git_project.id: [],
+    }
+    monkeypatch.setattr(fleet_service, "handoff_sources", lambda project: list(listed[project.id]))
+    guarded = ("#spawn-binary", "#spawn-permission", "#spawn-args", "#spawn-prompt")
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        def state() -> list[Any]:
+            return [
+                str(submit(dialog).label),
+                label_input(dialog).value,
+                label_input(dialog).disabled,
+                select(dialog, "task").disabled,
+                select(dialog, "task").value,
+                [dialog.query_one(selector).disabled for selector in guarded],
+                dialog.query_one("#spawn-worktree", Switch).disabled,
+                dialog.query_one("#spawn-worktree", Switch).value,
+                dialog.query_one("#spawn-take-over", RadioButton).value,
+                dialog.query_one("#spawn-how-row").display,
+                select(dialog, "from").value,
+            ]
+
+        select(dialog, "from").value = listed[git_project.id][0].agent.id
+        await settle(pilot)
+        dialog.query_one("#spawn-take-over", RadioButton).value = True
+        await settle(pilot)
+        dialog.query_one("#spawn-fresh", Checkbox).value = True
+        await settle(pilot)
+        locked = state()
+        select(dialog, "project").value = second_git_project.id
+        await settle(pilot)
+        freed = state()
+        freed.append(dialog.query_one("#spawn-fresh", Checkbox).value)
+        freed.append(note(dialog, "#spawn-how-note"))
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return [locked, freed]
+
+    locked, freed = drive(git_project, scenario, projects=[git_project, second_git_project])
+    teammate_id = listed[git_project.id][0].agent.id
+    assert locked == [
+        "Take over",  # the button names what it does
+        "coder-1",
+        True,  # the label is the teammate's
+        True,  # and so is the task
+        task.id,
+        [True, True, True, True],  # binary, permission, args, prompt
+        True,  # worktree: the teammate's tree
+        False,
+        True,  # Take over chosen
+        True,  # its How row shown
+        teammate_id,
+    ]
+    assert freed == [
+        "Spawn",
+        "coder-1",
+        False,
+        False,
+        NO_TASK,
+        [False, False, False, False],
+        False,  # worktree enabled again, for a git project
+        True,  # at the role's default
+        False,  # back on Fork
+        False,  # How row hidden
+        "",  # (none) chosen
+        False,  # Start fresh cleared
+        None,  # and no hand-off sentence left
+    ]
+    assert hand_offs.calls == []  # no hand-off was asked for
+    assert [call[0] for call in spawns.calls] == [second_git_project.id]
+
+
+def test_a_picked_persona_the_new_project_lacks_falls_back_to_the_roles_default_and_says_so(
+    git_project: ProjectInfo, other_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    tempo = git_project.root / ".aisquare" / "personas" / "tempo" / "SKILL.md"
+    tempo.parent.mkdir(parents=True)
+    tempo.write_text("---\nname: tempo\ndescription: A tempo.\n---\nKeep tempo.\n", "utf-8")
+    configure_role("coder", persona="minimalist")
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "persona").value = "tempo"  # this project's own
+        await pilot.pause()
+        picked = [select(dialog, "persona").value, note(dialog, "#spawn-status")]
+        select(dialog, "project").value = other_project.id
+        await settle(pilot)
+        fell: list[Any] = [select(dialog, "persona").value, note(dialog, "#spawn-status")]
+        fell += [submit(dialog).disabled, dialog.spawn_kwargs()["persona"]]
+        select(dialog, "persona").value = "mentor"  # a bundled one: in every project
+        await pilot.pause()
+        select(dialog, "project").value = git_project.id
+        await settle(pilot)
+        kept = [select(dialog, "persona").value, note(dialog, "#spawn-status")]
+        return [picked, fell, kept]
+
+    picked, fell, kept = drive(git_project, scenario, projects=[git_project, other_project])
+    assert picked == ["tempo", None]
+    assert fell == [
+        "minimalist",  # the role's default, not "tempo — not one of this project's personas"
+        "persona tempo is not one of plain's personas — using the role's default (minimalist)",
+        False,  # Spawn is not blocked: nothing is left to refuse
+        None,  # and the default is not sent as a choice
+    ]
+    assert kept == ["mentor", None]  # a pick the new project has survives, silently
+
+
+def test_the_project_field_takes_the_focus_when_it_is_shown_else_the_role(
+    git_project: ProjectInfo, other_project: ProjectInfo
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> str | None:
+        return dialog.focused.id if dialog.focused is not None else None
+
+    projects = [git_project, other_project]
+    assert drive(git_project, scenario, projects=projects) == "spawn-project"
+    assert drive(git_project, scenario) == "spawn-role"
+
+
+def test_the_header_and_the_manager_refusal_name_the_project_by_its_nickname(
+    git_project: ProjectInfo,
+    other_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As the dropdown and the sidebar do (``display_name``), not by the folder."""
+    named = git_project.model_copy(update={"nickname": "Docs site"})
+    shared = other_project.model_copy(update={"nickname": "Shared board"})
+    monkeypatch.setattr(
+        fleet_service,
+        "manager_of",
+        lambda project: spawned_agent(project) if project.id == other_project.id else None,
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [shown(dialog.query_one("#spawn-header", Static))]
+        seen.append(option_prompts(dialog, "project"))
+        select(dialog, "role").value = "manager"
+        await settle(pilot)
+        select(dialog, "project").value = other_project.id
+        await settle(pilot)
+        seen.append(shown(dialog.query_one("#spawn-header", Static)))
+        seen.append(note(dialog, "#spawn-role-note"))
+        return seen
+
+    first, options, second, refusal = drive(named, scenario, projects=[named, shared])
+    assert "Docs site · amber-otter" in first and "repo" not in first
+    assert options == ["Docs site", "Shared board"]
+    assert "Shared board · ruby-fox" in second and "plain" not in second
+    assert refusal == "Shared board already has a manager — one per project"

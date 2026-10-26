@@ -26,7 +26,7 @@ typecheck:
 	$(PYTHON) -m mypy
 
 ## lockcheck: uv.lock still matches pyproject.toml (`uv lock --check`); skipped,
-## and said so, where uv is not on PATH — CI's lock job always runs it (#278)
+## and said so, where uv is not on PATH — CI's lint job always runs it (#278)
 lockcheck:
 	@if command -v uv >/dev/null 2>&1; then uv lock --check; \
 	else echo "lockcheck: uv not on PATH, skipped (CI runs it)"; fi

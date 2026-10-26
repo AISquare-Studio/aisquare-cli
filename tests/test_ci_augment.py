@@ -920,9 +920,10 @@ def test_a_ci_failure_does_not_cost_the_prompt_its_spool(
     `try`, a raise in the CI path — `metric()` is a bare pydantic construction —
     silently dropped the prompt from the Explainability spool.
 
-    Shipping is configured HERE. It was not, and the test passed only after one of
-    those above had left ``insights``' once-per-process config cached with shipping
-    on: alone, or in a CI shard without them, the spool was empty for want of it."""
+    Shipping is configured here, as the join-record test below configures it: the spool
+    is written only when it is on, and this test read it from whatever an earlier test in
+    the same process had cached (``insights._config``), so it failed alone and under an
+    xdist order that ran it first."""
     config = AppConfig()
     config.explainability.ship = True
     config.explainability.gateway_url = "https://gateway.example"

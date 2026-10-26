@@ -10,8 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from aisquare.core import code_index
-from aisquare.core import snapshot as snapshot_core
-from aisquare.core.config import CodeSettings, SnapshotSettings, load_config
+from aisquare.core import ignore as ignore_core
+from aisquare.core.config import CodeSettings, load_config
 from aisquare.core.workspace import current_project
 from aisquare.models import ProjectInfo
 
@@ -33,13 +33,6 @@ def settings() -> CodeSettings:
         return CodeSettings()
 
 
-def _snapshot_settings() -> SnapshotSettings:
-    try:
-        return load_config().snapshot
-    except Exception:
-        return SnapshotSettings()
-
-
 def project_here(cwd: Path | None = None) -> ProjectInfo:
     return current_project(cwd)
 
@@ -56,8 +49,8 @@ def build_index(
             target.root,
             full=full,
             max_file_kb=settings().max_file_kb,
-            ignore=_snapshot_settings().ignore,
-            head=snapshot_core.head_sha(target.root),
+            ignore=settings().ignore,
+            head=ignore_core.head_sha(target.root),
         )
     except code_index.IndexBusy as exc:
         raise CodeIndexError(f"{exc} — try again in a moment") from None
@@ -65,7 +58,7 @@ def build_index(
 
 def index_status(project: ProjectInfo | None = None) -> code_index.IndexStatus:
     target = project or project_here()
-    return code_index.status(target.id, current_head=snapshot_core.head_sha(target.root))
+    return code_index.status(target.id, current_head=ignore_core.head_sha(target.root))
 
 
 def _indexed(project: ProjectInfo | None) -> ProjectInfo:

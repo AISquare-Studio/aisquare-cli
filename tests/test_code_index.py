@@ -175,7 +175,7 @@ def test_without_the_extra_typescript_is_reported_not_indexed(
 
 
 def test_ignored_trees_are_never_read(repo: Path) -> None:
-    """node_modules is gitignored nowhere here; the snapshot's DEFAULT_IGNORE leaves it out."""
+    """node_modules is gitignored nowhere here; core.ignore's DEFAULT_IGNORE leaves it out."""
     code_index.build("p", repo)
     assert code_index.find("p", "vendored") == []
 

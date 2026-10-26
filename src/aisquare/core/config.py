@@ -347,7 +347,15 @@ FLEET_DENY_TOOLS = (
 
 
 def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
-    """The six fleet roles and their built-in launch shape (docs/plans/fleet-tui.md §3.6).
+    """The six fleet roles and their built-in launch shape (docs/plans/fleet-tui.md §3.6),
+    and the role-less agent's (``harness.PLAIN_ROLE``, the Spawn dialog's *(none)*).
+
+    ``agent`` is here so ``config get/set/list fleet.roles.agent.*`` know it as they know
+    any role, at the shape spawn gave it when no table named it (``FleetRoleSettings()``).
+    A default, not a table ``set`` seeds: seeded, every unrelated ``config set`` wrote it,
+    and ``holds_a_setting`` then read the file as holding a setting, which undid #261's
+    reset/backup rule (review of #405, M1). At its default it is left out of the file
+    (``_with_whole_role_tables``).
 
     ``ui-tester`` carries no ``extra_args`` here: its ``--chrome`` is the role's own
     default (``harness.ROLE_PROFILES[...].default_args``) and is added by ``launch``
@@ -379,7 +387,15 @@ def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
         "reviewer": FleetRoleSettings(worktree=True, board_context="none"),
         "validator": FleetRoleSettings(),
         "ui-tester": FleetRoleSettings(),
+        _plain_role(): FleetRoleSettings(),
     }
+
+
+def _plain_role() -> str:
+    """``harness.PLAIN_ROLE``, imported here: harness imports this module back."""
+    from aisquare.core.harness import PLAIN_ROLE
+
+    return PLAIN_ROLE
 
 
 #: The reviewer's built-in ``extra_args`` from 0.8.0 to 0.8.2: Claude Code without the
@@ -688,6 +704,28 @@ def _migrate(data: dict[str, Any]) -> None:
     # wrote, and a file one of them saved whole again still says 2 once there is a 3.
     if version >= _FIRST_SPARSE_VERSION and _written_whole(data):
         _keep_only_what_v1_did_not_write_by_default(data)
+    _carry_snapshot_ignore(data)
+
+
+def _carry_snapshot_ignore(data: dict[str, Any]) -> None:
+    """A ``[snapshot] ignore`` list, read as ``[code] ignore`` when that has none.
+
+    The code index (#285) read its extra ignore patterns from ``[snapshot]``, the
+    codebase pack's section, which #399 retired with the pack (:data:`RETIRED_SECTIONS`:
+    loaded, then dropped at the next save). The patterns outlive the pack: read here,
+    they are written under ``[code]`` by that save, so no user setting is lost. A
+    ``[code] ignore`` already set wins. Not a version step: a file at any version can
+    still hold the section.
+    """
+    snapshot = data.get("snapshot")
+    if not isinstance(snapshot, dict):
+        return
+    ignore = snapshot.get("ignore")
+    if not isinstance(ignore, list) or not ignore:
+        return
+    code = data.setdefault("code", {})
+    if isinstance(code, dict) and "ignore" not in code:
+        code["ignore"] = list(ignore)
 
 
 def _versioned(dumped: dict[str, Any]) -> dict[str, Any]:
@@ -812,38 +850,6 @@ class WatchSettings(BaseModel):
     sources: dict[str, WatchSource] = Field(default_factory=dict)
 
 
-class SnapshotSettings(BaseModel):
-    """The codebase snapshot ``aisquare project onboard`` packs with Repomix.
-
-    ``max_tokens`` is the budget a pack must fit. The full pack is tried first,
-    then the compressed one (signatures only); a repo whose compressed pack is
-    STILL over it keeps that pack as the skeleton with its per-file index —
-    status ``skeleton_only``, every count recorded, ``onboard`` and ``doctor``
-    naming the numbers — rather than getting nothing. 150 000 mirrors the
-    server's ``REPO_PACK_MAX_TOKENS`` so artifacts stay consistent for a future
-    sync — raise it for a repo you know is big, or leave more out, with
-    ``ignore`` below or a ``.repomixignore`` at the repo root (#82).
-
-    ``ignore`` is the operator's own list of what to leave out of the pack, in
-    the glob syntax repomix's ``--ignore`` takes (``**/fixtures/**``,
-    ``docs/generated/**``, ``*.snap``). It EXTENDS the built-in list
-    (``core.snapshot.DEFAULT_IGNORE``: dependency trees, build output, caches,
-    this tool's worktrees, and any nested git repository or worktree found
-    below the root) rather than replacing it, and the repo's own ``.gitignore``
-    and ``.repomixignore`` apply on top, read by repomix itself. On the command
-    line the items are comma-separated, as repomix's own flag is::
-
-        aisquare config set snapshot.ignore '**/fixtures/**,docs/generated/**'
-
-    Read from the config file alone, like ``[fleet]``: there is no
-    ``AISQUARE_SNAPSHOT_*`` variable for either key, because this layer has no
-    per-key environment rung and one section is not the place to grow one.
-    """
-
-    max_tokens: int = 150_000
-    ignore: list[str] = Field(default_factory=list)
-
-
 class CodeSettings(BaseModel):
     """``[code]`` — the per-project symbol index behind ``aisquare code`` (#285).
 
@@ -851,10 +857,23 @@ class CodeSettings(BaseModel):
     ``--refresh``) and lets a session start refresh it in the background; ``false``
     leaves ``aisquare code index`` as the only way to build one. ``max_file_kb``: a
     file larger than this is not indexed (a generated bundle, a vendored blob).
+
+    ``ignore`` is the operator's own list of what the index leaves out, as globs
+    (``**/fixtures/**``, ``docs/generated/**``, ``*.snap``). It EXTENDS the built-in
+    list (``core.ignore.DEFAULT_IGNORE``: dependency trees, build output, caches, this
+    tool's worktrees, and any nested checkout below the root), and git's own ignores
+    apply first. On the command line the items are comma-separated::
+
+        aisquare config set code.ignore '**/fixtures/**,docs/generated/**'
+
+    It was ``[snapshot] ignore`` until 0.9.0 removed the codebase pack (#399); a file
+    that still holds that value has it read here, and written here at the next save
+    (:func:`_carry_snapshot_ignore`).
     """
 
     enabled: bool = True
     max_file_kb: int = 1024
+    ignore: list[str] = Field(default_factory=list)
 
 
 class PersonaImportSettings(BaseModel):
@@ -922,10 +941,12 @@ class AccountsSettings(BaseModel):
     saved keeps either only where it differs from them (``_V1_DEFAULTS``).
 
     ``prefer`` orders the accounts under ``switch_at`` (#277): ``priority``, the default,
-    takes the first in the operator's order; ``reset-soonest`` takes the one whose weekly
-    window resets first, priority breaking ties, so a week's allowance is spent before it
-    lapses rather than draining accounts with days still to run. It applies to a launch's
-    pick and to a hand-over's. The week is the shared seven-day window's reset, for every
+    takes the first in the operator's order, rank 1 (the machine default, #406) first;
+    ``reset-soonest`` takes the one whose weekly window resets first, priority breaking
+    ties, so a week's allowance is spent before it lapses rather than draining accounts
+    with days still to run. It applies to a launch's headroom pick and to a hand-over's;
+    under ``pick = "default"`` the preferred account, rank 1, decides and ``prefer`` is
+    not read. The week is the shared seven-day window's reset, for every
     agent: a family week (Opus, Sonnet) only ever makes an account read fuller.
 
     ``share_trust``, on by default, copies a folder's trust into the account a launch
@@ -957,6 +978,17 @@ class AccountsSettings(BaseModel):
     )
 
 
+class UpdatesSettings(BaseModel):
+    """``[updates]`` — asq's daily release check (``services.updates``).
+
+    ``check`` on, the default: asq asks PyPI at most once a day whether a newer aisquare is
+    out and, when one is, offers it under *⚙ Settings*. Off, it never asks. ``aisquare
+    upgrade`` asks whenever it is run, whatever this says.
+    """
+
+    check: bool = True
+
+
 class UiSettings(BaseModel):
     """``[ui]`` — how ``asq`` shows things to the person at it: the *User preferences* tab
     of App settings.
@@ -986,13 +1018,36 @@ class AppConfig(BaseModel):
     team: TeamSettings = Field(default_factory=TeamSettings)
     fleet: FleetSettings = Field(default_factory=FleetSettings)
     accounts: AccountsSettings = Field(default_factory=AccountsSettings)
-    snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
+    updates: UpdatesSettings = Field(default_factory=UpdatesSettings)
     experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
     experimental: ExperimentalSettings = Field(default_factory=ExperimentalSettings)
     persona: PersonaSettings = Field(default_factory=PersonaSettings)
     watch: WatchSettings = Field(default_factory=WatchSettings)
     code: CodeSettings = Field(default_factory=CodeSettings)
     ui: UiSettings = Field(default_factory=UiSettings)
+
+
+#: Sections an older build read and this one does not, each with why. An unknown section
+#: is kept by a save (:func:`_keep_unknown`), since a newer build may read it; these are
+#: dropped, since no build from this one on will, and doctor's config row names them
+#: until then (:func:`retired_sections`).
+RETIRED_SECTIONS: dict[str, str] = {
+    "snapshot": "aisquare no longer packs a codebase; an ignore list in it moves to [code]",
+}
+
+
+def retired_sections(path: Path | None = None) -> list[str]:
+    """The :data:`RETIRED_SECTIONS` the config file at ``path`` still holds, in that order.
+
+    Read from the file, since loading drops them. Empty for a file that is absent or will
+    not parse: the config row says that much itself.
+    """
+    target = path or paths.config_path()
+    try:
+        data = _parse_toml(target.read_bytes())
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return []
+    return [name for name in RETIRED_SECTIONS if name in data]
 
 
 def _dumped(model: BaseModel) -> dict[str, Any]:
@@ -1065,6 +1120,12 @@ def _with_whole_role_tables(sparse: dict[str, Any], full: dict[str, Any]) -> dic
     roles = fleet.get("roles") if isinstance(fleet, dict) else None
     if not isinstance(roles, dict) or not roles:
         return sparse
+    # The role-less agent's table, at its default, is not written: no build before it
+    # was a default reads one (each falls back to ``FleetRoleSettings()``, the same
+    # shape), and written, every file a ``config set`` saved carried a role nobody set.
+    plain = _plain_role()
+    if roles.get(plain) == _dumped(FleetRoleSettings()):
+        roles = {role: table for role, table in roles.items() if role != plain}
     whole = dict(sparse)
     whole["fleet"] = {**sparse.get("fleet", {}), "roles": roles}
     return whole
@@ -1432,6 +1493,8 @@ def save_config(
                 raise
         else:
             dumped = _keep_unknown(existing, dumped, config)
+            for name in RETIRED_SECTIONS:
+                dumped.pop(name, None)
     # Kept in full until here: _keep_unknown follows the model into every section, and
     # a section at its defaults may still hold keys this build does not know.
     dumped = _with_whole_role_tables(_overrides(dumped, system_defaults(), config), dumped)

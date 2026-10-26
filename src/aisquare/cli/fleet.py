@@ -1615,6 +1615,15 @@ def interactive_terminal() -> bool:
 
 
 def ui(
+    after_update: Annotated[
+        bool,
+        typer.Option(
+            "--after-update",
+            hidden=True,
+            help="Reattach the agents asq's ⬆ Restart & update recorded, restarting any "
+            "whose pane is gone (what `upgrade --one-click` reopens asq with).",
+        ),
+    ] = False,
     project: Annotated[
         list[str] | None,
         typer.Option(
@@ -1653,4 +1662,7 @@ def ui(
         _fail_fleet(exc)
     from aisquare.cli.ui.app import run_ui  # lazy: textual is heavy and only the UI needs it
 
-    run_ui(scope=scope)
+    if after_update:
+        run_ui(scope=scope, after_update=True)
+    else:
+        run_ui(scope=scope)

@@ -72,17 +72,18 @@ WARN_CONNECT = DoctorCheck(
     detail="hooks are missing",
     fix="(Re)connect it: aisquare agents connect claude-code",
 )
-WARN_SNAPSHOT = DoctorCheck(
-    name="snapshot",
+# No doctor row offers a project-scoped fix today; this one stands in for one.
+WARN_FACTS = DoctorCheck(
+    name="facts",
     status=CheckStatus.warn,
-    detail="no codebase snapshot",
-    fix="Pack one: aisquare project onboard",
+    detail="no project facts seeded",
+    fix="Seed them: aisquare project onboard",
 )
-WARN_REPOMIX = DoctorCheck(
-    name="repomix",
+WARN_TMUX = DoctorCheck(
+    name="tmux",
     status=CheckStatus.warn,
-    detail="repomix not found",
-    fix="Install Node.js, then: npm install -g repomix",
+    detail="tmux not found",
+    fix="Install it: brew install tmux",
 )
 CONNECTED = DoctorCheck(name="claude-code", status=CheckStatus.ok, detail="connected")
 
@@ -216,7 +217,7 @@ def test_pressing_onboard_runs_init_and_doctor_and_posts_project_onboarded(tmp_p
     run = Scripted(
         {
             "init": _result(_report(proj)),
-            "doctor": _result(_checks_json([OK, WARN_CONNECT, WARN_REPOMIX])),
+            "doctor": _result(_checks_json([OK, WARN_CONNECT, WARN_TMUX])),
         }
     )
 
@@ -336,7 +337,7 @@ def test_doctor_view_renders_a_button_only_for_known_fixes(tmp_path: Path) -> No
         view = DoctorView(cwd=tmp_path, run=Scripted({}))
         async with Host(view).run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            view.show([OK, WARN_CONNECT, WARN_REPOMIX, WARN_SNAPSHOT])
+            view.show([OK, WARN_CONNECT, WARN_TMUX, WARN_FACTS])
             await pilot.pause()
             buttons = [
                 (str(b.label), b.disabled)
@@ -346,7 +347,7 @@ def test_doctor_view_renders_a_button_only_for_known_fixes(tmp_path: Path) -> No
 
     report, buttons = asyncio.run(drive())
     assert "⚠ claude-code: hooks are missing" in report and "→ (Re)connect it" in report
-    assert "→ Install Node.js, then: npm install -g repomix" in report, "an unknown fix stays text"
+    assert "→ Install it: brew install tmux" in report, "an unknown fix stays text"
     assert buttons == [
         ("aisquare agents connect claude-code", False),
         ("aisquare project onboard --refresh", False),
@@ -393,7 +394,7 @@ def test_doctor_view_without_a_cwd_disables_project_scoped_fixes() -> None:
         view = DoctorView(run=Scripted({}))
         async with Host(view).run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            view.show([WARN_CONNECT, WARN_SNAPSHOT])
+            view.show([WARN_CONNECT, WARN_FACTS])
             await pilot.pause()
             return [
                 (str(b.label), b.disabled)

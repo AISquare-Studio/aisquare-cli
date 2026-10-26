@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import json
 import os
 import re
@@ -19,10 +18,18 @@ from urllib.parse import urlsplit
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import claude_sharing, code_index, experimental, harness, orchestrator, paths
-from aisquare.core import snapshot as snapshot_core
+from aisquare.core import (
+    claude_sharing,
+    code_index,
+    experimental,
+    harness,
+    orchestrator,
+    paths,
+    tls,
+)
+from aisquare.core import ignore as ignore_core
 from aisquare.core import tmux as tmux_core
-from aisquare.core.config import load_config
+from aisquare.core.config import RETIRED_SECTIONS, load_config, retired_sections
 from aisquare.core.injection import load_last
 from aisquare.core.keys import EXTENDED_MINIMUM
 from aisquare.core.spawn import TEAM_ENV_VARS
@@ -124,8 +131,8 @@ def doctor(
     explainability gateway round-trip). Everything else stays offline, so a
     plain ``aisquare doctor`` still answers on a train.
 
-    ``cwd`` is the directory whose PROJECT the project-scoped checks (snapshot,
-    brain, harness, self-invocation) report on; ``None`` is the process cwd, which is
+    ``cwd`` is the directory whose PROJECT the project-scoped checks (brain,
+    harness, self-invocation) report on; ``None`` is the process cwd, which is
     what the CLI means. The fleet UI hosts many projects in one process and
     must not ``os.chdir`` (docs/plans/fleet-tui.md §5.6), so it passes the
     selected project's root here and gets that project's report in-process.
@@ -145,14 +152,11 @@ def doctor(
         _check_home_filesystem(),
         _check_config(),
         _check_database(),
-        _check_repomix(),
-        _check_tiktoken(),
         _check_claude_code(cwd),
         *_planned_agent_checks(),
         *_claude_accounts_checks(),
         _check_tmux(),
         _check_gh(),
-        _check_snapshot(cwd),
         # Never warns, so it moves no actionable row out of the sidebar's first three.
         _check_code_index(cwd),
         _check_brain(cwd),
@@ -166,7 +170,7 @@ def doctor(
         # After the actionable machine checks on purpose. The fleet UI's sidebar
         # showed the first three not-ok rows (a stable sort within the warn
         # group), so a row inserted at position 12 evicted one of `brain` /
-        # `snapshot` / a logged-out `gh` — the ones an operator can act on — from
+        # a logged-out `gh` — the ones an operator can act on — from
         # what was seen first; the Doctor page still lists them in this order. The
         # fleet terminal row (#147) can warn too, about a running server's kept
         # prefix, so it waits here with them rather than beside tmux.
@@ -194,6 +198,9 @@ def doctor(
         # Only when a fleet role runs `auto` behind a configured proxy (#150);
         # offline — config, the store, the head of a few transcripts.
         *_optional(auto_mode.doctor_check()),
+        # One TLS handshake, nothing sent, so --live only. Before the headroom row,
+        # whose every reading fails the same way when this one does.
+        *_live_only(live, _check_tls),
         # Leaves the machine (one usage request per account), so --live only (#146).
         *_live_only(live, _claude_account_headroom_check),
         # One balance request per destination workspace (#143), so --live only.
@@ -494,6 +501,13 @@ def _check_config() -> DoctorCheck:
             f"config.toml is invalid: {exc}",
             "Fix it, or reset it to the defaults: aisquare init --reinit --yes",
         )
+    retired = retired_sections()
+    if retired:
+        # Green: the section is ignored, so nothing is wrong, and the next save drops it.
+        said = "; ".join(
+            f"[{name}] is no longer read ({RETIRED_SECTIONS[name]})" for name in retired
+        )
+        return _ok("config", f"config.toml is valid; {said}, and the next save drops it")
     return _ok("config", "config.toml is valid")
 
 
@@ -688,125 +702,6 @@ def _read_line(path: Path) -> str:
         return path.read_text(encoding="utf-8").strip().splitlines()[0]
     except (OSError, IndexError):
         return ""
-
-
-_NODE_FLOOR = snapshot_core.MIN_NODE_TEXT
-
-#: Deliberately NOT ``install_hint("nodejs")``. On the distributions that ship a
-#: Node too old for repomix, the package manager's ``nodejs`` IS the old one --
-#: so ``apt install nodejs`` is advice to reinstall what they already have, and
-#: the check would send them in a circle. The `tmux` check can use the package
-#: manager because every distribution's tmux clears its floor; Node's does not.
-_NODE_UPGRADE = (
-    f"Upgrade Node.js to {_NODE_FLOOR} or newer — from nodejs.org, or a version "
-    "manager such as fnm or nvm. Not your package manager's `nodejs`: on the "
-    "distributions that ship an old one, that is the version you already have."
-)
-
-
-def _check_repomix() -> DoctorCheck:
-    """Repomix, and the Node it actually has to run on.
-
-    ``npx`` EXISTING was the whole test, and it is true of machines that cannot
-    run repomix at all. Repomix 1.18.0 declares ``node >= 22``; Debian 12 ships
-    18 and Ubuntu 22.04 ships 12. On those, ``npx`` resolved, this line was
-    green, and the first ``project onboard`` failed -- a green check over a
-    broken feature, which is the one shape a diagnostic must never have.
-
-    THE FLOOR IS PER PATH, because the two paths run different repomixes.
-    ``npx --yes repomix`` fetches the LATEST release, so :data:`MIN_NODE` is its
-    floor. An installed ``repomix`` is whatever version was pinned, and a
-    machine running ``repomix@0.2`` on Node 18 may pack perfectly well -- so its
-    own ``engines.node`` is read and preferred, and judging it by the latest
-    release's floor would be the same false positive in the other direction.
-
-    THREE OUTCOMES, not two. ``node_version()`` answers ``None`` for a Node that
-    is absent, one that exits non-zero, and one whose output will not parse; the
-    first is a different fact from the other two. ``repomix`` and ``npx`` are
-    both ``#!/usr/bin/env node`` scripts, so no Node at all means packing cannot
-    run -- a warning, not "untested". An unreadable Node stays ``ok``: failing
-    open costs this line its verdict, while guessing "too old" would send
-    someone to reinstall a working toolchain.
-
-    NO NODE AT ALL IS OFF, NOT BROKEN. Snapshots are optional and memory and
-    the hooks never touch Node, so a machine with none of ``repomix``,
-    ``npx`` or ``node`` made a choice rather than a mistake: ``ok``, with
-    :data:`snapshot_core.OFF_DETAIL` and no fix. Any ONE of the three present
-    means someone started on the toolchain, and the warnings below still say
-    what is missing.
-    """
-    name = "repomix"
-    direct = shutil.which("repomix")
-    if direct is None and shutil.which("npx") is None:
-        if shutil.which("node") is None:
-            return _ok(name, snapshot_core.OFF_DETAIL)
-        # A Node IS here, so the missing piece is npm: no npx almost always means
-        # no npm, which Arch, Alpine and Debian's own nodejs package separately.
-        return _warn(
-            name,
-            "repomix not found — codebase snapshots are disabled",
-            f"Install npm (some distributions package it apart from Node; repomix needs "
-            f"Node.js {_NODE_FLOOR}+), then: npm install -g repomix",
-        )
-    how = "repomix found" if direct else "repomix available on demand via npx"
-    if shutil.which("node") is None:
-        # Not "untested": repomix and npx are Node scripts, so this machine
-        # cannot pack, and saying so is the whole point of the rewrite.
-        return _warn(
-            name,
-            f"{how}, but Node is not on PATH — repomix is a Node script, so "
-            "codebase snapshots cannot run",
-            f"Install Node.js {_NODE_FLOOR} or newer, or put the Node you have on PATH "
-            "(a version manager's shims are not on PATH for non-interactive shells)",
-        )
-    node = snapshot_core.node_version()
-    if node is None:
-        return _ok(
-            name,
-            f"{how} — Node version not readable, so untested against the "
-            f"{_NODE_FLOOR} minimum; snapshots enabled",
-        )
-    required, own_floor = snapshot_core.pack_node_floor()
-    found = ".".join(str(part) for part in node)
-    if node < required:
-        wanted = ".".join(str(part) for part in required)
-        whose = "the installed repomix needs" if own_floor else "repomix needs"
-        return _warn(
-            name,
-            f"{how}, but Node {found} is older than {whose} "
-            f"({wanted}+) — codebase snapshots will fail when packed",
-            _NODE_UPGRADE,
-        )
-    return _ok(name, f"{how} on Node {found} — codebase snapshots enabled")
-
-
-def _check_tiktoken() -> DoctorCheck:
-    installed = _has_module("tiktoken")
-    if not snapshot_core.can_pack():
-        # Only packing a snapshot counts tokens, so where nothing can pack there is
-        # nothing for it to sharpen, installed or not. An amber line here was a fix
-        # for a feature that is not running, on exactly the machines that chose not
-        # to run it; "enabled" was a claim about one, and the one-liner always adds
-        # tiktoken. It says packing, not snapshots: a pack made before Node went is
-        # still what agents get, and the snapshot row says so (review of #257).
-        return _ok(
-            "tiktoken",
-            ("installed, but unused" if installed else "off")
-            + " — only packing a codebase snapshot uses it, and nothing can pack here",
-        )
-    if installed:
-        return _ok("tiktoken", "exact snapshot token counts enabled")
-    # `pipx inject` takes the name of an INSTALLED PIPX ENVIRONMENT, which is
-    # this distribution -- so `pipx inject aisquare tiktoken` failed on every
-    # machine that had followed the documented install, naming an environment
-    # that does not exist there. Same root cause as `_GLOBAL_INSTALL`.
-    return _warn(
-        "tiktoken",
-        "tiktoken not installed — snapshot token counts are estimated",
-        f"Install it into the same environment as aisquare: "
-        f"pipx inject {DISTRIBUTION} tiktoken (or: uv tool install --with tiktoken "
-        f"{DISTRIBUTION}; in a plain virtualenv: pip install tiktoken)",
-    )
 
 
 _STALE_HOOKS = (
@@ -1359,7 +1254,7 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
         # directory deleted by hand drops none, so `choose` refused every launch in
         # that project while this said nothing (round 3).
         defaults = _claude_account_default_checks() if _arranges_an_account() else []
-        return [*defaults, *_claude_account_limit_checks()]
+        return [*defaults, *_claude_account_limit_checks(), *_claude_account_backoff_checks()]
     statuses = [claude_accounts_service.describe(account) for account in managed]
     parts = [
         f"{status.account.slot} {status.identity.email if status.identity else 'not signed in'}"
@@ -1377,12 +1272,14 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
             ),
             *_claude_account_default_checks(),
             *_claude_account_limit_checks(),
+            *_claude_account_backoff_checks(),
         ]
     return [
         _ok("claude-accounts", detail),
         *_optional(_claude_accounts_sharing_check(managed)),
         *_claude_account_default_checks(),
         *_claude_account_limit_checks(),
+        *_claude_account_backoff_checks(),
     ]
 
 
@@ -1444,10 +1341,10 @@ def _claude_accounts_sharing_check(managed: Sequence[ClaudeAccount]) -> DoctorCh
 
 
 def _arranges_an_account() -> bool:
-    """Whether anything the default checks report on was set: a binding or a default.
+    """Whether anything the default checks report on was set: a binding or a project default.
 
-    A role binding (``config.toml``), a project default (a project setting) or a
-    machine default (a registry row, slot 1's included). The store is read raw
+    A role binding (``config.toml``) or a project default (a project setting); the
+    machine default is rank 1 of the order, never "set" (#8). The store is read raw
     and only when ``context.db`` exists: ``store.claude_accounts`` does not
     reconcile, so deciding writes nothing. A file or a store that cannot be read
     is the ``config`` or ``database`` line's to report, so it arranges nothing here.
@@ -1458,9 +1355,7 @@ def _arranges_an_account() -> bool:
         if not paths.db_path().exists():
             return False
         with store_session() as store:
-            if store.project_settings(claude_accounts_service.PROJECT_ACCOUNT_KEY):
-                return True
-            return any(record.is_default for record in store.claude_accounts())
+            return bool(store.project_settings(claude_accounts_service.PROJECT_ACCOUNT_KEY))
     except Exception:
         return False
 
@@ -1867,6 +1762,98 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
     ]
 
 
+def _claude_account_backoff_checks() -> list[DoctorCheck]:
+    """Accounts whose usage reads are backed off (F1 of #400) — offline, from the store.
+
+    The usage endpoint answered one of them HTTP 429 (or 503 with ``Retry-After``), and
+    no ``aisquare`` process asks it again before the recorded wait ends. One line naming
+    each and until when; nothing when none waits. Gated on ``context.db`` like its
+    siblings: a doctor run creates nothing.
+    """
+    if not paths.db_path().exists():
+        return []
+    try:
+        # The slot directories, read from disk: `list_accounts` reconciles the registry as it
+        # reads, a write a doctor run must not make on a machine that arranged nothing.
+        accounts = [
+            claude_accounts_core.default_account(),
+            *claude_accounts_core.managed_accounts(),
+        ]
+        waiting = claude_accounts_service.usage_backoffs(accounts)
+    except Exception:  # the database line reports a broken store
+        return []
+    if not waiting:
+        return []
+    parts = [
+        f"{claude_accounts_core.label(account)} "
+        f"{claude_accounts_service.rate_limited_until_text(waiting[account.slot].until)}"
+        for account in accounts
+        if account.slot in waiting
+    ]
+    return [
+        _warn(
+            "claude-account-backoff",
+            # A 429, or a 503 that named a wait (Retry-After): it said 'after HTTP 429' for
+            # either (the tester's pass on #401, (d)).
+            f"usage reads backed off after HTTP 429 or 503 for {len(parts)} account(s): "
+            + " · ".join(parts),
+            "Nothing to do — reads resume by themselves when the wait ends, and the last good "
+            "reading is shown meanwhile. Logging in again does not clear a rate limit; poll "
+            "usage less often (see docs/fleet.md)",
+        )
+    ]
+
+
+#: Where the usage reads (and the Claude Code they stand beside) go.
+_TLS_PROBE_HOST = "api.anthropic.com"
+
+
+def _check_tls() -> DoctorCheck:
+    """``--live`` only: a verified handshake to :data:`_TLS_PROBE_HOST` through ``core.tls``.
+
+    The row a python.org Python on macOS needed: there every usage read said
+    "could not reach the usage endpoint" while curl worked, because the
+    interpreter's own CA paths were empty. It names the trust source in use, so
+    a failure here says which store refused the certificate.
+    """
+    try:
+        source = tls.trust_source()
+    except tls.CABundleError as exc:
+        return _fail("tls", f"the CA bundle could not be loaded: {exc}", tls.BUNDLE_FIX)
+    except OSError as exc:  # the OS store or certifi refused to build: rare, never a crash
+        return _fail(
+            "tls", f"the TLS context could not be built: {tls.error_text(exc)}", tls.CERT_FIX
+        )
+    proxy = tls.https_proxy(_TLS_PROBE_HOST)
+    via = ""
+    try:
+        if proxy:  # host:port only: a proxy URL may carry credentials, which no row prints
+            where, port, _user, _password = tls.proxy_endpoint(proxy)
+            via = f" through the proxy {where}:{port}"
+        tls.handshake(_TLS_PROBE_HOST)
+    except tls.ProxyURLError as exc:
+        # A malformed HTTPS_PROXY took the whole of doctor --live down (review of #403, m2).
+        return _warn("tls", f"{exc}; nothing was dialled", tls.PROXY_FIX)
+    except OSError as exc:
+        if tls.cert_failure(exc):
+            # The env bundle is already what refused it: point at the bundle, not at
+            # SSL_CERT_FILE as a remedy (review of #403, n4).
+            fix = tls.BUNDLE_FIX if source == tls.SOURCE_ENV else tls.CERT_FIX
+            return _fail(
+                "tls",
+                f"{_TLS_PROBE_HOST}'s certificate did not verify against {source}: "
+                f"{tls.error_text(exc)}",
+                fix,
+            )
+        return _warn(
+            "tls",
+            f"could not reach {_TLS_PROBE_HOST}{via} to check TLS "
+            f"({type(exc).__name__}: {tls.error_text(exc)})",
+            "check the network or proxy; usage reads need https://api.anthropic.com",
+        )
+    return _ok("tls", f"{_TLS_PROBE_HOST}{via} verified against {source}")
+
+
 def _claude_account_headroom_check() -> DoctorCheck | None:
     """``--live`` only: every enabled, signed-in account's windows, against ``switch_at``.
 
@@ -2037,13 +2024,12 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
 
     Reads the registry only when ``context.db`` already exists — a doctor run
     must not create the store (``tests/test_doctor_does_not_create_state.py``)
-    — and says nothing at all when no default, project default or role binding
-    has ever been set, so a machine that never arranged its accounts keeps the
-    doctor output it had. What it warns about is the class #145 exists for: a
-    default that is not signed in or is disabled launches Claude Code's login
-    screen (or the next rung down) instead of the account the operator meant,
-    and a binding or project default naming a removed slot refuses every
-    launch of that role or project with `unknown_account`.
+    — and says nothing at all when no project default or role binding has ever
+    been set, so a machine that never arranged its accounts keeps the doctor
+    output it had. What it warns about is the class #145 exists for: a binding or
+    project default naming a removed slot refuses every launch of that role or
+    project with `unknown_account`. The machine default under them is said too:
+    the first enabled, signed-in account in priority order (#8), or none.
     """
     if not paths.db_path().exists():
         return []
@@ -2067,33 +2053,24 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
             )
         ]
     by_slot = {account.slot: account for account in accounts}
-    default = next((account for account in accounts if account.is_default), None)
-    if default is None and not per_project and not bindings:
+    if not per_project and not bindings:
         return []
     checks: list[DoctorCheck] = []
-    if default is not None:
+    default = claude_accounts_service.preferred_account(accounts)
+    if default is None:
+        checks.append(
+            _warn(
+                "claude-account-default",
+                "no enabled account is signed in, so a launch nothing else names runs on "
+                "whatever claude the shell has",
+                "aisquare accounts run <slot> and sign in, or: aisquare accounts enable <slot>",
+            )
+        )
+    else:
         label = f"slot {default.slot} ({claude_accounts_core.label(default)})"
-        if default.disabled:
-            checks.append(
-                _warn(
-                    "claude-account-default",
-                    f"the machine default is {label} and it is disabled — launches skip it",
-                    f"aisquare accounts enable {default.slot}, or pick another: "
-                    "aisquare accounts default <slot>",
-                )
-            )
-        elif not claude_accounts_core.signed_in(default):
-            checks.append(
-                _warn(
-                    "claude-account-default",
-                    f"the machine default is {label} but it is not signed in — a launch "
-                    "would open Claude Code's login instead of the account you meant",
-                    f"aisquare accounts run {default.slot} and sign in, or pick another: "
-                    "aisquare accounts default <slot>",
-                )
-            )
-        else:
-            checks.append(_ok("claude-account-default", f"machine default: {label}"))
+        checks.append(
+            _ok("claude-account-default", f"machine default: {label}, rank {default.position}")
+        )
     dangling: list[str] = []
     for project_id, raw in per_project.items():
         if not raw.isdigit() or int(raw) not in by_slot:
@@ -2894,7 +2871,8 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
         f"no browser MCP/plugin declared in {len(dirs)} config dir(s) or {_short_path(mcp_json)}; "
         f"{chrome_note}. Without one the ui-tester reopens UI tasks as 'not browser-verified' "
         "rather than passing them on code alone — add the Chrome DevTools MCP with "
-        "`claude mcp add -s user chrome-devtools npx chrome-devtools-mcp`, or install the "
+        "`claude mcp add -s user chrome-devtools npx chrome-devtools-mcp@latest` (what "
+        "install.sh --with chrome-devtools runs), or install the "
         "Claude in Chrome extension (claude.ai/chrome)",
     )
 
@@ -2963,58 +2941,6 @@ def _check_gh() -> DoctorCheck:
         )
 
 
-def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
-    """The active project's codebase snapshot; ``cwd`` picks the project (default: process cwd)."""
-    absent = _uncreated_home("snapshot")
-    if absent is not None:
-        return absent
-    try:
-        with store_session() as store:
-            project = active_project(store, cwd)
-        snap = snapshot_core.load(project.id)
-    except Exception as exc:  # diagnostics must never crash
-        return _warn(
-            "snapshot", f"could not check the snapshot: {exc}", "Try: aisquare project onboard"
-        )
-    if snapshot_core.is_the_homes(project.id):
-        # The aisquare home, added as a project, is never packed: no fix to offer.
-        return _ok("snapshot", snapshot_core.HOME_SKIPPED)
-    # A stored pack stays on disk even where nothing can pack any more (Node gone,
-    # or on PATH only for the installer's own run): it says so, rather than "ready"
-    # beside a repomix row that reads off.
-    if snap is not None and snap.status == "ready":
-        return _ok(
-            "snapshot",
-            f"snapshot ready ({snap.file_count} files, {snap.token_count} tokens)"
-            + snapshot_core.unrefreshable_note(snap),
-        )
-    if snap is not None and snap.status == "skeleton_only":
-        # Usable, for whoever opens it: no agent is pointed at a pack. No fix,
-        # deliberately — re-packing would not change it, and a fix here is the
-        # button that was pressed forever with a green tick.
-        return _ok(
-            "snapshot",
-            snapshot_core.skeleton_only_detail(snap) + snapshot_core.unrefreshable_note(snap),
-        )
-    if not snapshot_core.can_pack():
-        # No fix, deliberately: `Pack one: aisquare project onboard` is a one-click
-        # button in the UI (services/onboarding.KNOWN_FIXES), and with nothing to
-        # run repomix it can never turn green. When something of the toolchain IS
-        # here, the repomix row warns and names what is missing. A Node that is
-        # there but too old still packs-and-fails, so it keeps this row's warning:
-        # can_pack() reads PATH only (snapshot_core.can_pack). Asked before a
-        # `too_large` verdict too: it stores nothing agents get, and its Re-pack
-        # button could no more turn green here (review of #257).
-        return _ok("snapshot", snapshot_core.off_detail())
-    if snap is not None and snap.status == "too_large":
-        # Not "no snapshot": there IS a verdict, and it names its numbers (#82).
-        # The fix is `--refresh` because a plain `onboard` only reloads this
-        # verdict — which is how the line stayed a warning forever.
-        return _warn("snapshot", snapshot_core.too_large_detail(snap), snapshot_core.REPACK_HINT)
-    # Nothing to fix: the pack is opt-in (`init` makes none) and no agent reads one.
-    return _ok("snapshot", "none — opt-in: aisquare project onboard packs one")
-
-
 def _check_code_index(cwd: Path | None = None) -> DoctorCheck:
     """``code index``: the active project's symbol index (#285) — symbols, files, age, parsers.
 
@@ -3029,7 +2955,7 @@ def _check_code_index(cwd: Path | None = None) -> DoctorCheck:
     try:
         with store_session() as store:
             project = active_project(store, cwd)
-        found = code_index.status(project.id, current_head=snapshot_core.head_sha(project.root))
+        found = code_index.status(project.id, current_head=ignore_core.head_sha(project.root))
         building = code_index.building(project.id)
     except Exception as exc:  # diagnostics must never crash
         return _ok(name, f"not evaluated ({exc})")
@@ -3352,13 +3278,6 @@ def _display_url(url: str) -> str:
     host = parts.netloc.rsplit("@", 1)[-1]
     path = parts.path.rstrip("/")
     return f"{parts.scheme}://{host}{path}" if parts.scheme else f"{host}{path}"
-
-
-def _has_module(name: str) -> bool:
-    try:
-        return importlib.util.find_spec(name) is not None
-    except ModuleNotFoundError:
-        return False
 
 
 def last_injection() -> InjectionRecord | None:

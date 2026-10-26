@@ -36,7 +36,8 @@ from typer.core import TyperGroup
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import paths
+from aisquare.core import brain as brain_core
+from aisquare.core import locking, paths
 from aisquare.core.entries import new_entry
 from aisquare.core.ids import new_agent_id, new_event_id, new_task_id
 from aisquare.core.orchestrator import FLEET_AGENT_ENV_VAR, team_project
@@ -54,6 +55,7 @@ from aisquare.models import (
 )
 from aisquare.services import fleet as fleet_service
 from aisquare.services import fresh as fresh_service
+from aisquare.services import team as team_service
 from tests.test_worktree import _git
 
 _BOARD = ("team_task", "team_event", "team_session", "fleet_agent")
@@ -255,7 +257,11 @@ def test_a_reset_clears_the_board_and_fleet_and_keeps_memory_prompts_and_every_o
         "meta": 3,
         "agents": 1,
         "worktrees": 0,
+        "briefs": 0,
+        "evidence": 0,
+        "manager_state": 0,
         "entries": None,
+        "brain": None,
         "prompts": None,
         "metrics": None,
         "branches": None,
@@ -485,7 +491,8 @@ def test_dry_run_prints_the_plan_and_changes_nothing(
     assert result.exit_code == 0, result.output
     said = " ".join(result.output.split())
     assert "clears 3 tasks · 2 notes and events · 1 session · 3 signals and marks" in said
-    assert "1 fleet agent · 0 worktrees · 1 context entry" in said
+    assert "1 fleet agent · 0 worktrees · 0 briefs · 0 brief evidence files" in said
+    assert "0 manager state files · 1 context entry · 0 project brains" in said
     assert "keeps prompt log and metrics (--prompts), fleet branches (--branches)" in said
     as_json = runner.invoke(app, ["--json", "project", "fresh", "-P", "alpha-x", "--dry-run"])
     assert json.loads(as_json.stdout)["counts"]["tasks"] == 3
@@ -550,6 +557,9 @@ def test_json_names_the_counts_cleared(
         "meta": 3,
         "agents": 1,
         "worktrees": 0,
+        "briefs": 0,
+        "evidence": 0,
+        "manager_state": 0,
     }
     assert report["manager"]["role"] == "manager" and report["manager_error"] is None
 
@@ -1548,3 +1558,168 @@ def test_a_store_error_in_the_confirming_read_keeps_the_partial_report(
     assert "OperationalError: database is locked" in str(stopped.value)
     assert stopped.value.report.stopped == ["coder-1"] and stops.asked == [alpha.id]
     assert len(_rows(alpha.id)["team_task"]) == tasks and spawned == []
+
+
+# --- what 0.9.0 added to a project: briefs, the manager's state, the brain (#6) ------------
+
+
+def _briefs_with_evidence(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[ProjectInfo, ProjectInfo]:
+    """Two briefs on alpha and one on beta, each with a finding whose screenshot the brief
+    keeps a copy of under ``~/.aisquare/briefs/<project>/``."""
+    from aisquare.services import briefs, team
+
+    alpha, beta, _, _ = two
+    for project in (alpha, alpha, beta):
+        monkeypatch.chdir(project.root)
+        created = briefs.create(f"{project.root.name} brief", ["a requirement"])
+        task, _ = team.add_task(f"{project.root.name} task")
+        (project.root / "shot.png").write_bytes(b"a screenshot")
+        briefs.finding(created.id, "R1", task_ref=task.id, summary="broken",
+                       artifact=project.root / "shot.png")  # fmt: skip
+    return alpha, beta
+
+
+def _brief_files(project_id: str) -> int:
+    root = paths.aisquare_home() / "briefs" / project_id
+    return sum(1 for path in root.rglob("*") if path.is_file()) if root.exists() else 0
+
+
+def test_a_reset_clears_the_projects_briefs_and_their_evidence_and_numbers_restart(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0.9.0's work briefs are board content: their rows and the evidence copies they keep go
+    with the board, counted in the plan and the report, and the next brief is B1 again.
+    Beta's briefs and evidence are untouched."""
+    from aisquare.services import briefs
+
+    alpha, beta = _briefs_with_evidence(two, monkeypatch)
+    evidence = _brief_files(alpha.id)
+    assert evidence >= 2 and _brief_files(beta.id) >= 1
+    beta_briefs = _raw("SELECT * FROM brief WHERE project_id = ? ORDER BY id", (beta.id,))
+    beta_files = _brief_files(beta.id)
+
+    planned = fresh_service.plan(alpha)
+    report = fresh_service.start_fresh(alpha)
+
+    assert (planned.counts.briefs, planned.counts.evidence) == (2, evidence)
+    assert (report.cleared.briefs, report.cleared.evidence) == (2, evidence)
+    assert _raw("SELECT COUNT(*) FROM brief WHERE project_id = ?", (alpha.id,)) == [(0,)]
+    assert not (paths.aisquare_home() / "briefs" / alpha.id).exists()
+    assert _raw("SELECT * FROM brief WHERE project_id = ? ORDER BY id", (beta.id,)) == beta_briefs
+    assert _brief_files(beta.id) == beta_files
+    monkeypatch.chdir(alpha.root)
+    assert briefs.create("the next piece of work", ["a requirement"]).number == 1
+
+
+def _manager_state(project: ProjectInfo, goal: str) -> Path:
+    """The manager's state file, as a manager writes it, with a note beside it."""
+    state = paths.manager_state_file(project.id)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(f"Goal: {goal}\nNext step: carry on\n", encoding="utf-8")
+    (state.parent / "notes.md").write_text("an aside the manager kept\n", encoding="utf-8")
+    return state
+
+
+def test_a_reset_clears_the_managers_state_so_the_new_manager_starts_blank(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The must: the manager's ``state.md`` (goal, decisions, open items, next step) was not
+    cleared, so the "blank" manager read the old goal back from its start pack. The whole
+    ``manager/`` folder goes (``state.md`` and anything kept beside it); beta's stays."""
+    alpha, beta, _, _ = two
+    state = _manager_state(alpha, "ship the old feature")
+    theirs = _manager_state(beta, "beta's own goal")
+
+    planned = fresh_service.plan(alpha)
+    report = fresh_service.start_fresh(alpha)
+
+    assert planned.counts.manager_state == report.cleared.manager_state == 2
+    assert not state.parent.exists() and theirs.read_text(encoding="utf-8").startswith("Goal")
+    monkeypatch.setenv("AISQUARE_ROLE", "manager")
+    pack = team_service.hook_session_start(
+        "cccc3333-0000-0000-0000-000000000000", alpha.root, "startup"
+    )
+    assert "ship the old feature" not in pack
+    assert "Resume: no state file yet" in pack
+
+
+def test_a_manager_state_that_cannot_be_removed_starts_no_manager(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A state file that stays would be read back by the new manager: none is started, and
+    the report says why and what to run."""
+    alpha, _, _, _ = two
+    state = _manager_state(alpha, "ship the old feature")
+    real = shutil.rmtree
+
+    def refuse(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == state.parent:
+            raise PermissionError(13, "Permission denied")
+        real(path, *args, **kwargs)
+
+    monkeypatch.setattr("aisquare.services.fresh.shutil.rmtree", refuse)
+
+    report = fresh_service.start_fresh(alpha)
+
+    assert report.manager is None and spawned == []
+    assert report.manager_error is not None and "state could not be removed" in report.manager_error
+    assert "aisquare fleet spawn --project alpha-x manager" in report.manager_error
+    assert state.exists() and report.cleared.tasks == 3
+
+
+def _brain(project: ProjectInfo) -> Path:
+    """A brain on disk, as gbrain leaves one (its PGLite marker)."""
+    home = brain_core.brain_home(project.id)
+    marker = home / ".gbrain" / "brain.pglite" / "PG_VERSION"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("16\n", encoding="utf-8")
+    return home
+
+
+def test_memory_takes_the_project_brain_too_and_only_the_projects(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    stops: Stops,
+) -> None:
+    """The brain is the project's remembered context beside its entries: kept by default,
+    gone with --memory, counted; another project's brain is untouched."""
+    alpha, beta, _, _ = two
+    mine, theirs = _brain(alpha), _brain(beta)
+
+    kept = fresh_service.start_fresh(alpha)
+    assert kept.cleared.brain is None and mine.is_dir()
+
+    planned = fresh_service.plan(alpha, memory=True)
+    report = fresh_service.start_fresh(alpha, memory=True)
+
+    assert planned.counts.brain == report.cleared.brain == 1
+    assert not mine.exists() and theirs.is_dir() and brain_core.brain_ready(beta.id)
+
+
+def test_a_brain_a_gbrain_run_holds_is_kept_not_torn(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+) -> None:
+    """PGLite is single-process, and gbrain runs under aisquare's own lock on the brain: a
+    distill or a recall in it keeps it, named as kept, rather than deleted under it. The
+    board is cleared all the same."""
+    alpha, _, _, _ = two
+    home = _brain(alpha)
+
+    with locking.holding(home / ".aisquare.lock", wait_s=0):  # a distill is running
+        report = fresh_service.start_fresh(alpha, memory=True)
+
+    assert home.is_dir() and brain_core.brain_ready(alpha.id)
+    assert report.cleared.brain == 0 and report.cleared.tasks == 3
+    assert [(kept.path, kept.reason) for kept in report.kept] == [
+        (home, "a distill or a recall is running in it; kept as it is")
+    ]

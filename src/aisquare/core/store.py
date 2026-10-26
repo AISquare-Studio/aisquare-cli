@@ -2689,7 +2689,8 @@ class SqliteStore:
         say what each table gave up; with ``apply`` off, count them and change nothing.
         ``apply`` has no default: a call that left it out deleted (review of #429).
 
-        The board is its ``team_task``, ``team_event`` and ``team_session`` rows, and in
+        The board is its ``team_task``, ``team_event``, ``team_session`` and ``brief`` rows
+        (the next brief is #1 again, as the next task is), and in
         ``team_meta`` its signals (``signal/<id>/*``) and the keys of the sessions that go
         (:func:`_session_meta_terms`: the nudge debounce, the continuation counters, …).
         The distiller's watermark stays: ``team_event.seq`` is one stream for every board,
@@ -2705,6 +2706,7 @@ class SqliteStore:
             ("team_event", "project_id = ?"),
             ("team_session", "project_id = ?"),
             ("fleet_agent", "project_id = ?"),
+            ("brief", "project_id = ?"),
         ]
         if memory:
             scope.append(("entry", "pool = 'project' AND project_id = ?"))

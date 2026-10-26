@@ -84,15 +84,21 @@ aisquare project prune --missing --worktrees  # the stale ones, after a confirma
 
 A project you reuse piece of work after piece of work can **start fresh**
 instead: `aisquare project fresh` (alias `reset`) stops its fleet, removes the
-agents' worktrees, clears its board and fleet rows (task numbers start at #1
-again) and starts a blank manager, keeping the registration, its settings and
-its snapshot. Its context entries, prompt log and fleet branches stay unless
-`--memory`, `--prompts` or `--branches`; work in a worktree or branch that no
-remote has refuses it unless `--discard-unpushed`. `--dry-run` shows the plan.
+agents' worktrees, clears its board (tasks, notes, sessions, signals and its work
+briefs, with the evidence they keep under `~/.aisquare/briefs/<id>/`) and its
+fleet rows, deletes the manager's state (`~/.aisquare/projects/<id>/manager/`,
+its `state.md`), so task and brief numbers start at #1 again and the new manager
+starts blank, and starts that manager. It keeps the registration and its
+settings, the symbol index (`~/.aisquare/projects/<id>/code`) and the command
+reports (`~/.aisquare/reports/`). Its context entries and brain
+(`~/.aisquare/projects/<id>/brain`), prompt log and fleet branches stay unless
+`--memory`, `--prompts` or `--branches`; a brain a distill or a recall is
+running in is kept and said so. Work in a worktree or branch that no remote has
+refuses it unless `--discard-unpushed`. `--dry-run` shows the plan.
 
 ```sh
 aisquare project fresh --dry-run              # what it would clear
-aisquare project fresh --memory --yes         # clear the remembered context too, without asking
+aisquare project fresh --memory --yes         # clear the entries and the brain too, without asking
 ```
 
 `aisquare project onboard` adds a folder as a project on purpose and seeds its

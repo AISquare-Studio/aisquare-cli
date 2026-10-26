@@ -154,6 +154,31 @@ def _lock(home: Path, *, wait_s: float) -> Iterator[bool]:
         yield won
 
 
+def clear(project_id: str) -> bool:
+    """Delete this project's brain (``project fresh --memory``): ``True`` when it went,
+    ``False`` when there was none.
+
+    Never torn from under a running gbrain: taken under the brain's own lock, tried and never
+    waited for, so a distill or a recall that holds it makes this raise :class:`BrainBusy`,
+    and the brain is left as it is. Moved aside under the lock and deleted after it, so a run
+    that comes next finds no brain and makes a new, empty one. Any other failure is the
+    ``OSError`` it is, the brain as it was."""
+    home = brain_home(project_id)
+    if not home.exists():
+        return False
+    aside = home.with_name(f".brain-cleared-{os.getpid()}-{os.urandom(4).hex()}")
+    with _lock(home, wait_s=0) as won:
+        if not won:
+            raise BrainBusy(f"a gbrain run holds {home}")
+        os.replace(home, aside)
+    shutil.rmtree(aside, ignore_errors=True)
+    return True
+
+
+class BrainBusy(OSError):
+    """The brain's lock is held: a distill or a recall is running in it."""
+
+
 def _run(home: Path, argv: list[str], *, stdin: str | None = None, timeout: int) -> str | None:
     """Run one gbrain command against ``home``; stdout on success, else ``None``."""
     binary = shutil.which("gbrain")

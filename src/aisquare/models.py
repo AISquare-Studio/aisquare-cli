@@ -1473,8 +1473,18 @@ class FreshCounts(BaseModel):
     agents: int = 0
     """Fleet agent rows, live and ended."""
     worktrees: int = 0
+    briefs: int = 0
+    """Work briefs, with their numbered requirements: the board's, as its tasks are."""
+    evidence: int = 0
+    """Files of the briefs' kept evidence, under ``~/.aisquare/briefs/<id>/``."""
+    manager_state: int = 0
+    """Files of the manager's own state (``~/.aisquare/projects/<id>/manager/``: its
+    ``state.md``, goal, decisions, open items, next step), which a blank manager must not
+    read back."""
     entries: int | None = None
     """``--memory``: the project's context entries."""
+    brain: int | None = None
+    """``--memory``: the project brain (``~/.aisquare/projects/<id>/brain``), 1 or 0."""
     prompts: int | None = None
     """``--prompts``: the prompt log."""
     metrics: int | None = None

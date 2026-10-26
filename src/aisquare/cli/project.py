@@ -382,7 +382,11 @@ def fresh(
         ),
     ] = None,
     memory: Annotated[
-        bool, typer.Option("--memory", help="Also clear its remembered context (context entries).")
+        bool,
+        typer.Option(
+            "--memory",
+            help="Also clear its remembered context: context entries and the project brain.",
+        ),
     ] = False,
     prompts: Annotated[
         bool, typer.Option("--prompts", help="Also clear its prompt log and turn metrics.")
@@ -416,11 +420,12 @@ def fresh(
     """Start fresh: clear the project's board and fleet, then start a blank manager (alias: reset).
 
     Every live agent is stopped as `fleet shutdown` stops it, each agent's worktree
-    is removed, and the board's tasks, notes, sessions and signals and the fleet's
-    rows are deleted; task numbers start at #1 again. The checkout, every other
-    branch, the registration and its settings, the onboarding snapshot and every
-    other project are kept, and so are its context entries, prompt log and fleet
-    branches unless --memory, --prompts or --branches says otherwise. Work its
+    is removed, and the board's tasks, notes, sessions, signals and work briefs (with
+    their kept evidence), the manager's state file and the fleet's rows are deleted;
+    task and brief numbers start at #1 again. The checkout, every other branch, the
+    registration and its settings, the symbol index, the command reports and every
+    other project are kept, and so are its context entries and brain, prompt log and
+    fleet branches unless --memory, --prompts or --branches says otherwise. Work its
     worktrees or branches hold that no remote has refuses the reset, named, unless
     --discard-unpushed. It prints the plan and asks first at a terminal (twice when
     discarding); off a terminal it is a dry run unless --yes, and under --json
@@ -546,7 +551,7 @@ def _emit_fresh_plan(plan: FreshPlan, *, discard: bool) -> None:
     kept = [
         what
         for what, chosen in (
-            ("context entries (--memory)", plan.memory),
+            ("context entries and brain (--memory)", plan.memory),
             ("prompt log and metrics (--prompts)", plan.prompts),
             ("fleet branches (--branches)", plan.branches),
         )

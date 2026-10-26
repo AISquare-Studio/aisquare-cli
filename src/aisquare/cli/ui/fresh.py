@@ -42,16 +42,17 @@ PLAN_WORKER = "fresh-plan"
 """The dialog's read of what Start fresh would clear (``services.fresh.plan``)."""
 
 EXTRAS: tuple[tuple[str, str], ...] = (
-    ("fresh-memory", "Project memory"),
+    ("fresh-memory", "Project memory (context entries and brain)"),
     ("fresh-prompts", "Prompt log & metrics"),
     ("fresh-branches", "Fleet git branches"),
 )
 """The dialog's checkboxes, by id, in the order shown: ``--memory``, ``--prompts``,
 ``--branches``."""
 
-ALWAYS = 6
+ALWAYS = 9
 """How many of ``services.fresh.count_words``'s words are what is always cleared: tasks,
-events, sessions, signals and marks, fleet agents and worktrees, never ``None``."""
+events, sessions, signals and marks, fleet agents, worktrees, briefs, brief evidence files
+and manager state files, never ``None``."""
 
 
 FRESH_FIXED_ROWS = 12
@@ -100,6 +101,7 @@ def narrowed(plan: FreshPlan, *, memory: bool, prompts: bool, branches: bool) ->
     counts = plan.counts.model_copy(
         update={
             "entries": plan.counts.entries if memory else None,
+            "brain": plan.counts.brain if memory else None,
             "prompts": plan.counts.prompts if prompts else None,
             "metrics": plan.counts.metrics if prompts else None,
             "branches": plan.counts.branches if branches else None,
@@ -196,9 +198,10 @@ class ConfirmFresh(ModalScreen[FreshChoice | None]):
                 yield Static(Text(f"Start {display_name(self.project)} fresh?"), id="fresh-title")
                 yield Static(
                     Text(
-                        "Its agents are stopped, their worktrees removed, and its board and "
-                        "fleet cleared: task numbers start at #1 again. The folder, its other "
-                        "branches, its settings and its snapshot are kept."
+                        "Its agents are stopped, their worktrees removed, and its board, "
+                        "briefs and fleet cleared, with the manager's state: task and brief "
+                        "numbers start at #1 again. The folder, its other branches, its "
+                        "settings, its symbol index and the command reports are kept."
                     ),
                     id="fresh-about",
                 )

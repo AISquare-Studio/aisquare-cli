@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import sys
 import textwrap
@@ -159,4 +158,4 @@ def test_a_server_under_a_shell_that_stays_is_a_teammate(
     assert SESSION in rows and any(row.startswith("mcp:remote:") for row in rows), (rows, report)
     [author] = notes.values()
     assert author.startswith("mcp:remote:"), (notes, report)
-    assert shlex.quote(SESSION) not in notes.values()
+    assert SESSION not in notes.values(), "not written as the session"

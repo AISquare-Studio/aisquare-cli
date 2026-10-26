@@ -66,7 +66,7 @@ KEEP_SECONDS = 14 * 24 * 3600
 
 
 #: The ``team_meta`` keys, ``host/<project id>/<pid>``. Under the project, as ``signal/``
-#: is, so removing the project takes them (``store._purge_team_meta``).
+#: is, so removing the project takes them (``ContextStore._purge_team_meta``).
 _PREFIX = "host/"
 
 

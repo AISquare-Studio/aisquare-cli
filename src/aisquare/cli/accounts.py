@@ -504,10 +504,12 @@ def statusline_(
             line.append(said, style="green" if site.state in {"ours", "wrapped"} else "")
             if site.changed:
                 line.append(" (changed now)", style="bold")
+            if site.note:
+                line.append(f" — {site.note}", style="yellow")
             if site.error:
                 line.append(f" — failed: {site.error}", style="red")
             console.print(line)
-        if install and any(site.state == "foreign" for site in sites):
+        if install and any(site.state == "foreign" and not site.note for site in sites):
             console.print(
                 "a status line of your own is left as it is; --install --wrap keeps it and "
                 "adds ours after it",

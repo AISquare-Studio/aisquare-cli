@@ -164,10 +164,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   opens the Board tab. With only the manager running, there is no line.
 - **Claude Code's status line, and the sessions on this machine** (#287; opt-in).
   `aisquare accounts statusline --install` sets `asq-statusline` as each account's
-  status line where none is set (`--wrap` keeps yours and prints it first;
-  `--uninstall` and `aisquare uninstall` take out only ours and give the file back
-  as it was). In every session it shows `acct 3 · 5h 42% · wk 61% · fleet 58% left
-  (3×) · ctx 34%`, importing the standard library only. Each session it runs in
+  status line where none is set (`--wrap` keeps yours and prints it first, unless it
+  cannot be read back from inside ours exactly as you wrote it: on Windows a command
+  with a `"` in it, a quoted path under `Program Files`, is left as it is and the
+  command says so; `--uninstall` and `aisquare uninstall` take out only ours and give
+  the file back as it was, your command from the copy made at install). In every
+  session it shows `acct 3 · 5h 42% · wk 61% · fleet 58% left (3×) · ctx 34%`,
+  importing the standard library only; the fleet's share only while `fleet.json` is
+  no older than the usage cache's five minutes (`asq` rewrites it every minute), the
+  account's name always. It reads and prints UTF-8 whatever the Windows code page of
+  its pipes, and so does the command it wraps. Each session it runs in
   keeps a record (ids, cwd, model and those figures, never a prompt; kept a day):
   `aisquare accounts sessions [--since 15m] [--json]` and the Accounts page list
   every session that reported, hand-launched ones too, and the usage cache takes

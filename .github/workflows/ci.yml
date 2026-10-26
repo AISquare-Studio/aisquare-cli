@@ -54,18 +54,21 @@ permissions:
 #            protection to require, whatever the number of legs or shards.
 #
 # Measured after: a sub-PR's slowest job ended 8.2 minutes after its run started,
-# against 22 (run 40230232483: its 4 shards 4.6-8.1); the full matrix's at 8.7,
-# against 64 (run 40241701340 on a530036f: Linux shards 5.0-8.6, Windows 6.8-8.7).
+# against 22 (run 40230232483, green: its 4 shards 4.6-8.1). The full matrix's
+# slowest job ran 12.1 and ci-ok ended at 12.3, against 64 (run 40246673512 on
+# 1f23b826, green on its first attempt: Linux shards 4.8-8.2, Windows 7.4-12.1); in
+# 40244987840, on the same commit, the slowest ended at 10.3 and the run was green on
+# its second attempt, after a flaky UI test.
 # pytest-split's shards are even, each within about 5% of the others by the last
 # run's times; what spreads them is the runners, 0.6 to 1.8 times as fast as each
-# other within one run. Windows has 10 shards so that a runner 1.8 times slower
-# than usual still finishes in about 12.5 minutes: at 8, one took 16.2 (run
-# 40240227553).
+# other within one run. Windows has 10 shards for that: at 8, a runner 1.78 times
+# slower than its tests' last run took 16.2 (run 40240227553); at 10, the slowest
+# Windows shard ran 12.1 (run 40246673512).
 #
 # Every job has a timeout of about twice its usual time, so a hung shard fails in
 # minutes, not at GitHub's six hours. Installs are uv's, not pip's, compiled as
-# pip compiles them: about 4 s against 13 on Linux and 20-28 against 50 on Windows
-# (run 40232807941 against 40218362245). ci/constraints.txt still pins ruff and mypy.
+# pip compiles them: 3-5 s against 13 on Linux and 26-38 against 50 on Windows
+# (run 40246673512 against 40218362245). ci/constraints.txt still pins ruff and mypy.
 #
 # LEAN CI FOR A TRAIN'S SUB-PRS (owner decision 2026-10-23). A pull request into
 # rc/** — one workstream of a release train — runs lint, the py3.12 leg (captain

@@ -269,7 +269,7 @@ exclude = ["/docs/demo.gif", "/docs/demo/*.png", "/.test_durations"]
 testpaths = ["tests"]
 addopts = "-ra"
 # A test still running after 5 minutes dumps every thread's stack to stderr (it is not
-# failed: CI's step timeout does that), so a hang names itself in the log.
+# failed: CI's job timeout does that), so a hang names itself in the log.
 faulthandler_timeout = 300
 
 [tool.ruff]

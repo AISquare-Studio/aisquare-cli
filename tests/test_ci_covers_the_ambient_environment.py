@@ -95,7 +95,7 @@ _ASSIGNS_HOME = r"AISQUARE_HOME\s*[:=]"
 #: about the definition rather than about any mention of the name.
 _ASSIGNS_VARIANT = r"(?<![A-Z_])AMBIENT\s*[:=]"
 
-#: The shell function the ambient job asserts its premise with. Named here so a
+#: The shell function the ambient legs assert their premise with. Named here so a
 #: rename fails these guards loudly instead of leaving them quietly satisfied.
 PREMISE = "assert_proxy"
 
@@ -292,7 +292,7 @@ def test_both_proxy_states_are_covered() -> None:
 
     for variant in ("proxy-down", "proxy-up"):
         assert variant in variants, (
-            f"the ambient job no longer runs the {variant} variant; each proxy "
+            f"the ambient legs no longer run the {variant} variant; each proxy "
             "state catches a different leak and neither catches the other"
         )
 
@@ -385,7 +385,7 @@ def test_the_ambient_environment_variables_are_set(ambient: str) -> None:
 
     for name in ("AISQUARE_EXPLAINABILITY_TARGET=", "EXPLAINABILITY_GATEWAY_URL="):
         assert name in exported, (
-            f"{name} is no longer set for the ambient job, so an axis conftest "
+            f"{name} is no longer set for the ambient legs, so an axis conftest "
             "itself flags as dangerous is unreproduced again"
         )
 
@@ -416,7 +416,7 @@ def test_the_ambient_job_exports_what_an_account_launch_does(ambient: str) -> No
     ]
 
     assert not missing, (
-        f"the ambient job does not set {missing}, which conftest clears because a "
+        f"the ambient legs do not set {missing}, which conftest clears because a "
         "launch onto a Claude account exports them — so a fixture that reads them "
         "out of os.environ passes here and fails from a developer's fleet pane"
     )
@@ -436,7 +436,7 @@ def test_the_premise_is_read_from_the_config_not_hardcoded(suite_step: str) -> N
     ``service``/``mode`` contract rather than "something answered 200".
     """
     assert "explainability status --json" in suite_step, (
-        "the ambient job no longer reads the configured proxy out of the config, "
+        "the ambient legs no longer read the configured proxy out of the config, "
         "so the port it occupies can drift from the port the suite probes"
     )
     assert '"$port"' in suite_step, "the stub is no longer started on the port read from the config"
@@ -499,7 +499,7 @@ def test_the_listener_starts_before_the_suite_in_the_same_step(suite_step: str) 
     """
     before, found, _ = suite_step.partition(SUITE)
 
-    assert found, f"the ambient job no longer runs `{SUITE}`"
+    assert found, f"the ambient legs no longer run `{SUITE}`"
     assert "tests.proxy_stub" in before, (
         "the proxy stub is not started before the suite in the same step, so it "
         "is either killed before pytest runs or started too late — either way "
@@ -550,7 +550,7 @@ def test_the_variant_name_is_declared_and_closed(ambient: str, suite_step: str) 
     declared = [line for line in _commands(ambient) if re.search(_ASSIGNS_VARIANT, line)]
 
     assert declared, (
-        "nothing declares AMBIENT for the ambient job, so every dispatch in the "
+        "nothing declares AMBIENT for the ambient legs, so every dispatch in the "
         "suite step falls through to proxy-down and the matrix runs one ambient "
         "under both of its names"
     )
@@ -625,7 +625,7 @@ def test_the_workflow_reuses_the_test_suites_proxy_stub(job: str, ambient: str) 
     a literal was what blocked that fix.
     """
     assert "python -m tests.proxy_stub" in ambient, (
-        "the ambient job no longer uses tests/proxy_stub.py"
+        "the ambient legs no longer use tests/proxy_stub.py"
     )
     for inlined in ("http.server", "BaseHTTPRequestHandler", "HTTPServer"):
         assert inlined not in job, (

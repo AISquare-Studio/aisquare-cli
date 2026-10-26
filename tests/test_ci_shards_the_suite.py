@@ -16,7 +16,9 @@ one check whose name does not move with the shards.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -32,6 +34,13 @@ from tests.ci_matrix import ROOT, jobs, workflow
 _SAMPLE = ["tests/test_ci_concurrency.py", "tests/test_ci_checks_the_lock.py"]
 
 _SPLIT = re.compile(r"--splits \$\{\{ matrix\.shards \}\} --group \$\{\{ matrix\.shard \}\}")
+
+#: What every shard runs, the plain and the ambient step alike.
+SHARD_PYTEST = (
+    "pytest -n auto -ra --durations=20 --splits ${{ matrix.shards }} --group ${{ matrix.shard }}"
+    " --splitting-algorithm least_duration"
+    ' --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json"'
+)
 
 
 def _note(
@@ -113,6 +122,70 @@ def test_a_note_filed_under_another_shard_fails(tmp_path: Path) -> None:
     problems, _ = shards.check(tmp_path)
 
     assert "py3.12: 2.json is the note of group 1" in problems
+
+
+def test_a_test_run_and_never_collected_fails_and_is_named(tmp_path: Path) -> None:
+    """A shard that ran something its collection never had split a different suite."""
+    ghost = "tests/test_x.py::test_ghost"
+    _note(tmp_path, "py3.12", 1, 2, SUITE, [*SUITE[:3], ghost])
+    _note(tmp_path, "py3.12", 2, 2, SUITE, SUITE[3:])
+
+    problems, _ = shards.check(tmp_path)
+
+    assert problems == [f"py3.12: run, and never collected (1): {ghost}"]
+
+
+def test_a_note_past_the_last_shard_fails(tmp_path: Path) -> None:
+    _note(tmp_path, "py3.12", 1, 2, SUITE, SUITE[:3])
+    _note(tmp_path, "py3.12", 2, 2, SUITE, SUITE[3:])
+    _note(tmp_path, "py3.12", 3, 2, SUITE, [])
+
+    problems, _ = shards.check(tmp_path)
+
+    assert problems == ["py3.12: a note from shard(s) [3], past 2"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["{not json", "[]", '{"splits": 2, "group": 2, "selected": []}'],
+    ids=["not-json", "not-an-object", "no-collection"],
+)
+def test_an_unreadable_note_fails_and_is_named(tmp_path: Path, content: str) -> None:
+    _note(tmp_path, "py3.12", 1, 2, SUITE, SUITE[:3])
+    (tmp_path / "py3.12" / "2.json").write_text(content, encoding="utf-8")
+
+    problems, held = shards.check(tmp_path)
+
+    assert held == []
+    assert any(problem.startswith("py3.12/2.json: ") for problem in problems), problems
+
+
+def test_a_leg_whose_every_note_is_unreadable_fails_beside_a_leg_that_holds(
+    tmp_path: Path,
+) -> None:
+    """Such a leg never reaches the per-leg check, so only the read itself can fail it; and
+    the other leg holding must not let the run pass."""
+    _note(tmp_path, "py3.12", 1, 1, SUITE, SUITE)
+    for group in (1, 2):
+        (tmp_path / "py3.13").mkdir(exist_ok=True)
+        (tmp_path / "py3.13" / f"{group}.json").write_text("{not json", encoding="utf-8")
+
+    problems, held = shards.check(tmp_path)
+
+    assert [line.split(":")[0] for line in held] == ["py3.12"]
+    assert sorted(problem.split(":")[0] for problem in problems) == [
+        "py3.13/1.json",
+        "py3.13/2.json",
+    ]
+    assert shards.main(["check", str(tmp_path)]) == 1
+
+
+def test_times_for_a_leg_with_none_are_refused(tmp_path: Path) -> None:
+    """A refresh of .test_durations from a leg that left no times would write a file of
+    nothing, which splits every test as an average one."""
+    _note(tmp_path, "py3.12", 1, 1, SUITE, SUITE)
+    with pytest.raises(SystemExit, match=r"no shard times for py3\.12"):
+        shards.durations(tmp_path, ["py3.12"])
 
 
 def test_no_notes_at_all_fail(tmp_path: Path) -> None:
@@ -277,6 +350,8 @@ def test_the_committed_durations_are_a_map_of_this_suites_tests() -> None:
 
 
 def test_every_shard_runs_its_part_and_keeps_its_note() -> None:
+    """The whole line, not a part of it: ``pytest … || true`` keeps every part and turns a
+    red shard green, and a green shard is what ``ci-ok`` passes."""
     test = workflow()["jobs"]["test"]
     commands = [
         line.strip()
@@ -289,6 +364,16 @@ def test_every_shard_runs_its_part_and_keeps_its_note() -> None:
     for command in commands:
         assert _SPLIT.search(command), f"a shard does not run its part of the leg: {command}"
         assert note in command, f"a shard does not note what it ran: {command}"
+        assert command == SHARD_PYTEST, f"a shard's pytest is not the pinned line: {command}"
+    for step in test["steps"]:
+        script = str(step.get("run", ""))
+        if "pytest " in script:
+            assert "shell" not in step, (
+                "a test step's shell may drop `-e`, so a red pytest is not fatal"
+            )
+            assert not re.search(r"^\s*set \+e\b", script, re.MULTILINE), (
+                "`set +e` lets the step outlive a red pytest and end on the next command's status"
+            )
 
     upload = [
         step
@@ -354,6 +439,72 @@ def test_ci_ok_needs_every_job_and_fails_unless_all_passed() -> None:
     assert 'select(.value.result != "success")' in script, "ci-ok passes some job that did not"
     assert "exit 1" in script
     assert ok["steps"][0]["env"]["NEEDS"] == "${{ toJSON(needs) }}"
+
+
+def _ci_ok_script() -> str:
+    steps = workflow()["jobs"]["ci-ok"]["steps"]
+    assert len(steps) == 1, "ci-ok is one step, which is the one these tests run"
+    return str(steps[0]["run"])
+
+
+#: Every job ci-ok waits for, from ci.yml itself, so a job added later is in these cases.
+_NEEDED = [str(job) for job in workflow()["jobs"]["ci-ok"]["needs"]]
+
+
+def _ci_ok(results: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """ci-ok's own script, run as the runner runs it (``bash -e``), on the ``needs`` it reads."""
+    needs = json.dumps({job: {"result": result, "outputs": {}} for job, result in results.items()})
+    return subprocess.run(
+        ["bash", "-e", "-c", _ci_ok_script()],
+        env={**os.environ, "NEEDS": needs},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
+_RUNS_CI_OK = pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("bash") is None or shutil.which("jq") is None,
+    reason="runs ci-ok's own script, which is bash and jq as on ubuntu-latest",
+)
+
+
+@_RUNS_CI_OK
+def test_ci_ok_passes_when_every_job_did() -> None:
+    run = _ci_ok(dict.fromkeys(_NEEDED, "success"))
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+@_RUNS_CI_OK
+@pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
+@pytest.mark.parametrize("job", _NEEDED)
+def test_ci_ok_fails_when_any_one_job_did_not_pass(job: str, result: str) -> None:
+    """Each job on its own, each way it can end short of success.
+
+    A text pin let an inverted test (``-z`` for ``-n``), an ``exit 0`` or an extra jq
+    ``select`` that drops one job through; this is the behaviour the one required check
+    exists for (review of #427).
+    """
+    run = _ci_ok({**dict.fromkeys(_NEEDED, "success"), job: result})
+    assert run.returncode != 0, f"ci-ok passed with {job} {result}: {run.stdout}"
+    assert f"::error::not every job passed: {job}" in run.stdout, run.stdout
+
+
+def test_no_job_or_step_continues_on_error() -> None:
+    """``continue-on-error`` reports a failed step or job as a success: on any job here,
+    or on ci-ok's own step, a red suite would pass the one required check."""
+    for name, job in workflow()["jobs"].items():
+        assert "continue-on-error" not in job, f"job {name} continues on error"
+        for step in job.get("steps", []):
+            assert "continue-on-error" not in step, (
+                f"step {step.get('name') or step.get('uses')!r} of {name} continues on error"
+            )
+    text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    code = [line for line in text.splitlines() if not line.strip().startswith("#")]
+    assert not [line for line in code if "continue-on-error" in line], (
+        "continue-on-error is set somewhere the job and step walk above does not look"
+    )
 
 
 @pytest.mark.parametrize("lean", [True, False], ids=["sub-pr", "full"])

@@ -192,6 +192,13 @@ def check(root: Path) -> tuple[list[str], list[str]]:
         except (ValueError, OSError) as error:
             problems.append(f"{path.parent.name}/{path.name}: unreadable ({error})")
             continue
+        if not (
+            isinstance(note, dict)
+            and isinstance(note.get("collected"), list)
+            and isinstance(note.get("selected"), list)
+        ):
+            problems.append(f"{path.parent.name}/{path.name}: not a shard's note")
+            continue
         legs.setdefault(path.parent.name, {})[group] = note
     if not legs and not problems:
         problems.append(f"no shard notes under {root}: nothing proves any split")

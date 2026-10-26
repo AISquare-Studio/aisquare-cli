@@ -28,14 +28,15 @@ FULL_LEGS = {
     "windows-py3.12": ("windows-latest", "3.12", "on", "none", 10),
 }
 
-#: What only the ``lint`` job runs, once, rather than every leg.
-LINT_STEPS = {
-    "Lint (ruff)",
-    "Format check (ruff)",
-    "Type check (mypy)",
-    "Type check as Windows (mypy --platform win32)",
-    "Check the lock",
+#: What only the ``lint`` job runs, once, rather than every leg: each step and its command.
+LINT = {
+    "Lint (ruff)": "ruff check src tests",
+    "Format check (ruff)": "ruff format --check src tests",
+    "Type check (mypy)": "mypy",
+    "Type check as Windows (mypy --platform win32)": "mypy --platform win32",
+    "Check the lock": "uv lock --check",
 }
+LINT_STEPS = set(LINT)
 
 
 def _legs(matrix_jobs: list[dict[str, Any]]) -> dict[str, tuple[Any, ...]]:
@@ -83,6 +84,30 @@ def test_lint_runs_once_and_on_no_leg() -> None:
     assert "strategy" not in steps["lint"], "lint is one job, not a matrix"
     leg = {step.get("name", "") for step in steps["test"]["steps"]}
     assert not leg & LINT_STEPS, f"a test leg still runs {leg & LINT_STEPS}"
+
+
+def test_lint_runs_each_check_as_a_check() -> None:
+    """The commands, not only the names: ``ruff check --exit-zero``, ``ruff format`` without
+    ``--check``, an ``echo mypy`` or a ``mypy`` where the Windows run was all keep every step
+    name and check nothing."""
+    run = {step.get("name", ""): str(step.get("run", "")).strip() for step in lint_steps()}
+    assert {name: run.get(name) for name in LINT} == LINT
+
+
+def test_every_install_takes_the_pinned_ruff_and_mypy() -> None:
+    """ci/constraints.txt pins the versions; an install without it resolves the newest."""
+    for job in ("lint", "test"):
+        installs = [
+            str(step["run"])
+            for step in workflow()["jobs"][job]["steps"]
+            if step.get("name") == "Install"
+        ]
+        assert len(installs) == 1 and "-c ci/constraints.txt" in installs[0], (job, installs)
+
+
+def lint_steps() -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = workflow()["jobs"]["lint"]["steps"]
+    return steps
 
 
 def test_a_sub_pr_packages_on_linux_only() -> None:

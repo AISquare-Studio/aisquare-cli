@@ -19,14 +19,14 @@ again before it acts, and refuses work found since that nobody agreed to discard
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Static
 from textual.worker import Worker, WorkerState
 
@@ -49,6 +49,23 @@ EXTRAS: tuple[tuple[str, str], ...] = (
 ALWAYS = 6
 """How many of ``services.fresh.count_words``'s words are what is always cleared: tasks,
 events, sessions, signals and marks, fleet agents and worktrees, never ``None``."""
+
+
+FRESH_FIXED_ROWS = 12
+"""The rows of :class:`ConfirmFresh` that never scroll: its border and padding (4), the
+checkboxes and the margin above them (4), the buttons and theirs (4)."""
+
+DISCARD_FIXED_ROWS = 8
+"""The rows of :class:`ConfirmDiscard` that never scroll: its border and padding (4), the
+buttons and the margin above them (4)."""
+
+
+def fit_body(screen: Screen[Any], body: str, fixed: int) -> None:
+    """Let a dialog's scrolling ``body`` take what the terminal has past its ``fixed`` rows,
+    so the box, its checkboxes and its buttons fit whole: at 80x24 a plan with every extra
+    ticked made the box a row too tall, and the buttons lost their bottom edge
+    (tester-fresh-ui at 8b66e535). The text scrolls instead."""
+    screen.query_one(body, VerticalScroll).styles.max_height = max(3, screen.size.height - fixed)
 
 
 class StartFresh(Message):
@@ -143,12 +160,12 @@ class ConfirmFresh(ModalScreen[FreshChoice | None]):
     CSS = """
     ConfirmFresh { align: center middle; }
     ConfirmFresh #fresh-box {
-        width: 76; height: auto; max-height: 100%; border: heavy $error; background: $surface;
-        padding: 1 2;
+        width: 76; max-width: 100%; height: auto; max-height: 100%; border: heavy $error;
+        background: $surface; padding: 1 2;
     }
+    ConfirmFresh #fresh-body { height: auto; }
     ConfirmFresh #fresh-title { height: auto; text-style: bold; }
     ConfirmFresh #fresh-about { height: auto; color: $text-muted; margin-bottom: 1; }
-    ConfirmFresh #fresh-scroll { height: auto; max-height: 10; }
     ConfirmFresh #fresh-plan { height: auto; }
     ConfirmFresh #fresh-extras { height: auto; margin-top: 1; }
     ConfirmFresh #fresh-extras Checkbox { border: none; height: 1; padding: 0 1; }
@@ -168,16 +185,16 @@ class ConfirmFresh(ModalScreen[FreshChoice | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="fresh-box"):
-            yield Static(Text(f"Start {display_name(self.project)} fresh?"), id="fresh-title")
-            yield Static(
-                Text(
-                    "Its agents are stopped, their worktrees removed, and its board and fleet "
-                    "cleared: task numbers start at #1 again. The folder, its other branches, "
-                    "its settings and its snapshot are kept."
-                ),
-                id="fresh-about",
-            )
-            with VerticalScroll(id="fresh-scroll"):
+            with VerticalScroll(id="fresh-body"):
+                yield Static(Text(f"Start {display_name(self.project)} fresh?"), id="fresh-title")
+                yield Static(
+                    Text(
+                        "Its agents are stopped, their worktrees removed, and its board and "
+                        "fleet cleared: task numbers start at #1 again. The folder, its other "
+                        "branches, its settings and its snapshot are kept."
+                    ),
+                    id="fresh-about",
+                )
                 yield Static(Text("reading the project…", style="dim"), id="fresh-plan")
             with Vertical(id="fresh-extras"):
                 for checkbox, label in EXTRAS:
@@ -189,6 +206,7 @@ class ConfirmFresh(ModalScreen[FreshChoice | None]):
                 yield Button("Cancel", id="fresh-cancel")
 
     def on_mount(self) -> None:
+        fit_body(self, "#fresh-body", FRESH_FIXED_ROWS)
         self.query_one("#fresh-cancel", Button).focus()
         project = self.project
         self.run_worker(
@@ -282,6 +300,9 @@ class ConfirmFresh(ModalScreen[FreshChoice | None]):
     def action_cancel_fresh(self) -> None:
         self.dismiss(None)
 
+    def on_resize(self) -> None:
+        fit_body(self, "#fresh-body", FRESH_FIXED_ROWS)
+
 
 class ConfirmDiscard(ModalScreen[bool]):
     """ "Throw away the work no remote has?" — each tree or branch, *Discard and start fresh*
@@ -291,11 +312,11 @@ class ConfirmDiscard(ModalScreen[bool]):
     CSS = """
     ConfirmDiscard { align: center middle; }
     ConfirmDiscard #discard-box {
-        width: 84; height: auto; max-height: 90%; border: heavy $error; background: $surface;
-        padding: 1 2;
+        width: 76; max-width: 100%; height: auto; max-height: 100%; border: heavy $error;
+        background: $surface; padding: 1 2;
     }
-    ConfirmDiscard #discard-title { height: auto; text-style: bold; }
-    ConfirmDiscard #discard-scroll { height: auto; max-height: 14; margin-top: 1; }
+    ConfirmDiscard #discard-scroll { height: auto; }
+    ConfirmDiscard #discard-title { height: auto; text-style: bold; margin-bottom: 1; }
     ConfirmDiscard #discard-list { height: auto; }
     ConfirmDiscard #discard-buttons { height: auto; margin-top: 1; align: right middle; }
     ConfirmDiscard #discard-buttons Button { margin-left: 2; }
@@ -310,14 +331,14 @@ class ConfirmDiscard(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         count = len(self.unpushed)
         with Vertical(id="discard-box"):
-            yield Static(
-                Text(
-                    f"{display_name(self.project)}'s fleet holds work no remote has, in "
-                    f"{count} place{'s' if count != 1 else ''}. Throw it away?"
-                ),
-                id="discard-title",
-            )
             with VerticalScroll(id="discard-scroll"):
+                yield Static(
+                    Text(
+                        f"{display_name(self.project)}'s fleet holds work no remote has, in "
+                        f"{count} place{'s' if count != 1 else ''}. Throw it away?"
+                    ),
+                    id="discard-title",
+                )
                 yield Static(
                     Text("\n".join(unpushed_row(item) for item in self.unpushed)),
                     id="discard-list",
@@ -329,7 +350,11 @@ class ConfirmDiscard(ModalScreen[bool]):
                 yield Button("Cancel", id="discard-cancel")
 
     def on_mount(self) -> None:
+        fit_body(self, "#discard-scroll", DISCARD_FIXED_ROWS)
         self.query_one("#discard-cancel", Button).focus()
+
+    def on_resize(self) -> None:
+        fit_body(self, "#discard-scroll", DISCARD_FIXED_ROWS)
 
     @on(Button.Pressed, "#discard-confirm")
     def _yes(self, event: Button.Pressed) -> None:

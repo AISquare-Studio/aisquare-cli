@@ -219,13 +219,18 @@ def unpushed_line(item: FreshUnpushed) -> str:
     return f"{where}: {', '.join(what)}"
 
 
-def unpushed_refusal(planned: FreshPlan) -> str:
-    """The refusal of a plan whose trees or branches hold work found nowhere else."""
+DISCARD_FLAG = "pass --discard-unpushed to throw it away"
+"""How ``project fresh`` lets work found nowhere else go: what its refusal says to do."""
+
+
+def unpushed_refusal(planned: FreshPlan, *, way: str = DISCARD_FLAG) -> str:
+    """The refusal of a plan whose trees or branches hold work found nowhere else, with
+    ``way``, how the surface asking lets it go: the CLI's flag by default; the UI says to
+    open Start fresh… again and confirm the discard."""
     lines = "; ".join(unpushed_line(item) for item in planned.unpushed)
     return (
         f"can't start fresh: {project_service.display_name(planned.project)}'s fleet holds "
-        f"work found nowhere else — push it, or pass --discard-unpushed to throw it away: "
-        f"{lines}"
+        f"work found nowhere else — push it, or {way}: {lines}"
     )
 
 

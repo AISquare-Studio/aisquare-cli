@@ -15,15 +15,19 @@ home, ``list_agents`` scripted, the spawn of the new manager faked.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widgets import Button, Checkbox, OptionList, Static
 
-from aisquare.cli.ui.fresh import ConfirmDiscard, ConfirmFresh
+from aisquare.cli.ui.app import _fresh_group
+from aisquare.cli.ui.board import BoardPanel
+from aisquare.cli.ui.fresh import EXTRAS, ConfirmDiscard, ConfirmFresh, FreshChoice, StartFresh
 from aisquare.cli.ui.project_menu import ProjectMenu
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.core import paths
@@ -273,7 +277,8 @@ def test_confirm_applies_with_the_extras_chosen_and_says_what_was_cleared(
         {"memory": True, "prompts": False, "branches": False, "discard_unpushed": False}
     ]
     assert "✓ alpha started fresh — cleared 2 tasks, 1 note or event" in toasts, toasts
-    assert "1 context entry; new manager manager started" in toasts, toasts
+    assert "1 context entry; a new manager started (session sess-new)" in toasts, toasts
+    assert "manager manager" not in toasts
     board = _board("prj_a")
     assert board["team_task"] == board["team_event"] == board["entry"] == []
     assert len(board["prompt"]) == 1, "the prompt log stays without its box ticked"
@@ -386,3 +391,221 @@ def test_a_refused_plan_says_why_and_cannot_be_confirmed(
     )
     assert disabled
     assert _board("prj_a") == before and applied == []
+
+
+# --- reopened at 8b66e535 (tester-fresh-ui) --------------------------------------------------
+
+
+def _feed(panel: BoardPanel) -> list[str]:
+    feed = panel.query_one("#feed", OptionList)
+    return [str(feed.get_option_at_index(i).prompt) for i in range(feed.option_count)]
+
+
+def _post(project_id: str, text: str) -> None:
+    with store_session() as store:
+        store.add_team_event(
+            TeamEvent(
+                id=new_event_id(), project_id=project_id, text=text, created_at=datetime.now(UTC)
+            )
+        )
+
+
+@pytest.mark.parametrize("hidden", [False, True], ids=["board shown", "board hidden"])
+def test_the_boards_feed_holds_only_what_was_written_after_the_reset(
+    alpha: ProjectInfo, applied: list[dict[str, Any]], hidden: bool
+) -> None:
+    """The feed reads past its cursor and only grows, so after a reset it kept every cleared
+    note, signal and ``agent_exited``, selectable, until asq restarted: on a board open
+    through it, on one hidden then shown, and after ``r``. Every open board of the project
+    starts over (``BoardPanel.start_over``)."""
+    _post("prj_a", "before the reset")
+
+    async def go(pilot: Pilot[None]) -> dict[str, list[str]]:
+        app = fleet_app(pilot)
+        app.sidebar.open_menu("prj_a")
+        await settle(app)
+        await _menu(pilot, "settings")
+        view = app.current_view()
+        assert isinstance(view, ProjectView)
+        view.active = "tab-board"
+        await settle(app)
+        panel = view.query_one(BoardPanel)
+        seen = {"before": _feed(panel)}
+        if hidden:
+            view.active = "tab-settings"
+            await settle(app)
+        dialog = await _open_from_menu(pilot)
+        await settle(app)
+        dialog.query_one("#fresh-confirm", Button).press()
+        await settle(app)
+        _post("prj_a", "after the reset")
+        view.active = "tab-board"
+        await settle(app)
+        panel.query_one("#feed", OptionList).focus()  # the panel's keys, as a click there gives
+        await pilot.press("r")
+        await settle(app)
+        seen["after"] = _feed(panel)
+        seen["ids"] = list(panel._events_by_id)
+        return seen
+
+    seen = drive(go)
+    assert any("before the reset" in line for line in seen["before"])
+    assert [line for line in seen["after"] if "the reset" in line] == [
+        line for line in seen["after"] if "after the reset" in line
+    ]
+    assert not any("before the reset" in line or "a note" in line for line in seen["after"])
+    assert any("after the reset" in line for line in seen["after"])
+    connection = sqlite3.connect(str(paths.db_path()))
+    try:
+        stored = {row[0] for row in connection.execute("SELECT id FROM team_event")}
+    finally:
+        connection.close()
+    assert set(seen["ids"]) <= stored, "no event the reset deleted is selectable"
+
+
+def _unpushed_plan(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Every line the dialog can show: live agents, a session, every extra, unpushed work."""
+    real_plan = fresh_service.plan
+
+    def plan(project: ProjectInfo, **kwargs: Any) -> FreshPlan:
+        found = real_plan(project, **kwargs)
+        return found.model_copy(
+            update={
+                "live_agents": ["manager", "coder-auth", "coder-billing"],
+                "sessions": ["asq:asq-amber-otter"],
+                "unpushed": [
+                    FreshUnpushed(
+                        path=tmp_path / "trees" / f"coder-{n}",
+                        branch=f"fleet/amber-otter/coder-{n}",
+                        commits=n,
+                        uncommitted=bool(n % 2),
+                    )
+                    for n in range(1, 4)
+                ],
+            }
+        )
+
+    monkeypatch.setattr(fresh_service, "plan", plan)
+
+
+def _inside(inner: Region, outer: Region) -> bool:
+    return (
+        outer.x <= inner.x
+        and outer.y <= inner.y
+        and inner.right <= outer.right
+        and inner.bottom <= outer.bottom
+    )
+
+
+def test_both_dialogs_fit_whole_at_80x24(
+    alpha: ProjectInfo,
+    applied: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """At 80x24, ConfirmDiscard (84 wide) lost its right border and Cancel's edge, and
+    ConfirmFresh with every extra ticked was a row too tall: its buttons lost their bottom
+    edge. Each box fits the screen, and its buttons fit inside its border; the text
+    scrolls instead."""
+    _unpushed_plan(monkeypatch, tmp_path)
+
+    async def go(pilot: Pilot[None]) -> list[tuple[str, Region, Region, list[Region]]]:
+        app = fleet_app(pilot)
+        dialog = await _open_from_menu(pilot)
+        await settle(app)
+        for checkbox, _ in EXTRAS:
+            await _tick(pilot, dialog, checkbox)
+        boxes = []
+        box = dialog.query_one("#fresh-box")
+        buttons = [b.region for b in dialog.query(Button)]
+        boxes.append(("fresh", app.screen.region, box.region, buttons))
+        dialog.query_one("#fresh-confirm", Button).press()
+        await settle(app)
+        discard = app.screen
+        assert isinstance(discard, ConfirmDiscard)
+        box = discard.query_one("#discard-box")
+        buttons = [b.region for b in discard.query(Button)]
+        boxes.append(("discard", app.screen.region, box.region, buttons))
+        return boxes
+
+    for name, screen, box, buttons in drive(go, size=(80, 24)):
+        assert _inside(box, screen), (name, box, screen)
+        border = box.shrink((1, 1, 1, 1))  # the heavy border is one cell all round
+        assert buttons and all(_inside(button, border) for button in buttons), (name, box, buttons)
+
+
+def test_a_late_unpushed_refusal_says_what_to_do_in_the_ui(
+    alpha: ProjectInfo,
+    applied: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Work committed after the dialog read its plan: the run plans again and refuses. Its
+    toast told a UI user to "pass --discard-unpushed"; it says to open Start fresh again."""
+    later = fresh_service.plan(alpha).model_copy(
+        update={"unpushed": [FreshUnpushed(path=tmp_path / "t", branch="fleet/x/c", commits=1)]}
+    )
+
+    def refuse(project: ProjectInfo, **_: Any) -> Any:
+        raise fresh_service.FreshRefused(
+            fresh_service.unpushed_refusal(later), code="unpushed_work", plan=later
+        )
+
+    monkeypatch.setattr(fresh_service, "start_fresh", refuse)
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        dialog = await _open_from_menu(pilot)
+        await settle(app)
+        dialog.query_one("#fresh-confirm", Button).press()
+        return await _toasts(app)
+
+    toasts = drive(go, notifications=True)
+    assert "open Start fresh… again and confirm the discard" in toasts, toasts
+    assert "fleet/x/c" in toasts and "--discard-unpushed" not in toasts
+
+
+def test_start_fresh_is_refused_while_a_run_of_it_is_going(
+    alpha: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Start fresh could be opened again, and confirmed, while a run was in flight: two runs
+    would each stop what the other spawned and start a manager. The menu, the Settings
+    button and a confirmation are each refused while it runs, and the worker is exclusive in
+    its project's group."""
+    release = threading.Event()
+    runs: list[str] = []
+
+    def start_fresh(project: ProjectInfo, **_: Any) -> Any:
+        runs.append(project.id)
+        assert release.wait(30), "the test never released the run"
+        raise fresh_service.FreshRefused("stood in for a run", code="fleet_error")
+
+    monkeypatch.setattr(fresh_service, "start_fresh", start_fresh)
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        dialog = await _open_from_menu(pilot)
+        await settle(app)
+        dialog.query_one("#fresh-confirm", Button).press()
+        for _ in range(20):  # not settle: it would wait for the held run
+            await pilot.pause()
+            if runs:
+                break
+        group = _fresh_group("prj_a")
+        running = [w for w in app.workers if w.group == group and not w.is_finished]
+        app.post_message(StartFresh("prj_a"))  # the menu's and the Settings button's
+        for _ in range(5):
+            await pilot.pause()
+        reopened = type(app.screen).__name__
+        app._start_fresh(FreshChoice("prj_a"))  # a confirmation landing meanwhile
+        for _ in range(5):
+            await pilot.pause()
+        release.set()
+        toasts = await _toasts(app)
+        return {"running": len(running), "reopened": reopened, "toasts": toasts}
+
+    seen = drive(go, notifications=True)
+    assert seen["running"] == 1
+    assert seen["reopened"] != "ConfirmFresh"
+    assert str(seen["toasts"]).count("alpha is starting fresh already") == 2
+    assert runs == ["prj_a"], "one run, however often it was asked for"

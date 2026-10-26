@@ -560,7 +560,7 @@ def _emit_fresh(report: FreshReport) -> None:
     if report.manager is not None:
         session = (report.manager.session_id or "")[:8]
         console.print(
-            f"  ✓ new manager {report.manager.label} ({report.manager.id}) · session {session} "
+            f"  ✓ a new manager started: {report.manager.id} · session {session} "
             f"· pane {report.manager.pane_id}",
             markup=False,
         )

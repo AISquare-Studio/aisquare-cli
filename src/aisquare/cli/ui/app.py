@@ -186,7 +186,17 @@ goes to the network only for an account whose cached usage is over five minutes 
 PROJECT_REMOVE_WORKER = "project-remove"
 """The thread worker a card's *Remove from fleet…* forgets its project on (``project forget``)."""
 PROJECT_FRESH_WORKER = "project-fresh"
-"""The thread worker *Start fresh…* clears a project's board and fleet on (``project fresh``)."""
+"""The thread worker *Start fresh…* clears a project's board and fleet on (``project fresh``),
+one a project at a time (:func:`_fresh_group`)."""
+UNPUSHED_IN_THE_UI = "open Start fresh… again and confirm the discard"
+"""How the UI lets work found nowhere else go, where the CLI's refusal names its flag."""
+
+
+def _fresh_group(project_id: str) -> str:
+    """The worker group of a project's Start fresh: one run of it at a time."""
+    return f"{PROJECT_FRESH_WORKER}:{project_id}"
+
+
 _QUIT_POLL = 0.1
 """Seconds between the looks a hand-over takes at the reads it waits out (``_exit_when_read``)."""
 _HAND_OFF_PATIENCE = 10.0
@@ -2186,6 +2196,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if project is None:
             self.notify("that project is no longer listed", severity="warning", timeout=4)
             return
+        if self._fresh_running(project):
+            return
 
         def chosen(choice: FreshChoice | None) -> None:
             if choice is not None:
@@ -2201,6 +2213,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if project is None:
             self.notify("that project is no longer listed", severity="warning", timeout=4)
             return
+        if self._fresh_running(project):
+            return
         target = project
         self.run_worker(
             lambda: fresh_service.start_fresh(
@@ -2211,10 +2225,28 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 discard_unpushed=choice.discard_unpushed,
             ),
             name=PROJECT_FRESH_WORKER,
-            group=PROJECT_FRESH_WORKER,
+            group=_fresh_group(target.id),
+            exclusive=True,
             thread=True,
             exit_on_error=False,
         )
+
+    def _fresh_running(self, project: ProjectInfo) -> bool:
+        """Whether a Start fresh of ``project`` is still running, said when it is: a second
+        run beside it would stop what the first just spawned, and both would start a manager.
+        Refused here, at the menu, the Settings button and the confirmation alike; the
+        worker is exclusive in its project's group as well."""
+        group = _fresh_group(project.id)
+        if not any(worker.group == group and not worker.is_finished for worker in self.workers):
+            return False
+        self.notify(
+            f"{project_service.display_name(project)} is starting fresh already — wait for it "
+            "to finish",
+            severity="warning",
+            timeout=6,
+            markup=False,
+        )
+        return True
 
     def _project_freshened(self, event: Worker.StateChanged) -> None:
         """What a Start fresh did: a toast of what was cleared and the new manager, a warning
@@ -2223,7 +2255,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.state is WorkerState.SUCCESS and isinstance(result, FreshReport):
             name = project_service.display_name(result.project)
             cleared = ", ".join(fresh_service.cleared_words(result))
-            manager = f"; new manager {result.manager.label} started" if result.manager else ""
+            session = (result.manager.session_id or "")[:8] if result.manager else ""
+            manager = f"; a new manager started (session {session})" if result.manager else ""
             self.notify(
                 f"✓ {name} started fresh — cleared {cleared}{manager}", timeout=10, markup=False
             )
@@ -2245,21 +2278,25 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         elif event.state is WorkerState.ERROR:
             error = event.worker.error
             known = (fresh_service.FreshRefused, fresh_service.FreshIncomplete)
-            said = (
-                str(error)
-                if isinstance(error, known)
-                else f"could not start it fresh: {type(error).__name__}: {error}"
-            )
+            if isinstance(error, fresh_service.FreshRefused) and error.plan is not None:
+                # Work found since the dialog read its plan: the CLI's flag means nothing
+                # here (tester-fresh-ui at 8b66e535).
+                said = fresh_service.unpushed_refusal(error.plan, way=UNPUSHED_IN_THE_UI)
+            elif isinstance(error, known):
+                said = str(error)
+            else:
+                said = f"could not start it fresh: {type(error).__name__}: {error}"
             self.notify(said, title="not started fresh", severity="error", timeout=12, markup=False)
             if isinstance(error, fresh_service.FreshIncomplete):
                 self.refresh_data()  # its agents were stopped: the sidebar says so
 
     def _read_boards(self, project_id: str) -> None:
-        """Read the project's board again wherever one is open, at once: a hidden one reads
-        when it is shown (``BoardPanel.on_show``)."""
+        """Every open board of the project, hidden ones too, starts over
+        (``BoardPanel.start_over``): its feed forgets the events the reset deleted and reads
+        the board from its start. Read again only past its cursor, it kept listing them."""
         for panel in self.query(BoardPanel):
             if panel.project is not None and panel.project.id == project_id:
-                panel.refresh_data()
+                panel.start_over()
 
     async def _open_settings(self, project_id: str) -> None:
         """The menu's *Open settings*: the project's page, on its Settings tab."""

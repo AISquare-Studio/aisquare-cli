@@ -522,7 +522,7 @@ def test_at_a_terminal_it_asks_and_asks_again_before_discarding(
 
     assert agreed.exit_code == 0, agreed.output
     assert "✓ started alpha fresh — cleared" in agreed.output and not tree.exists()
-    assert "new manager manager" in agreed.output
+    assert "✓ a new manager started: agt_" in agreed.output
 
 
 def test_json_names_the_counts_cleared(

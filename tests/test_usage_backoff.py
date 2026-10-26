@@ -667,7 +667,8 @@ def test_a_family_week_that_has_reset_shows_live_and_cached(
         assert "sonnet reset 1h ago" in shown.stdout, shown.stdout
         assert "45%" not in shown.stdout and "resets now" not in shown.stdout
         assert "opus 60% resets in" in shown.stdout, "a week still running is as before"
-    [row] = [row for row in json.loads(as_json.stdout) if row.get("usage")]
+    # Slot 1, never signed in, has a usage too since #13: its cause and fix.
+    [row] = [row for row in json.loads(as_json.stdout) if row["account"]["slot"] == 2]
     assert row["usage"]["family_week_percent"] == {"opus": 60.0}, row["usage"]
     assert set(row["usage"]["family_week_resets_at"]) == {"opus", "sonnet"}
 

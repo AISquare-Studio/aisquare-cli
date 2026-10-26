@@ -38,6 +38,7 @@ from aisquare.core.state_file import read_state
 from aisquare.core.store import unmet_needs
 from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import claude_accounts as accounts_service
+from aisquare.services import model_memory
 from aisquare.services import team as team_service
 
 if TYPE_CHECKING:
@@ -187,6 +188,7 @@ def _session_lines(
     accounts = len({s.account for s in live if s.account})
     if labels is None:
         labels = accounts_service.slot_labels() if accounts > 1 else {}
+    chosen: list[str | None] = []
     for session in live:
         emoji = _ROLE_EMOJI.get(session.role, "🤖")
         style = _ROLE_STYLE.get(session.role, "white")
@@ -205,7 +207,14 @@ def _session_lines(
             text.append(f"  {label}", style="cyan dim")
         if session.model:
             text.append(f"  {session.model}", style="dim cyan")
-            if harness.model_mismatch(session.role, session.model):
+            off = harness.model_mismatch(session.role, session.model)
+            if off:
+                # The owner's pick, which a fleet spawn runs whatever the role (#16): read
+                # once, and only for a session off its ladder, never on every tick.
+                if not chosen:
+                    chosen.append(model_memory.remembered().model)
+                off = harness.model_mismatch(session.role, session.model, chosen=chosen[0])
+            if off:
                 text.append("  ⚠ off-ladder", style="bold yellow")
         text.append(f"  {minutes}m", style="dim")
         if minutes > 30:

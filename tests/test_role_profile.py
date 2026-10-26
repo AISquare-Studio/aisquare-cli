@@ -237,6 +237,21 @@ class TestLaunchWiring:
         assert result.exit_code == 0, result.output
         assert spy["argv"] == ["claude", "--model", "opus", *policy_args("coder"), "-p", "go"]
 
+    def test_the_lines_own_model_and_effort_replace_the_bindings(
+        self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+    ) -> None:
+        """#16, seq 3424 (c): a binding's ``--model`` and a fleet window's own (the Spawn
+        dialog's Model field, a spawn's ``--model``) both reached Claude Code. The line's
+        own wins, as a spawn's args win over the role's settings; the binding's other
+        flags stay."""
+        _bind("coder", args=["--model", "sonnet", "--effort", "low", "--verbose"])
+        result = runner.invoke(app, ["launch", "coder", "--model", "opus"])
+
+        assert result.exit_code == 0, result.output
+        argv = spy["argv"]
+        assert argv.count("--model") == 1 and argv[argv.index("--model") + 1] == "opus"
+        assert argv[argv.index("--effort") + 1] == "low" and "--verbose" in argv
+
     def test_an_unbound_role_leaves_the_ambient_env_alone(
         self,
         runner: CliRunner,

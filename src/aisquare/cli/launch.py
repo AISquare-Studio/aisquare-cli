@@ -609,6 +609,12 @@ def launch(
     )
     role_args = [*defaults.args, *policy.args]
     binding_args, agent_args = policy.strip(profile.args), policy.strip(ctx.args)
+    # A model or an effort this line names replaces the binding's: a fleet window's own
+    # (the spawn's `--model`, the Spawn dialog's field, a restart of what the agent runs
+    # now) wins over the role's settings, and Claude Code was given both (#16).
+    for flag in ("--model", "--effort"):
+        if harness.flag_arg(agent_args, flag) is not None:
+            binding_args = harness.without_flag(binding_args, flag)
     for note in [*defaults.notes, *policy.notes]:
         # A withheld flag is otherwise invisible: the launch succeeds and the
         # role degrades silently (a ui-tester with no browser reopens every UI

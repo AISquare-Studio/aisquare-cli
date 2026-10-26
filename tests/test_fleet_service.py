@@ -2207,6 +2207,13 @@ def _captured(
     model_memory.observe(agent.session_id, str(transcript), effort=effort, agent_id=agent.id)
 
 
+def _started(agent: FleetAgent, model: str, effort: str | None) -> None:
+    """The agent's session start as its hook reports it: the model its launch resolved to
+    (``opus`` runs ``claude-opus-5-5``) and the effort (``CLAUDE_EFFORT``)."""
+    assert agent.session_id is not None
+    model_memory.started(agent.session_id, model=model, effort=effort, agent_id=agent.id)
+
+
 def test_a_restart_and_a_switch_start_what_the_agent_runs_now(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -2240,8 +2247,12 @@ def test_a_restart_and_a_switch_start_what_the_agent_runs_now(
     assert _model_flags(spec.extra_args) == [], "the launch-time pick is not replayed beside it"
 
     _captured(monkeypatch, restarted, transcript, "claude-sonnet-5-5", "low")
-    fleet_service.switch(project, restarted.label, to="3")
+    picked = model_memory.remembered()
+    switched = fleet_service.switch(project, restarted.label, to="3").started
     assert _model_flags(_command(tmux)) == ["--model", "claude-sonnet-5-5", "--effort", "low"]
+    assert model_memory.remembered() == picked, "a switch never changes the pick (3386)"
+    assert switched.launch_spec is not None
+    assert (switched.launch_spec.model, switched.launch_spec.effort) == ("claude-sonnet-5-5", "low")
 
 
 def test_a_restart_with_nothing_changed_replays_the_launch_as_recorded(
@@ -2261,6 +2272,133 @@ def test_a_restart_with_nothing_changed_replays_the_launch_as_recorded(
     fleet_service.restart(project, agent.label)
     assert _model_flags(_command(tmux)) == ["--model", "opus"]
     assert model_memory.remembered() == model_memory.Pick("opus", None)
+
+
+def test_a_model_command_within_the_aliases_family_is_the_pick_and_the_restarts_model(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The tester's reopen of #16 (seq 3424, 1): ``opus`` was read as ANY opus id, so a
+    ``/model claude-opus-4-5`` after ``--model opus`` was no change, and the restart came
+    back on ``opus``, which runs claude-opus-5-5. An alias is only the id it resolved to,
+    as the session's start reported it."""
+    agent = _coder(project, agent_args=["--model", "opus", "--effort", "xhigh"])
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-5-5", "xhigh")
+    _captured(monkeypatch, agent, transcript, "claude-opus-4-5", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("claude-opus-4-5", "xhigh")
+
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _model_flags(_command(tmux)) == ["--model", "claude-opus-4-5", "--effort", "xhigh"]
+
+
+@pytest.mark.parametrize("args", [["--model", ""], ["--effort="], ["--model"]])
+def test_an_empty_model_or_effort_in_a_spawns_args_is_refused(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, args: list[str]
+) -> None:
+    """Seq 3424 (b): ``fleet spawn coder --model ""`` forgot the pick and gave Claude Code
+    ``--model ''``. Only a field the owner cleared in the Spawn dialog forgets (3386)."""
+    model_memory.remember(model="opus", effort="xhigh")
+    with pytest.raises(fleet_service.FleetError, match="needs a value"):
+        _coder(project, agent_args=args)
+    assert tmux.spawned == []
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+
+
+def test_an_agent_launched_with_no_pick_comes_back_with_none(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #441 (3): a restart or a switch of an agent nobody chose a model for pinned
+    the account default it read (``--model claude-opus-5-5 --effort high``), and a switch
+    carried it to an account with another default. Unchanged since its start, it comes
+    back as it was launched: no flag. And neither touches the pick (3386)."""
+    _two_slots_with_usage(monkeypatch, work=10, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-5-5", "high")
+    _captured(monkeypatch, agent, transcript, "claude-opus-5-5", "high")
+    assert model_memory.remembered() == model_memory.Pick()
+
+    tmux.die(agent.pane_id, 0)
+    restarted = fleet_service.restart(project, agent.label).started
+    assert _model_flags(_command(tmux)) == []
+    fleet_service.switch(project, restarted.label, to="3")
+    assert _model_flags(_command(tmux)) == []
+    assert model_memory.remembered() == model_memory.Pick()
+
+
+def test_a_mode_alias_is_kept_by_its_turns_and_its_restart(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #441 (2): ``opusplan`` runs opus in plan mode and sonnet otherwise, so an
+    ordinary sonnet reply is no ``/model``. It became the pick, and the restart dropped
+    opusplan for sonnet."""
+    agent = _coder(project, agent_args=["--model", "opusplan"])
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-5-5", None)
+    _captured(monkeypatch, agent, transcript, "claude-sonnet-5-5", "high")
+    assert model_memory.remembered().model == "opusplan"
+
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _flag(_command(tmux), "--model") == "opusplan"
+
+
+def test_a_fork_starts_what_its_source_runs_now(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #441 (7): a fork replays its source's launch with the model and effort the
+    source runs now, and leaves the pick as it was."""
+    source = _coder(project, agent_args=["--model", "opus", "--effort", "xhigh"])
+    transcript = _on_disk(source, tmp_path)
+    _started(source, "claude-opus-5-5", "xhigh")
+    _captured(monkeypatch, source, transcript, "claude-fable-5-1", "max")
+    picked = model_memory.remembered()
+
+    fork = fleet_service.hand_off(project, source.label).started.agent
+    assert _model_flags(_command(tmux)) == ["--model", "claude-fable-5-1", "--effort", "max"]
+    assert fork.launch_spec is not None and _model_flags(fork.launch_spec.extra_args) == []
+    assert model_memory.remembered() == picked
+
+
+def test_a_hand_over_starts_what_the_agent_runs_now_and_leaves_the_pick(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #441 (7): the automatic hand-over at a usage limit replays the agent as a
+    switch does, on what it runs now, and the pick is the owner's as before (3386)."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(
+        project, "coder", worktree=False, account="2", agent_args=["--model", "opus"]
+    ).agent
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-5-5", "high")
+    _captured(monkeypatch, agent, transcript, "claude-fable-5-1", "max")
+    model_memory.remember(model="sonnet", effort="low")  # a later pick, on another spawn
+
+    moved = fleet_service.switch(project, agent.label, automatic=True, reason="session limit")
+    assert moved.to_slot == 3
+    assert _model_flags(_command(tmux)) == ["--model", "claude-fable-5-1", "--effort", "max"]
+    assert model_memory.remembered() == model_memory.Pick("sonnet", "low")
 
 
 def test_another_binary_gets_no_model_flag(

@@ -264,8 +264,10 @@ def read_launch_default(
     from the role's configured args and then the form's ``agent_args`` (a ``--model opus``
     typed into *Extra agent args*, or the Model field's, reads that family's week; review of
     #424). Neither naming one, the agent runs its account's default: no family."""
-    args = [*fleet_service.role_settings(role).extra_args, *agent_args]
-    family = harness.launch_family(args)
+    # As the spawn decides it (`fleet._model_choice`): the form's model replaces the role's,
+    # whose settings come before the account's default (review of #441, 4).
+    pin = fleet_service.role_pin(role)
+    family = harness.launch_family(agent_args) or harness.model_family(pin.model)
     return accounts_service.launch_default(role, project=project, family=family)
 
 

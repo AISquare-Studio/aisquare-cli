@@ -3136,7 +3136,7 @@ def spawn(
     account_pinned: bool | None = None,
     model: str | None = None,
     effort: str | None = None,
-    running: model_memory.Pick | None = None,
+    running: model_memory.Running | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -3163,7 +3163,8 @@ def spawn(
     agent runs is :func:`_model_choice`'s: the spawn's own pick, the role's settings, then
     the owner's last pick (``services.model_memory``), which a new agent's own pick replaces
     once it is up; nothing at all is the account's default. ``running`` is a replay's: what the
-    replaced agent runs now (:func:`_running`), started in place of the recorded flag.
+    replaced agent runs now and what its launch ran (:func:`_running`); one it has moved off
+    since is started in place of the recorded flag.
 
     ``spec`` REPLAYS a recorded launch (#144): the binary, permission mode,
     worktree choice and arguments come from what the agent was started with,
@@ -6165,7 +6166,7 @@ def _model_choice(
     extra: Sequence[str],
     *,
     spec: LaunchSpec | None,
-    running: model_memory.Pick | None,
+    running: model_memory.Running | None,
     model: str | None,
     effort: str | None,
 ) -> _ModelChoice:
@@ -6177,14 +6178,19 @@ def _model_choice(
     account's default), then the role's settings (its ``extra_args``, ``role_args``, or its
     binding's arguments), then the owner's last pick (``model_memory.remembered``), whatever
     the role. With none, no flag: Claude Code runs the account's own default. A flag this
-    spawn chose replaces the role's (no flag is passed twice) and is the next pick; the
-    role's settings are that role's alone, and never the pick.
+    spawn chose replaces the role's, and ``aisquare launch`` drops the binding's beside it
+    (no flag is passed twice); it is the next pick. The role's settings are that role's
+    alone, and never the pick. An empty ``--model`` or ``--effort`` in ``extra`` is refused:
+    only the dialog's cleared field asks for the account's default (seq 3424, b).
 
-    A replay of ``spec`` (restart, switch, fork) starts what the agent runs now, ``running``
-    (its session as its hooks last read it, ``model_memory.observe``) when that is not what
-    it was launched with, in place of the recorded flag; else the launch as recorded, and
-    remembers nothing. A binding's flag is the launch's own (``aisquare launch`` adds it) and
-    nothing is added beside it. Another binary than Claude Code gets nothing added.
+    A replay of ``spec`` (restart, switch, fork) starts what the agent runs now
+    (``running.now``, its hooks' last reading, ``model_memory.observe``) when that is not
+    what its launch ran (``running.launched``, as its session first reported it; with no
+    report, what the recorded flag would run: ``harness.ran_another``), in place of the
+    recorded flag; else the launch as recorded. So an agent launched with no pick and never
+    moved comes back with none, on whatever account it goes to, and one launched on a mode
+    alias (``opusplan``) keeps it. A replay remembers nothing. Another binary than Claude
+    Code gets nothing added.
     """
     role_args, extra = list(role_args), list(extra)
     if not harness.is_default_agent(binary):
@@ -6196,25 +6202,28 @@ def _model_choice(
     added: dict[str, str | None] = {}
     runs: dict[str, str | None] = {}
     picked: dict[str, str | None] = {}
-    for flag, name, same in (
-        ("--model", "model", harness.same_model),
-        ("--effort", "effort", harness.same_effort),
-    ):
+    for flag, name in (("--model", "model"), ("--effort", "effort")):
         of_binding = harness.flag_arg(bound, flag)
         if spec is not None:
             recorded = harness.flag_arg(extra, flag)
-            then = recorded or getattr(spec, name)
-            now = getattr(running, name) if running is not None else None
-            if of_binding is not None:
-                runs[name] = of_binding
-            elif now is not None and not same(now, then):
+            then = recorded or getattr(spec, name) or of_binding
+            if running is not None and _moved(
+                name, getattr(running.now, name), getattr(running.launched, name), then
+            ):
                 extra = harness.without_flag(extra, flag)
-                added[name] = runs[name] = now
+                added[name] = runs[name] = getattr(running.now, name)
             else:
                 added[name] = None if recorded is not None else getattr(spec, name)
                 runs[name] = then
             continue
         typed = harness.flag_arg(extra, flag)
+        if (typed is None and flag in extra) or typed == "":
+            raise FleetError(
+                f"{flag} needs a value: name one ({flag} "
+                f"{'opus' if name == 'model' else 'xhigh'}), or leave it out to run your last "
+                "pick, or the account's own default with none; the Spawn dialog's cleared "
+                f"{name.capitalize()} field is what forgets the pick"
+            )
         asked = typed if typed is not None else (model if name == "model" else effort)
         of_role = harness.flag_arg(role_args, flag)
         if asked is not None:
@@ -6235,10 +6244,28 @@ def _model_choice(
     )
 
 
-def _running(session: TeamSession | None) -> model_memory.Pick | None:
-    """What ``session`` runs now, as its hooks last read it: a replay starts that
-    (:func:`_model_choice`)."""
-    return None if session is None else model_memory.Pick(session.model, session.effort)
+def _moved(name: str, now: str | None, launched: str | None, then: str | None) -> bool:
+    """Whether a replayed agent runs another ``name`` (model or effort) ``now`` than its
+    launch did: than ``launched``, what its session reported the launch ran, else than what
+    the recorded flag ``then`` runs (:func:`harness.ran_another`; for an effort, the flag
+    itself, and no flag, the account's default, is no move). A mode alias never moves."""
+    if now is None:
+        return False
+    if name == "model":
+        if harness.is_mode_alias(then):
+            return False
+        return (
+            not harness.same_reading(now, launched) if launched else harness.ran_another(now, then)
+        )
+    if launched is not None:
+        return not harness.same_effort(now, launched)
+    return then is not None and not harness.same_effort(now, then)
+
+
+def _running(agent: FleetAgent, session: TeamSession | None) -> model_memory.Running | None:
+    """What a replay of ``agent`` starts from: what its session runs now and what its launch
+    ran (``model_memory.running``)."""
+    return model_memory.running(agent, session)
 
 
 def role_pin(role: str, config: FleetSettings | None = None) -> model_memory.Pick:
@@ -8505,7 +8532,7 @@ def _respawn(
         account_pinned=account_pinned,
         replaces=replaces,
         # What it runs now, over the recorded launch: a `/model` made since is kept.
-        running=_running(session),
+        running=_running(agent, session),
     )
     if agent.launch_spec is not None and replay:
         # Said once the replacement is up, for what it really took from the row: a
@@ -9250,7 +9277,7 @@ def hand_off(
         start_point=_fork_point(project, agent, notes) if own else None,
         fork=True,
         kickoff=False,  # its own first line names the source and the task
-        running=_running(session),  # the model and effort its source runs now
+        running=_running(agent, session),  # the model and effort its source runs now
     )
     resumed = resume is not None
     how = "resumed its session as a fork" if resumed else "started fresh"

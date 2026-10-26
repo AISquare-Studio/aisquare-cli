@@ -137,19 +137,44 @@ def launch_family(args: Sequence[str] = ()) -> str | None:
 _MODEL_SUFFIX = re.compile(r"\[[^\]]*\]$")
 
 
-def same_model(one: str | None, other: str | None) -> bool:
-    """Whether ``one`` and ``other`` name one model: the same text, or an alias and an id of
-    its family (``opus`` and ``claude-opus-5-5``, which is what a session reports for a launch
-    with ``--model opus``). A ``[1m]`` suffix is no other model."""
-    if one is None or other is None:
-        return one is other
+def same_reading(one: str, other: str) -> bool:
+    """Whether two model ids a session reported are one model: the same id, its case and a
+    ``[1m]`` suffix aside. An alias is never the same as an id here: ``opus`` is only the id
+    it resolved to, which the session itself reports (#16, seq 3424)."""
     first, second = (_MODEL_SUFFIX.sub("", value.strip().lower()) for value in (one, other))
-    if first == second:
-        return True
-    return any(
-        alias in MODEL_FAMILIES and model_family(model) == alias
-        for alias, model in ((first, second), (second, first))
-    )
+    return first == second
+
+
+#: Model aliases that run more than one model, by mode: ``opusplan`` is opus in plan mode
+#: and sonnet otherwise, so no one reply names it, and a reply of either is no ``/model``.
+MODE_ALIASES: frozenset[str] = frozenset({"opusplan"})
+
+#: The alias for the account's own default model: as good as no ``--model`` at all.
+DEFAULT_MODEL_ALIAS = "default"
+
+
+def is_mode_alias(model: str | None) -> bool:
+    """Whether ``model`` is one of :data:`MODE_ALIASES` (``opusplan[1m]`` included)."""
+    return model is not None and _MODEL_SUFFIX.sub("", model.strip().lower()) in MODE_ALIASES
+
+
+def ran_another(reading: str, flag: str | None) -> bool:
+    """Whether ``reading``, the model a session reported with nothing read before it, is
+    another model than the launch's ``--model`` ``flag`` started.
+
+    Never for no flag (or ``default``): what it ran is the account's own default, which only
+    Claude Code knows. Never for a mode alias (:func:`is_mode_alias`). For a family's alias
+    (``opus``), only a reading of another family: the id the alias resolved to is not known
+    before the session says, so a same-family id is taken for it (the session's start
+    reports it, and a ``/model`` after that is read against that report). For an id, any
+    other id (:func:`same_reading`).
+    """
+    if flag is None or flag.strip().lower() == DEFAULT_MODEL_ALIAS or is_mode_alias(flag):
+        return False
+    bare = _MODEL_SUFFIX.sub("", flag.strip().lower())
+    if bare in MODEL_FAMILIES:
+        return model_family(reading) != bare
+    return not same_reading(reading, flag)
 
 
 def same_effort(one: str | None, other: str | None) -> bool:
@@ -906,11 +931,13 @@ def resolve_model(
     return None  # unreachable: the last rung always returns
 
 
-def model_mismatch(role: str, model: str | None) -> str | None:
+def model_mismatch(role: str, model: str | None, *, chosen: str | None = None) -> str | None:
     """A warning when a session's captured model does not fit its role's tiering.
 
-    ``None`` when there is nothing to say: untiered role, no capture, or a
-    model that belongs to one of the ladder's families.
+    ``None`` when there is nothing to say: untiered role, no capture, a
+    model that belongs to one of the ladder's families, or the model the owner
+    chose (``chosen``: the pick a fleet spawn runs whatever the role,
+    ``services.model_memory``; an alias of it is any id of its family here).
 
     Deliberately env-blind: this judges *other* sessions (from the shared
     store, in other processes), so reading this process's
@@ -923,6 +950,11 @@ def model_mismatch(role: str, model: str | None) -> str | None:
         return None
     profile = ROLE_PROFILES.get(base_role(role))
     if profile is None:
+        return None
+    if chosen is not None and (
+        same_reading(model, chosen)
+        or model_family(model) == _MODEL_SUFFIX.sub("", chosen.strip().lower())
+    ):
         return None
     families = [MODEL_FAMILIES[alias] for alias in profile.ladder if alias in MODEL_FAMILIES]
     if not families:

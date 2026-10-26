@@ -7,6 +7,7 @@ failure is swallowed and the command exits 0, never disrupting the agent.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -117,6 +118,12 @@ def _effort_level(payload: dict[str, Any]) -> str | None:
     return level if isinstance(level, str) and level else None
 
 
+def _effort_now(payload: dict[str, Any]) -> str | None:
+    """The effort the session runs: the payload's ``effort.level``, else the
+    ``CLAUDE_EFFORT`` Claude Code gives its hooks (a payload may carry none, #16)."""
+    return _effort_level(payload) or os.environ.get("CLAUDE_EFFORT", "").strip() or None
+
+
 @app.command("session-start")
 def session_start() -> None:
     """Emit aisquare context for a starting session (stdout becomes context)."""
@@ -128,7 +135,7 @@ def session_start() -> None:
             source=_str(payload, "source"),
             transcript_path=_str(payload, "transcript_path"),
             model=_str(payload, "model"),
-            effort=_effort_level(payload),
+            effort=_effort_now(payload),
         )
         # Inside the try: the write itself can fail on what the context holds
         # (a character stdout cannot encode), and that must not become a
@@ -197,7 +204,7 @@ def stop() -> None:
             last_message=_str(payload, "last_assistant_message"),
             permission_mode=_str(payload, "permission_mode"),
             transcript_path=_str(payload, "transcript_path"),
-            effort=_effort_level(payload),
+            effort=_effort_now(payload),
         )
     except ManagerWakeupError as exc:  # the row is right; only the wake-up was lost
         _cost_of_failing_open("stop", exc.cause, cost=_COST["manager-wakeup"])

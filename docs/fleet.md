@@ -214,16 +214,29 @@ a manager always started on Fable at high effort over the default you saved with
 xhigh`, or the Spawn dialog's Model and Effort fields and Extra agent args); then the
 role's settings, its `[fleet.roles.<role>] extra_args` or its binding's `--arg`, which is
 where a role is customised; then your last pick; and with none, no flag at all, so Claude
-Code runs the account's own saved default, as before 0.9.0. **Your last pick is one per
-home**, for every role and persona alike. It is written by a spawn that names one itself
-(a cleared dialog field forgets it) and by a `/model` inside any running fleet agent,
-which its next turn end reads (the model off its transcript's last reply, the effort off
-the hook's `CLAUDE_EFFORT`); a role's settings are that role's alone and never write it.
-A restart, a `fleet switch`, a hand-over and a fork start what the agent runs now, not
-what it was launched with. Any model or effort Claude Code takes is kept as written
-(`fable`, `claude-opus-5-5`, `opus[1m]`; `low` to `max`, `ultracode`); another binary
-gets neither flag. `fleet ls --json` shows the flags a spawn added in each agent's
-`launch_spec` (`model`, `effort`) and its `command`.
+Code runs the account's own saved default, as before 0.9.0. A flag the spawn names
+replaces the role's, the binding's included, so Claude Code is never given two. An empty
+one (`--model ""`) is refused: leave it out instead, and clear the dialog's field to
+forget your pick.
+
+**Your last pick is one per home**, for every role and persona alike. It is written by a
+spawn that names one itself (a cleared dialog field forgets it) and by a `/model` inside
+any running fleet agent, which its next turn end reads: the model off its transcript's
+last reply, the effort off the hook's `effort.level`, else its `CLAUDE_EFFORT`. A reading
+is a `/model` when it names another id than the session's last one (its start's, or the
+previous turn's); an alias is only the id it resolved to, so `/model claude-opus-4-5` in
+an agent launched with `--model opus` (which runs `claude-opus-5-5`) is one. An agent
+launched on `opusplan` runs opus and sonnet by mode, so its replies say nothing of a pick.
+Only the agent's own session counts: a `claude -p` run from its shell is not the agent. A
+role's settings are that role's alone and never write the pick. A restart, a `fleet
+switch`, a hand-over and a fork start the model and effort the agent was moved to since
+its launch, over the recorded flag and the binding's; an agent you never moved comes back
+as it was launched, so one launched with no pick runs the default of whatever account it
+moves to. None of them changes your pick. Any model or effort Claude Code takes is kept
+as written (`fable`, `claude-opus-5-5`, `opus[1m]`, `opusplan`; `low` to `max`,
+`ultracode`); another binary gets neither flag. `fleet ls --json` shows the flags a spawn
+added in each agent's `launch_spec` (`model`, `effort`) and its `command`. Since your pick
+runs on every role, the board's `⚠ off-ladder` chip stands down for a session on it.
 
 **One tester per task.** The manager spawns a tester for each task that reaches review:
 `fleet spawn tester --task <id>` (a ui-tester for a task titled "UI: …"). Its cycle takes

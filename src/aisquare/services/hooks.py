@@ -114,6 +114,9 @@ def session_start_context(
         if session_id
         else ""
     )
+    if session_id:
+        # After the team hook, which binds a fleet row to this session where it may.
+        remember_the_start(session_id, model=model, effort=effort)
     # Last, and only when the experiment is on: the standing instruction to
     # consult the recall tool, then any retrieved material — closest to what
     # the agent is about to do, and the part it should weigh least. Not in a
@@ -289,24 +292,36 @@ def remember_the_model(
     session_id: str, transcript_path: str | None, *, effort: str | None = None
 ) -> None:
     """A fleet agent's turn end: the model and effort it runs now, for its restart and every
-    next spawn (``model_memory.observe``). The effort is the payload's, else the
-    ``CLAUDE_EFFORT`` Claude Code gives its hooks. Nothing for a session no fleet window runs
-    (no ``AISQUARE_FLEET_AGENT``): no store, no transcript read. An extra on the turn end,
-    never part of it: it fails open, said on stderr."""
+    next spawn (``model_memory.observe``). ``effort`` is the payload's, else the
+    ``CLAUDE_EFFORT`` Claude Code gives its hooks (the CLI reads both). Nothing for a session
+    no fleet window runs (no ``AISQUARE_FLEET_AGENT``): no store, no transcript read. An
+    extra on the turn end, never part of it: it fails open, said on stderr."""
     agent_id = orchestrator.env_fleet_agent()
     if agent_id is None:
         return
     try:
-        model_memory.observe(
-            session_id,
-            transcript_path,
-            effort=effort or os.environ.get("CLAUDE_EFFORT"),
-            agent_id=agent_id,
-        )
+        model_memory.observe(session_id, transcript_path, effort=effort, agent_id=agent_id)
     except Exception as exc:  # the turn ended all the same; only the reading is lost
         sys.stderr.write(
             f"aisquare: the agent's model was not read ({type(exc).__name__}: {exc}) — a "
             "restart starts the model it was launched with; run: aisquare doctor\n"
+        )
+
+
+def remember_the_start(session_id: str, *, model: str | None, effort: str | None) -> None:
+    """A fleet agent's session start: what its launch runs, as the payload reports it, which
+    a restart compares what it runs later with (``model_memory.started``). Nothing for a
+    session no fleet window runs. Fails open, said on stderr: stdout is the agent's context.
+    """
+    agent_id = orchestrator.env_fleet_agent()
+    if agent_id is None:
+        return
+    try:
+        model_memory.started(session_id, model=model, effort=effort, agent_id=agent_id)
+    except Exception as exc:  # the session starts all the same; only the reading is lost
+        sys.stderr.write(
+            f"aisquare: the agent's launch model was not read ({type(exc).__name__}: {exc}) "
+            "— a restart compares with its launch flags; run: aisquare doctor\n"
         )
 
 

@@ -426,6 +426,30 @@ def test_board_flags_an_off_ladder_session(
     assert "⚠ off-ladder" in board
 
 
+def test_the_owners_own_pick_is_no_off_ladder_session(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #441 (6): a fleet spawn runs the owner's last pick whatever the role, so a
+    coder on the fable the owner chose was flagged off its ladder on every teammate's
+    board. A session on the pick is not; one on another model still is."""
+    from aisquare.services import model_memory
+    from aisquare.services import team as team_service
+
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    work = tmp_path / "repo"
+    work.mkdir()
+    add_project(work)
+    model_memory.remember(model="fable")
+    board = team_service.hook_session_start(
+        "sess-model-3", work, "startup", model="claude-fable-5-1", effort="high"
+    )
+    assert "[claude-fable-5-1]" in board and "off-ladder" not in board
+    board = team_service.hook_session_start(
+        "sess-model-4", work, "startup", model="claude-haiku-4-5", effort="low"
+    )
+    assert "⚠ off-ladder" in board
+
+
 def test_v8_database_migrates_to_v9_and_keeps_sessions(isolated_home: Path) -> None:
     import sqlite3 as raw_sqlite
 

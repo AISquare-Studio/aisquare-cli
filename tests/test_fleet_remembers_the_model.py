@@ -216,15 +216,116 @@ def test_the_first_reading_of_an_agent_launched_with_no_pick_is_its_accounts_def
     assert model_memory.remembered() == model_memory.Pick("claude-fable-5-1", "max")
 
 
-def test_the_alias_it_was_launched_with_is_no_change() -> None:
-    """``--model opus`` runs ``claude-opus-5-5``; ``ultracode`` reports as xhigh."""
+def test_an_alias_is_only_the_id_it_resolved_to() -> None:
+    """Seq 3424 (1): ``opus`` was ANY opus id. Two readings are one model only when they
+    name the same id; the first reading after a launch is the launch's own unless it is of
+    another family than an alias, or another id than an id."""
     from aisquare.core import harness
 
-    assert harness.same_model("opus", "claude-opus-5-5")
-    assert harness.same_model("claude-opus-5-5", "opus[1m]")
-    assert not harness.same_model("opus", "claude-fable-5-1")
-    assert not harness.same_model("claude-opus-5-5", "claude-opus-4-1")
+    assert harness.same_reading("claude-opus-5-5", "claude-opus-5-5[1m]")
+    assert not harness.same_reading("claude-opus-5-5", "claude-opus-4-5")
+    assert not harness.ran_another("claude-opus-5-5", "opus")
+    assert harness.ran_another("claude-fable-5-1", "opus")
+    assert harness.ran_another("claude-opus-4-5", "claude-opus-5-5")
+    assert not harness.ran_another("claude-opus-5-5", None), "no flag: the account's own"
+    assert not harness.ran_another("claude-sonnet-5-5", "opusplan"), "a mode alias runs both"
     assert harness.same_effort("ultracode", "xhigh") and not harness.same_effort("high", "max")
+
+
+def _hook(
+    event: str,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    session_id: str = SESSION,
+    effort: str | None = None,
+    **payload: Any,
+) -> None:
+    """``aisquare hook <event>`` as Claude Code runs it in the agent's window."""
+    monkeypatch.setenv(FLEET_AGENT_ENV_VAR, AGENT)
+    if effort is None:
+        monkeypatch.delenv("CLAUDE_EFFORT", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_EFFORT", effort)
+    body = {
+        "session_id": session_id,
+        "cwd": str(project.root),
+        "transcript_path": str(project.root / f"{session_id}.jsonl"),
+        **payload,
+    }
+    done = CliRunner().invoke(app, ["hook", event], input=json.dumps(body))
+    assert done.exit_code == 0, done.output
+
+
+def test_a_model_command_within_the_launch_aliases_family_is_a_pick(
+    work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seq 3424 (1), through the hooks: launched ``--model opus``, whose session started on
+    claude-opus-5-5; a ``/model claude-opus-4-5`` is the pick."""
+    _manager(work, model=None, effort=None, spec=LaunchSpec(binary="claude", model="opus"))
+    monkeypatch.setenv("AISQUARE_ROLE", "manager")
+    _hook(
+        "session-start",
+        work,
+        monkeypatch,
+        effort="xhigh",
+        source="startup",
+        model="claude-opus-5-5",
+    )
+    _write(_transcript(work), _reply("claude-opus-4-5"))
+    _hook("stop", work, monkeypatch, effort="xhigh")
+    assert model_memory.remembered() == model_memory.Pick("claude-opus-4-5", None)
+
+
+def test_an_effort_changed_in_the_first_turn_is_a_pick(
+    work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seq 3424 (a): the session start reads ``CLAUDE_EFFORT`` too, so the effort it started
+    on is known before the first Stop, and a ``/model`` that changes it in that turn is a
+    pick. (The payload carries no ``effort`` here, as on a Claude Code that sends none.)"""
+    _manager(work, model=None, effort=None)
+    monkeypatch.setenv("AISQUARE_ROLE", "manager")
+    _hook(
+        "session-start",
+        work,
+        monkeypatch,
+        effort="high",
+        source="startup",
+        model="claude-fable-5-1",
+    )
+    assert _session(work).effort == "high"
+    _write(_transcript(work), _reply("claude-fable-5-1"))
+    _hook("stop", work, monkeypatch, effort="max")
+    assert model_memory.remembered() == model_memory.Pick(None, "max")
+
+
+def test_a_nested_claude_in_a_fleet_agents_shell_never_writes_the_pick(
+    work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seq 3424 (2): a ``claude -p`` run from an agent's shell inherits its
+    ``AISQUARE_FLEET_AGENT``, and its Stop, on the account's default at high, overwrote the
+    pick. Only the session the row is bound to speaks for it (``team._fleet_row``)."""
+    launched = LaunchSpec(binary="claude", extra_args=["--model", "opus", "--effort", "xhigh"])
+    _manager(work, role="coder", model="claude-opus-5-5", effort="xhigh", spec=launched)
+    model_memory.remember(model="opus", effort="xhigh")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    monkeypatch.setenv("CLAUDE_PID", "999999")  # another process than the pane's
+    nested = "sess-nested"
+    _hook(
+        "session-start",
+        work,
+        monkeypatch,
+        session_id=nested,
+        effort="high",
+        source="startup",
+        model="claude-sonnet-5-5",
+    )
+    _write(work.root / f"{nested}.jsonl", _reply("claude-sonnet-5-5"))
+    _hook("stop", work, monkeypatch, session_id=nested, effort="high")
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+    with store_session() as store:
+        row = store.get_fleet_agent(AGENT)
+    assert row is not None and row.session_id == SESSION, "the row stayed its own session's"
 
 
 @pytest.mark.parametrize(

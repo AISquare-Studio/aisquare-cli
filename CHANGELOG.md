@@ -98,14 +98,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   extra_args`, a binding's `--arg`), then your last pick, and with none no flag at all, so
   Claude Code runs the account's own default, as before 0.9.0. Fable or `max` run only when
   you chose them. Your last pick is one per home, for every role and persona, kept in the
-  home's store; it is written by a spawn that names one (a cleared dialog field forgets it)
-  and by a `/model` inside any running fleet agent, which its Stop hook reads from the
-  transcript's last reply and the hook's `CLAUDE_EFFORT` (one tail read, fail-open). A
-  role's settings win for that role and never write it. A restart, a switch, a hand-over and
-  a fork start what the agent runs now rather than what it was launched with. A spawn's own
-  `--model` or `--effort` also replaces the same flag in the role's `extra_args` instead of
-  passing it twice. Agents spawned by 0.9.0 keep the rung they recorded until they run
-  another model.
+  home's store; it is written by a spawn that names one (a cleared dialog field forgets it;
+  an empty `--model ""` is refused) and by a `/model` inside any running fleet agent, which
+  its Stop hook reads from the transcript's last reply and the payload's `effort.level`, else
+  `CLAUDE_EFFORT` (one tail read, fail-open; the agent's own session only, never a `claude
+  -p` run from its shell). An alias is only the id it resolved to, as the session's start
+  reports it, so a `/model` within its family counts; `opusplan` replies never do. A role's
+  settings win for that role and never write the pick. A restart, a switch, a hand-over and
+  a fork start what the agent was moved to since its launch, and an agent never moved comes
+  back as launched (no pick stays no pick, on any account); none changes the pick. A
+  spawn's own `--model` or `--effort` replaces the same flag in the role's `extra_args` and
+  binding instead of passing it twice, and `aisquare launch` drops a binding's flag that its
+  own line names. The `⚠ off-ladder` chip stands down for a session on your pick. Agents
+  spawned by 0.9.0 keep the rung they recorded until they run another model.
 - **The Spawn dialog's Account field says what a spawn with no account runs on**
   (#12 on the board). With rank 1 the default (#406), the field still opened on
   `(this shell's)`, which read as if the spawn skipped the accounts while it ran

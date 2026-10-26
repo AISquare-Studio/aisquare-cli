@@ -60,6 +60,7 @@ from aisquare.services import (
     explainability_ops,
     iam,
     install_route,
+    model_memory,
 )
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import credits as credits_service
@@ -3322,12 +3323,16 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
             live = [s for s in store.team_sessions(project.id) if s.ended_at is None]
         interference = harness.interfering_env()
         mismatches: list[str] = []
+        # The owner's pick runs on every role's fleet agents: no session on it is off (#16).
+        chosen = model_memory.remembered().model if live else None
         for session in live:
             # `base_role`: a numbered seat (`coder1`, the shape README documents
             # for a parallel crew) rides its role's ladder, so it is judged
             # against it. Keyed on the raw role, `ROLE_PROFILES.get` missed and
             # every seat was silently exempt from the board's only tiering signal.
-            complaint = harness.model_mismatch(team_service.base_role(session.role), session.model)
+            complaint = harness.model_mismatch(
+                team_service.base_role(session.role), session.model, chosen=chosen
+            )
             if complaint:
                 mismatches.append(f"{session.id[:8]} ({session.role}): {complaint}")
         problems: list[str] = []

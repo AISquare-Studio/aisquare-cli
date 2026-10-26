@@ -18,6 +18,7 @@ import pytest
 from textual.pilot import Pilot
 from textual.widgets import Input, Select
 
+from aisquare.cli.ui import spawn as spawn_module
 from aisquare.cli.ui.spawn import ACCOUNT_DEFAULT_CHOICE, SpawnDialog
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
 from aisquare.models import FleetAgentStatus, ProjectInfo
@@ -206,6 +207,27 @@ def test_the_model_field_is_the_family_the_account_label_reads(
 
     drive(git_project, scenario, defaults=counted)
     assert reads == [["--model", "opus"], ["--model", "sonnet"], ["--model", "haiku"]]
+
+
+def test_the_account_label_reads_the_family_the_spawn_runs(
+    git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #441 (4): with the reviewer pinned to haiku and opus typed in the form, the
+    label read haiku's week while the spawn ran opus. A model the form names replaces the
+    role's, as in the spawn; with none, the role's pin is the family."""
+    _pin_reviewer()
+    families: list[str | None] = []
+
+    def launch_default(
+        role: str | None, *, project: ProjectInfo | None = None, family: str | None = None
+    ) -> accounts_service.LaunchDefault:
+        families.append(family)
+        return accounts_service.LaunchDefault(accounts_service.AccountChoice(None, None))
+
+    monkeypatch.setattr(accounts_service, "launch_default", launch_default)
+    spawn_module.read_launch_default(git_project, "reviewer", ["--model", "opus"])
+    spawn_module.read_launch_default(git_project, "reviewer", [])
+    assert families == ["opus", "haiku"]
 
 
 def test_a_hand_off_locks_the_fields_to_its_teammates_own(

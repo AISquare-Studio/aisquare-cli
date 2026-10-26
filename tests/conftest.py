@@ -207,10 +207,15 @@ AMBIENT_ENV_VARS = (
     # (`core.claude_accounts.keychain_service`), which it hands to the teammates it
     # spawns: a suite run from one of those would name every account's item after it.
     "CLAUDE_SECURESTORAGE_CONFIG_DIR",
-    # Claude Code hands it to the MCP servers it starts, and to every shell a session runs:
-    # a suite run from inside Claude Code would name every virtual MCP row after that
-    # session (`mcp_server.client_session_id`, #48).
+    # Claude Code hands it to the MCP servers it starts, and to every shell a session runs.
+    # Nothing reads it any more (#48's naming went with option A), but a suite run from
+    # inside Claude Code should still see the same environment as one run from a terminal.
     "CLAUDE_CODE_SESSION_ID",
+    # Claude Code's own pid, given to its hooks and to every shell a session runs: the pid
+    # `mcp_host.register` records at SessionStart. A suite run from inside Claude Code would
+    # register the real Claude Code process as the host of every test session, and the
+    # tests that hand `register` a pid of their own would not be the only ones to.
+    "CLAUDE_PID",
     "AISQUARE_TEAM",
     "AISQUARE_ROLE",
     # Exported by `launch --persona`; a fleet agent running the suite has one.

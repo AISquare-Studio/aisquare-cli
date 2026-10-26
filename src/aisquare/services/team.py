@@ -52,7 +52,7 @@ from aisquare.models import (
     TeamTask,
 )
 from aisquare.services import distill as distill_service
-from aisquare.services import install_route
+from aisquare.services import install_route, mcp_host
 from aisquare.services import project as project_service
 
 #: The fail-open reads of the fleet row say here what they swallowed. Nothing
@@ -2352,6 +2352,10 @@ def hook_session_start(
         )
         if role is not None and known is not None and known.role != role:
             session = store.update_session(session.id, role=role)
+        # Which process runs this session: its own MCP server proves itself against it
+        # (``mcp_host``), and writes as this row. Every start records it, a /clear's and a
+        # fork's new id included, so the record follows the session the process serves now.
+        mcp_host.register(store, project.id, session.id)
         if source != _COMPACT_SOURCE or _take_quiet_compaction(store, session, source):
             # A session that just started, cleared or resumed sits at its prompt until
             # something is typed — whose own hook says `working`. Left at the upsert's
@@ -2504,18 +2508,20 @@ def _has_team(store: ContextStore, project_id: str, session_id: str | None) -> b
     task, a live fleet agent, or a live session (seen within :data:`_STALE_AFTER`, not
     ended) other than the caller's own row. Three reads on indexed columns.
 
-    ``session_id`` is the caller's row where it is known (the hooks). Where it is not —
-    the MCP server, started by its client alongside SessionStart and before that hook
-    writes the row — ANY live session is a team: it may be a teammate, and the board is
-    the fail-safe answer. A session restarting beside its own not-yet-ended previous row
-    reads as a team for that reason.
+    ``session_id`` is the caller's row where it is known: the hooks, and an MCP server that
+    has proved which session it is the own server of (``mcp_host``, option B of
+    docs/plans/mcp-own-row.md). Where it is not, ANY live session is a team: the MCP server
+    starts alongside SessionStart and may do so before that hook writes the row, or may be
+    a remote teammate's, and the board is the fail-safe answer. A session restarting beside
+    its own not-yet-ended previous row reads as a team for that reason.
 
-    Every live ``mcp:`` row counts, a session's own MCP server's too: a remote teammate
-    over ``aisquare serve`` writes one, and no row tells the two apart for sure (owner
-    decision, 2026-10-24, option A). So a solo session that calls a board tool reads as a
-    team until that row goes stale (#45 m1, a known limitation; docs/orchestration.md).
-    Precise detection is option B, planned in draft PR #397
-    (https://github.com/AISquare-Studio/aisquare-cli/pull/397).
+    Every live ``mcp:`` row counts, which is why a session's own server must not write one:
+    a remote teammate over ``aisquare serve`` writes one, and no row tells the two apart.
+    A server that proves it is a session's own writes as that session instead, and the
+    row it would have written never exists. One that cannot prove it (an older server, a
+    session whose hooks never ran on this board, a named client, a ``serve`` started from a
+    shell) writes the ``mcp:`` row, and the board counts it until it goes stale (owner
+    decision of 2026-10-24: the hard rule comes before the trim).
     """
     if store.has_team_task_in(project_id, _OPEN_TASKS):
         return True
@@ -2525,10 +2531,11 @@ def _has_team(store: ContextStore, project_id: str, session_id: str | None) -> b
     return any(other.id != session_id and other.ended_at is None for other in seen)
 
 
-def board_has_team(store: ContextStore, project_id: str) -> bool:
+def board_has_team(store: ContextStore, project_id: str, *, host: str | None = None) -> bool:
     """:func:`_has_team` for a caller that is not a session yet (the MCP server, started by
-    its client): its own row is not known, so any live session counts."""
-    return _has_team(store, project_id, None)
+    its client): its own row is not known, so any live session counts, unless the server
+    has proved which session it is the own server of (``host``, its id)."""
+    return _has_team(store, project_id, host)
 
 
 def hook_prompt_heartbeat(
@@ -2596,6 +2603,7 @@ def hook_prompt_heartbeat(
                     prompted_at=now,
                 )
             )
+            mcp_host.register(store, project.id, session.id)  # as at session start
             if solo:
                 store.set_meta(_unbriefed(session.id), "1")
                 return ""
@@ -4280,8 +4288,9 @@ def _fleet_row_hint(
 
     A session bound to a row is that row. Without one — no session at all (the
     plain ``task next --status review`` of a cycle typed by hand), or a session
-    no row is bound to (the MCP server's virtual ``mcp:`` session, whose process
-    is the agent's own child) — the window's variable still says which row this
+    no row is bound to (an MCP server's virtual ``mcp:`` session, whose process
+    is the agent's own child; a session whose own server acts as it is the
+    session, and bound as any other) — the window's variable still says which row this
     process works under, and for the order that is enough: the worst a misread
     costs is a nested child being shown its parent's task first, which it may
     not claim anyway. Two testers spawned for two review tasks were both handed

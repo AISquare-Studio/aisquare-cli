@@ -834,20 +834,32 @@ def keep_the_protocol_pipe_to_ourselves() -> bool:
     reader of the private copy, so the transport, which takes ``sys.stdin.buffer``, is unchanged.
 
     ``False``, and nothing touched, when ``sys.stdin`` is not this process's own (a test's
-    stand-in, a caller's pipe) or fd 0 is not there to take.
+    stand-in, a caller's pipe), fd 0 is not there to take, or any step fails: the server then
+    starts as before, with the sites that name their own stdin as its belts, not one that does
+    not start.
     """
     if sys.stdin is None or sys.stdin is not sys.__stdin__:
         return False
     try:
         private = os.dup(0)
-        null = os.open(os.devnull, os.O_RDONLY)
     except OSError:
         return False
     try:
-        os.dup2(null, 0)
-    finally:
-        os.close(null)
-    sys.stdin = io.TextIOWrapper(os.fdopen(private, "rb"), encoding="utf-8", errors="replace")
+        reader = io.TextIOWrapper(os.fdopen(private, "rb"), encoding="utf-8", errors="replace")
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.close(private)
+        return False
+    try:
+        null = os.open(os.devnull, os.O_RDONLY)
+        try:
+            os.dup2(null, 0)
+        finally:
+            os.close(null)
+    except OSError:
+        reader.close()  # the private copy goes with it; fd 0 is as it was
+        return False
+    sys.stdin = reader
     return True
 
 

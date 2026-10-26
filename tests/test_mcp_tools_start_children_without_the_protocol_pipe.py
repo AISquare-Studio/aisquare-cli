@@ -29,6 +29,7 @@ Two layers, each tested:
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import subprocess
@@ -117,14 +118,63 @@ def test_a_stdin_that_is_not_the_process_own_is_left_alone(
 ) -> None:
     """A test's stand-in, or a pipe a caller swapped in, is not the protocol pipe of a process
     that was started as a server: nothing of fd 0 is touched."""
-    import io
-
     before = os.fstat(0)
     stand_in = io.StringIO("")
     monkeypatch.setattr(sys, "stdin", stand_in)
     assert mcp_server.keep_the_protocol_pipe_to_ourselves() is False
     assert sys.stdin is stand_in
     assert os.fstat(0).st_ino == before.st_ino
+
+
+@pytest.mark.parametrize("failing", ["the dup2", "opening the null device"])
+def test_a_swap_that_cannot_be_made_leaves_stdin_as_it_was_and_no_descriptor_open(
+    monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    """The swap is a layer over sites that name their own stdin: a step of it that fails must
+    start the server as before, not stop it, and must not leave the private copy open."""
+    try:
+        os.close(os.dup(0))
+    except OSError:
+        pytest.skip("fd 0 is closed in this runner: there is nothing to take")
+    stand_in = io.StringIO("")
+    monkeypatch.setattr(sys, "stdin", stand_in)
+    monkeypatch.setattr(sys, "__stdin__", stand_in)  # as a process's own stdin is
+    taken: list[int] = []
+    readers: list[Any] = []  # held here, so a reader the function forgot to close stays open
+    real_dup, real_open = os.dup, os.open
+
+    def dup(fd: int) -> int:
+        copy = real_dup(fd)
+        taken.append(copy)
+        return copy
+
+    class Recording(io.TextIOWrapper):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            readers.append(self)
+
+    def refuse(*args: object, **kwargs: object) -> int:
+        raise OSError("refused")
+
+    def open_(path: Any, *args: Any, **kwargs: Any) -> int:
+        if path == os.devnull and failing == "opening the null device":
+            raise OSError("refused")
+        return real_open(path, *args, **kwargs)
+
+    with monkeypatch.context() as during:  # undone before pytest's capture dup2's its own fds
+        during.setattr(os, "dup", dup)
+        during.setattr(os, "open", open_)
+        during.setattr(io, "TextIOWrapper", Recording)
+        if failing == "the dup2":
+            during.setattr(os, "dup2", refuse)
+        swapped = mcp_server.keep_the_protocol_pipe_to_ourselves()
+
+    assert swapped is False
+    assert sys.stdin is stand_in
+    assert len(taken) == 1 and len(readers) == 1, "the failure was not reached"
+    assert readers[0].closed, "the private copy was left open"
+    with pytest.raises(OSError):
+        os.fstat(taken[0])  # closed again
 
 
 # --- every spawn a tool reaches names its stdin ------------------------------------------------

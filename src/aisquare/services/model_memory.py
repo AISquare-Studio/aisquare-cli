@@ -17,8 +17,9 @@ the owner's choices write the pick (manager decision, board seq 3428):
   forgets it, unless the role's settings pin that flag. A spawn an agent makes, and every
   restart, switch, hand-over and fork, runs its flags for that agent alone;
 - a ``/model`` inside any running fleet agent, as its next turn end reads it
-  (:func:`observe`, from the Stop hook). An agent cannot type one into another
-  (``fleet.tell`` refuses it).
+  (:func:`observe`, from the Stop hook). An agent cannot hand another a ``/model`` or
+  ``/effort`` (``fleet.setting_command``: ``fleet.tell`` refuses it, and so does the spawn
+  whose first message opens with one).
 
 The latest write wins.
 """

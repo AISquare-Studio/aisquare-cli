@@ -2465,27 +2465,88 @@ def test_a_restart_runs_the_model_and_effort_it_is_given_for_that_agent_alone(
     assert model_memory.remembered() == model_memory.Pick("sonnet", "low")
 
 
+#: The setting commands an agent may not hand another, in the shapes a message can open with.
+SETTING_COMMANDS = [
+    "/model haiku",
+    "  /model haiku",
+    "\n/model fable",
+    "/model",
+    "/effort max",
+    "\n  /effort max",
+    "\t/effort",
+]
+
+
+@pytest.mark.parametrize("text", SETTING_COMMANDS)
 @pytest.mark.parametrize("who", ["as", "env"])
-def test_an_agents_tell_cannot_type_a_model_command(
+def test_an_agents_tell_cannot_type_a_setting_command(
     tmux: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
     who: str,
+    text: str,
 ) -> None:
-    """Manager decision (seq 3428, b), round 2 review FYI: a ``/model`` typed into an agent
-    is the owner's pick, so an agent's ``fleet tell`` (``--as``, or from a fleet agent's
-    shell) may not type one; it is pointed at ``fleet restart … --model``."""
+    """Manager decision (seq 3428, b), round 2 review FYI, round 3 reopen (seq 3581, 1): a
+    ``/model`` or ``/effort`` typed into an agent is read as the owner's at its next Stop,
+    and becomes the pick, so an agent's ``fleet tell`` (``--as``, or from a fleet agent's
+    shell) may not open with one; it is pointed at ``fleet restart … --model/--effort``."""
     agent = _coder(project)
     _board_session(agent, "waiting")
     tmux.set_command(agent.pane_id, "claude")
     if who == "env":
         monkeypatch.setenv(FLEET_AGENT_ENV_VAR, "agt_somemanager")
-    with pytest.raises(fleet_service.FleetError, match=r"fleet restart .*coder-1 --model"):
-        fleet_service.tell(
-            project, agent.label, "  /model haiku", sender="ses_mgr1" if who == "as" else None
-        )
+    with pytest.raises(fleet_service.FleetError, match=r"fleet restart .*coder-1 --(model|effort)"):
+        fleet_service.tell(project, agent.label, text, sender="ses_mgr1" if who == "as" else None)
     assert tmux.typed == [] and _events(project, "note") == []
+
+
+def test_a_message_that_only_mentions_a_setting_command_goes_through(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Code runs a command only where a message opens with it."""
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+    monkeypatch.setenv(FLEET_AGENT_ENV_VAR, "agt_somemanager")
+    for text in ("run /model to see it", "/models are listed in the docs", "/effortless"):
+        tmux.typed.clear()
+        assert fleet_service.tell(project, agent.label, text, sender="ses_mgr1").delivered
+
+
+@pytest.mark.parametrize("text", SETTING_COMMANDS)
+@pytest.mark.parametrize("who", ["as", "env"])
+def test_an_agents_spawn_cannot_open_with_a_setting_command(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    who: str,
+    text: str,
+) -> None:
+    """Round 3 reopen (seq 3581, 2): with no task, a spawn's first message is its prompt as
+    given, and Claude Code runs a leading ``/model`` (``claude '/model sonnet'``: "saved as
+    your default"); the agent's next Stop made it the owner's pick. An agent's spawn may not
+    open with one, refused before anything starts, and is pointed at its own flags."""
+    model_memory.remember(model="opus", effort="xhigh")
+    if who == "env":
+        monkeypatch.setenv(FLEET_AGENT_ENV_VAR, "agt_somemanager")
+    with pytest.raises(fleet_service.FleetError, match=r"fleet spawn .*coder --(model|effort)"):
+        _coder(project, prompt=text, spawned_by="ses_mgr1" if who == "as" else "user")
+    assert tmux.spawned == []
+    with store_session() as store:
+        assert store.fleet_agents(project.id, live_only=False) == []
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+
+
+@pytest.mark.parametrize("spawned_by", ["user", fleet_service.CAPTAIN_ROLE])
+def test_the_owners_and_the_captains_spawn_may_open_with_a_setting_command(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, spawned_by: str
+) -> None:
+    """The owner's own words, as the dialog's First prompt or a shell's ``--prompt``, and the
+    captain typing what the owner said, are the owner's choice."""
+    agent = _coder(project, prompt="/effort max", spawned_by=spawned_by)
+    assert agent.first_prompt == "pending"
 
 
 def test_the_owner_and_the_captain_may_tell_an_agent_a_model_command(

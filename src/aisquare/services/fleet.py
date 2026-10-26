@@ -3287,6 +3287,9 @@ def spawn(
     """
     config = settings()
     _require_role(role)
+    # Before anything starts: an agent's spawn may not hand its agent a /model or /effort
+    # as its first message (#16, seq 3581). A replay's and a hand-off's open with our own words.
+    _refuse_an_agents_opening_command(project, role, prompt, spawned_by)
     if experimental.captain_role(role) and not _is_home_project(project):
         raise FleetError(
             "the captain lives on the home board, one per home — `aisquare captain` starts "
@@ -5869,8 +5872,9 @@ def tell(
     agent it showed, and a replacement that took the label since (a manager's
     restart or switch, in another process) is refused, not typed into.
 
-    An agent's tell may not start with ``/model`` (:func:`_refuse_an_agents_model_command`):
-    typed into an agent it becomes the owner's pick for every spawn (#16).
+    An agent's tell may not open with ``/model`` or ``/effort``
+    (:func:`_refuse_an_agents_setting_command`): typed into an agent it becomes the owner's
+    pick for every spawn (#16).
 
     And the pane must be the row's own (:func:`_its_agent`): on the server that took a row's
     socket, its pane id is another agent's. A held row read its board's ``waiting`` while
@@ -5896,7 +5900,7 @@ def tell(
     there, the agent's ``UserPromptSubmit`` its acknowledgement. A busy agent gets the note
     at the end of its turn (``team.hook_stop``, ``[fleet] deliver_notes_at_turn_end``).
     """
-    _refuse_an_agents_model_command(project, label, text, sender)
+    _refuse_an_agents_setting_command(project, label, text, sender)
 
     def noted(why: str) -> str:
         """``why``, and the board note filed in the message's place, when there is one."""
@@ -6131,20 +6135,30 @@ def attach_persona(
     )
 
 
-#: A ``/model`` command at the start of a message, which Claude Code runs as typed.
-_MODEL_COMMAND = re.compile(r"^\s*/model(\s|$)")
+#: A ``/model`` or ``/effort`` command at the start of a message, after any spaces and line
+#: breaks: Claude Code runs it as typed (``claude '/model sonnet'`` saves it as the account's
+#: default), and the agent's next Stop reads it as the owner's choice (#16). Case counts:
+#: Claude Code answers ``/MODEL`` with "Unknown command".
+_SETTING_COMMAND = re.compile(r"^\s*/(model|effort)(\s|$)")
 
 
-def _refuse_an_agents_model_command(
+def setting_command(text: str | None) -> str | None:
+    """The setting command ``text`` opens with (``/model`` or ``/effort``), else ``None``."""
+    found = _SETTING_COMMAND.match(text) if text else None
+    return f"/{found.group(1)}" if found is not None else None
+
+
+def _refuse_an_agents_setting_command(
     project: ProjectInfo, label: str, text: str, sender: str | None
 ) -> None:
-    """Refuse a ``/model`` an agent would type into another (manager decision, seq 3428 b):
-    typed into an agent it is read as the owner's ``/model``, and becomes the pick every
-    later spawn runs. An agent's tell is one with ``sender`` (``--as``) or from a fleet
-    agent's own environment; the owner's (neither, from a shell or asq, or the phone) and the
-    captain's, which types what the owner said, go through. The way out is ``fleet restart
-    <label> --model``, for that agent alone."""
-    if _MODEL_COMMAND.match(text) is None:
+    """Refuse a ``/model`` or ``/effort`` an agent would type into another (manager decision,
+    seq 3428 b; seq 3581, 1): typed into an agent it is read as the owner's, and becomes the
+    pick every later spawn runs. An agent's tell is one with ``sender`` (``--as``) or from a
+    fleet agent's own environment; the owner's (neither, from a shell or asq, or the phone)
+    and the captain's, which types what the owner said, go through. The way out is ``fleet
+    restart <label> --model/--effort``, for that agent alone."""
+    command = setting_command(text)
+    if command is None:
         return
     own = orchestrator.env_fleet_agent()
     if sender is None and own is None:
@@ -6155,11 +6169,32 @@ def _refuse_an_agents_model_command(
             row = store.fleet_agent_for_session(sender)
     if row is not None and row.role == CAPTAIN_ROLE:
         return
+    flag = command.replace("/", "--")
     raise FleetError(
-        f"an agent cannot type /model into {label}: there it becomes the owner's pick, which "
-        "every later spawn runs (#16) — to run it on another model, restart it on one, for "
-        f"that agent alone: `{project_service.fleet_command('restart', project, label)} "
-        "--model <model>`"
+        f"an agent cannot type {command} into {label}: there it becomes the owner's pick, which "
+        "every later spawn runs (#16) — restart it on what it should run, for that agent "
+        f"alone: `{project_service.fleet_command('restart', project, label)} {flag} <value>`"
+    )
+
+
+def _refuse_an_agents_opening_command(
+    project: ProjectInfo, role: str, prompt: str | None, spawned_by: str
+) -> None:
+    """Refuse an agent's spawn whose first message opens with ``/model`` or ``/effort`` (seq
+    3581, 2): with no task, that message is the prompt as given, Claude Code runs the command,
+    and the new agent's next Stop reads it as the owner's choice. Asked before anything
+    starts. The owner's spawn (:func:`_the_owners_spawn`: asq, the owner's shell, the captain
+    on the owner's words) goes through; an agent's is pointed at its own ``--model`` /
+    ``--effort``, which run for that agent alone."""
+    command = setting_command(prompt)
+    if command is None or _the_owners_spawn(spawned_by):
+        return
+    flag = command.replace("/", "--")
+    raise FleetError(
+        f"a spawn an agent makes cannot open with {command}: in the new agent it becomes the "
+        "owner's pick, which every later spawn runs (#16) — give the spawn its own flag, for "
+        f"that agent alone: `{project_service.fleet_command('spawn', project, role)} {flag} "
+        "<value>`"
     )
 
 

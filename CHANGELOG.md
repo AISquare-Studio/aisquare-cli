@@ -107,9 +107,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   window starts its agent without the `CLAUDE_EFFORT` the tmux server inherited, and with no
   `--effort` the first turn's end is the baseline, so an effort changed inside an agent's
   very first turn is not remembered. A spawn an agent makes (`--as`, or from its shell) runs
-  its flags for that agent alone, and an agent's `fleet tell` that starts with `/model` is
-  refused in favour of the new `fleet restart <label> --model … --effort …`, which runs that
-  agent alone on them. An alias is only the id it resolved to, as the session's start
+  its flags for that agent alone. An agent may not hand another a `/model` or `/effort` (a
+  message that opens with one, after spaces or line breaks): its `fleet tell` is refused in
+  favour of the new `fleet restart <label> --model … --effort …`, which runs that agent alone
+  on them, and its spawn whose `--prompt` opens with one is refused before anything starts,
+  in favour of the spawn's own flags. An alias is only the id it resolved to, as the session's start
   reports it, so a `/model` within its family counts; an `opusplan` agent's opus and sonnet
   replies never do. A role's settings win for that role and never write the pick. A
   restart, a switch, a hand-over and a fork as the same role keep what the agent was

@@ -229,9 +229,12 @@ reads: the model off its transcript's last reply, the effort off the Stop hook p
 window starts its agent without the `CLAUDE_EFFORT` it would inherit from whoever started
 the tmux server). A spawn an agent makes (`fleet spawn … --as
 <session>`, or from a fleet agent's own shell, such as a manager's) runs its flags for that
-one agent and leaves your pick alone, and an agent's `fleet tell` may not type a `/model`
-into another (it is refused, and pointed at `fleet restart <label> --model <model>`, which
-runs that agent alone on it and is no pick either). A model reading
+one agent and leaves your pick alone. Nor may an agent hand another a `/model` or
+`/effort` as a message (anywhere a message opens with one, after spaces or line breaks):
+its `fleet tell` is refused and pointed at `fleet restart <label> --model/--effort`, which
+runs that agent alone on it and is no pick either, and its spawn with such a `--prompt` is
+refused before anything starts and pointed at the spawn's own `--model`/`--effort`. Yours
+and the captain's go through. A model reading
 is a `/model` when it names another id than the session's last one (its start's, or the
 previous turn's); an effort reading, when it differs from the previous turn's, or before
 any from the launch's own `--effort`. So with no `--effort` the first turn's end is the

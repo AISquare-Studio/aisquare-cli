@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from collections.abc import Mapping
 from typing import Annotated, NoReturn
@@ -31,9 +32,9 @@ from aisquare.core.claude_accounts import agent_label
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
+from aisquare.services import autostop, install_route
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
-from aisquare.services import install_route
 from aisquare.services import project as project_service
 
 app = typer.Typer(
@@ -82,9 +83,10 @@ _STATE_CHIP = {
 def _fail_fleet(exc: Exception) -> NoReturn:
     """The service's reason, on stderr for a human and as ``detail`` under ``--json``.
 
-    Four codes, most specific first — every subclass is also a ``FleetError``,
-    so the order here IS the mapping: ``fleet_unavailable`` (no usable tmux),
-    ``not_found`` (the project reference), ``no_such_agent`` (the label), and
+    Most specific first — every subclass is also a ``FleetError``, so the order
+    here IS the mapping: ``fleet_unavailable`` (no usable tmux), ``not_found``
+    (the project reference), ``no_such_agent`` (the label), a capacity refusal's
+    own code (``capacity_project``, ``capacity_fleet``, ``capacity_memory``), and
     ``fleet_error`` for everything else the service refused with a reason.
     """
     if isinstance(exc, fleet_service.FleetUnavailable):
@@ -93,6 +95,8 @@ def _fail_fleet(exc: Exception) -> NoReturn:
         fail(str(exc), error="not_found", detail=str(exc))
     if isinstance(exc, fleet_service.NoSuchAgent):
         fail(str(exc), error="no_such_agent", detail=str(exc))
+    if isinstance(exc, fleet_service.CapacityRefused):
+        fail(str(exc), error=exc.code, detail=str(exc))
     fail(str(exc), error="fleet_error", detail=str(exc))
 
 
@@ -1188,11 +1192,30 @@ def shutdown(
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     _emit_shutdown(report, target)
+    _stop_the_watcher_with_the_fleet()
     if _not_down(report) or report.release_failures:
         # The fleet is not down — or it is, with claims stuck on ended sessions.
         # Said in the report AND in the exit code, so a script that only reads
         # the code cannot mistake either for a clean run.
         raise typer.Exit(code=1)
+
+
+def _stop_the_watcher_with_the_fleet() -> None:
+    """A shutdown that leaves no fleet agent live anywhere stops ``aisquare watch`` too
+    (P2-W2, #284): it watches every project, so one project's shutdown leaves it running."""
+    from aisquare.core.store import store_session
+    from aisquare.services import watch as watch_service
+
+    try:
+        with store_session() as store:
+            live = [a for a in store.live_fleet_agents() if a.role != fleet_service.CAPTAIN_ROLE]
+        if live or watch_service.running_pid() is None:
+            return
+        pid = watch_service.stop_detached()
+    except Exception:  # the fleet is down either way; the watcher has its own --stop
+        return
+    if not get_state().json_output:
+        stdout_console().print(f"stopped the watcher too (pid {pid})", markup=False)
 
 
 def _not_down(report: fleet_service.ShutdownReport) -> bool:
@@ -1236,6 +1259,44 @@ def attach(project: ProjectRef = None) -> None:
         )
 
 
+def _reap_finished(target: ProjectInfo | None, *, dry_run: bool) -> None:
+    """``fleet reap --finished``: every auto-stoppable worker, stopped when it has finished
+    (P2-W1b, #283)."""
+    projects = [target] if target is not None else autostop.every_project()
+    try:
+        looked = autostop.reap_finished(projects, dry_run=dry_run)
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                [
+                    {
+                        "label": item.verdict.agent.label,
+                        "project_id": item.verdict.agent.project_id,
+                        "finished": item.verdict.finished,
+                        "reason": item.verdict.reason,
+                        "kept_because": item.verdict.blocked,
+                        "stopped": item.stopped,
+                    }
+                    for item in looked
+                ]
+            )
+        )
+        return
+    console = stdout_console()
+    if not looked:
+        console.print("no worker of an auto_stop_roles role is live", markup=False)
+    for item in looked:
+        v = item.verdict
+        if item.stopped:
+            console.print(f"✓ stopped {v.agent.label}: {v.reason}", markup=False)
+        elif v.finished:
+            console.print(f"  would stop {v.agent.label}: {v.reason}", markup=False)
+        else:
+            console.print(f"  kept {v.agent.label}: {v.blocked}", markup=False)
+
+
 @app.command("reap")
 def reap(
     project: ProjectRef = None,
@@ -1257,6 +1318,19 @@ def reap(
             "is left live and named with or without this flag.",
         ),
     ] = False,
+    finished: Annotated[
+        bool,
+        typer.Option(
+            "--finished",
+            help="Stop the workers that have finished instead (\\[fleet] auto_stop_roles): "
+            "a task closed or a result posted, nothing claimed, queued or unread, idle "
+            "auto_stop_idle_minutes, an empty input box. The exit says actor auto-stop.",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="With --finished: list the candidates, stop none."),
+    ] = False,
 ) -> None:
     """Record exited agents, mark vanished panes lost, remove finished worktrees.
 
@@ -1269,7 +1343,12 @@ def reap(
     back to the board.
     """
     refuse_conflicting_scope(every, project)
+    if dry_run and not finished:
+        raise typer.BadParameter("--dry-run goes with --finished")
     target = None if every else _project(project)
+    if finished:
+        _reap_finished(target, dry_run=dry_run)
+        return
     try:
         report = fleet_service.reap(target, server_down=server_down)
     except fleet_service.FleetError as exc:
@@ -1369,32 +1448,194 @@ def rename(
         stdout_console().print(f"  ⚠ {note}")
 
 
-@app.command("pause")
-def pause(project: ProjectRef = None, as_session: SessionRef = None) -> None:
-    """Pause the fleet: the manager spawns nothing until `resume`."""
-    target = _project(project)
+@app.command("capacity")
+def capacity() -> None:
+    """Memory headroom and live agents against every admission limit (#283)."""
+    report = fleet_service.capacity()
+    if get_state().json_output:
+        typer.echo(json.dumps(report.as_json()))
+        return
+    head = report.headroom
+    out = stdout_console()
+    if head.available_mb is not None:
+        total = f" of {head.total_mb} MB" if head.total_mb is not None else ""
+        out.print(f"memory:   {head.available_mb} MB available{total}", markup=False)
+    else:
+        out.print("memory:   cannot be read on this machine", markup=False)
+    psi = f" (PSI some avg10 {head.psi_some_avg10:g})" if head.psi_some_avg10 is not None else ""
+    out.print(f"pressure: {head.pressure}{psi}", markup=False)
+    floor = f"{report.min_free_mb} MB" if report.min_free_mb else "off"
+    out.print(f"floor:    {floor} (min_free_mb)", markup=False)
+    budget = str(report.max_agents_total) if report.max_agents_total else "no budget"
+    out.print(f"agents:   {report.live_total} live ({budget}; max_agents_total)", markup=False)
+    for name, count in report.live.items():
+        out.print(f"  {name}: {count} of {report.max_agents_per_project}", markup=False)
+    mark = "✓" if report.admits else "✗"
+    out.print(f"{mark} {report.reason}", markup=False)
+
+
+_DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smh]?)\s*$")
+
+
+def _seconds(text: str) -> float:
+    """``90``, ``90s``, ``15m``, ``1h`` as seconds; a usage error for anything else."""
+    found = _DURATION.match(text)
+    if found is None:
+        raise typer.BadParameter("a duration like 90s, 15m or 1h", param_hint="--wait")
+    return float(found.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[found.group(2)]
+
+
+@app.command(
+    "gate",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def gate(
+    ctx: typer.Context,
+    min_free_mb: Annotated[
+        int | None,
+        typer.Option(
+            "--min-free-mb",
+            help="Memory to wait for, in MB (default: \\[fleet] test_gate_mb, else min_free_mb).",
+        ),
+    ] = None,
+    wait: Annotated[
+        str | None,
+        typer.Option(
+            "--wait",
+            help="How long to wait for it, e.g. 90s or 15m (default: test_gate_wait_minutes).",
+        ),
+    ] = None,
+) -> None:
+    """Wait for memory headroom, then run a heavy command: `aisquare fleet gate -- pytest`.
+
+    Polls every 5 s. With enough memory it runs the command after `--` and exits with
+    its code (with no command, exits 0). At the deadline it runs nothing and exits 75.
+    With --json the command's output goes to stderr and stdout is one JSON object.
+    """
+    needed = fleet_service.gate_floor(min_free_mb)
+    seconds = (
+        _seconds(wait)
+        if wait is not None
+        else fleet_service.settings().test_gate_wait_minutes * 60.0
+    )
+    result = fleet_service.wait_for_memory(needed, seconds)
+    command = list(ctx.args)
+    if command and command[0] == "--":
+        command = command[1:]
+    as_json = get_state().json_output
+    if not result.passed:
+        available = f"{result.available_mb} MB" if result.available_mb is not None else "unknown"
+        message = (
+            f"not run: {available} available, {needed} MB needed for {wait or f'{seconds / 60:g}m'}"
+        )
+        if result.pressure == "critical":
+            message += " (memory pressure critical)"
+        if as_json:
+            typer.echo(
+                json.dumps(
+                    {
+                        "passed": False,
+                        "ran": None,
+                        "available_mb": result.available_mb,
+                        "needed_mb": needed,
+                        "waited_seconds": round(result.waited_seconds, 1),
+                        "pressure": result.pressure,
+                    }
+                )
+            )
+        else:
+            typer.echo(f"✗ {message}", err=True)
+        raise typer.Exit(fleet_service.GATE_EXIT)
+    code = 0
+    if command:
+        import subprocess  # lazy: only a gated run needs it
+
+        try:
+            # Under --json the one object is stdout's: the command's own output goes to
+            # stderr, where a human still sees it (review of #323).
+            code = subprocess.run(
+                command,
+                check=False,
+                stdout=2 if as_json else None,  # fd 2: stderr
+            ).returncode
+        except OSError as exc:
+            fail(f"could not run {command[0]}: {exc}", error="not_run")
+    if as_json:
+        typer.echo(
+            json.dumps(
+                {
+                    "passed": True,
+                    "ran": command or None,
+                    "exit_code": code,
+                    "available_mb": result.available_mb,
+                    "needed_mb": needed,
+                    "waited_seconds": round(result.waited_seconds, 1),
+                    "pressure": result.pressure,
+                }
+            )
+        )
+    raise typer.Exit(code)
+
+
+GroupRef = Annotated[
+    str | None,
+    typer.Option(
+        "--group",
+        help="Every project of this group and its parent (a project group with a parent).",
+    ),
+]
+
+
+def _group_targets(group: str) -> list[ProjectInfo]:
+    """The projects ``--group`` names: the group's members and its parent (P2-W6, #199)."""
+    from aisquare.core.store import store_session
+    from aisquare.services import parent as parent_service
+    from aisquare.services import project_groups as groups_service
+
+    with store_session() as store:
+        try:
+            found = groups_service.resolve_group(store, group)
+        except KeyError:
+            fail(f"no group matches '{group}'", error="not_found", ref=group)
+        return parent_service.group_projects(store, found.id)
+
+
+def _pause_or_resume(
+    project: str | None, group: str | None, as_session: str | None, *, on: bool
+) -> None:
+    if project is not None and group is not None:
+        fail("give a project or --group, not both", error="usage", exit_code=2)
+    targets = _group_targets(group) if group is not None else [_project(project)]
+    verb = fleet_service.pause if on else fleet_service.resume
     try:
-        fleet_service.pause(target, session_ref=as_session)
+        for target in targets:
+            verb(target, session_ref=as_session)
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     if get_state().json_output:
-        typer.echo(json.dumps({"paused": True, **_project_json(target)}))
+        payload = [{"paused": on, **_project_json(t)} for t in targets]
+        typer.echo(json.dumps(payload[0] if group is None else payload))
         return
-    stdout_console().print(f"⏸ fleet paused for {_display_name(target)}", markup=False)
+    for target in targets:
+        mark, said = ("⏸", "paused") if on else ("▶", "resumed")
+        stdout_console().print(f"{mark} fleet {said} for {_display_name(target)}", markup=False)
+
+
+@app.command("pause")
+def pause(
+    project: ProjectRef = None, group: GroupRef = None, as_session: SessionRef = None
+) -> None:
+    """Pause the fleet: the manager spawns nothing until `resume`. `--group` pauses a group's
+    members and its parent at once, and an agent may not spawn on any of them."""
+    _pause_or_resume(project, group, as_session, on=True)
 
 
 @app.command("resume")
-def resume(project: ProjectRef = None, as_session: SessionRef = None) -> None:
-    """Resume a paused fleet."""
-    target = _project(project)
-    try:
-        fleet_service.resume(target, session_ref=as_session)
-    except fleet_service.FleetError as exc:
-        _fail_fleet(exc)
-    if get_state().json_output:
-        typer.echo(json.dumps({"paused": False, **_project_json(target)}))
-        return
-    stdout_console().print(f"▶ fleet resumed for {_display_name(target)}", markup=False)
+def resume(
+    project: ProjectRef = None, group: GroupRef = None, as_session: SessionRef = None
+) -> None:
+    """Resume a paused fleet (`--group`: a group's members and its parent)."""
+    _pause_or_resume(project, group, as_session, on=False)
 
 
 def not_interactive_reason() -> str | None:
@@ -1424,7 +1665,32 @@ def interactive_terminal() -> bool:
     return not_interactive_reason() is None
 
 
-def ui() -> None:
+def ui(
+    after_update: Annotated[
+        bool,
+        typer.Option(
+            "--after-update",
+            hidden=True,
+            help="Reattach the agents asq's ⬆ Restart & update recorded, restarting any "
+            "whose pane is gone (what `upgrade --one-click` reopens asq with).",
+        ),
+    ] = False,
+    project: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--project",
+            "-P",
+            help="Show only this project (repeatable): codename, name or id prefix.",
+            metavar="PROJECT",
+        ),
+    ] = None,
+    group: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--group", help="Show only this group's projects (repeatable).", metavar="GROUP"
+        ),
+    ] = None,
+) -> None:
     """Open the fleet UI — every project, agent and session in one view."""
     if get_state().json_output:
         fail(
@@ -1441,6 +1707,13 @@ def ui() -> None:
             error="not_a_tty",
             detail=reason,
         )
+    try:
+        scope = fleet_service.ui_scope(project or (), group or ())
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
     from aisquare.cli.ui.app import run_ui  # lazy: textual is heavy and only the UI needs it
 
-    run_ui()
+    if after_update:
+        run_ui(scope=scope, after_update=True)
+    else:
+        run_ui(scope=scope)

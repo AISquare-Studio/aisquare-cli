@@ -40,6 +40,7 @@ from aisquare.services.captain import actions
 from aisquare.services.captain import state as captain_state
 from aisquare.services.captain.errors import Refused
 from tests import captain_screens as shots
+from tests.fleet_fakes import list_agents_as
 from tests.test_stubs import IMPLEMENTED
 
 VERBS = ("attention", "next", "resolve", "snooze", "since", "log", "uav", "wololo", "bt", "actions")
@@ -79,7 +80,7 @@ SINCE_KEYS = {
 @pytest.fixture(autouse=True)
 def no_fleet(monkeypatch: pytest.MonkeyPatch) -> None:
     """The queue's refresh asks the fleet for every project's agents; here there are none."""
-    monkeypatch.setattr(fleet_service, "list_agents", lambda project, *, live_only=True: [])
+    list_agents_as(monkeypatch, lambda project, *, live_only=True: [])
 
 
 @pytest.fixture

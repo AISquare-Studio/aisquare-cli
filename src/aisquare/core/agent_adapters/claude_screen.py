@@ -190,7 +190,7 @@ def _undimmed(row: str) -> str:
                 dim = True
             elif param in ("0", "22"):
                 dim = False
-        position = match.end()
+        position = match.span()[1]  # not `.end()`: a remote module's method of that name
     if not dim:
         kept.append(row[position:])
     return PANE_ESCAPES.sub("", "".join(kept))

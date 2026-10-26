@@ -761,28 +761,43 @@ def _record_delivery(event: TeamEvent, board: _Board) -> TeamEvent:
     return stored
 
 
-def session_account(transcript_path: str | None, agent: str | None = None) -> str | None:
+def session_account(
+    transcript_path: str | None, agent: str | None = None, row: FleetAgent | None = None
+) -> str | None:
     """Which agent config dir (account) a session of ``agent`` runs under, or ``None``: what
     to read where its hook did not name it.
 
-    An agent whose hook commands name their config dir (``capabilities.hook_names_home``:
-    Codex's ``--config-dir``) is not told its home otherwise, so nothing here guesses it from
-    the transcript. Any other agent's is derived from the transcript path in the hook
-    payload (``<config-dir>/projects/<slug>/<session>.jsonl``, Claude Code's) rather than
-    from its home variable (``CLAUDE_CONFIG_DIR``): the variable only reaches us if the
-    agent happens to export it to hook subprocesses, whereas the transcript path is always
-    in the payload and names the directory unambiguously. Falls back to the agent's home
-    variable (``AgentAdapter.home_env``) when the path has an unexpected shape.
+    Asked in the order that cannot be fooled by a shared directory (P2-W7, #198):
+
+    1. the fleet ``row``'s ``account_slot``: the account the launch chose, recorded (one
+       ladder numbers every agent's slots);
+    2. the agent's home variable (``AgentAdapter.home_env``: ``CLAUDE_CONFIG_DIR``) in the
+       hook's environment, which the launch sets for that account;
+    3. the transcript path in the payload (``<config-dir>/projects/<slug>/<id>.jsonl``,
+       Claude Code's), for a session nothing launched: under a shared root (a slot's
+       ``projects/`` linked to the plain claude's, #198's workaround) it names the shared
+       directory, not the account. An agent whose hook commands name their config dir
+       (``capabilities.hook_names_home``: Codex's ``--config-dir``) is not told its home
+       otherwise, so nothing here guesses it from the transcript.
     """
     adapter = recorded_adapter(agent)
     if adapter is None:
         return None
+    if row is not None and row.account_slot is not None:
+        from aisquare.core import claude_accounts as accounts_core  # lazy: no import cycle
+
+        account = accounts_core.find_account(row.account_slot)
+        if account is not None:
+            return str(account.config_dir)
+    env = os.environ.get(adapter.home_env, "").strip()
+    if env:
+        return env
     if transcript_path and not adapter.capabilities.hook_names_home:
         path = Path(transcript_path)
         # …/<config-dir>/projects/<project-slug>/<session-id>.jsonl
         if len(path.parents) >= 3 and path.parents[1].name == "projects":
             return str(path.parents[2])
-    return os.environ.get(adapter.home_env, "").strip() or None
+    return None
 
 
 def slot_labels_via(store: ContextStore) -> Mapping[int, str]:
@@ -1575,6 +1590,33 @@ def set_focus(text: str, session_ref: str, cwd: Path | None = None) -> TeamSessi
     return updated
 
 
+_ROUTED: ContextVar[list[str] | None] = ContextVar("aisquare_routed", default=None)
+"""The parent projects a board write routed something to (P2-W6), whose managers are
+nudged once the write is committed (:func:`_flush_routed`)."""
+
+
+def _route_up(store: ContextStore, event: TeamEvent) -> None:
+    """Inside a board write: send ``event`` up to its group's parent when the group's rules
+    say so (``services.parent``), and remember whom to wake. Never costs the write."""
+    from aisquare.services import parent as parent_service  # lazy: it imports this module
+
+    try:
+        woken = parent_service.route_up(store, event)
+    except Exception:  # routing is an extra; the member's own write stands
+        return
+    if woken:
+        _ROUTED.set([*(_ROUTED.get() or []), *woken])
+
+
+def _flush_routed() -> None:
+    """Nudge the parent managers this call's writes routed to; outside the store session,
+    as every nudge is. Debounced like any other (5 s)."""
+    woken = _ROUTED.get() or []
+    _ROUTED.set(None)
+    for project_id in dict.fromkeys(woken):
+        _nudge_manager(project_id, reason="routed", board=project_id)
+
+
 def add_note(
     text: str,
     *,
@@ -1626,6 +1668,7 @@ def add_note(
             task_id=task_id,
             to_role=to_role,
         )
+        _route_up(store, event)
         wakes = kind in ("result", "question") or _addressed_to_manager(to_role)
         manager = (
             _nudge_target(store, session.id if session else None, board.id, cwd)
@@ -1644,6 +1687,7 @@ def add_note(
         # 'note' is not a MANAGER_WAKE_KIND either, so its Stop hook did not
         # deliver it and it sat past the cursor until some unrelated event.
         _nudge_manager(manager, reason=f"{kind}_to_manager", board=board.id)
+    _flush_routed()
     return stored
 
 
@@ -1711,17 +1755,33 @@ def add_task(
     needs: list[str] | None = None,
     session_ref: str | None = None,
     cwd: Path | None = None,
+    project: str | None = None,
+    origin: str | None = None,
 ) -> tuple[TeamTask, bool]:
     """Add a shared task; idempotent on its key (re-adding returns the original).
 
     ``needs`` are task refs (prefixes fine) this task depends on; ``task
     next`` will not hand it out until they are resolved.
+
+    ``project`` and ``origin`` are a parent manager's delegation (P2-W6, #199): the task goes
+    on ``project``'s board, a member of a group whose parent is the writer's board, and
+    ``origin`` is the task on that parent board it was delegated from, which its status
+    changes route up to (``services.parent``). ``ValueError`` names what does not fit.
     """
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
         board = _board(store, session, cwd, write=True)
+        origin_task: TeamTask | None = None
+        if origin is not None:
+            origin_task = find_task(store, origin, board.id)
+            if origin_task is None or origin_task.project_id != board.id:
+                raise ValueError(f"--origin {origin}: no such task on this board ({board.name})")
+        if project is not None:
+            board = _delegated_board(store, project, board)
+        elif origin_task is not None:
+            raise ValueError("--origin goes with --project: the member the task is delegated to")
         resolved_needs: list[str] = []
         for ref in needs or []:
             needed = find_task(store, ref, board.id)
@@ -1750,6 +1810,8 @@ def add_task(
         )
         event = None
         if created:
+            if origin_task is not None:
+                store.set_task_origin(task.id, origin_task.id, origin_task.project_id)
             event = _emit(
                 store,
                 board.id,
@@ -1772,6 +1834,25 @@ def add_task(
         Delivery(seq=None, board_id=board.id, board_name=board.name, warning=board.warning)
     )
     return fresh, created
+
+
+def _delegated_board(store: ContextStore, ref: str, parent: _Board) -> _Board:
+    """The board of the member ``ref`` names, which the writer's board must parent."""
+    from aisquare.services import parent as parent_service  # lazy: it imports this module
+
+    found = store.find_projects(ref)
+    if len(found) != 1:
+        raise ValueError(
+            f"--project {ref}: {'no such project' if not found else 'more than one project'}"
+        )
+    member = found[0]
+    over = parent_service.parent_of(store, member.id)
+    if over is None or over.project.id != parent.id:
+        raise ValueError(
+            f"--project {ref}: not a member of a group this board ({parent.name}) parents; "
+            "`aisquare project group parent <group> <project>` names a group's parent"
+        )
+    return _board_of(store, member.id)
 
 
 def list_tasks(status: TaskStatus | None = None, cwd: Path | None = None) -> list[TeamTask]:
@@ -1928,7 +2009,16 @@ def _finish_task(
             if wakes
             else task.project_id
         )
-        updated = store.set_task_status(task.id, status)
+        if status == "done":
+            # The evidence gate (docs/work-briefs.md): a task linked to a requirement needs
+            # a fresh pass from it for each, and the check's briefs are compared again in
+            # the status write's own transaction. A task no brief links is not gated.
+            from aisquare.services import briefs as briefs_service  # lazy: it imports this
+
+            read = briefs_service.gate(store, task)
+            updated = store.complete_task_if_unchanged(task.id, read)
+        else:
+            updated = store.set_task_status(task.id, status)
         if status in CLOSED_STATUSES:
             # Rule 3 of the fleet-row section: the rows spawned for this task
             # have nothing left to be told about it.
@@ -1942,6 +2032,7 @@ def _finish_task(
             session_id=session.id if session else None,
             task_id=updated.id,
         )
+        _route_up(store, event)
         board = _board_of(store, updated.project_id)
     _record_delivery(event, board)
     return updated, board, manager
@@ -1964,6 +2055,7 @@ def finish_task(
     )
     distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_done", board=board.id)
+    _flush_routed()
     return task
 
 
@@ -1975,6 +2067,7 @@ def review_task(ref: str, *, note: str | None = None, session_ref: str | None = 
     )
     distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_review", board=board.id)
+    _flush_routed()
     return task
 
 
@@ -1999,10 +2092,12 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
             session_id=session.id if session else None,
             task_id=reopened.id,
         )
+        _route_up(store, event)
         board = _board_of(store, reopened.project_id)
     _record_delivery(event, board)
     distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_reopened", board=board.id)
+    _flush_routed()
     return reopened
 
 
@@ -2079,6 +2174,7 @@ def block_task(ref: str, *, reason: str, session_ref: str | None = None) -> Team
     )
     distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_blocked", board=board.id)
+    _flush_routed()
     return task
 
 
@@ -2086,6 +2182,7 @@ def drop_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     """Drop a task that is no longer worth doing (``task drop``)."""
     _require_enabled()
     task, _, _ = _finish_task(ref, "dropped", "task_dropped", session_ref=session_ref, wakes=False)
+    _flush_routed()
     return task
 
 
@@ -2270,6 +2367,15 @@ def _board_reading(store: ContextStore, session: TeamSession) -> tuple[bool, Rel
     return True, Relevance(task_ids=tuple(sorted(tasks)), names=names)
 
 
+#: What Claude Code keeps of a hook's output, in characters; it cuts the rest (see
+#: :class:`StopDecision`).
+HOOK_OUTPUT_CAP = 10_000
+
+#: Held back under :data:`HOOK_OUTPUT_CAP` for what joins the parts of a session start
+#: and the line ending ``hook session-start`` prints after them.
+_HOOK_MARGIN = 64
+
+
 def hook_session_start(
     session_id: str,
     cwd: Path | None,
@@ -2281,6 +2387,7 @@ def hook_session_start(
     agent: str = "claude-code",
     native_session_id: str | None = None,
     account: str | None = None,
+    reserve: int = 0,
 ) -> str:
     """Register this session with the orchestrator and return the board injection.
 
@@ -2313,10 +2420,12 @@ def hook_session_start(
         # #259, round 18).
         project_service.capture(store, project)
         now = _now()
-        # The account the session runs on is the reported path's, even where the
-        # transcript recorded is the original file (`_transcript_to_keep`), unless the
-        # agent's own hook named it (an agent whose transcript path names no account).
-        account = account or session_account(transcript_path, agent)
+        asked_persona, persona_note, named = _asked_persona(store, project.id)
+        # The account the session runs on: its fleet row's first (P2-W7), else the reported
+        # path's, even where the transcript recorded is the original file
+        # (`_transcript_to_keep`), unless the agent's own hook named it (an agent whose
+        # transcript path names no account).
+        account = account or session_account(transcript_path, agent, named)
         transcript_path = _transcript_to_keep(known, transcript_path)
         # Computed before upsert_session(), which overwrites transcript_path.
         collision = _shared_row_banner(known, transcript_path, now)
@@ -2338,7 +2447,6 @@ def hook_session_start(
             and adapter is not None
             and adapter.capabilities.starts_at_its_prompt
         )
-        asked_persona, persona_note, named = _asked_persona(store, project.id)
         session = store.upsert_session(
             TeamSession(
                 id=session_id,
@@ -2415,7 +2523,7 @@ def hook_session_start(
             )
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
-        return collision + _render_board(
+        board = collision + _render_board(
             project,
             store.team_sessions(project.id),
             store.team_tasks(project.id),
@@ -2427,7 +2535,33 @@ def hook_session_start(
             cwd=cwd,
             labels=lambda: slot_labels_via(store),
             fleet=fleet,
+            links=_link_marks(project.id, store),
         )
+        # The block takes only the room the session start has left: ``reserve`` is what
+        # the caller puts before the board. Given a fixed share, it took a busy board's
+        # session start past the cap, and Claude Code cut the block's own tail.
+        room = HOOK_OUTPUT_CAP - _HOOK_MARGIN - reserve - len(board)
+        return board + _requirements_block(store, session, assigned, room)
+
+
+def _requirements_block(
+    store: ContextStore, session: TeamSession, assigned: Assignment | None, room: int
+) -> str:
+    """The requirements linked to this session's task, for its session start
+    (``briefs.session_requirements``), in at most ``room`` characters. Fails open on its
+    own, as :func:`_assignment` does: an unreadable brief costs this block, never the
+    board above it."""
+    try:
+        from aisquare.services import briefs as briefs_service  # lazy: it imports this
+
+        budget = min(briefs_service.REQUIREMENTS_BUDGET, room)
+        if budget <= 0:
+            return ""
+        return briefs_service.session_requirements(
+            store, session, assigned.task if assigned is not None else None, budget=budget
+        )
+    except Exception:
+        return ""
 
 
 #: The task states that are work someone may pick up or is doing: a board holding one is
@@ -2568,7 +2702,8 @@ def hook_prompt_heartbeat(
             # The persona as a session start asks it, and briefed below as there: this is
             # the session's first injection. Without it, an agent launched with --persona
             # before its project was tracked or the team was on ran without its persona
-            # block until a /clear (review of #201, R1-F3).
+            # block until a /clear (review of #201, R1-F3). Read before the row is written,
+            # for its account (P2-W7) as for the binding.
             asked_persona, persona_note, named = _asked_persona(store, project.id)
             session = store.upsert_session(
                 TeamSession(
@@ -2581,7 +2716,7 @@ def hook_prompt_heartbeat(
                     last_seen_at=now,
                     cursor=store.latest_seq(project.id),
                     transcript_path=transcript_path,
-                    account=account or session_account(transcript_path, agent),
+                    account=account or session_account(transcript_path, agent, named),
                     model=harness.clean_model_id(model),
                     effort=harness.clean_effort(effort),
                     persona=asked_persona,
@@ -2596,7 +2731,7 @@ def hook_prompt_heartbeat(
             # This door binds a fleet row too (an agent that started before the
             # orchestrator was switched on) — and does so BEFORE the tasks are
             # read: computed as an argument, the claim it moved was rendered
-            # under its old holder on this very board (review of #135).
+            # under its old holder on this very board (review of #135). Read above.
             assigned = _assignment(store, session.id, project.id, named=named)
             store.renew_leases(session.id, now + timedelta(minutes=orchestrator.lease_minutes()))
             _settle_owed_persona(store, session)  # this injection briefs the persona itself
@@ -3351,6 +3486,16 @@ def hook_note(project_id: str, text: str, *, session_id: str | None = None) -> N
         _emit(store, project_id, "note", text, session_id=session_id)
 
 
+def watch_event(board_id: str, text: str) -> None:
+    """``aisquare watch``'s one line for a project with new items (P2-W2, #284): kind
+    ``watch``, addressed to the manager, so it wakes it (:func:`wake_class`) and a working
+    manager is handed it at its turn's end. Counts and a path, never an excerpt."""
+    if not orchestrator.team_enabled():
+        return
+    with store_session() as store:
+        _emit(store, board_id, "watch", text, to_role=MANAGER_ROLE)
+
+
 def hook_notice(project_id: str, text: str, *, session_id: str | None = None) -> None:
     """A human-only feed line from a worker (:data:`HUMAN_BOARD_KINDS`): no agent is briefed
     with it or woken by it."""
@@ -3715,6 +3860,19 @@ def age_text(when: datetime, now: datetime) -> str:
     return minutes_text(max(0, int((now - when).total_seconds() // 60)))
 
 
+def _link_marks(project_id: str, store: ContextStore | None = None) -> dict[str, str]:
+    """The board's linked-task marks (``parent.link_marks``); none when it cannot be read."""
+    from aisquare.services import parent as parent_service  # lazy: it imports this module
+
+    try:
+        if store is not None:
+            return parent_service.link_marks(store, project_id)
+        with store_session() as opened:
+            return parent_service.link_marks(opened, project_id)
+    except Exception:
+        return {}
+
+
 def render_board(
     project: ProjectInfo,
     sessions: list[TeamSession],
@@ -3725,7 +3883,13 @@ def render_board(
     from aisquare.services import claude_accounts as accounts_service  # lazy: no import cycle
 
     return _render_board(
-        project, sessions, tasks, events, me=None, labels=accounts_service.slot_labels
+        project,
+        sessions,
+        tasks,
+        events,
+        me=None,
+        labels=accounts_service.slot_labels,
+        links=_link_marks(project.id),
     )
 
 
@@ -3742,6 +3906,7 @@ def _render_board(
     labels: Mapping[int, str] | Callable[[], Mapping[int, str]] | None = None,
     fleet: ProjectInfo | None = None,
     cwd: Path | None = None,
+    links: Mapping[str, str] | None = None,
 ) -> str:
     """The board, and for ``me`` the protocol and its role's cycle, whose fleet commands
     name ``fleet`` (:func:`_cycle_project`). ``briefing`` is a session's first injection's
@@ -3817,7 +3982,8 @@ def _render_board(
                 if waiting
                 else ""
             )
-            lines.append(f"  - {task_label(task)} [{task.status}{claim}] {task.title}{waits}")
+            link = f" {links[task.id]}" if links and task.id in links else ""
+            lines.append(f"  - {task_label(task)} [{task.status}{claim}] {task.title}{waits}{link}")
         if len(open_tasks) > _BOARD_TASKS:
             lines.append(f"  … {len(open_tasks) - _BOARD_TASKS} more — `aisquare task list`")
     if events:
@@ -3947,6 +4113,17 @@ def _rules_lines(root: Path) -> list[str]:
     return lines
 
 
+def _parent_briefing(store: ContextStore, project_id: str) -> list[str]:
+    """A parent manager's block in its start pack (P2-W6, #199): its groups, members and
+    the delegation verbs, at most 600 chars; nothing for a project that parents none."""
+    from aisquare.services import parent as parent_service
+
+    try:
+        return parent_service.briefing(store, project_id)
+    except Exception:  # the pack goes out without it
+        return []
+
+
 def _unanswered(events: Sequence[TeamEvent], authors: Mapping[str, str]) -> list[TeamEvent]:
     """The newest :data:`_PACK_QUESTIONS` questions nobody has answered: no later event is
     addressed to the asker (its label or role), and the asker has not written again since."""
@@ -4003,6 +4180,7 @@ def _start_pack(
         head += _assignment_lines(assigned, me)
     head += _state_lines(paths.manager_state_file(home.id), now)
     tail = _rules_lines(home.root)
+    tail += _parent_briefing(store, home.id)
     tail += _protocol_lines(
         project,
         me,
@@ -4014,7 +4192,7 @@ def _start_pack(
     )
     tail.append("</aisquare-team>")
     head += _open_items(store, project, me, sessions, agents, numbers, authors)
-    items = _task_lines(tasks, numbers, labels)
+    items = _task_lines(tasks, numbers, labels, _link_marks(project.id, store))
     room = _START_PACK_BUDGET - sum(len(line) + 1 for line in (*head, *tail))
     kept: list[str] = []
     for index, line in enumerate(items):
@@ -4067,7 +4245,10 @@ def _open_items(
 
 
 def _task_lines(
-    tasks: Sequence[TeamTask], numbers: Mapping[str, int], labels: Mapping[str, str]
+    tasks: Sequence[TeamTask],
+    numbers: Mapping[str, int],
+    labels: Mapping[str, str],
+    links: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Every open task, one line each, ``#n [status @label] title ⧗ needs #m``: the start
     pack's part that takes what the budget leaves."""
@@ -4086,7 +4267,8 @@ def _task_lines(
             if waiting
             else ""
         )
-        lines.append(f"  - {task_label(task)} [{task.status}{holder}] {task.title}{waits}")
+        link = f" {links[task.id]}" if links and task.id in links else ""
+        lines.append(f"  - {task_label(task)} [{task.status}{holder}] {task.title}{waits}{link}")
     return lines
 
 
@@ -4703,6 +4885,18 @@ def kickoff_prompt(
     return "\n".join([f"You are {label}.", *_assignment_lines(assignment, me)])
 
 
+def _has_parent(project_id: str) -> bool:
+    """Whether ``project_id``'s group has a parent manager (P2-W6): its manager asks the
+    parent before the human. A store that cannot be read says no."""
+    from aisquare.services import parent as parent_service  # lazy: it imports this module
+
+    try:
+        with store_session() as store:
+            return parent_service.parent_of(store, project_id) is not None
+    except Exception:
+        return False
+
+
 def _role_cycle(
     me: TeamSession, project: ProjectInfo | None, task: TeamTask | None = None
 ) -> list[str]:
@@ -4732,6 +4926,9 @@ def _role_cycle(
     spawned_for = None if task is None else (task.id if task.number is None else str(task.number))
     # Its fleet project's, else its board's: under a hub, one manager per project.
     state_file = str(paths.manager_state_file(project.id if project else me.project_id))
+    escalate = base_role(me.role) == MANAGER_ROLE and _has_parent(
+        project.id if project else me.project_id
+    )
     if project is not None:
         return harness.role_cycle(
             base_role(me.role),
@@ -4740,12 +4937,14 @@ def _role_cycle(
             paused=harness.pause_signal(project.id, me.project_id),
             task=spawned_for,
             state_file=state_file,
+            escalate_to_parent=escalate,
         )
     cycle = harness.role_cycle(
         base_role(me.role),
         short_id(me.id),
         task=spawned_for,
         state_file=state_file,
+        escalate_to_parent=escalate,
         fleet=lambda verb: (
             install_route.command_line(["aisquare", "fleet", verb, "--project"])
             + f" {_NO_CYCLE_PROJECT}"

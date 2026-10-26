@@ -37,7 +37,7 @@
 # pyproject.toml and both plugins' plugin.json; tests/test_claude_plugin.py and
 # tests/test_codex_plugin.py fail when they disagree. AISQUARE_PLUGIN_FROM replaces
 # the whole requirement (a wheel, a path) for testing a build that is not on PyPI yet.
-AISQUARE_PLUGIN_VERSION=0.8.2
+AISQUARE_PLUGIN_VERSION=0.9.0
 
 # The event, and the one a session starts with: Claude Code's are the `aisquare hook`
 # subcommands, Codex's the names its payload carries (core.agent_adapters.codex).

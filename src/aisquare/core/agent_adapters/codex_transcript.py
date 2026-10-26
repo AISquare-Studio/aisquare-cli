@@ -562,7 +562,7 @@ def _rollout_lines(record: dict[str, Any], width: int) -> list[str]:
         if role == "user":
             return [] if _own(text.lstrip()) else [YOU, *wrap(text, width), ""]
         if role == "assistant":
-            return [speaker_line(SPEAKER), *_said(text, width), ""]
+            return [speaker_line(SPEAKER), *_said_rows(text, width), ""]
         return []
     if kind in _CALLS:
         name = _call_name(payload)
@@ -575,7 +575,7 @@ def _rollout_lines(record: dict[str, Any], width: int) -> list[str]:
     return []
 
 
-def _said(text: str, width: int) -> list[str]:
+def _said_rows(text: str, width: int) -> list[str]:
     """The agent's words, a ``<proposed_plan>`` in them as a plan: what is around it as
     words, the plan under a dim ``plan:`` line, indented."""
     lines: list[str] = []

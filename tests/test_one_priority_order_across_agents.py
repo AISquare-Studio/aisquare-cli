@@ -333,7 +333,7 @@ def test_choose_any_is_the_hand_offs_cross_agent_pick(
 # --------------------------------------------------------------------------- the upgrade
 
 
-@pytest.mark.parametrize("version", [42, 37], ids=["v42", "main-v37"])
+@pytest.mark.parametrize("version", [44, 39, 37], ids=["v44", "main-v39", "main-v37"])
 def test_an_upgraded_store_keeps_each_agents_order_with_the_default_agent_first(
     fake_home: Path, version: int
 ) -> None:
@@ -341,14 +341,14 @@ def test_an_upgraded_store_keeps_each_agents_order_with_the_default_agent_first(
 
     first = core.create_account()
     second = core.create_account()
-    codex = core.create_account(CODEX)  # main's v37 store has no row for it: v41 adds the table
+    codex = core.create_account(CODEX)  # main's stores have no row for it: v43 adds the table
     plain = core.kind(CLAUDE).plain_slot
     rows = [
         f"INSERT INTO claude_account (slot, config_dir, position, created_at) VALUES "
         f"({slot}, '{core.find_account(slot).config_dir}', {position}, '2026-10-01')"  # type: ignore[union-attr]
         for position, slot in enumerate([second.slot, plain, first.slot], start=1)
     ]
-    if version >= 41:
+    if version >= 43:
         rows.append(
             "INSERT INTO agent_account (slot, agent, config_dir, position, created_at) VALUES "
             f"({codex.slot}, '{CODEX}', '{codex.config_dir}', 1, '2026-10-01')"

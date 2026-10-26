@@ -1282,13 +1282,15 @@ def role_cycle(
     paused: str = PAUSE_SIGNAL,
     task: str | None = None,
     state_file: str | None = None,
+    escalate_to_parent: bool = False,
 ) -> list[str]:
     """The standing work cycle injected for ``role`` (empty for unknown roles).
 
     ``task`` is the task the agent was spawned for (``12`` or its id, never ``#12``, which a
     shell reads as a comment), when it was: a
     tester or ui-tester then verifies that one task and stops after its verdict (#129 a).
-    ``state_file`` is where a manager keeps its state (P1 WS-4, #281).
+    ``state_file`` is where a manager keeps its state (P1 WS-4, #281). ``escalate_to_parent``:
+    the project's group has a parent manager, whom a manager asks before the human (P2-W6).
 
     Keyed on :func:`base_role`, so a numbered seat (``coder1``) is briefed as
     the role it is a seat of — the number is an identity, not a new role. Every
@@ -1299,14 +1301,64 @@ def role_cycle(
     """
     role = base_role(role)
     core = _role_cycle_core(
-        role, session_short_id, fleet=fleet, paused=paused, task=task, state_file=state_file
+        role,
+        session_short_id,
+        fleet=fleet,
+        paused=paused,
+        task=task,
+        state_file=state_file,
+        escalate_to_parent=escalate_to_parent,
     )
     if not core:
         return []
+    if role in ("runner", "tester", "validator") and _test_gate_on():
+        core = [*core, *_GATE_LINE]
     if role in _CLEANS_UP:
         core = [*core, *(line.format(reap=fleet("reap")) for line in _CLEANUP)]
     merge_said = any("merge" in line.lower() for line in core)
     return [*core, *_lane_rule(role, session_short_id, merge_said=merge_said, fleet=fleet)]
+
+
+_GATE_LINE = (
+    "Run a heavy check (the full test suite, a build) through the memory gate:",
+    "`aisquare fleet gate -- <command>` waits for headroom, and exit 75 means it never",
+    "came: say so on the board rather than run it anyway.",
+)
+
+
+def _auto_stop_line() -> list[str]:
+    """The manager's line on auto-stop (P2-W1b, #283): the fleet stops these itself. None
+    while ``auto_stop_finished`` is off."""
+    roles = _auto_stop_roles()
+    if not roles:
+        return []
+    return [
+        f"Finished workers of these roles stop by themselves ({', '.join(roles)}; the exit "
+        "says auto-stop): stop the others, coders included, yourself."
+    ]
+
+
+def _auto_stop_roles() -> list[str]:
+    """``[fleet] auto_stop_roles`` while ``auto_stop_finished`` is on, else none (#283). An
+    unreadable config names none."""
+    try:
+        from aisquare.core.config import load_config
+
+        fleet = load_config().fleet
+    except Exception:
+        return []
+    return list(fleet.auto_stop_roles) if fleet.auto_stop_finished else []
+
+
+def _test_gate_on() -> bool:
+    """Whether ``[fleet] test_gate_mb`` is set (#283): only then do the checking roles'
+    cycles name ``fleet gate``. An unreadable config names nothing."""
+    try:
+        from aisquare.core.config import load_config
+
+        return load_config().fleet.test_gate_mb > 0
+    except Exception:
+        return False
 
 
 STATE_FILE_MAX = 4_000
@@ -1373,6 +1425,7 @@ def _role_cycle_core(
     paused: str = PAUSE_SIGNAL,
     task: str | None = None,
     state_file: str | None = None,
+    escalate_to_parent: bool = False,
 ) -> list[str]:
     """The role-specific half of the cycle for an already-normalised ``role``;
     see :func:`role_cycle`."""
@@ -1481,9 +1534,23 @@ def _role_cycle_core(
             "and removes the agent's worktree once its work is pushed. When the validator's",
             f"gate is PASS: `{fleet('reap')}` again, then",
             f'`aisquare note "READY: <PRs + evidence>" --kind result --as {sid}` and stop.',
+            *_auto_stop_line(),
             *_state_rule(state_file),
-            "Never write code. Never merge. Blocked twice on one task? Ask the human:",
-            f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and descriptive',
+            "Never watch panes, CI or pull requests with Monitor or sleep loops: `aisquare",
+            "watch --detach` runs one watcher for the fleet, and its `watch:` lines wake you.",
+            *(
+                [
+                    "Never write code. Never merge. Blocked twice on one task? Ask your parent",
+                    f'manager: `aisquare note "…" --kind question --to parent --as {sid}`. Labels',
+                    "are unique and descriptive",
+                ]
+                if escalate_to_parent
+                else [
+                    "Never write code. Never merge. Blocked twice on one task? Ask the human:",
+                    f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and '
+                    "descriptive",
+                ]
+            ),
             "(coder-auth, not coder-2).",
         ]
     if role == "ui-tester":

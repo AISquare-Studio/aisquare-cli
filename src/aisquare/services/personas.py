@@ -652,7 +652,9 @@ def _fetch(url: str) -> _Source:
     startup never pays for it): 20 s, 2 MB, refused past either."""
     from urllib.error import URLError
     from urllib.parse import urlsplit
-    from urllib.request import Request, urlopen
+    from urllib.request import Request
+
+    from aisquare.core.tls import urlopen
 
     request = Request(url, headers={"User-Agent": "aisquare-cli persona import"})
     try:

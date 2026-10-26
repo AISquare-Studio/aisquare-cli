@@ -1,10 +1,11 @@
 """A launch's Claude account is decided in ONE place — `services.claude_accounts.choose`.
 
 #145 put a ladder under every launch: the ``--account`` flag, the role's
-binding, the project's default, the machine's default. ``aisquare launch`` and
+binding, the project's default, the machine's default — rank 1 of the priority
+order since #8 on the board. ``aisquare launch`` and
 ``aisquare fleet spawn`` both walk it, and the only reason a hand-typed launch
 and a fleet window can be trusted to land on the same account is that neither
-walks it itself. The moment one of them reads ``is_default`` on its own, or
+walks it itself. The moment one of them reads a rank on its own, or
 calls ``resolve`` directly, or reaches for ``core.default_account()``, the two
 surfaces can disagree — and "it ran on the wrong login" is exactly the silent
 failure the default exists to end.
@@ -46,6 +47,7 @@ _DECIDERS = frozenset(
         "list_accounts",
         "managed_accounts",
         "machine_default",
+        "preferred_account",
         "project_default",
         # The one priority order across agents (owner, PR #113): an agent and an account
         # picked from it are the agent rung's (`agent_launch.resolve`), then `choose`'s.
@@ -55,9 +57,10 @@ _DECIDERS = frozenset(
         "headroom_choice",
     }
 )
-#: Reading the default flag is deciding too: ``[a for a in accounts if a.is_default]``
-#: is a resolver with no name.
-_DECIDING_ATTRIBUTES = frozenset({"is_default", "DEFAULT_SLOT"})
+#: Reading the rank is deciding too: ``[a for a in accounts if a.position == 1]`` is a
+#: resolver with no name — the machine default IS rank 1 (#8 on the board). The retired
+#: ``is_default`` flag stays listed, so nothing brings a second notion of it back.
+_DECIDING_ATTRIBUTES = frozenset({"position", "is_default", "DEFAULT_SLOT"})
 
 #: Functions a launching module may call to reach an account: the resolver, and
 #: the two helpers that ACT on an already-chosen account (setting its variables,
@@ -145,6 +148,10 @@ _OFFENDING_BODIES = {
     "looks a slot up": "def f():\n    return claude_accounts_core.find_account(2)\n",
     "lists and picks": "def f():\n    return claude_accounts_service.list_accounts()[0]\n",
     "reads the machine default": "def f():\n    return claude_accounts_service.machine_default()\n",
+    "walks the order itself": (
+        "def f(accounts):\n    return claude_accounts_service.preferred_account(accounts)\n"
+    ),
+    "reads the rank": "def f(accounts):\n    return [a for a in accounts if a.position == 1]\n",
     "reads the project default": (
         "def f(p):\n    return claude_accounts_service.project_default(p)\n"
     ),

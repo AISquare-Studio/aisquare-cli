@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated, get_args
+from typing import Annotated, NoReturn, get_args
 
 import typer
 from rich.table import Table
@@ -19,9 +19,11 @@ from aisquare.cli.team import (
     receipt_suffix,
     warn_board_scope,
 )
-from aisquare.core.console import stdout_console
+from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
+from aisquare.core.store import BriefChangedError
 from aisquare.models import TaskStatus, TeamTask
+from aisquare.services import briefs as briefs_service
 from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError
 
@@ -119,6 +121,22 @@ def add(
             help="Task this one depends on: its number (12, #12) or id (repeat for several).",
         ),
     ] = None,
+    project: Annotated[
+        str | None,
+        typer.Option(
+            "--project",
+            help="A parent manager's delegation: add it on this member's board "
+            "(a member of a group this board parents).",
+        ),
+    ] = None,
+    origin: Annotated[
+        str | None,
+        typer.Option(
+            "--origin",
+            help="With --project: the task on this board it is delegated from; its status "
+            "changes route back here.",
+        ),
+    ] = None,
     as_session: SessionRef = None,
 ) -> None:
     """Add a shared task. Re-adding the same task is safe — you get the original.
@@ -148,10 +166,19 @@ def add(
         )
     try:
         task, created = team_service.add_task(
-            title, key=key, detail=detail, role=role, needs=needs, session_ref=as_session
+            title,
+            key=key,
+            detail=detail,
+            role=role,
+            needs=needs,
+            session_ref=as_session,
+            project=project,
+            origin=origin,
         )
     except ValueError as exc:
-        fail(str(exc), error="invalid_needs")
+        said = str(exc)
+        delegation = said.startswith(("--project", "--origin"))
+        fail(said, error="invalid_delegation" if delegation else "invalid_needs")
     except KeyError as exc:
         # The session resolves first in add_task, so a KeyError here names a
         # --needs ref — blame it, not the (valid) --as session.
@@ -346,12 +373,60 @@ def done(
     note: Annotated[str | None, typer.Option("--note", help="Result worth sharing.")] = None,
     as_session: SessionRef = None,
 ) -> None:
-    """Mark a task done (optionally sharing the outcome)."""
+    """Mark a task done (optionally sharing the outcome).
+
+    A task linked to a brief's requirements needs a fresh pass from it for each
+    (docs/work-briefs.md); without one, it stays as it is and each one is named."""
     try:
         task = team_service.finish_task(ref, note=note, session_ref=as_session)
+    except briefs_service.TaskNotProven as exc:
+        _not_proven(exc)
+    except BriefChangedError as exc:
+        fail(f"{exc}: run task done again", error="brief_changed", ref=exc.brief_id)
     except STORE_ERRORS as exc:
         _fail_team(exc, ref)
     _emit_task(task, verb="done")
+
+
+def _not_proven(exc: briefs_service.TaskNotProven) -> NoReturn:
+    """``task done`` refused by the evidence gate: each requirement, its state and why, in
+    text on stderr and as a list under ``--json``."""
+    label = team_service.task_label(exc.task)
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "error": "task_not_proven",
+                    "ref": exc.task.id,
+                    "detail": str(exc),
+                    "requirements": [
+                        {"brief": i.brief, "requirement": i.requirement, "state": i.state,
+                         "reason": i.reason}
+                        for i in exc.items
+                    ],
+                },
+                separators=(",", ":"),
+            )
+        )  # fmt: skip
+    else:
+        console = stderr_console()
+        console.print(f"✗ {label} cannot be done: it needs a fresh pass for each of", markup=False)
+        for item in exc.items:
+            console.print(
+                f"  {item.brief} {item.requirement} [{item.state}] {item.reason}", markup=False
+            )
+        first = next((i for i in exc.items if i.requirement.startswith("R")), None)
+        console.print(
+            "  "
+            + briefs_service.record_hint(
+                exc.task.project_id,
+                exc.task.id,
+                first.brief if first else "BRIEF",
+                first.requirement if first else "R1",
+            ),
+            markup=False,
+        )
+    raise typer.Exit(1)
 
 
 @app.command("block")

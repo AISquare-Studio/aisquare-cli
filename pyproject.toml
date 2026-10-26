@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aisquare-cli"
-version = "0.8.2"
+version = "0.9.0"
 description = "One terminal over your projects and your coding agents: task a manager in plain words, and it runs the coders, testers and reviewers for you."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -92,6 +92,13 @@ dependencies = [
   # from 1.5, so from Python 3.12): elsewhere Remote starts an ngrok on PATH, as
   # it always did (ngrok_sdk.bundled_ngrok).
   "ngrok>=1.4; sys_platform == 'darwin' or (sys_platform == 'win32' and (platform_machine != 'ARM64' or python_version >= '3.12')) or (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64' or platform_machine == 'armv7l'))",
+  # Every HTTPS call verifies against the OS trust store (core/tls.py). A
+  # python.org Python on macOS ships no CA bundle, so without these every usage
+  # read failed CERTIFICATE_VERIFY_FAILED while curl worked. truststore asks the
+  # Keychain / Windows store / distro bundle; certifi is the fallback for an
+  # interpreter truststore cannot use. Both pure Python, imported lazily.
+  "truststore>=0.10",
+  "certifi>=2024.7.4",
 ]
 
 [project.optional-dependencies]
@@ -162,6 +169,18 @@ remote = [
   # are core since #34, and `pipx install 'aisquare-cli[remote]'` was the
   # documented way to get them.
 ]
+code = [
+  # `aisquare code`'s TypeScript and JavaScript parsers (core/code_index.py, #285).
+  # Python is indexed with the standard library's `ast` and needs nothing here.
+  # The per-grammar wheels, not tree-sitter-language-pack: each wheel carries its
+  # compiled grammar AND its own queries/tags.scm, so nothing is downloaded at
+  # index time (the language pack fetches its grammars on first parse, and the
+  # index promises that nothing leaves the machine). Floors: the versions the
+  # parser was written and measured against.
+  "tree-sitter>=0.25",
+  "tree-sitter-typescript>=0.23",
+  "tree-sitter-javascript>=0.25",
+]
 tui = [
   # Kept as a no-op alias for one release: `pipx install 'aisquare-cli[tui]'`
   # was the documented way to get the board TUI before textual became core.
@@ -180,6 +199,11 @@ experiment = [
 ]
 dev = [
   "pytest>=9.1.1",
+  # The [code] extra's parsers, so tests/test_code_index.py exercises the
+  # TypeScript and JavaScript paths in CI rather than skipping them.
+  "tree-sitter>=0.25",
+  "tree-sitter-typescript>=0.23",
+  "tree-sitter-javascript>=0.25",
   # `make test` runs the suite on every core (#129 d). Each test already has a home,
   # a tmux folder and a `claude` stand-in of its own (tests/conftest.py), so workers
   # share nothing a test writes.
@@ -246,6 +270,9 @@ exclude = ["/docs/demo.gif", "/docs/demo/*.png"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# A test still running after 5 minutes dumps every thread's stack to stderr (it is not
+# failed: CI's step timeout does that), so a hang names itself in the log.
+faulthandler_timeout = 300
 
 [tool.ruff]
 line-length = 100
@@ -270,4 +297,10 @@ plugins = ["pydantic.mypy"]
 # dev extra does not install them (faster-whisper drags in ctranslate2 and av); mypy
 # still walks the import lines. Untyped here, checked for real under [voice].
 module = ["faster_whisper", "faster_whisper.*", "numpy", "segno"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The code index's TypeScript/JavaScript parsers (#285), imported lazily from the
+# optional [code] extra, which the dev extra does not install.
+module = ["tree_sitter", "tree_sitter_javascript", "tree_sitter_typescript"]
 ignore_missing_imports = true

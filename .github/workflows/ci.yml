@@ -118,8 +118,13 @@ jobs:
 
       # One pytest-xdist worker per core, as `make test` runs it (#129 d). The ambient
       # job below stays serial: it exists to catch reads of machine state, not to be fast.
+      # A ceiling, so a slow or hung suite fails instead of holding a runner for the
+      # 6-hour default: ubuntu legs take 13-25 min, windows ~45 (measured 2026-10-24). A
+      # test past pyproject's faulthandler_timeout prints every thread's stack first, and
+      # --durations names the slowest tests on every run.
       - name: Test (pytest)
-        run: pytest -n auto -ra
+        timeout-minutes: ${{ runner.os == 'Windows' && 75 || 45 }}
+        run: pytest -n auto -ra --durations=20
         env:
           AISQUARE_SUITE_CAPTAIN: ${{ matrix.captain }}
 
@@ -310,8 +315,10 @@ jobs:
       # FREE during pytest and proxy-up silently became a second proxy-down.
       # Proven in CI before it was fixed: both variants failed IDENTICALLY on the
       # same commit. Starting the listener and running the suite in one shell is
-      # what keeps them in the same process group.
+      # what keeps them in the same process group. Serial, 43-59 min (2026-10-24): the
+      # ceiling fails a slow or hung suite rather than holding the runner.
       - name: Test (pytest)
+        timeout-minutes: 90
         run: |
           # THE VARIANT NAME, checked before anything dispatches on it. Every
           # dispatch below is `if [ "$AMBIENT" = "proxy-up" ] … else <proxy-down>`,

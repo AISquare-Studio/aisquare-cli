@@ -1990,9 +1990,14 @@ def test_a_binarys_flags_session_id_and_account_are_its_adapters(
     home = tmp_path / "home"
     monkeypatch.setenv(adapter.home_env, str(home))
     transcript = tmp_path / "dir" / "projects" / "slug" / "session.jsonl"
-    read = home if adapter.capabilities.hook_names_home else tmp_path / "dir"
-    assert team_service.session_account(str(transcript), adapter.id) == str(read)
+    # The home the launch set wins (P2-W7, #198: under a shared root the transcript names the
+    # shared directory, not the account), for every agent.
+    assert team_service.session_account(str(transcript), adapter.id) == str(home)
     assert team_service.session_account(None, adapter.id) == str(home)
+    # With none set, the transcript names it, but for an agent whose hooks name their home.
+    monkeypatch.delenv(adapter.home_env)
+    read = None if adapter.capabilities.hook_names_home else str(tmp_path / "dir")
+    assert team_service.session_account(str(transcript), adapter.id) == read
 
 
 def test_a_sign_in_runs_the_agents_own_command_or_its_tui_bare(
@@ -2090,8 +2095,10 @@ def test_the_accounts_commands_name_an_agents_slots_in_its_own_words(
     assert chosen.exit_code == 0, chosen.output
     named = f" · {adapter.label}" in chosen.output
     assert named is not slot.legacy_slots, chosen.output
-    assert cleared.exit_code == 0, cleared.output
-    assert (f"cleared for {adapter.label}" in cleared.output) is not slot.legacy_slots
+    # The machine default is rank 1 of the one order, whatever its agent: nothing clears it
+    # (0.9.0, #406), and the refusal says how to change it.
+    assert cleared.exit_code != 0 and "cannot be cleared" in cleared.output, cleared.output
+    assert "accounts move" in cleared.output
     assert f"no {slot.noun} account in slot 99" in missing.output
 
 

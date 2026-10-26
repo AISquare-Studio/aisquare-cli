@@ -1,5 +1,8 @@
 # Fleet TUI — one `asq` view over every project, agent and session
 
+> **Since then (#399):** the codebase snapshot and its packer are gone from the CLI,
+> with doctor's rows for them, so every mention of them below is history.
+>
 > **Status: implemented on this branch** (PR #71; the Decisions log at the bottom
 > records what landed and every deviation). This is a living document: update it
 > in the same PR as the code it describes, and keep the *Decisions log* at the
@@ -183,10 +186,13 @@ started when a pane first goes on screen with a live frame:
 **A private server, never the user's.** `tmux -L asq -f <bundled conf>`. We do
 not read `~/.tmux.conf`, touch the user's sessions, or change their prefix key.
 Bundled options: `status off` · `escape-time 0` (Esc must interrupt Claude
-immediately) · `history-limit 50000` · `remain-on-exit on` · `mouse off` (we own the
-mouse) · `default-terminal tmux-256color` · `terminal-overrides ',*:Tc'` ·
+immediately) · `history-limit 50000` · `remain-on-exit on` · `mouse on` (P2-W3,
+#100: the wheel reaches Claude Code in `fleet attach`; the UI's own mouse reports go
+to the pane as `send-keys -H` over its control client, which the option does not
+touch) · `default-terminal tmux-256color` · `terminal-overrides ',*:Tc'` ·
 `extended-keys on` (CSI-u / modifyOtherKeys reach Claude Code — shift+enter and
-friends) · `set-clipboard off` · `focus-events on` · `monitor-activity on` (kept
+friends) · `set-clipboard off` (`on` with `[fleet] pane_clipboard = "on"`, #101: a
+pane program's OSC 52 copy is kept) · `focus-events on` · `monitor-activity on` (kept
 for an attached `tmux -L asq attach` client; headless the flag is always set, so
 the ▶ pulse comes from `history_size`/cursor changing between frames — measured
 on tmux 3.7c, pinned by `tests/test_tmux.py`).
@@ -841,7 +847,9 @@ launched by hand), path 2 is a no-op and path 1 still works.
 
 ### 7.4 Guardrails
 
-`max_agents_per_project` (default 4) · `fleet pause` (a signal the cycle
+`max_agents_per_project` (default 4) · `max_agents_total` and `min_free_mb`
+(#283: a fleet-wide budget and a memory floor, [docs/fleet.md](../fleet.md#capacity)) ·
+`fleet pause` (a signal the cycle
 respects) · kill / restart per agent from the UI · claims already lease-expire
 when an agent dies · a task reopened twice returns to the manager (existing
 planner rule) · reviewer is `--restricted` · a human merges · the hourly

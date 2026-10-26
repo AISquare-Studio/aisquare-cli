@@ -1595,23 +1595,35 @@ def board(
     interval: Annotated[
         float, typer.Option("--interval", "-i", help="Refresh seconds in watch mode.")
     ] = 3.0,
+    project_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--project",
+            "-P",
+            help="Show this project's board (codename, name or id prefix), not this "
+            "folder's: the pointer a parent manager's routed line gives.",
+            metavar="PROJECT",
+        ),
+    ] = None,
 ) -> None:
     """Show the live team board (sessions, tasks, recent updates)."""
+    named = _named_project(project_ref)
     if watch:
         if get_state().json_output:
             raise typer.BadParameter("--watch and --json cannot be combined")
-        _watch_board(max(interval, 0.5))
+        _watch_board(max(interval, 0.5), named)
         return
     try:
         # The captain's audit is left out before the recent updates are counted: one
         # line per captain tool call filled the list (review of #240, finding 11). The
         # bell and the notices are this board's own; `aisquare captain log` is the audit.
         project, sessions, tasks, events = team_service.board_data(
-            exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS
+            project=named, exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS
         )
     except STORE_ERRORS as exc:
         _fail_team(exc)
-    warn_board_scope(None)
+    if named is None:
+        warn_board_scope(None)
     if get_state().json_output:
         typer.echo(json.dumps(board_json(project, sessions, tasks, events)))
         return
@@ -1626,11 +1638,27 @@ def board(
     )
 
 
-def _watch_board(interval: float) -> None:
+def _named_project(ref: str | None) -> ProjectInfo | None:
+    """The project ``board --project`` names (as ``ui --project`` resolves it), or
+    ``None`` for this folder's. A parent manager's routed line points at a member's board
+    this way (P2-W6), and the option it named did not exist (TUI-401c check 4)."""
+    if ref is None:
+        return None
+    from aisquare.services import fleet as fleet_service  # lazy: board alone needs none
+
+    try:
+        return fleet_service.resolve_project(ref)
+    except fleet_service.FleetError as exc:
+        fail(str(exc), error="not_found", ref=ref)
+    except STORE_ERRORS as exc:
+        _fail_team(exc)
+
+
+def _watch_board(interval: float, project: ProjectInfo | None = None) -> None:
     """Run the live board (interactive TUI or Rich fallback — see cli.watch)."""
     from aisquare.cli import watch as watch_ui
 
     try:
-        watch_ui.run_watch(interval)
+        watch_ui.run_watch(interval, project)
     except TeamDisabledError as exc:
         _fail_team(exc)

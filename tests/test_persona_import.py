@@ -388,7 +388,7 @@ def test_a_config_that_will_not_load_refuses_the_llm_path_unless_an_engine_is_na
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        '[persona.import]\nengine = "off"\n\n[snapshot]\nignore = "node_modules"\n',
+        '[persona.import]\nengine = "off"\n\n[explainability]\nroles = "node_modules"\n',
         encoding="utf-8",
     )
     runs = _runs(monkeypatch, _envelope())
@@ -610,7 +610,7 @@ def test_https_is_fetched_in_process_http_and_oversized_responses_are_refused(
     fetched: list[tuple[str, float]] = []
     skill = b"---\nname: web-skill\ndescription: From the web.\n---\nBody.\n"
 
-    def urlopen(request: Any, timeout: float) -> _Response:
+    def urlopen(request: Any, timeout: float, **_: Any) -> _Response:
         fetched.append((request.full_url, timeout))
         return _Response(skill if "small" in request.full_url else b"z" * (2 * 1024 * 1024 + 10))
 

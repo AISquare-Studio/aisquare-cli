@@ -92,7 +92,6 @@ RoleOpt = Annotated[
 ]
 
 _DASH = "—"
-_DEFAULT_MARK = "*"
 
 
 @app.callback(invoke_without_command=True)
@@ -160,17 +159,24 @@ def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> t
         return _DASH, _DASH
     if not usage.available:
         return usage.reason or "unavailable", ""
-    session = _percent(usage.session_percent)
-    if usage.session_resets_at is not None:
-        session += f" · resets {format_reset(usage.session_resets_at, now=now)}"
-    week = _percent(usage.week_percent)
-    if usage.week_resets_at is not None:
-        week += f" · resets {format_reset(usage.week_resets_at, now=now)}"
+    session = _window_cell(usage.session_percent, usage.session_resets_at, now=now)
+    week = _window_cell(usage.week_percent, usage.week_resets_at, now=now)
     # The per-family weeks (#277), each with its own reset: they bind that family alone.
-    for family, percent in sorted(usage.family_week_percent.items()):
-        week += f" · {family} {_percent(percent)}"
-        if (resets := usage.family_week_resets_at.get(family)) is not None:
-            week += f" resets {format_reset(resets, now=now)}"
+    # One whose reset has passed says so, as a reset session or week does: its figure is
+    # for a window that is over, never 'resets now' (tester's pass on #401, (b)). A cached
+    # or kept reading has already dropped that figure and kept the reset time
+    # (_with_family_weeks, _without_reset_windows), so a family is read from either map:
+    # looped over the figures alone, it vanished (TUI-401b (b) at e28697f1, REVIEW-401 n6).
+    moment = now or accounts_service._now()
+    passed = {f for f, when in usage.family_week_resets_at.items() if when <= moment}
+    for family in sorted(set(usage.family_week_percent) | passed):
+        resets = usage.family_week_resets_at.get(family)
+        if family in passed and resets is not None:
+            week += f" · {family} reset {accounts_service.describe_age(resets, now=moment)}"
+            continue
+        week += f" · {family} {_percent(usage.family_week_percent[family])}"
+        if resets is not None:
+            week += f" resets {format_reset(resets, now=moment)}"
     return session, week
 
 
@@ -190,6 +196,19 @@ def _windows_cell(usage: ClaudeUsage | None, *, now: datetime | None = None) -> 
             line += f" · resets {format_reset(window.resets_at, now=now)}"
         lines.append(line + (" · limits" if window == limiting else ""))
     return "\n".join(lines)
+
+
+def _window_cell(percent: float | None, resets_at: datetime | None, *, now: datetime | None) -> str:
+    """``40% · resets in 3h 10m (18:00)`` — or ``reset 1h ago`` for a kept reading's window
+    that has reset since (its figure emptied: the window it described is over; review of
+    #408, MAJ-1), never the old figure with ``resets now``."""
+    moment = now or accounts_service._now()
+    if percent is None and resets_at is not None and resets_at <= moment:
+        return f"reset {accounts_service.describe_age(resets_at, now=moment)}"
+    cell = _percent(percent)
+    if resets_at is not None:
+        cell += f" · resets {format_reset(resets_at, now=moment)}"
+    return cell
 
 
 def _short(path: object) -> str:
@@ -235,9 +254,9 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
     several = len(agents) > 1
     table = Table(box=None, pad_edge=False, show_edge=False, header_style="bold")
     # Rows arrive in PRIORITY order (services.claude_accounts.list_accounts), so
-    # the table reads top-down as "the order the fleet would try them"; the
-    # default is starred the way `project list` stars the active project.
-    for column in (" ", "slot", *(["agent"] if several else []), "label", "signed in as"):
+    # the table reads top-down as "the order the fleet would try them": the first
+    # enabled, signed-in row is the machine default, and needs no mark of its own.
+    for column in ("slot", *(["agent"] if several else []), "label", "signed in as"):
         table.add_column(column)
     for column in ("plan", "hooks"):
         table.add_column(column)
@@ -259,7 +278,6 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
         if status.account.disabled:
             label.append(" (disabled)", style="dim")
         cells: list[Text | str] = [
-            Text(_DEFAULT_MARK, style="bold green") if status.account.is_default else "",
             str(status.account.slot),
             *([core.agent_label(status.account.agent)] if several else []),
             label,
@@ -289,22 +307,6 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
     for status in overview.accounts:
         if status.detail:
             console.print(f"{status.label}: {status.detail}", markup=False, style="yellow")
-    default = next(
-        (
-            s
-            for s in overview.accounts
-            if s.account.is_default and core.kind(s.account.agent).legacy_slots
-        ),
-        None,
-    )
-    if default is None:
-        console.print(
-            Text(
-                "no default account — launches run on whatever claude the shell has; "
-                "pick one: aisquare accounts default <slot|alias|email>",
-                style="dim",
-            )
-        )
     console.print(
         Text(
             "add one: aisquare accounts add [--agent codex] · open one: aisquare accounts run "
@@ -315,7 +317,8 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
 
 
 _REFRESH_HELP = (
-    "Fetch now instead of serving a reading up to five minutes old (the shared usage cache)."
+    "Fetch now instead of serving a reading up to five minutes old (the shared usage cache). "
+    "An account the usage endpoint rate-limited is not asked again before its wait ends."
 )
 
 
@@ -351,10 +354,49 @@ def _refreshed_line(statuses: list[ClaudeAccountStatus]) -> Text | None:
     said = f"usage as of {accounts_service.describe_age(min(read))}" if read else "no usage read"
     if failed:
         said += f" · last try failed {accounts_service.describe_age(max(failed))}"
+    # During a wait `--refresh` sends nothing for that account: the hint says so rather than
+    # promise a fetch (review of #408, N1).
+    moment = accounts_service._now()
+    waiting = [
+        (status.label, until)
+        for status in statuses
+        if status.usage is not None
+        and status.usage.rate_limited
+        and (until := status.usage.rate_limited_until) is not None
+        and until > moment
+    ]
+    if not waiting:
+        hint = "--refresh fetches now"
+    elif len(waiting) == len(tried):
+        first = min(until for _, until in waiting)
+        hint = f"{accounts_service.rate_limited_until_text(first)}; --refresh waits too"
+    else:
+        held = ", ".join(
+            f"{label} {accounts_service.rate_limited_until_text(until)}" for label, until in waiting
+        )
+        hint = f"--refresh fetches now, except {held}"
     return Text(
-        f"{said} (percent USED; refreshed at most every 5 min) — --refresh fetches now",
+        f"{said} (percent USED; refreshed at most every 5 min) — {hint}",
         style="dim",
     )
+
+
+def _kept_lines(statuses: list[ClaudeAccountStatus]) -> list[Text]:
+    """One line per row showing an older reading because the newest try read nothing:
+    ``account 2: rate-limited until 14:32 — …; showing the reading from 12m ago`` (F1 of
+    #400). The numbers in the table are that reading's; this says how old, and why."""
+    lines: list[Text] = []
+    for status in statuses:
+        usage = status.usage
+        if usage is None or not usage.available or usage.last_failed_reason is None:
+            continue
+        age = (
+            f"; showing the reading from {accounts_service.describe_age(usage.fetched_at)}"
+            if usage.fetched_at is not None
+            else ""
+        )
+        lines.append(Text(f"{status.label}: {usage.last_failed_reason}{age}", style="yellow"))
+    return lines
 
 
 @app.command("list")
@@ -385,6 +427,9 @@ def list_(
         typer.echo(_overview_json(overview))
         return
     _emit_overview(overview, with_usage=usage)
+    if usage:
+        for kept in _kept_lines(overview.accounts):
+            stdout_console().print(kept)
     if usage and (line := _refreshed_line(overview.accounts)) is not None:
         stdout_console().print(line)
 
@@ -458,6 +503,8 @@ def usage_(
         row: list[Text | str] = [str(status.account.slot), label, who, session, week]
         table.add_row(*row, *([windows or ""] if windowed else []))
     console.print(table)
+    for kept in _kept_lines(asked):
+        console.print(kept)
     if (line := _refreshed_line(asked)) is not None:
         console.print(line)
 
@@ -545,12 +592,12 @@ def _show_defaults(project: ProjectInfo | None) -> None:
     console = stdout_console()
     if machine is None:
         console.print(
-            "machine default: none — launches run on whatever claude the shell has "
-            "(set one: aisquare accounts default <slot|alias|email>)",
+            "machine default: none — no enabled account is signed in, so launches run on "
+            "whatever claude the shell has",
             markup=False,
         )
     else:
-        console.print(f"machine default: {_who(machine)}", markup=False)
+        console.print(f"machine default: {_who(machine)} · rank {machine.position}", markup=False)
     if project is not None:
         name = project.root.name or project.id
         if per_project is None:
@@ -558,9 +605,13 @@ def _show_defaults(project: ProjectInfo | None) -> None:
         else:
             console.print(f"project {name}: {_who(per_project)}", markup=False)
     for agent, (theirs, their_project) in others.items():
-        if theirs is not None:
+        if theirs is not None and theirs != machine:
+            # The machine default is rank 1, whatever its agent; a launch pinned to this
+            # agent takes its own first account in that order.
             console.print(
-                f"{core.agent_label(agent)} machine default: {_who(theirs)}", markup=False
+                f"{core.agent_label(agent)}, when a launch is pinned to it: {_who(theirs)} "
+                f"· rank {theirs.position}",
+                markup=False,
             )
         if their_project is not None and project is not None:
             console.print(
@@ -574,7 +625,8 @@ def _show_defaults(project: ProjectInfo | None) -> None:
     console.print(
         Text(
             "a launch picks, in order: --account · the role's binding · the project default · "
-            "the machine default · whatever the shell has",
+            "the machine default (the first enabled, signed-in account in priority order) · "
+            "whatever the shell has",
             style="dim",
         )
     )
@@ -591,22 +643,27 @@ def default(
     project: ProjectOpt = None,
     role: RoleOpt = None,
     clear: Annotated[
-        bool, typer.Option("--clear", help="Remove the default at the chosen level.")
+        bool,
+        typer.Option(
+            "--clear", help="Remove a project's default or a role's binding (not the machine's)."
+        ),
     ] = False,
     agent: AgentOpt = None,
 ) -> None:
     """Choose the account a launch runs under — for the machine, a project, or a role.
 
-    Without a reference it prints the defaults as they stand. With one it sets
-    the MACHINE default, or a PROJECT's (``--project``), or a ROLE's binding
-    (``--role``, the same thing ``team bind <role> --account`` writes). A launch
-    resolves them top-down: ``--account`` on the command line, then the role's
-    binding, then the project's default, then the machine's; with none of those
-    it runs on whatever ``claude`` the shell already has, exactly as before.
+    Without a reference it prints the defaults as they stand. With one it sets a
+    PROJECT's default (``--project``) or a ROLE's binding (``--role``, the same
+    thing ``team bind <role> --account`` writes). The MACHINE default is rank 1
+    of the one priority order, across agents — the first enabled, signed-in
+    account — so at machine level this is an alias of ``accounts move <ref> top``.
+    A launch resolves them top-down: ``--account`` on the command line, then the
+    role's binding, then the project's default, then the machine's; with no
+    account signed in it runs on whatever ``claude`` the shell already has.
 
-    Each agent has its own defaults: an account sets its own agent's, and
-    ``--clear`` clears Claude Code's unless ``--agent codex`` says otherwise. A
-    role's binding is checked against the agent the role launches.
+    A project's default is per agent: an account sets its own agent's, and
+    ``--clear --project`` clears Claude Code's unless ``--agent codex`` says
+    otherwise. A role's binding is checked against the agent the role launches.
     """
     whose = _agent(agent) if agent is not None else None
     if project is not None and role is not None:
@@ -640,6 +697,19 @@ def default(
         )
     elif chosen is None:
         stdout_console().print(f"✓ {level} default cleared", markup=False)
+    elif target is None:
+        stdout_console().print(
+            f"✓ machine default: {_who(chosen)} — moved to rank 1 of the priority order",
+            markup=False,
+        )
+        if not core.signed_in(chosen):
+            # Rank 1 is the default only for an account that can run a launch (review
+            # of #406, m1): say so, or the line above promises what the next launch skips.
+            stdout_console().print(
+                f"  · it is not signed in, so launches skip it until it is: "
+                f"aisquare accounts run {chosen.slot}",
+                markup=False,
+            )
     else:
         stdout_console().print(f"✓ {level} default: {_who(chosen)}", markup=False)
 
@@ -722,9 +792,8 @@ def _emit_order(accounts: list[ClaudeAccount]) -> None:
         return
     console = stdout_console()
     for account in accounts:
-        mark = _DEFAULT_MARK if account.is_default else " "
         off = "  (disabled)" if account.disabled else ""
-        console.print(f"{mark} {account.position}. {_who(account)}{off}", markup=False)
+        console.print(f"{account.position}. {_who(account)}{off}", markup=False)
 
 
 @app.command("order", context_settings=SLOT_ARGS)
@@ -771,12 +840,6 @@ def _toggle(ref: str, *, disabled: bool) -> None:
             "still usable with --account",
             markup=False,
         )
-        if account.is_default:
-            stdout_console().print(
-                "  · it is the machine default: launches fall through to the next rung until "
-                "it is enabled again (doctor says so too)",
-                markup=False,
-            )
     else:
         stdout_console().print(f"✓ {_who(account)} is enabled", markup=False)
 
@@ -1104,6 +1167,105 @@ def settings(
             if change.reason:
                 line += f" — {change.reason}"
             console.print(line, markup=False, style="red" if change.outcome == "failed" else None)
+    if failed:
+        raise typer.Exit(1)
+
+
+def _parts(value: str | None, flag: str) -> list[claude_sharing.SharePart]:
+    """``memory,skills`` as parts, or a usage error naming the ones that exist."""
+    if value is None:
+        return []
+    asked = [part.strip() for part in value.split(",") if part.strip()]
+    unknown = [part for part in asked if part not in claude_sharing.SHARE_PARTS]
+    if unknown or not asked:
+        raise typer.BadParameter(
+            f"{', '.join(unknown) or '(none)'} — parts are {', '.join(claude_sharing.SHARE_PARTS)}",
+            param_hint=flag,
+        )
+    return [part for part in claude_sharing.SHARE_PARTS if part in asked]
+
+
+_PART_WORDS = {
+    "linked": "linked to the plain claude's",
+    "already": "already shared",
+    "unlinked": "unlinked",
+    "restored": "its own restored",
+    "refused": "left as it is",
+    "failed": "failed",
+    "shared": "shared",
+    "own": "its own",
+    "none": "none",
+    "elsewhere": "linked elsewhere (not ours)",
+    "merged": "merged",
+}
+
+
+@app.command("share")
+def share(
+    enable: Annotated[
+        str | None,
+        typer.Option(
+            "--enable",
+            help=f"Parts to share, comma-separated: {', '.join(claude_sharing.SHARE_PARTS)}.",
+            metavar="PARTS",
+        ),
+    ] = None,
+    disable: Annotated[
+        str | None,
+        typer.Option(
+            "--disable", help="Parts to stop sharing; each slot's own comes back.", metavar="PARTS"
+        ),
+    ] = None,
+    status: Annotated[
+        bool, typer.Option("--status", help="What every account holds; change nothing.")
+    ] = False,
+) -> None:
+    """What every Claude account has in common: memory, skills, agents, commands, CLAUDE.md.
+
+    `memory` gives every launch one auto-memory directory per project, under
+    ~/.aisquare/claude-shared/memory (merged from every account the first time). The
+    others make each managed account's entry a link to the plain claude's, its own kept
+    beside it as <entry>.own-<stamp> until --disable puts it back. `plugins` is
+    experimental: MCP logins and the plugin store are per account. Transcripts are
+    never shared: a session moved to another account resumes by its path.
+    """
+    on = _parts(enable, "--enable")
+    off = _parts(disable, "--disable")
+    if set(on) & set(off):
+        fail("a part can be enabled or disabled, not both", error="usage")
+    changes: list[accounts_service.PartChange] = []
+    with expected_config_write_errors():
+        if on:
+            changes += accounts_service.enable_share(on)
+        if off:
+            changes += accounts_service.disable_share(off)
+    held = accounts_service.share_status() if status or not (on or off) else []
+    knobs = accounts_service.accounts_settings()
+    failed = any(change.outcome == "failed" for change in changes)
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "share": list(knobs.share),
+                    "memory_dir": str(accounts_service.shared_memory_root()),
+                    "changes": [change.as_json() for change in changes],
+                    "status": [change.as_json() for change in held],
+                }
+            )
+        )
+    else:
+        console = stdout_console()
+        console.print(f"shared: {', '.join(knobs.share) or 'nothing'}", markup=False)
+        for change in [*changes, *held]:
+            line = f"  · {core.label(change.account)} {change.part}: {_PART_WORDS[change.outcome]}"
+            if change.detail:
+                line += f" ({change.detail})"
+            style = (
+                "red"
+                if change.outcome == "failed"
+                else ("yellow" if change.outcome in ("refused", "elsewhere") else None)
+            )
+            console.print(line, markup=False, style=style)
     if failed:
         raise typer.Exit(1)
 

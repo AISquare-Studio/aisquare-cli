@@ -299,7 +299,7 @@ def action_open_transcript(app: App[Any], command: list[str]) -> str | None:
     return None
 
 
-def _build_app_class(interval: float) -> Any:
+def _build_app_class(interval: float, project: ProjectInfo | None = None) -> Any:
     """Build the Textual app class (a factory so tests can drive it headless).
 
     The board itself is ``cli.ui.board.BoardPanel``; this app adds what a
@@ -376,11 +376,13 @@ def _build_app_class(interval: float) -> Any:
             return self.query_one(BoardPanel)
 
         def compose(self) -> ComposeResult:
-            try:
-                project: ProjectInfo | None = team_service.resolve_project(None)
-            except Exception:
-                project = None
-            yield BoardPanel(project, interval=interval, id="board-panel")
+            shown: ProjectInfo | None = project
+            if shown is None:
+                try:
+                    shown = team_service.resolve_project(None)
+                except Exception:
+                    shown = None
+            yield BoardPanel(shown, interval=interval, id="board-panel")
             yield Footer()
 
         def on_mount(self) -> None:
@@ -445,8 +447,8 @@ def _build_app_class(interval: float) -> Any:
     return BoardApp
 
 
-def _run_tui(interval: float) -> None:
-    app = _build_app_class(interval)()
+def _run_tui(interval: float, project: ProjectInfo | None = None) -> None:
+    app = _build_app_class(interval, project)()
     app.run()
     for line in getattr(app, "unsaved", ()):
         stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
@@ -455,12 +457,12 @@ def _run_tui(interval: float) -> None:
 # --- the Rich fallback ------------------------------------------------------------
 
 
-def board_frame(height: int, width: int) -> Text:
+def board_frame(height: int, width: int, project: ProjectInfo | None = None) -> Text:
     """One fallback frame: header, sessions, open tasks, then as many recent
     events as the remaining terminal rows can hold — the captain's audit left out,
     as ``aisquare board`` leaves it out (``team.CAPTAIN_AUDIT_KINDS``)."""
     project, sessions, tasks, events, switches = team_service.board_read(
-        events=200, exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS
+        events=200, project=project, exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS
     )
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(
@@ -493,22 +495,23 @@ def board_frame(height: int, width: int) -> Text:
     return text
 
 
-def _run_fallback(interval: float) -> None:
+def _run_fallback(interval: float, project: ProjectInfo | None = None) -> None:
     from rich.live import Live
 
     console = stdout_console()
     try:
         with Live(console=console, screen=True, auto_refresh=False) as live:
             while True:
-                frame = board_frame(console.size.height, console.size.width)
+                frame = board_frame(console.size.height, console.size.width, project)
                 live.update(frame, refresh=True)
                 time.sleep(interval)
     except KeyboardInterrupt:
         return
 
 
-def run_watch(interval: float) -> None:
-    """The board watch entry point: interactive TUI, or Rich fallback."""
+def run_watch(interval: float, project: ProjectInfo | None = None) -> None:
+    """The board watch entry point: interactive TUI, or Rich fallback; ``project``'s board,
+    or the one for the working directory."""
     try:
         import textual  # noqa: F401
     except ImportError:
@@ -516,6 +519,6 @@ def run_watch(interval: float) -> None:
             "tip: pip install 'aisquare-cli[tui]' for the interactive board "
             "(clickable tasks/feed, scrolling, detail bar)"
         )
-        _run_fallback(interval)
+        _run_fallback(interval, project)
         return
-    _run_tui(interval)
+    _run_tui(interval, project)

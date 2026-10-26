@@ -21,16 +21,22 @@ byte-identical to what it always was.
 The environment has one more decision in it since #145: WHICH CLAUDE ACCOUNT.
 ``--account`` names one for this launch; without it the role's binding, the
 project's default and the machine's default are consulted in that order
-(``aisquare accounts default``), and with none of those set the environment is
-exactly what it always was. One resolver, ``services.claude_accounts.choose``,
-answers for ``launch`` and ``fleet spawn`` alike — for a Codex role too, where
-the account is a Codex slot and the launch sets ``CODEX_HOME`` to it.
+(``aisquare accounts default``). The machine's default is the preferred account,
+the first enabled, signed-in one in the priority order (#406), so with an account
+signed in a launch runs on one. The exception is a role whose binding sets its
+agent's directory itself (``team bind --env``/``--env-file``): it keeps that directory
+unless a flag, an account binding, a project default or a headroom pick names an
+account. With no account signed in, the environment is exactly what it always was.
+One resolver, ``services.claude_accounts.choose``, answers for ``launch`` and
+``fleet spawn`` alike — for a Codex role too, where the account is a Codex slot and
+the launch sets ``CODEX_HOME`` to it.
 """
 
 from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -46,6 +52,7 @@ from aisquare.cli.common import fail
 from aisquare.cli.native_args import NativeForwardingCommand as LaunchCommand
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import experimental, harness, orchestrator, paths, personas
+from aisquare.core.agent_adapters import adapter_for_binary
 from aisquare.core.agent_adapters.types import BadEffortError, LaunchPart
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.console import stderr_console
@@ -156,6 +163,41 @@ def _check_persona(name: str, root: Path | None) -> None:
         personas.resolve(name, root)
     except personas.PersonaError as exc:
         fail(str(exc), error="unknown_persona", ref=name)
+
+
+def _with_shared_memory(
+    binary: str, role_args: Sequence[str], operator_args: Sequence[str]
+) -> list[str]:
+    """``role_args`` with ``[accounts] share = ["memory"]``'s shared auto-memory directory for
+    this folder in their ``--settings`` (P2-W7, #198). Claude Code only.
+
+    ONE ``--settings`` for every key aisquare sets: the role's skill listing (P1 WS-1,
+    ``harness.tool_policy``) and the memory directory merge into one JSON. Two flags are not
+    two settings: Claude Code reads one, and the memory stood down on the role's own flag,
+    so a coder or a tester shared no memory at all (sync #367). An ``--settings`` the
+    operator's line carries (``operator_args``: a binding's ``--arg``, a fleet
+    ``extra_args``, what was typed) still wins, as each feature says; the memory's
+    stand-down is said in one dim line.
+    """
+    out = list(role_args)
+    wanted = claude_accounts_service.memory_settings_args(Path.cwd())
+    if not wanted:
+        return out
+    if any(arg == "--settings" or arg.startswith("--settings=") for arg in operator_args):
+        stderr_console().print(
+            "accounts: memory is not shared into this launch — its own --settings wins",
+            style="dim",
+        )
+        return out
+    runs = adapter_for_binary(binary)
+    if runs is None or runs.accounts is None or not runs.accounts.shares_settings:
+        return out  # `autoMemoryDirectory` is Claude Code's settings key (SCOPE #113 090: W7)
+    memory = json.loads(wanted[1])
+    for index, arg in enumerate(out[:-1]):
+        if arg == "--settings":
+            out[index + 1] = json.dumps({**json.loads(out[index + 1]), **memory})
+            return out
+    return [*out, *wanted]
 
 
 def _persona_system_prompt(
@@ -543,9 +585,12 @@ def launch(
     # the role's standing shape. For slot 1 that means RESTORING this shell's
     # own two variables (or their absence) over whatever the binding set — a
     # launch announced as `[plain claude]` must not run on the binding's other
-    # login. When NOTHING chose (no flag, no binding, no default — every
-    # machine before #145), the environment is left exactly as it was. Every
-    # rung answers with an account of the role's agent: a Codex role runs on a
+    # login. The machine's default is the first enabled, signed-in account
+    # (#406), so something chooses whenever one is signed in. Nothing chooses
+    # when none is, or when the role's binding sets its agent's directory
+    # itself and no flag, account binding, project default or headroom pick
+    # names an account: then the environment is left as the binding made it.
+    # Every rung answers with an account of the role's agent: a Codex role runs on a
     # Codex slot (`CODEX_HOME`), and another agent's account is refused, naming both.
     choice = claude_accounts_service.AccountChoice(account=None, source=None)
     if selected.adapter.accounts is not None:
@@ -617,6 +662,7 @@ def launch(
     )
     role_args = [*defaults.args, *policy.args]
     binding_args, agent_args = policy.strip(profile.args), policy.strip(ctx.args)
+    role_args = _with_shared_memory(resolution.binary, role_args, [*binding_args, *agent_args])
     for note in [*defaults.notes, *policy.notes]:
         # A withheld flag is otherwise invisible: the launch succeeds and the
         # role degrades silently (a ui-tester with no browser reopens every UI

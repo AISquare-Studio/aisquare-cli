@@ -29,7 +29,10 @@ from aisquare.core import agents as agent_core
 from aisquare.core import experimental
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
+from aisquare.models import ProjectInfo
 from aisquare.services import ci_client
+from aisquare.services import hooks as hooks_service
+from aisquare.services import project as project_service
 from tests import private_fleets
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -881,6 +884,92 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+#: The detached start of an index build (#285), as written, for the tests of it:
+#: ``no_detached_code_index_build`` replaces it for every other test.
+REAL_START_CODE_INDEX = hooks_service.start_code_index
+
+
+@pytest.fixture(autouse=True)
+def no_detached_code_index_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No ``init`` or ``project onboard`` in the suite starts a detached ``aisquare code
+    index``: it would run in a session of its own that outlives the test. A test that wants
+    an index builds one (``code_service.build_index``)."""
+    monkeypatch.setattr(hooks_service, "start_code_index", lambda _project, *, full=False: None)
+
+
+#: The session-start refresh of the symbol index (#285), as written, for the tests of it:
+#: ``no_detached_code_refresh`` replaces it for every other test.
+REAL_REFRESH_CODE_INDEX = hooks_service._refresh_code_index
+
+
+@pytest.fixture(autouse=True)
+def no_detached_code_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No session start in the suite starts a detached ``aisquare code index`` (#285).
+
+    ``init`` and ``project onboard`` build an index now, so every later session-start
+    hook would start one, in a session of its own that outlives the test.
+    """
+    monkeypatch.setattr(hooks_service, "_refresh_code_index", lambda _project: None)
+
+
+REAL_ENSURE_CODE_INDEX = project_service._ensure_code_index
+
+
+@pytest.fixture(autouse=True)
+def no_index_of_this_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """``init`` and ``project onboard`` build a symbol index only under pytest's temp dirs.
+
+    A test that runs either where it stands onboards this repository, and a full index of
+    it per test (a fresh home each time, so never incremental) took rc/p2's CI from ~20 to
+    60-90 minutes. Elsewhere the onboard reports no index, as with ``[code] enabled`` off.
+    """
+    base = tmp_path_factory.getbasetemp().resolve()
+
+    def ensure(project: ProjectInfo, *, refresh: bool) -> str | None:
+        if not project.root.resolve().is_relative_to(base):
+            return None
+        return REAL_ENSURE_CODE_INDEX(project, refresh=refresh)
+
+    monkeypatch.setattr(project_service, "_ensure_code_index", ensure)
+
+
+@pytest.fixture(autouse=True)
+def roomy_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every spawn in the suite sees plenty of memory, whatever the runner has (#283).
+
+    ``min_free_mb`` is on by default, so a CI runner short of 2 GB would otherwise refuse
+    the spawn a test is about. A test of admission sets its own headroom; the probes'
+    own tests call ``linux_headroom`` / ``darwin_headroom`` with their fixtures.
+    """
+    from aisquare.core import memory
+
+    monkeypatch.setattr(
+        memory, "headroom", lambda: memory.Headroom(65_536, 131_072, "normal", None, "test")
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_detached_root_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No in-process test starts the detached worker that posts a Run's root (#129 e).
+
+    It runs in a session of its own and outlives the test, retrying a gateway the test
+    has already shut down. A test of the worker patches ``_start_root_worker`` itself; a
+    test of a traced launch patches ``_post_run_root``. Reaching this is a test that did
+    neither, and it fails loudly rather than leave a process behind.
+    """
+    from aisquare.services import explainability
+
+    def refuse(argv: list[str], key: bytes) -> None:
+        raise AssertionError(
+            "a test started a detached root worker: patch explainability._post_run_root "
+            f"or _start_root_worker ({' '.join(argv[-5:])})"
+        )
+
+    monkeypatch.setattr(explainability, "_start_root_worker", refuse)
+
+
 @pytest.fixture(autouse=True)
 def no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Never read the macOS Keychain of the machine the suite runs on.
@@ -922,6 +1011,71 @@ def no_native_clipboard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(clipboard, "osc52_terminal", lambda env: "accepts")
 
 
+PYPI_CLOSED = "PyPI is not asked from the test suite"
+"""What :func:`no_pypi` answers for every PyPI lookup a test did not supply its own for."""
+
+
+@pytest.fixture(autouse=True)
+def no_pypi(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """Never ask PyPI from a test; answer as an offline machine does.
+
+    ``install_route.fetch_latest`` is the one request to PyPI in the package: ``aisquare
+    upgrade`` and asq's daily release check (``services.updates``) both ask it. Every
+    ``FleetApp`` a test builds runs that check, and only the route kept it offline: a
+    checkout is never checked, and the suite runs editable. From a non-editable install
+    (``pip install .``, a uv tool, a packager's run) the UI tests asked PyPI twenty
+    times in two files, and waited out a timeout each where the network is firewalled
+    (review of #301, M1). The answer is the one an offline machine gets, which every
+    caller already takes as "no answer". Tests of the lookup and the upgrade put their own
+    over this one (``tests/installer_seams.py``, ``machine`` in test_lifecycle_upgrade.py)
+    or call the real function they took at import. Each ask is kept, for a probe.
+    """
+    from aisquare.services import install_route
+
+    asked: list[dict[str, object]] = []
+
+    def offline(timeout: float = 0.0, **kwargs: object) -> install_route.LatestRelease:
+        asked.append(dict(kwargs))
+        return install_route.LatestRelease(None, PYPI_CLOSED)
+
+    monkeypatch.setattr(install_route, "fetch_latest", offline)
+    return asked
+
+
+TLS_CLOSED = "the suite makes no TLS handshake off this machine"
+"""What :func:`no_tls_probe` answers for a handshake to any host but this machine's own."""
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+@pytest.fixture(autouse=True)
+def no_tls_probe(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Never shake hands with a real host from a test; answer as a refused connection does.
+
+    ``core.tls.handshake`` is ``doctor --live``'s ``tls`` row (#403): a verified handshake to
+    api.anthropic.com. Every test that ran ``doctor --live`` sent a TCP connect and a TLS
+    ClientHello there, eight of them, and waited out the 10 s timeout where a firewall drops
+    rather than refuses (REVIEW-403, MAJOR-1). Refused, the row warns "could not reach", as
+    an offline machine's does. A handshake to this machine (a test's own TLS server) runs
+    for real; a test of the row puts its own stand-in over this one. Each refused host is
+    kept, for a probe.
+    """
+    from aisquare.core import tls
+
+    real = tls.handshake
+    refused: list[str] = []
+
+    def handshake(host: str, *, port: int = 443, timeout: float = 10.0) -> None:
+        if host in _LOOPBACK_HOSTS:
+            real(host, port=port, timeout=timeout)
+            return
+        refused.append(host)
+        raise ConnectionRefusedError(TLS_CLOSED)
+
+    monkeypatch.setattr(tls, "handshake", handshake)
+    return refused
+
+
 @pytest.fixture(autouse=True)
 def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never run a hook's aisquare for its version; answer as this install.
@@ -930,9 +1084,9 @@ def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     ``_aisquare_command`` resolves: the console script beside this interpreter
     when there is one, otherwise the machine's ``aisquare`` — a pyenv shim on the
     author's box. Which one is ambient state, and running it would grade the
-    developer's PATH rather than this tree. Same shape as ``no_repomix`` below.
-    Tests of the probe itself capture the real function at import and call it
-    against fake scripts they write (test_doctor_stale_hook_binary.py).
+    developer's PATH rather than this tree. Tests of the probe itself capture the
+    real function at import and call it against fake scripts they write
+    (test_doctor_stale_hook_binary.py).
     """
     from aisquare.core import agents
     from aisquare.core.version import __version__
@@ -974,21 +1128,6 @@ def install_outside_the_tree(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda *args, **kwargs: (Path("/nonexistent/aisquare-under-test"),),
         raising=False,
     )
-
-
-@pytest.fixture(autouse=True)
-def no_repomix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Disable the repomix subprocess by default so tests never shell out.
-
-    Snapshot generation degrades to "skipped". Tests that exercise the packing
-    logic override ``snapshot._run_repomix`` with a fake returning synthetic XML.
-    """
-    from aisquare.core import snapshot
-
-    def _unavailable(*_args: object, **_kwargs: object) -> tuple[str, str]:
-        raise snapshot.RepomixUnavailableError("repomix disabled in tests")
-
-    monkeypatch.setattr(snapshot, "_run_repomix", _unavailable)
 
 
 @pytest.fixture(autouse=True)
@@ -1060,6 +1199,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         f"{NEEDS_CAPTAIN}: needs the experimental captain on; skipped when "
         f"{SUITE_CAPTAIN_ENV}=off runs the suite with it off, as it ships",
+    )
+    config.addinivalue_line(
+        "markers",
+        "e2e: drives a real, signed-in Claude Code (and spends tokens); skipped unless the "
+        "test's own variables name what to drive",
     )
 
 

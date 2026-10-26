@@ -237,7 +237,7 @@ def test_every_seam_that_runs_in_the_git_environment_is_ruled_stripped() -> None
         if function is not None and "env=git_env()" in inspect.getsource(function):
             in_git_env.append(key)
 
-    assert len(in_git_env) == 5, in_git_env  # `handoff._git`, the brief's, is the fifth (#15)
+    assert len(in_git_env) == 8, in_git_env  # main's seven and `handoff._git`, the brief's (#15)
     assert [key for key in in_git_env if not SEAMS[key].strips_identity] == []
 
 
@@ -485,7 +485,7 @@ def test_every_git_seam_runs_in_the_one_git_environment(
     git's environment by hand, and they had drifted apart: the snapshot's stripped the
     identity and set ``GIT_TERMINAL_PROMPT=0``, the fleet's copied the environment as it was.
     Every git seam takes :func:`git_env`, so a fix to one is a fix to all."""
-    from aisquare.core import snapshot, workspace
+    from aisquare.core import workspace
     from aisquare.services import ci_snapshot, fleet
 
     seen: dict[str, dict[str, str] | None] = {}
@@ -498,11 +498,8 @@ def test_every_git_seam_runs_in_the_one_git_environment(
     fleet._git(tmp_path, "status", "--porcelain")
     ci_snapshot._git(tmp_path, "stash", "create", timeout=5)
     workspace.git_common_root(tmp_path)
-    snapshot.head_sha(tmp_path)
 
-    asked = [
-        "--git-common-dir --show-cdup", "rev-parse HEAD", "stash create", "status --porcelain"
-    ]  # fmt: skip
+    asked = ["--git-common-dir --show-cdup", "stash create", "status --porcelain"]
     assert sorted(seen) == asked, seen
     for argv, env in seen.items():
         assert env == git_env(), argv

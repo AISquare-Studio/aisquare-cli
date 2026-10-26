@@ -70,6 +70,7 @@ from aisquare.services.first_run import (
     TmuxState,
 )
 from aisquare.services.onboarding import FixResult, OnboardOutcome, PathVerdict
+from tests.fleet_fakes import list_agents_as
 from tests.fsperms import can_symlink
 from tests.pane_harness import asks_a_server, socket_of
 from tests.ui_workers import settle_page, settle_until
@@ -798,7 +799,7 @@ def test_step_one_holds_its_folder_while_a_start_runs(tmp_path: Path) -> None:
 
 
 def test_step_three_waits_while_step_one_sets_a_folder_up(tmp_path: Path) -> None:
-    """An unlisted folder is listed by the store before its snapshot is packed, so the
+    """An unlisted folder is listed by the store before its onboarding finishes, so the
     shell's next frame listed it mid-onboarding, step 1 was listed again, and the folder
     asq started in came back: Start manager would have started there (review of #257)."""
     machine, _ = _ready_machine(tmp_path)
@@ -1251,7 +1252,7 @@ def fleet_rows(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[FleetAgentStat
     def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         return list(rows.get(project.id, []))
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
     return rows
 
 
@@ -1753,7 +1754,7 @@ def test_an_agent_stopped_elsewhere_is_not_brought_back(
     def listing(p: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         return machine.statuses(p)
 
-    monkeypatch.setattr(fleet_service, "list_agents", listing)
+    list_agents_as(monkeypatch, listing)
     scripted(machine)
 
     async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[Any]:
@@ -1789,7 +1790,7 @@ def test_a_clock_that_steps_back_does_not_keep_a_stopped_agent_started(
     def listing(p: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         return machine.statuses(p)
 
-    monkeypatch.setattr(fleet_service, "list_agents", listing)
+    list_agents_as(monkeypatch, listing)
     scripted(machine)
 
     async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> tuple[bool, str]:
@@ -1816,7 +1817,7 @@ def listed_by(machine: Machine, project: ProjectInfo, monkeypatch: pytest.Monkey
     def listing(p: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         return machine.statuses(p)
 
-    monkeypatch.setattr(fleet_service, "list_agents", listing)
+    list_agents_as(monkeypatch, listing)
 
 
 def test_coders_whose_windows_are_gone_are_not_counted_and_are_restarted(

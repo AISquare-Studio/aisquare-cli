@@ -3,3 +3,10 @@
 # are one script (tests/test_codex_plugin.py holds them byte for byte).
 plugins/claude-code/scripts/aisquare-hook text eol=lf
 plugins/codex/scripts/aisquare-hook text eol=lf
+
+# The installers are released byte for byte (scripts/stamp_installers.py), so they
+# are LF in every checkout too: install.sh for the same reason as the hook, and
+# install.ps1 so a stamp made anywhere matches the one CI makes. PowerShell 5.1
+# and 7 both read LF; `irm … | iex` runs the string it is given either way.
+install.sh text eol=lf
+install.ps1 text eol=lf

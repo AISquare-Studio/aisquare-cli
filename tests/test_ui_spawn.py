@@ -86,7 +86,8 @@ from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.captain import state as captain_state
-from tests.ui_workers import settle_page, settle_workers
+from tests.fleet_fakes import list_agents_as
+from tests.ui_workers import released, settle_page, settle_workers
 
 T = TypeVar("T")
 SIZE = (120, 50)
@@ -402,7 +403,7 @@ def fleet(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[FleetAgentStatus]]:
     def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         return list(agents.get(project.id, []))
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
     return agents
 
 
@@ -852,9 +853,9 @@ def test_a_fleet_error_keeps_the_dialog_open_with_the_message_and_spawn_re_enabl
             submit(dialog).disabled,
             dialog.query_one("#spawn-cancel", Button).disabled,
         ]
-        # Past the first press's 0.2 s "-active" effect, during which Button ignores
-        # a click — then a second press must spawn again: re-enabled for real.
-        await pilot.pause(submit(dialog).active_effect_duration + 0.1)
+        # Past the first press's "-active" effect, during which Button ignores a
+        # click — then a second press must spawn again: re-enabled for real.
+        await released(pilot, submit(dialog))
         await pilot.click("#spawn-submit")
         await settle(pilot)
         seen.append(list(host.results))
@@ -1102,7 +1103,7 @@ def test_a_spawn_whose_read_outlives_the_users_move_leaves_them_where_they_went(
         return listing(project, live_only=live_only)
 
     spawns.answer = answer
-    monkeypatch.setattr(fleet_service, "list_agents", hung)
+    list_agents_as(monkeypatch, hung)  # the tick reads through list_agents_many (#83)
 
     async def scenario(pilot: Pilot[None], app: RecordingFleetApp) -> list[Any]:
         try:
@@ -1348,7 +1349,7 @@ def test_pick_opens_the_picker_in_new_order_and_fills_who_runs_it(
     git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, spawns: SpawnRecorder
 ) -> None:
     settings_service.bind_role("coder2", agent_bin="claude2")
-    monkeypatch.setattr(fleet_service, "list_agents", lambda project, *, live_only=True: [])
+    list_agents_as(monkeypatch, lambda project, *, live_only=True: [])
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         seen: list[Any] = []
@@ -1652,8 +1653,11 @@ def test_take_over_locks_the_label_and_task_to_the_teammates_and_asks_first(
         # closed opened nothing on windows-latest (`NoMatches: '#take-over-yes' on
         # SpawnDialog()`, rc/p0 run 39985702872), the dialog not yet hit-testable again.
         submit(dialog).press()
-        await wait_for_screen(pilot, spawn_module.ConfirmTakeOverScreen)
-        await pilot.click("#take-over-yes")
+        question = await wait_for_screen(pilot, spawn_module.ConfirmTakeOverScreen)
+        # Pressed on the question itself for the same reason: a click the moment it was
+        # pushed landed before it could be hit-tested, so no hand-off was ever asked for
+        # (a gate under load at cc8d5e0c, captain on and off, and 1 in 5 alone).
+        question.query_one("#take-over-yes", Button).press()
         await settle(pilot)
         return list(host.results)
 
@@ -2190,3 +2194,92 @@ def test_off_the_spawn_dialog_preset_to_a_declared_captain_is_an_ordinary_spawn(
     seen = drive(git_project, scenario, presets={"role": "captain"})
     assert seen == [False, False], "a label of its own and a role that can change"
     assert [call[1] for call in spawns.calls] == ["captain"], "through fleet.spawn"
+
+
+# --- task #4: the spawn dialog's follow-ups from PR #303 -------------------------------------
+
+
+def test_with_no_role_the_empty_persona_says_plain_claude_not_its_role_alone(
+    git_project: ProjectInfo,
+) -> None:
+    """Role *(none)* has no role to run as: the note said "runs as its role alone" for it."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [
+            select(dialog, "persona").value,
+            note(dialog, "#spawn-persona-description"),
+        ]
+        select(dialog, "role").value = spawn_module.NO_ROLE
+        await settle(pilot)
+        seen.append(note(dialog, "#spawn-persona-description"))
+        select(dialog, "role").value = "coder"
+        await settle(pilot)
+        seen.append(note(dialog, "#spawn-persona-description"))
+        return seen
+
+    persona, with_role, without, back = drive(git_project, scenario)
+    assert persona == ""
+    assert without == "(plain Claude: no role, no persona)"
+    assert with_role == back == "(no persona — the agent runs as its role alone)"  # the control
+
+
+def test_a_role_change_re_describes_the_note_under_the_owners_own_empty_persona(
+    git_project: ProjectInfo,
+) -> None:
+    """The owner's pick is kept across a role change, so nothing re-puts the persona and
+    its note was described only by the role change itself: with *(none)* picked by hand,
+    Role *(none)* still said "runs as its role alone" (review of #405 in #401, n9)."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "persona").value = "careful"
+        await settle(pilot)
+        select(dialog, "persona").value = ""  # the owner's own pick: no persona
+        await settle(pilot)
+        seen: list[Any] = [note(dialog, "#spawn-persona-description")]
+        select(dialog, "role").value = spawn_module.NO_ROLE
+        await settle(pilot)
+        seen += [select(dialog, "persona").value, note(dialog, "#spawn-persona-description")]
+        return seen
+
+    with_role, kept, without = drive(git_project, scenario)
+    assert with_role == "(no persona — the agent runs as its role alone)"  # the control
+    assert kept == "", "the owner's pick stands"
+    assert without == "(plain Claude: no role, no persona)"
+
+
+def test_the_pick_note_shows_only_beside_a_pick_that_presses(
+    git_project: ProjectInfo, teammates: list[FleetAgentStatus]
+) -> None:
+    """A hand-off disables *Pick…* (``_lock_other_screens``), and the note went on saying what
+    it does; back to *(none)*, both come back."""
+    teammates.append(teammate(git_project))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        pick = dialog.query_one("#spawn-pick", Button)
+        seen: list[Any] = [pick.disabled, note(dialog, "#spawn-pick-note")]
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        seen += [pick.disabled, note(dialog, "#spawn-pick-note")]
+        select(dialog, "from").value = spawn_module.NO_SOURCE
+        await settle(pilot)
+        seen += [pick.disabled, note(dialog, "#spawn-pick-note")]
+        return seen
+
+    free, free_note, handed, handed_note, back, back_note = drive(git_project, scenario)
+    assert (free, handed, back) == (False, True, False)
+    assert free_note is not None and "fills Role, Binary and Account" in free_note
+    assert handed_note is None
+    assert back_note == free_note
+
+
+@pytest.mark.needs_captain
+def test_the_captains_dialog_hides_the_pick_note_beside_its_disabled_pick(
+    git_project: ProjectInfo,
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        return [dialog.query_one("#spawn-pick", Button).disabled, note(dialog, "#spawn-pick-note")]
+
+    disabled, shown_note = drive(
+        git_project, scenario, presets={"role": fleet_service.CAPTAIN_ROLE}
+    )
+    assert disabled is True and shown_note is None

@@ -51,6 +51,7 @@ from functools import lru_cache
 from typing import Any
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from aisquare.core import tls
 from aisquare.core.config import ExperimentSettings, load_config
 from aisquare.models import BriefingStatus, ClientReason, HookAction
 from aisquare.services.ci_contract import (
@@ -252,6 +253,12 @@ def exchange(
     hook has already waited too long, and counting it would hide exactly the
     latency being measured.
     """
+    # The opener is built once per process before the clock (on 3.12+ HTTPSHandler builds a
+    # ~3 ms default context of its own). The verified context is the exchange thread's own,
+    # built at its first https request: one per thread, as truststore holds a context's lock
+    # across a handshake (review of #403, m1), and only when a request is sent (n6). A bundle
+    # that will not load raises inside the exchange, which maps it to a reason.
+    _opener()
     started = time.monotonic()
     deadline_s = max(deadline_ms, 1) / 1000.0
     box: list[Exchange] = []
@@ -319,12 +326,15 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-_OPENER = build_opener(_NoRedirect)
+@lru_cache(maxsize=1)
+def _opener() -> Any:
+    """Built on first use; its handler builds the TLS context at the first https request."""
+    return build_opener(_NoRedirect, tls.https_handler())
 
 
 def urlopen(request: Request, timeout: float) -> Any:
-    """The one way this module opens a URL: the redirect-refusing opener."""
-    return _OPENER.open(request, timeout=timeout)
+    """The one way this module opens a URL: the redirect-refusing, verified opener."""
+    return _opener().open(request, timeout=timeout)
 
 
 def _blocking_exchange(

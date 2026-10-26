@@ -89,8 +89,7 @@ from aisquare.services import explainability_ops as ops
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from tests.ci_support import git
-from tests.test_captain_sidebar import until
-from tests.ui_workers import settle_page
+from tests.ui_workers import settle_page, settle_until_held
 
 T = TypeVar("T")
 
@@ -322,6 +321,15 @@ def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[NoTmux]:
     assert not guard.ran, f"a UI test ran tmux: {guard.ran[:3]}"
 
 
+class _NoFleetServer:
+    """A fleet tmux server that is not there: the leftover scan asks it nothing."""
+
+    socket = "asq-none"
+
+    def available(self) -> bool:
+        return False
+
+
 @pytest.fixture(autouse=True)
 def quiet_explainability(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     """No probe dials anything; the client lane answers from a fake; calls are counted."""
@@ -341,6 +349,8 @@ def quiet_explainability(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
         )
 
     monkeypatch.setattr(explainability_service, "shipping_state", shipping_state)
+    # Disable scans for leftovers (#51), the fleet tmux server among them: no server here.
+    monkeypatch.setattr(ops, "_fleet_tmux_server", lambda: _NoFleetServer())
     monkeypatch.setattr(
         ops,
         "probe_proxy",
@@ -424,20 +434,16 @@ def test_the_personas_tab_reads_nothing_until_it_is_opened(
         view = host.query_one(ProjectView)
         seen = [(len(view.query(PersonasTab)), len(reads))]
 
-        # Each opening waits for its read, the handler's last effect: on Windows CI one pause
-        # returned between the tab's mount and its read (main's run 40119046458, #113's
-        # 40134430454: (1, 0)), as ``test_captain_sidebar.until`` says of such handlers.
-        async def opened(tab: str, read: int) -> tuple[int, int]:
+        # Each opening is waited for by the read it makes, not one pause: on a loaded
+        # windows-latest runner the tab had mounted and its on_mount had not yet read.
+        async def open_tab(tab: str, read: int) -> None:
             view.active = tab
-            await until(pilot, lambda: len(reads) >= read, what=f"{tab}'s read")
+            await settle_until_held(pilot.app, lambda: len(reads) >= read, what=f"read {read}")
             await pilot.pause()
-            return len(view.query(PersonasTab)), len(reads)
+            seen.append((len(view.query(PersonasTab)), len(reads)))
 
-        seen += [
-            await opened("tab-personas", 1),
-            await opened("tab-board", 1),
-            await opened("tab-personas", 2),
-        ]
+        for tab, read in (("tab-personas", 1), ("tab-board", 1), ("tab-personas", 2)):
+            await open_tab(tab, read)
         return seen
 
     seen = drive(project, scenario)
@@ -1408,6 +1414,44 @@ def test_explainability_enable_writes_the_switch_and_disable_clears_it(
     assert any(m.startswith("✓ tracing enabled") for m, _ in notices)
     assert any(m.startswith("✓ tracing disabled") for m, _ in notices)
     assert load_config().explainability.target == "stg"  # nothing else was touched
+
+
+def test_disable_offers_reset_for_a_leftover_proxy_and_reset_removes_it(
+    project: ProjectInfo, quiet_explainability: dict[str, int], tmp_path: Path
+) -> None:
+    """#51: Disable left a settings file's ANTHROPIC_BASE_URL in place, unsaid. Now it
+    names it and offers Reset, which removes it (a backup kept) and goes away again."""
+    config = load_config()
+    config.explainability.enabled = True
+    config.explainability.targets["stg"] = ExplainabilityTarget(
+        gateway_url="https://stg-gateway.example", proxy_url="https://stg-proxy.example:9443"
+    )
+    save_config(config)
+    settings = project.root / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(
+        json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://stg-proxy.example:9443"}}),
+        encoding="utf-8",
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[bool, bool, list[Any]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        reset = host.query_one("#explainability-reset", Button)
+        hidden_before = not reset.display
+        await pilot.click("#explainability-disable")
+        await settle(pilot)
+        offered = bool(reset.display)
+        reset.press()
+        await settle(pilot)
+        return hidden_before and not reset.display, offered, list(host.notices)
+
+    hidden, offered, notices = drive(project, scenario)
+    assert offered, notices
+    assert hidden, "hidden until Disable finds something, and again once Reset ran"
+    assert any(str(settings) in m and s == "warning" for m, s in notices), notices
+    assert any(m.startswith("✓ removed the proxy from 1 place") for m, _ in notices), notices
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"env": {}}
 
 
 def test_explainability_ship_drains_through_the_service_and_register_refuses_unconfigured(

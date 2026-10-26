@@ -1736,9 +1736,14 @@ class BadEffortError(ValueError):
 # (a managed slot's number is unique across them), and each agent's PLAIN home —
 # whatever its binary uses in this shell — has a reserved number of its own.
 
-UsageFetch = Callable[[str, Mapping[str, str], float], tuple[int, bytes]]
-"""``(url, headers, timeout) -> (status, body)``: how an agent that reads usage over the
-network reaches it. Supplied by the service layer; core never opens a socket."""
+UsageFetch = Callable[
+    [str, Mapping[str, str], float],
+    tuple[int, bytes] | tuple[int, bytes, Mapping[str, str]],
+]
+"""``(url, headers, timeout) -> (status, body[, headers])``: how an agent that reads usage
+over the network reaches it. Supplied by the service layer; core never opens a socket. The
+answer's headers are optional, so a fetch with none to give still works; they carry a
+429's ``Retry-After``."""
 
 
 class AgentAccounts(Protocol):

@@ -266,25 +266,28 @@ def test_codex_defaults_are_checked_apart_from_claude_codes(
     names = {check.name for check in diagnostics._other_accounts_checks()}
     assert names == {"codex-accounts"}  # nothing arranged: no default line
 
-    service.set_default(str(codex.slot))
+    # The machine default is rank 1 of the one order and never "set" (0.9.0, #406): a project
+    # default is what arranges, and the row says the account a Codex launch there takes.
+    service.set_default(str(codex.slot), project=work)
     checks = {check.name: check for check in diagnostics._other_accounts_checks()}
     default = checks["codex-account-default"]
+    chosen = service.machine_default("codex")
+    assert chosen is not None and chosen.slot == codex.slot
     assert default.status.value == "ok"
-    assert default.detail == f"Codex machine default: slot {codex.slot} (account {codex.slot})"
+    assert default.detail == (
+        f"preferred Codex account: slot {codex.slot} (account {codex.slot}), rank {chosen.position}"
+    )
     # Claude Code has no default of its own, and a Codex one is not it.
     assert diagnostics._claude_accounts_checks() == []
 
-    service.set_default(str(unsigned.slot))
-    checks = {check.name: check for check in diagnostics._other_accounts_checks()}
-    default = checks["codex-account-default"]
-    assert default.status.value == "warn" and "not signed in" in default.detail
-    assert default.fix is not None and f"aisquare accounts run {unsigned.slot} login" in default.fix
-
-    service.set_default(str(codex.slot))
     service.set_disabled(str(codex.slot), True)
     checks = {check.name: check for check in diagnostics._other_accounts_checks()}
-    assert checks["codex-account-default"].status.value == "warn"
-    assert "disabled" in checks["codex-account-default"].detail
+    default = checks["codex-account-default"]
+    assert (
+        default.status.value == "warn" and "no enabled Codex account is signed in" in default.detail
+    )
+    assert default.fix is not None and "aisquare accounts run <slot> login" in default.fix
+    assert unsigned.slot  # skipped, as the disabled one is, by the preferred rung
 
 
 def test_a_codex_roles_binding_and_project_default_are_checked_against_codex_accounts(

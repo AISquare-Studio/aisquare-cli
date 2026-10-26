@@ -59,9 +59,7 @@ leave it alone: it is the captain's home board. You can add it on purpose with
 its own card, which leaves out the captain's row (the captain stays in its own
 section), and the add warns once that this folder holds aisquare's settings, the
 fleet database and every Claude account's login data, which agents working there
-can read and change. It is never packed into a codebase snapshot (`init`,
-`project onboard` and `--refresh` skip it, and doctor says so), so agents there
-get no packed overview. Removing it from the fleet hides it again.
+can read and change. Removing it from the fleet hides it again.
 
 Turn it on for this home in `asq`: *⚙ Settings ▸ Captain* (the box at the top of
 *App settings ▸ Agent settings*), tick *Captain (experimental)*. The ★ beside Fleet and the Captain section above the projects
@@ -457,8 +455,10 @@ is never pressed or pasted into.
 
 Named here so nobody re-derives them:
 
-- **Pull requests waiting on you** through a `gh` provider in the queue's
-  sources (the queue has the item kind; the provider is not wired).
+- **Pull requests waiting on you** through a `gh` provider: **done** in `aisquare
+  watch` (P2-W2). With `[watch] github = true`, the queue's `pr` items are the
+  approved pull requests of each project's GitHub repository, read through `gh api`
+  with ETags ([fleet](fleet.md#watching-the-fleet)).
 - **The captain persona in project pickers**: today every bundled persona shows
   in a project's spawn dialog, the captain's included; hiding a captain-only
   persona is a catalogue rule for every picker.

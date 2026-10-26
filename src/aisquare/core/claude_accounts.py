@@ -87,7 +87,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from aisquare.core import claude_sharing, paths
+from aisquare.core import claude_sharing, paths, tls
 from aisquare.core.harness import MODEL_FAMILIES, model_family
 from aisquare.core.names import name_flaw, name_key
 from aisquare.core.version import __version__
@@ -1379,6 +1379,34 @@ def _window(raw: Any) -> tuple[float | None, datetime | None]:
     return value, when
 
 
+RETRY_AFTER_MAX_SECONDS = 6 * 3600.0
+"""The longest ``Retry-After`` honoured: a header asking for days is a broken header."""
+
+
+def _retry_after(headers: Mapping[str, str], now: datetime) -> float | None:
+    """The seconds an answer's ``Retry-After`` asks to wait — a number, or an HTTP date —
+    clamped to [1 s, :data:`RETRY_AFTER_MAX_SECONDS`]; ``None`` when it sent none we read."""
+    raw = next((value for key, value in headers.items() if key.lower() == "retry-after"), None)
+    if raw is None or not raw.strip():
+        return None
+    seconds: float | None
+    try:
+        seconds = float(raw.strip())
+    except ValueError:
+        from email.utils import parsedate_to_datetime
+
+        try:
+            when = parsedate_to_datetime(raw.strip())
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - now).total_seconds()
+    if seconds != seconds:  # NaN
+        return None
+    return min(RETRY_AFTER_MAX_SECONDS, max(1.0, seconds))
+
+
 _FAMILY_WEEK = "seven_day_"
 """The prefix of a per-family weekly window in the usage payload: ``seven_day_opus``…"""
 MODEL_FAMILY_NAMES = frozenset(MODEL_FAMILIES.values())
@@ -1509,10 +1537,32 @@ def endpoint_usage(
         "User-Agent": f"aisquare-cli/{__version__}",
     }
     try:
-        status, body = fetch(USAGE_URL, headers, USAGE_TIMEOUT_SECONDS)
+        answer = fetch(USAGE_URL, headers, USAGE_TIMEOUT_SECONDS)
     except OSError as exc:  # URLError, a refused connection, a timeout
+        if isinstance(exc, tls.CABundleError):
+            return ClaudeUsage(
+                available=False,
+                reason=f"TLS: the CA bundle could not be loaded — {tls.BUNDLE_FIX}",
+            )
+        if tls.cert_failure(exc):
+            return ClaudeUsage(
+                available=False,
+                reason=f"TLS certificate could not be verified — {tls.CERT_HINT}",
+            )
         return ClaudeUsage(
             available=False, reason=f"could not reach the usage endpoint ({type(exc).__name__})"
+        )
+    status, body = answer[0], answer[1]
+    answered: Mapping[str, str] = answer[2] if len(answer) == 3 else {}
+    wait = _retry_after(answered, now or datetime.now(tz=UTC))
+    if status == 429 or (status == 503 and wait is not None):
+        # Not a login problem: the wait is recorded by the service's ``read_usage`` (F1 of #400).
+        moment = now or datetime.now(tz=UTC)
+        return ClaudeUsage(
+            available=False,
+            reason=f"HTTP {status} from the usage endpoint — rate-limited",
+            rate_limited=True,
+            rate_limited_until=moment + timedelta(seconds=wait) if wait is not None else None,
         )
     if status == 401:
         return ClaudeUsage(

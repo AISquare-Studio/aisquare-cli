@@ -179,16 +179,20 @@ def test_the_hooks_are_read_in_the_home_of_the_account_the_manager_runs_on(
     hooked = first_run.probe_fleet(which=on_path("codex"), sign_in=False)
     assert hooked.home == slot.config_dir and hooked.connected and hooked.trust_pending
     assert f"aisquare's hooks in {slot.config_dir}" in claude_text(hooked, platform="linux").plain
-    # Control: with no Codex default, the manager runs on the plain home, read as before,
-    # where a launch with nothing named takes the default (`pick = "default"`). 0.8.1's own
-    # default, `headroom`, sends it to the signed-in slot that has room, slot 2 here.
+    # The machine default is rank 1 of the one order (0.9.0, #406): the signed-in slot is the
+    # first usable Codex account, so the manager runs on it, whether the launch picks by
+    # headroom (0.8.1's own default) or by the order (`pick = "default"`).
     agents_service.disconnect("codex", slot.config_dir)
-    accounts_service.set_default(None, agent="codex")
     room = first_run.probe_fleet(which=on_path("codex"))
     assert room.home == slot.config_dir and room.account_slot == slot.slot
     config = load_config()
     config.accounts.pick = "default"
     save_config(config)
+    ordered = first_run.probe_fleet(which=on_path("codex"))
+    assert ordered.home == slot.config_dir and ordered.account_slot == slot.slot
+    # Control: with the slot out of every automatic choice, the manager runs on the plain
+    # home, read as before.
+    accounts_service.set_disabled(str(slot.slot), True)
     plain = first_run.probe_fleet(which=on_path("codex"))
     assert plain.home == codex_home and plain.connected and plain.account_slot == 0
 

@@ -30,12 +30,13 @@ all of them must reach it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -101,6 +102,7 @@ from aisquare.cli.ui.sidebar import (
     Sidebar,
     SpawnAgent,
     StopAgent,
+    UpdateSelected,
     agent_name,
 )
 from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
@@ -108,6 +110,15 @@ from aisquare.cli.ui.stop import StopAgentScreen
 from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.ticks import while_running
+from aisquare.cli.ui.update import (
+    CHECK_WORKER,
+    PLAN_WORKER,
+    PRESS_WORKER,
+    REATTACH_WORKER,
+    REFRESH_DEADLINE_SECONDS,
+    REFRESH_WORKER,
+    UpdateScreen,
+)
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, UsageRead, read_session
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.app_settings import AppSettingsView, UiSettingsChanged
@@ -140,10 +151,12 @@ from aisquare.models import (
     ProjectInfo,
 )
 from aisquare.services import claude_accounts as accounts_service
-from aisquare.services import diagnostics, project_groups
+from aisquare.services import diagnostics, install_route, project_groups
 from aisquare.services import fleet as fleet_service
+from aisquare.services import lifecycle as lifecycle_service
 from aisquare.services import project as project_service
 from aisquare.services import settings as settings_service
+from aisquare.services import updates as updates_service
 
 DoctorRunner = Callable[[], list[DoctorCheck]]
 """What the Doctor page runs: ``diagnostics.doctor`` in production, a stub in tests."""
@@ -160,6 +173,23 @@ _AgentHeadroomRead = tuple[str | None, HeadroomSummary, bool]
 """One agent's accounts as the status line read them: the agent (``None`` before the first
 accounts frame, the reader's own default, Claude Code's), the room left across them, and
 whether every enabled one needs a login."""
+
+ReleaseCheck = Callable[[], updates_service.Offer | None]
+"""What the ⬆ row asks whether a newer aisquare is out: ``updates.check_for_release`` in
+production (PyPI at most once a day), a stub in tests."""
+
+UPDATE_HAND_OFF = ("upgrade", "--one-click")
+"""What the ⬆ dialog's *Restart & update* hands the terminal to, as Doctor's Update hands it
+``upgrade --reopen``: no question, and asq back at once on the new version (``--one-click``).
+Unpinned, as ``aisquare upgrade`` installs: a pinned receipt would hold every later ``uv tool
+upgrade`` back (review of #301)."""
+
+NO_PRESS_TO_TAKE = (
+    "the update did not leave its record of the running agents, or it was over ten minutes "
+    "old: none was looked at. Restart all brings back any that went"
+)
+"""The reopen's toast when there is no press to take (``updates.reattach_after_update``)."""
+
 
 _DoctorReport = tuple[Path | None, list[DoctorCheck]]
 """What the doctor worker hands back: the scope it ran for, and its checks."""
@@ -178,6 +208,9 @@ ACCOUNTS_WORKER = "shell-accounts"
 """The thread worker that reads the accounts' frame (``FleetApp.refresh_accounts``)."""
 HEADROOM_WORKER = "sidebar-headroom"
 """The thread worker that reads the status line's headroom (``FleetApp.refresh_headroom``)."""
+HOUSEKEEPING_SECONDS = 30.0
+"""How often asq's housekeeping tick runs (:meth:`FleetApp._housekeeping`): Remote's auto-off,
+and the release check's hourly ask, which has no timer of its own."""
 HEADROOM_SECONDS = 60.0
 """How often the status line's headroom is re-read — never on the two-second tick. A read
 goes to the network only for an account whose cached usage is over five minutes old."""
@@ -302,6 +335,8 @@ class _FleetRead:
     groups: list[ProjectGroup] = field(default_factory=list)
     agents: dict[str, list[FleetAgentStatus]] = field(default_factory=dict)
     notices: dict[str, str] = field(default_factory=dict)
+    live: dict[str, int] = field(default_factory=dict)
+    """Live rows per project, for a collapsed group's members, whose agents are not read."""
     error: str | None = None
     taken_at: datetime = field(default_factory=datetime.now)
     home: ProjectInfo | None = None
@@ -317,18 +352,36 @@ class _FleetRead:
     before Settings switched it on found nothing of it, which is not "no captain"."""
 
 
-def _read_frame(show_captured: bool, captain: bool) -> _FleetRead:
+def _read_frame(
+    show_captured: bool,
+    captain: bool,
+    viewed: Collection[str] | None = None,
+    scope: Collection[str] | None = None,
+) -> _FleetRead:
     """One frame of the sidebar, read on the calling thread: the fleet, then the captain's
-    home board and row when the captain is on (``experimental.captain``)."""
-    read = _read_fleet(show_captured, captain=captain)
+    home board and row when the captain is on (``experimental.captain``). ``viewed`` and
+    ``scope`` as for :func:`_read_fleet`."""
+    read = _read_fleet(show_captured, viewed, scope, captain=captain)
     return replace(_read_captain(read), captain_asked=True) if captain else read
 
 
-def _read_fleet(show_captured: bool, *, captain: bool = False) -> _FleetRead:
+def _read_fleet(
+    show_captured: bool,
+    viewed: Collection[str] | None = None,
+    scope: Collection[str] | None = None,
+    *,
+    captain: bool = False,
+) -> _FleetRead:
     """One frame of the fleet, read on the calling thread: the projects and their groups,
-    then each project's agents. ``list_agents`` asks tmux about every row and ends the dead
-    ones through a store session it opens itself, on this thread too. The captured
-    directories are listed when ``show_captured`` and ``[projects] capture`` both say so.
+    then their agents. One store session reads them all; ``list_agents_many`` then asks
+    each tmux server once, and ends the dead rows through a store session of its own, on
+    this thread too. A project with no recent row, or folded away in a collapsed group, is
+    not read at all (#83). The captured directories are listed when ``show_captured`` and
+    ``[projects] capture`` both say so.
+
+    ``viewed``: the projects an open view shows, read even when folded away, whose view a
+    frame without them would leave to age; ``None`` folds nothing (the first frame, read
+    before the views it reopens). ``scope``: the only projects listed (``ui --project``).
 
     With ``captain``, the captain's home board is read in the same session, by the id
     resolved here: :func:`_read_captain` opened a second session and resolved the home
@@ -345,35 +398,49 @@ def _read_fleet(show_captured: bool, *, captain: bool = False) -> _FleetRead:
             projects = [
                 p
                 for p in store.list_projects(all=show_captured and capturing)
-                if p.id != home_id or p.onboarded_at is not None
+                if (p.id != home_id or p.onboarded_at is not None)
+                and (scope is None or p.id in scope)
             ]
             groups = store.project_groups()
             home = store.get_project(home_id) if captain else None
+            folded = set() if viewed is None else _folded(projects, groups) - set(viewed)
+            listings = fleet_service.read_listings(store, projects, skip=folded)
+            # A manager nudge a draft held back (P0-W2, #276), read in this frame's session.
+            owed = fleet_service.deferred_nudge_targets(store)
     except Exception as exc:  # the store is briefly unavailable — keep what is shown
         return _FleetRead(capturing, error=f"{type(exc).__name__}: {exc}")
-    agents: dict[str, list[FleetAgentStatus]] = {}
+    many = fleet_service.list_agents_many(listings)
+    # A folded project is no key: not read is not "no agents" (`group_header_text`, and
+    # `_feed_open_views`, which leaves a view of one as it is).
+    agents = {p.id: many.agents.get(p.id, []) for p in projects if p.id not in folded}
     notices: dict[str, str] = {}
-    for project in projects:
-        try:
-            statuses = fleet_service.list_agents(project)
-            if project.id == home_id:  # the captain is the captain section's, never the card's
-                statuses = [s for s in statuses if not fleet_service.is_the_captains_row(s.agent)]
-            agents[project.id] = statuses
-        except Exception as exc:  # a bug in the fleet path must not take the view down
-            agents[project.id] = []
-            notices[project.id] = f"agents unavailable — {_why_unread(exc)}"
+    for project_id, failure in many.errors.items():
+        # A bug in the fleet path must not take the view down: said, with its class.
+        notices[project_id] = f"agents unavailable — {_why_unread(failure)}"
+    if home_id in agents:  # the captain is the captain section's, never the card's
+        agents[home_id] = [
+            s for s in agents[home_id] if not fleet_service.is_the_captains_row(s.agent)
+        ]
     # The one write a frame makes: a manager nudge a draft held back goes out once its input
-    # box is clear (P0-W2, #276). One indexed read when nothing is held back; never raises.
-    fleet_service.retry_deferred_nudges()
-    return _FleetRead(capturing, projects, groups, agents, notices, home=home)
+    # box is clear (P0-W2, #276); nothing is opened when nothing is owed.
+    with contextlib.suppress(Exception):
+        fleet_service.send_deferred_nudges(owed)
+    return _FleetRead(capturing, projects, groups, agents, notices, listings.live, home=home)
 
 
-def _why_unread(exc: Exception) -> str:
-    """Why a ``list_agents`` failed, as a card and the captain's section both say it: a
-    ``FleetError`` already says what failed; anything else is named by its class."""
+def _why_unread(exc: BaseException) -> str:
+    """Why a project's agents could not be read, as a card and the captain's section both
+    say it: a ``FleetError`` already says what failed; anything else is named by its class."""
     if isinstance(exc, fleet_service.FleetError):
         return str(exc)
     return f"{type(exc).__name__}: {exc}"
+
+
+def _folded(projects: list[ProjectInfo], groups: list[ProjectGroup]) -> set[str]:
+    """The projects a collapsed group hides: its members, bar the pinned ones, which the
+    Pinned section shows (``project_groups.arrange``)."""
+    collapsed = {group.id for group in groups if group.collapsed}
+    return {p.id for p in projects if p.pinned_at is None and p.group_id in collapsed}
 
 
 def _read_captain(read: _FleetRead) -> _FleetRead:
@@ -837,8 +904,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         headroom: HeadroomReader | None = accounts_service.read_fleet_headroom,
         headroom_seconds: float = HEADROOM_SECONDS,
         remote: RemoteController | None = None,
+        release_check: ReleaseCheck | None = None,
+        after_update: bool = False,
+        scope: Collection[str] | None = None,
     ) -> None:
         super().__init__()
+        self.scope = None if scope is None else frozenset(scope)
+        """The projects ``aisquare ui --project/--group`` listed; ``None`` lists every one."""
         self._workers = self._worker_threads = _WorkerThreads(self)
         """Textual's own manager, which ``self.workers`` reads, and the threads it ran."""
         self._hand_off_since = 0.0
@@ -860,6 +932,39 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.remote.call_back = self.call_later
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
+        self._release_check = release_check
+        self.release: updates_service.Offer | None = None
+        """The newer release the ⬆ row offers; ``None`` while none is (``check_release``)."""
+        self.after_update = after_update
+        """Opened by ``upgrade --one-click``: reattach the agents the press recorded."""
+        self._release_asked_at = 0.0
+        """When the release check was last asked (``time.monotonic``): the housekeeping tick
+        asks again once ``updates.ASK_EVERY_SECONDS`` have passed (:meth:`_housekeeping`)."""
+        self._release_off = release_check is not None and not updates_service.check_enabled()
+        """``[updates] check`` as App settings last read it, off: the row is taken away at once
+        (:meth:`on_ui_settings_changed`); a check asked after reads the setting itself. Seeded
+        from the config asq starts with: seeded on, an asq started with the check off and then
+        switched on asked nothing until the hourly tick (review of #401, m1)."""
+        self._release_stale = False
+        """A check was running as ``[updates] check`` was switched: its answer is dropped, and
+        asked again if the check is on (:meth:`on_ui_settings_changed`)."""
+        self._planned_runnable: tuple[str, bool] | None = None
+        """The release the update dialog's last plan was read for, and whether it could run the
+        update here: the row says what it said for that release, whatever the route alone says
+        at the next check (:meth:`_release_checked`). Another release is the route's again: a
+        passing reason (uv off PATH, a lock) stuck for every later one (review of #401, n2)."""
+        self._refreshed: tuple[str | None] | None = None
+        """PyPI's answer to the update dialog's own ask (``updates.refresh_latest``), once it
+        has landed: ``(None,)`` when the lookup found none. ``None`` while it is out."""
+        self._refresh_worker: Worker[str | None] | None = None
+        """That ask, while its answer still counts: only its answer reaches the dialog and the
+        row. Let go when the dialog closes and at the deadline, so a late answer, or one for a
+        dialog closed since, changes nothing (review of #301, m4, m5)."""
+        self._refresh_deadline: asyncio.TimerHandle | None = None
+        """The ask's deadline (``REFRESH_DEADLINE_SECONDS``), cancelled once it is let go."""
+        self._press_worker: Worker[updates_service.Press] | None = None
+        """*Restart & update*'s read and record of the agents alive at the press: only its
+        answer hands over (:meth:`_update_pressed`)."""
         self._accounts = accounts
         self.accounts_overview: AccountsOverview | None = None
         """The last Accounts frame that was read; ``None`` before the first or when disabled."""
@@ -965,7 +1070,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # The first frame is read here, on the UI thread, before anything is drawn: there
         # is nothing on screen yet for the read to hold up, and what was open last time is
         # reopened from it below. Every frame after it is read in a thread (`refresh_data`).
-        self._paint_fleet(_read_frame(self.show_captured, self.captain_on))
+        self._paint_fleet(_read_frame(self.show_captured, self.captain_on, scope=self.scope))
         self.set_interval(self.refresh_seconds, self.refresh_data)
         # The status line's headroom is the usage cache's, on its own slow clock: never
         # on the two-second tick, which would ask the network as often as it went stale.
@@ -978,12 +1083,19 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # a restored Doctor page runs it itself, as opening it does.
         if not self._restore_selection():
             self.run_doctor()
+        # After the first frame, off the UI thread: the reopen's look at the agents the press
+        # recorded, and the release check, which asks PyPI at most once a day whatever the
+        # hourly ask (`services.updates`).
+        if self.after_update:
+            self._reattach()
+        if self._release_check is not None:
+            self.check_release()
         # wait=False here and below: a Remote that stops runs down on a thread of its own,
         # since stopping uvicorn and ngrok froze the fleet UI for seconds (r3 review of #243).
         self.remote.restore(wait=False)
         # "📡 remote · N devices" under the status line while Remote is on (#33).
         self.query_one("#others").mount(RemoteChip(self.remote, id="remote-chip"))
-        self.set_interval(30.0, self._remote_auto_off)
+        self.set_interval(HOUSEKEEPING_SECONDS, self._housekeeping)
         self.set_interval(30.0, self.remote.revive_tunnel_if_dead)
         # The captain's ui actions (T4): after the first frame, which they resolve against.
         # Only with the captain on, read once at start as the rest of the shell reads it: off,
@@ -1145,6 +1257,22 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         severity: SeverityLevel = "warning" if news.trouble else "information"
         self.notify(news.text, title="Remote", severity=severity, timeout=10, markup=False)
 
+    def _housekeeping(self) -> None:
+        """Every :data:`HOUSEKEEPING_SECONDS`: Remote's auto-off, and the release check's ask
+        once :data:`~aisquare.services.updates.ASK_EVERY_SECONDS` have passed since the last.
+
+        One tick for both, not a timer each: on Windows every pending Textual timer holds a
+        thread of asyncio's default executor for as long as it sleeps (``textual._win_sleep``),
+        and a runner has eight. An hourly interval of the release check's own took one for
+        the app's whole life, and the UI tests whose thread workers then queued behind the
+        timers failed on Windows CI, the same seven twice (runs 39991862850, 40013337378)."""
+        self._remote_auto_off()
+        if (
+            self._release_check is not None
+            and time.monotonic() - self._release_asked_at >= updates_service.ASK_EVERY_SECONDS
+        ):
+            self.check_release()
+
     def _remote_auto_off(self) -> None:
         """The 30 s auto-off check; a Remote whose timer ran out stops without this thread."""
         self.remote.enforce_auto_off(wait=False)
@@ -1273,8 +1401,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # `a`'s choice is read as the read begins, so one held for a hand-over and started
         # when it is called off reads what is shown then.
         self._fleet_since = time.monotonic()
+        viewed = self._viewed_projects()  # asked here, on the UI thread, not in the worker
         self._fleet_worker = self.run_worker(
-            lambda: _read_frame(self.show_captured, self.captain_on),
+            lambda: _read_frame(self.show_captured, self.captain_on, viewed, self.scope),
             name=FLEET_WORKER,
             group=FLEET_WORKER,
             thread=True,
@@ -1378,6 +1507,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             cards,
             notices=read.notices,
             groups=read.groups,
+            live=read.live,
             always_show_paths=self.always_show_project_path,
         )
         self._feed_open_views(self.snapshot)
@@ -1572,6 +1702,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.state in (WorkerState.SUCCESS, WorkerState.ERROR) and self._headroom_owed:
             self.refresh_headroom()
 
+    def _viewed_projects(self) -> frozenset[str]:
+        """The projects an open Project or Agent view shows (:func:`_read_fleet`'s ``viewed``)."""
+        content = self.content
+        return frozenset(
+            [view.project.id for view in content.query_children(ProjectView)]
+            + [view.status.agent.project_id for view in content.query_children(AgentView)]
+        )
+
     def _feed_open_views(self, snapshot: FleetSnapshot) -> None:
         """Hand every open Project/Agent view its row from the new frame.
 
@@ -1612,6 +1750,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 project_view.refresh_project(fresh_project)
             if snapshot.notices.get(fresh_project.id) is not None:
                 continue  # we could not ask — not "the fleet answered: none"
+            if fresh_project.id not in snapshot.agents:
+                continue  # folded away and not read (#83) — not "none" either
             # ProjectView.show() is the MANAGER status renderer; the snapshot
             # goes through refresh_status, which picks the manager out of it.
             project_view.refresh_status(snapshot.agents.get(fresh_project.id, []))
@@ -1706,6 +1846,21 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         if event.worker.name == HEADROOM_WORKER:
             self._headroom_read(event)
+            return
+        if event.worker.name == CHECK_WORKER:
+            self._release_checked(event)
+            return
+        if event.worker.name == PLAN_WORKER:
+            self._update_planned(event)
+            return
+        if event.worker.name == PRESS_WORKER:
+            self._update_pressed(event)
+            return
+        if event.worker.name == REFRESH_WORKER:
+            self._update_refreshed(event)
+            return
+        if event.worker.name == REATTACH_WORKER:
+            self._reattached(event)
             return
         if event.worker.name != _DOCTOR_WORKER:
             return
@@ -2354,6 +2509,343 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if from_keyboard:
             self.query_one("#settings-hub", SettingsHubView).focus_first()
 
+    # --- the ⬆ row: a newer aisquare, and the one-click update ------------------------------
+
+    def check_release(self) -> None:
+        """Ask, off the UI thread, whether a newer aisquare is out
+        (``updates.check_for_release``): at the start, and from the housekeeping tick every
+        hour after (:meth:`_housekeeping`). PyPI is asked only once the last answer is a day
+        old, and a lookup that failed is tried again on the next hour's ask. One at a time."""
+        check = self._release_check
+        if check is None or any(
+            worker.name == CHECK_WORKER and not worker.is_finished for worker in self.workers
+        ):
+            return
+        self._release_asked_at = time.monotonic()
+        self.run_worker(
+            check, name=CHECK_WORKER, group=CHECK_WORKER, thread=True, exit_on_error=False
+        )
+
+    def _release_checked(self, event: Worker.StateChanged) -> None:
+        """Show the ⬆ row for the release the check found, or take it away; the first time a
+        release is found, one toast says so. A check that failed changes nothing, silently."""
+        if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            return
+        if self._release_stale:
+            # Asked before the switch was saved: its answer is for the setting that was.
+            self._release_stale = False
+            if not self._release_off:
+                self.check_release()
+            return
+        if event.state is not WorkerState.SUCCESS:
+            return
+        offer = event.worker.result
+        if offer is not None and not isinstance(offer, updates_service.Offer):
+            return
+        if offer is not None:
+            offer = self._kept_from_the_dialog(offer)
+        self.release = offer
+        if offer is None:
+            self.sidebar.show_update(None)
+            return
+        self.sidebar.show_update(offer.version, runnable=offer.runnable)
+        if offer.announce:
+            how = "restarts asq to update" if offer.runnable else "says how to update this install"
+            self.notify(
+                f"aisquare {offer.version} is out (you run {offer.current}) — ⬆ in the "
+                f"sidebar {how}",
+                timeout=10,
+                markup=False,
+            )
+
+    def _kept_from_the_dialog(self, offer: updates_service.Offer) -> updates_service.Offer:
+        """``offer`` as the check found it, with what the update dialog learned since kept: the
+        newer of the two releases (a check that read before the dialog's ask wrote its answer
+        put the older back), and the dialog plan's word on whether asq can run the update
+        (the route alone undid it at the next check; review of #301, n4)."""
+        shown = self.release
+        if (
+            shown is not None
+            and lifecycle_service.newer_release(shown.version, offer.version) is True
+        ):
+            offer = replace(offer, version=shown.version, announce=False)
+        planned = self._planned_runnable
+        if planned is not None and planned[0] == offer.version:
+            offer = replace(offer, runnable=planned[1])
+        return offer
+
+    def on_update_selected(self, event: UpdateSelected) -> None:
+        """The ⬆ row: read how this install updates, off the UI thread; the dialog opens on
+        the answer (:meth:`_update_planned`). Pressed again while an update's hand-over waits
+        for the reads running, it is Doctor's second press: past the wait, it calls it off."""
+        if self.hand_off is not None:
+            self.on_doctor_view_hand_off(DoctorView.HandOff(self.hand_off))
+            return
+        offer = self.release
+        busy = {PLAN_WORKER, PRESS_WORKER}
+        if (
+            offer is None
+            or isinstance(self.screen, UpdateScreen)
+            or any(worker.name in busy and not worker.is_finished for worker in self.workers)
+        ):
+            # One dialog at a time, and none once a press is writing down the agents: a
+            # second dialog opened then would hand over twice (review of #301).
+            return
+        known = install_route.LatestRelease(offer.version)
+        self._refreshed = None
+        self.run_worker(
+            lambda: lifecycle_service.upgrade_plan(known_latest=known),
+            name=PLAN_WORKER,
+            group=PLAN_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+        # An earlier dialog's ask can still be out: opened, closed with Esc and opened again,
+        # its answer enabled Restart while this one's was out (review of #301, m4).
+        self._let_go_of_refresh()
+        self._refresh_worker = ask = self.run_worker(
+            updates_service.refresh_latest,
+            name=REFRESH_WORKER,
+            group=REFRESH_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+        # The loop's own timer, not a Textual one: on Windows a pending Textual timer holds a
+        # thread of asyncio's default executor (``_housekeeping`` has the story), and stopping
+        # it takes another. The deadline's took the runner's last; the dialog closing on
+        # "nothing newer" waited on it, and its toast never showed (windows-latest, run
+        # 40104926701). Posted to the app, it runs after an answer already queued.
+        self._refresh_deadline = asyncio.get_running_loop().call_later(
+            REFRESH_DEADLINE_SECONDS, self.call_later, self._refresh_overdue, ask
+        )
+
+    def _let_go_of_refresh(self) -> None:
+        """Count no answer of the dialog's ask from here on, and cancel its deadline."""
+        self._refresh_worker = None
+        if self._refresh_deadline is not None:
+            self._refresh_deadline.cancel()
+            self._refresh_deadline = None
+
+    def _refresh_overdue(self, ask: Worker[str | None]) -> None:
+        """``REFRESH_DEADLINE_SECONDS`` passed with ``ask`` unanswered: it found no answer, as
+        a lookup that failed finds none. The lookup's own timeout is per read, so a server
+        trickling its answer held *Restart & update* off for 36 s (review of #301, m5)."""
+        if ask is not self._refresh_worker:
+            return  # answered, or its dialog closed
+        self._let_go_of_refresh()
+        self._refreshed = (None,)
+        if isinstance(self.screen, UpdateScreen):
+            self.screen.show_latest(None)
+
+    def _update_refreshed(self, event: Worker.StateChanged) -> None:
+        """PyPI's answer to the dialog's ask: the number the dialog and the row show. An ask
+        that failed leaves the last check's number, said as unconfirmed. The answer to an ask
+        let go (:meth:`_let_go_of_refresh`) is dropped.
+
+        An answer that nothing is newer than the version that runs takes the row away and
+        says so, and closes the dialog, or keeps it from opening (:meth:`_update_planned`
+        opens none without an offer): before the plan was read, the click opened nothing and
+        the row went in silence (review of #301, m2)."""
+        if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR):
+            return
+        if event.worker is not self._refresh_worker:
+            return
+        self._let_go_of_refresh()
+        result = event.worker.result if event.state is WorkerState.SUCCESS else None
+        found = result if isinstance(result, str) else None
+        self._refreshed = (found,)
+        offer = self.release
+        screen = self.screen if isinstance(self.screen, UpdateScreen) else None
+        current = offer.current if offer is not None else screen.plan.current if screen else None
+        if found is not None and current is not None:
+            if lifecycle_service.newer_release(found, current) is not True:
+                self.release = None
+                self.sidebar.show_update(None)
+                if screen is not None:
+                    screen.dismiss(False)
+                self.notify(
+                    f"aisquare {current} is the newest release — nothing to update",
+                    timeout=8,
+                    markup=False,
+                )
+                return
+            if offer is not None and found != offer.version:
+                self.release = replace(offer, version=found)
+                self.sidebar.show_update(found, runnable=offer.runnable)
+                if self._planned_runnable is not None:
+                    self._planned_runnable = (found, self._planned_runnable[1])
+        if screen is not None:
+            screen.show_latest(found)
+            self._announced(found)
+
+    def _live_agents(self) -> list[FleetAgent]:
+        """Every agent alive in the frame on screen (``ALIVE_STATES``): the ones an update keeps."""
+        if self.snapshot is None:
+            return []
+        return [
+            status.agent
+            for statuses in self.snapshot.agents.values()
+            for status in statuses
+            if status.state in ALIVE_STATES
+        ]
+
+    def _update_planned(self, event: Worker.StateChanged) -> None:
+        """Open the update dialog on the plan read for it, or say why it could not be read.
+
+        Not once a hand-over waits (``hand_off``, Doctor's Update or Uninstall pressed while
+        the plan was read): the click checks it, and the dialog opened over the hand-over all
+        the same (review of #301, n3)."""
+        if event.state in (WorkerState.SUCCESS, WorkerState.ERROR) and self.hand_off is not None:
+            self._let_go_of_refresh()  # no dialog opens to take its answer
+            return
+        offer = self.release
+        if event.state is WorkerState.ERROR:
+            self._let_go_of_refresh()  # no dialog opens to take its answer
+            self.notify(
+                f"could not read how aisquare updates here: {event.worker.error}",
+                severity="error",
+                timeout=8,
+                markup=False,
+            )
+            return
+        plan = event.worker.result
+        if event.state is not WorkerState.SUCCESS or offer is None:
+            return
+        if not isinstance(plan, lifecycle_service.UpgradePlan):
+            return
+        self._planned_runnable = (offer.version, plan.runnable)
+        if plan.runnable != offer.runnable:
+            # The row was decided from the install's route alone; the dialog's plan has the
+            # last word (uv gone from PATH since, say), and the row says what it says.
+            self.release = offer = replace(offer, runnable=plan.runnable)
+            self.sidebar.show_update(offer.version, runnable=plan.runnable)
+        screen = UpdateScreen(plan, len(self._live_agents()), offer.version)
+        if self._refreshed is not None:
+            screen.show_latest(self._refreshed[0])  # PyPI answered before the plan was read
+            self._announced(self._refreshed[0])
+        self.push_screen(screen, self._update_answered)
+
+    def _announced(self, version: str | None) -> None:
+        """The dialog shows ``version``: it is announced, and the next hourly ask toasts it no
+        more (``updates.mark_announced``). Only once a dialog shows it: recorded by the ask
+        itself, a release whose dialog never opened (a plan error, a hand-off pending, an
+        answer let go of) was never toasted (review of #401, n3)."""
+        if version is not None:
+            updates_service.mark_announced(version)
+
+    def _update_answered(self, confirmed: bool | None) -> None:
+        """*Restart & update*: read the agents alive now and write them down, off the UI
+        thread (:meth:`_update_pressed` hands over once that is done). Cancel, Escape and Close
+        change nothing.
+
+        Read again rather than taken from the frame on screen, which is up to a refresh old:
+        an agent that exited since would have been restarted after the reopen (review of
+        #301, m1). The projects asked of are the frame's, the ones the dialog counted from.
+        Closed either way, the dialog's ask is let go: its answer, landing later, is dropped.
+        """
+        self._let_go_of_refresh()
+        if not confirmed or any(
+            worker.name == PRESS_WORKER and not worker.is_finished for worker in self.workers
+        ):
+            return
+        snapshot = self.snapshot
+        project_ids: set[str] = set()
+        if snapshot is not None:
+            project_ids = {project.id for project in snapshot.projects}
+            if snapshot.home is not None:
+                project_ids.add(snapshot.home.id)
+        seen = self._live_agents()
+        self._press_worker = self.run_worker(
+            lambda: updates_service.record_press(
+                updates_service.agents_alive_now(project_ids, seen)
+            ),
+            name=PRESS_WORKER,
+            group=PRESS_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _update_pressed(self, event: Worker.StateChanged) -> None:
+        """Hand the terminal over as Doctor's Update does (:meth:`on_doctor_view_hand_off`),
+        once the agents alive at the press are written down. Without that record the reopen
+        could not restart an agent that went, so a record that could not be written refuses
+        the update; a hand-over refused (a writer still running) leaves no record behind
+        (review of #301, m3). Only the read this dialog started hands over."""
+        if event.worker is not self._press_worker:
+            return
+        if event.state is WorkerState.ERROR:
+            self.notify(
+                f"could not write down the running agents ({event.worker.error}): nothing was "
+                "updated",
+                severity="error",
+                timeout=8,
+                markup=False,
+            )
+            return
+        if event.state is not WorkerState.SUCCESS:
+            return
+        if not isinstance(event.worker.result, updates_service.Press):
+            return
+        self.on_doctor_view_hand_off(DoctorView.HandOff(UPDATE_HAND_OFF))
+        if self.hand_off != UPDATE_HAND_OFF:
+            self._forget_press()
+
+    def _forget_press(self) -> None:
+        """Drop the press's record: the update it was for did not start. A store that will not
+        take it leaves a record only ``ui --after-update`` reads, and the next press rewrites."""
+        try:
+            updates_service.forget_press()
+        except Exception:
+            return
+
+    def _reattach(self) -> None:
+        """Opened by the one-click update: look at the agents the press recorded, off the UI
+        thread, restarting any that is gone (``updates.reattach_after_update``)."""
+        self.run_worker(
+            updates_service.reattach_after_update,
+            name=REATTACH_WORKER,
+            group=REATTACH_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _reattached(self, event: Worker.StateChanged) -> None:
+        """Say what the reopen found of the agents the press kept, and show the restarts.
+
+        No record to take is said too: a hand-over held past ten minutes by a read that hung
+        left the record too old, and the reopen said nothing at all, so an agent gone in the
+        update stayed down unnamed (review of #301, n2)."""
+        if event.state is WorkerState.ERROR:
+            self.notify(
+                f"could not look at the agents the update kept: {event.worker.error}",
+                severity="error",
+                timeout=10,
+                markup=False,
+            )
+            return
+        outcome = event.worker.result
+        if event.state is not WorkerState.SUCCESS:
+            return
+        if outcome is None:
+            self.notify(
+                NO_PRESS_TO_TAKE,
+                severity="warning",
+                timeout=12,
+                markup=False,
+            )
+            return
+        if not isinstance(outcome, updates_service.Reattached):
+            return
+        trouble = bool(outcome.failed) or not outcome.updated
+        self.notify(
+            outcome.toast(),
+            severity="warning" if trouble else "information",
+            timeout=12,
+            markup=False,
+        )
+        if outcome.restarted or outcome.left:  # a row left was ended as it was judged
+            self.refresh_data()
+
     async def on_app_settings_selected(self, event: AppSettingsSelected) -> None:
         """The hub's *App settings*: the machine-wide settings, under *⚙ Settings*, on the
         tab the link names (*Remote control*'s, *Captain*'s)."""
@@ -2388,11 +2880,26 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.refresh_accounts()
 
     def on_ui_settings_changed(self, event: UiSettingsChanged) -> None:
-        """App settings saved, reloaded or reset: the sidebar's directory lines follow now."""
+        """App settings saved, reloaded or reset: the sidebar's directory lines follow now, and
+        the release check. Switched off, the ⬆ row goes at once; switched on, the check asks
+        at once. Both waited for the hourly ask, up to an hour, while the switch's own line
+        said "no ⬆ row", and the row still opened its dialog (review of #301, m2)."""
         always = event.ui.always_show_project_path
         if always != self.always_show_project_path:
             self.always_show_project_path = always
             self.sidebar.show_paths(always)
+        if event.updates is None:
+            return
+        was_off, self._release_off = self._release_off, not event.updates.check
+        if was_off == self._release_off:
+            return
+        if any(worker.name == CHECK_WORKER and not worker.is_finished for worker in self.workers):
+            self._release_stale = True
+        if self._release_off:
+            self.release = None
+            self.sidebar.show_update(None)
+        else:
+            self.check_release()
 
     def on_usage_read(self, event: UsageRead) -> None:
         """The Accounts page read usage (a tick, or *↻ Refresh usage*): the dot reads the
@@ -2569,9 +3076,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         waited = _hand_off_clock() - self._hand_off_since
         if not self._hand_off_overdue and waited >= _HAND_OFF_PATIENCE:
             self._hand_off_overdue = True
+            again = "the ⬆ row" if self.hand_off == UPDATE_HAND_OFF else "Update or Uninstall"
             self.notify(
-                f"Still waiting for {_in_words(running)} after {waited:.0f} s. Press Update "
-                "or Uninstall again to stay in asq; quit, and it runs once they end.",
+                f"Still waiting for {_in_words(running)} after {waited:.0f} s. Press {again} "
+                "again to stay in asq; quit, and it runs once they end.",
                 severity="warning",
                 timeout=10,
             )
@@ -2590,6 +3098,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """
         if self._hand_off_poll is not None:
             self._hand_off_poll.stop()
+        if self.hand_off == UPDATE_HAND_OFF:
+            self._forget_press()  # the ⬆ update that recorded it will not run
         self.hand_off = None
         self._hand_off_overdue = False
         self.notify("Called off: asq carries on", timeout=4)
@@ -2701,6 +3211,7 @@ def _writing_workers() -> dict[str, str]:
         explainability.SAVE_WORKER: "Explainability's setup",
         explainability.REGISTER_WORKER: "Explainability's registration",
         explainability.SHIP_WORKER: "Explainability's ship",
+        explainability.RESET_WORKER: "Explainability's routing reset",
         accounts.SIGN_OUT_WORKER: "an AISquare sign-out",
         accounts.COMPLETE_WORKER: "a Claude sign-in",
         accounts.ABANDON_WORKER: "a Claude sign-in's discard",
@@ -2708,6 +3219,8 @@ def _writing_workers() -> dict[str, str]:
         accounts.ARRANGE_WORKER: "an account change",
         accounts.RENAME_WORKER: "an account's rename",
         PROJECT_REMOVE_WORKER: "a project's removal",
+        REATTACH_WORKER: "the update's restart of the agents it kept",
+        PRESS_WORKER: "the update's record of the running agents",
     }
 
 
@@ -2735,6 +3248,9 @@ def _waited_reads() -> dict[str, str]:
     return {
         _DOCTOR_WORKER: "the doctor's checks",
         FLEET_WORKER: "the sidebar's read of the fleet",
+        CHECK_WORKER: "the release check",
+        PLAN_WORKER: "how aisquare updates here",
+        REFRESH_WORKER: "the update dialog's ask of PyPI",
         ACCOUNTS_WORKER: "the accounts' read",
         HEADROOM_WORKER: "the accounts' headroom",
         doctor.ROUTE_WORKER: "how aisquare was installed",
@@ -2745,6 +3261,7 @@ def _waited_reads() -> dict[str, str]:
         agent.LABELS_WORKER: "an agent's account names",
         board.LABELS_WORKER: "a board's account names",
         explainability.STATUS_WORKER: "Explainability's status",
+        explainability.LEFTOVERS_WORKER: "Explainability's check for leftover routing",
         fleet_bulk.PLAN_WORKER: "Settings ▸ Fleet's read of the running agents",
         app_settings.ACCOUNTS_WORKER: "App settings' accounts",
         welcome.worker_name("look"): "Welcome's checks",
@@ -2787,6 +3304,10 @@ REMOTE_QUIT_QUIET_SECONDS = 0.5
 _HANDED_OVER = {"upgrade": "Update", "uninstall": "Uninstall"}
 """The Doctor's button for each command it hands over (``doctor.HAND_OFFS``)."""
 
+_ASQS_OWN_FLAGS = frozenset({"--reopen", "--one-click"})
+"""The hidden flags asq hands over with, to open it again afterwards: never in a command
+a person is told to type."""
+
 
 def _hand_off_undone(hand_off: tuple[str, ...]) -> str:
     """What a Ctrl-C in the quit's waits says of the hand-over it ends: that the Update or
@@ -2794,13 +3315,13 @@ def _hand_off_undone(hand_off: tuple[str, ...]) -> str:
 
     The Ctrl-C ends the process at once (``remote_server._remote_quit_now``), and said
     nothing of it: a user who pressed it to hurry the upgrade along could not tell that
-    ``aisquare upgrade`` never ran (round 4 of #259). ``--reopen`` is asq's own, to open it
-    again once the command is done, and not asked of a command typed in a shell.
+    ``aisquare upgrade`` never ran (round 4 of #259). ``--reopen`` and ``--one-click`` are
+    asq's own, to open it again once the command is done, and not asked of a command typed
+    in a shell.
     """
     from aisquare.core import selfcli
-    from aisquare.services import install_route
 
-    args = [arg for arg in hand_off if arg != "--reopen"]
+    args = [arg for arg in hand_off if arg not in _ASQS_OWN_FLAGS]
     button = _HANDED_OVER.get(args[0], args[0]) if args else "the hand-over"
     command = install_route.command_line(["aisquare", *selfcli.global_flags(), *args])
     return f"⚠ {button} did not run: asq quit at the Ctrl-C — `{command}` runs it"
@@ -2826,7 +3347,10 @@ def run_ui(**options: Any) -> None:
     """
     from aisquare.services import remote_server
 
-    app = FleetApp(**options)
+    # The release check runs in the asq a person opens, never in an app a test builds unless
+    # the test passes one: each FleetApp started a check worker and an hourly ask, one more
+    # thread worker beside the reads the UI tests time (Windows CI on bff5c05e).
+    app = FleetApp(**{"release_check": updates_service.check_for_release, **options})
     with ngrok_ends_with():
         app.run()
         # Read with getattr so an app still needs only `run()`, `unsaved` and `remote` to be

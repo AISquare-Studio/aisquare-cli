@@ -90,13 +90,13 @@ def test_settings_save_approve_for_me_and_follow_the_roles_agent(tmp_path: Path)
         view = host.query_one(AppSettingsView)
         lines = [str(view.query_one("#role-launch-coder", Static).render())]
         view.query_one("#role-afm-coder", Select).value = "off"
-        await pilot.pause()
+        await settle_page(host)  # the pick's message reaches the form's handler
         lines.append(str(view.query_one("#role-launch-coder", Static).render()))
         view.query_one("#role-family-coder", Select).value = "claude-code"
-        await pilot.pause()
+        await settle_page(host)
         lines.append(str(view.query_one("#role-launch-coder", Static).render()))
         view.query_one("#save-settings", Button).press()
-        await pilot.pause()
+        await settle_page(host)
         return lines
 
     codex, off, claude = drive_app_settings(scenario)

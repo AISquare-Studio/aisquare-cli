@@ -23,6 +23,8 @@ on:
       - tests/install/**
       - tests/test_install_script_*.py
       - .github/workflows/install.yml
+      # The hand-off job serves a release stamped by it.
+      - scripts/stamp_installers.py
       # The Claude Code plugin's launcher is POSIX sh too, checked by `static`.
       - plugins/**
       - .claude-plugin/**
@@ -73,6 +75,7 @@ jobs:
         run: |
           shellcheck --shell=sh install.sh \
             tests/install/cell.sh tests/install/cell-nonroot.sh tests/install/matrix.sh \
+            tests/install/release-cell.sh tests/install/handoff.sh \
             plugins/claude-code/scripts/aisquare-hook \
             plugins/codex/scripts/aisquare-hook
 
@@ -80,6 +83,7 @@ jobs:
         run: |
           shfmt -i 4 -ci -d install.sh \
             tests/install/cell.sh tests/install/cell-nonroot.sh tests/install/matrix.sh \
+            tests/install/release-cell.sh tests/install/handoff.sh \
             plugins/claude-code/scripts/aisquare-hook \
             plugins/codex/scripts/aisquare-hook
 
@@ -98,6 +102,7 @@ jobs:
         run: |
           for script in install.sh tests/install/cell.sh \
             tests/install/cell-nonroot.sh tests/install/matrix.sh \
+            tests/install/release-cell.sh tests/install/handoff.sh \
             plugins/claude-code/scripts/aisquare-hook \
             plugins/codex/scripts/aisquare-hook; do
             dash -n "$script"
@@ -135,7 +140,7 @@ jobs:
               ;;
           esac
           pytest -ra tests/test_install_script_is_posix.py tests/test_install_script_functions.py \
-            tests/test_claude_plugin.py
+            tests/test_install_script_handoff.py tests/test_claude_plugin.py
 
   powershell:
     name: install.ps1 (parse + analyse)
@@ -181,6 +186,42 @@ jobs:
             -Severity Error,Warning -ExcludeRule PSAvoidUsingWriteHost
           if ($found) { $found | Format-Table -AutoSize | Out-String | Write-Host; exit 1 }
           Write-Host "analyzer: clean (PSAvoidUsingWriteHost excluded, see comment)"
+
+      - name: The command install.ps1 hands to WSL (WSL stood in for)
+        shell: pwsh
+        # wsl.exe gives `bash -lc <command>` to the distribution's DEFAULT SHELL,
+        # which sees the command inside double quotes: a `$`, a backtick, a `"`
+        # or a `\` in it would be expanded there, before bash runs it. So the
+        # command must be main's install.sh piped into `sh -s --` with the
+        # arguments and nothing else; main's install.sh hands off to the
+        # release's own inside WSL. The runner has no WSL distribution, so
+        # `wsl.exe` here is a FUNCTION (a function wins over an application of
+        # the same name) that names one distribution and keeps the command.
+        run: |
+          function global:wsl.exe {
+            if ($args -contains '--list') {
+              if ($args -contains '--verbose') { return '* Ubuntu    Running    2' }
+              return 'Ubuntu'
+            }
+            $global:Inner = $args[-1]
+            $global:LASTEXITCODE = 0
+          }
+          $main = 'https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh'
+          $cases = @(
+            @{ Args = @('--yes'); Tail = '--yes' },
+            @{ Args = @('--yes', '--version', '0.9.0'); Tail = '--yes --version 0.9.0' },
+            @{ Args = @('--no-handoff'); Tail = '--no-handoff' }
+          )
+          foreach ($case in $cases) {
+            $global:Inner = $null
+            $forward = $case.Args
+            ./install.ps1 @forward
+            $want = "set -e; curl -fsSL '$main' | sh -s -- $($case.Tail)"
+            Write-Host "$forward -> $global:Inner"
+            if ($global:Inner -ne $want) { Write-Host "expected: $want"; exit 1 }
+            if ($global:Inner -match '[$`"\\]') { Write-Host 'WSL default shell would expand it'; exit 1 }
+          }
+          Write-Host 'install.ps1 hands WSL main''s install.sh, untouched by its default shell'
 
       # The WSL DELEGATION ITSELF IS NOT TESTED HERE, said out loud rather than
       # left as a gap a reader has to notice: GitHub's windows-latest runners do
@@ -255,6 +296,33 @@ jobs:
             -e HOME=/root \
             "${{ matrix.image }}" sh /mnt/tests/install/cell.sh
 
+  handoff:
+    name: main's script hands off to a release's own (dash, BusyBox ash)
+    runs-on: ubuntu-latest
+    needs: static
+    # THE ONE JOB THAT TAKES THE HAND-OFF PATH. Every other job and cell sets
+    # AISQUARE_INSTALL_PACKAGE, --offline or AISQUARE_INSTALL_NO_HANDOFF, because
+    # each grades THIS tree's script; this one grades main's script handing off.
+    # The release is this tree stamped by scripts/stamp_installers.py and served
+    # from a local http.server (GitHub itself is not reachable from a PR), and
+    # the real curl downloads it: hand-off, pin, `curl … | sh`, and a real 404
+    # falling back; then GNU wget and BusyBox wget, with no curl on PATH. All
+    # dry runs; tests/install/handoff.sh has the details.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install dash and BusyBox
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dash busybox
+
+      - name: The hand-off, end to end
+        run: sh tests/install/handoff.sh
+
   macos:
     name: macOS (Homebrew path)
     runs-on: macos-latest
@@ -319,14 +387,11 @@ jobs:
             | sort | tr '\n' ' ')
           echo "not ok: [$amber]"
           # `install` amber would mean uv produced a shape doctor rejects — the
-          # §3.1 claim this whole bootstrap choice rests on. `tiktoken` amber
-          # would mean `--with tiktoken` did not take.
+          # §3.1 claim this whole bootstrap choice rests on.
           case "$amber" in
             *install*)  echo "::error::the install check is amber on macOS"; exit 1 ;;
-            *tiktoken*) echo "::error::tiktoken is amber — --with tiktoken did not take"; exit 1 ;;
           esac
-          # `snapshot` and `brain` are expected here: --no-project registers
-          # nothing, and gbrain is out of scope.
+          # `brain` is expected here: gbrain is out of scope.
 
       - name: Re-run — a current machine installs nothing
         env:
@@ -338,8 +403,10 @@ jobs:
           # The PyPI-named target and --offline, for the same reason
           # tests/install/cell.sh's run 3 uses them: the short-circuit never
           # fires for a local build, and --offline makes "current" independent
-          # of what PyPI happens to serve.
-          sh install.sh --yes --offline --no-project --no-agent | tee /tmp/rerun.log
+          # of what PyPI happens to serve. No hand-off, as in run 3: this
+          # tree's script is the one under test, not the latest release's.
+          AISQUARE_INSTALL_NO_HANDOFF=1 \
+            sh install.sh --yes --offline --no-project --no-agent | tee /tmp/rerun.log
           grep -q 'Nothing to do' /tmp/rerun.log \
             || { echo "::error::the re-run did not short-circuit"; exit 1; }
 
@@ -449,3 +516,22 @@ jobs:
             -e CELL_AGENT=codex \
             -e HOME=/root \
             debian:12 sh /mnt/tests/install/cell.sh
+
+  release-old-node:
+    name: the latest release onto an old Node, no extra
+    runs-on: ubuntu-latest
+    needs: static
+    # The one job that installs FROM PyPI, as everyone who is not CI does. Every
+    # other cell grades a wheel of this tree with --with chrome-devtools, so none
+    # could see the installed release's own doctor rows (the codebase snapshot's,
+    # up to 0.8.2) going amber on Debian's Node 18: review of #399, MAJOR 1.
+    # tests/install/release-cell.sh says what it asserts.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The release, with --yes, onto debian:12's own Node
+        run: |
+          docker run --rm \
+            -v "$PWD:/mnt:ro" \
+            -e HOME=/root \
+            debian:12 sh /mnt/tests/install/release-cell.sh

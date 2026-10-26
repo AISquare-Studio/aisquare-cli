@@ -31,6 +31,7 @@ aisquare-cli[serve]``); the CLI imports it lazily and explains if missing.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -41,11 +42,12 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
-from aisquare.core import agent_sessions, paths
+from aisquare.core import agent_sessions, code_index, paths
 from aisquare.core import credentials as credentials_store
 from aisquare.core.spawn import LAUNCH_AGENT_ENV
-from aisquare.core.store import ContextStore, is_locked_error, store_session
+from aisquare.core.store import BriefChangedError, ContextStore, is_locked_error, store_session
 from aisquare.models import TaskStatus, TeamSession
+from aisquare.services import code as code_service
 from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError, DeliveryUnconfirmedError, TeamDisabledError
@@ -220,6 +222,11 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
         ) from exc
     except (ClaimLostError, project_service.NotAdded) as exc:
         raise _tool_error(f"error: {exc}") from exc
+    except BriefChangedError as exc:
+        # A correction that lands while `task done` runs (the evidence gate): a RuntimeError,
+        # so without this it reached the client as a raw tool exception, not the stable
+        # wording remote agents correct themselves from (review of #341, finding 5).
+        raise _tool_error(f"error: {exc}; run task_update done again") from exc
     except DeliveryUnconfirmedError as exc:
         # The #20 contract crosses the remote surface too: an unconfirmed
         # write must reach the agent as the error wording, never a raw
@@ -436,6 +443,39 @@ def recall(query: str) -> str:
     return _guard(run)
 
 
+def code_lookup(query: str, mode: str = "find", limit: int = 20) -> str:
+    """Ask the project's symbol index before you grep.
+
+    ``mode``: ``find`` (where ``query`` is defined), ``refs`` (every use of it),
+    ``similar`` (definitions with like names: run it before writing a new helper;
+    ``query`` may be ``path:line``). Returns JSON.
+    """
+
+    def run() -> str:
+        if mode == "find":
+            return json.dumps(
+                {"symbols": [s.as_json() for s in code_service.find_symbols(query, limit=limit)]}
+            )
+        if mode == "refs":
+            return json.dumps(
+                {"refs": [r.as_json() for r in code_service.find_refs(query, limit=limit)]}
+            )
+        if mode == "similar":
+            anchor, found = code_service.find_similar(query, limit=limit)
+            return json.dumps(
+                {
+                    "anchor": anchor.as_json() if anchor is not None else None,
+                    "similar": [item.as_json() for item in found],
+                }
+            )
+        raise _tool_error(f"error: mode must be find, refs or similar, not {mode!r}")
+
+    try:
+        return _guard(run)
+    except code_service.CodeIndexError as exc:
+        raise _tool_error(f"error: {exc}") from exc
+
+
 # --- server assembly ------------------------------------------------------------
 
 
@@ -545,6 +585,12 @@ def build_server(*, team: bool | None = None) -> MCPServer:
 
     if ci_recall.available():
         server.add_tool(ci_recall.collective_intelligence_recall)
+
+    # The symbol index's tool (#285), only where it has something to answer: a tool
+    # every call of which says "no index" is noise in every client's tool list.
+    with contextlib.suppress(Exception):
+        if code_index.ready(code_service.project_here().id):
+            server.add_tool(code_lookup)
 
     exact_error_results(server)
     return server

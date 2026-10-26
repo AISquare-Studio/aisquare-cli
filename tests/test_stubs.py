@@ -30,6 +30,11 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("board",),
     ("recall",),
     ("launch",),
+    ("exec",),
+    ("reports", "list"),
+    ("reports", "show"),
+    ("reports", "prune"),
+    ("reports", "stats"),
     ("serve",),
     ("captain", "serve"),
     ("captain",),
@@ -73,12 +78,21 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "pause",
             "resume",
             "switch",
+            "capacity",
+            "gate",
         )
     ),
+    ("code", "find"),
+    ("code", "refs"),
+    ("code", "similar"),
+    ("code", "index"),
+    ("accounts", "share"),
     ("explainability", "status"),
     ("explainability", "env"),
     ("explainability", "enable"),
     ("explainability", "disable"),
+    ("explainability", "reset"),
+    ("explainability", "post-root"),
     ("explainability", "register"),
     ("explainability", "ship"),
     ("explainability", "key"),
@@ -89,6 +103,12 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("hook", "user-prompt-submit"),
     ("hook", "stop-failure"),
     ("hook", "hand-over"),
+    ("hook", "auto-stop"),
+    ("project", "group", "parent"),
+    ("project", "group", "route"),
+    ("project", "group", "cap"),
+    ("watch",),
+    ("watch", "show"),
     ("hook", "compact-check"),
     ("hook", "session-end"),
     ("hook", "stop"),
@@ -130,6 +150,10 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "drop",
             "release",
         )
+    ),
+    *(
+        ("brief", command)
+        for command in ("create", "list", "show", "update", "link", "evidence", "finding", "check")
     ),
     *(
         (group, command)

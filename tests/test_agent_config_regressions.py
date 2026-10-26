@@ -611,12 +611,13 @@ def test_an_exporter_in_the_home_of_the_account_the_launch_runs_on_is_kept(
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", Mock())
     slot = claude_accounts.create_account("codex")
     (slot.config_dir / "config.toml").write_text('[otel]\nexporter="none"\n')
-    accounts_service.set_default(str(slot.slot))
-    result = runner.invoke(app, ["launch", "coder", "--agent", "codex"])
+    # Named by the flag: the preferred rung (rank 1) skips an account with no login yet.
+    result = runner.invoke(
+        app, ["launch", "coder", "--agent", "codex", "--account", str(slot.slot)]
+    )
     assert result.exit_code == 0, result.output
     assert "keeps your configured exporter" in result.output and not start.called
     # Control: on the shell's own home, which configures none, the receiver starts.
-    accounts_service.set_default(None, agent="codex")
     result = runner.invoke(app, ["launch", "coder", "--agent", "codex"])
     assert result.exit_code == 0, result.output
     assert start.call_count == 1

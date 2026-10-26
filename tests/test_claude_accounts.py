@@ -1287,3 +1287,27 @@ def test_accounts_usage_shows_each_family_week_beside_the_week() -> None:
     _session, week = _usage_cells(reading, now=NOW)
     assert week.startswith("20% · resets in 2d")
     assert " · opus 100% resets in 1d" in week
+
+
+def test_a_family_week_whose_reset_has_passed_says_reset_not_resets_now() -> None:
+    """The tester's pass on #401, (b): a live reading whose Sonnet week reset an hour ago
+    printed 'sonnet 45% resets now'. It says the week reset, as a reset session or week
+    does (#408), and the figure for the window that is over goes."""
+    from aisquare.cli.accounts import _usage_cells
+    from aisquare.models import ClaudeUsage
+
+    reading = ClaudeUsage(
+        available=True,
+        session_percent=10.0,
+        week_percent=20.0,
+        week_resets_at=NOW + timedelta(days=2),
+        family_week_percent={"opus": 60.0, "sonnet": 45.0},
+        family_week_resets_at={
+            "opus": NOW + timedelta(days=1),
+            "sonnet": NOW - timedelta(hours=1),
+        },
+    )
+    _session, week = _usage_cells(reading, now=NOW)
+    assert " · sonnet reset 1h ago" in week, week
+    assert "45%" not in week and "resets now" not in week
+    assert " · opus 60% resets in 1d" in week, "a family week still running is as before"

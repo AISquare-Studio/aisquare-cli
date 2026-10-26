@@ -1024,6 +1024,11 @@ def disable() -> None:
         else None
     )
 
+    # The rest of the leftovers (#51): the same proxy in a settings file, a
+    # binding or the fleet tmux server outlives the switch and kills every
+    # launch once the proxy stops. Named here, removed by `reset`.
+    leftovers = [source for source in ops.routing_sources() if source.stale]
+
     if get_state().json_output:
         # The stale-export warning is the only thing here an operator ACTS on,
         # so it survives into the machine-readable form rather than being
@@ -1039,6 +1044,7 @@ def disable() -> None:
                         if stale is None
                         else {"variable": RESERVED_ENV_VARS[0], "value": stale}
                     ),
+                    "leftovers": [source.as_json() for source in leftovers],
                 }
             )
         )
@@ -1052,6 +1058,93 @@ def disable() -> None:
             "launches from here keep using the proxy and will fail once it stops. "
             f"We cannot change your shell: unset {names}"
         )
+    files = [source for source in leftovers if source.kind != "process"]
+    if files:
+        typer.echo("  still routing to a proxy of ours:")
+        for source in files:
+            typer.echo(f"    {source.where}: {source.base_url or 'our identity headers'}")
+        typer.echo(f"  remove them: {ops.RESET_COMMAND}")
+
+
+@app.command("post-root", hidden=True)
+def post_root(
+    gateway_url: Annotated[str, typer.Argument(help="The active target's gateway.")],
+    agent_name: Annotated[str, typer.Argument(help="The session's X-Agent-Name.")],
+    pipeline_id: Annotated[str, typer.Argument(help="The session's pipeline id.")],
+) -> None:
+    """Post a launched session's Run root — the detached half of a traced launch (#129 e).
+
+    Started by ``wire_session`` with the workspace key on stdin, never in argv.
+    """
+    key = sys.stdin.readline().strip()
+    if not key:
+        fail(
+            "no workspace key on stdin — this worker is started by a traced launch", error="no_key"
+        )
+    verdict = ops.post_run_root(gateway_url, key, agent_name, pipeline_id)
+    raise typer.Exit(0 if verdict.ok else 1)
+
+
+@app.command("reset")
+def reset_command(
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Say what would change; change nothing.")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Apply without asking.")] = False,
+) -> None:
+    """Turn tracing off and remove every leftover ANTHROPIC_BASE_URL of ours (targets kept).
+
+    Settings files (a backup kept beside each), role bindings and the fleet tmux
+    server lose the proxy and its headers; your own gateway is left alone. A
+    shell cannot be changed from here: the unset line and the rc files that
+    mention the variables are printed, never edited.
+    """
+    as_json = get_state().json_output
+    if not dry_run and not yes:
+        with expected_config_write_errors():  # a plan writes nothing; the guard reads names
+            plan = ops.reset_routing(dry_run=True)
+        if plan.nothing_to_reset:
+            _print_reset(plan, as_json=as_json)
+            return
+        if as_json:
+            fail(
+                "reset changes files: pass --yes to apply, or --dry-run to only look",
+                error="confirmation_required",
+            )
+        _print_reset(plan, as_json=False)
+        if not typer.confirm("Apply?"):
+            raise typer.Exit(1)
+    with expected_config_write_errors():
+        report = ops.reset_routing(dry_run=dry_run)
+    _print_reset(report, as_json=as_json)
+    if report.failed:
+        raise typer.Exit(1)
+
+
+def _print_reset(report: ops.RoutingReset, *, as_json: bool) -> None:
+    if as_json:
+        typer.echo(json.dumps(report.as_json()))
+        return
+    if report.nothing_to_reset:
+        typer.echo("✓ nothing to reset — tracing is off and no leftover of ours routes an agent")
+    else:
+        would = "would " if report.dry_run else ""
+        if report.tracing_was_on:
+            typer.echo(f"{'·' if report.dry_run else '✓'} {would}turn tracing off (targets kept)")
+        for source in report.removed:
+            mark = "·" if report.dry_run else "✓"
+            typer.echo(f"{mark} {would}remove {', '.join(source.variables)} from {source.where}")
+        for source, why in report.failed:
+            typer.echo(f"✗ {source.where}: {why}")
+        for backup in report.backups:
+            typer.echo(f"  backup: {backup}")
+    if report.shell_unset:
+        typer.echo(f"  this shell still exports them — we cannot change it: {report.shell_unset}")
+    for rc in report.rc_files:
+        typer.echo(f"  mentioned in {rc} (not edited — remove it there if it is ours)")
+    if not report.dry_run:
+        for source in (s for s in report.remaining if s.kind != "process"):
+            typer.echo(f"  still set: {source.where} — {source.fix}")
 
 
 @app.command()

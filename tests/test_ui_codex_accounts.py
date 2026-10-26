@@ -252,11 +252,11 @@ def test_a_codex_row_says_how_old_its_reading_is_and_never_asks_to_open_a_sessio
     }
     assert (shown_row["slot"], shown_row["name"]) == ("4", "account 4")
     assert (shown_row["email"], shown_row["plan"]) == ("me@example.com", "plus")
-    assert (shown_row["session"], shown_row["week"]) == ("▮▮▯▯▯ 42%", "▯▯▯▯▯ 7%")
-    assert shown_row["status"] == "as of 3h ago"
+    # The age is said beside the bar, as a kept reading's is; the whole line is the tooltip.
+    assert (shown_row["session"], shown_row["week"]) == ("▮▮▯▯▯ 42% · 3h", "▯▯▯▯▯ 7%")
     unfinished = account_cells(_codex_status(0, "me@example.com", signed_in=False), None, now=NOW)
     assert unfinished["name"].plain == "plain codex"
-    assert unfinished["status"].plain == "⚠ login incomplete"  # never "token missing": Claude's
+    assert unfinished["session"].plain == "⚠ login incomplete"  # never "token missing": Claude's
     # A Claude row never carries an age: its reading is taken now, over the network.
     claude = ClaudeAccountStatus(
         account=ClaudeAccount(slot=1, config_dir=Path("/h/.claude")),
@@ -264,7 +264,7 @@ def test_a_codex_row_says_how_old_its_reading_is_and_never_asks_to_open_a_sessio
         identity=ClaudeIdentity(email="me@example.com"),
         signed_in=True,
     )
-    assert "as of" not in account_cells(claude, reading, now=NOW)["status"].plain
+    assert "3h" not in account_cells(claude, reading, now=NOW)["session"].plain
     assert reading_age(reading.model_copy(update={"fetched_at": NOW}), now=NOW) == ""
     assert reading_age(reading.model_copy(update={"fetched_at": None}), now=NOW) == ""
     old = reading.model_copy(update={"fetched_at": NOW - timedelta(days=3)})
@@ -321,13 +321,14 @@ def test_a_codex_slot_renders_in_the_one_table_with_offline_usage_bars(
     assert seen["in_table"], "every agent's rows are in the one table"
     assert f"{slot}  account {slot}" in seen["line"]
     assert seen["cells"]["agent"] == "Codex"
-    assert "codex@example.com  plus" in seen["line"]
+    assert "codex@example.com  ▮▮▯▯▯ 42% · 3h" in seen["line"] and seen["line"].endswith("plus")
     shown_cells = seen["cells"]
-    assert (shown_cells["session"], shown_cells["week"]) == ("▮▮▯▯▯ 42%", "▯▯▯▯▯ 7%")
-    assert shown_cells["session-resets"].startswith("in ") and shown_cells["status"] == (
-        "as of 3h ago"
-    )
-    assert not seen["add"] and seen["remove"] and not seen["login"]
+    # The reading's age is said beside its bar, as a kept reading's is: a rollout's is as
+    # old as its last turn.
+    assert (shown_cells["session"], shown_cells["week"]) == ("▮▮▯▯▯ 42% · 3h", "▯▯▯▯▯ 7%")
+    assert shown_cells["session-resets"].startswith("in ") and shown_cells["plan"] == "plus"
+    # A signed-in row offers *Log in again* (0.9.0), the same sign-in as *Log in*.
+    assert not seen["add"] and seen["remove"] and seen["login"]
     assert offline == []  # read from the rollout: no request was made for it
 
 
@@ -486,26 +487,6 @@ def test_log_in_over_a_codex_slots_stale_login_waits_for_codex_login_to_replace_
     assert closed and completed == [account.slot]
     [window] = windows
     assert window["command"][-4:] == ["accounts", "run", str(account.slot), "login"]
-
-
-def test_default_on_a_codex_row_sets_the_codex_default_and_leaves_claudes_alone() -> None:
-    account = core.create_account(CODEX)
-    _sign_in_codex(account.config_dir, "codex@example.com")
-    overview = _real_overview()
-    slot = account.slot
-
-    async def go(pilot: Pilot[None]) -> str:
-        app = fleet_app(pilot)
-        view = await open_accounts(pilot)
-        await press(pilot, f"#account-default-{slot}")
-        await settle_until(app, lambda: "default" in notice(view))
-        return notice(view)
-
-    said = drive(go, overview=overview)
-    assert said == f"✓ slot {slot} is the Codex machine default"
-    codex_default = accounts_service.machine_default(CODEX)
-    assert codex_default is not None and codex_default.slot == slot
-    assert accounts_service.machine_default() is None  # Claude Code's own is untouched
 
 
 def test_a_codex_account_moves_above_a_claude_one_in_the_one_order_at_80x24(

@@ -366,7 +366,15 @@ FLEET_DENY_TOOLS = (
 
 
 def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
-    """The six fleet roles and their built-in launch shape (docs/plans/fleet-tui.md §3.6).
+    """The six fleet roles and their built-in launch shape (docs/plans/fleet-tui.md §3.6),
+    and the role-less agent's (``harness.PLAIN_ROLE``, the Spawn dialog's *(none)*).
+
+    ``agent`` is here so ``config get/set/list fleet.roles.agent.*`` know it as they know
+    any role, at the shape spawn gave it when no table named it (``FleetRoleSettings()``).
+    A default, not a table ``set`` seeds: seeded, every unrelated ``config set`` wrote it,
+    and ``holds_a_setting`` then read the file as holding a setting, which undid #261's
+    reset/backup rule (review of #405, M1). At its default it is left out of the file
+    (``_with_whole_role_tables``).
 
     ``ui-tester`` carries no ``extra_args`` here: its ``--chrome`` is the role's own
     default (``harness.ROLE_PROFILES[...].default_args``) and is added by ``launch``
@@ -398,6 +406,7 @@ def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
         "reviewer": FleetRoleSettings(worktree=True, board_context="none"),
         "validator": FleetRoleSettings(),
         "ui-tester": FleetRoleSettings(),
+        _plain_role(): FleetRoleSettings(),
     }
 
 
@@ -407,6 +416,13 @@ def built_in_extra_args(role: str) -> list[str]:
     does not name."""
     default = _default_fleet_roles().get(role)
     return list(default.extra_args) if default is not None else []
+
+
+def _plain_role() -> str:
+    """``harness.PLAIN_ROLE``, imported here: harness imports this module back."""
+    from aisquare.core.harness import PLAIN_ROLE
+
+    return PLAIN_ROLE
 
 
 #: The reviewer's built-in ``extra_args`` from 0.8.0 to 0.8.2: Claude Code without the
@@ -715,6 +731,28 @@ def _migrate(data: dict[str, Any]) -> None:
     # wrote, and a file one of them saved whole again still says 2 once there is a 3.
     if version >= _FIRST_SPARSE_VERSION and _written_whole(data):
         _keep_only_what_v1_did_not_write_by_default(data)
+    _carry_snapshot_ignore(data)
+
+
+def _carry_snapshot_ignore(data: dict[str, Any]) -> None:
+    """A ``[snapshot] ignore`` list, read as ``[code] ignore`` when that has none.
+
+    The code index (#285) read its extra ignore patterns from ``[snapshot]``, the
+    codebase pack's section, which #399 retired with the pack (:data:`RETIRED_SECTIONS`:
+    loaded, then dropped at the next save). The patterns outlive the pack: read here,
+    they are written under ``[code]`` by that save, so no user setting is lost. A
+    ``[code] ignore`` already set wins. Not a version step: a file at any version can
+    still hold the section.
+    """
+    snapshot = data.get("snapshot")
+    if not isinstance(snapshot, dict):
+        return
+    ignore = snapshot.get("ignore")
+    if not isinstance(ignore, list) or not ignore:
+        return
+    code = data.setdefault("code", {})
+    if isinstance(code, dict) and "ignore" not in code:
+        code["ignore"] = list(ignore)
 
 
 def _versioned(dumped: dict[str, Any]) -> dict[str, Any]:
@@ -740,6 +778,18 @@ class FleetSettings(BaseModel):
     how often the manager's Stop hook may keep it going on new board events;
     ``deny_tools`` are the Claude Code tools every role launches without
     (:data:`FLEET_DENY_TOOLS` by default), wherever it starts.
+
+    Admission (#283): ``max_agents_total`` caps the live agents across every project,
+    the captain excluded (``0``: no budget); ``min_free_mb`` refuses a spawn below that
+    much available memory, or at critical memory pressure (``0``: off);
+    ``test_gate_mb`` is ``fleet gate``'s floor (``0``: ``min_free_mb``) and
+    ``test_gate_wait_minutes`` how long the gate waits for it.
+
+    Auto-stop (P2-W1b, #283): with ``auto_stop_finished`` a worker of a role in
+    ``auto_stop_roles`` that has finished — its task closed (or a ``result`` posted),
+    nothing claimed, nothing addressed to it unread, nothing queued for it, an empty input
+    box — and has sat idle ``auto_stop_idle_minutes`` is stopped, ``actor=auto-stop``.
+    Coders are not in the default list: a coder in review may be reopened.
 
     ``first_prompt`` is how an agent's first message reaches it (P0-W1a, #122):
     ``argv``, Claude Code's own command line (``claude -- "<prompt>"``), for a Claude
@@ -787,6 +837,19 @@ class FleetSettings(BaseModel):
     quiet_compact_state_max_age: float = Field(default=20.0, ge=0)
     quiet_compact_resume: bool = False
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
+    max_agents_total: int = 0
+    min_free_mb: int = 2048
+    test_gate_mb: int = 0
+    test_gate_wait_minutes: int = 15
+    auto_stop_finished: bool = True
+    auto_stop_idle_minutes: float = Field(default=5.0, ge=0)
+    auto_stop_roles: list[str] = Field(
+        default_factory=lambda: ["tester", "reviewer", "validator", "ui-tester"]
+    )
+    pane_clipboard: Literal["off", "on"] = "off"
+    """Whether a program in an agent's pane may set your clipboard (OSC 52, tmux's
+    ``set-clipboard``). Off by default: on, any program a pane runs can write it. Applies
+    to a server started after the change."""
 
 
 class AgentModelDefault(BaseModel):
@@ -804,35 +867,54 @@ class AgentSettings(BaseModel):
     models: dict[str, AgentModelSettings] = Field(default_factory=dict)
 
 
-class SnapshotSettings(BaseModel):
-    """The codebase snapshot ``aisquare project onboard`` packs with Repomix.
+class WatchSource(BaseModel):
+    """One operator command ``aisquare watch`` runs (``[watch.sources.<name>]``): it prints
+    JSON lines ``{"id", "project", "kind", "summary"}``, every ``every_seconds``."""
 
-    ``max_tokens`` is the budget a pack must fit. The full pack is tried first,
-    then the compressed one (signatures only); a repo whose compressed pack is
-    STILL over it keeps that pack as the skeleton with its per-file index —
-    status ``skeleton_only``, every count recorded, ``onboard`` and ``doctor``
-    naming the numbers — rather than getting nothing. 150 000 mirrors the
-    server's ``REPO_PACK_MAX_TOKENS`` so artifacts stay consistent for a future
-    sync — raise it for a repo you know is big, or leave more out, with
-    ``ignore`` below or a ``.repomixignore`` at the repo root (#82).
+    command: list[str] = Field(default_factory=list)
+    every_seconds: int = Field(default=300, ge=1)
 
-    ``ignore`` is the operator's own list of what to leave out of the pack, in
-    the glob syntax repomix's ``--ignore`` takes (``**/fixtures/**``,
-    ``docs/generated/**``, ``*.snap``). It EXTENDS the built-in list
-    (``core.snapshot.DEFAULT_IGNORE``: dependency trees, build output, caches,
-    this tool's worktrees, and any nested git repository or worktree found
-    below the root) rather than replacing it, and the repo's own ``.gitignore``
-    and ``.repomixignore`` apply on top, read by repomix itself. On the command
-    line the items are comma-separated, as repomix's own flag is::
 
-        aisquare config set snapshot.ignore '**/fixtures/**,docs/generated/**'
+class WatchSettings(BaseModel):
+    """``aisquare watch``, the fleet's one non-AI watcher (P2-W2, #284): what a manager
+    would otherwise watch with its own turns.
 
-    Read from the config file alone, like ``[fleet]``: there is no
-    ``AISQUARE_SNAPSHOT_*`` variable for either key, because this layer has no
-    per-key environment rung and one section is not the place to grow one.
+    ``interval_seconds`` is one tick. ``github`` (off by default: it leaves the machine)
+    asks GitHub for each project's open pull requests every ``github_every_seconds``,
+    with ETags, so an unchanged answer costs no rate limit. ``auto_stop`` runs P2-W1b's
+    ``reap --finished`` each tick. ``sources`` are the operator's own commands.
     """
 
-    max_tokens: int = 150_000
+    interval_seconds: int = Field(default=60, ge=1)
+    github: bool = False
+    github_every_seconds: int = Field(default=120, ge=1)
+    auto_stop: bool = True
+    sources: dict[str, WatchSource] = Field(default_factory=dict)
+
+
+class CodeSettings(BaseModel):
+    """``[code]`` — the per-project symbol index behind ``aisquare code`` (#285).
+
+    ``enabled`` builds the index when a project is onboarded (``project onboard``,
+    ``--refresh``) and lets a session start refresh it in the background; ``false``
+    leaves ``aisquare code index`` as the only way to build one. ``max_file_kb``: a
+    file larger than this is not indexed (a generated bundle, a vendored blob).
+
+    ``ignore`` is the operator's own list of what the index leaves out, as globs
+    (``**/fixtures/**``, ``docs/generated/**``, ``*.snap``). It EXTENDS the built-in
+    list (``core.ignore.DEFAULT_IGNORE``: dependency trees, build output, caches, this
+    tool's worktrees, and any nested checkout below the root), and git's own ignores
+    apply first. On the command line the items are comma-separated::
+
+        aisquare config set code.ignore '**/fixtures/**,docs/generated/**'
+
+    It was ``[snapshot] ignore`` until 0.9.0 removed the codebase pack (#399); a file
+    that still holds that value has it read here, and written here at the next save
+    (:func:`_carry_snapshot_ignore`).
+    """
+
+    enabled: bool = True
+    max_file_kb: int = 1024
     ignore: list[str] = Field(default_factory=list)
 
 
@@ -901,10 +983,12 @@ class AccountsSettings(BaseModel):
     saved keeps either only where it differs from them (``_V1_DEFAULTS``).
 
     ``prefer`` orders the accounts under ``switch_at`` (#277): ``priority``, the default,
-    takes the first in the operator's order; ``reset-soonest`` takes the one whose weekly
-    window resets first, priority breaking ties, so a week's allowance is spent before it
-    lapses rather than draining accounts with days still to run. It applies to a launch's
-    pick and to a hand-over's. The week is the shared seven-day window's reset, for every
+    takes the first in the operator's order, rank 1 (the machine default, #406) first;
+    ``reset-soonest`` takes the one whose weekly window resets first, priority breaking
+    ties, so a week's allowance is spent before it lapses rather than draining accounts
+    with days still to run. It applies to a launch's headroom pick and to a hand-over's;
+    under ``pick = "default"`` the preferred account, rank 1, decides and ``prefer`` is
+    not read. The week is the shared seven-day window's reset, for every
     agent: a family week (Opus, Sonnet) only ever makes an account read fuller.
 
     ``cross_agent_handover``, on by default, lets a limit's hand-over cross agents once the
@@ -920,6 +1004,13 @@ class AccountsSettings(BaseModel):
     ``share_settings``, off by default, keeps every managed account's ``settings.json``
     a link to the plain claude's. Both: ``core.claude_sharing``.
 
+    ``share`` (P2-W7, #198), empty by default, names what every account has in common:
+    ``memory`` (one auto-memory directory per project under
+    ``~/.aisquare/claude-shared/memory``, passed to each launch as ``--settings``),
+    ``skills``, ``agents``, ``commands`` and ``claude_md`` (each managed slot's entry a
+    link to the plain claude's, its own kept beside it), and ``plugins`` (experimental).
+    ``aisquare accounts share`` turns parts on and off; a launch links a slot made since.
+
     Read from the config file alone, like ``[fleet]``: there is no
     ``AISQUARE_ACCOUNTS_*`` variable, for the same reason that section gives.
     """
@@ -932,6 +1023,20 @@ class AccountsSettings(BaseModel):
     cross_agent_handover: bool = True
     share_trust: bool = True
     share_settings: bool = False
+    share: list[Literal["memory", "skills", "agents", "commands", "claude_md", "plugins"]] = Field(
+        default_factory=list
+    )
+
+
+class UpdatesSettings(BaseModel):
+    """``[updates]`` — asq's daily release check (``services.updates``).
+
+    ``check`` on, the default: asq asks PyPI at most once a day whether a newer aisquare is
+    out and, when one is, offers it under *⚙ Settings*. Off, it never asks. ``aisquare
+    upgrade`` asks whenever it is run, whatever this says.
+    """
+
+    check: bool = True
 
 
 class UiSettings(BaseModel):
@@ -964,11 +1069,36 @@ class AppConfig(BaseModel):
     team: TeamSettings = Field(default_factory=TeamSettings)
     fleet: FleetSettings = Field(default_factory=FleetSettings)
     accounts: AccountsSettings = Field(default_factory=AccountsSettings)
-    snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
+    updates: UpdatesSettings = Field(default_factory=UpdatesSettings)
     experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
     experimental: ExperimentalSettings = Field(default_factory=ExperimentalSettings)
     persona: PersonaSettings = Field(default_factory=PersonaSettings)
+    watch: WatchSettings = Field(default_factory=WatchSettings)
+    code: CodeSettings = Field(default_factory=CodeSettings)
     ui: UiSettings = Field(default_factory=UiSettings)
+
+
+#: Sections an older build read and this one does not, each with why. An unknown section
+#: is kept by a save (:func:`_keep_unknown`), since a newer build may read it; these are
+#: dropped, since no build from this one on will, and doctor's config row names them
+#: until then (:func:`retired_sections`).
+RETIRED_SECTIONS: dict[str, str] = {
+    "snapshot": "aisquare no longer packs a codebase; an ignore list in it moves to [code]",
+}
+
+
+def retired_sections(path: Path | None = None) -> list[str]:
+    """The :data:`RETIRED_SECTIONS` the config file at ``path`` still holds, in that order.
+
+    Read from the file, since loading drops them. Empty for a file that is absent or will
+    not parse: the config row says that much itself.
+    """
+    target = path or paths.config_path()
+    try:
+        data = _parse_toml(target.read_bytes())
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return []
+    return [name for name in RETIRED_SECTIONS if name in data]
 
 
 def _dumped(model: BaseModel) -> dict[str, Any]:
@@ -1041,6 +1171,12 @@ def _with_whole_role_tables(sparse: dict[str, Any], full: dict[str, Any]) -> dic
     roles = fleet.get("roles") if isinstance(fleet, dict) else None
     if not isinstance(roles, dict) or not roles:
         return sparse
+    # The role-less agent's table, at its default, is not written: no build before it
+    # was a default reads one (each falls back to ``FleetRoleSettings()``, the same
+    # shape), and written, every file a ``config set`` saved carried a role nobody set.
+    plain = _plain_role()
+    if roles.get(plain) == _dumped(FleetRoleSettings()):
+        roles = {role: table for role, table in roles.items() if role != plain}
     whole = dict(sparse)
     whole["fleet"] = {**sparse.get("fleet", {}), "roles": roles}
     return whole
@@ -1445,6 +1581,8 @@ def save_config(
                 raise
         else:
             dumped = _keep_unknown(existing, dumped, config)
+            for name in RETIRED_SECTIONS:
+                dumped.pop(name, None)
     # Kept in full until here: _keep_unknown follows the model into every section, and
     # a section at its defaults may still hold keys this build does not know.
     dumped = _with_whole_role_tables(_overrides(dumped, system_defaults(), config), dumped)

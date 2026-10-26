@@ -773,3 +773,366 @@ def test_share_settings_links_the_account_a_launch_runs_on(
     assert not sharing.settings_path(second).exists()  # only the one launched
     assert service.share_for_launch(tmp_path, account=third) == []  # already
     assert service.share_for_launch(tmp_path, account=plain) == []  # it IS the source
+
+
+# --- [accounts] share: skills, agents, commands, CLAUDE.md, memory (P2-W7, #198) ----------
+
+NOW = __import__("datetime").datetime(2026, 10, 23, 12, 0, tzinfo=__import__("datetime").UTC)
+
+
+def _tree(root: Path) -> dict[str, str | None]:
+    """Every entry under ``root``: a file's text, a link's target, ``None`` for a dir."""
+    found: dict[str, str | None] = {}
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            found[rel] = "->" + os.readlink(path)
+        elif path.is_file():
+            found[rel] = path.read_text(encoding="utf-8")
+        elif path.is_dir():
+            found[rel] = None
+    return found
+
+
+@pytest.fixture
+def skilled(three: tuple[ClaudeAccount, ...]) -> tuple[ClaudeAccount, ...]:
+    """The plain claude with a skill and a CLAUDE.md; slot 2 with its own skill and CLAUDE.md;
+    slot 3 with none of either."""
+    if not can_symlink():  # pragma: no cover - a privilege CI holds, a laptop may not
+        pytest.skip("this machine cannot create symlinks")
+    plain, second, _third = three
+    (plain.config_dir / "skills" / "shared-skill").mkdir(parents=True)
+    (plain.config_dir / "skills" / "shared-skill" / "SKILL.md").write_text("shared\n")
+    (plain.config_dir / "CLAUDE.md").write_text("plain rules\n")
+    (second.config_dir / "skills" / "mine").mkdir(parents=True)
+    (second.config_dir / "skills" / "mine" / "SKILL.md").write_text("slot two's\n")
+    (second.config_dir / "CLAUDE.md").write_text("slot two rules\n")
+    return three
+
+
+def test_enable_links_every_slot_and_keeps_its_own_and_disable_restores_it_exactly(
+    skilled: tuple[ClaudeAccount, ...],
+) -> None:
+    _plain, second, third = skilled
+    before = {account.slot: _tree(account.config_dir) for account in (second, third)}
+
+    changes = service.enable_share(["skills", "claude_md"], now=NOW)
+
+    outcome = {(c.account.slot, c.part): (c.outcome, c.detail) for c in changes}
+    assert outcome == {
+        (2, "skills"): ("linked", "skills.own-20261023T120000Z"),
+        (3, "skills"): ("linked", None),
+        (2, "claude_md"): ("linked", "CLAUDE.md.own-20261023T120000Z"),
+        (3, "claude_md"): ("linked", None),
+    }
+    for account in (second, third):
+        assert (
+            account.config_dir / "skills" / "shared-skill" / "SKILL.md"
+        ).read_text() == "shared\n"
+        assert (account.config_dir / "CLAUDE.md").read_text() == "plain rules\n"
+    kept = second.config_dir / "skills.own-20261023T120000Z"
+    assert (kept / "mine" / "SKILL.md").read_text() == "slot two's\n"
+    assert load_config().accounts.share == ["skills", "claude_md"]
+
+    again = service.enable_share(["skills", "claude_md"], now=NOW)
+    assert {c.outcome for c in again} == {"already"}, "idempotent"
+
+    service.disable_share(["skills", "claude_md"])
+
+    assert {account.slot: _tree(account.config_dir) for account in (second, third)} == before
+    assert load_config().accounts.share == []
+    again_off = service.disable_share(["skills"])
+    assert [(c.account.slot, c.outcome) for c in again_off] == [(2, "own"), (3, "none")]
+    assert {account.slot: _tree(account.config_dir) for account in (second, third)} == before
+
+
+def test_an_entry_linked_elsewhere_is_refused_and_left_alone(
+    skilled: tuple[ClaudeAccount, ...], tmp_path: Path
+) -> None:
+    _plain, second, _third = skilled
+    theirs = tmp_path / "someone-elses-agents"
+    theirs.mkdir()
+    (second.config_dir / "agents").symlink_to(theirs, target_is_directory=True)
+
+    [refused] = [c for c in service.enable_share(["agents"], now=NOW) if c.account.slot == 2]
+
+    assert refused.outcome == "refused" and "not ours to replace" in (refused.detail or "")
+    assert f"links to {theirs} " in (refused.detail or "")
+    # Still linked there: by realpath, since Windows reads a link back as ``\\?\C:\...``.
+    entry = second.config_dir / "agents"
+    assert sharing._is_link(entry) and os.path.realpath(entry) == os.path.realpath(theirs)
+
+
+def test_a_refusal_names_the_link_as_written_without_windows_prefix(
+    skilled: tuple[ClaudeAccount, ...], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows reads a link back with its extended-length prefix (run 40073711742): the
+    refusal names the path as the operator wrote it."""
+    _plain, second, _third = skilled
+    theirs = tmp_path / "someone-elses-agents"
+    theirs.mkdir()
+    (second.config_dir / "agents").symlink_to(theirs, target_is_directory=True)
+    real_readlink = os.readlink
+    prefix = "\\\\?\\"
+    # Windows' own readlink already has it (rc/p2 push run 40087282716): once, as there.
+    monkeypatch.setattr(
+        os, "readlink", lambda path: prefix + real_readlink(path).removeprefix(prefix)
+    )
+
+    [refused] = [c for c in service.enable_share(["agents"], now=NOW) if c.account.slot == 2]
+
+    assert refused.outcome == "refused"
+    assert f"links to {theirs} — not ours to replace" in (refused.detail or ""), refused.detail
+
+
+def test_a_refusal_names_a_share_as_written(
+    skilled: tuple[ClaudeAccount, ...], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link to a share reads back on Windows as ``UNC`` under the extended-length prefix
+    (review of #386): the refusal names it by its two leading backslashes, as typed."""
+    _plain, second, _third = skilled
+    theirs = tmp_path / "someone-elses-agents"
+    theirs.mkdir()
+    (second.config_dir / "agents").symlink_to(theirs, target_is_directory=True)
+    monkeypatch.setattr(os, "readlink", lambda path: "\\\\?\\UNC\\srv\\team\\agents")
+
+    [refused] = [c for c in service.enable_share(["agents"], now=NOW) if c.account.slot == 2]
+
+    assert "links to \\\\srv\\team\\agents — not ours" in (refused.detail or ""), refused.detail
+
+
+def test_on_windows_a_directory_is_a_junction_when_a_symlink_needs_a_privilege(
+    skilled: tuple[ClaudeAccount, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _plain, _second, third = skilled
+    made: list[tuple[Path, Path]] = []
+    real_symlink = os.symlink
+
+    def refuse(src: object, dst: object, target_is_directory: bool = False) -> None:
+        raise OSError(1314, "A required privilege is not held by the client")
+
+    monkeypatch.setattr(sharing, "_platform", lambda: "nt")
+    monkeypatch.setattr(os, "symlink", refuse)
+
+    def junction(source: Path, entry: Path) -> None:
+        made.append((source, entry))
+        real_symlink(source, entry, target_is_directory=True)  # stands in for the junction
+
+    monkeypatch.setattr(sharing, "_junction", junction)
+    change = service._link_part(third, "agents", core.default_account().config_dir, NOW)
+    assert change.outcome == "linked"
+    assert made == [(core.default_account().config_dir / "agents", third.config_dir / "agents")]
+
+
+def test_a_launch_links_a_slot_made_after_the_part_was_turned_on(
+    skilled: tuple[ClaudeAccount, ...],
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: dict[str, Any],
+) -> None:
+    service.enable_share(["skills"], now=NOW)
+    fourth = core.create_account()
+    _write_claude_json(fourth, "four@x.dev")
+    folder = tmp_path / "work"
+    folder.mkdir()
+    monkeypatch.chdir(folder)
+
+    result = runner.invoke(app, ["launch", "coder", "--account", str(fourth.slot)])
+
+    assert result.exit_code == 0, result.output
+    assert sharing.part_state(fourth.config_dir, "skills", core.default_account().config_dir) == (
+        "shared"
+    )
+    assert "now shares the plain claude's skills" in result.stderr
+
+
+def test_memory_on_every_launch_carries_the_shared_directory_for_its_project(
+    three: tuple[ClaudeAccount, ...],
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: dict[str, Any],
+) -> None:
+    folder = tmp_path / "work.repo"
+    folder.mkdir()
+    monkeypatch.chdir(folder)
+    service.enable_share(["memory"])
+    for slot in ("1", "3"):
+        result = runner.invoke(app, ["launch", "coder", "--account", slot])
+        assert result.exit_code == 0, result.output
+        argv = launched["argv"]
+        assert argv.count("--settings") == 1, "one --settings for every key aisquare sets"
+        settings = json.loads(argv[argv.index("--settings") + 1])
+        want = service.shared_memory_root() / sharing.memory_key(Path.cwd())
+        # The coder's skill listing (P1 WS-1) and the shared memory (P2-W7), both: the
+        # memory stood down on the role's own --settings, so no coder shared any (sync #367).
+        assert settings == {"skillListingMaxDescChars": 1, "autoMemoryDirectory": str(want)}
+        assert sharing.memory_key(Path.cwd()).endswith("-work-repo")
+    # The operator's own --settings wins over both, and the launch says why.
+    result = runner.invoke(app, ["launch", "coder", "--account", "3", "--settings", "{}"])
+    assert launched["argv"].count("--settings") == 1
+    assert launched["argv"][launched["argv"].index("--settings") + 1] == "{}"
+    assert "its own --settings wins" in result.stderr
+    # A manager keeps the full skill listing: its --settings is the memory's alone.
+    result = runner.invoke(app, ["launch", "manager", "--account", "3"])
+    assert result.exit_code == 0, result.output
+    argv = launched["argv"]
+    assert argv.count("--settings") == 1
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"autoMemoryDirectory": str(want)}
+
+
+def test_memory_off_adds_nothing_to_a_launch(
+    three: tuple[ClaudeAccount, ...],
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: dict[str, Any],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    runner.invoke(app, ["launch", "coder", "--account", "3"])
+    argv = launched["argv"]
+    # The coder's own skill listing (P1 WS-1) and nothing of the memory's.
+    assert argv.count("--settings") == 1
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"skillListingMaxDescChars": 1}
+    runner.invoke(app, ["launch", "manager", "--account", "3"])
+    assert "--settings" not in launched["argv"]
+
+
+def test_the_first_memory_enable_merges_every_slots_memory_without_overwriting(
+    three: tuple[ClaudeAccount, ...],
+) -> None:
+    plain, second, third = three
+    key = "-work-repo"
+
+    def memory(account: ClaudeAccount, files: dict[str, str]) -> None:
+        folder = account.config_dir / "projects" / key / "memory"
+        folder.mkdir(parents=True)
+        for name, text in files.items():
+            (folder / name).write_text(text, encoding="utf-8")
+
+    memory(plain, {"MEMORY.md": "- [Tabs](tabs.md)\n", "tabs.md": "use tabs\n"})
+    memory(
+        second,
+        {
+            "MEMORY.md": "- [Tabs](tabs.md)\n- [Tests](tests.md)\n",
+            "tabs.md": "use spaces\n",
+            "tests.md": "pytest\n",
+        },
+    )
+    memory(third, {"tests.md": "pytest\n"})
+
+    changes = service.enable_share(["memory"])
+
+    shared = service.shared_memory_root() / key
+    assert (shared / "MEMORY.md").read_text() == "- [Tabs](tabs.md)\n- [Tests](tests.md)\n"
+    assert (shared / "tabs.md").read_text() == "use tabs\n", "the first one in stays"
+    assert (shared / "tabs.slot2.md").read_text() == "use spaces\n", "the other is kept beside"
+    assert (shared / "tests.md").read_text() == "pytest\n"
+    assert [(c.account.slot, c.outcome) for c in changes] == [(2, "merged")]
+    assert service.enable_share(["memory"]) == [], "only the first enable merges"
+
+
+def test_share_cli_json_status_enable_disable(
+    skilled: tuple[ClaudeAccount, ...], runner: CliRunner
+) -> None:
+    on = runner.invoke(app, ["--json", "accounts", "share", "--enable", "agents,memory"])
+    assert on.exit_code == 0, on.output
+    report = json.loads(on.output)
+    assert report["share"] == ["memory", "agents"]
+    assert {(c["slot"], c["part"], c["outcome"]) for c in report["changes"]} == {
+        (2, "agents", "linked"),
+        (3, "agents", "linked"),
+    }
+    status = json.loads(runner.invoke(app, ["--json", "accounts", "share", "--status"]).output)
+    held = {(c["slot"], c["part"]): c["outcome"] for c in status["status"]}
+    assert held[(2, "agents")] == "shared" and held[(1, "memory")] == "shared"
+    bad = runner.invoke(app, ["accounts", "share", "--enable", "transcripts"])
+    assert bad.exit_code == 2 and "parts are memory" in bad.output
+    off = runner.invoke(app, ["--json", "accounts", "share", "--disable", "agents"])
+    assert json.loads(off.output)["share"] == ["memory"]
+
+
+def test_the_doctor_row_warns_on_a_part_a_slot_does_not_share_and_a_linked_projects(
+    skilled: tuple[ClaudeAccount, ...], tmp_path: Path
+) -> None:
+    from aisquare.services import diagnostics
+
+    _plain, second, third = skilled
+    managed = core.managed_accounts()
+    assert diagnostics._claude_accounts_sharing_check(managed) is None, "nothing shared: no row"
+
+    service.enable_share(["skills", "memory"], now=NOW)
+    row = diagnostics._claude_accounts_sharing_check(managed)
+    assert row is not None and row.status.value == "ok"
+    assert row.detail.startswith("sharing skills, memory; memory in ")
+
+    sharing.unlink_part(third.config_dir, "skills", core.default_account().config_dir)
+    (second.config_dir / "projects").symlink_to(
+        core.default_account().config_dir, target_is_directory=True
+    )
+    row = diagnostics._claude_accounts_sharing_check(managed)
+    assert row is not None and row.status.value == "warn"
+    assert "slot 3 has no skills linked yet" in row.detail
+    assert "slot 2's projects/ is a symlink" in row.detail
+
+
+# --- review of #360's minors -------------------------------------------------------------
+
+
+@pytest.mark.skipif(not can_symlink(), reason="needs symlinks")
+def test_sharing_a_part_the_plain_claude_has_none_of_keeps_the_slots_own_in_sight(
+    tmp_path: Path,
+) -> None:
+    """Linked to an empty skills/ the plain claude was given, a slot's own skills vanished
+    from it. What the slot has and the plain claude lacks goes there first, never over an
+    entry it has; the slot's own copy is kept beside as before."""
+    plain, slot = tmp_path / "plain", tmp_path / "slot"
+    (slot / "skills" / "deploy").mkdir(parents=True)
+    (slot / "skills" / "deploy" / "SKILL.md").write_text("mine\n")
+    (slot / "skills" / "review").mkdir()
+    (slot / "skills" / "review" / "SKILL.md").write_text("slot's review\n")
+    (plain / "skills" / "review").mkdir(parents=True)
+    (plain / "skills" / "review" / "SKILL.md").write_text("plain's review\n")
+
+    kept = sharing.link_part(slot, "skills", plain, now=NOW)
+
+    seen = slot / "skills"
+    assert (seen / "deploy" / "SKILL.md").read_text() == "mine\n", "the slot's own, in sight"
+    assert (seen / "review" / "SKILL.md").read_text() == "plain's review\n", "never over it"
+    assert kept is not None and (kept / "review" / "SKILL.md").read_text() == "slot's review\n"
+
+
+def test_a_differing_note_is_kept_under_a_name_that_stays_markdown(tmp_path: Path) -> None:
+    """The fallback was ``note.slotb.md-2``, which no longer reads as a .md, and the note
+    named the first candidate, not the file written."""
+    target, a, b = tmp_path / "shared", tmp_path / "a", tmp_path / "b"
+    for directory, body in ((a, "one\n"), (b, "two\n")):
+        directory.mkdir()
+        (directory / "note.md").write_text(body)
+    target.mkdir()
+    (target / "note.md").write_text("zero\n")
+    (target / "note.slotb.md").write_text("an older different copy\n")
+
+    notes = sharing.merge_memory([("slota", a), ("slotb", b)], target)
+
+    assert (target / "note.slota.md").read_text() == "one\n"
+    assert (target / "note.slotb-2.md").read_text() == "two\n"
+    assert ("slotb", "note.md differed: kept as note.slotb-2.md") in notes
+    assert sharing.merge_memory([("slotb", b)], target) == [], "the same bytes: kept once"
+
+
+def test_merging_memory_md_keeps_its_blank_lines(tmp_path: Path) -> None:
+    target, a, b = tmp_path / "shared", tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    (a / "MEMORY.md").write_text("# Index\n\n- [one](one.md)\n\n- [two](two.md)\n")
+    (b / "MEMORY.md").write_text("# Index\n\n- [two](two.md)\n\n## Later\n\n- [three](three.md)\n")
+
+    sharing.merge_memory([("a", a), ("b", b)], target)
+
+    # The first index whole, blank lines and all; then what the second adds, its own blank
+    # lines kept between its new lines.
+    assert (target / "MEMORY.md").read_text() == (
+        "# Index\n\n- [one](one.md)\n\n- [two](two.md)\n## Later\n\n- [three](three.md)\n"
+    )

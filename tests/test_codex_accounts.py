@@ -681,20 +681,21 @@ def test_an_email_signed_in_to_both_agents_resolves_by_the_launching_agent(
 # --------------------------------------------------------------------------- service: arranging
 
 
-def test_defaults_are_per_agent_and_a_claude_launch_never_sees_codexs(
+def test_the_default_is_rank_one_and_a_claude_launch_never_sees_codexs(
     home: Path, tmp_path: Path
 ) -> None:
     claude = core.create_account()
     first = _codex_slot("a@example.com")
     second = _codex_slot("b@example.com")
 
-    service.set_default(str(claude.slot))
-    service.set_default(str(second.slot))  # Codex's own default; Claude's stays
-    assert _slot(service.machine_default()) == claude.slot
+    # The machine default is rank 1 of the one order, whatever its agent (0.9.0, #406).
+    service.set_default(str(second.slot))
+    assert _slot(service.machine_default()) == second.slot
     assert _slot(service.machine_default("codex")) == second.slot
-    assert _slot(service.choose(None).account) == claude.slot
+    assert service.machine_default("claude-code") is None, "no Claude account is signed in"
+    assert service.choose(None).account is None, "a Claude launch never sees Codex's"
     picked = service.choose(None, agent="codex")
-    assert (_slot(picked.account), picked.source) == (second.slot, "machine default")
+    assert (_slot(picked.account), picked.source) == (second.slot, "preferred")
 
     project = team_project(tmp_path)
     with store_session() as store:
@@ -704,9 +705,10 @@ def test_defaults_are_per_agent_and_a_claude_launch_never_sees_codexs(
     assert service.project_default(project) is None  # Claude's project default is untouched
     assert service.choose(None, project=project, agent="codex").source == "project default"
 
-    service.set_default(None, agent="codex")
-    assert service.machine_default("codex") is None
-    assert _slot(service.machine_default()) == claude.slot  # a Codex clear leaves Claude's
+    with pytest.raises(service.AccountsError, match="cannot be cleared"):
+        service.set_default(None, agent="codex")  # rank 1 is always somebody's
+    service.set_default(None, project=project, agent="codex")
+    assert service.project_default(project, agent="codex") is None
     with pytest.raises(service.WrongAgent):
         service.set_default(str(claude.slot), agent="codex")
 
@@ -723,7 +725,8 @@ def test_alias_disable_order_move_and_remove_work_on_codex_slots(home: Path) -> 
     assert named.alias == "codex-work" and service.resolve("codex-work").slot == first.slot
 
     assert service.set_disabled("codex-work", True).disabled
-    assert service.choose(None, agent="codex", spread=False).account is None
+    # The preferred rung skips it: the first enabled, signed-in Codex account is the other.
+    assert _slot(service.choose(None, agent="codex", spread=False).account) == second.slot
 
     order = service.move(str(second.slot), "top")
     codex_order = [a.slot for a in order if a.agent == "codex"]
@@ -737,7 +740,7 @@ def test_alias_disable_order_move_and_remove_work_on_codex_slots(home: Path) -> 
     assert (
         moved.name.startswith(f"{second.slot}.removed-") and moved.parent.name == "codex-accounts"
     )
-    assert service.machine_default("codex") is None  # the default went with the slot
+    assert service.machine_default("codex") is None  # the one enabled slot went with it
     with pytest.raises(service.AccountsError, match="codex logout"):
         (home / ".codex").mkdir()
         service.remove(core.default_account(agent="codex"))
@@ -877,15 +880,17 @@ def test_accounts_run_execs_codex_in_the_slots_home(
     assert service.sign_in_command(slot)[-3:] == ["run", str(slot.slot), "login"]
 
 
-def test_accounts_default_shows_and_clears_codex_s_own(home: Path, runner: CliRunner) -> None:
+def test_accounts_default_shows_rank_one_and_refuses_to_clear_it(
+    home: Path, runner: CliRunner
+) -> None:
     slot = _codex_slot("me@example.com")
     assert runner.invoke(app, ["accounts", "default", str(slot.slot)]).exit_code == 0
     shown = runner.invoke(app, ["accounts", "default"])
-    assert f"Codex machine default: slot {slot.slot}" in shown.stdout
-    assert "machine default: none" in shown.stdout  # Claude's has none
+    assert f"machine default: slot {slot.slot}" in shown.stdout
+    assert "Codex" in shown.stdout and "rank 1" in shown.stdout  # whatever its agent
     cleared = runner.invoke(app, ["accounts", "default", "--clear", "--agent", "codex"])
-    assert cleared.exit_code == 0 and "cleared for Codex" in cleared.stdout
-    assert service.machine_default("codex") is None
+    assert cleared.exit_code != 0 and "cannot be cleared" in cleared.output
+    assert service.machine_default("codex") is not None
 
 
 # --------------------------------------------------------------------------- launch and spawn
@@ -1210,7 +1215,9 @@ def _running_on_screen(monkeypatch: pytest.MonkeyPatch) -> None:
     outside any sandbox (a sandboxed one is refused tmux)."""
     from aisquare.services import fleet
 
-    def observe(placements: Any, also: Any = (), reads: Any = None) -> dict[str, Any]:
+    def observe(
+        placements: Any, also: Any = (), reads: Any = None, tick: Any = None
+    ) -> dict[str, Any]:
         return {
             placement.row.id: fleet._PaneView(False, None, "codex", None)
             for placement in placements

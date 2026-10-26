@@ -386,6 +386,53 @@ with it off where it can, and its panel says when it could not.
 cards and quick answers, notifications on iPhone, the security model, and a
 checklist for before you leave the desk.
 
+**Long waits.** A manager waiting on CI, a review or an agent's dialog does not poll
+for it with Monitor or `sleep` loops, each of which is a turn that re-sends its whole
+context. `aisquare watch --detach` runs one watcher for the fleet, and its `watch:` board
+lines wake the manager with counts and a file path ([fleet](fleet.md#watching-the-fleet)).
+
+### A manager over a group
+
+A manager hears only its own board. When one manager coordinates several projects, a
+project group (`aisquare project group …`) can name a **parent**: an ordinary project,
+outside the group, whose manager is the group's. The members' boards stay their own; what
+the group's rules choose is copied up as one line.
+
+```sh
+aisquare project group parent app hq              # hq's manager is app's parent (--clear)
+aisquare project group route app --kinds question,task_blocked,result,linked
+aisquare project group route app --pattern 'READY|BLOCKED'   # a matching note routes too
+aisquare project group cap app 6                  # live agents across members and parent
+aisquare note "which base?" --kind question --to parent       # from a member's agent
+aisquare task add "auth API" --project api --origin 12       # from the parent's manager
+```
+
+- **Routed lines.** A member's event the rules choose lands, in the member's own write, on
+  the parent's board as `routed from api#812 (question by coder-auth): which base? —
+  aisquare board --project api`, addressed to the parent's manager (so it wakes it), and
+  that manager is nudged. By default a group routes questions to the manager or the
+  parent, `task_blocked`, `result`, and every status change of a task delegated from the
+  parent; `--kinds` chooses, `--pattern` adds notes whose text matches, `--off` stops it,
+  and `--to parent` always routes. One child routes at most one line a minute: the rest
+  are folded into a count the child's next routed line carries (`+4 folded`). A question, a
+  blocked task and anything `--to parent` are never folded: they always route at once.
+- **Linked tasks.** `task add --project <member> --origin <task>` delegates a task from the
+  parent's board to a member's: the member's line shows `← hq#12`, the origin's
+  `→ 2 linked, 1 done`, a child's status changes route up, and when every child is
+  closed (at least one done; a dropped one does not hold the origin open),
+  `linked_all_done` asks the parent's manager to close the origin. It closes it itself.
+- **Escalation.** Under a parent, a member's manager asks the parent before the human
+  ("blocked twice" in its cycle names `--to parent`).
+- **Subtree pause and cap.** `aisquare fleet pause --group app` pauses every member and the
+  parent; under a parent an agent's own spawn on a paused board is refused. `project group
+  cap` counts the live agents across members and parent, as the fleet-wide budget does.
+- **Briefing.** The parent's manager is told its group in its start pack: the members,
+  whether each has a manager up, and the delegation verbs, in a few lines.
+
+A group without a parent behaves exactly as before. `AISQUARE_TEAM_HUB` is still the
+way one board serves several repositories; a parent is for several boards with a manager
+each.
+
 ### Tuning (environment variables)
 
 Orchestration has no config files — a handful of env knobs:
@@ -435,11 +482,12 @@ a sign-in.
 
 **Choosing one.** Several accounts are only useful if a launch knows which to
 run on, so an account can be the **default**, have a **name**, and sit in a
-**priority order** — arranged from the Accounts page (★ *Default*, ↑/↓,
-*Disable*) or from the command line:
+**priority order** — arranged from the Accounts page (↑/↓, *Disable*) or from
+the command line. The machine default is the first enabled, signed-in account in
+that order (rank 1); there is no separate default to keep in step with it:
 
 ```sh
-aisquare accounts default 2               # the machine default: every launch runs on slot 2
+aisquare accounts default 2               # the machine default: slot 2 moves to rank 1 (= move 2 top)
 aisquare accounts default 3 --project .   # …except this project, which runs on slot 3
 aisquare accounts default 1 --role coder  # …and coders, who run on the plain claude
 aisquare accounts default                 # show the three levels as they stand
@@ -457,10 +505,10 @@ the role's binding, then the project's default, then the account with room
 of those set it runs on whatever `claude` the shell already has, exactly as
 before, so a machine that never added an account notices nothing. One
 resolver answers for every surface, so the fleet UI and a hand-typed launch can
-never disagree about which login an agent gets; `accounts list` stars the
-default and lists the slots in priority order; `doctor` warns when the default is
-not signed in or is disabled, and when a binding names an account the machine no
-longer has.
+never disagree about which login an agent gets; `accounts list` lists the slots
+in priority order, the first enabled, signed-in one being the default (no mark of
+its own); `doctor` names that default, warns when no enabled account is signed
+in, and when a binding names an account the machine no longer has.
 
 ### Which agent a launch runs
 
@@ -534,6 +582,23 @@ Code's own files — it reads the email and plan Claude Code recorded, and the
 usage numbers come from the endpoint Claude Code's `/usage` reads, best effort:
 if that endpoint changes, a row says `usage unavailable` and nothing else
 breaks.
+
+**TLS.** Usage reads, like every HTTPS call the CLI makes, verify the server
+against the OS trust store (the macOS Keychain, Windows' store, the distro
+bundle on Linux) through `truststore`, or through `certifi` where `truststore`
+cannot be imported. `SSL_CERT_FILE` and `SSL_CERT_DIR` still name a bundle of your
+own, e.g. behind a proxy that re-signs HTTPS, and trust what they did before, as
+OpenSSL reads them: `SSL_CERT_FILE` REPLACES the default CA file, so the bundle must
+hold the public roots as well as the proxy's CA (append it to a copy of them);
+`SSL_CERT_DIR`, a directory of hashed certificates (`openssl rehash`), replaces only
+the default directory and so adds to the default file. On Windows both add to the
+Windows store. On a machine with no trust store at all (a minimal
+container with no CA files), name certifi's: `SSL_CERT_FILE=$(python -m certifi)`. A row that says *TLS certificate could not be
+verified* is that, not the endpoint: `aisquare doctor --live`'s `tls` row
+performs one handshake to api.anthropic.com (through `HTTPS_PROXY` when one
+applies, as every request does) and names the trust source it used. A plain
+`http://` call uses the context only to verify a redirect to `https://`, and goes
+without it when the bundle will not load, so a bad bundle affects only HTTPS.
 
 Accounts laid out some other way — a wrapper script, a proxy, a directory you
 made yourself — still bind to a role as a **launch profile**: a binary, a set

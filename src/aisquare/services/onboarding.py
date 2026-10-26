@@ -18,7 +18,7 @@ Three questions, three functions:
   line kept for the log (:data:`INIT_FLAGS` says why the flag).
 - :func:`fix_commands` / :func:`apply_fix` — which of the doctor's ``fix``
   hints are OUR OWN commands, safe to run at a click, and the click itself.
-  Anything else — ``pipx install``, ``npm install -g repomix``, a command with a
+  Anything else — ``pipx install``, ``brew install tmux``, a command with a
   ``<placeholder>`` the user must fill in — stays text, on purpose.
 """
 

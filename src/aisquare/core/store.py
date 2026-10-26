@@ -24,6 +24,7 @@ import json
 import os
 import random
 import re
+import shutil
 import sqlite3
 import sys
 import time
@@ -34,7 +35,7 @@ from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from types import EllipsisType
-from typing import Any, Concatenate, NamedTuple, ParamSpec, Protocol, TypeVar
+from typing import Any, Concatenate, Literal, NamedTuple, ParamSpec, Protocol, TypeVar
 
 from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
@@ -537,7 +538,7 @@ def _has_table(connection: sqlite3.Connection, table: str) -> bool:
     return connection.execute(query, (table,)).fetchone() is not None
 
 
-#: The two triggers v39 makes (#113), each ``IF NOT EXISTS``.
+#: The two triggers v41 makes (#113), each ``IF NOT EXISTS``.
 _TEAM_META_TRIGGERS = """
 CREATE TRIGGER IF NOT EXISTS team_meta_insert_time AFTER INSERT ON team_meta BEGIN
  UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
@@ -549,7 +550,7 @@ END;
 
 
 def _date_team_meta_writes(connection: sqlite3.Connection) -> None:
-    """v38 → v39 (#113): the triggers that date every insert and change of a ``team_meta``
+    """v40 → v41 (#113): the triggers that date every insert and change of a ``team_meta``
     row. A trigger cannot be made on a table that is not there, and a store that lacks
     ``team_meta`` still opens, for the doctor to name what it lacks."""
     if _has_table(connection, "team_meta"):
@@ -558,7 +559,7 @@ def _date_team_meta_writes(connection: sqlite3.Connection) -> None:
 
 
 def _redate_team_meta(connection: sqlite3.Connection) -> None:
-    """v39 → v40 (#113): the rows #113's dogfooded v16 left dated 0, dated now."""
+    """v41 → v42 (#113): the rows #113's dogfooded v16 left dated 0, dated now."""
     if _has_table(connection, "team_meta"):
         connection.execute(
             "UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
@@ -571,8 +572,8 @@ _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
     12: _converge_v11_fork,
     25: _index_board_stamps,
     29: _index_task_numbers,
-    38: _date_team_meta_writes,
-    39: _redate_team_meta,
+    40: _date_team_meta_writes,
+    41: _redate_team_meta,
 }
 
 
@@ -584,10 +585,10 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
     store another line stamped past 17 without ever running it.
     "On purpose" is read off what the row already carries: context entries, a
     codename (it entered the fleet), linked repos, board activity, a fleet
-    agent — and a codebase snapshot on disk, which ``project onboard`` and
-    ``init`` write. Everything else — the 23 of 27 registrations on the
-    reporting machine that held nothing but captured prompts — stays hidden,
-    reachable through ``project list --all``.
+    agent — and a codebase snapshot on disk, which ``project onboard`` and ``init``
+    wrote up to 0.8.2 (:func:`_snapshot_on_disk`). Everything else — the
+    23 of 27 registrations on the reporting machine that held nothing but
+    captured prompts — stays hidden, reachable through ``project list --all``.
 
     A FORGOTTEN row is never adopted, whatever it carries: ``forget`` clears
     ``onboarded_at`` so that the next prompt there revives the row captured,
@@ -608,9 +609,15 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
         ")"
     )
     rows = connection.execute(
-        "SELECT id FROM project WHERE onboarded_at IS NULL AND forgotten_at IS NULL"
+        "SELECT id, root FROM project WHERE onboarded_at IS NULL AND forgotten_at IS NULL"
     ).fetchall()
-    with_snapshot = [row[0] for row in rows if _snapshot_on_disk(str(row[0]))]
+    # Never the aisquare home's own row: builds before D5 packed the home too, and that
+    # pack is no sign the owner added it (main's snapshot.exists() said the same). The
+    # stat first: only a row with a pack has its root resolved, so roots on dead mounts
+    # cost nothing.
+    with_snapshot = [
+        row[0] for row in rows if _snapshot_on_disk(str(row[0])) and not is_the_home(Path(row[1]))
+    ]
     for project_id in with_snapshot:
         connection.execute(
             "UPDATE project SET onboarded_at = created_at WHERE id = ? AND onboarded_at IS NULL",
@@ -619,7 +626,14 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
 
 
 def _snapshot_on_disk(project_id: str) -> bool:
-    """Whether the project's snapshot is on disk; one that cannot be looked at is no evidence.
+    """Whether the project's old pack is on disk; one that cannot be looked at is no evidence.
+
+    Builds up to 0.8.2 packed a project on ``project onboard`` and on ``init``, and
+    wrote ``projects/<id>/snapshot/snapshot.json`` beside the pack. The packer is gone,
+    but a store from 0.6 or older still reaches this backfill, and for a project the
+    owner added and never used, that file is its only mark. So the check is a plain
+    path, with no packer to import, and :func:`_remove_old_packs` deletes the packs
+    only after :func:`_migrate` has run this.
 
     ``Path.exists`` answers ``False`` for a path that is not there and RAISES for a
     snapshot directory this user cannot search (``PermissionError``). Raised out of
@@ -629,12 +643,56 @@ def _snapshot_on_disk(project_id: str) -> bool:
     stays captured, as one without a snapshot does, and a later ``project
     onboard`` adds it.
     """
-    from aisquare.core import snapshot as snapshot_core  # lazy: keeps store import-light
-
     try:
-        return snapshot_core.exists(project_id)
+        return (paths.project_data_dir(project_id) / "snapshot" / "snapshot.json").exists()
     except OSError:
         return False
+
+
+#: Written in ``cache/`` once :func:`_remove_old_packs` has run, so each later open
+#: costs one stat. Disposable: run again, it finds nothing to delete.
+_OLD_PACKS_REMOVED = "old-packs-removed"
+
+
+def _remove_old_packs() -> None:
+    """Delete the codebase packs builds up to 0.8.2 left in ``projects/<id>/snapshot/``, once.
+
+    Called by :func:`open_store` after :func:`_migrate`, and never before it: the v17
+    backfill reads a pack's ``snapshot.json`` as evidence (:func:`_snapshot_on_disk`),
+    and a pack deleted before an old store migrates takes that evidence with it.
+
+    Only a directory named ``snapshot``, directly in a project's data directory, and
+    only while it resolves to one inside ``projects/``: a symlink is never followed out
+    of the home, and ``brain/`` beside it is never touched. Best effort: what cannot be
+    deleted stays, and the open goes on. ``RuntimeError`` too: on Python 3.11 and 3.12
+    ``Path.resolve()`` raises it for a symlink loop, and a ``projects/`` that points at
+    itself made every command a traceback (review of #399).
+
+    Done is recorded only once ``projects/`` was listed, or is not there at all. On
+    3.13 that loop resolves without raising and ``is_dir()`` swallows the ELOOP, so
+    asking ``is_dir()`` first marked a ``projects/`` it never read as done for good.
+    """
+    marker = paths.cache_dir() / _OLD_PACKS_REMOVED
+    try:
+        if marker.exists():
+            return
+        inside = (paths.aisquare_home() / "projects").resolve()
+        try:
+            projects = list(inside.iterdir())
+        except FileNotFoundError:
+            projects = []
+        for project in projects:
+            pack = project / "snapshot"
+            with contextlib.suppress(OSError, RuntimeError):
+                if (
+                    pack.is_dir()
+                    and not pack.is_symlink()
+                    and pack.resolve().parent.parent == inside
+                ):
+                    shutil.rmtree(pack, ignore_errors=True)
+        marker.touch()
+    except (OSError, RuntimeError):
+        pass
 
 
 def _bind_keys_to_their_destinations(connection: sqlite3.Connection) -> None:
@@ -746,7 +804,7 @@ def _board_existing_agents(connection: sqlite3.Connection) -> None:
 
 
 def _adopt_claude_code_identity(connection: sqlite3.Connection) -> None:
-    """v37 → v38's backfill (#113): the sessions and fleet agents Claude Code made say so.
+    """v39 → v40's backfill (#113): the sessions and fleet agents Claude Code made say so.
 
     Runs right after ``team_session.native_session_id`` is added (``agent`` is added just
     before it), in the same transaction, and only then (:data:`_BACKFILLS`). A session
@@ -760,12 +818,12 @@ def _adopt_claude_code_identity(connection: sqlite3.Connection) -> None:
 
 
 def _adopt_claude_code_fleet_agents(connection: sqlite3.Connection) -> None:
-    """v37 → v38's backfill (#113): a fleet agent started as ``claude`` is Claude Code's."""
+    """v39 → v40's backfill (#113): a fleet agent started as ``claude`` is Claude Code's."""
     connection.execute("UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude'")
 
 
 def _date_team_meta(connection: sqlite3.Connection) -> None:
-    """v38 → v39's backfill (#113): the ``team_meta`` rows from before the column are
+    """v40 → v41's backfill (#113): the ``team_meta`` rows from before the column are
     dated now, so the launch-metadata cleanup gives them a full retention period."""
     connection.execute("UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER)")
 
@@ -1166,41 +1224,88 @@ _SCHEMA_V36 = ""
 # tables: the presence pass adds the column, v35's ``IF NOT EXISTS`` script makes the
 # tables, and v36 and this step find their columns in place.
 _SCHEMA_V37 = ""
-# v38-v43 (#113): the coding-agent steps. That line stamped them 15-17 while it was in
+# v38 (P2-W6, #199): a parent manager over a project group. ``project_group`` gains its
+# parent project, its routing rules (JSON) and its agent cap; ``team_task`` gains the task
+# it was delegated from (its origin and that origin's project). All nullable and in
+# :data:`_PRODUCTS`, added only where absent, so a store another line carried past v37
+# converges too; a row from before them reads NULL: no parent, no rules, no cap, no origin.
+# #140's "nothing else references a group" is amended by exactly these linkage columns.
+#
+# rc/p2-capacity-setup stamped this step v36, after its own v34 (P0-W1a, now v36) and v35
+# (P1 WS-2, now v37): the sync of main 8eb18a8a moved it here, after main's v34 and v35. A
+# store that ran rc/p2 reads v36 with P0-W1a's, P1 WS-2's and these columns and neither
+# ``fleet_agent.ended_by`` nor the usage tables: the presence pass adds the column and
+# runs v35's ``IF NOT EXISTS`` script for the tables, and v37 and this step find their
+# columns in place.
+_SCHEMA_V38 = ""
+
+# v39 (docs/plans/evidence-gate.md, part 2): work briefs. One row per brief, its
+# requirements, links, evidence and corrections as one JSON document, so every write
+# compares ``revision`` and replaces the document whole (:meth:`SqliteStore.save_brief`).
+# Named ``brief``, not ``work_brief``: #136's builds stamped their own v15 for a
+# ``work_brief (id, project_id, revision, data)`` table, and ``IF NOT EXISTS`` would
+# keep that table on such a store, without this one's ``number`` or timestamps. Its
+# rows are left where they are, unread. The script creates the table and its index,
+# both in :data:`_PRODUCTS`.
+#
+# #306 and #341 stamped this step v34 on their own branches, beside #38's v34 and #346's
+# v35 here, and v36 once they merged main's v35. #417 stamped it v37, after P0-W1a's v36,
+# and P1 WS-2's v37 above moved it to v38, and main's P2-W6 took v38 (above) in the same
+# release, so the final merge moved it here, to v39. A store that ran any of them reads
+# v34, v36, v37 or v38 with ``brief``, and lacks what a step under its stamp adds:
+# ``fleet_agent.ended_by`` (v34), P0-W1a's columns (v36), P1 WS-2's (v37) or P2-W6's
+# (v38). The presence pass (:func:`_converge_by_presence`) adds those, the ladder runs
+# the steps above the stamp, and this step then finds ``brief`` and its index in place:
+# every statement is ``IF NOT EXISTS``, so it is idempotent.
+_SCHEMA_V39 = """
+CREATE TABLE IF NOT EXISTS brief (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    revision INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS brief_number ON brief (project_id, number);
+"""
+# v40-v45 (#113): the coding-agent steps. That line stamped them 15-17 while it was in
 # flight (the note above _SCHEMA_V15), then 26-29 once it took main's v25, then 33-36
 # once it took 0.8.1's 26-32, then 34-38 once it took 0.8.2's v33 (the persona columns),
 # then 36-41 once it took #274's v34 (``fleet_agent.ended_by``) and v35 (the usage
-# tables), then 37-42 once it took #295's v36 (the first-message columns); #296 took v37
-# (``team_event.actor`` and ``meta``) first, so these come after it, renumbered again.
+# tables), then 37-42 once it took #295's v36 (the first-message columns), then 38-43
+# once it took #296's v37 (``team_event.actor`` and ``meta``); 0.9.0's v38 (P2-W6's parent
+# manager columns) and v39 (work briefs) took the numbers under these, so they come
+# after them, renumbered again.
 # Idempotent like every step from v15 on: the columns are in :data:`_PRODUCTS`, their
 # backfills in :data:`_BACKFILLS`, the triggers are ``IF NOT EXISTS`` and the tables and
 # their indexes too. A store #113's line stamped 26-29 ran
 # none of 0.8.1's v26-v29 under those numbers, one it stamped 33-36 has no persona
 # columns, one it stamped 34-38 has neither ``ended_by`` nor the usage tables, one it
-# stamped 36-41 has no first-message columns, and one it stamped 37-42 has no event actor:
-# the presence pass
+# stamped 36-41 has no first-message columns, one it stamped 37-42 has no event actor,
+# and one it stamped 38-43 has neither P2-W6's columns nor ``brief``: the presence pass
 # (:func:`_converge_by_presence`) finds those columns, tables and indexes absent and
 # applies them, with their backfills (task numbers among them), before the ladder goes on
 # from its stamp; and these steps, whose products it holds already, add nothing to it but
-# the v40 repair of rows dated 0, which converges.
+# the v42 repair of rows dated 0, which converges.
 #
-# v38: native coding-agent identity, independent of runtime session IDs.
+# v40: native coding-agent identity, independent of runtime session IDs.
 # ``team_session.agent`` and ``native_session_id`` and ``fleet_agent.agent`` are the
 # whole step, so the script is empty; their backfill
 # (:func:`_adopt_claude_code_identity`) marks the rows Claude Code made.
-_SCHEMA_V38 = ""
-# v39: when each ``team_meta`` row was last written, for the launch-metadata cleanup.
+_SCHEMA_V40 = ""
+# v41: when each ``team_meta`` row was last written, for the launch-metadata cleanup.
 # The column, ``team_meta.updated_at``, is in :data:`_PRODUCTS`, and its backfill
 # (:func:`_date_team_meta`) dates the rows that predate it; the triggers, made in
 # Python where the table is (:func:`_date_team_meta_writes`, in :data:`_PREPARE`), date
 # every later insert and change of value.
-_SCHEMA_V39 = ""
-# v40: #113 stamped 17 for this repair while the native-agent branch was being
+_SCHEMA_V41 = ""
+# v42: #113 stamped 17 for this repair while the native-agent branch was being
 # dogfooded: its v16 stores made before that step's backfill was added hold rows
 # dated 0. An UPDATE of those rows only, where the table is (:func:`_redate_team_meta`):
 # a store that meets it twice converges.
-_SCHEMA_V40 = ""
-# v41: the arrangement of OTHER agents' account slots (Codex's, t3). The slots are
+_SCHEMA_V42 = ""
+# v43: the arrangement of OTHER agents' account slots (Codex's, t3). The slots are
 # directories like Claude Code's (``core.claude_accounts``: one ladder numbers every
 # agent's, so ``slot`` alone is the key), and this table is ``claude_account`` for
 # them, plus the agent: an alias, a rank among that agent's slots, a default PER
@@ -1210,8 +1315,11 @@ _SCHEMA_V40 = ""
 # reconciles ``claude_account`` against Claude Code's directories alone — it would
 # prune every Codex row it met, on any machine where two builds share the store.
 # Aliases are unique across the two tables by the service (``set_alias`` checks the
-# other agent's before writing); within this one, by the index.
-_SCHEMA_V41 = """
+# other agent's before writing); within this one, by the index. The default flag is
+# retired the way ``claude_account``'s is (0.9.0, #406): rank 1 of the one order (v45) is
+# the machine default, so a flag a store still carries is folded into the order on the
+# next read (:meth:`SqliteStore.promote_retired_agent_account_default`) and cleared.
+_SCHEMA_V43 = """
 CREATE TABLE IF NOT EXISTS agent_account (
     slot        INTEGER PRIMARY KEY,
     agent       TEXT NOT NULL,
@@ -1227,14 +1335,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS agent_account_alias ON agent_account (alias)
 CREATE UNIQUE INDEX IF NOT EXISTS agent_account_default ON agent_account (agent)
     WHERE is_default = 1;
 """
-# v42: every window a usage reading has (``claude_usage.windows``, the ``UsageWindow`` list as
+# v44: every window a usage reading has (``claude_usage.windows``, the ``UsageWindow`` list as
 # JSON), so the five-minute cache serves an agent whose windows are not Claude Code's five
 # hours and week (a daily quota per model) what it read. The column is the whole step, so
 # the script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps NULL, which
 # reads as its session and week columns say, as every row did.
-_SCHEMA_V42 = ""
-# v43: ONE priority order over every agent's accounts (owner, PR #113): a rank per slot,
-# whatever agent the slot is (``slot`` alone is the key, as v41 says). The per-agent
+_SCHEMA_V44 = ""
+# v45: ONE priority order over every agent's accounts (owner, PR #113): a rank per slot,
+# whatever agent the slot is (``slot`` alone is the key, as v43 says). The per-agent
 # ``position`` columns stay, and are kept in step with it, for the builds before this step
 # that share the store. A table of its own, not a column on the two registries: an older
 # build reconciles those and would never write a rank for the slots it adds, while a slot
@@ -1242,7 +1350,7 @@ _SCHEMA_V42 = ""
 # first read (``services.claude_accounts._ranked``: the default agent's accounts first,
 # so nothing changes on upgrade) since the default agent is the user's config, not the
 # store's.
-_SCHEMA_V43 = """
+_SCHEMA_V45 = """
 CREATE TABLE IF NOT EXISTS account_rank (
     slot  INTEGER PRIMARY KEY,
     rank  INTEGER NOT NULL
@@ -1293,6 +1401,8 @@ _MIGRATIONS = (
     _SCHEMA_V41,
     _SCHEMA_V42,
     _SCHEMA_V43,
+    _SCHEMA_V44,
+    _SCHEMA_V45,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1362,18 +1472,28 @@ _PRODUCTS: dict[int, _Products] = {
     36: _Products(columns=(("team_event", "actor", "TEXT"), ("team_event", "meta", "TEXT"))),
     37: _Products(
         columns=(
+            ("project_group", "parent_project_id", "TEXT"),
+            ("project_group", "route", "TEXT"),
+            ("project_group", "max_agents", "INTEGER"),
+            ("team_task", "origin_task_id", "TEXT"),
+            ("team_task", "origin_project_id", "TEXT"),
+        )
+    ),
+    38: _Products(("brief", "brief_number")),
+    39: _Products(
+        columns=(
             ("team_session", "agent", "TEXT"),
             ("team_session", "native_session_id", "TEXT"),
             ("fleet_agent", "agent", "TEXT"),
         )
     ),
-    38: _Products(
+    40: _Products(
         ("team_meta_insert_time", "team_meta_update_time"),
         (("team_meta", "updated_at", "INTEGER NOT NULL DEFAULT 0"),),
     ),
-    40: _Products(("agent_account", "agent_account_alias", "agent_account_default")),
-    41: _Products(columns=(("claude_usage", "windows", "TEXT"),)),
-    42: _Products(("account_rank",)),
+    42: _Products(("agent_account", "agent_account_alias", "agent_account_default")),
+    43: _Products(columns=(("claude_usage", "windows", "TEXT"),)),
+    44: _Products(("account_rank",)),
 }
 
 _PROJECT_COLUMNS = (
@@ -1647,6 +1767,25 @@ class ContextStore(Protocol):
         self, writes: Sequence[tuple[TeamEvent, str, dict[str, Any]]]
     ) -> list[TeamEvent]: ...
     def add_team_event(self, event: TeamEvent) -> TeamEvent: ...
+    def add_brief(
+        self, brief_id: str, project_id: str, data: str, created_at: datetime, event: TeamEvent
+    ) -> tuple[int, TeamEvent]: ...
+    def get_brief(self, project_id: str, ref: str) -> BriefRow | None: ...
+    def briefs(self, project_id: str) -> list[BriefRow]: ...
+    def all_brief_documents(self) -> list[str]: ...
+    def complete_task_if_unchanged(self, task_id: str, briefs: Mapping[str, int]) -> TeamTask: ...
+    def save_brief(
+        self,
+        brief_id: str,
+        project_id: str,
+        *,
+        expected: int,
+        revision: int,
+        data: str,
+        updated_at: datetime,
+        event: TeamEvent,
+        transitions: Sequence[TaskTransition] = (),
+    ) -> list[TeamEvent]: ...
     def get_event(self, event_id: str) -> TeamEvent | None: ...
     def get_event_by_seq(self, seq: int) -> TeamEvent | None: ...
     def find_event_by_id(self, ref: str) -> TeamEvent | None: ...
@@ -1717,12 +1856,14 @@ class ContextStore(Protocol):
     def live_fleet_agents(self) -> list[FleetAgent]: ...
     def fleet_label_heads(self, project_id: str | None = None) -> list[FleetAgent]: ...
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
+    def fleet_live_counts(self, since: datetime) -> dict[str, int]: ...
     def fleet_agent_boards(self, project_id: str, *, live_only: bool = False) -> list[str]: ...
     def fleet_board(self, project_id: str) -> str | None: ...
     def fleet_manager_board(self, project_id: str) -> str | None: ...
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
+    def replace_ui_state(self, key: str, expected: str | None, value: str | None) -> bool: ...
     def project_groups(self) -> list[ProjectGroup]: ...
     def get_project_group(self, group_id: str) -> ProjectGroup | None: ...
     def find_project_group(self, name: str) -> ProjectGroup | None: ...
@@ -1737,6 +1878,21 @@ class ContextStore(Protocol):
         collapsed: bool | None = None,
     ) -> ProjectGroup: ...
     def delete_project_group(self, group_id: str) -> list[str]: ...
+    def group_settings(self, group_id: str) -> GroupSettings: ...
+    def set_group_settings(
+        self,
+        group_id: str,
+        *,
+        parent_project_id: str | EllipsisType | None = ...,
+        route: Mapping[str, object] | EllipsisType | None = ...,
+        max_agents: int | EllipsisType = ...,
+    ) -> GroupSettings: ...
+    def set_task_origin(
+        self, task_id: str, origin_task_id: str, origin_project_id: str
+    ) -> None: ...
+    def task_origins(self, project_id: str) -> dict[str, tuple[str, str]]: ...
+    def linked_tasks(self, origin_task_id: str) -> list[TeamTask]: ...
+    def linked_counts(self, origin_project_id: str) -> dict[str, tuple[int, int]]: ...
     def layout_change(self) -> contextlib.AbstractContextManager[None]: ...
     def update_project_layout(
         self,
@@ -1788,23 +1944,23 @@ class ContextStore(Protocol):
     def upsert_claude_account(self, slot: int, config_dir: Path) -> ClaudeAccountRecord: ...
     def delete_claude_account(self, slot: int) -> bool: ...
     def delete_claude_accounts(self, slots: Sequence[int]) -> int: ...
-    def set_claude_account_default(self, slot: int | None) -> None: ...
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None: ...
     def set_claude_account_disabled(self, slot: int, disabled: bool) -> None: ...
     def order_claude_accounts(self, slots: Sequence[int]) -> None: ...
-    # Other agents' account registry (v41): the same arrangement, per agent.
+    # Other agents' account registry (v43): the same arrangement, per agent.
     def agent_accounts(self, agent: str) -> list[ClaudeAccountRecord]: ...
     def upsert_agent_account(
         self, agent: str, slot: int, config_dir: Path
     ) -> ClaudeAccountRecord: ...
     def delete_agent_accounts(self, agent: str, slots: Sequence[int]) -> int: ...
-    def set_agent_account_default(self, agent: str, slot: int | None) -> None: ...
     def set_agent_account_alias(self, agent: str, slot: int, alias: str | None) -> None: ...
     def set_agent_account_disabled(self, agent: str, slot: int, disabled: bool) -> None: ...
     def order_agent_accounts(self, agent: str, slots: Sequence[int]) -> None: ...
-    # One priority order over every agent's slots (v43).
+    # One priority order over every agent's slots (v45).
     def account_ranks(self) -> dict[int, int]: ...
     def rank_accounts(self, slots: Sequence[int]) -> None: ...
+    def promote_retired_claude_account_default(self) -> int | None: ...
+    def promote_retired_agent_account_default(self, agent: str) -> int | None: ...
     # Usage readings (v16, #146): the history behind "how fast is this window filling".
     def add_usage_sample(self, sample: UsageSample) -> None: ...
     def usage_samples(self, slot: int, *, since: datetime) -> list[UsageSample]: ...
@@ -2125,7 +2281,7 @@ def _row_to_usage_sample(row: sqlite3.Row) -> UsageSample:
 
 
 def _usage_windows(raw: str | None) -> tuple[UsageWindow, ...] | None:
-    """A sample's windows as v42 keeps them; ``None`` for a row from before (or one this
+    """A sample's windows as v44 keeps them; ``None`` for a row from before (or one this
     build cannot read), which its session and week columns describe."""
     if raw is None:
         return None
@@ -2152,6 +2308,39 @@ def _row_to_task(row: sqlite3.Row) -> TeamTask:
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
     )
+
+
+class BriefRow(NamedTuple):
+    """One stored brief: its document, and what the store keeps beside it."""
+
+    id: str
+    number: int
+    revision: int
+    data: str
+
+
+TaskTransition = tuple[str, Literal["reopen", "block"], str]
+"""A board task a brief write moves: ``(task id, what, the task event's text)``
+(:meth:`SqliteStore.save_brief`)."""
+
+_BRIEF_COLUMNS = "id, number, revision, data"
+_BRIEF_NUMBER_REF = re.compile(r"^[#Bb]?([0-9]{1,6})$")
+"""A brief ref that is its board number: ``3``, ``#3`` or ``B3``."""
+
+
+class BriefChangedError(RuntimeError):
+    """A brief write lost to another: the revision it read is not the stored one."""
+
+    def __init__(self, brief_id: str) -> None:
+        super().__init__(f"brief {brief_id} changed while this write was being made; retry it")
+        self.brief_id = brief_id
+
+
+def _row_to_brief(row: sqlite3.Row) -> BriefRow:
+    return BriefRow(
+        id=str(row["id"]), number=int(row["number"]), revision=int(row["revision"]),
+        data=str(row["data"]),
+    )  # fmt: skip
 
 
 def _row_to_event(row: sqlite3.Row) -> TeamEvent:
@@ -2676,7 +2865,7 @@ class SqliteStore:
         foreign_keys = ON``; the counts say what each table gave up. Every table
         whose foreign key references ``project`` is found in the schema
         (:meth:`_tables_referencing_project`), so a table a later migration adds
-        is purged without being listed here. The team tables, ``fleet_agent``,
+        is purged without being listed here. The team tables, ``brief``, ``fleet_agent``,
         ``metric`` and the token-usage tables carry no FK, so the schema cannot
         name them: they are
         listed, and deleted by ``project_id`` the way every read of them is
@@ -2720,6 +2909,7 @@ class SqliteStore:
                 "metric",
                 "usage_turn",
                 "usage_session",
+                "brief",
             ):
                 if table in removed:
                     continue  # it has gained the FK, and went above
@@ -4073,6 +4263,201 @@ class SqliteStore:
             written.append(event.model_copy(update={"seq": cursor.lastrowid}))
         return written
 
+    def _insert_event(self, event: TeamEvent) -> TeamEvent:
+        """One ``team_event`` row in the caller's transaction, returned with its ``seq``."""
+        cursor = self._conn.execute(
+            "INSERT INTO team_event (id, project_id, session_id, kind, text, "
+            "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event.id,
+                event.project_id,
+                event.session_id,
+                event.kind,
+                event.text,
+                event.task_id,
+                event.to_role,
+                event.created_at.isoformat(),
+            ),
+        )
+        return event.model_copy(update={"seq": cursor.lastrowid})
+
+    def add_brief(
+        self, brief_id: str, project_id: str, data: str, created_at: datetime, event: TeamEvent
+    ) -> tuple[int, TeamEvent]:
+        """Insert a new brief at revision 1 with its board event, in one transaction; its
+        number on the board and the stored event, whose text is prefixed with the brief's
+        label (``B3 r1: ``), known only once the number is.
+
+        The number is the board's highest plus one, read in the INSERT itself, as
+        :meth:`upsert_task` numbers tasks, so two creates cannot share one.
+        """
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO brief (id, project_id, number, revision, data, created_at, "
+                "updated_at) SELECT ?, ?, COALESCE(MAX(number), 0) + 1, 1, ?, ?, ? "
+                "FROM brief WHERE project_id = ?",
+                (brief_id, project_id, data, created_at.isoformat(), created_at.isoformat(),
+                 project_id),
+            )  # fmt: skip
+            row = self._conn.execute("SELECT number FROM brief WHERE id = ?", (brief_id,))
+            number = int(row.fetchone()[0])
+            stored = self._insert_event(
+                event.model_copy(update={"text": f"B{number} r1: {event.text}"})
+            )
+        return number, stored
+
+    def get_brief(self, project_id: str, ref: str) -> BriefRow | None:
+        """The brief ``ref`` names on ``project_id``'s board: its number (``3``, ``#3``,
+        ``B3``), else its id, an id prefix or an id tail. Never another board's."""
+        number = _BRIEF_NUMBER_REF.match(ref.strip())
+        if number is not None:
+            row = self._conn.execute(
+                f"SELECT {_BRIEF_COLUMNS} FROM brief WHERE project_id = ? AND number = ?",
+                (project_id, int(number.group(1))),
+            ).fetchone()
+            return _row_to_brief(row) if row is not None else None
+        row = self._conn.execute(
+            f"SELECT {_BRIEF_COLUMNS} FROM brief WHERE project_id = ? AND id = ?",
+            (project_id, ref),
+        ).fetchone()
+        if row is not None:
+            return _row_to_brief(row)
+        stripped = _ref_stripped(ref)
+        if not stripped:
+            return None
+        for pattern in (f"{stripped}*", f"*{stripped}"):
+            matches = self._conn.execute(
+                f"SELECT {_BRIEF_COLUMNS} FROM brief WHERE project_id = ? AND id GLOB ? LIMIT 2",
+                (project_id, pattern),
+            ).fetchall()
+            if len(matches) > 1:
+                raise AmbiguousIdError(ref)
+            if matches:
+                return _row_to_brief(matches[0])
+        return None
+
+    def briefs(self, project_id: str) -> list[BriefRow]:
+        """Every brief on ``project_id``'s board, by number."""
+        rows = self._conn.execute(
+            f"SELECT {_BRIEF_COLUMNS} FROM brief WHERE project_id = ? ORDER BY number",
+            (project_id,),
+        ).fetchall()
+        return [_row_to_brief(row) for row in rows]
+
+    def all_brief_documents(self) -> list[str]:
+        """Every brief's stored document on every board, a forgotten project's included:
+        report retention keeps what their evidence cites, and a forgotten project comes
+        back with its briefs when its root registers again."""
+        return [str(row[0]) for row in self._conn.execute("SELECT data FROM brief").fetchall()]
+
+    def complete_task_if_unchanged(self, task_id: str, briefs: Mapping[str, int]) -> TeamTask:
+        """Mark a task done, in one ``BEGIN IMMEDIATE`` transaction with the check that every
+        brief linking it is still at the revision its evidence gate read (``briefs``).
+
+        A brief linked to the task that changed since, or that links it now and was not
+        read, raises :class:`BriefChangedError` and writes nothing: a correction landing
+        between the gate and the write fails the completion. A brief that does not name
+        the task is never read, and one that names it but cannot be parsed counts as
+        linked. The write itself is :meth:`set_task_status`'s for ``done``.
+        """
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            task = self.get_task(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            rows = self._conn.execute(
+                "SELECT id, revision, data FROM brief WHERE project_id = ?", (task.project_id,)
+            ).fetchall()
+            for row in rows:
+                data = str(row["data"])
+                if task.id not in data:
+                    continue
+                try:
+                    document = json.loads(data)
+                    linked = any(
+                        task.id in requirement.get("task_ids", [])
+                        for requirement in document.get("requirements", [])
+                    )
+                except (ValueError, AttributeError, TypeError):
+                    linked = True
+                if linked and briefs.get(str(row["id"])) != int(row["revision"]):
+                    raise BriefChangedError(str(row["id"]))
+            self._conn.execute(
+                "UPDATE team_task SET status = 'done', claimed_by = NULL, "
+                "claim_expires_at = NULL, updated_at = ? WHERE id = ?",
+                (_now_iso(), task.id),
+            )
+        updated = self.get_task(task.id)
+        assert updated is not None  # just updated
+        return updated
+
+    def save_brief(
+        self,
+        brief_id: str,
+        project_id: str,
+        *,
+        expected: int,
+        revision: int,
+        data: str,
+        updated_at: datetime,
+        event: TeamEvent,
+        transitions: Sequence[TaskTransition] = (),
+    ) -> list[TeamEvent]:
+        """Replace a brief's document, move the tasks it sends back, and write the events,
+        in one transaction; the stored events, the brief's first.
+
+        Compare-and-swap on ``revision``: a writer that read ``expected`` and finds
+        another revision raises :class:`BriefChangedError` and changes nothing, so two
+        writers never overwrite each other's evidence. Each transition is guarded by
+        the task's status in its own UPDATE: ``reopen`` takes a task in review or done
+        back to todo and unowned; ``block`` blocks a task that is neither dropped nor
+        blocked, and keeps its owner, the one who has to see why. A task whose status
+        moved on since the caller read it is left as it is, and gets no event. Each
+        moved task's event carries ``event``'s session, so the session whose write
+        moved it is not woken by it.
+        """
+        stored: list[TeamEvent] = []
+        with self._conn:
+            changed = self._conn.execute(
+                "UPDATE brief SET revision = ?, data = ?, updated_at = ? "
+                "WHERE id = ? AND project_id = ? AND revision = ?",
+                (revision, data, updated_at.isoformat(), brief_id, project_id, expected),
+            ).rowcount
+            if changed != 1:
+                raise BriefChangedError(brief_id)
+            stored.append(self._insert_event(event))
+            for task_id, action, text in transitions:
+                if action == "reopen":
+                    moved = self._conn.execute(
+                        "UPDATE team_task SET status = 'todo', claimed_by = NULL, "
+                        "claim_expires_at = NULL, updated_at = ? "
+                        "WHERE id = ? AND project_id = ? AND status IN ('review', 'done')",
+                        (_now_iso(), task_id, project_id),
+                    ).rowcount
+                    kind = "task_reopened"
+                else:
+                    moved = self._conn.execute(
+                        "UPDATE team_task SET status = 'blocked', updated_at = ? "
+                        "WHERE id = ? AND project_id = ? AND status NOT IN ('dropped', 'blocked')",
+                        (_now_iso(), task_id, project_id),
+                    ).rowcount
+                    kind = "task_blocked"
+                if moved == 1:
+                    stored.append(
+                        self._insert_event(
+                            event.model_copy(
+                                update={
+                                    "id": f"{event.id}-{task_id}",
+                                    "kind": kind,
+                                    "text": text,
+                                    "task_id": task_id,
+                                    "to_role": None,
+                                }
+                            )
+                        )
+                    )
+        return stored
+
     @_session_write
     def add_team_event(self, event: TeamEvent) -> TeamEvent:
         if event.session_id:
@@ -4649,6 +5034,94 @@ class SqliteStore:
             raise KeyError(group_id)
         return members
 
+    def group_settings(self, group_id: str) -> GroupSettings:
+        """A group's parent, routing rules and cap (P2-W6, #199); none of them set when the
+        group is gone."""
+        row = self._conn.execute(
+            "SELECT parent_project_id, route, max_agents FROM project_group WHERE id = ?",
+            (group_id,),
+        ).fetchone()
+        if row is None:
+            return GroupSettings(group_id=group_id)
+        try:
+            route = json.loads(row["route"]) if row["route"] else None
+        except ValueError:
+            route = None
+        return GroupSettings(
+            group_id=group_id,
+            parent_project_id=row["parent_project_id"],
+            route=route if isinstance(route, dict) else None,
+            max_agents=int(row["max_agents"] or 0),
+        )
+
+    def set_group_settings(
+        self,
+        group_id: str,
+        *,
+        parent_project_id: str | EllipsisType | None = ...,
+        route: Mapping[str, object] | EllipsisType | None = ...,
+        max_agents: int | EllipsisType = ...,
+    ) -> GroupSettings:
+        """Change the given settings (``...`` leaves one as it is; ``None`` clears it). Raises
+        ``KeyError`` for a group that is gone."""
+        sets: list[str] = []
+        params: list[object] = []
+        if parent_project_id is not ...:
+            sets.append("parent_project_id = ?")
+            params.append(parent_project_id)
+        if route is not ...:
+            sets.append("route = ?")
+            params.append(json.dumps(dict(route)) if route is not None else None)
+        if max_agents is not ...:
+            sets.append("max_agents = ?")
+            params.append(int(max_agents))
+        if sets:
+            cursor = self._conn.execute(
+                f"UPDATE project_group SET {', '.join(sets)} WHERE id = ?", (*params, group_id)
+            )
+            self._conn.commit()
+            if cursor.rowcount != 1:
+                raise KeyError(group_id)
+        return self.group_settings(group_id)
+
+    def set_task_origin(self, task_id: str, origin_task_id: str, origin_project_id: str) -> None:
+        """Record the task ``task_id`` was delegated from (P2-W6): on another board, usually
+        the group's parent."""
+        self._conn.execute(
+            "UPDATE team_task SET origin_task_id = ?, origin_project_id = ? WHERE id = ?",
+            (origin_task_id, origin_project_id, task_id),
+        )
+        self._conn.commit()
+
+    def task_origins(self, project_id: str) -> dict[str, tuple[str, str]]:
+        """Of a board's tasks, the ones delegated from another: task id → (origin task id,
+        origin project id)."""
+        rows = self._conn.execute(
+            "SELECT id, origin_task_id, origin_project_id FROM team_task "
+            "WHERE project_id = ? AND origin_task_id IS NOT NULL",
+            (project_id,),
+        ).fetchall()
+        return {str(r["id"]): (str(r["origin_task_id"]), str(r["origin_project_id"])) for r in rows}
+
+    def linked_counts(self, origin_project_id: str) -> dict[str, tuple[int, int]]:
+        """Of a board's tasks that others were delegated from: origin task id → (how many
+        were delegated, how many of those are done). One query for the whole board."""
+        rows = self._conn.execute(
+            "SELECT origin_task_id, COUNT(*) AS n, SUM(status = 'done') AS d FROM team_task "
+            "WHERE origin_project_id = ? AND origin_task_id IS NOT NULL GROUP BY origin_task_id",
+            (origin_project_id,),
+        ).fetchall()
+        return {str(r["origin_task_id"]): (int(r["n"]), int(r["d"] or 0)) for r in rows}
+
+    def linked_tasks(self, origin_task_id: str) -> list[TeamTask]:
+        """Every task delegated from ``origin_task_id``, on any board."""
+        rows = self._conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE origin_task_id = ? "
+            "ORDER BY created_at, id",
+            (origin_task_id,),
+        ).fetchall()
+        return [_row_to_task(row) for row in rows]
+
     def update_project_layout(
         self,
         project_id: str,
@@ -5009,6 +5482,33 @@ class SqliteStore:
             )
         self._commit()
 
+    def replace_ui_state(self, key: str, expected: str | None, value: str | None) -> bool:
+        """Compare-and-set: write ``value`` under ``key`` (``None`` forgets it) only while the
+        row still holds ``expected`` (``None``: no row). Returns whether it was written.
+
+        For a fact two processes may race on, read in one session and written in another
+        (a usage read's back-off, F1 of #400): a stale write must not undo a newer one."""
+        if expected is None and value is None:
+            row = self._conn.execute("SELECT 1 FROM ui_state WHERE key = ?", (key,)).fetchone()
+            return row is None
+        if expected is None:
+            cursor = self._conn.execute(
+                "INSERT INTO ui_state (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (key) DO NOTHING",
+                (key, value, _now_iso()),
+            )
+        elif value is None:
+            cursor = self._conn.execute(
+                "DELETE FROM ui_state WHERE key = ? AND value = ?", (key, expected)
+            )
+        else:
+            cursor = self._conn.execute(
+                "UPDATE ui_state SET value = ?, updated_at = ? WHERE key = ? AND value = ?",
+                (value, _now_iso(), key, expected),
+            )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
     def get_fleet_agent(self, ref: str) -> FleetAgent | None:
         """A fleet agent by id or unambiguous id prefix (git-style)."""
         rows = self._conn.execute(
@@ -5069,6 +5569,22 @@ class SqliteStore:
             args,
         ).fetchall()
         return [_row_to_bound_fleet_agent(row) for row in rows]
+
+    def fleet_live_counts(self, since: datetime) -> dict[str, int]:
+        """Project id → its live rows, for every project with a live row or one that ended at
+        or after ``since`` (``0`` for one with only the latter); no other project is a key.
+
+        The projects a listing of recent rows can show anything for (``services.fleet``'s
+        ``read_listings``, ``asq``'s tick, #83): with 305 listed projects every tick read
+        every one's rows and sessions, and asked its tmux server, for no agent at all.
+        One pass over the table, grouped in SQL.
+        """
+        rows = self._conn.execute(
+            "SELECT project_id, SUM(ended_at IS NULL) FROM fleet_agent "
+            "WHERE ended_at IS NULL OR ended_at >= ? GROUP BY project_id",
+            (since.astimezone(UTC).isoformat(),),
+        ).fetchall()
+        return {row[0]: int(row[1]) for row in rows}
 
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]:
         """The project's rows that ended at or after ``since``, oldest first.
@@ -5384,7 +5900,7 @@ class SqliteStore:
     def upsert_claude_account(self, slot: int, config_dir: Path) -> ClaudeAccountRecord:
         """Register ``slot`` at the END of the order, or refresh a known slot's directory.
 
-        The arrangement of a known slot — alias, position, default, disabled —
+        The arrangement of a known slot — alias, position, disabled —
         is never touched by an upsert: a sync that re-reads the directories
         must not reorder what the operator arranged. New slots queue at the
         end because "the account I just added" is the one most safely ranked
@@ -5406,10 +5922,8 @@ class SqliteStore:
     def delete_claude_account(self, slot: int) -> bool:
         """Forget a slot's arrangement; True when there was one.
 
-        A default that named this slot goes with the row — the partial index
-        keeps "one default" true, and a default pointing at nothing is exactly
-        the state a removal must not leave behind (the next ``add`` reuses the
-        number, and a stale default would silently adopt the newcomer).
+        Its rank goes with the row and the order closes up, so the next ``add``,
+        which reuses the number, queues at the end rather than inheriting a place.
         """
         return self.delete_claude_accounts([slot]) == 1
 
@@ -5430,24 +5944,6 @@ class SqliteStore:
         else:
             self._commit()
         return deleted
-
-    def set_claude_account_default(self, slot: int | None) -> None:
-        """Make ``slot`` the one default (``None`` clears it). Unknown slot → ``KeyError``.
-
-        Two statements in one transaction: clear, then set. The partial unique
-        index would otherwise refuse the second default before the first was
-        cleared, and a clear that committed alone would leave NO default if
-        the set then failed — which is a worse state than the one asked for.
-        """
-        self._conn.execute("UPDATE claude_account SET is_default = 0 WHERE is_default = 1")
-        if slot is not None:
-            cursor = self._conn.execute(
-                "UPDATE claude_account SET is_default = 1 WHERE slot = ?", (slot,)
-            )
-            if cursor.rowcount != 1:
-                self._rollback()
-                raise KeyError(slot)
-        self._commit()
 
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None:
         """Name a slot (``None`` unnames it). A taken alias raises ``sqlite3.IntegrityError``."""
@@ -5487,7 +5983,7 @@ class SqliteStore:
             )
         self._commit()
 
-    # --- other agents' account registry (v41) ---------------------------------------------------
+    # --- other agents' account registry (v43) ---------------------------------------------------
     #
     # ``claude_account``'s methods above, for the rows of one other agent: the same
     # one-statement writes, the default and the alias refused by the indexes.
@@ -5532,21 +6028,6 @@ class SqliteStore:
             self._commit()
         return deleted
 
-    def set_agent_account_default(self, agent: str, slot: int | None) -> None:
-        """Make ``slot`` ``agent``'s one default (``None`` clears it). Unknown → ``KeyError``."""
-        self._conn.execute(
-            "UPDATE agent_account SET is_default = 0 WHERE agent = ? AND is_default = 1", (agent,)
-        )
-        if slot is not None:
-            cursor = self._conn.execute(
-                "UPDATE agent_account SET is_default = 1 WHERE agent = ? AND slot = ?",
-                (agent, slot),
-            )
-            if cursor.rowcount != 1:
-                self._rollback()
-                raise KeyError(slot)
-        self._commit()
-
     def set_agent_account_alias(self, agent: str, slot: int, alias: str | None) -> None:
         """Name a slot (``None`` unnames it). A taken alias raises ``sqlite3.IntegrityError``."""
         cursor = self._conn.execute(
@@ -5579,7 +6060,7 @@ class SqliteStore:
             )
         self._commit()
 
-    # --- one priority order over every agent's slots (v43) ----------------------------------
+    # --- one priority order over every agent's slots (v45) ----------------------------------
 
     def account_ranks(self) -> dict[int, int]:
         """Each ranked slot's place in the one order, 1 first."""
@@ -5592,6 +6073,88 @@ class SqliteStore:
         for rank, slot in enumerate(dict.fromkeys(slots), start=1):
             self._conn.execute("INSERT INTO account_rank (slot, rank) VALUES (?, ?)", (slot, rank))
         self._commit()
+
+    def promote_retired_claude_account_default(self) -> int | None:
+        """Move the slot the retired ``is_default`` flag names to rank 1 and clear the flag.
+
+        The machine default IS rank 1 of the order (#8 on the board), so a flag an
+        older build set is folded into the order: that slot goes to the top, the
+        others keep their order behind it, renumbered 1..n, and the flag is cleared
+        — so a launch that took a signed-in, enabled old default takes the same account
+        after the upgrade. Two do change. An old default that is signed out or disabled
+        is skipped by the preferred rung, so the launch goes to the next enabled,
+        signed-in account (before, a signed-out one opened on its login screen). And
+        where headroom does not pick (``pick = "default"``, or no usage readable), a
+        role with a hand-written ``team bind <role> --env CLAUDE_CONFIG_DIR=…`` ran on
+        the old default and now runs on its own directory, since a binding wins over
+        the preferred account; a headroom pick still overrides that binding, as before.
+        Keyed on the DATA, not on a schema
+        version: a store any line carried past whatever version a step would have had
+        still holds the flag, and is promoted on its next read all the same. Clearing
+        it makes this idempotent, and lets a later reorder stand. One transaction;
+        the slot moved, or ``None`` when no flag was set. The column and its index
+        stay (dropping a column is a table rebuild, and an older build reading this
+        store still expects it).
+        """
+        row = self._conn.execute(
+            "SELECT slot FROM claude_account WHERE is_default = 1 LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None  # the common case: one read, no transaction, no lock
+        promoted = int(row[0])
+        # Clear the flag FIRST: the UPDATE takes the write lock, and only the one that
+        # still finds the flag goes on. Reading the order before it, a promote racing a
+        # promote-then-reorder wrote its stale order over the reorder (review of #406,
+        # the lost update); a second promoter now finds no flag and writes nothing.
+        cleared = self._conn.execute(
+            "UPDATE claude_account SET is_default = 0 WHERE slot = ? AND is_default = 1",
+            (promoted,),
+        )
+        if cleared.rowcount != 1:
+            self._conn.rollback()
+            return None
+        current = [record.slot for record in self.claude_accounts()]  # under the lock
+        order = [promoted, *(slot for slot in current if slot != promoted)]
+        for position, slot in enumerate(order, start=1):
+            self._conn.execute(
+                "UPDATE claude_account SET position = ? WHERE slot = ?", (position, slot)
+            )
+        self._conn.commit()
+        return promoted
+
+    def promote_retired_agent_account_default(self, agent: str) -> int | None:
+        """:meth:`promote_retired_claude_account_default` for ``agent``'s slots: the flag
+        ``agent_account.is_default`` (store v43, one per agent) a build before the one order
+        across agents set, folded into ``agent``'s own order as its first, and cleared.
+
+        Rank 1 of the one order is the machine default whatever its agent, so no agent has a
+        default of its own; the service puts the slot ahead of the agent's other accounts in
+        that order too (``services.claude_accounts._ranked``). Keyed on the data, idempotent,
+        one transaction; the slot moved, or ``None`` when no flag was set.
+        """
+        row = self._conn.execute(
+            "SELECT slot FROM agent_account WHERE agent = ? AND is_default = 1 LIMIT 1",
+            (agent,),
+        ).fetchone()
+        if row is None:
+            return None
+        promoted = int(row[0])
+        cleared = self._conn.execute(
+            "UPDATE agent_account SET is_default = 0 WHERE slot = ? AND is_default = 1",
+            (promoted,),
+        )
+        if cleared.rowcount != 1:
+            self._conn.rollback()
+            return None
+        current = [record.slot for record in self.agent_accounts(agent)]  # under the lock
+        order = [promoted, *(slot for slot in current if slot != promoted)]
+        for position, slot in enumerate(order, start=1):
+            self._conn.execute(
+                "UPDATE agent_account SET position = ? WHERE agent = ? AND slot = ?",
+                (position, agent, slot),
+            )
+        self._conn.commit()
+        return promoted
 
     # --- usage readings (v16, #146) ------------------------------------------------------------
 
@@ -5772,6 +6335,17 @@ _SESSION_META_KINDS: tuple[str, ...] = (
 """The ``team_meta`` keys kept per session as ``<kind>:<session id>``: the manager's nudge
 debounce, the solo session's not-yet-briefed mark (#346), and the quiet compaction's mark,
 its newest refusal and its latest arm (P1 WS-4)."""
+
+
+class GroupSettings(NamedTuple):
+    """A project group's parent manager settings (P2-W6, #199)."""
+
+    group_id: str
+    parent_project_id: str | None = None
+    route: dict[str, object] | None = None
+    """``{"kinds": [...], "pattern": str | None, "off": bool}``; ``None``: the defaults."""
+    max_agents: int = 0
+    """Live agents across the group's members and parent; ``0`` is no cap."""
 
 
 class Relevance(NamedTuple):
@@ -6315,6 +6889,7 @@ def open_store() -> ContextStore:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA foreign_keys = ON")
             names = _migrate(connection)
+            _remove_old_packs()
             return SqliteStore(connection, names=names)
         except sqlite3.OperationalError as exc:
             if is_locked_error(exc):

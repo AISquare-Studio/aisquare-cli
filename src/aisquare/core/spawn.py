@@ -73,16 +73,12 @@ narrowing their environment would be change without a reason:
   * ``core/agents.py::hook_binary_version`` — ``<hook's aisquare> --version``,
     a string: doctor asking another install of this CLI what version it is,
     so hooks that name a stale binary stop grading as healthy (#84).
-  * ``core/snapshot.py::node_version`` — ``node --version``, a string. Backs the
-    doctor's repomix line, which has to gate on the floor repomix declares
-    (``node >= 22``) rather than on whether ``npx`` exists.
-  * ``core/snapshot.py::head_sha`` and ``core/workspace.py::git_common_root`` —
-    ``git rev-parse``; stripped, as every git seam is (:func:`git_env`).
+  * ``core/workspace.py::git_common_root`` — ``git rev-parse``; stripped, as every
+    git seam is (:func:`git_env`).
   * ``services/ci_snapshot.py::_git`` — the CI test bed's snapshot plumbing
     (``stash create``, ``update-ref``, ``rev-parse``, ``remote get-url``). No
     model; stripped anyway because it runs inside a traced session's hook and
     a child of a hook is not the agent.
-  * ``core/snapshot.py::_run_repomix`` — repomix packs files; no model.
   * ``core/editor.py::edit_text`` — the operator's ``$EDITOR``. It is theirs,
     and it should get their environment.
   * ``core/clipboard.py::write`` — the platform's clipboard tool (``pbcopy``,
@@ -142,9 +138,14 @@ Excluded, the fleet's own plumbing (docs/plans/fleet-tui.md §3.4):
     text on stdin or as one argument; no model process, and stripped anyway:
     a synthesiser has no use for an identity, and ``powershell.exe`` is a shell.
 
-Checked and NOT a seam, recorded so the next reader does not re-derive it:
-  * ``services/project.py`` — catches ``subprocess.SubprocessError`` but starts
-    nothing itself; it is a caller of ``core/snapshot.py``'s seams.
+Excluded, command reports (docs/command-reports.md):
+  * ``services/command_reports.py::run_command`` — ``asq exec``'s command, the
+    operator's or agent's own, with its environment unchanged: running it through
+    the wrapper must not change what it does. Not stripped; it is the caller's
+    action, under the caller's identity, exactly as if run directly.
+  * ``core/source_revision.py::_git`` — ``git rev-parse`` and ``git ls-files``
+    for the per-file source identity a ``--project`` report records; no model,
+    stripped, as every git seam is (:func:`git_env`).
 
 NOT a spawn seam, and not fixable here: Claude Code subagents (``Task``) and
 Workflow agents run IN-PROCESS inside one agent and inherit its environment
@@ -283,11 +284,35 @@ SEAMS: dict[str, Seam] = {
         "a detached `aisquare team distill` of ours — a background worker is not an agent session",
         strips_identity=True,
     ),
+    "aisquare/services/github_prs.py::_run_gh": Seam(
+        EXCLUDED,
+        "`gh api` for `aisquare watch` and the captain queue's pull requests (P2-W2, #284). "
+        "No model process; run untraced",
+        strips_identity=True,
+    ),
+    "aisquare/services/github_prs.py::repo_of": Seam(
+        EXCLUDED,
+        "`git remote get-url origin`, to name a project's GitHub repository (P2-W2). No model "
+        "process; stripped, as every git seam is (`git_env()`)",
+        strips_identity=True,
+    ),
+    "aisquare/services/watch.py::_run_source": Seam(
+        EXCLUDED,
+        "an operator's `[watch.sources.<name>]` command (P2-W2, #284). It may run a model "
+        "(a `claude -p` one-shot), so it runs untraced and cannot inherit an identity",
+        strips_identity=True,
+    ),
     "aisquare/services/hooks.py::_detach": Seam(
         EXCLUDED,
         "a detached `aisquare hook hand-over` of ours (#146; review of #205, finding 1) — the "
         "worker that moves a limited agent is not an agent session, and it outlives the pane "
         "whose hook started it",
+        strips_identity=True,
+    ),
+    "aisquare/services/explainability.py::_start_root_worker": Seam(
+        EXCLUDED,
+        "a detached `aisquare explainability post-root` of ours (#129 e) — it posts a "
+        "launched session's Run root off the launch path; a worker, not an agent session",
         strips_identity=True,
     ),
     "aisquare/cli/accounts.py::_exec": Seam(
@@ -316,13 +341,15 @@ SEAMS: dict[str, Seam] = {
         "grading as healthy (#84). An eager callback that exits before any command "
         "runs; no model process",
     ),
-    "aisquare/core/snapshot.py::head_sha": Seam(
+    "aisquare/core/ignore.py::head_sha": Seam(
         EXCLUDED, "`git rev-parse HEAD`, in `git_env()`", strips_identity=True
     ),
-    "aisquare/core/snapshot.py::node_version": Seam(
-        EXCLUDED, "`node --version`, a string — the floor repomix declares"
+    "aisquare/core/code_index.py::_git_files": Seam(
+        EXCLUDED,
+        "`git ls-files -co --exclude-standard` for the symbol index's file list (#285), in "
+        "`git_env()`; no model",
+        strips_identity=True,
     ),
-    "aisquare/core/snapshot.py::_run_repomix": Seam(EXCLUDED, "repomix packs files; no model"),
     "aisquare/core/workspace.py::git_common_root": Seam(
         EXCLUDED, "`git rev-parse`, in `git_env()`", strips_identity=True
     ),
@@ -443,11 +470,24 @@ SEAMS: dict[str, Seam] = {
         "No model process; stripped, as every git seam is (`git_env()`)",
         strips_identity=True,
     ),
-    "aisquare/core/tmux.py::_sysctl": Seam(
+    "aisquare/core/memory.py::_sysctl": Seam(
         EXCLUDED,
         "`sysctl -n kern.bootsessionuuid` (macOS) or `kern.boottime` (macOS, the BSDs), at a "
         "fleet spawn and when uninstall, upgrade and fleet shutdown ask whether an agent may "
-        "still run; an identifier and a time, no model",
+        "still run; and `kern.memorystatus_vm_pressure_level` and `hw.memsize` (macOS) for "
+        "the fleet's admission (#283); identifiers, a time and numbers, no model",
+    ),
+    "aisquare/cli/fleet.py::gate": Seam(
+        EXCLUDED,
+        "`aisquare fleet gate -- CMD`: the agent's own heavy command (a test run, a build), "
+        "started once memory allows (#283). It is the agent's shell command, run in the "
+        "agent's own environment as if typed; no model process of ours",
+    ),
+    "aisquare/core/memory.py::_vm_stat": Seam(
+        EXCLUDED,
+        "`vm_stat` (macOS): the page counts the fleet's admission reads as available memory "
+        "(#283); no model",
+        strips_identity=True,
     ),
     "aisquare/services/ngrok_tunnel.py::popen_tied": Seam(
         EXCLUDED,
@@ -461,6 +501,17 @@ SEAMS: dict[str, Seam] = {
         "`spd-say`) with the text on stdin or as one argument (T3). No model process; "
         "stripped anyway — a synthesiser has no use for an identity, and powershell "
         "is a shell",
+        strips_identity=True,
+    ),
+    "aisquare/services/command_reports.py::run_command": Seam(
+        EXCLUDED,
+        "`asq exec`'s command, the caller's own, with its environment and semantics "
+        "unchanged; not stripped — it runs under the caller's identity, as if run directly",
+    ),
+    "aisquare/core/source_revision.py::_git": Seam(
+        EXCLUDED,
+        "`git rev-parse` / `git ls-files` for a command report's per-file source identity; "
+        "no model, stripped, as every git seam is (`git_env()`)",
         strips_identity=True,
     ),
 }

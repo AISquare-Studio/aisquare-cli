@@ -848,8 +848,10 @@ def test_its_negative_plain_slot_is_named_by_its_number_wherever_a_slot_is(
 
     defaulted = runner.invoke(app, ["accounts", "default", number])
     assert defaulted.exit_code == 0, defaulted.output
-    found = accounts_service.machine_default(third.id)
-    assert found is not None and found.slot == plain.slot
+    # Rank 1 IS the machine default (0.9.0, #406): `default <slot>` moves it to the top of the
+    # one order, whatever agent it is. Whether it would be picked is the login's (a plain slot
+    # with none is skipped by the preferred rung).
+    assert accounts_service.list_accounts()[0].slot == plain.slot
     bound = runner.invoke(app, ["team", "bind", "coder", "--agent", third.id, "--account", number])
     assert bound.exit_code == 0, bound.output
 

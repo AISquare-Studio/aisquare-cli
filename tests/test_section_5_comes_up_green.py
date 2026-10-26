@@ -1,5 +1,8 @@
 """§5 of the cutover calls `doctor` "the one command that proves it green".
 
+(That command is `aisquare explainability doctor` since 0.9.1: `aisquare doctor` carries no
+explainability row. Where this file says "doctor" it means that section's command.)
+
 Nothing held the green state itself. `test_doctor_live_proxy.py` pins the proxy
 ROW — up, down, tracing on, tracing off, and `--live`'s promise to dial — and it
 is thorough about that row. But the operator's question at 08:00 is not "is the
@@ -74,7 +77,7 @@ def _configure(runner: CliRunner, proxy_url: str) -> None:
 
 
 def _doctor(runner: CliRunner) -> tuple[int, dict[str, dict[str, Any]]]:
-    result = runner.invoke(app, ["--json", "doctor"], catch_exceptions=False)
+    result = runner.invoke(app, ["--json", "explainability", "doctor"], catch_exceptions=False)
     payload = json.loads(result.stdout)
     assert payload, "doctor produced no checks at all"
     return result.exit_code, {row["name"]: row for row in payload}

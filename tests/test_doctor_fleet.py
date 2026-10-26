@@ -1025,7 +1025,8 @@ def test_cli_doctor_emits_the_fleet_rows_in_text_and_json(runner: CliRunner) -> 
         assert name in names, names
         assert f" {name}: " in text, text
     assert names.index("claude-code") < names.index("tmux") < names.index("gh")
-    assert names.index("fleet") < names.index("explainability")
+    assert "fleet" in names
+    assert not [name for name in names if name.startswith("explainability")], names
 
 
 def test_a_healthy_machine_yields_no_fleet_warning(runner: CliRunner) -> None:

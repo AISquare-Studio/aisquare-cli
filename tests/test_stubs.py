@@ -35,6 +35,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("reports", "show"),
     ("reports", "prune"),
     ("reports", "stats"),
+    ("reports", "seal"),
     ("serve",),
     ("captain", "serve"),
     ("captain",),

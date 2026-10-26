@@ -172,19 +172,23 @@ def _without_pem_blocks(text: str) -> str:
     either, so the pass ends there."""
     if "-----BEGIN " not in text:
         return text
-    ends = [(found.start(), found.end()) for found in _PEM_END.finditer(text)]
+    ends = [found.span() for found in _PEM_END.finditer(text)]
     if not ends:
         return text
     kept: list[str] = []
     at = 0
     nearest = 0
     for begin in _PEM_BEGIN.finditer(text):
-        if begin.start() < at:
+        # `span()`, not `start()` and `end()`: the hook path is held to the names it calls by
+        # tests/test_remote_names_stay_off_the_hook_graph.py, which reads a `.end()` as a call
+        # of the remote control's own `end`.
+        opens, closes = begin.span()
+        if opens < at:
             continue  # inside a block already taken out
-        nearest = bisect_left(ends, (begin.end(), 0), nearest)
+        nearest = bisect_left(ends, (closes, 0), nearest)
         if nearest == len(ends):
             break
-        kept += [text[at : begin.start()], MARKER]
+        kept += [text[at:opens], MARKER]
         at = ends[nearest][1]
     kept.append(text[at:])
     return "".join(kept)

@@ -149,8 +149,10 @@ def start_fresh(
     stopped = bool(planned.live_agents or planned.sessions)
     if stopped:
         _stop(project, report, actor=actor)
-    _confirm_down(project, report, planned.sessions, stopped=stopped)
     try:
+        # Inside the try: its read opens the store, and a store locked past its busy timeout
+        # after the stop lost the report of what was stopped (review of #429, round 5).
+        _confirm_down(project, report, planned.sessions, stopped=stopped)
         found, trees, tips = _held_now(project, report, branches=branches)
         if _uncovered(found, discard):
             later = planned.model_copy(

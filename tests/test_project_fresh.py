@@ -1508,3 +1508,43 @@ def test_work_found_before_the_stop_tells_a_terminal_user_to_run_it_again(
     assert "pass --discard-unpushed" in " ".join(without.output.split()), (
         "without the flag, the flag is still what to pass"
     )
+
+
+# --- review round 5 on #429 (#5) -----------------------------------------------------------
+
+
+def test_a_store_error_in_the_confirming_read_keeps_the_partial_report(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    stops: Stops,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 5: the strict read after the stop ran outside the try that turns a failure past
+    the stop into a FreshIncomplete with the report so far. Its read opens the store, and a
+    store locked past its busy timeout escaped raw: a traceback, and no word of the agents
+    already stopped."""
+    alpha, _, _, _ = two
+    with store_session() as store:
+        store.upsert_fleet_agent(_agent(alpha, "coder-1"))
+    real = fleet_service.shutdown
+    after_stop = {"yes": False}
+
+    def shutdown(project: ProjectInfo, **kwargs: Any) -> fleet_service.ShutdownReport:
+        after_stop["yes"] = True
+        return real(project, **kwargs)
+
+    def project_sessions(project: ProjectInfo) -> list[str] | None:
+        if after_stop["yes"]:  # the store locked past its busy timeout, after the stop
+            raise sqlite3.OperationalError("database is locked")
+        return []
+
+    monkeypatch.setattr(fleet_service, "shutdown", shutdown)
+    monkeypatch.setattr(fleet_service, "project_sessions", project_sessions)
+    tasks = len(_rows(alpha.id)["team_task"])
+
+    with pytest.raises(fresh_service.FreshIncomplete) as stopped:
+        fresh_service.start_fresh(alpha)
+
+    assert "OperationalError: database is locked" in str(stopped.value)
+    assert stopped.value.report.stopped == ["coder-1"] and stops.asked == [alpha.id]
+    assert len(_rows(alpha.id)["team_task"]) == tasks and spawned == []

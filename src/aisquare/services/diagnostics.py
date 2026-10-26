@@ -162,6 +162,7 @@ def doctor(
         _check_code_index(cwd),
         _check_brain(cwd),
         _check_harness(cwd),
+        *_optional(_check_model_pick_reader()),
         _check_self_invocation(cwd),
         _check_fleet(),
         *_check_dead_managers(),
@@ -3364,6 +3365,27 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
         return _ok(name, detail)
     except Exception:  # diagnostics must never crash
         return _ok(name, "not evaluated")
+
+
+def _check_model_pick_reader() -> DoctorCheck | None:
+    """Whether Claude Code answered an owner's ``/model`` or ``/effort`` in words the fleet's
+    pick reader cannot read (#16, round 6 of #441): no pick was written from it and a restart
+    starts the launch's values, so a reworded answer in a new Claude Code is said, not
+    silent. ``None`` while every answer read (the row stays out of the way), and for a home
+    not made yet, which doctor never makes."""
+    if _uncreated_home("fleet model pick") is not None:
+        return None
+    found = model_memory.unread()
+    if found is None:
+        return None
+    return _warn(
+        "fleet model pick",
+        f"{found.get('version', 'Claude Code')} answered {found.get('said', '?')} "
+        f"({found.get('at', '?')[:19]}) in words this aisquare cannot read: no pick was "
+        "written from it, and a restart starts the agent's launch model",
+        "update aisquare (`aisquare upgrade`); meanwhile name the model on the spawn "
+        "(`fleet spawn <role> --model …`) or the restart (`fleet restart <label> --model …`)",
+    )
 
 
 def _check_self_invocation(cwd: Path | None = None) -> DoctorCheck:

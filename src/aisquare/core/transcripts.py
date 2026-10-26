@@ -153,21 +153,25 @@ def latest_model(path: Path, *, tail_bytes: int = _TAIL_BYTES) -> str | None:
     return latest
 
 
-# --- the owner's /model and /effort, as Claude Code records them (#16, seq 3609) --------
+# --- the owner's /model and /effort, as Claude Code records them (#16) ------------------
 #
-# What Claude Code 2.1.310 writes (``tests/fixtures/claude_code/model_commands_2.1.310.jsonl``,
-# probed on a scratch config dir):
+# What Claude Code 2.1.310 and 2.1.311 write (``tests/fixtures/claude_code/
+# model_commands_2.1.31*.jsonl``, probed on a scratch config dir):
 #
-# - a built-in ``/model`` or ``/effort`` runs locally, starts no turn, and is recorded as its
-#   caveat (``isMeta``), then ``<command-name>/model</command-name> <command-message>model
-#   </command-message> <command-args>haiku</command-args>``, then its answer,
-#   ``<local-command-stdout>Set model to `Haiku 5.5` and saved as your default for new
-#   sessions</local-command-stdout>``, as ``user`` records; the picker's Esc as ``system``
-#   records of subtype ``local_command`` (``Kept model as `Opus 5.5```);
-# - a custom command or a skill is a turn's prompt: ``<command-message>quick</command-message>
-#   <command-name>/quick</command-name> <command-args>…</command-args>``, then its expansion
-#   (``isMeta``), and no answer of its own;
+# - a built-in ``/model`` or ``/effort`` runs locally and starts no turn. It is a FRAME of
+#   three ``user`` records: its caveat (``isMeta``, ``<local-command-caveat>…``), the command
+#   (the caveat's child: ``<command-name>/model</command-name> <command-message>model
+#   </command-message> <command-args>haiku</command-args>``) and its answer (the command's
+#   child: ``<local-command-stdout>Set model to `Haiku 5.5` and saved as your default for new
+#   sessions</local-command-stdout>``); the picker's Esc as two ``system`` records of subtype
+#   ``local_command``, the answer the command's child;
+# - a custom command or a skill opens a turn: ``<command-message>quick</command-message>
+#   <command-name>/quick</command-name> …``, then its expansion (``isMeta``);
 # - a typed prompt is the text itself.
+#
+# Text can quote all of this (a typed prompt, a Stop hook's feedback, which is how a board
+# note reaches an agent, a compaction summary) but cannot make the frame: no typed text is
+# ``isMeta`` or a ``system`` record, nor the child of a caveat (review of #441, round 6).
 
 #: The settings a built-in command changes and the pick keeps.
 SETTINGS = ("model", "effort")
@@ -175,117 +179,123 @@ SETTINGS = ("model", "effort")
 _COMMAND_NAME = re.compile(r"<command-name>/([^<\s]+)</command-name>")
 _COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 _COMMAND_STDOUT = re.compile(r"<local-command-stdout>(.*?)</local-command-stdout>", re.S)
+_CAVEAT = "<local-command-caveat>"
 
 
 @dataclasses.dataclass(frozen=True)
 class SettingCommand:
-    """A built-in ``/model`` or ``/effort`` run in the session, as Claude Code records it."""
+    """A built-in ``/model`` or ``/effort`` run in the session, framed and answered."""
 
     setting: str
     """``model`` or ``effort``."""
     args: str
     """What was typed after it (``""`` for the picker)."""
-    stdout: str | None
-    """What Claude Code answered (``Set model to …``, ``Cancelled``); ``None``: none recorded."""
+    stdout: str
+    """What Claude Code answered (``Set model to …``, ``Cancelled``)."""
+    version: str | None = None
+    """The Claude Code version that recorded it, for a reader that cannot read the answer."""
 
 
 @dataclasses.dataclass(frozen=True)
 class CommandScan:
     """What :func:`commands_since` read: each built-in ``/model`` and ``/effort``, and each
-    turn's prompt as ``"plain"`` or ``"command"`` (a custom command or a skill opened it), in
-    the order written, and the offset the next read starts at."""
+    turn's prompt as ``"plain"`` or ``"command"`` (a custom command, a skill or a typed
+    ``/…`` opened it), in the order written, and the offset the next read starts at."""
 
     events: tuple[SettingCommand | str, ...]
     end: int
 
 
 def commands_since(path: Path, offset: int) -> CommandScan | None:
-    """The settings commands and turn prompts written to ``path`` since ``offset`` (a file
-    that is shorter than that is read from its start); ``None`` when it cannot be read.
+    """The built-in ``/model`` and ``/effort`` commands and the turn prompts written to
+    ``path`` since ``offset`` (a file shorter than that is read from its start); ``None``
+    when it cannot be read.
 
-    Read once, forward: each Stop reads what the session wrote since the last, line by line,
-    and parses only the lines that can be a prompt or a command (no tool result, no reply).
-    A command whose answer is not written yet, and a line still being written, are left for
-    the next read.
+    A command counts only in Claude Code's own frame, answered: the command the child of a
+    caveat (or a ``system`` ``local_command`` record), its answer the command's child. Read
+    once, forward, to the last complete line, whatever is pending there: a frame cut by the
+    read is lost, never held (a held one pinned every later read to it). Only lines that can
+    be a prompt or a frame are parsed: no tool result, no reply.
     """
     events: list[SettingCommand | str] = []
-    held: tuple[str, str, int] | None = None  # a command's name and args, and where it began
-
-    def resolve(as_prompt: bool) -> None:
-        nonlocal held
-        if held is None:
-            return
-        name, args, _ = held
-        if name in SETTINGS:
-            events.append(SettingCommand(name, args, None))
-        elif as_prompt:
-            events.append("command")
-        held = None
-
+    caveats: set[str] = set()
+    framed: dict[str, tuple[str, str]] = {}  # a framed command's uuid → its name and args
     try:
         with path.open("rb") as handle:
             size = handle.seek(0, 2)
-            position = offset if 0 <= offset <= size else 0
-            handle.seek(position)
-            end = position
+            end = offset if 0 <= offset <= size else 0
+            handle.seek(end)
             for raw in handle:
                 if not raw.endswith(b"\n"):
                     break  # still being written: the next read takes it whole
-                begins, end = end, end + len(raw)
-                if b"tool_result" in raw or (b'"user"' not in raw and b"local_command" not in raw):
+                end += len(raw)
+                # A quoted `"tool_use_id"` in typed text is escaped: only a real result has it.
+                if b'"tool_use_id"' in raw or (
+                    b'"user"' not in raw and b"local_command" not in raw
+                ):
                     continue
                 try:
                     entry = json.loads(raw)
                 except (ValueError, UnicodeDecodeError):
                     continue
-                text, meta = _record_text(entry)
-                if text is None:
-                    continue
-                if (named := _COMMAND_NAME.search(text)) is not None:
-                    resolve(as_prompt=True)
-                    args = _COMMAND_ARGS.search(text)
-                    held = (named.group(1), args.group(1).strip() if args else "", begins)
-                elif (answer := _COMMAND_STDOUT.search(text)) is not None:
-                    if held is not None and held[0] in SETTINGS:
-                        events.append(SettingCommand(held[0], held[1], answer.group(1).strip()))
-                    held = None  # another local command's answer: no turn of its own
-                elif meta:
-                    if not text.startswith("<local-command-caveat>"):
-                        resolve(as_prompt=True)  # a command's expansion: it opened a turn
-                elif _is_typed_prompt(text):
-                    resolve(as_prompt=True)
-                    events.append("plain")
+                event = _frame_step(entry, caveats, framed) if isinstance(entry, dict) else None
+                if event is not None:
+                    events.append(event)
     except OSError:
         return None
-    if held is not None:
-        end = held[2]  # its answer or expansion is still to come: read it again then
     return CommandScan(tuple(events), end)
 
 
-def _record_text(entry: dict[str, Any]) -> tuple[str | None, bool]:
-    """A ``user`` record's text, or a ``system`` ``local_command`` record's, with whether it
-    is ``isMeta``; ``None`` for any other record."""
-    if entry.get("isSidechain") is True:
-        return None, False
-    if entry.get("type") == "system":
-        content = entry.get("content") if entry.get("subtype") == "local_command" else None
-        return (content if isinstance(content, str) else None), False
-    if entry.get("type") != "user":
-        return None, False
-    message = entry.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    if isinstance(content, list):
-        if any(isinstance(block, dict) and block.get("type") != "text" for block in content):
-            return None, False
-        content = "".join(block.get("text", "") for block in content if isinstance(block, dict))
-    return (content if isinstance(content, str) else None), entry.get("isMeta") is True
-
-
-def _is_typed_prompt(text: str) -> bool:
-    """Whether a ``user`` record's text is a typed prompt: not empty, and none of Claude
-    Code's own records (an interruption, a shell command's ``<bash-…>``)."""
+def _frame_step(
+    entry: dict[str, Any], caveats: set[str], framed: dict[str, tuple[str, str]]
+) -> SettingCommand | str | None:
+    """One record's part in :func:`commands_since`: a turn's prompt kind, an answered setting
+    command, or nothing (keeping ``caveats`` and ``framed`` for the records after it)."""
+    if entry.get("isSidechain") is True or entry.get("isCompactSummary") is True:
+        return None
+    system = entry.get("type") == "system"
+    if system:
+        text = entry.get("content") if entry.get("subtype") == "local_command" else None
+    elif entry.get("type") == "user":
+        message = entry.get("message")
+        text = message.get("content") if isinstance(message, dict) else None
+        if isinstance(text, list) and all(
+            isinstance(block, dict) and block.get("type") == "text" for block in text
+        ):
+            text = "".join(block.get("text", "") for block in text)
+    else:
+        text = None
+    if not isinstance(text, str):
+        return None
+    uuid, parent = entry.get("uuid"), entry.get("parentUuid")
+    if entry.get("isMeta") is True:
+        if text.startswith(_CAVEAT) and isinstance(uuid, str):
+            caveats.add(uuid)
+        return None  # a command's expansion, a hook's feedback: never a frame, never a prompt
+    if (named := _COMMAND_NAME.match(text)) is not None:
+        if isinstance(uuid, str) and (system or parent in caveats):
+            args = _COMMAND_ARGS.search(text)
+            framed[uuid] = (named.group(1), args.group(1).strip() if args else "")
+        return None
+    if (answer := _COMMAND_STDOUT.match(text)) is not None:
+        command = framed.pop(parent, None) if isinstance(parent, str) else None
+        if command is None or command[0] not in SETTINGS:
+            return None
+        version = entry.get("version")
+        return SettingCommand(
+            command[0],
+            command[1],
+            answer.group(1).strip(),
+            version if isinstance(version, str) else None,
+        )
+    if system:
+        return None
     stripped = text.strip()
-    return bool(stripped) and not stripped.startswith(("[Request interrupted", "<bash-"))
+    if stripped.startswith(("<command-message>", "/")):
+        return "command"
+    if stripped and not stripped.startswith(("[Request interrupted", "<")):
+        return "plain"
+    return None
 
 
 def refusal_count(path: Path, *, tail_bytes: int = _TAIL_BYTES, since: int = 0) -> int:

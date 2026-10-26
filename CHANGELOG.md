@@ -101,9 +101,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   home's store, and only your choices write it: a spawn of yours that names one (asq's
   dialog or your shell; a cleared dialog field forgets it, and over a role's own pin runs
   the pin; an empty `--model ""` is refused), and the built-in `/model` or `/effort` you run
-  in any fleet agent, which its Stop hook finds in Claude Code's own record of the command
-  (its args, else its answer: `Set model to …`, `Kept model as …`, `Set effort level to …`;
-  a choice "for this session only" runs on in that agent and is no pick). Nothing else is
+  in any fleet agent, which its Stop hook finds in Claude Code's own frame for the command
+  (caveat, command, answer, each the last one's child: no quoted text, board note or
+  summary can make it, and an unanswered command is none). The value is its args, else its
+  answer (`Set model to …`, `Set effort level to …`); the picker's `Default (recommended)`
+  forgets the model pick; a choice "for this session only" runs on in that agent and is no
+  pick; leaving a picker (`Kept model as …`, `Cancelled`) sets nothing. Read as Claude Code
+  2.1.310 and 2.1.311 word it: an answer in other words writes no pick (explicit args still
+  count), says so once on stderr, and doctor shows it (`fleet model pick`). Nothing else is
   evidence: a model or effort that merely differs from the last turn's, as a custom
   command's or a skill's `model:`/`effort:` frontmatter makes it for one turn, writes no
   pick and is never replayed. Only the agent's own session counts, never a `claude -p` run

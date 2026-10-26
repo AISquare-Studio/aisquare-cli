@@ -223,16 +223,24 @@ forget your pick.
 write it: a spawn of yours that names one (from asq's dialog or your own shell; a cleared
 dialog field forgets it, unless the role's settings pin that flag, whose pin then runs and
 whose blank says so), and the built-in `/model` or `/effort` you run inside any fleet agent,
-which its next turn end finds in Claude Code's own record of the command (its name, its
-args, its answer: `Set model to …`, `Kept model as …`, `Set effort level to …`). The value
-is the command's: what you typed after it, else what Claude Code answered (the picker's
-`Opus 5.5` is `claude-opus-5-5`), else, when that names no model, the next plain turn's. A
-choice "for this session only" runs on in that agent and is no pick. **Nothing else is
+which its next turn end finds in Claude Code's own record of the command: the frame Claude
+Code writes for a local command (its caveat, the command, its answer, each the last one's
+child), which no text can make, so a typed prompt, a board note or a compaction summary
+that quotes one counts for nothing, and a command Claude Code never answered for nothing
+either. The value is the command's: what you typed after it, else what Claude Code
+answered (`Set model to `Opus 5.5`` is `claude-opus-5-5`; `Set effort level to high`). The
+picker's `Default (recommended)` forgets the model pick: the account's default from then on.
+A choice "for this session only" runs on in that agent and is no pick. Opening a picker to
+look and leaving it (`Kept model as …`, `Cancelled`) sets nothing. **Nothing else is
 evidence**: a model or an effort that merely differs from the last turn's, as a custom
 command's or a skill's `model:` or `effort:` frontmatter makes it for ONE turn, writes no
-pick and moves nothing, whoever typed it. The captain writes the pick only from its own
-call path (the captain on, its own row; its spawns take no model), never from an `--as
-captain` an agent typed. A spawn an agent makes (`fleet spawn … --as <session>`, or from a
+pick and moves nothing, whoever typed it. The reader knows Claude Code 2.1.310's and
+2.1.311's words; an answer in others writes no pick (explicit args still count), says so on
+stderr once, and doctor shows it as `fleet model pick` until an answer reads again. The
+captain writes the pick only from its own call path (the captain on, its own row; its
+spawns take no model), never from an `--as captain` an agent typed. These guards keep
+cooperating agents from writing your pick by mistake; they are no wall against a process
+that sets `AISQUARE_FLEET_AGENT` or the store itself. A spawn an agent makes (`fleet spawn … --as <session>`, or from a
 fleet agent's own shell, such as a manager's) runs its flags for that one agent and leaves
 your pick alone. Nor may an agent hand another a `/model` or `/effort` as a message (one
 that opens with it, after spaces, line breaks or invisible format characters): its `fleet

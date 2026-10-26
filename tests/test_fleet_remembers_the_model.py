@@ -12,6 +12,7 @@ payload's ``effort.level``), and the readers it relies on.
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -61,25 +62,22 @@ def _prompt(text: str = "carry on") -> dict[str, Any]:
 
 
 def _typed(project: ProjectInfo, setting: str, args: str, stdout: str) -> None:
-    """The owner's built-in ``/model`` or ``/effort``, as Claude Code 2.1.310 records it
-    (``tests/fixtures/claude_code/model_commands_2.1.310.jsonl``)."""
-    caveat = "<local-command-caveat>The command below was run directly in Claude Code…"
-    name = (
-        f"<command-name>/{setting}</command-name>\n            <command-message>{setting}"
-        f"</command-message>\n            <command-args>{args}</command-args>"
-    )
+    """The owner's built-in ``/model`` or ``/effort``, as Claude Code records it (the frame of
+    ``tests/fixtures/claude_code/model_commands_2.1.311.jsonl``): the caveat, the command its
+    child, the answer the command's child."""
+    caveat, command, answer = (str(uuid.uuid4()) for _ in range(3))
     _write(
         _transcript(project),
-        {"type": "user", "isMeta": True, "message": {"role": "user", "content": caveat}},
-        {"type": "user", "message": {"role": "user", "content": name}},
-        {
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": f"<local-command-stdout>{stdout}</local-command-stdout>",
-            },
-        },
-    )
+        {"type": "user", "uuid": caveat, "isMeta": True,
+         "message": {"role": "user", "content": "<local-command-caveat>The command below…"}},
+        {"type": "user", "uuid": command, "parentUuid": caveat,
+         "message": {"role": "user", "content": f"<command-name>/{setting}</command-name>\n"
+                     f"            <command-message>{setting}</command-message>\n"
+                     f"            <command-args>{args}</command-args>"}},
+        {"type": "user", "uuid": answer, "parentUuid": command,
+         "message": {"role": "user",
+                     "content": f"<local-command-stdout>{stdout}</local-command-stdout>"}},
+    )  # fmt: skip
 
 
 SAVED = "and saved as your default for new sessions"
@@ -452,80 +450,138 @@ def test_one_value_is_kept_apart_from_the_other_and_a_blank_forgets_it() -> None
     assert model_memory.remembered() == model_memory.Pick(None, "max"), "not a model"
 
 
-FIXTURE = Path(__file__).parent / "fixtures" / "claude_code" / "model_commands_2.1.310.jsonl"
-"""What real Claude Code 2.1.310 recorded (round 4 reopen, seq 3609; probed on a scratch
-config dir): plain turns; ``/quick`` (a command with ``model: haiku``, replied as haiku),
-``/deep`` (``effort: low``) and ``/peff`` (a skill with ``effort: low``); ``/model haiku``,
-``/effort low`` twice, the ``/model`` picker saved and session-only, ``/model sonnet`` twice,
-``/model claude-opus-5-5``, the ``/effort`` picker saved, session-only and cancelled, and the
-``/model`` picker's Esc (``Kept model as``, a ``system`` ``local_command`` record). Trimmed to
-the fields the reader takes; every content string as written."""
+FIXTURES = Path(__file__).parent / "fixtures" / "claude_code"
+"""What real Claude Code recorded, probed on a scratch config dir (round 6 of #441, seq
+3628): ``model_commands_2.1.310.jsonl`` and ``model_commands_2.1.311.jsonl``. Each holds a
+plain turn whose Stop hook blocked once with a reason that QUOTES a ``/model`` record (as a
+board note does), a typed prompt quoting one, ``/quick`` (``model: haiku``), ``/model haiku``,
+``/effort low``, the ``/model`` picker's ``Default (recommended)`` and its Esc (``Kept model as``,
+``system`` ``local_command`` records), the ``/effort`` picker's Esc (``Cancelled``); 2.1.310 the
+session-only picks, 2.1.311 a ``/compact`` and its summary (``isCompactSummary``). Trimmed to
+the fields the reader anchors on (``uuid``, ``parentUuid``, ``isMeta``, ``isCompactSummary``,
+``version``), every content string as written."""
 
 
-def _setting(setting: str, args: str, stdout: str) -> tuple[str, str, str]:
-    return (setting, args, stdout)
-
-
-def test_the_commands_claude_code_2_1_310_records_are_read_in_order() -> None:
-    scan = transcripts.commands_since(FIXTURE, 0)
-    assert scan is not None and scan.end == FIXTURE.stat().st_size
-    seen = [
-        event if isinstance(event, str) else (event.setting, event.args, event.stdout or "")
+def _events(name: str) -> list[str | tuple[str, str, str]]:
+    scan = transcripts.commands_since(FIXTURES / name, 0)
+    assert scan is not None and scan.end == (FIXTURES / name).stat().st_size
+    return [
+        event if isinstance(event, str) else (event.setting, event.args, event.stdout)
         for event in scan.events
     ]
-    saved = "and saved as your default for new sessions"
-    low = "Set effort level to low (saved as your default for new sessions): Quick, "
-    assert [event if isinstance(event, str) else event[:2] for event in seen] == [
-        "plain", "command", "plain", "command", "command", "plain",
-        ("model", "haiku"), ("effort", "low"), ("effort", "low"),
-        "plain",
-        ("model", ""), ("model", ""), ("model", "sonnet"), ("model", "sonnet"),
-        ("model", "claude-opus-5-5"), ("effort", ""), ("effort", ""), ("effort", ""),
-        ("model", ""),
-        "plain",
+
+
+SET = "Set model to `{}` and saved as your default for new sessions"
+
+
+def test_only_claude_codes_own_frame_is_a_command_on_2_1_311() -> None:
+    """The caveat, then the command its child, then the answer its child (or the picker's
+    ``system`` pair): nothing else, though the Stop hook's feedback, a typed prompt and the
+    compact summary all quote a ``/model`` record."""
+    events = _events("model_commands_2.1.311.jsonl")
+    commands = [event for event in events if not isinstance(event, str)]
+    assert [event for event in events if isinstance(event, str)] == [
+        "plain", "plain", "command", "plain", "command", "plain",
     ]  # fmt: skip
-    commands = [event for event in seen if not isinstance(event, str)]
-    assert commands[0][2] == f"Set model to `Haiku 5.5` {saved}"
-    assert commands[1][2].startswith(low)
-    assert commands[4][2] == "Set model to `Sonnet 5.5` for this session only"
-    assert commands[10][2] == "Cancelled"
-    assert commands[11][2] == "Kept model as `Opus 5.5`"
-    # A read from where the last one ended sees nothing again.
-    again = transcripts.commands_since(FIXTURE, scan.end)
-    assert again is not None and again.events == ()
+    assert [(setting, args) for setting, args, _ in commands] == [
+        ("model", "haiku"), ("effort", "low"), ("model", ""), ("effort", ""),
+        ("model", ""), ("model", ""),
+    ]  # fmt: skip
+    answers = [answer for _, _, answer in commands]
+    assert answers[0] == SET.format("Haiku 5.5")
+    assert answers[2] == SET.format("Sonnet 5.5")
+    assert answers[3] == "Cancelled"
+    assert answers[4] == SET.format("Opus 5.5 (default)")
+    assert answers[5] == "Kept model as `Opus 5.5 (default)`"
+
+
+def test_only_claude_codes_own_frame_is_a_command_on_2_1_310() -> None:
+    events = _events("model_commands_2.1.310.jsonl")
+    commands = [event for event in events if not isinstance(event, str)]
+    assert [(setting, args) for setting, args, _ in commands] == [
+        ("model", "haiku"), ("effort", "low"), ("model", ""), ("model", ""), ("effort", ""),
+        ("model", ""), ("effort", ""),
+    ]  # fmt: skip
+    answers = [answer for _, _, answer in commands]
+    assert answers[2] == SET.format("Opus 5.5 (default)")
+    assert answers[3] == "Kept model as `Opus 5.5 (default)`"
+    assert answers[4] == "Cancelled"
+    assert str(answers[5]).endswith("for this session only")
+    assert str(answers[6]).startswith("Set effort level to medium (this session only)")
 
 
 def test_a_commands_value_comes_from_its_args_else_what_claude_code_answered() -> None:
-    scan = transcripts.commands_since(FIXTURE, 0)
-    assert scan is not None
-    values = [
-        model_memory.command_value(event)
-        for event in scan.events
-        if isinstance(event, transcripts.SettingCommand)
-    ]
-    pick, live = True, False
-    assert values == [
-        model_memory.CommandValue("model", "haiku", pick),
-        model_memory.CommandValue("effort", "low", pick),
-        model_memory.CommandValue("effort", "low", pick),
-        model_memory.CommandValue("model", "claude-haiku-5-5", pick),  # the picker, saved
-        model_memory.CommandValue("model", "claude-sonnet-5-5", live),  # this session only
-        model_memory.CommandValue("model", "sonnet", pick),
-        model_memory.CommandValue("model", "sonnet", pick),
-        model_memory.CommandValue("model", "claude-opus-5-5", pick),
-        model_memory.CommandValue("effort", "high", pick),
-        model_memory.CommandValue("effort", "medium", live),
-        None,  # Cancelled
-        model_memory.CommandValue("model", "claude-opus-5-5", pick),  # Kept model as
-    ]
-    unnamed = transcripts.SettingCommand(
-        "model",
-        "",
-        "Set model to `Default (recommended)` and saved as your default for new sessions",
+    """Round 6 decisions (seq 3628): ``Kept model as`` (the picker's Esc) sets nothing, nor
+    does ``Cancelled``; ``Default (recommended)`` forgets the model (``""``: the account's
+    default from then on); "this session only" moves the agent and is no pick."""
+    value = model_memory.command_value
+
+    def command(setting: str, args: str, answer: str) -> transcripts.SettingCommand:
+        return transcripts.SettingCommand(setting, args, answer, "2.1.311")
+
+    assert value(command("model", "haiku", SET.format("Haiku 5.5"))) == model_memory.CommandValue(
+        "model", "haiku", True
     )
-    assert model_memory.command_value(unnamed) == model_memory.CommandValue("model", None, pick)
-    refused = transcripts.SettingCommand("model", "nope", "Invalid model: nope")
-    assert model_memory.command_value(refused) is None
+    assert value(command("model", "", SET.format("Sonnet 5.5"))) == model_memory.CommandValue(
+        "model", "claude-sonnet-5-5", True
+    )
+    assert value(command("model", "", SET.format("Opus 5.5 (default)"))) == (
+        model_memory.CommandValue("model", "", True)
+    )
+    assert value(command("model", "", "Kept model as `Opus 5.5 (default)`")) is None
+    assert value(command("model", "", "Kept model as `Fable 5.1`")) is None
+    assert value(command("effort", "", "Cancelled")) is None
+    assert value(
+        command("model", "", "Set model to `Sonnet 5.5` for this session only")
+    ) == model_memory.CommandValue("model", "claude-sonnet-5-5", False)
+    assert value(
+        command("effort", "", "Set effort level to medium (this session only): Balanced")
+    ) == model_memory.CommandValue("effort", "medium", False)
+    assert value(
+        command("effort", "low", "Set effort level to low (saved as your default for new …")
+    ) == model_memory.CommandValue("effort", "low", True)
+
+
+def test_an_answer_this_version_cannot_read_is_said_and_explicit_args_still_count() -> None:
+    """Round 6 minor 3: a reworded answer must not fail silently. It is unread
+    (``understood=False``: the canary), and only the command's own args are a value."""
+    value = model_memory.command_value
+    reworded = transcripts.SettingCommand("model", "haiku", "Model set to Haiku 5.5", "2.2.0")
+    assert value(reworded) == model_memory.CommandValue("model", "haiku", True, understood=False)
+    bare = transcripts.SettingCommand("model", "", "Model set to Haiku 5.5", "2.2.0")
+    assert value(bare) == model_memory.CommandValue("model", None, True, understood=False)
+
+
+def _framed(path: Path, *records: dict[str, object]) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+
+
+def test_a_command_with_no_answer_yet_is_none_and_never_holds_the_read(tmp_path: Path) -> None:
+    """Round 6 minor 4: a command whose answer is not written yet never pinned the offset
+    there (every Stop re-read the transcript from it). The read moves on past it; a command
+    with no answer is no command."""
+    path = tmp_path / "t.jsonl"
+    _framed(
+        path,
+        {"type": "user", "uuid": "c1", "isMeta": True,
+         "message": {"role": "user", "content": "<local-command-caveat>The command below…"}},
+        {"type": "user", "uuid": "m1", "parentUuid": "c1",
+         "message": {"role": "user", "content": "<command-name>/model</command-name>\n"
+                     "            <command-args>fable</command-args>"}},
+    )  # fmt: skip
+    scan = transcripts.commands_since(path, 0)
+    assert scan is not None and scan.events == () and scan.end == path.stat().st_size
+
+
+def test_a_prompt_that_mentions_a_tool_result_is_a_prompt(tmp_path: Path) -> None:
+    """Round 6 minor 6: the tool-result filter skipped every line that said ``tool_result``."""
+    path = tmp_path / "t.jsonl"
+    prompt = {"role": "user", "content": "why is the tool_result empty?"}
+    _framed(path, {"type": "user", "uuid": "p1", "message": prompt})
+    scan = transcripts.commands_since(path, 0)
+    assert scan is not None and scan.events == ("plain",)
 
 
 def test_the_latest_reply_is_read_off_the_tail(tmp_path: Path) -> None:

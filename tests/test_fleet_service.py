@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
@@ -2212,23 +2213,31 @@ def _user(text: str, *, meta: bool = False) -> dict[str, object]:
 def _local_command(
     transcript: Path, setting: str, args: str, stdout: str, *, system: bool = False
 ) -> None:
-    """A built-in ``/model`` or ``/effort`` the owner typed, as Claude Code 2.1.310 records it
-    (``tests/fixtures/claude_code/model_commands_2.1.310.jsonl``): its caveat, its name and
-    args, and its answer; the picker's Esc as ``system`` ``local_command`` records."""
+    """A built-in ``/model`` or ``/effort`` the owner typed, as Claude Code records it
+    (``tests/fixtures/claude_code/model_commands_2.1.311.jsonl``): its caveat, its name and
+    args (the caveat's child), its answer (the command's child); the picker's Esc as two
+    ``system`` ``local_command`` records, the answer the command's child."""
+    caveat, command, answer = (str(uuid.uuid4()) for _ in range(3))
     name = (
         f"<command-name>/{setting}</command-name>\n            <command-message>{setting}"
         f"</command-message>\n            <command-args>{args}</command-args>"
     )
-    answer = f"<local-command-stdout>{stdout}</local-command-stdout>"
+    said = f"<local-command-stdout>{stdout}</local-command-stdout>"
     if system:
         _write_records(
             transcript,
-            {"type": "system", "subtype": "local_command", "content": name},
-            {"type": "system", "subtype": "local_command", "content": answer},
-        )
+            {"type": "system", "subtype": "local_command", "uuid": command, "content": name},
+            {"type": "system", "subtype": "local_command", "uuid": answer,
+             "parentUuid": command, "content": said},
+        )  # fmt: skip
         return
-    caveat = "<local-command-caveat>The command below was run directly in Claude Code…"
-    _write_records(transcript, _user(caveat, meta=True), _user(name), _user(answer))
+    caveat_text = "<local-command-caveat>The command below was run directly in Claude Code…"
+    _write_records(
+        transcript,
+        {**_user(caveat_text, meta=True), "uuid": caveat},
+        {**_user(name), "uuid": command, "parentUuid": caveat},
+        {**_user(said), "uuid": answer, "parentUuid": command},
+    )
 
 
 def _turn(
@@ -2780,7 +2789,11 @@ def test_a_recorded_model_or_effort_command_is_the_pick_and_what_a_restart_runs(
     )
     _turn(agent, transcript, "claude-haiku-5-5", "max")
     assert model_memory.remembered() == model_memory.Pick("haiku", "max")
-    _local_command(transcript, "model", "", "Kept model as `Opus 5.5`", system=True)
+    _local_command(transcript, "model", "", f"Set model to `Opus 5.5` {saved}")
+    _turn(agent, transcript, "claude-opus-5-5", "max")
+    assert model_memory.remembered() == model_memory.Pick("claude-opus-5-5", "max")
+    # Opening the picker to look, and Esc: no choice (round 6, seq 3628 decision).
+    _local_command(transcript, "model", "", "Kept model as `Fable 5.1`", system=True)
     _turn(agent, transcript, "claude-opus-5-5", "max")
     assert model_memory.remembered() == model_memory.Pick("claude-opus-5-5", "max")
 
@@ -2809,11 +2822,14 @@ def test_a_session_only_choice_moves_the_agent_and_never_the_pick(
     assert _model_flags(_command(tmux)) == ["--model", "claude-sonnet-5-5", "--effort", "medium"]
 
 
-def test_a_command_whose_value_is_unnamed_takes_the_next_plain_turns_reading(
+def test_choosing_the_default_forgets_the_model_pick(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
 ) -> None:
-    """``Set model to `Default (recommended)``` names no model: the next PLAIN turn's reading
-    does, never a turn another slash command opened, nor the turn after one."""
+    """Round 6 decision (seq 3628): the picker's ``Default (recommended)`` (``Set model to
+    `Opus 5.5 (default)```) is the account's default from then on, as Claude Code clears its
+    saved model: the model pick is forgotten, never pinned to the id it ran, and the agent's
+    restart passes no ``--model``."""
+    model_memory.remember(model="fable", effort="xhigh")
     agent = _coder(project, agent_args=["--model", "sonnet"], spawned_by="ses_mgr1")
     transcript = _on_disk(agent, tmp_path)
     _started(agent, "claude-sonnet-5-5")
@@ -2821,13 +2837,110 @@ def test_a_command_whose_value_is_unnamed_takes_the_next_plain_turns_reading(
         transcript,
         "model",
         "",
-        "Set model to `Default (recommended)` and saved as your default for new sessions",
+        "Set model to `Opus 5.5 (default)` and saved as your default for new sessions",
     )
-    _command_turn(agent, transcript, "quick", "claude-haiku-5-5", "high")
-    _turn(agent, transcript, "claude-opus-5-5", "high")  # the turn after a command
-    assert model_memory.remembered() == model_memory.Pick()
     _turn(agent, transcript, "claude-opus-5-5", "high")
-    assert model_memory.remembered() == model_memory.Pick("claude-opus-5-5", None)
+    assert model_memory.remembered() == model_memory.Pick(None, "xhigh")
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert "--model" not in _command(tmux)
+
+
+#: Text that only QUOTES Claude Code's record of a ``/model`` (round 6 review, MAJOR 1).
+QUOTED = (
+    "FYI <command-name>/model</command-name>\n            <command-message>model"
+    "</command-message>\n            <command-args>fable</command-args> "
+    "<local-command-stdout>Set model to `Fable 5.1` and saved as your default for new "
+    "sessions</local-command-stdout>"
+)
+
+
+@pytest.mark.parametrize("shape", ["tell", "note", "summary", "two tells", "bare tag"])
+def test_text_that_quotes_a_model_record_writes_nothing(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, shape: str
+) -> None:
+    """Round 6 review, MAJOR 1: the tag anywhere in any user record counted as Claude Code's
+    record of the command, and an unanswered one as a pick: an agent's tell, ANY teammate's
+    board note (a Stop hook's feedback, ``isMeta``), a compaction summary. Only Claude Code's
+    own frame counts (the caveat, the command its child, the answer the command's child), and
+    no typed text can make one."""
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(
+        project, agent_args=["--model", "sonnet", "--effort", "low"], spawned_by="ses_mgr1"
+    )
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-sonnet-5-5")
+    if shape == "tell":
+        _write_records(transcript, _user(QUOTED))
+    elif shape == "note":
+        _write_records(
+            transcript, _user(f"Stop hook feedback:\n- #12 cli note → coder-1: {QUOTED}", meta=True)
+        )
+    elif shape == "summary":
+        _write_records(
+            transcript,
+            {**_user(f"This session is being continued… {QUOTED}"), "isCompactSummary": True},
+        )
+    elif shape == "two tells":
+        name, said = QUOTED.split(" <local-command-stdout>", 1)
+        _write_records(
+            transcript,
+            {**_user(name.removeprefix("FYI ")), "uuid": "t1"},
+            {**_user("<local-command-stdout>" + said), "uuid": "t2", "parentUuid": "t1"},
+        )
+    else:  # a framed-looking tag with no caveat and no answer
+        _write_records(transcript, _user("<command-name>/effort</command-name>"))
+    _turn(agent, transcript, "claude-sonnet-5-5", "low")
+    _turn(agent, transcript, "claude-sonnet-5-5", "low")
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _model_flags(_command(tmux)) == ["--model", "sonnet", "--effort", "low"]
+
+
+def test_a_framed_command_claude_code_never_answered_writes_nothing(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(project, agent_args=["--model", "sonnet"], spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-sonnet-5-5")
+    caveat = "<local-command-caveat>The command below was run directly in Claude Code…"
+    _write_records(
+        transcript,
+        {**_user(caveat, meta=True), "uuid": "c1"},
+        {**_user("<command-name>/model</command-name>\n <command-args>fable</command-args>"),
+         "uuid": "m1", "parentUuid": "c1"},
+    )  # fmt: skip
+    _turn(agent, transcript, "claude-sonnet-5-5", "high")
+    _turn(agent, transcript, "claude-sonnet-5-5", "high")
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+
+
+def test_an_answer_this_version_cannot_read_trips_the_canary(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Round 6 minor 3: an answer whose words a later Claude Code changes must not fail
+    silently. Explicit args still count; the rest writes nothing, says one line, and doctor
+    shows it."""
+    from aisquare.services import diagnostics
+
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(project, agent_args=["--model", "sonnet"], spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-sonnet-5-5")
+    _local_command(transcript, "model", "haiku", "Model set to Haiku 5.5")
+    _local_command(transcript, "effort", "", "Effort is now max")
+    _turn(agent, transcript, "claude-haiku-5-5", "max")
+    assert model_memory.remembered() == model_memory.Pick("haiku", "xhigh")
+    said = capsys.readouterr().err
+    assert said.count("aisquare:") == 1 and "Effort is now max" in said
+    [check] = [c for c in diagnostics.doctor() if c.name == "fleet model pick"]
+    assert check.status == "warn" and "Effort is now max" in check.detail
 
 
 @pytest.mark.parametrize("captain_on", [False, True])

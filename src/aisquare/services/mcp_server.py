@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from aisquare.core import code_index, paths
 from aisquare.core import credentials as credentials_store
-from aisquare.core.store import is_locked_error
+from aisquare.core.store import BriefChangedError, is_locked_error
 from aisquare.models import TaskStatus, TeamSession
 from aisquare.services import code as code_service
 from aisquare.services import project as project_service
@@ -171,6 +171,11 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
         ) from exc
     except (ClaimLostError, project_service.NotAdded) as exc:
         raise _tool_error(f"error: {exc}") from exc
+    except BriefChangedError as exc:
+        # A correction that lands while `task done` runs (the evidence gate): a RuntimeError,
+        # so without this it reached the client as a raw tool exception, not the stable
+        # wording remote agents correct themselves from (review of #341, finding 5).
+        raise _tool_error(f"error: {exc}; run task_update done again") from exc
     except DeliveryUnconfirmedError as exc:
         # The #20 contract crosses the remote surface too: an unconfirmed
         # write must reach the agent as the error wording, never a raw

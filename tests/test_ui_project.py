@@ -89,7 +89,7 @@ from aisquare.services import explainability_ops as ops
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from tests.ci_support import git
-from tests.ui_workers import settle_page
+from tests.ui_workers import settle_page, settle_until_held
 
 T = TypeVar("T")
 
@@ -433,10 +433,17 @@ def test_the_personas_tab_reads_nothing_until_it_is_opened(
     async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[int, int]]:
         view = host.query_one(ProjectView)
         seen = [(len(view.query(PersonasTab)), len(reads))]
-        for tab in ("tab-personas", "tab-board", "tab-personas"):
+
+        # Each opening is waited for by the read it makes, not one pause: on a loaded
+        # windows-latest runner the tab had mounted and its on_mount had not yet read.
+        async def open_tab(tab: str, read: int) -> None:
             view.active = tab
+            await settle_until_held(pilot.app, lambda: len(reads) >= read, what=f"read {read}")
             await pilot.pause()
             seen.append((len(view.query(PersonasTab)), len(reads)))
+
+        for tab, read in (("tab-personas", 1), ("tab-board", 1), ("tab-personas", 2)):
+            await open_tab(tab, read)
         return seen
 
     seen = drive(project, scenario)

@@ -120,6 +120,58 @@ def test_a_members_question_to_the_parent_lands_on_its_board_and_wakes_its_manag
     assert manager is not None and team_service.wake_class(routed, manager) == "wake"
 
 
+def test_the_routed_lines_pointer_runs_and_shows_the_members_board(
+    tree: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """TUI-401c check 4: the routed line ends with ' — aisquare board --project <member>',
+    and `aisquare board` had no --project (exit 2, 'No such option'), so the one thing the
+    line asks of the parent's manager failed. Run exactly as written, from the parent's own
+    folder, it shows the member's board with the member's question on it."""
+    event = _note("which base, rc/p1 or rc/p2?", to="parent", kind="question")
+    [routed] = _events(tree["hq"], "routed")
+    pointer = routed.text.rsplit(" — ", 1)[1]
+    assert pointer == "aisquare board --project api", "control: the line as written"
+    monkeypatch.chdir(tree["hq"].root)
+
+    shown = runner.invoke(app, pointer.split()[1:])
+    as_json = runner.invoke(app, ["--json", *pointer.split()[1:]])
+
+    assert shown.exit_code == 0, shown.output
+    assert "which base, rc/p1 or rc/p2?" in shown.stdout, shown.stdout
+    board = json.loads(as_json.stdout)
+    assert board["project"]["id"] == tree["api"].id
+    assert event.seq in [e["payload"]["seq"] for e in board["events"]]
+    missing = runner.invoke(app, ["--json", "board", "--project", "nope"])
+    assert missing.exit_code == 1 and '"not_found"' in missing.stdout, missing.output
+
+
+def test_board_watch_follows_the_named_project(
+    tree: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """``board --project <member> --watch [--interval]`` watches the member's board: the
+    watcher is handed that project and the interval, and its frame is that board."""
+    from aisquare.cli import watch as watch_ui
+
+    _note("which base, rc/p1 or rc/p2?", to="parent", kind="question")
+    monkeypatch.chdir(tree["hq"].root)
+    handed: list[tuple[float, str | None]] = []
+    monkeypatch.setattr(
+        watch_ui,
+        "run_watch",
+        lambda interval, project=None: handed.append(
+            (interval, project.id if project is not None else None)
+        ),
+    )
+
+    watched = runner.invoke(app, ["board", "--project", "api", "--watch", "--interval", "2"])
+
+    assert watched.exit_code == 0, watched.output
+    assert handed == [(2.0, tree["api"].id)]
+    frame = watch_ui.board_frame(40, 160, tree["api"]).plain
+    assert "which base, rc/p1 or rc/p2?" in frame, frame
+    assert f"aisquare board — {tree['api'].root.name}" in frame
+
+
 def test_a_pattern_routes_a_matching_note_and_not_another(
     tree: dict[str, ProjectInfo],
 ) -> None:

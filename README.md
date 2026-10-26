@@ -23,8 +23,8 @@ instead of cold. The memory also works on its own, without the UI.
 ## Quickstart 1: memory only
 
 Needs [uv](https://docs.astral.sh/uv/) and
-[Claude Code](https://claude.com/claude-code); no installer, no tmux. Node 22+
-is optional and adds an on-demand codebase snapshot. Run `init` inside your repo:
+[Claude Code](https://claude.com/claude-code); no installer, no tmux. Run `init`
+inside your repo:
 
 ```sh
 UV_PYTHON_DOWNLOADS=automatic uv tool install --python 3.13 aisquare-cli
@@ -49,9 +49,12 @@ missing, and ends by offering to open the UI:
 curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh
 ```
 
+That installs the latest release. To pin one, every release from 0.9.0 on
+carries its own copy: `curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.0/install.sh | sh`.
+
 macOS, Linux and WSL2. It installs uv, a Python 3.13 for the CLI alone,
-`aisquare-cli`, tmux, gh, git, Node and Claude Code, then registers the git repo
-you ran it from and wires Claude Code's hooks. Running it again is a no-op.
+`aisquare-cli`, tmux, gh, git and Claude Code, offers Node for browser tools,
+then registers the git repo you ran it from and wires Claude Code's hooks. Running it again is a no-op.
 [Install](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/install.md)
 has the PowerShell line that sets up WSL2 on Windows, how to read the script
 before you run it, and how to install by hand.
@@ -115,8 +118,10 @@ backed by one SQLite file: no daemon, no cloud dependency. Sign in with
 - Python 3.11+ if you install by hand (the one-liner brings its own 3.13).
 - [Claude Code](https://claude.com/claude-code) for the agents, and tmux 3.2+
   for the fleet.
-- Node 22+, optional, for a codebase snapshot packed on demand (`aisquare project onboard`).
-  The symbol index (`aisquare code find|refs|similar`) needs nothing extra for Python.
+- Node 22.12+, optional, for browser tools like the Chrome DevTools MCP; the one-liner
+  offers both, Node and the MCP registered with Claude Code (`--with chrome-devtools`
+  installs them without asking). aisquare itself never runs Node.
+- The symbol index (`aisquare code find|refs|similar`) needs nothing extra for Python.
 
 The package is `aisquare-cli`; the command is `aisquare`, with `asq` as the
 short alias.
@@ -129,7 +134,9 @@ short alias.
 | [Memory](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/memory.md) | Your agent remembers preferences and project conventions, and starts every session oriented. For everyone; nothing to run after setup |
 | [The fleet](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/fleet.md) | The UI, the roles, `aisquare fleet …`, Claude accounts, and every default you can change |
 | [Orchestration](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/orchestration.md) | Several agent sessions work one problem as a team, with a shared task board. Opt-in, per repo |
+| [Work briefs](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/work-briefs.md) | A request as numbered requirements linked to board tasks, with the checks, findings and corrections recorded against them |
 | [Phone control](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/remote.md) | Optional: the fleet on your phone through your own ngrok tunnel. What needs you across every project, each agent's screen, the board, and once you allow writes, the keys to answer |
+| [Command reports](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/command-reports.md) | `asq exec` runs a command once and saves how it ended and on which source, so a later step can cite it without running it again |
 | [Reference](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/reference.md) | The hooks, the `~/.aisquare` layout, the main command tree and the global flags |
 | [The AISquare platform](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/platform.md) | Optional: signing in, Explainability, the Collective Intelligence test bed |
 | [The captain](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/captain.md) | Experimental, off by default: one agent above every project that you talk to, typed or spoken. Turning it on, its tools, the voice page and the queue of what needs you |

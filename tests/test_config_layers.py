@@ -27,6 +27,7 @@ from aisquare.core.config import (
     _V1_DEFAULTS,
     CONFIG_VERSION,
     FLEET_DENY_TOOLS,
+    RETIRED_SECTIONS,
     AccountsSettings,
     AppConfig,
     FleetRoleSettings,
@@ -39,6 +40,7 @@ from aisquare.core.config import (
     save_config,
     system_defaults,
 )
+from aisquare.core.harness import PLAIN_ROLE
 from aisquare.core.paths import config_path
 from aisquare.services import settings as settings_service
 
@@ -49,7 +51,11 @@ def _file(target: Path) -> dict[str, Any]:
 
 #: Every fleet role's table at its defaults: what every save writes whole, so that a build
 #: before the layers, which reads the file without the defaults under it, sees them all.
-_ROLES: dict[str, Any] = system_defaults()["fleet"]["roles"]
+#: All but the role-less agent's, which no such build reads and a save leaves out at its
+#: default (review of #405, M1).
+_ROLES: dict[str, Any] = {
+    role: table for role, table in system_defaults()["fleet"]["roles"].items() if role != PLAIN_ROLE
+}
 
 
 def _roles(**changes: Any) -> dict[str, Any]:
@@ -104,13 +110,13 @@ def test_a_save_writes_only_the_keys_that_differ_from_the_system_defaults(
     config = AppConfig()
     config.fleet.roles["coder"].permission_mode = "acceptEdits"
     config.accounts.pick = "default"
-    config.snapshot.ignore = ["**/fixtures/**"]
+    config.explainability.roles = ["coder"]
     save_config(config, target)
     assert _file(target) == {
         "config_version": CONFIG_VERSION,
         "fleet": {"roles": _roles(coder={"permission_mode": "acceptEdits"})},
         "accounts": {"pick": "default"},
-        "snapshot": {"ignore": ["**/fixtures/**"]},
+        "explainability": {"roles": ["coder"]},
     }
     assert load_config(target) == config
 
@@ -239,7 +245,8 @@ def test_config_list_overrides_with_none_still_prints_toml(runner: CliRunner) ->
 
 def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> None:
     """The snapshot is version 1's defaults, frozen. When a default changes later, or a
-    setting is added, it changes here — never in ``_V1_DEFAULTS``, which is what 0.8.0 wrote."""
+    setting is added, it changes here — never in ``_V1_DEFAULTS``, which is what 0.8.0 wrote.
+    A section removed since is one of ``RETIRED_SECTIONS``: 0.8.0 wrote ``[snapshot]``."""
     changed = {
         "accounts": {
             "pick": "headroom",
@@ -256,8 +263,10 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "import": {"engine": "auto", "api_model": "claude-opus-5"},
         },
         "experimental": {"captain": False},
-        # The symbol index (#285).
-        "code": {"enabled": True, "max_file_kb": 1024},
+        # asq's daily release check (services.updates).
+        "updates": {"check": True},
+        # The symbol index (#285); its ignore list was [snapshot]'s until #399.
+        "code": {"enabled": True, "max_file_kb": 1024, "ignore": []},
         # App settings ▸ User preferences, added since.
         "ui": {"always_show_project_path": False},
         # The fleet's admission (#283), the role tool policy (#280: the reviewer's deny is its
@@ -296,6 +305,19 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
                     **({"extra_args": []} if role == "reviewer" else {}),
                 }
                 for role in _V1_DEFAULTS["fleet"]["roles"]
+            }
+            | {
+                # The role-less agent, a default since review of #405 (M1): no v1 table to
+                # overlay, so the whole of it.
+                PLAIN_ROLE: {
+                    "permission_mode": "auto",
+                    "worktree": False,
+                    "extra_args": [],
+                    "deny_tools": [],
+                    "allow_tools": [],
+                    "skill_listing": "names",
+                    "board_context": "all",
+                }
             },
         },
         "team": {"brief_blocks": ["objective", "acceptance", "boundaries"], "brief_strict": False},
@@ -308,7 +330,11 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "sources": {},
         },
     }
-    assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
+    then = _overlay(_V1_DEFAULTS, changed)
+    assert set(RETIRED_SECTIONS) <= set(then)
+    assert {key: value for key, value in then.items() if key not in RETIRED_SECTIONS} == (
+        system_defaults()
+    )
 
 
 def test_a_v1_file_keeps_only_what_differs_from_v1s_defaults(tmp_path: Path) -> None:
@@ -493,7 +519,13 @@ def test_a_file_this_build_writes_reads_the_same_without_the_defaults_under_it(
     save_config(config, target)
 
     older = _as_a_whole_file_reader_reads(target)
-    assert older.fleet.roles == load_config(target).fleet.roles == config.fleet.roles
+    assert load_config(target).fleet.roles == config.fleet.roles
+    # The role-less agent's table is left out at its default; such a build falls back to
+    # the same shape for it (fleet.role_settings), so the fleet reads the same.
+    assert older.fleet.roles == {
+        role: table for role, table in config.fleet.roles.items() if role != PLAIN_ROLE
+    }
+    assert config.fleet.roles[PLAIN_ROLE] == FleetRoleSettings()
     # The same table, but an older build denies a role only what its extra_args say, so
     # its reviewer can edit: `upgrade --version` says so (lifecycle's tools_regained).
     assert older.fleet.roles["reviewer"].extra_args == []

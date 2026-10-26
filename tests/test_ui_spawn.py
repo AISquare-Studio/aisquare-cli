@@ -1973,22 +1973,26 @@ def _two_agents_codex_on_top(monkeypatch: pytest.MonkeyPatch) -> tuple[int, int]
 
 def _usage_read_held(
     monkeypatch: pytest.MonkeyPatch, slots: tuple[int, int]
-) -> tuple[threading.Event, threading.Event, list[int]]:
-    """``cached_usage`` held until the test lets it go: ``(started, release, threads)``, the
-    id of the thread of each read in ``threads``."""
+) -> tuple[threading.Event, threading.Event, list[int], list[int]]:
+    """``cached_usage`` held until the test lets it go: ``(started, release, threads, ui)``,
+    the id of the thread of each read in ``threads``. A read on a thread named in ``ui`` (the
+    test's own, the UI's) is answered at once, so a dialog that wrongly reads there fails
+    the test quickly instead of hanging it."""
     started, release = threading.Event(), threading.Event()
     threads: list[int] = []
+    ui: list[int] = []
 
     def held(accounts: Any, **_: Any) -> dict[int, ClaudeUsage]:
         threads.append(threading.get_ident())
         started.set()
-        release.wait(10)
+        if threading.get_ident() not in ui:
+            release.wait(10)
         window = UsageWindow(name="session", minutes=300, used_percent=10.0)
         return {a.slot: ClaudeUsage(available=True, windows=(window,)) for a in accounts}
 
     monkeypatch.setattr(accounts_service, "cached_usage", held)
     monkeypatch.setattr(accounts_service, "read_usage", lambda accounts, **_: held(accounts))
-    return started, release, threads
+    return started, release, threads, ui
 
 
 def test_opening_the_dialog_reads_no_usage_on_the_ui_thread_and_says_it_is_picking(
@@ -2003,11 +2007,12 @@ def test_opening_the_dialog_reads_no_usage_on_the_ui_thread_and_says_it_is_picki
     *Spawn* waiting, and fills in when the read answers. The read here is held until released;
     one made on the UI thread is recorded (it is not held, so the failure is quick)."""
     slots = _two_agents_codex_on_top(monkeypatch)
-    started, release, threads = _usage_read_held(monkeypatch, slots)
+    started, release, threads, ui = _usage_read_held(monkeypatch, slots)
 
     async def run() -> tuple[list[Any], list[Any], int]:
         host = Host(git_project, accounts=lambda: agents_overview(*MIXED))
         ui_thread = threading.get_ident()
+        ui.append(ui_thread)
         async with host.run_test(size=SIZE) as pilot:
             await pilot.pause()
             dialog = host.screen
@@ -2053,12 +2058,13 @@ def test_a_picked_agent_needs_no_wait_for_the_roles_own(
     """An Agent chosen up front is the launch's agent whatever the role's turns out to be: the
     form is complete and *Spawn* is not held by the read still out for the ``(role's: …)``."""
     slots = _two_agents_codex_on_top(monkeypatch)
-    started, release, _threads = _usage_read_held(monkeypatch, slots)
+    started, release, _threads, ui = _usage_read_held(monkeypatch, slots)
 
     async def run() -> list[Any]:
         host = Host(
             git_project, accounts=lambda: agents_overview(*MIXED), presets={"agent": "claude-code"}
         )
+        ui.append(threading.get_ident())
         async with host.run_test(size=SIZE) as pilot:
             await pilot.pause()
             dialog = host.screen

@@ -453,8 +453,7 @@ class _KnownFix:
 
 
 #: The doctor hints that become buttons. ``init`` is deliberately absent — from
-#: the UI that is the Onboard flow, not a fix — and so is ``team distill``,
-#: which starts a model process. Extending this table is the whole review
+#: the UI that is the Onboard flow, not a fix. Extending this table is the whole review
 #: surface for "what can one click run".
 KNOWN_FIXES: tuple[_KnownFix, ...] = (
     _KnownFix(

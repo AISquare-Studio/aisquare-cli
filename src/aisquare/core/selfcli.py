@@ -57,8 +57,8 @@ def argv_for(args: Sequence[str]) -> list[str]:
     window inherits regardless of what the spawner had set.
 
     Every self-invocation in the package builds its argv here — ``run`` below,
-    the fleet's window command, the detached distiller and the hook fallback —
-    so the flag has exactly one home.
+    the fleet's window command and the hook fallback — so the flag has
+    exactly one home.
     """
     return [sys.executable, "-P", "-m", "aisquare", *args]
 

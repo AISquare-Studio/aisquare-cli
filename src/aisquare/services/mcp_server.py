@@ -10,7 +10,7 @@ traffic is attributed on the board and flows into every local session's
 deltas like any teammate's. A Claude Code session's OWN stdio server is not
 remote: where it can prove whose it is (:mod:`aisquare.services.mcp_host`) it acts
 as that session, so the board shows one session per agent. The tool surface is
-deliberately small — nine tools — because giant MCP surfaces burn context before
+deliberately small — eight tools — because giant MCP surfaces burn context before
 any work happens.
 
 Failing tools surface as real MCP error results (``isError: true``), never as
@@ -253,7 +253,7 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
         raise _tool_error(f"error: {exc}") from exc
 
 
-# --- the nine tools (plain functions; registered on the MCPServer below) ------
+# --- the eight tools (plain functions; registered on the MCPServer below) ------
 
 
 def team_board() -> str:
@@ -432,16 +432,6 @@ def signal(name: str, value: str | None = None) -> str:
     return _guard(run)
 
 
-def recall(query: str) -> str:
-    """Search the team's long-term memory (distilled decisions and outcomes)."""
-
-    def run() -> str:
-        output = team_service.recall(query)
-        return output if output is not None else "brain unavailable (nothing distilled yet?)"
-
-    return _guard(run)
-
-
 def code_lookup(query: str, mode: str = "find", limit: int = 20) -> str:
     """Ask the project's symbol index before you grep.
 
@@ -579,7 +569,6 @@ def build_server(*, team: bool | None = None) -> MCPServer:
         team_log,
         verify,
         signal,
-        recall,
     ):
         server.add_tool(tool)
 
@@ -635,7 +624,7 @@ def exact_error_results(server: MCPServer) -> None:
         the caller), not a crash, and is not logged as one.
 
         The request context and the call's own params are threaded through as
-        the SDK's handler does, so a tool that takes ``ctx`` (none of the nine
+        the SDK's handler does, so a tool that takes ``ctx`` (none of the eight
         does) sees its request rather than a request-less stand-in. Not
         threaded: the subscriptions bus behind ``ctx.notify_*`` — a second
         private attribute, ``server._subscriptions``, that no tool needs. The

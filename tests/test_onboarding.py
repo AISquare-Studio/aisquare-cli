@@ -485,9 +485,6 @@ def test_fix_commands_leaves_everything_that_is_not_our_command_as_text() -> Non
         FAIL_HOME,  # `aisquare init` from the UI is the Onboard flow, not a fix
         _fix("config", "Fix or reset: aisquare init --reinit"),
         _fix(
-            "brain", "It initialises on the first distill: aisquare team distill"
-        ),  # a model process
-        _fix(
             "proxy", "aisquare explainability enable --proxy-url <url>"
         ),  # a value we cannot supply
         _fix(

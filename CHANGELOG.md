@@ -140,13 +140,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   measurements and the process trees, is docs/plans/mcp-own-row.md.
 
 - **`aisquare serve --stdio` keeps its protocol pipe to itself.** Its stdin is the pipe the client
-  writes requests into, and its tools started `git` (every call, twice) and `gbrain` with that
+  writes requests into, and its tools started `git` (every call, twice) with that
   stdin inherited, so a child held the pipe. On Windows a process started with a pipe that
   another thread is blocked reading can stall as it starts, which is the suspected cause (not
   confirmed on Windows) of a tool call that never answered. The server now reads requests from a
   private copy of stdin and points its own stdin at the null device before it serves, so
-  no process a tool starts, `git`, `gbrain` or a tmux nudge, can hold or read the pipe; the `git`
-  and `gbrain` calls a tool reaches also name no stdin of their own.
+  no process a tool starts, `git` or a tmux nudge, can hold or read the pipe; the `git`
+  calls a tool reaches also name no stdin of their own.
+
+### Removed
+
+- **The project brain (gbrain) is gone.** It was an optional third-party CLI that
+  nobody maintained or used, and it only added noise: `aisquare recall` and
+  `aisquare team distill` are removed (so is the `recall` tool of `aisquare serve`, now
+  eight tools), as are the detached drain every board write started, the `brain` row of
+  `aisquare doctor` and `AISQUARE_BRAIN`, `AISQUARE_BRAIN_EMBED` and
+  `AISQUARE_BRAIN_EMBED_MODEL`. Nothing on disk is deleted: an existing
+  `~/.aisquare/projects/<id>/brain` stays where it is, and the store's schema is
+  untouched. `install.sh` still expects the `brain` row from a release that has it
+  (`--version 0.9.0` and older), alongside the codebase-snapshot rows.
 
 ## [0.9.0] - 2026-10-25
 

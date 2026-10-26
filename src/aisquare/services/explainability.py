@@ -1405,7 +1405,7 @@ def store_project_api_key(project_id: str, key: str) -> Path:
     """Write a project's key owner-only and return where it landed.
 
     The directory is created mode 700 when it does not exist yet; an existing
-    one keeps its mode (it holds the brain, which is not secret).
+    one keeps its mode (it holds the symbol index, which is not secret).
 
     The key goes in as the machine's does (:func:`store_api_key`): by rename
     from a temp restricted to this account while it is still empty

@@ -130,7 +130,5 @@ that mode, Claude Code's classifier, not you, approves each tool call.
   configure, scrubbed at your `redaction` level, with the repository, branch,
   session ids and a commit id. `AISQUARE_CI_KEY` goes with it as a bearer token, in
   cleartext if the URL is `http://`.
-- **Semantic recall, when on** (`AISQUARE_BRAIN_EMBED=1`). Distilled notes and
-  each `recall` query go to the embedding provider you configure.
 - **`aisquare serve` on a non-loopback address.** Its bearer token travels over
   plain HTTP.

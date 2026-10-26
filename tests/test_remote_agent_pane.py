@@ -729,7 +729,13 @@ def test_keys_queued_behind_actions_holding_every_write_thread_are_not_typed_as_
     run_write = app.kit.kit_run_write
 
     async def watched(handler: Any, body: dict[str, Any], arrived: float, *rest: Any) -> Any:
-        if handler is not restart:
+        # The tap's arrival, by what it carries. Every handler reaches the pool wrapped
+        # (``tracked_write``), so ``handler is not restart`` was true of the restart too, and
+        # its arrival, a moment before the tap's, was the one the wait below was counted
+        # from: a tap that started 0.1 s after the restart (a loaded windows-latest runner)
+        # was let go of by the restart before its own 0.3 s was up, and was typed (CI run
+        # 40364537727). Started 0.2 s late here, it fails the same way.
+        if "keys" in body:
             queued.append(arrived)
         return await run_write(handler, body, arrived, *rest)
 

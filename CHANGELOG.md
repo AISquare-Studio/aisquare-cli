@@ -63,7 +63,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stdin inherited, so a child held the pipe. On Windows a process started with a pipe that
   another thread is blocked reading can stall as it starts, which is the suspected cause (not
   confirmed on Windows) of a tool call that never answered. The server now reads requests from a
-  private copy of stdin and points its own stdin at the null device before it starts anything, so
+  private copy of stdin and points its own stdin at the null device before it serves, so
   no process a tool starts, `git`, `gbrain` or a tmux nudge, can hold or read the pipe; the `git`
   and `gbrain` calls a tool reaches also name no stdin of their own.
 

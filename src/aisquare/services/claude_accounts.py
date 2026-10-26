@@ -72,6 +72,7 @@ from aisquare.models import (
     ProjectInfo,
     StatuslineSession,
     StatuslineSite,
+    UsageCause,
     UsageSample,
     UsageTrend,
     WeekReset,
@@ -434,6 +435,7 @@ def choose(
     spread: bool | None = None,
     fetch: Fetch | None = None,
     family: str | None = None,
+    max_age: float | None = None,
 ) -> AccountChoice:
     """THE account resolver: which Claude account a launch runs under, and why.
 
@@ -465,12 +467,16 @@ def choose(
     ``spread=True``, which a hand-over passes — the preferred account gives way to
     :func:`headroom_choice`, the account with room in both of its windows,
     ``exclude`` naming the slot a hand-over is leaving. When no account's usage
-    can be read, the preferred account decides exactly as before. A launch reads
+    can be read, the preferred account decides exactly as before. Like the preferred
+    account, a launch's headroom pick leaves a binding that sets
+    ``CLAUDE_CONFIG_DIR`` by hand alone; a hand-over's still moves it. A launch reads
     usage through the cache, a minute deep (:data:`PICK_MAX_AGE_SECONDS`); a
     hand-over (``spread=True``) reads it live.
 
     ``family`` is the launch's model family (``core.harness.launch_family``), for the
-    headroom rung's per-family weeks and limit marks (#277).
+    headroom rung's per-family weeks and limit marks (#277). ``max_age`` is how deep a
+    launch's headroom rung reads the cache, :data:`PICK_MAX_AGE_SECONDS` when unsaid: a
+    form that only SHOWS the pick reads the shared five minutes (:func:`launch_default`).
 
     ``exclude`` is honoured on EVERY rung: a binding or a project default that
     names the account being left is skipped with a note and the ladder goes on,
@@ -534,15 +540,28 @@ def choose(
                 )
             else:
                 return AccountChoice(preferred, "project default", notes)
+    # The rungs below are SILENT defaults: neither may restore this shell's variables over
+    # a `team bind <role> --env CLAUDE_CONFIG_DIR=…` someone wrote by hand, which is what
+    # applying an account does (core.apply_launch_env). That binding launched on its own
+    # directory before rank 1 was the default, and still does (review of #406, M1), whether
+    # rank 1 or a headroom pick would have chosen (#9). A flag, an account binding or a
+    # project default still win over it, and so does a hand-over, whose whole point is to
+    # move the agent elsewhere: any ``spread`` is one (choose_for_handover reads headroom
+    # itself, then falls back here with ``spread=False``).
+    hand_written = _binding_names_a_directory(role)
+    if hand_written and spread is None:
+        return AccountChoice(None, None, notes)
     settings = accounts_settings()
     by_headroom = spread if spread is not None else settings.pick == "headroom"
     if by_headroom:
+        # A hand-over reads live; a launch through the cache, a minute deep unless told.
+        depth = PICK_MAX_AGE_SECONDS if max_age is None else max_age
         picked, more = headroom_choice(
             accounts,
             switch_at=settings.switch_at,
             exclude=skip,
             fetch=fetch,
-            max_age=PICK_MAX_AGE_SECONDS if spread is None else None,
+            max_age=depth if spread is None else None,
             family=family,
             prefer=settings.prefer,
         )
@@ -554,18 +573,39 @@ def choose(
         notes.extend(more)
         if picked is not None:
             return AccountChoice(picked, "headroom", notes)
-    if _binding_names_a_directory(role):
-        # The preferred rung is a SILENT default: it must not restore this shell's
-        # variables over a `team bind <role> --env CLAUDE_CONFIG_DIR=…` someone wrote
-        # by hand, which is what applying slot 1 does (core.apply_launch_env). That
-        # binding launched on its own directory before rank 1 was the default, and
-        # still does (review of #406, M1). A flag, an account binding, a project
-        # default or a headroom pick still win over it, as they always did.
+    if hand_written:  # a hand-over that found no room: rank 1 is still a silent default
         return AccountChoice(None, None, notes)
     preferred = preferred_account(accounts, skip, notes)
     if preferred is not None:
         return AccountChoice(preferred, "preferred", notes)
     return AccountChoice(None, None, notes)
+
+
+@dataclass(frozen=True)
+class LaunchDefault:
+    """What a launch with no ``--account`` runs under, for a form to show before it launches
+    (the Spawn dialog's Account field, #12 on the board): :func:`choose`'s answer, and why
+    it chose nothing when that is a binding's directory rather than this shell's."""
+
+    choice: AccountChoice
+    bound_directory: bool = False
+    """Nothing was chosen because the role's binding sets ``CLAUDE_CONFIG_DIR`` by hand,
+    which the launch keeps (#9): it runs on that directory, not on this shell's."""
+
+
+def launch_default(
+    role: str | None, *, project: ProjectInfo | None = None, family: str | None = None
+) -> LaunchDefault:
+    """:func:`choose` with no flag, as ``fleet spawn`` asks it for ``role`` in ``project``.
+
+    For showing, not launching: its headroom rung reads the shared cache five minutes deep
+    (:data:`USAGE_MAX_AGE_SECONDS`, the status line's depth), so a form that shows it sends
+    no request the status line would not. The launch itself reads a minute deep and can
+    pick another account when a window moved since. Raises :class:`NoSuchAccount` as the
+    launch would.
+    """
+    choice = choose(None, role=role, project=project, family=family, max_age=USAGE_MAX_AGE_SECONDS)
+    return LaunchDefault(choice, choice.account is None and _binding_names_a_directory(role))
 
 
 def _binding_names_a_directory(role: str | None) -> bool:
@@ -957,6 +997,141 @@ def _limit_of(payload: Mapping[str, Any], kinds: frozenset[str]) -> float | None
     return max((limit.percent for limit in _limits(payload) if limit.kind in kinds), default=None)
 
 
+# --- why there is no reading, and what to do about it --------------------------------------------
+#
+# Every reading with nothing to show carries a cause (`UsageCause`) and the fix for it,
+# stamped in ONE place, `unreadable_usage`; the fixes are the one table `USAGE_FIXES`. The
+# Accounts page shows the two on hover over its '!', and `accounts usage` beside the
+# reason: neither works out the cause or the fix from the reason's words.
+
+_LOG_IN = "press Log in (in a terminal: aisquare accounts run {slot}, then /login)"
+_REFRESH_TOKEN = (
+    "press Log in, or open a session on this account (aisquare accounts run {slot}): "
+    "Claude Code refreshes the token"
+)
+_THEN_REFRESH = "then ↻ Refresh usage (or --refresh)"
+
+USAGE_FIXES: dict[UsageCause, str | None] = {
+    UsageCause.not_signed_in: _LOG_IN,
+    UsageCause.token_missing: _LOG_IN,
+    UsageCause.token_expired: _REFRESH_TOKEN,
+    UsageCause.token_rejected: _REFRESH_TOKEN,
+    UsageCause.keychain_locked: (
+        f"unlock the login keychain (Keychain Access, or log out and back in), {_THEN_REFRESH}"
+    ),
+    UsageCause.keychain_refused: f"allow aisquare in Keychain Access, {_THEN_REFRESH}",
+    UsageCause.keychain_timeout: (
+        f"answer the Keychain's prompt if one is waiting, {_THEN_REFRESH}"
+    ),
+    # A Keychain that would not say is not asked again by itself (core.read_keychain).
+    UsageCause.keychain_failed: "↻ Refresh usage (or --refresh) asks the Keychain again",
+    UsageCause.rate_limited: "none needed, reads resume {at}by themselves",
+    UsageCause.unreachable: "check the network or HTTPS_PROXY",
+    UsageCause.tls_bundle: tls.BUNDLE_FIX,  # the same words as doctor's tls row
+    UsageCause.tls_cert: tls.CERT_HINT,
+    UsageCause.http_error: None,
+    UsageCause.bad_answer: None,
+    UsageCause.read_failed: None,
+}
+"""What to do about each cause, ``{slot}`` and ``{at}`` filled in by :func:`usage_fix`; ``None``
+where nothing done on this machine helps, which :data:`NO_FIX` says."""
+
+TLS_BUNDLE_REASON = "TLS: the CA bundle could not be loaded"
+"""Why there is no reading when ``SSL_CERT_FILE`` / ``SSL_CERT_DIR`` will not load (#403)."""
+TLS_CERT_REASON = "TLS certificate could not be verified"
+"""Why there is no reading when the endpoint's certificate did not verify (#403)."""
+
+NO_FIX = "fix: none from here, the next read tries again by itself"
+"""What :func:`fix_line` says for a cause with no fix (:data:`USAGE_FIXES`)."""
+
+
+def usage_fix(
+    cause: UsageCause, *, slot: int | None = None, until: datetime | None = None
+) -> str | None:
+    """What to do about ``cause`` on slot ``slot`` (:data:`USAGE_FIXES`): ``until`` is a rate
+    limit's end, ``reads resume at 14:32 by themselves``."""
+    fix = USAGE_FIXES[cause]
+    if fix is None:
+        return None
+    at = f"at {until.astimezone().strftime('%H:%M')} " if until is not None else ""
+    return fix.format(slot="<slot>" if slot is None else slot, at=at)
+
+
+def unreadable_usage(
+    cause: UsageCause, reason: str, *, slot: int | None = None, **fields: Any
+) -> ClaudeUsage:
+    """A reading with nothing to show: ``reason`` says what is wrong, and ``cause`` and its
+    fix (:func:`usage_fix`) are stamped here, the one place they are."""
+    until = fields.get("rate_limited_until")
+    return ClaudeUsage(
+        available=False,
+        reason=reason,
+        cause=cause,
+        fix=usage_fix(cause, slot=slot, until=until),
+        **fields,
+    )
+
+
+def fix_line(reading: ClaudeUsage) -> str:
+    """``fix: press Log in …``, or :data:`NO_FIX` for a reading whose cause has none."""
+    return f"fix: {reading.fix}" if reading.fix else NO_FIX
+
+
+def kept_fix_line(reading: ClaudeUsage, *, slot: int | None = None) -> str | None:
+    """``fix: point SSL_CERT_FILE …``: the fix for the failed try a kept reading stands in
+    for (:attr:`~ClaudeUsage.last_failed_cause`, :data:`USAGE_FIXES`), or :data:`NO_FIX`;
+    ``None`` for a live reading, or a kept one recorded before the cause was."""
+    cause = reading.last_failed_cause
+    if not reading.available or reading.last_failed_reason is None or cause is None:
+        return None
+    fix = usage_fix(cause, slot=slot, until=reading.rate_limited_until)
+    return f"fix: {fix}" if fix else NO_FIX
+
+
+def explain_usage(reading: ClaudeUsage) -> str:
+    """``the stored token has expired; fix: press Log in …``: the reason and its fix in one
+    line, for a surface with no hover (``accounts list --usage``, ``accounts usage``)."""
+    return f"{reading.reason or 'unavailable'}; {fix_line(reading)}"
+
+
+_EXPIRED = "the stored token has expired"
+_REJECTED = "the token was rejected (HTTP 401)"
+_KEYCHAIN_CAUSES: dict[core.KeychainProblem, tuple[UsageCause, str | None]] = {
+    "locked": (UsageCause.keychain_locked, core.KEYCHAIN_LOCKED_REASON),
+    "refused": (UsageCause.keychain_refused, core.KEYCHAIN_REFUSED_REASON),
+    "timeout": (UsageCause.keychain_timeout, None),
+    "failed": (UsageCause.keychain_failed, None),
+}
+"""A Keychain's kind of refusal as a reading's cause, and its reason when the core's words
+carry a fix of their own (``None``: its words stand)."""
+
+
+def _no_login_reason() -> str:
+    if core.keychain_platform():
+        return "no login in the Keychain or a credentials file — not signed in"
+    return "no credentials file — not signed in"
+
+
+def usage_problem(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> ClaudeUsage | None:
+    """Why a row has no usage to show, worst first — or ``None`` when it shows a reading
+    (a kept one too: F1 of #400) or one is still owed.
+
+    No login, then a token gone or expired, all read from ``status`` without a request;
+    then the reading's own cause (a 401, a locked Keychain, the endpoint). The page's
+    '!' and its tooltip, and ``accounts usage``, are drawn from it alone.
+    """
+    slot = status.account.slot
+    if status.identity is None:
+        return unreadable_usage(UsageCause.not_signed_in, "not signed in", slot=slot)
+    if not status.signed_in:
+        return unreadable_usage(UsageCause.token_missing, _no_login_reason(), slot=slot)
+    if status.token_state == "expired":
+        return unreadable_usage(UsageCause.token_expired, _EXPIRED, slot=slot, needs_login=True)
+    if reading is not None and not reading.available:
+        return reading
+    return None
+
+
 def usage(
     account: ClaudeAccount, *, now: datetime | None = None, fetch: Fetch | None = None
 ) -> ClaudeUsage:
@@ -975,22 +1150,16 @@ def usage(
     module never does. A Keychain that would not show the token says why
     (locked, refused), and asks for no log-in. No reason ever carries the token.
     """
+    slot = account.slot
     login = core.stored_login(account)
     creds = login.credentials
     if creds is None:
-        if login.unreadable is not None:
-            reason = login.unreadable
-        elif core.keychain_platform():
-            reason = "no login in the Keychain or a credentials file — not signed in"
-        else:
-            reason = "no credentials file — not signed in"
-        return ClaudeUsage(available=False, reason=reason)
+        if login.unreadable is None:
+            return unreadable_usage(UsageCause.token_missing, _no_login_reason(), slot=slot)
+        cause, said = _KEYCHAIN_CAUSES[login.problem or "failed"]
+        return unreadable_usage(cause, said or login.unreadable, slot=slot)
     if creds.expired(now):
-        return ClaudeUsage(
-            available=False,
-            reason="the stored token has expired — open a session on this account to refresh it",
-            needs_login=True,
-        )
+        return unreadable_usage(UsageCause.token_expired, _EXPIRED, slot=slot, needs_login=True)
     headers = {
         "Authorization": f"Bearer {creds.access_token}",
         "anthropic-beta": OAUTH_BETA,
@@ -1000,18 +1169,16 @@ def usage(
     try:
         answer = (fetch or _http_get)(USAGE_URL, headers, USAGE_TIMEOUT_SECONDS)
     except OSError as exc:  # URLError, a refused connection, a timeout
+        # #403's two TLS failures, each with its own cause: the fix is tls.BUNDLE_FIX /
+        # tls.CERT_HINT (USAGE_FIXES), shown beside the reason, not inside it.
         if isinstance(exc, tls.CABundleError):
-            return ClaudeUsage(
-                available=False,
-                reason=f"TLS: the CA bundle could not be loaded — {tls.BUNDLE_FIX}",
-            )
+            return unreadable_usage(UsageCause.tls_bundle, TLS_BUNDLE_REASON, slot=slot)
         if tls.cert_failure(exc):
-            return ClaudeUsage(
-                available=False,
-                reason=f"TLS certificate could not be verified — {tls.CERT_HINT}",
-            )
-        return ClaudeUsage(
-            available=False, reason=f"could not reach the usage endpoint ({type(exc).__name__})"
+            return unreadable_usage(UsageCause.tls_cert, TLS_CERT_REASON, slot=slot)
+        return unreadable_usage(
+            UsageCause.unreachable,
+            f"could not reach the usage endpoint ({type(exc).__name__})",
+            slot=slot,
         )
     status, body = answer[0], answer[1]
     answered: Mapping[str, str] = answer[2] if len(answer) == 3 else {}
@@ -1019,33 +1186,34 @@ def usage(
     if status == 429 or (status == 503 and wait is not None):
         # Not a login problem: the wait is recorded by `read_usage` (F1 of #400).
         moment = now or _now()
-        return ClaudeUsage(
-            available=False,
-            reason=f"HTTP {status} from the usage endpoint — rate-limited",
+        return unreadable_usage(
+            UsageCause.rate_limited,
+            f"HTTP {status} from the usage endpoint — rate-limited",
+            slot=slot,
             rate_limited=True,
             rate_limited_until=moment + timedelta(seconds=wait) if wait is not None else None,
         )
     if status == 401:
-        return ClaudeUsage(
-            available=False,
-            reason="the token was rejected — open a session on this account to refresh it",
-            needs_login=True,
-        )
+        return unreadable_usage(UsageCause.token_rejected, _REJECTED, slot=slot, needs_login=True)
     if status != 200:
-        return ClaudeUsage(available=False, reason=f"HTTP {status} from the usage endpoint")
+        return unreadable_usage(
+            UsageCause.http_error, f"HTTP {status} from the usage endpoint", slot=slot
+        )
     try:
         payload: Any = json.loads(body)
     except ValueError:
-        return ClaudeUsage(available=False, reason="the usage endpoint did not answer with JSON")
+        return unreadable_usage(
+            UsageCause.bad_answer, "the usage endpoint did not answer with JSON", slot=slot
+        )
     if not isinstance(payload, dict):
-        return ClaudeUsage(
-            available=False, reason="the usage endpoint answered in an unknown shape"
+        return unreadable_usage(
+            UsageCause.bad_answer, "the usage endpoint answered in an unknown shape", slot=slot
         )
     session_percent, session_resets = _window(payload.get("five_hour"))
     week_percent, week_resets = _window(payload.get("seven_day"))
     if session_percent is None and week_percent is None:
-        return ClaudeUsage(
-            available=False, reason="the usage endpoint answered without the two windows"
+        return unreadable_usage(
+            UsageCause.bad_answer, "the usage endpoint answered without the two windows", slot=slot
         )
     family_percent, family_resets = _family_weeks(payload)
     return ClaudeUsage(
@@ -1394,9 +1562,10 @@ class UsageBackoff:
         """What a read of this slot answers while the wait runs: nothing, and why."""
         # Stamped with when the 429 came back, not ``now``: a gated read sends nothing, and
         # "last try failed just now" said a try was made (review of #408, N1).
-        return ClaudeUsage(
-            available=False,
-            reason=self.reason,
+        return unreadable_usage(
+            UsageCause.rate_limited,
+            self.reason,
+            slot=self.slot,
             rate_limited=True,
             rate_limited_until=self.until,
             fetched_at=min(self.since, now),
@@ -1598,8 +1767,10 @@ def read_usage(
                 try:
                     readings[slot] = future.result()
                 except Exception as exc:  # one account's failure must not cost the rest
-                    readings[slot] = ClaudeUsage(
-                        available=False, reason=f"usage read failed ({type(exc).__name__})"
+                    readings[slot] = unreadable_usage(
+                        UsageCause.read_failed,
+                        f"usage read failed ({type(exc).__name__})",
+                        slot=slot,
                     )
     answered = [account for account in asked if readings[account.slot].available]
     cleared = [account.slot for account in answered if account.slot in backoffs]
@@ -1648,7 +1819,8 @@ def read_usage(
 # for the first and is served what it read. A launch's headroom pick reads
 # through the cache too, a minute deep (PICK_MAX_AGE_SECONDS); a hand-over and
 # `doctor --live` still read live (`read_usage`): one moves an agent off a full
-# account, the other was asked to look now.
+# account, the other was asked to look now. The move `[accounts] before_limit` makes,
+# of an agent that hit no limit, picks from the cache like a launch (F2 of #400).
 
 USAGE_MAX_AGE_SECONDS = 300.0
 """How old a recorded reading may be and still be served instead of a fetch: five minutes."""
@@ -1824,6 +1996,7 @@ def _preferred(good: ClaudeUsage | None, failed: ClaudeUsage | None) -> ClaudeUs
         update={
             "last_failed_at": failed.fetched_at,
             "last_failed_reason": failed.reason,
+            "last_failed_cause": failed.cause,
             "rate_limited": failed.rate_limited,
             "rate_limited_until": failed.rate_limited_until,
         }
@@ -2643,7 +2816,8 @@ sidebar's own tick, so a burst of spawns, or a spawn beside the sidebar's or the
 read, is served by one reading. And a five-hour window moves a point or two a minute
 under the heaviest use, far less than the room under ``switch_at`` a pick looks for;
 the cache's five minutes could start an agent on an account that crossed the line since.
-A hand-over still reads live (:func:`choose_for_handover`)."""
+A hand-over after a limit still reads live (:func:`choose_for_handover`); one before the
+limit (``[accounts] before_limit``) reads this deep, as a launch does."""
 
 
 def headroom_choice(
@@ -2783,6 +2957,8 @@ def headroom_choice(
             readings[account.slot] = ClaudeUsage(
                 available=False,
                 reason=f"{why}; {age}",
+                cause=reading.cause,
+                fix=reading.fix,
                 rate_limited=reading.rate_limited,
                 rate_limited_until=reading.rate_limited_until,
             )
@@ -2867,6 +3043,7 @@ def choose_for_handover(
     automatic: bool = False,
     fetch: Fetch | None = None,
     family: str | None = None,
+    max_age: float | None = None,
 ) -> AccountChoice:
     """The target of a hand-over: HEADROOM FIRST; the ladder only when nothing can be measured.
 
@@ -2894,6 +3071,10 @@ def choose_for_handover(
     enabled, so headroom moved an agent onto a slot the operator had disabled.
     :func:`choose` does not pick from it by headroom or by a default either
     (review of the #205 fold, round 1). ``--to`` still names an account.
+
+    ``max_age`` reads the candidates through the cache instead, that deep: the move
+    ``[accounts] before_limit`` makes (F2 of #400), of an agent that hit no limit, whose
+    hook read them a moment ago (:func:`headroom_choice`).
     """
     skip = frozenset(exclude)  # read three times below: never an iterator
     if explicit is not None:
@@ -2912,6 +3093,7 @@ def choose_for_handover(
         least_bad=not automatic,
         family=family,
         prefer=settings.prefer,
+        max_age=max_age,
     )
     notes.extend(more)
     if picked is not None:
@@ -2937,6 +3119,164 @@ def choose_for_handover(
                 None, None, [*notes, *fallback.notes, said + mark.describe(now=moment)]
             )
     return AccountChoice(fallback.account, fallback.source, [*notes, *fallback.notes])
+
+
+# --- before the limit (F2 of #400) ---------------------------------------------------------
+#
+# ``[accounts] before_limit`` moves (or, ``warn``, names) a fleet agent whose account reads
+# over ``switch_at``, at a turn end or an idle notice (``services.hooks.check_before_limit``).
+# Nothing here polls, and the hooks fetch nothing: they decide from what is ON RECORD
+# (``on_record=True``: the shared cache's readings, five minutes deep, no request), and only
+# the detached worker reads through the cache, which may ask the endpoint (the agent's account
+# five minutes deep, the accounts it could go to a launch's minute deep), never during a
+# back-off. A kept reading (:func:`is_kept`) is no live one, and moves nobody.
+
+
+@dataclass(frozen=True)
+class LineReading:
+    """An account's live reading against ``switch_at``, for an agent of ``family``."""
+
+    account: ClaudeAccount
+    reading: ClaudeUsage
+    used: float
+    """Percent used of its fuller window (:func:`headroom_percent`)."""
+    over: bool
+    """At or over the line: the account counts as full."""
+    lifts_at: datetime | None
+    """When every window over the line has reset, and the account is under it again; ``None``
+    when one of them named no reset, or none is over."""
+
+    def lifts_within(self, minutes: int, *, now: datetime | None = None) -> bool:
+        """Whether the account is under the line again within ``minutes``: a wait that is
+        cheaper than a cold start elsewhere, as after a limit (``wait_if_reset_within_minutes``)."""
+        if self.lifts_at is None:
+            return False
+        return self.lifts_at - (now or _now()) <= timedelta(minutes=minutes)
+
+
+def has_passed(when: datetime, *, now: datetime | None = None) -> bool:
+    """Whether ``when`` — a window's reset — is past, by the clock readings are taken on."""
+    return when <= (now or _now())
+
+
+def _on_record(
+    accounts: Sequence[ClaudeAccount], *, max_age: float, now: datetime | None = None
+) -> dict[int, ClaudeUsage]:
+    """What :func:`cached_usage` would serve ``accounts`` without a fetch: each one's reading
+    recorded in the last ``max_age`` seconds for the token it holds now. Nothing is asked."""
+    moment = now or _now()
+    tokens = {
+        account.slot: token
+        for account in accounts
+        if (token := _token_fingerprint(account, moment)) is not None
+    }
+    return _served(accounts, tokens, since=moment - timedelta(seconds=max_age), now=moment)
+
+
+def line_reading(
+    slot: int,
+    *,
+    switch_at: int,
+    family: str | None = None,
+    on_record: bool = False,
+    fetch: Fetch | None = None,
+    now: datetime | None = None,
+) -> LineReading | None:
+    """Account ``slot`` against ``switch_at`` for an agent of ``family``, by a LIVE reading;
+    ``None`` when there is none: the account cannot be read, or the reading is a kept one (the
+    last good figure of a failed read, or a back-off's), which moves no agent — and with
+    ``on_record``, when nothing is on record. A registry that cannot be read is no answer.
+
+    ``on_record`` reads what the cache holds and asks nothing: a hook's read. Otherwise it is
+    read through :func:`cached_usage`, :data:`USAGE_MAX_AGE_SECONDS` deep: the worker's.
+    """
+    accounts, note = _read_for_handover()
+    if accounts is None or note is not None:
+        return None
+    account = next((a for a in accounts if a.slot == slot), None)
+    if account is None or not core.signed_in(account):
+        return None
+    if on_record:
+        reading = _on_record([account], max_age=USAGE_MAX_AGE_SECONDS, now=now).get(slot)
+    else:
+        reading = cached_usage([account], fetch=fetch, now=now)[slot]
+    if reading is None or not reading.available or is_kept(reading):
+        return None
+    used = headroom_percent(reading, family)
+    if used is None:
+        return None
+    windows = [
+        (reading.session_percent, reading.session_resets_at),
+        (reading.week_percent, reading.week_resets_at),
+    ]
+    if family is not None:
+        windows.append(
+            (reading.family_week_percent.get(family), reading.family_week_resets_at.get(family))
+        )
+    over = [when for percent, when in windows if percent is not None and percent >= switch_at]
+    resets = [when for when in over if when is not None]
+    lifts_at = max(resets) if resets and len(resets) == len(over) else None
+    return LineReading(account, reading, used, used >= switch_at, lifts_at)
+
+
+def room_on_record(
+    leaving: int, *, switch_at: int, family: str | None = None, now: datetime | None = None
+) -> bool:
+    """Whether an account other than ``leaving`` may take an agent of ``family``, by what is on
+    record alone (nothing is asked): ``False`` only when every candidate the automatic pick
+    would weigh (:func:`choose_for_handover`) is known not to — at a limit mark for the family,
+    its family week spent, or its live reading on record at or over ``switch_at`` — or the
+    registry cannot be read, when that pick takes nothing. A candidate with no live reading on
+    record may: only a read can say, and that is the worker's.
+
+    A hook's question (F2 of #400): with every other account over the line, a turn end then
+    reads none of them, however long that lasts, where a pick a minute deep re-read each one a
+    minute at every turn end.
+    """
+    accounts, note = _read_for_handover()
+    if accounts is None or note is not None:
+        return False
+    moment = now or _now()
+    marks = limit_marks(now=moment)
+    candidates = [
+        account
+        for account in accounts
+        if not account.disabled
+        and account.slot != leaving
+        and core.signed_in(account)
+        and not any(mark.blocks(family) for mark in marks.get(account.slot, []))
+    ]
+    readings = _on_record(candidates, max_age=USAGE_MAX_AGE_SECONDS, now=moment)
+    for account in candidates:
+        reading = readings.get(account.slot)
+        if reading is None or not reading.available or is_kept(reading):
+            return True
+        own = reading.family_week_percent.get(family) if family is not None else None
+        if own is not None and own >= 100:
+            continue
+        used = headroom_percent(reading, family)
+        if used is None or used < switch_at:
+            return True
+    return False
+
+
+def account_pin(role: str | None, *, named: bool) -> str | None:
+    """Why an agent of ``role`` stays on its account whatever its usage reads, or ``None``.
+
+    ``named`` is its launch's ``--account`` (``LaunchSpec.account_pinned``). Then the role's
+    binding to an account (``team bind <role> --account``), and a binding that sets
+    ``CLAUDE_CONFIG_DIR`` by hand, which no default overrides (#9). A hand-over after a limit
+    still moves each of them; ``[accounts] before_limit``, which acts on none (F2 of #400),
+    asks here. A config that cannot be read pins nothing, as it binds nothing.
+    """
+    if named:
+        return "named with --account"
+    bound, _note = _role_binding_ref(role)
+    if bound:
+        return f"bound to account {bound}"
+    if _binding_names_a_directory(role):
+        return "its binding sets CLAUDE_CONFIG_DIR"
+    return None
 
 
 # --- signing in -------------------------------------------------------------------------

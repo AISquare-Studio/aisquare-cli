@@ -286,6 +286,36 @@ def _left(used: float | None) -> float | None:
     return None if used is None else min(100.0, max(0.0, 100.0 - used))
 
 
+class UsageCause(StrEnum):
+    """Why an account has no usage to show (:attr:`ClaudeUsage.cause`), as a kind.
+
+    Set where the reading is made (``services.claude_accounts``), so the Accounts page and
+    ``accounts usage`` act on the kind and never on :attr:`ClaudeUsage.reason`'s words. What
+    to do about each is ``services.claude_accounts.USAGE_FIXES``, the one table of fixes.
+    """
+
+    # no login to read with
+    not_signed_in = "not_signed_in"
+    token_missing = "token_missing"
+    token_expired = "token_expired"
+    token_rejected = "token_rejected"
+
+    # the macOS Keychain would not say
+    keychain_locked = "keychain_locked"
+    keychain_refused = "keychain_refused"
+    keychain_timeout = "keychain_timeout"
+    keychain_failed = "keychain_failed"
+
+    # the usage endpoint
+    rate_limited = "rate_limited"
+    unreachable = "unreachable"
+    tls_bundle = "tls_bundle"
+    tls_cert = "tls_cert"
+    http_error = "http_error"
+    bad_answer = "bad_answer"
+    read_failed = "read_failed"
+
+
 class ClaudeUsage(BaseModel):
     """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them.
 
@@ -299,7 +329,12 @@ class ClaudeUsage(BaseModel):
 
     available: bool
     reason: str | None = None
-    """Why nothing could be read, when ``available`` is False."""
+    """Why nothing could be read, when ``available`` is False: what is wrong, in words."""
+    cause: UsageCause | None = None
+    """The kind of :attr:`reason`, when ``available`` is False."""
+    fix: str | None = None
+    """What to do about :attr:`cause` (``press Log in …``), or ``None`` when nothing done on
+    this machine helps: from ``services.claude_accounts.usage_fix``, with the cause."""
     needs_login: bool = False
     """Signed in, but the stored token has expired or was rejected: a session on the
     account refreshes it. False for every other reason nothing could be read."""
@@ -328,6 +363,10 @@ class ClaudeUsage(BaseModel):
     last_failed_reason: str | None = None
     """Why the try at :attr:`last_failed_at` read nothing ("rate-limited until 14:32",
     "could not reach the usage endpoint …"), shown beside the older figure it kept."""
+    last_failed_cause: UsageCause | None = None
+    """The :attr:`cause` of that try, so the older figure shows its fix too
+    (``services.claude_accounts.kept_fix_line``): a TLS failure on an account with a
+    reading on record shows the figure, and the fix is the only word of what to do."""
     rate_limited: bool = False
     """The usage endpoint answered HTTP 429 (or 503 with ``Retry-After``) for this account,
     now or on a try still being waited out: logging in again does not clear it."""
@@ -1409,6 +1448,10 @@ class LaunchSpec(BaseModel):
     less the ones that chose a session (``--session-id``, ``--resume``, ``--continue``):
     those are per launch, like a restart's own ``--resume``."""
     account_slot: int | None = None
+    account_pinned: bool = False
+    """The account was NAMED for the agent — ``--account``, or the Spawn dialog's choice — not
+    picked: ``[accounts] before_limit`` leaves it there (F2 of #400). A replay keeps it, a
+    switch included; ``False`` on a spec recorded before it."""
     worktree: bool = False
     command: list[str] = Field(default_factory=list)
     recorded_by: str | None = None

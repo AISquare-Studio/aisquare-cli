@@ -13565,6 +13565,137 @@ def test_switch_moves_a_limited_agent_to_the_account_with_headroom_and_resumes_i
     assert still is not None and still.status == "doing" and still.claimed_by == agent.session_id
 
 
+def test_a_move_before_the_limit_says_so_and_picks_from_the_cache_the_hook_just_read(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """F2 of #400: the move ``[accounts] before_limit = "switch"`` makes. The board's
+    ``switched`` line gives the reason, ``(before limit)``; the resumed agent is told it moved
+    before its limit, not "after before limit"; and the pick reads the candidates from the
+    cache the hook read them into, so the move sends the endpoint nothing of its own."""
+    from aisquare.services import claude_accounts as accounts_service
+    from tests.test_usage_aware_accounts import _payload, _Usage
+
+    _two_slots_with_usage(monkeypatch, work=92, personal=10)
+
+    def live(percent: float) -> dict[str, Any]:
+        # The real clock runs here: windows that reset ahead of it, or the cache serves none.
+        soon = datetime.now(tz=UTC) + timedelta(hours=3)
+        payload = _payload(percent, resets_at=soon)
+        payload["seven_day"]["resets_at"] = (soon + timedelta(days=2)).isoformat()
+        return payload
+
+    endpoint = _Usage({"tok-work": live(92), "tok-personal": live(10)})
+    monkeypatch.setattr(accounts_service, "_http_get", endpoint)
+    agent = fleet_service.spawn(project, "coder", worktree=False).agent
+    assert agent.account_slot == 3  # headroom: account 2 is over the line
+    with store_session() as store:  # say it ran on 2, as the hook found it
+        store.upsert_fleet_agent(agent.model_copy(update={"account_slot": 2}))
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    accounts_service.cached_usage(accounts_service.list_accounts())  # the hook's reads
+    asked = len(endpoint.calls)
+
+    receipt = fleet_service.switch(
+        project,
+        agent.label,
+        reason=accounts_core.BEFORE_LIMIT_REASON,
+        spawned_by="usage-limit",
+        automatic=True,
+        agent_id=agent.id,
+        max_age=accounts_service.PICK_MAX_AGE_SECONDS,
+    )
+
+    assert (receipt.from_slot, receipt.to_slot) == (2, 3)
+    assert len(endpoint.calls) == asked, "the pick asked the endpoint again"
+    with store_session() as store:
+        kinds = [(e.kind, e.text) for e in store.recent_events(project.id, limit=10)]
+    [switched] = [text for kind, text in kinds if kind == "switched"]
+    assert "moved from account 2 (slot 2) to account 3 (slot 3) (before limit)" in switched
+    [line] = _first_lines(tmux, receipt.started.pane_id)
+    assert line.startswith(
+        f"You are {agent.label}, moved to another Claude account before its usage limit and "
+        "resumed mid-task"
+    ), line
+
+
+def test_only_an_account_named_at_the_spawn_pins_the_agent_and_its_replacements_keep_it(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``LaunchSpec.account_pinned`` (F2 of #400): ``--account`` pins, a pick does not. A
+    restart and a switch name the row's slot or the target's to the resolver, a ``--account``
+    of sorts, which must neither pin an agent nobody pinned nor unpin one somebody did."""
+    _two_slots_with_usage(monkeypatch, work=10, personal=20)
+    _settings(monkeypatch, max_agents_per_project=8)  # two agents, then three forks
+    named = fleet_service.spawn(project, "coder", worktree=False, account="3").agent
+    picked = fleet_service.spawn(project, "coder", worktree=False).agent
+    assert named.launch_spec is not None and named.launch_spec.account_pinned
+    assert picked.launch_spec is not None and not picked.launch_spec.account_pinned
+    for agent in (named, picked):
+        _with_transcript(agent, tmp_path / "missing.jsonl")
+
+    def pinned(agent: FleetAgent) -> bool:
+        assert agent.launch_spec is not None
+        return agent.launch_spec.account_pinned
+
+    # A restart names the row's own slot: it neither pins nor unpins.
+    assert not pinned(fleet_service.restart(project, picked.label).started)
+    assert pinned(fleet_service.restart(project, named.label).started)
+    # A switch keeps the pin, on the account it moves the agent to.
+    assert pinned(fleet_service.switch(project, named.label, to="2").started)
+    # A take-over that names an account is somebody's choice: pinned there.
+    assert pinned(fleet_service.restart(project, picked.label, account="3").started)
+    # A fork: the source's pin with no account named, the dialog's own choice with one, and
+    # none on "(this shell's)", which names no account.
+    assert pinned(fleet_service.hand_off(project, named.label).started.agent)
+    unpinned = fleet_service.spawn(project, "coder", worktree=False).agent
+    _with_transcript(unpinned, tmp_path / "missing.jsonl")
+    assert not pinned(fleet_service.hand_off(project, unpinned.label).started.agent)
+    assert pinned(fleet_service.hand_off(project, unpinned.label, account="2").started.agent)
+    shell = fleet_service.hand_off(
+        project, named.label, account=fleet_service.THIS_SHELL_ACCOUNT
+    ).started.agent
+    assert not pinned(shell)
+
+
+def test_a_switch_whose_after_mark_check_refuses_takes_the_mark_back_and_stops_nothing(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``after_mark`` (F2 of #400, m3 of #423's review): asked once the session is marked
+    handing over, before the ``/exit``. A refusal there — a prompt that landed after
+    ``before_stop`` looked — takes the mark back and leaves the agent running."""
+    _two_slots_with_usage(monkeypatch, work=92, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, tmp_path / "missing.jsonl")
+    before = _session_state(agent.session_id or "")
+    seen: list[str] = []
+
+    def after_mark() -> None:
+        seen.append(_session_state(agent.session_id or ""))
+        raise RuntimeError("a prompt landed")
+
+    with pytest.raises(RuntimeError, match="a prompt landed"):
+        fleet_service.switch(project, agent.label, to="3", after_mark=after_mark)
+
+    assert seen == [team_service.HANDOVER_STATE]  # asked with the mark on
+    assert _session_state(agent.session_id or "") == before  # and the mark taken back
+    assert agent.pane_id not in tmux.killed
+    assert not [typed for typed in tmux.typed if typed[0] == agent.pane_id]
+    assert [status.agent.id for status in fleet_service.list_agents(project)] == [agent.id]
+
+
 def test_the_receipts_are_immutable() -> None:
     """``SpawnReceipt`` lost ``frozen=True`` when its neighbours were inserted (review of #205,
     second round); every caller reads a receipt, none may rewrite one."""

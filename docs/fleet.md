@@ -159,7 +159,17 @@ tmux can see and its row says so (`no hooks`).
    plain Claude Code session with no standing cycle or mission, `fleet spawn
    agent` below; then the fleet's roles plus any role bound with `team bind`;
    `manager` is greyed out while one runs), **hand off from** (a teammate to
-   fork or take over) and **account**. Everything else is folded into
+   fork or take over) and **account**. Account opens on no account at all, the
+   spawn's own default, and says what that runs on and why: `(default: rank 1 ·
+   work)`, `(default: headroom · work)`, `(default: bound to tester · account
+   2)` or `(default: project default · work)`, what `accounts order`, `team
+   bind` and `accounts default --project` decide for the role picked and a
+   `--model` in Extra agent args (read again when either changes; the captain's
+   dialog the same for the captain). It
+   reads `(this shell's)` only when no account is signed in, so the spawn leaves
+   this shell's `CLAUDE_CONFIG_DIR` as it is. A headroom pick is shown from the
+   readings the status line already has; the spawn picks again when it runs.
+   Everything else is folded into
    **Advanced** — click its title, or `Tab` to it and press `Enter`. It opens
    by itself when the dialog opens with a binary or persona already filled in,
    and whenever one of its fields is why *Spawn* is disabled. In it, first who
@@ -963,10 +973,15 @@ revokes the session exactly as `aisquare logout` does. A token supplied through
 
 **Claude Code** is below it: a table, one aligned row per account in priority
 order — **↑**/**↓** first, then the slot, its name, who is signed in, the
-five-hour and seven-day windows (a bar and the percent **used**, or why there is
-no reading: `not signed in`, `⚠ token expired`, the reason the usage could not
-be read) with **Log in** beside them when a login is due, when each window
-resets, and the plan last. A value too long for its column ends in `…` (hover it for the whole
+five-hour and seven-day windows (a bar and the percent **used**, or one `!`
+across the two when there is no reading to show) with **Log in** beside them
+when a login is due, when each window resets, and the plan last. Hover the `!`
+for what is wrong and what to do about it: `not signed in` with `fix: press Log
+in …`, `the login Keychain is locked` with `fix: unlock the login keychain …`,
+`could not reach the usage endpoint (URLError)` with `fix: check the network or
+HTTPS_PROXY`. Where nothing done on this machine helps (an HTTP 5xx, an answer
+aisquare cannot read), it says so: `fix: none from here, the next read tries
+again by itself`. A value too long for its column ends in `…` (hover it for the whole
 text); on a narrow page the table scrolls sideways as one, header included.
 Slot **1** is the plain `claude` of your machine (whatever `CLAUDE_CONFIG_DIR`
 was in the shell you started `asq` from, `~/.claude` otherwise). Every other
@@ -981,8 +996,8 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   pane closes by itself. Close the pane without signing in, or press *Cancel
   sign-in*, and the empty slot is discarded.
 - **Log in** on a row does the same for a slot that has no login, or whose
-  token is missing, expired or rejected (slot 1 included) — the usage cells
-  beside it say which. Type `/login` if Claude Code does not prompt you; the pane
+  token is missing, expired or rejected (slot 1 included) — the `!` beside it
+  says which on hover. Type `/login` if Claude Code does not prompt you; the pane
   waits for a *fresh* login, not the stale one on disk, then closes, and the
   row reads its usage again. On a row that reads fine the same button says
   **Log in again**: the same flow, for a fresh login on a working slot, without
@@ -1012,11 +1027,15 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   (`▮▮▯▯▯ 40% · 12m`) and its tooltip why the newer try read nothing (`reading
   from 12m ago · rate-limited until 14:32 …`); the line above says the try
   failed. A window of that reading that has reset since shows as `reset 1h ago`,
-  never as the old figure. Only an account that was never read shows `—`, and
-  its usage cells say why (`HTTP 503 …`; hover for the whole reason, and for the
-  pace of the session window when there is one). `aisquare accounts usage` and
-  `list --usage` print the same under the table (`account 2: rate-limited until
-  14:32 — logging in again does not clear it; showing the reading from 12m ago`).
+  never as the old figure. Only an account that was never read shows the `!`,
+  whose tooltip says why and the fix (`HTTP 503 …`); a reading's own cell tooltip
+  has the pace of the session window when there is one. `aisquare accounts usage`
+  and `list --usage` print the kept reading's reason under the table (`account 2:
+  rate-limited until 14:32 — logging in again does not clear it; showing the
+  reading from 12m ago`), and an unread account's reason and fix in its row (`the
+  stored token has expired; fix: press Log in, …`). In `--json` such a reading
+  carries `cause` (`token_expired`, `keychain_locked`, `rate_limited`…) and `fix`
+  (`null` where nothing done here helps).
 - **A rate-limited read backs off.** When the endpoint answers HTTP 429 (or 503
   with `Retry-After`), the account is not asked again until the wait it named
   ends — or, when it named none, a minute, doubling with each 429 in a row up to
@@ -1032,13 +1051,14 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   one cached reading. To hear that an agent has hit a usage limit, run
   `aisquare watch` ([Watching the fleet](#watching-the-fleet)), which reports it with
   the rest of what needs you, rather than a loop of your own around `accounts usage`.
-  A token the endpoint refuses shows at once (`⚠ token rejected`), and an expired one says
-  so (`⚠ token expired`). Nothing else on the page is affected. On macOS the
+  A token the endpoint refuses shows the `!` at once (`the token was rejected (HTTP 401)`
+  on hover), and so does an expired one (`the stored token has expired`). Nothing else
+  on the page is affected. On macOS the
   token is read from the login Keychain, from the item Claude Code keeps for
   each account (plain and every managed slot), and from `.credentials.json` when
   there is no item. A locked Keychain, or one that refuses aisquare, is said on
-  the row (`the login Keychain is locked — unlock it …`) rather than
-  offered a Log in. It is not asked again by itself (a locked Keychain's unlock
+  the row's `!` (`the login Keychain is locked`, `fix: unlock the login keychain
+  …`) rather than offered a Log in. It is not asked again by itself (a locked Keychain's unlock
   dialog would come back every tick): opening the page, **↻ Refresh usage** or
   a Log in asks it again. A reset reads as a
   distance and a clock time — `resets in 3h 10m (18:00)`, `resets in 2d 4h (Tue
@@ -1104,7 +1124,8 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   with several, the one with room comes before it (*Headroom*, below). With no
   account signed in, a launch runs on whatever `claude` the shell already has,
   exactly as before any of this existed — and so does a role whose binding sets
-  `CLAUDE_CONFIG_DIR` by hand (`team bind <role> --env`): rank 1 never overrides it. The
+  `CLAUDE_CONFIG_DIR` by hand (`team bind <role> --env`): neither rank 1 nor a headroom
+  pick overrides it (a hand-over still moves it). The
   agent's info line and `fleet ls` name the account it was resolved to, and its
   sidebar row shows the slot (`#2`).
 - **Headroom.** By default — `[accounts] pick = "headroom"`, *launches pick* in
@@ -1202,6 +1223,49 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   not move) in a note beside `switched`, and `switched` itself says whether
   the replacement's first line reached it. `doctor` lists parked agents; `doctor --live` warns when every account
   is over the line.
+- **Before the limit.** Off by default for this release: `[accounts] before_limit =
+  "switch"` moves a fleet agent before its account runs out instead of after.
+  When the agent's turn ends (the `Stop` hook), or Claude Code's idle notice says it has sat
+  at its prompt for a minute, and its account reads at or over `switch_at` (85 % used by
+  default, the line every pick counts as full), the same kind of detached hand-over as
+  `on_limit = "switch"` moves it to an account under the line, resuming its session.
+  The board says `switched … (before limit)` and the replacement is told it moved
+  before its usage limit. It never happens mid-turn: an agent that is working, asking for
+  permission or kept going by a note is left alone, and so is one whose turn left background
+  work running, which the `/exit` of a move would kill — a background command, a `Monitor`,
+  a background subagent or a skill forked in the background whose final notice (the one
+  with a status; a Monitor's events have none) is not in its transcript yet, its
+  subagents' transcripts included, until that work has reported (a `TaskStop` of it, or a
+  Monitor's own timeout, ends it too) — and one
+  with a message queued during its turn, which starts the next turn as this one ends. The
+  move waits five seconds after the turn end, past the start-up of the hook a just-typed
+  prompt runs, so that prompt is stamped on the board; then, before the stop and again once
+  the agent is marked as being moved, it checks that nothing began since the turn end — no
+  prompt stamped on the board, and no queued message taken, notice or reply in the
+  transcript — and that the pane shows Claude Code idle at its prompt, and no background
+  work. The pane is what catches a prompt typed in the last moment: Claude Code shows its
+  spinner from the moment a prompt is submitted, while its hook runs and before the prompt
+  reaches the board or the transcript. If anything has begun, the agent is left alone and
+  its next turn end asks again. The manager and the
+  captain are never moved before a limit (a limit still moves them). Nothing moves when the
+  windows over the line reset within `wait_if_reset_within_minutes`, when no other account
+  is under the line (the agent goes on where it is, and nobody is woken), for an agent put
+  on its account by name (`--account` at the spawn or in the Spawn dialog, `team bind <role>
+  --account`, or a binding that sets `CLAUDE_CONFIG_DIR` by hand), in a project `fleet
+  pause` holds (on the board its agents read, the hub's under one), for a worker auto-stop
+  is about to stop (it has finished: see [Capacity](#capacity); moved, it would run a whole
+  turn on the new account before the stop), or for an agent started or looked at in the
+  last ten minutes. The manager is woken only when a move that went
+  ahead fails (`handover_failed`). `warn` makes no move: it puts one `before_limit` line on
+  the board for each crossing of the line, naming the account, the account with room and
+  the `fleet switch` that moves it; it is said again only once the account has read under
+  the line or its windows have reset, and it is for you, not the agents (it reaches no
+  teammate's prompt). No loop polls, and a turn end asks the usage endpoint nothing: the
+  hook decides from what the usage cache already holds whether to look, and a worker
+  detached from it does the reads, through the cache (the agent's account five minutes
+  deep, a back-off honoured; the others a minute deep, as for a launch, which is what the
+  move then picks from). With every other account over the line, turn ends read none of
+  them. A kept reading (the last good figure of a failed read) moves nobody.
 - **Folder trust.** Claude Code asks *"Is this a project you created or one you
   trust?"* the first time it starts in a folder, once **per account** — and the
   answer it highlights is *No, exit*. So a yes on account 2 left every agent on
@@ -1293,6 +1357,7 @@ aisquare accounts move 3 top           # up · down · top · bottom
 aisquare accounts disable 3            # out of automatic selection; enable puts it back
 aisquare config set accounts.pick default      # spawns stay on the machine default (headroom is the default)
 aisquare config set accounts.on_limit wait     # an agent that hits its limit stays parked (switch is the default)
+aisquare config set accounts.before_limit switch # move an agent at its turn end once its account is over switch_at (off is the default; warn only says so)
 aisquare config set accounts.prefer reset-soonest # under the line, the week that ends first (priority is the default)
 aisquare accounts trust                # trust this folder on every account (its repository, in a checkout)
 aisquare accounts trust --sync         # every folder any account trusts, trusted on all of them

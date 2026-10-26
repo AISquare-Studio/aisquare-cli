@@ -25,8 +25,9 @@ an entry of its own in place of the reply — ``"model": "<synthetic>"``,
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -322,3 +323,257 @@ def _entries(lines: list[bytes]) -> Iterator[dict[str, Any]]:
             continue
         if isinstance(entry, dict):
             yield entry
+
+
+# --- background work and activity: is a turn end a safe point (F2 of #400) ------------
+#
+# The background work a turn can leave running, every kind this machine's 563 transcripts
+# hold (Claude Code 2.1.304 to 2.1.310; review of #423, round 2), as ``toolUseResult``:
+#
+# - a background Bash, ``run_in_background`` or moved there at its timeout:
+#   ``{"backgroundTaskId": "b8y4zgj98", ...}``;
+# - a ``Monitor`` (an agent's wait on CI or a condition): ``{"taskId": "brlrwkgkh",
+#   "timeoutMs": 1800000, "persistent": false}``;
+# - a background subagent: ``{"isAsync": true, "status": "async_launched", "agentId": …}``;
+# - a background forked skill: ``{"status": "forked", "background": true, "agentId": …}``.
+#
+# Each reports in a ``<task-notification>`` naming it — queued, then taken — and its FINAL one
+# carries a ``<status>`` (completed, failed, killed, stopped). A Monitor first sends events
+# with no ``<status>``, one or many, so only a notice with a status ends a task. ``TaskStop``
+# ends one too, its call and its result (``{"task_id": …}``), and so does a Monitor's own
+# ``timeoutMs`` (unless ``persistent``). A shape with an id this list does not know is counted
+# as running until it reports, fails closed; the two foreground shapes that carry an id are
+# not: a subagent that answered inline (``"status": "completed"``) and a skill forked in the
+# foreground (``"status": "forked"`` without ``"background": true``).
+
+_LAUNCH_MARKS = (
+    b'"backgroundTaskId"',
+    b'"taskId"',
+    b'"agentId"',
+    b'"shellId"',
+    b"<task-id>",
+    b'"TaskStop"',
+    b'"task_id"',
+)
+"""What a line must hold to say anything of background work: a launch, a notice, a stop. Every
+other line is skipped unparsed, so a scan of an 18 MB transcript parses a handful of them."""
+_NOTICE = re.compile(rb"<task-notification>(.*?)(?=<task-notification>|</task-notification>|$)")
+_NOTICE_ID = re.compile(rb"<task-id>\s*([^<\s]+)\s*</task-id>")
+_NOTICE_STATUS = re.compile(rb"<status>\s*([^<\s]+)\s*</status>")
+_RAW_IDS = re.compile(rb'"(?:backgroundTaskId|taskId|agentId|shellId)"\s*:\s*"([^"]+)"')
+_FOREGROUND = frozenset({"completed", "failed", "error", "cancelled", "canceled", "interrupted"})
+"""A subagent result's ``status`` when it answered inline: it runs no more."""
+_LAUNCH_ID_KEYS = ("backgroundTaskId", "taskId", "agentId", "shellId")
+
+
+def background_running(
+    path: Path, *, since: datetime | None = None, now: datetime | None = None
+) -> list[str]:
+    """The ids of the background work the transcript at ``path`` started and has not seen end
+    (the kinds above): a Bash in the background, a ``Monitor``, a background subagent or forked
+    skill, or a shape not known that carries an id — with no notice with a ``<status>`` naming
+    it after the launch, no ``TaskStop`` of it, and for a Monitor, its ``timeoutMs`` not past
+    at ``now``.
+
+    A turn can end with such work still running, and the agent's own process runs it: an
+    ``/exit`` then kills it, and a resumed conversation waits for a notice that never comes.
+    ``[accounts] before_limit`` moves nobody while it runs (``services.hooks``).
+
+    Work a SUBAGENT launched is the session's too: its launch is in the subagent's own
+    transcript, ``<session>/subagents/agent-<id>.jsonl`` beside ``path``, and its notice lands
+    in the main one (review of #423, round 3: 19 on this machine, 6 of 10 traced still running
+    at a main turn end). Those files are read for launches and stops first, then ``path``,
+    whose notices end them.
+
+    ``since`` leaves out launches written before it — the start of the process that runs the
+    agent now (its fleet row's): a restart or a switch resumes the conversation, not the work,
+    and its launches would otherwise read as running for good. A launch on a line too long to
+    parse (:data:`_LINE_MAX_BYTES`) is read by its id alone and counted. Read whole, line by
+    line; ``OSError`` when a file cannot be read.
+    """
+    running: dict[str, datetime | None] = {}
+    for transcript in (*_subagent_transcripts(path), path):
+        _read_background(transcript, running, since)
+    moment = now or datetime.now(tz=UTC)
+    return [task for task, until in running.items() if until is None or until > moment]
+
+
+def _subagent_transcripts(path: Path) -> list[Path]:
+    """The transcripts of the subagents the session at ``path`` ran: ``<session>/subagents``."""
+    folder = path.with_suffix("") / "subagents"
+    return sorted(folder.glob("*.jsonl")) if folder.is_dir() else []
+
+
+def _read_background(
+    path: Path, running: dict[str, datetime | None], since: datetime | None
+) -> None:
+    """Add the launches of ``path`` to ``running`` and take out what ended there."""
+    with path.open("rb") as handle:
+        for raw in handle:
+            if not any(mark in raw for mark in _LAUNCH_MARKS):
+                continue
+            for task in _notices_with_a_status(raw):
+                running.pop(task, None)
+            record = _parsed(raw)
+            if record is None:
+                if len(raw) > _LINE_MAX_BYTES:
+                    for match in _RAW_IDS.findall(raw):
+                        running[match.decode(errors="replace")] = None
+                continue
+            for stopped in _stopped_ids(record):
+                running.pop(stopped, None)
+            when = _timestamp(record)
+            if since is not None and when is not None and when < since:
+                continue
+            for task, until in _launches(record, when):
+                running[task] = until
+
+
+def _notices_with_a_status(raw: bytes) -> list[str]:
+    """The ids of the ``<task-notification>`` blocks in ``raw`` that carry a ``<status>``: a
+    task's final notice. A Monitor's events carry none, and end nothing."""
+    ended: list[str] = []
+    for block in _NOTICE.findall(raw):
+        found = _NOTICE_ID.search(block)
+        if found is not None and _NOTICE_STATUS.search(block) is not None:
+            ended.append(found.group(1).decode(errors="replace"))
+    return ended
+
+
+def _launches(record: dict[str, Any], when: datetime | None) -> list[tuple[str, datetime | None]]:
+    """The background work ``record``'s tool result started, each with when it ends of itself
+    (a Monitor's timeout), else ``None``: until it reports."""
+    result = record.get("toolUseResult")
+    if not isinstance(result, dict):
+        return []
+    task = result.get("taskId")
+    if isinstance(task, str) and task:
+        timeout = result.get("timeoutMs")
+        until = None
+        if (
+            result.get("persistent") is not True
+            and isinstance(timeout, int | float)
+            and timeout > 0
+            and when is not None
+        ):
+            until = when + timedelta(milliseconds=timeout)
+        return [(task, until)]
+    status = result.get("status")
+    agent = result.get("agentId")
+    if isinstance(agent, str) and agent:
+        inline = status in _FOREGROUND or (
+            status == "forked" and result.get("background") is not True
+        )
+        return [] if inline else [(agent, None)]
+    return [
+        (value, None)
+        for key in _LAUNCH_ID_KEYS
+        if isinstance(value := result.get(key), str) and value
+    ]
+
+
+def _stopped_ids(record: dict[str, Any]) -> list[str]:
+    """The ids ``record``'s ``TaskStop`` names: the agent's call (``input.task_id``, or an older
+    ``shell_id``) or its result (``toolUseResult.task_id``)."""
+    found: list[str] = []
+    result = record.get("toolUseResult")
+    if isinstance(result, dict) and not any(key in result for key in _LAUNCH_ID_KEYS):
+        stopped = result.get("task_id")
+        if isinstance(stopped, str) and stopped:
+            found.append(stopped)
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return found
+    for block in _content_blocks(message.get("content")):
+        tool_input = block.get("input")
+        if block.get("type") != "tool_use" or block.get("name") != "TaskStop":
+            continue
+        if isinstance(tool_input, dict):
+            found.extend(
+                value
+                for key in ("task_id", "shell_id")
+                if isinstance(value := tool_input.get(key), str) and value
+            )
+    return found
+
+
+_ACTIVITY_MARKS = (
+    b'"type":"user"',
+    b'"type":"assistant"',
+    b'"queue-operation"',
+    b'"stop_hook_summary"',
+    b'"type": "user"',
+    b'"type": "assistant"',
+)
+
+
+def activity_since(path: Path, offset: int) -> bool:
+    """Whether the transcript at ``path`` shows a turn begun after byte ``offset`` — a turn
+    end's size — or one about to begin.
+
+    Begun: a ``user`` record (a prompt, a task's notice, a tool's result), an ``assistant`` one,
+    or a queued message taken (``queue-operation`` ``dequeue``) after ``offset``. A prompt's own
+    record is written once its ``UserPromptSubmit`` hook has passed (a prompt that hook blocks
+    gets none), so this sees a typed prompt no sooner than its board stamp does; it is a
+    queued message or a task's notice, whose ``enqueue`` and ``dequeue`` are on disk at once,
+    that it sees first. What Claude Code writes at an idle prompt (``system`` records, titles,
+    modes, attachments) is no turn.
+
+    About to begin: a message queued during the turn and not yet taken — an ``enqueue`` since
+    the last turn end the queue lived through (a ``stop_hook_summary``, written after the Stop
+    hooks have run) with no ``dequeue`` or ``remove`` after it — which Claude Code submits as
+    the turn ends. Counted from the last turn end only: over the whole file, one enqueue never
+    matched (the same notice queued twice, taken once) read as busy at every turn end after
+    it, and the agent was never moved (review of #423, round 2). A file shorter than
+    ``offset`` (rewritten) counts as activity. ``OSError`` when it cannot be read.
+    """
+    queued = 0
+    with path.open("rb") as handle:
+        if handle.seek(0, 2) < offset:
+            return True
+        handle.seek(0)
+        position = 0
+        for raw in handle:
+            start, position = position, position + len(raw)
+            if not any(mark in raw for mark in _ACTIVITY_MARKS):
+                continue
+            record = _parsed(raw)
+            if record is None:
+                if start >= offset and len(raw) > _LINE_MAX_BYTES:
+                    return True  # too long to read: a pasted prompt as like as anything
+                continue
+            kind = record.get("type")
+            if kind == "system" and record.get("subtype") == "stop_hook_summary":
+                queued = 0
+            elif kind == "queue-operation":
+                operation = record.get("operation")
+                if operation == "enqueue":
+                    queued += 1
+                elif operation in ("dequeue", "remove"):
+                    queued = max(0, queued - 1)
+                    if operation == "dequeue" and start >= offset:
+                        return True
+            elif start >= offset and kind in ("user", "assistant"):
+                return True
+    return queued > 0
+
+
+_LINE_MAX_BYTES = 262_144
+"""Longest line the background and activity scans parse (a pasted attachment can be megabytes
+on one line); a longer one is read by its ids alone, or counted as activity."""
+
+
+def _parsed(raw: bytes) -> dict[str, Any] | None:
+    if len(raw) > _LINE_MAX_BYTES:
+        return None
+    try:
+        record = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _content_blocks(content: object) -> list[dict[str, Any]]:
+    if isinstance(content, list):
+        return [block for block in content if isinstance(block, dict)]
+    return []

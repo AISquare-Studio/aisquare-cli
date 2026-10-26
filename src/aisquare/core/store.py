@@ -2698,14 +2698,19 @@ class SqliteStore:
         (the next brief is #1 again, as the next task is), and in
         ``team_meta`` its signals (``signal/<id>/*``) and the keys of the sessions that go
         (:func:`_session_meta_terms`: the nudge debounce, the continuation counters, …).
-        The distiller's watermark stays: ``team_event.seq`` is one stream for every board,
-        so the next event is past it whatever went. The fleet is its ``fleet_agent`` rows,
-        and a live one refuses the reset (``ValueError``): asked under the write lock, so an
-        agent a spawn recorded after the caller stopped the rest is never left without its
-        row. ``memory`` takes the project's context entries too (the FTS follows through
-        ``entry_ad``), ``prompts`` its prompt log and turn metrics. The registration and
-        every other project's rows are not touched; the next task added is #1 again, as a
-        number is its board's highest plus one."""
+        The ``ui_state`` rows the before-limit hand-over keeps per label
+        (:data:`_FLEET_LABEL_STATE`) go with them, counted with the ``team_meta`` keys: the
+        next fleet reuses a label (``coder-1``), and a stale "warned" row would hide its first
+        warning. The distiller's watermark stays: ``team_event.seq`` is one stream for every
+        board, so the next event is past it whatever went.
+
+        The fleet is its ``fleet_agent`` rows, and a live one refuses the reset
+        (``ValueError``): asked under the write lock, so an agent a spawn recorded after the
+        caller stopped the rest is never left without its row. ``memory`` takes the
+        project's context entries too (the FTS follows through ``entry_ad``), ``prompts``
+        its prompt log and turn metrics. The registration and every other project's rows are
+        not touched; the next task added is #1 again, as a number is its board's highest
+        plus one."""
         scope = [
             ("team_task", "project_id = ?"),
             ("team_event", "project_id = ?"),
@@ -2718,7 +2723,8 @@ class SqliteStore:
         if prompts:
             scope += [("prompt", "project_id = ?"), ("metric", "project_id = ?")]
 
-        def meta() -> list[tuple[str, tuple[str, ...]]]:
+        def meta() -> list[tuple[str, str, tuple[str, ...]]]:
+            """``(table, where, params)`` for each group of keys the reset clears."""
             sessions = [
                 str(row["id"])
                 for row in self._conn.execute(
@@ -2726,7 +2732,17 @@ class SqliteStore:
                 ).fetchall()
             ]
             signals = ("key GLOB ?", (f"signal/{_glob_escape(project_id)}/*",))
-            return [signals, *_session_meta_terms(sessions)]
+            labels = (
+                " OR ".join(["key GLOB ?"] * len(_FLEET_LABEL_STATE)),
+                tuple(f"{prefix}{_glob_escape(project_id)}:*" for prefix in _FLEET_LABEL_STATE),
+            )
+            return [
+                *(
+                    ("team_meta", where, params)
+                    for where, params in (signals, *_session_meta_terms(sessions))
+                ),
+                ("ui_state", *labels),
+            ]
 
         if not apply:
             count = "SELECT COUNT(*) FROM {} WHERE {}"
@@ -2737,8 +2753,8 @@ class SqliteStore:
                 for table, where in scope
             }
             counts["team_meta"] = sum(
-                int(self._conn.execute(count.format("team_meta", where), params).fetchone()[0])
-                for where, params in meta()
+                int(self._conn.execute(count.format(table, where), params).fetchone()[0])
+                for table, where, params in meta()
             )
             return counts
         removed: dict[str, int] = {}
@@ -2759,8 +2775,8 @@ class SqliteStore:
                     f"DELETE FROM {table} WHERE {where}", (project_id,)
                 ).rowcount
             removed["team_meta"] = sum(
-                self._conn.execute(f"DELETE FROM team_meta WHERE {where}", params).rowcount
-                for where, params in keys
+                self._conn.execute(f"DELETE FROM {table} WHERE {where}", params).rowcount
+                for table, where, params in keys
             )
         return removed
 
@@ -5697,6 +5713,12 @@ _SESSION_META_KINDS: tuple[str, ...] = (
 """The ``team_meta`` keys kept per session as ``<kind>:<session id>``: the manager's nudge
 debounce, the solo session's not-yet-briefed mark (#346), and the quiet compaction's mark,
 its newest refusal and its latest arm (P1 WS-4)."""
+
+
+_FLEET_LABEL_STATE: tuple[str, ...] = ("before-limit:", "before-limit-warned:")
+"""The ``ui_state`` keys kept per fleet label as ``<prefix><project id>:<label>``: the turn
+end that last started a before-limit move, and the crossing a ``warn`` has named
+(``services.hooks``). A reset clears a project's (:meth:`SqliteStore.reset_project`)."""
 
 
 def _session_meta_terms(sessions: Sequence[str]) -> Iterator[tuple[str, tuple[str, ...]]]:

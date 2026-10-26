@@ -1514,7 +1514,8 @@ class FreshCounts(BaseModel):
     """Board events: notes, decisions, claims, reviews, exits."""
     sessions: int = 0
     meta: int = 0
-    """``team_meta`` rows: the board's signals and the gone sessions' marks."""
+    """``team_meta`` rows: the board's signals and the gone sessions' marks, with the
+    project's before-limit ``ui_state`` rows."""
     agents: int = 0
     """Fleet agent rows, live and ended."""
     worktrees: int = 0

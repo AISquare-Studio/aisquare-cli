@@ -13150,7 +13150,9 @@ def _brief_prompt(
             ]
     brief = handoff.write(
         handoff.build(
-            label=label or source.label,
+            # A take-over is the source's own label; a fork has one of its own, which the
+            # spawn picks when none was asked for: never the source's, as a fork's own.
+            label=label if fork else source.label,
             source=source,
             record=record,
             target_agent=onto,

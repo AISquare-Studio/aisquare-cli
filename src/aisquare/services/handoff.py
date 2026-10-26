@@ -44,6 +44,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from aisquare.core import atomic, paths
 from aisquare.core import claude_accounts as claude_accounts_core
@@ -51,7 +52,7 @@ from aisquare.core.agent_adapters import get_adapter, recorded_adapter
 from aisquare.core.agent_adapters.transcripts import lines_backwards, lines_forward
 from aisquare.core.config import load_config
 from aisquare.core.launch_seal import LaunchRecord
-from aisquare.core.redaction import redact
+from aisquare.core.redaction import MARKER, redact
 from aisquare.core.spawn import git_env
 from aisquare.core.workspace import git_argv
 from aisquare.models import FleetAgent, RedactionLevel, TeamEvent, TeamTask
@@ -93,6 +94,10 @@ counted (``+N more``) and are on the board. A manager can hold twenty."""
 
 CLAIM_MAX = 120
 """Most characters of one claim's title a brief quotes."""
+
+LABEL_MAX = 80
+"""Most characters of a teammate's label a brief quotes (the service bounds none; the Spawn
+dialog's own is 24): a longer one would push the last two lines out of the first prompt."""
 
 COMMITS = 5
 """The newest commits of the tree a brief lists."""
@@ -175,19 +180,23 @@ class HandoffBrief:
         reserve = _MIDDLE_ROOM if self.conversation else 0
         core, claims, entries, tree = (_scrubbed(part, self.redaction) for part in self._head())
         head = _fit_head(core, claims, entries, tree, room - reserve)
-        # Only the newest lines that could fit are scrubbed: a long session is megabytes.
-        pool, before = _newest_that_fit(self.conversation, limit)
+        # All of the conversation is scrubbed, then windowed and clipped: a key or a PEM block
+        # whose start the window cuts off, or whose line the clip cuts, is already gone.
         lines, cut = _newest_that_fit(
-            _scrubbed(pool, self.redaction), room - _size("\n".join(head)) - 1 - reserve
+            _scrubbed(self.conversation, self.redaction),
+            room - _size("\n".join(head)) - 1 - reserve,
         )
         middle: list[str] = []
         if lines:
             source = claude_accounts_core.agent_label(self.source_agent)
-            cut_note = ", its start cut to fit" if cut or before else ""
-            middle = [f"{self.source}'s conversation on {source}, newest last{cut_note}:", *lines]
+            cut_note = ", its start cut to fit" if cut else ""
+            middle = [
+                f"{_name(self.source)}'s conversation on {source}, newest last{cut_note}:",
+                *lines,
+            ]
         elif self.conversation:
             where = "in the brief file, too long for here" if self.path else "too long for here"
-            middle = [f"({self.source}'s conversation is {where})"]
+            middle = [f"({_name(self.source)}'s conversation is {where})"]
         return _cut_bytes("\n".join([*head, *middle, *tail]), limit)
 
     def _head(self) -> tuple[list[str], list[str], list[str], list[str]]:
@@ -195,62 +204,82 @@ class HandoffBrief:
         board entries (a heading, then the oldest first), and the tree."""
         source = claude_accounts_core.agent_label(self.source_agent)
         target = claude_accounts_core.agent_label(self.target_agent)
-        why = f" ({self.reason})" if self.reason else ""
+        # Each text is scrubbed whole BEFORE it is cut to its bound, never after: a clip that
+        # takes the end of a key leaves its start, which no pattern of the scrub matches.
+        raw = self._raw
+        label, name = _name(self.label), _name(self.source)
+        why = f" ({raw(self.reason)})" if self.reason else ""
         if self.fork:
-            who = f"You are {self.label}, a fork" if self.label else "You are a fork"
+            who = f"You are {label}, a fork" if label else "You are a fork"
             core = [
-                f"{who} of {self.source}, which keeps running on "
+                f"{who} of {name}, which keeps running on "
                 f"{source}. You run on {target}: a conversation does not move between agents, "
                 "so you start fresh, in your own worktree on your own branch with no claims, "
-                f"and this brief carries {self.source}'s work so far."
+                f"and this brief carries {name}'s work so far."
             ]
         else:
             # A take-over keeps its source's label: it is the previous session of the same agent.
-            who = "the previous session of this agent" if self.label == self.source else self.source
+            who = "the previous session of this agent" if self.label == self.source else name
             core = [
-                f"You are {self.label}, taking over from {who}, which ran on {source}"
+                f"You are {label}, taking over from {who}, which ran on {source}"
                 f"{why}. You run on {target}: a conversation does not move between agents, so "
                 "you start fresh, and this brief carries its work."
             ]
         if self.task is not None:
-            whose = f"{self.source}'s task, not yours" if self.fork else "your task"
-            title = _clip(_single_line(self.task.title), ENTRY_MAX)
+            whose = f"{name}'s task, not yours" if self.fork else "your task"
+            title = _clip(_single_line(raw(self.task.title)), ENTRY_MAX)
             core.append(f"Task ({whose}): {title} ({self.task.id}).")
             if self.task.detail and self.task.detail.strip():
-                core.append(f"Contract: {_clip(self.task.detail.strip(), DETAIL_MAX)}")
+                core.append(f"Contract: {_clip(raw(self.task.detail).strip(), DETAIL_MAX)}")
         claims: list[str] = []
         if self.claims and not self.fork:
             claims.append("Claims, now yours:")
             claims.extend(
-                f"- {_task_ref(task)} {_clip(_single_line(task.title), CLAIM_MAX)}"
+                f"- {_task_ref(task)} {_clip(_single_line(raw(task.title)), CLAIM_MAX)}"
                 for task in self.claims[:CLAIMS_MAX]
             )
             if len(self.claims) > CLAIMS_MAX:
                 claims.append(f"- (+{len(self.claims) - CLAIMS_MAX} more, on the board)")
         entries: list[str] = []
         if self.entries:
-            entries.append(f"{self.source}'s last board entries:")
+            entries.append(f"{name}'s last board entries:")
             entries.extend(
-                f"- {event.kind}: {_clip(_single_line(event.text), ENTRY_MAX)}"
+                f"- {event.kind}: {_clip(_single_line(raw(event.text)), ENTRY_MAX)}"
                 for event in self.entries
             )
         tree = (
-            _git_lines(self.git, self.source if self.fork else None) if self.git is not None else []
+            _git_lines(self._scrubbed_git(self.git), name if self.fork else None)
+            if self.git is not None
+            else []
         )
         return core, claims, entries, tree
 
+    def _raw(self, text: str) -> str:
+        """``text`` scrubbed at this brief's level, whole."""
+        return redact(text, self.redaction)
+
+    def _scrubbed_git(self, state: GitState) -> GitState:
+        """The tree's facts scrubbed: a path or a commit subject can hold a token."""
+        return replace(
+            state,
+            branch=self._raw(state.branch) if state.branch else None,
+            changed=tuple(self._raw(line) for line in state.changed),
+            commits=tuple(self._raw(line) for line in state.commits),
+        )
+
     def _tail(self) -> list[str]:
         task = f" and `aisquare task show {self.task.id}`" if self.task is not None else ""
+        name = _name(self.source)
         if self.fork:
             lines = [
                 f"Start by reading `aisquare board`{task}, then `git status` and `git log "
                 "--oneline -5` in your own worktree, and say what you will take on; never touch "
-                f"{self.source}'s tree or its task."
+                f"{name}'s tree or its task."
             ]
         else:
             lines = [
                 f"Start by reading `aisquare board`{task}, then `git status` and `git log "
-                f"--oneline -5` in this directory; continue from where {self.source} left off "
+                f"--oneline -5` in this directory; continue from where {name} left off "
                 "and do not redo work that is already committed."
             ]
         if self.path is not None:
@@ -273,6 +302,7 @@ def build(
     """The brief of ``source``'s work, as its launch ``record`` holds it, for ``label`` on
     ``target_agent``. Never raises: a transcript or a tree that cannot be read is a brief
     without that section."""
+    level = _redaction_level()
     return HandoffBrief(
         label=label,
         source=source.label,
@@ -283,16 +313,22 @@ def build(
         claims=tuple(claims),
         entries=tuple(recent),
         git=git_state(Path(record.cwd)),
-        conversation=conversation(record),
+        conversation=conversation(record, level=level),
         fork=fork,
-        redaction=_redaction_level(),
+        redaction=level,
     )
 
 
-def conversation(record: LaunchRecord, *, turns: int = TURNS) -> tuple[str, ...]:
+def conversation(
+    record: LaunchRecord, *, turns: int = TURNS, level: RedactionLevel = RedactionLevel.standard
+) -> tuple[str, ...]:
     """The newest ``turns`` records of the session ``record`` holds, as its agent's own
     transcript reader renders them, as plain lines (no terminal escapes), oldest first:
     the human's words, the agent's, and each call as one line. ``()`` for none.
+
+    Every string of a record is redacted at ``level`` BEFORE the reader wraps it
+    (:func:`scrub_entry`): the reader breaks a line at 110 columns, and none of the
+    redaction's patterns matches a key broken over two lines.
 
     The walk Remote's Transcript tab pages with (``AgentTranscript.records`` over the lines
     read back from the end, then ``page_lines``), done here rather than through
@@ -312,7 +348,7 @@ def conversation(record: LaunchRecord, *, turns: int = TURNS) -> tuple[str, ...]
         ahead = lines_forward(path, end, budget=SCAN_BUDGET)  # read only if the reader asks
         turns_seen: list[list[str]] = []
         for _offset, entry in reader.records(walked, ahead):
-            rendered = [] if entry is None else reader.page_lines(entry, WIDTH)
+            rendered = [] if entry is None else reader.page_lines(scrub_entry(entry, level), WIDTH)
             if rendered:
                 turns_seen.append(rendered)
                 if len(turns_seen) >= turns:
@@ -320,6 +356,24 @@ def conversation(record: LaunchRecord, *, turns: int = TURNS) -> tuple[str, ...]
     except Exception:  # the brief goes without it, never the hand-off
         return ()
     return tuple(_plain(line) for rendered in reversed(turns_seen) for line in rendered)
+
+
+def scrub_entry(value: Any, level: RedactionLevel, depth: int = 0) -> Any:
+    """``value``, a record read from a transcript (JSON: dicts, lists, strings), with every
+    string in it redacted at ``level``. A record is scrubbed whole, so a PEM block or a key
+    that the reader would wrap over lines is one match; a structure nested past 64 levels is
+    no transcript's, and is replaced."""
+    if level is RedactionLevel.off:
+        return value
+    if isinstance(value, str):
+        return redact(value, level)
+    if depth >= 64:
+        return MARKER
+    if isinstance(value, list):
+        return [scrub_entry(item, level, depth + 1) for item in value]
+    if isinstance(value, dict):
+        return {key: scrub_entry(item, level, depth + 1) for key, item in value.items()}
+    return value
 
 
 def git_state(tree: Path) -> GitState | None:
@@ -594,6 +648,11 @@ def _newest_that_fit(lines: Sequence[str], room: int) -> tuple[list[str], bool]:
 
 def _plain(line: str) -> str:
     return _ESCAPES.sub("", line).rstrip()
+
+
+def _name(label: str | None) -> str:
+    """A teammate's label as a brief quotes it: on one line, at most :data:`LABEL_MAX`."""
+    return _clip(_single_line(label or ""), LABEL_MAX)
 
 
 def _single_line(text: str) -> str:

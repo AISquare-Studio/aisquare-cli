@@ -33,7 +33,9 @@ adapter.**
   both ways ([the parity row](docs/coding-agents.md#parity-with-claude-code)).
   **The newest of the conversation goes to the other agent's vendor**, which the
   switch's tooltip says: it is scrubbed first as outgoing text is (`[redaction]
-  level`), in the prompt and in the file, and a brief file is removed after 14 days.
+  level`), in the prompt and in the file, each record whole before its text is wrapped or
+  windowed (a 108-character key, a JWT, a PEM block the first prompt's window starts inside),
+  and a brief file is removed after 14 days.
   The cut that fits the first prompt never takes its last two lines (where to start,
   and the file's path): the conversation goes first, then the board entries, the tree
   and the claims, and the brief lists the first 8 claims and counts the rest. A fork

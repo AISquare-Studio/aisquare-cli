@@ -203,8 +203,10 @@ CROSS_AGENT_TIP = (
     "instead of waiting. A conversation cannot move between agents, so the other agent "
     "starts fresh with a brief of the work: the task, the board, the tree and the newest of "
     "the conversation, which goes to that agent's vendor, with credentials scrubbed out "
-    "first ([redaction] level). Off: a hand-over stays on its agent."
+    "first (redaction.level). Off: a hand-over stays on its agent."
 )
+"""Said on the switch and its label. A tooltip is markup to Textual, which eats a ``[section]``:
+no square bracket is written in one (tests/test_ui_app_settings.py pins what it renders)."""
 
 FALLBACK_AGENT_TIP = (
     "The agent a launch runs only when no account is usable (no one signed in, an API key, "

@@ -15,6 +15,7 @@ from typing import Any, TypeVar
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.content import Content
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
 from textual.widgets import (
@@ -27,12 +28,14 @@ from textual.widgets import (
     Switch,
     TabbedContent,
 )
+from textual.widgets._tooltip import Tooltip
 
 from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.views.app_settings import (
     AGENT_ADVANCED,
     AGENT_TAB,
     CROSS_AGENT_TIP,
+    FALLBACK_AGENT_TIP,
     ON_LIMIT_MODES,
     PREFERENCES_ADVANCED,
     PREFERENCES_TAB,
@@ -458,6 +461,30 @@ def test_the_hand_off_across_agents_switch_says_the_conversation_goes_to_the_oth
     assert switch_tip == label_tip == CROSS_AGENT_TIP
     for said in ("conversation", "that agent's vendor", "scrubbed", "Off:"):
         assert said in CROSS_AGENT_TIP
+
+
+@pytest.mark.parametrize("tip", [CROSS_AGENT_TIP, FALLBACK_AGENT_TIP], ids=["cross", "fallback"])
+def test_a_tooltip_renders_the_words_it_is_written_in(tip: str) -> None:
+    """Textual reads a tooltip as markup: ``[redaction]`` rendered as nothing, and the
+    sentence "scrubbed out first ( level)" reached the user (tester on #15). What
+    ``Tooltip.update`` renders is the sentence, word for word."""
+
+    class Host(App[None]):
+        def compose(self) -> ComposeResult:
+            yield Tooltip()
+
+    async def render() -> str:
+        host = Host()
+        async with host.run_test() as pilot:
+            shown = host.query_one(Tooltip)
+            shown.update(tip)
+            await pilot.pause()
+            visual = shown.visual
+            assert isinstance(visual, Content)
+            return visual.plain
+
+    assert asyncio.run(render()) == tip
+    assert "[" not in tip, "no square bracket in a tooltip: Textual reads it as markup"
 
 
 def test_settings_switch_the_daily_release_check_off_and_on() -> None:

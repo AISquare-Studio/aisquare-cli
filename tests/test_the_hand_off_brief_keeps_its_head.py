@@ -460,3 +460,146 @@ def test_the_brief_file_is_written_even_when_the_prune_finds_nothing_to_do() -> 
     assert written.path is not None
     assert stat.S_IMODE(written.path.stat().st_mode) == 0o600 or os.name == "nt"
     assert written.path.read_text(encoding="utf-8").endswith(f"{written.path}.\n")
+
+
+# --- f4, tester's round: a secret is scrubbed whole, before it is wrapped, windowed or clipped ---
+
+AKIA = "AKIAIOSFODNN7EXAMPLE"
+RSA = [
+    "-----BEGIN RSA PRIVATE KEY-----",
+    *(f"MIIEowIBAAKCAQEA{n:02d}" + "q9Zx" * 15 for n in range(26)),
+    "-----END RSA PRIVATE KEY-----",
+]
+
+
+def _bare() -> handoff.HandoffBrief:
+    """A brief of a conversation alone, so that nearly all of the first prompt is its window."""
+    return handoff.HandoffBrief(
+        label="coder-1",
+        source="coder-1",
+        source_agent="codex",
+        target_agent="claude-code",
+        path=BRIEF_FILE,
+    )
+
+
+def _later(count: int) -> tuple[str, ...]:
+    return tuple(f"later {n} " + "word " * 30 for n in range(count))
+
+
+def test_a_key_the_window_cuts_the_start_of_is_gone_with_the_rest() -> None:
+    """The tester's (c): a PEM block pasted, then enough said that the first prompt's window
+    starts inside it. BEGIN is outside the window, so the PEM rule could not match what was
+    left; the whole conversation is scrubbed first. Swept over how much was said after it, so
+    the window's start falls on every line of the block."""
+    for limit, counts in (
+        (handoff.PROMPT_MAX, range(1, 90)),
+        (handoff.FILE_MAX, range(480, 800, 7)),
+    ):
+        for count in counts:
+            text = replace(_bare(), conversation=(*RSA, *_later(count))).text(limit)
+
+            assert "q9Zx" not in text and "MIIEowIBAAKCAQEA" not in text, (limit, count)
+            assert f"later {count - 1} " in text, "the newest of the conversation is there"
+            assert text.endswith(KEPT)
+
+
+def test_a_key_over_two_hundred_characters_in_one_line_is_scrubbed_before_it_is_clipped() -> None:
+    """The tester's clip case: a line cut at 400 left 'AKIAIOSFODNN7EXAMPL', one character short
+    of a pattern, in the brief."""
+    line = "x" * (handoff.ENTRY_MAX - 5) + " " + AKIA + " and more words after it"
+    text = _brief(0, conversation=(line,)).text()
+
+    assert AKIA[:12] not in text
+    assert "xxxxxxxx" in text
+
+
+@pytest.mark.parametrize(
+    ("where", "bound"),
+    [("title", handoff.ENTRY_MAX), ("detail", handoff.DETAIL_MAX)],
+)
+def test_a_key_on_the_edge_of_a_clip_in_the_task_is_scrubbed_first(where: str, bound: int) -> None:
+    made = "x" * (bound - 11) + " " + AKIA + " tail"
+    task = _task(7, **({"title": made} if where == "title" else {"detail": made}))
+
+    text = replace(_brief(0), task=task).text()
+
+    assert AKIA[:10] not in text, where
+
+
+def test_a_key_on_the_edge_of_a_clip_in_an_entry_or_a_claim_is_scrubbed_first() -> None:
+    entry = _event(1, "y" * (handoff.ENTRY_MAX - 11) + " " + AKIA + " tail")
+    claim = _task(9, "z" * (handoff.CLAIM_MAX - 11) + " " + AKIA + " tail")
+
+    text = replace(_brief(0), entries=(entry,), claims=(claim,)).text()
+
+    assert AKIA[:10] not in text
+
+
+def test_the_head_is_scrubbed_at_the_level_the_brief_holds() -> None:
+    """The task, the claims, the board entries and the tree: strict takes who and where out of
+    them as it does from the conversation; off sends them as typed (tester's pin gap)."""
+    detail = f"mail me@example.com about /Users/anmol/Work/x with API_KEY={KEY}"
+    brief = replace(
+        _brief(0),
+        task=_task(7, "Fix /Users/anmol/Work/y", detail=detail),
+        claims=(_task(9, "ask me@example.com"),),
+        entries=(_event(1, "from /Users/anmol/Work/z"),),
+        git=handoff.GitState(
+            tree=Path("/Users/anmol/Work/proj"),
+            branch="fix/me@example.com",
+            changed=(" M /Users/anmol/Work/a.py",),
+            commits=("abc1234 thanks me@example.com",),
+        ),
+    )
+    strict = replace(brief, redaction=RedactionLevel.strict).text()
+    standard = replace(brief, redaction=RedactionLevel.standard).text()
+    off = replace(brief, redaction=RedactionLevel.off).text()
+
+    for gone in ("me@example.com", "/Users/anmol", KEY):
+        assert gone not in strict, gone
+    assert "mail [redacted] about ~/Work/x" in strict and "Fix ~/Work/y" in strict
+    assert "me@example.com" in standard and "/Users/anmol/Work/x" in standard
+    assert KEY not in standard and "API_KEY=[redacted]" in standard
+    assert f"API_KEY={KEY}" in off and "/Users/anmol/Work/z" in off
+
+
+@pytest.mark.parametrize("fork", [False, True])
+def test_a_label_of_two_hundred_characters_keeps_the_last_two_lines(fork: bool) -> None:
+    long = "coder-" + "x" * 200
+    brief = _brief(8, changed=30, conversation=_talk(), label=long, source=long, fork=fork)
+
+    text = brief.text()
+    lines = text.split("\n")
+
+    assert _size(text) <= handoff.PROMPT_MAX
+    assert lines[-1] == KEPT and lines[-2].startswith("Start by reading `aisquare board`")
+    assert long not in text and "x" * 200 not in text
+    assert "coder-" + "x" * (handoff.LABEL_MAX - len("coder-")) + " …" in text, "cut, said so"
+    assert "x" * handoff.LABEL_MAX not in text
+
+
+def test_scrub_entry_redacts_every_string_of_a_record_and_nothing_else() -> None:
+    record = {
+        "type": "user",
+        "n": 3,
+        "ok": True,
+        "message": {"content": [{"text": f"KEY={KEY}"}, {"text": "plain words"}, 4, None]},
+    }
+    scrubbed = handoff.scrub_entry(record, RedactionLevel.standard)
+
+    assert scrubbed == {
+        "type": "user",
+        "n": 3,
+        "ok": True,
+        "message": {"content": [{"text": "KEY=[redacted]"}, {"text": "plain words"}, 4, None]},
+    }
+    assert record["message"]["content"][0]["text"] == f"KEY={KEY}", "the record read is not changed"  # type: ignore[index]
+    assert handoff.scrub_entry(record, RedactionLevel.off) is record
+    deep: object = "x"
+    for _ in range(80):
+        deep = [deep]
+    flat = handoff.scrub_entry(deep, RedactionLevel.standard)
+    while isinstance(flat, list):
+        flat = flat[0]
+    assert flat == "[redacted]", "a structure no transcript has is replaced, not walked"

@@ -1303,7 +1303,9 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   across agents sends the newest of them to Anthropic from Codex and to OpenAI from
   Claude Code, which is why the switch can be turned off. They are scrubbed first, as
   text leaving the machine is (`[redaction] level`: credentials at `standard`, who and
-  where as well at `strict`, nothing at `off`), in the prompt and in the file; a brief
+  where as well at `strict`, nothing at `off`), in the prompt and in the file. Each record is
+  scrubbed whole before its text is wrapped at 110 columns or the newest of it is chosen, so
+  a key or a PEM block that a line break or the cut would have split is gone with the rest; a brief
   file is removed after 14 days. The old session ends,
   `switched` names both agents, and the new launch record names the new agent, so a
   restart or Fork of it stays there. One switch per limit holds across agents too: the

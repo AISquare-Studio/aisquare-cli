@@ -367,3 +367,108 @@ def test_a_key_the_human_pasted_reaches_neither_the_first_message_nor_the_brief_
     assert "it fails: ANTHROPIC_API_KEY=[redacted]" in prompt
     assert "it fails: ANTHROPIC_API_KEY=[redacted]" in file_text
     assert key not in prompt and key not in file_text
+
+
+def _talk(role: str, n: int, text: str) -> str:
+    """One Claude Code transcript record, as a line."""
+    stamp = f"2026-10-19T18:{n // 60:02d}:{n % 60:02d}.000Z"
+    if role == "user":
+        message: dict[str, object] = {"role": "user", "content": text}
+    else:
+        message = {"id": f"m{n}", "role": "assistant", "content": [{"type": "text", "text": text}]}
+    return json.dumps(
+        {"type": role, "uuid": f"{role[0]}{n}", "timestamp": stamp, "message": message}
+    )
+
+
+def test_credentials_the_reader_wraps_or_the_window_cuts_reach_neither_the_message_nor_the_file(
+    tmux: FakeTmux,  # noqa: F811 - pytest resolves fixtures by NAME
+    codex_on_path: Path,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The tester's three (review of #15): a real-length Anthropic key in an assignment, a
+    JWT of 283 characters, and an RSA key pasted before so much was said that the first
+    prompt's window begins inside it. The reader wraps a line at 110 columns, where no pattern
+    matches half a key, and the window cuts the start of a block off its end: each is scrubbed
+    in the record, whole, before either happens."""
+    key = "sk-ant-api03-" + "Qw3rTy9uIo" * 9 + "Zx7cV"  # 108 characters, a real key's length
+    jwt = ".".join(
+        [
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "eyJzdWIiOiI" + "MTIzNDU2Nzg5MA" * 8,
+            "SflKxwRJSMeKKF2" + "QT4fwpMeJf36POk6yJV" * 5,
+        ]
+    )
+    assert len(key) == 108 and len(jwt) > 250
+    pem = [
+        "-----BEGIN RSA PRIVATE KEY-----",
+        *(f"MIIEowIBAAKCAQEA{n:02d}" + "q9ZxK" * 12 for n in range(26)),
+        "-----END RSA PRIVATE KEY-----",
+    ]
+    leg = _spans(monkeypatch, tmp_path, project, tmux, "claude-code")
+    records = [
+        _talk("user", 1, f"it fails: ANTHROPIC_API_KEY={key}"),
+        _talk("assistant", 2, "rotate that key"),
+        _talk("user", 3, f"this token keeps failing: {jwt}"),
+        _talk("assistant", 4, "that one is expired"),
+        _talk("user", 5, "and my deploy key:\n" + "\n".join(pem)),
+        *(
+            _talk("user" if n % 2 else "assistant", 10 + n, f"exchange {n}: " + "word " * 70)
+            for n in range(40)
+        ),
+    ]
+    leg.transcript.write_text("\n".join(records) + "\n", encoding="utf-8")
+
+    receipt = fleet_service.hand_off(
+        project, leg.agent.label, mode="take_over", fresh=True, to_agent="codex"
+    )
+
+    [prompt] = _first_lines(tmux, receipt.started.agent.pane_id)
+    [note] = [n for n in receipt.notes if n.startswith("hand-off brief: ")]
+    file_text = Path(note.removeprefix("hand-off brief: ")).read_text(encoding="utf-8")
+    assert "exchange 39" in prompt and "exchange 39" in file_text, "the newest is carried"
+    fragments = [key[-24:], key[20:60], jwt.split(".")[1][20:60], jwt.split(".")[2][-30:],
+                 "q9ZxK", "MIIEowIBAAKCAQEA", "BEGIN RSA", "END RSA"]  # fmt: skip
+    for where, text in (("the first message", prompt), ("the brief file", file_text)):
+        for fragment in fragments:
+            assert fragment not in text, (where, fragment)
+    assert "ANTHROPIC_API_KEY=[redacted]" in file_text
+
+
+@pytest.mark.parametrize(("level", "kept"), [("off", True), ("standard", False), ("strict", False)])
+def test_the_redaction_level_the_config_holds_is_the_one_a_hand_off_sends_at(
+    level: str,
+    kept: bool,
+    tmux: FakeTmux,  # noqa: F811 - pytest resolves fixtures by NAME
+    codex_on_path: Path,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``off`` is the owner's word that the conversation goes as typed; the rest scrub it, and
+    ``strict`` takes who and where out of it too."""
+    from aisquare.core.config import load_config, save_config
+    from aisquare.models import RedactionLevel
+
+    config = load_config()
+    config.redaction.level = RedactionLevel(level)
+    save_config(config)
+    leg = _spans(monkeypatch, tmp_path, project, tmux, "claude-code")
+    secret = "API_KEY=abcdef0123456789abcdef"
+    leg.transcript.write_text(
+        _talk("user", 1, f"mail me@example.com from /Users/anmol/Work/x {secret}") + "\n",
+        encoding="utf-8",
+    )
+
+    receipt = fleet_service.hand_off(
+        project, leg.agent.label, mode="take_over", fresh=True, to_agent="codex"
+    )
+
+    [prompt] = _first_lines(tmux, receipt.started.agent.pane_id)
+    assert (secret in prompt) is kept
+    assert ("me@example.com" in prompt) is (level != "strict")
+    assert ("/Users/anmol/Work/x" in prompt) is (level != "strict")

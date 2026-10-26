@@ -94,3 +94,4 @@ def test_doctor_no_longer_takes_the_explainability_options(runner: CliRunner) ->
     helped = runner.invoke(app, ["doctor", "--help"]).output
     assert "explainab" not in helped.lower(), helped
     assert "--target" not in helped and "--project" not in helped
+    assert "prompt" not in helped.lower(), "--fix asks nothing, and --yes does not say it does"

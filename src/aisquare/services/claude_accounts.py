@@ -2484,6 +2484,18 @@ the cache's five minutes could start an agent on an account that crossed the lin
 A hand-over still reads live (:func:`choose_for_handover`)."""
 
 
+@dataclass(frozen=True)
+class HeadroomDecision:
+    """:func:`headroom_decision`'s answer: the account, the notes, and whether a reading
+    decided it."""
+
+    account: ClaudeAccount | None
+    notes: list[str]
+    measured: bool = True
+    """``False`` when ``account`` was taken with no reading to go by: an account that could
+    not be measured keeps its place (``unread_keeps_place``), it is not a full one."""
+
+
 def headroom_choice(
     accounts: Sequence[ClaudeAccount],
     *,
@@ -2496,6 +2508,35 @@ def headroom_choice(
     family: str | None = None,
     prefer: str = "priority",
 ) -> tuple[ClaudeAccount | None, list[str]]:
+    """The account with headroom, and the notes that say how it was picked
+    (:func:`headroom_decision`, an account that cannot be read skipped)."""
+    decision = headroom_decision(
+        accounts,
+        switch_at=switch_at,
+        exclude=exclude,
+        fetch=fetch,
+        now=now,
+        least_bad=least_bad,
+        max_age=max_age,
+        family=family,
+        prefer=prefer,
+    )
+    return decision.account, decision.notes
+
+
+def headroom_decision(
+    accounts: Sequence[ClaudeAccount],
+    *,
+    switch_at: int,
+    exclude: Iterable[int] = (),
+    fetch: Fetch | None = None,
+    now: datetime | None = None,
+    least_bad: bool = True,
+    max_age: float | None = None,
+    family: str | None = None,
+    prefer: str = "priority",
+    unread_keeps_place: bool = False,
+) -> HeadroomDecision:
     """The account with headroom, and the notes that say how it was picked.
 
     ``family`` is the agent's model family, when known: that family's week counts
@@ -2525,6 +2566,15 @@ def headroom_choice(
     skipped and named; ``None`` when nothing could be measured, so the
     caller's next rung decides.
 
+    ``unread_keeps_place`` is the launch's AGENT rung's rule (:func:`agent_pick`, review
+    of #14, M1): an account that could not be read is *unmeasured*, not *full*, so it keeps
+    its place in the order and only an account measured over the line, or one a limit mark
+    or a spent family week shuts, gives its place to a later one. The expired token that
+    an idle Claude Code account normally reads (a session on it refreshes it) must not hand
+    the launch to another agent. ``measured`` on the answer says which kind of account was
+    taken. ``prefer = "reset-soonest"`` compares the readings it has: an unmeasured account
+    ahead of them is not passed over for a measured one, and is not preferred either.
+
     An account the usage endpoint asked to wait (F1 of #400) is not asked
     again, by a launch or a hand-over: the pick decides by its newest reading
     recorded in the last :data:`USAGE_MAX_AGE_SECONDS`, and says so, or skips
@@ -2538,7 +2588,7 @@ def headroom_choice(
         if not account.disabled and account.slot not in skip and core.signed_in(account)
     ]
     if not candidates:
-        return None, [_NOTHING_TO_PICK]
+        return HeadroomDecision(None, [_NOTHING_TO_PICK])
     moment = now or _now()
     marks = limit_marks(now=moment)
     notes: list[str] = []
@@ -2551,12 +2601,14 @@ def headroom_choice(
             notes.append(f"headroom: {core.label(account)} skipped — {mark.describe(now=moment)}")
     if not open_ones:
         notes.append("headroom: every account is at a limit it named — the default decides")
-        return None, notes
+        return HeadroomDecision(None, notes)
     candidates = open_ones
     if max_age is None:
         readings = read_usage(candidates, now=now, fetch=fetch)
     elif len(candidates) == 1 and least_bad:
-        return candidates[0], [*notes, *_over_the_line(candidates[0], switch_at, now=now)]
+        return HeadroomDecision(
+            candidates[0], [*notes, *_over_the_line(candidates[0], switch_at, now=now)]
+        )
     else:
         readings = cached_usage(candidates, max_age=max_age, now=now, fetch=fetch)
     readings = dict(readings)
@@ -2624,7 +2676,7 @@ def headroom_choice(
                 rate_limited=reading.rate_limited,
                 rate_limited_until=reading.rate_limited_until,
             )
-    measured: list[tuple[ClaudeAccount, float]] = []
+    measured: list[tuple[ClaudeAccount, float | None]] = []
     for account in candidates:
         reading = readings[account.slot]
         percent = headroom_percent(reading, family)
@@ -2635,42 +2687,63 @@ def headroom_choice(
             notes.append(f"headroom: {core.label(account)} skipped — its {family} week is spent")
         elif percent is not None:
             measured.append((account, percent))
+        elif unread_keeps_place:
+            measured.append((account, None))
+            notes.append(
+                f"headroom: {core.label(account)} could not be read — "
+                f"{reading.reason or 'no reading'}; unmeasured is not full, so it keeps its place"
+            )
         else:
             notes.append(
                 f"headroom: {core.label(account)} skipped — {reading.reason or 'no reading'}"
             )
     if not measured:
         notes.append("headroom: no account's usage could be read — the default decides")
-        return None, notes
-    summary = " · ".join(describe_headroom(a, readings[a.slot], family) for a, _pct in measured)
-    under_line = [a for a, pct in measured if pct < switch_at]
-    if prefer == "reset-soonest" and len(under_line) > 1:
+        return HeadroomDecision(None, notes)
+    summary = " · ".join(
+        describe_headroom(a, readings[a.slot], family)
+        if pct is not None
+        else f"{core.label(a)} unread"
+        for a, pct in measured
+    )
+    under_line = [(a, pct) for a, pct in measured if pct is None or pct < switch_at]
+    first_under = under_line[0] if under_line else None
+    read_under = [a for a, pct in under_line if pct is not None]
+    if (
+        prefer == "reset-soonest"
+        and len(read_under) > 1
+        and first_under is not None
+        and first_under[1] is not None
+    ):
         never = datetime.max.replace(tzinfo=UTC)
-        soonest = min(under_line, key=lambda a: readings[a.slot].week_resets_at or never)
-        if soonest is not under_line[0]:
+        soonest = min(read_under, key=lambda a: readings[a.slot].week_resets_at or never)
+        if soonest is not first_under[0]:
             notes.append(
                 f"headroom: {summary} — {core.label(soonest)}'s week resets first of those "
                 f"under the {switch_at}%-used line (prefer = reset-soonest)"
             )
-            return soonest, notes
-    under = under_line[0] if under_line else None
-    if under is not None:
+            return HeadroomDecision(soonest, notes)
+    if first_under is not None:
+        under, under_percent = first_under
         notes.append(
             f"headroom: {summary} — {core.label(under)} is first under the {switch_at}%-used line"
+            if under_percent is not None
+            else f"headroom: {summary} — {core.label(under)} is first in the order and no "
+            f"account measured over the {switch_at}%-used line is ahead of it"
         )
-        return under, notes
+        return HeadroomDecision(under, notes, measured=under_percent is not None)
     if not least_bad:
         notes.append(
             f"headroom: {summary} — every account is over the {switch_at}%-used line; "
             "nothing to switch to"
         )
-        return None, notes
-    least, pct = min(measured, key=lambda pair: pair[1])
+        return HeadroomDecision(None, notes)
+    least, pct = min(((a, p) for a, p in measured if p is not None), key=lambda pair: pair[1])
     notes.append(
         f"headroom: {summary} — every account is over the {switch_at}%-used line; "
         f"{core.label(least)} has the most room ({max(0, 100 - pct):.0f}% left)"
     )
-    return least, notes
+    return HeadroomDecision(least, notes)
 
 
 def _over_the_line(account: ClaudeAccount, switch_at: int, *, now: datetime | None) -> list[str]:
@@ -2702,8 +2775,9 @@ class AgentPick:
 
     From :func:`choose_any`: ``agent`` is the picked account's, and both are ``None`` when
     no account is usable or none could be measured. From :func:`agent_pick` (a launch's
-    agent rung), ``account`` may be ``None`` with ``agent`` set: the order chose the agent
-    and leaves its account to :func:`choose`, as before.
+    agent rung), ``account`` may be ``None`` with ``agent`` set: the order chose the agent,
+    no reading decided the account, and :func:`choose` finds it by its ladder, whose last
+    rung is rank 1 of that agent's accounts.
     """
 
     agent: str | None
@@ -2792,28 +2866,48 @@ def account_agent(ref: str | None, *, role: str | None = None) -> str | None:
     ``role``'s binding names: naming an account names its agent, so a launch that nothing
     else pins runs it there (``services.agent_launch.resolve``). ``None`` when neither names
     an account that exists: :func:`choose` says why, as it always did. Never raises, and
-    makes no store on a machine that has none."""
+    makes no store on a machine that has none.
+
+    A role's binding to a DISABLED account names no agent: :func:`choose` skips it with a
+    note and goes on, and so does the agent, to the order (review of #14, nit 6). The
+    flag's account is the operator's own word and is taken as named, as ``choose`` does."""
     try:
         wanted = ref if ref is not None else _role_binding_ref(role)[0]
         if not wanted:
             return None
         accounts = _read_arranged()[0] if paths.db_path().exists() else core.list_accounts()
-        return _resolve_in(accounts, wanted).agent
+        account = _resolve_in(accounts, wanted)
+        return None if ref is None and account.disabled else account.agent
     except Exception:
         return None
 
 
 def agent_pick(
-    *, fetch: Fetch | None = None, which: Callable[[str], str | None] | None = None
+    *,
+    fetch: Fetch | None = None,
+    which: Callable[[str], str | None] | None = None,
+    measure: bool = True,
 ) -> AgentPick:
     """The agent a launch that nothing pins runs: the agent of the best usable account.
 
     A launch's agent rung (``services.agent_launch.resolve``, below ``--agent``, a role's
     binding, a binary and the project's default). Usable accounts of one agent alone
     decide it with no usage read, and leave the account to :func:`choose`. Across agents,
-    with ``[accounts] pick = "headroom"``, :func:`choose_any`'s rule picks the account too,
-    which :func:`choose` then takes (one usage read for both); with nothing measured, or
-    with ``pick = "default"``, the first usable account's agent. ``agent=None`` when no
+    with ``[accounts] pick = "headroom"``, the rule is :func:`headroom_decision`'s with
+    ``unread_keeps_place``: the first account in the order that is not measured over the
+    ``switch_at`` line or marked at a limit gives the agent, and when a reading put it
+    there, the account too, which :func:`choose` then takes (one usage read for both).
+
+    An account whose usage cannot be read (an expired token, an unreachable endpoint: the
+    state an account idle for hours normally reads, a session on it refreshes it) is
+    unmeasured, not full: it keeps its place, so a lower agent's account never takes the
+    launch from it (review of #14, M1; rank 1 is the machine default whatever its
+    reading, #406). The account within that agent is then :func:`choose`'s, by its
+    ladder: a measured account of the same agent may still go first, else rank 1 of it.
+
+    With nothing measured, with ``pick = "default"`` or with ``measure=False`` (a display of
+    the agent, which reads no usage), the first usable account's agent, and ``account`` is
+    left to :func:`choose`, whose last rung is that same first account. ``agent=None`` when no
     account is usable, the registry cannot be read, or this machine has no store yet:
     the launch's fallbacks decide (the user's coding agent under App settings).
     """
@@ -2829,17 +2923,21 @@ def agent_pick(
     if len({account.agent for account in candidates}) == 1:
         return AgentPick(first.agent, None)
     settings = accounts_settings()
-    if settings.pick != "headroom":
+    if not measure or settings.pick != "headroom":
         return AgentPick(first.agent, None, (f"{core.label(first)} is first in the order",))
-    picked, notes = headroom_choice(
+    decision = headroom_decision(
         candidates,
         switch_at=settings.switch_at,
         fetch=fetch,
         max_age=PICK_MAX_AGE_SECONDS,
         prefer=settings.prefer,
+        unread_keeps_place=True,
     )
+    picked, notes = decision.account, decision.notes
     if picked is None:
         return AgentPick(first.agent, None, (*notes, f"{core.label(first)} is first in the order"))
+    if not decision.measured:
+        return AgentPick(picked.agent, None, tuple(notes))
     return AgentPick(picked.agent, picked, tuple(notes))
 
 

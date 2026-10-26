@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import shutil
 from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from aisquare.core import claude_accounts as core
+from aisquare.core import paths
 from aisquare.core.config import AccountsSettings, RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
@@ -54,29 +56,73 @@ def _installed(monkeypatch: pytest.MonkeyPatch, **found: str | None) -> None:
     )
 
 
-def _usage(monkeypatch: pytest.MonkeyPatch, used: Mapping[int, float | None]) -> list[list[int]]:
-    """Each slot's reading, ``used`` percent of one window (``None``: unreadable); the
-    slots of every read are recorded, one list per read."""
+EXPIRED = ClaudeUsage(
+    available=False,
+    needs_login=True,
+    reason="the stored token has expired — open a session on this account to refresh it",
+)
+"""What an account idle for hours reads: signed in, its token to be refreshed by a session."""
+UNREACHABLE = ClaudeUsage(available=False, reason="could not reach the usage endpoint")
+THROTTLED = ClaudeUsage(available=False, rate_limited=True, reason="rate-limited until 14:32")
+Reading = float | ClaudeUsage | None
+"""A slot's scripted reading: percent used of one window, a reading as it is, or ``None``
+(unreadable)."""
+
+
+def _reading(value: Reading, *, week_resets: datetime | None = None) -> ClaudeUsage:
+    if isinstance(value, ClaudeUsage):
+        return value
+    if value is None:
+        return ClaudeUsage(available=False, reason="unread")
+    windows = [UsageWindow(name="session", minutes=300, used_percent=value)]
+    if week_resets is not None:
+        windows.append(
+            UsageWindow(name="week", minutes=10080, used_percent=value, resets_at=week_resets)
+        )
+    return ClaudeUsage(available=True, windows=tuple(windows))
+
+
+def _usage(
+    monkeypatch: pytest.MonkeyPatch,
+    used: Mapping[int, Reading],
+    *,
+    resets: Mapping[int, datetime] | None = None,
+) -> list[list[int]]:
+    """Each slot's reading (:data:`Reading`; ``resets`` the day its week resets); the slots
+    of every read are recorded, one list per read."""
     reads: list[list[int]] = []
 
     def cached(accounts: Iterable[ClaudeAccount], **_: Any) -> dict[int, ClaudeUsage]:
         listed = list(accounts)
         reads.append([a.slot for a in listed])
         return {
-            a.slot: (
-                ClaudeUsage(available=False, reason="unread")
-                if used.get(a.slot) is None
-                else ClaudeUsage(
-                    available=True,
-                    windows=(UsageWindow(name="session", minutes=300, used_percent=used[a.slot]),),
-                )
-            )
+            a.slot: _reading(used.get(a.slot), week_resets=(resets or {}).get(a.slot))
             for a in listed
         }
 
     monkeypatch.setattr(service, "cached_usage", cached)
     monkeypatch.setattr(service, "read_usage", lambda accounts, **k: cached(accounts))
     return reads
+
+
+def _split_usage(
+    monkeypatch: pytest.MonkeyPatch, *, cached: Mapping[int, Reading], live: Mapping[int, Reading]
+) -> tuple[list[list[int]], list[list[int]]]:
+    """The cache's readings and a live read's, apart; the slots of each read, per kind."""
+    cached_reads: list[list[int]] = []
+    live_reads: list[list[int]] = []
+
+    def reader(used: Mapping[int, Reading], reads: list[list[int]]) -> Any:
+        def read(accounts: Iterable[ClaudeAccount], **_: Any) -> dict[int, ClaudeUsage]:
+            listed = list(accounts)
+            reads.append([a.slot for a in listed])
+            return {a.slot: _reading(used.get(a.slot)) for a in listed}
+
+        return read
+
+    monkeypatch.setattr(service, "cached_usage", reader(cached, cached_reads))
+    monkeypatch.setattr(service, "read_usage", reader(live, live_reads))
+    return cached_reads, live_reads
 
 
 def _claude(email: str) -> ClaudeAccount:
@@ -191,7 +237,9 @@ def test_with_nothing_measured_the_order_alone_picks(
     selected = agent_launch.resolve("coder")
 
     assert (selected.adapter.id, selected.source) == (CODEX, "accounts")
-    assert selected.pick is not None and selected.pick.account is None, "choose() picks it"
+    assert selected.pick is not None and selected.pick.account is None, "no reading decided it"
+    choice = service.choose(None, role="coder", agent=CODEX, pick=selected.pick)
+    assert choice.account is not None and choice.account.slot == codex.slot
 
 
 def test_pick_default_takes_the_first_usable_accounts_agent_with_no_reading(
@@ -305,6 +353,333 @@ def test_the_account_the_rung_picked_is_the_launchs_with_no_second_read(
     assert choice.account is not None and choice.account.slot == second.slot
     assert choice.source == "headroom"
     assert len(reads) == 1, "one usage read for the agent and its account"
+
+
+# --------------------------------------------------------------------------- an unread account
+#
+# Review of #14, M1: an account whose usage cannot be read is UNMEASURED, not FULL. The
+# state an account idle for hours normally reads (an expired token, which a session on the
+# account refreshes) must not hand an unpinned launch to a lower agent's account.
+
+
+def test_an_unread_top_account_keeps_its_place_so_the_launch_keeps_its_agent(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude = _claude("c@example.com")
+    codex = _codex("x@example.com")
+    _usage(monkeypatch, {claude.slot: EXPIRED, codex.slot: 20.0})
+
+    selected = agent_launch.resolve("coder")
+
+    assert (selected.adapter.id, selected.source) == (CLAUDE, "accounts")
+    assert selected.pick is not None and selected.pick.account is None, "no reading decided it"
+    assert any("keeps its place" in note for note in selected.pick.notes), selected.pick.notes
+    choice = service.choose(None, role="coder", agent=CLAUDE, pick=selected.pick)
+    assert choice.account is not None and choice.account.slot == claude.slot
+
+
+@pytest.mark.parametrize(
+    ("top", "next_", "agent"),
+    [
+        (95.0, 20.0, CODEX),
+        (EXPIRED, 20.0, CLAUDE),
+        (UNREACHABLE, 20.0, CLAUDE),
+        (THROTTLED, 20.0, CLAUDE),
+        (95.0, None, CODEX),
+        (None, None, CLAUDE),
+        (95.0, 90.0, CODEX),
+    ],
+    ids=[
+        "measured over the line",
+        "expired token",
+        "unreachable endpoint",
+        "endpoint asked to wait",
+        "over the line, the next unread",
+        "neither read",
+        "both over the line: the most room",
+    ],
+)
+def test_a_lower_agent_wins_only_over_an_account_measured_over_the_line(
+    machine: Path, monkeypatch: pytest.MonkeyPatch, top: Reading, next_: Reading, agent: str
+) -> None:
+    claude = _claude("c@example.com")
+    codex = _codex("x@example.com")
+    _usage(monkeypatch, {claude.slot: top, codex.slot: next_})
+
+    assert agent_launch.resolve("coder").adapter.id == agent
+
+
+def test_an_account_at_a_named_limit_gives_its_place_to_the_next_agent(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude = _claude("c@example.com")
+    codex = _codex("x@example.com")
+    _usage(monkeypatch, {claude.slot: EXPIRED, codex.slot: None})
+    assert agent_launch.resolve("coder").adapter.id == CLAUDE
+
+    service.remember_limit(claude.slot, "weekly", datetime.now(tz=UTC) + timedelta(days=2))
+
+    assert agent_launch.resolve("coder").adapter.id == CODEX
+
+
+def test_the_top_codex_account_keeps_its_place_when_nothing_was_recorded_for_it(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude = _claude("c@example.com")
+    codex = _codex("x@example.com")
+    service.move(str(codex.slot), "top")
+    _usage(monkeypatch, {codex.slot: None, claude.slot: 10.0})
+
+    assert agent_launch.resolve("coder").adapter.id == CODEX
+
+
+def test_reset_soonest_compares_the_readings_there_are_and_never_prefers_an_unread_account(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude = _claude("c@example.com")
+    codex = _codex("x@example.com")
+    now = datetime.now(tz=UTC)
+    _pick(prefer="reset-soonest")
+    _usage(
+        monkeypatch,
+        {claude.slot: 10.0, codex.slot: 10.0},
+        resets={claude.slot: now + timedelta(days=5), codex.slot: now + timedelta(days=1)},
+    )
+    assert agent_launch.resolve("coder").adapter.id == CODEX, "the week that ends first"
+
+    _pick(prefer="priority")
+    assert agent_launch.resolve("coder").adapter.id == CLAUDE, "the first in the order"
+
+    _pick(prefer="reset-soonest")
+    _usage(monkeypatch, {claude.slot: EXPIRED, codex.slot: 10.0}, resets={codex.slot: now})
+    assert agent_launch.resolve("coder").adapter.id == CLAUDE, "unread is not passed over"
+
+
+def test_an_unread_account_is_never_a_hand_overs_target(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The asymmetry is the point: a launch keeps an unread account's place, a hand-over is
+    leaving a limited account and moves only to one it MEASURED."""
+    claude = _claude("c@example.com")
+    codex = _codex("x@example.com")
+    _usage(monkeypatch, {claude.slot: EXPIRED, codex.slot: 20.0})
+
+    moved = service.choose_any(live=True)
+
+    assert moved.agent == CODEX and moved.account is not None and moved.account.slot == codex.slot
+
+
+def test_nothing_measured_the_order_picks_the_agent_and_choose_lands_on_its_first_account(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #14, minor 3: with no reading to decide, ``pick.account`` is ``None`` and the
+    launch's ladder ends on rank 1 of that agent's accounts: the order's own choice."""
+    _claude("c@example.com")
+    top = _codex("x@example.com")
+    second = _codex("y@example.com")
+    service.reorder([str(top.slot), str(second.slot)])
+    _usage(monkeypatch, {})
+
+    for pick in ("headroom", "default"):
+        _pick(pick=pick)
+        selected = agent_launch.resolve("coder")
+        assert selected.adapter.id == CODEX
+        choice = service.choose(None, role="coder", agent=CODEX, pick=selected.pick)
+        assert (choice.account.slot if choice.account else None, choice.source) == (
+            top.slot,
+            "preferred",
+        ), pick
+
+
+def test_a_roles_binding_to_a_disabled_account_names_no_agent(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #14, nit 6: ``choose`` skips a disabled binding, so the agent goes on to the
+    order too; the account a launch NAMES (``--account``) is the operator's word, disabled
+    or not."""
+    claude = _claude("c@example.com")
+    codex = _codex("x@example.com")
+    _usage(monkeypatch, {claude.slot: 10.0, codex.slot: 10.0})
+    config = load_config()
+    config.team.profiles["coder"] = RoleLaunchProfile(account=str(codex.slot))
+    save_config(config)
+    assert agent_launch.resolve("coder").adapter.id == CODEX, "bound, enabled: its agent"
+
+    service.set_disabled(str(codex.slot), True)
+
+    selected = agent_launch.resolve("coder")
+    assert (selected.adapter.id, selected.source) == (CLAUDE, "accounts")
+    named = agent_launch.resolve("coder", account=str(codex.slot))
+    assert (named.adapter.id, named.source) == (CODEX, "account")
+
+
+def test_a_display_asks_the_order_alone_and_reads_no_usage(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude = _claude("c@example.com")
+    codex = _codex("x@example.com")
+    service.move(str(codex.slot), "top")
+    reads = _usage(monkeypatch, {codex.slot: 99.0, claude.slot: 5.0})
+
+    shown = agent_launch.resolve("coder", measure=False)
+
+    assert (shown.adapter.id, shown.source) == (CODEX, "accounts")
+    assert reads == [], "a display never reads usage"
+    assert agent_launch.resolve("coder").adapter.id == CLAUDE, "a launch does, and moves on"
+    assert len(reads) == 1
+
+
+# --------------------------------------------------------------------------- the pick's inputs
+
+
+def test_the_hand_offs_pick_never_re_picks_the_account_it_is_leaving(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The excluded account has headroom, so only the exclusion keeps it from being picked."""
+    claude = _claude("c@example.com")
+    codex = _codex("x@example.com")
+    service.move(str(codex.slot), "top")
+    _usage(monkeypatch, {codex.slot: 5.0, claude.slot: 40.0})
+    assert service.choose_any(live=True).agent == CODEX
+
+    moved = service.choose_any(exclude=[codex.slot], live=True)
+
+    assert moved.agent == CLAUDE and moved.account is not None
+    assert moved.account.slot == claude.slot
+    listed = service.list_accounts()
+    assert codex.slot not in [a.slot for a in service.usable_accounts(listed, exclude=[codex.slot])]
+    assert codex.slot in [a.slot for a in service.usable_accounts(listed)]
+
+
+def test_a_disabled_account_is_never_usable_whatever_the_pick_reads(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude = _claude("c@example.com")
+    codex = _codex("x@example.com")
+    service.move(str(codex.slot), "top")
+    service.set_disabled(str(codex.slot), True)
+    listed = service.list_accounts()
+    assert codex.slot not in [a.slot for a in service.usable_accounts(listed)]
+
+    for settings in ({"pick": "default"}, {"pick": "headroom"}):
+        _pick(**settings)
+        _usage(monkeypatch, {})
+        assert agent_launch.resolve("coder").adapter.id == CLAUDE, settings
+        assert service.choose_any(agents=[CODEX, CLAUDE]).agent == CLAUDE
+    assert claude.slot in [a.slot for a in service.usable_accounts(listed)]
+
+
+def test_a_hand_over_reads_live_and_a_launch_through_the_cache(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude = _claude("c@example.com")
+    codex = _codex("x@example.com")
+    service.move(str(codex.slot), "top")
+    cached, live = _split_usage(
+        monkeypatch,
+        cached={codex.slot: 99.0, claude.slot: 10.0},
+        live={codex.slot: 10.0, claude.slot: 10.0},
+    )
+
+    by_hand_over = service.choose_any(live=True)
+    assert by_hand_over.agent == CODEX and (len(live), len(cached)) == (1, 0)
+
+    by_launch = service.choose_any()
+    assert by_launch.agent == CLAUDE and (len(live), len(cached)) == (1, 1)
+
+
+def test_the_agent_rung_is_asked_for_the_pick_and_the_accounts_settings(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``prefer`` and ``switch_at`` reach the rung's pick, as they reach ``choose_any``'s."""
+    claude = _claude("c@example.com")
+    codex = _codex("x@example.com")
+    _pick(switch_at=50)
+    _usage(monkeypatch, {claude.slot: 60.0, codex.slot: 40.0})
+
+    assert agent_launch.resolve("coder").adapter.id == CODEX, "60% is over a 50% line"
+
+    _pick(switch_at=70)
+    assert agent_launch.resolve("coder").adapter.id == CLAUDE
+
+
+def test_a_limit_mark_for_the_launchs_family_sends_it_past_the_account_the_rung_picked(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rung ran before the model was known: an Opus mark on the account it picked shuts
+    that account to an Opus launch, which then takes the headroom rung's answer."""
+    first = _claude("c@example.com")
+    second = _claude("d@example.com")
+    codex = _codex("x@example.com")
+    _usage(monkeypatch, {first.slot: 10.0, second.slot: 20.0, codex.slot: 30.0})
+    selected = agent_launch.resolve("coder")
+    assert selected.pick is not None and selected.pick.account is not None
+    assert selected.pick.account.slot == first.slot
+    plain = service.choose(None, role="coder", agent=CLAUDE, pick=selected.pick, family="opus")
+    assert plain.account is not None and plain.account.slot == first.slot
+
+    service.remember_limit(first.slot, "opus", datetime.now(tz=UTC) + timedelta(days=2))
+    marked = service.choose(None, role="coder", agent=CLAUDE, pick=selected.pick, family="opus")
+
+    assert marked.account is not None and marked.account.slot == second.slot
+    assert marked.source == "headroom"
+
+
+def test_a_machine_with_no_store_is_not_given_one_by_the_agent_rung(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _installed(monkeypatch, claude="/bin/claude", codex="/bin/codex")
+    _usage(monkeypatch, {})
+    _codex("x@example.com")
+    assert not paths.db_path().exists()
+
+    pick = service.agent_pick()
+
+    assert (pick.agent, pick.account) == (None, None)
+    assert not paths.db_path().exists(), "a pick makes no store"
+    selected = agent_launch.resolve("coder")
+    assert (selected.adapter.id, selected.source) == (CLAUDE, "default")
+
+
+# --------------------------------------------------------------------------- the rungs around it
+
+
+def test_the_accounts_come_before_the_inherited_family_before_the_operators_choice(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude = _claude("c@example.com")
+    _usage(monkeypatch, {claude.slot: 10.0})
+    monkeypatch.setenv(agent_launch.LAUNCH_AGENT_ENV, CODEX)
+    monkeypatch.setenv(agent_launch.ACTIVE_AGENT_ENV, CODEX)
+    assert agent_launch.resolve("coder").source == "accounts", "a usable account is first"
+    assert agent_launch.resolve("coder").adapter.id == CLAUDE
+
+    service.set_disabled(str(claude.slot), True)  # no account is usable now
+    monkeypatch.setenv(agent_launch.ACTIVE_AGENT_ENV, CLAUDE)
+    inherited = agent_launch.resolve("coder")
+    assert (inherited.adapter.id, inherited.source) == (CODEX, "inherited")
+
+    monkeypatch.delenv(agent_launch.LAUNCH_AGENT_ENV)
+    monkeypatch.setenv(agent_launch.ACTIVE_AGENT_ENV, CODEX)
+    _default_agent(CLAUDE)
+    operator = agent_launch.resolve("coder")
+    assert (operator.adapter.id, operator.source) == (CODEX, "operator"), "over the user's"
+
+
+def test_a_named_wrapper_that_names_no_agent_stays_the_default_agents_with_accounts_present(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude = _claude("c@example.com")
+    codex = _codex("x@example.com")
+    service.move(str(codex.slot), "top")
+    _usage(monkeypatch, {codex.slot: 1.0, claude.slot: 1.0})
+    assert agent_launch.resolve("coder").adapter.id == CODEX
+
+    selected = agent_launch.resolve("coder", binary="/opt/bin/my-wrapper")
+
+    assert (selected.adapter.id, selected.source) == (CLAUDE, "default")
+    assert selected.binary.binary == "/opt/bin/my-wrapper"
+    assert selected.pick is None
 
 
 # --------------------------------------------------------------------------- choose_any

@@ -185,11 +185,19 @@ def resolve(
     env_overrides: dict[str, str] | None = None,
     extra_args: list[str] | None = None,
     account: str | None = None,
+    measure: bool = True,
 ) -> ResolvedAgent:
     """The agent ``role`` launches, its binary and why. ``account`` is the launch's
     ``--account``: the account it names (else the role's bound one) names the agent when
     nothing above pins it; below that, the agent of the best account in the one priority
-    order (``claude_accounts.agent_pick``), then the fallbacks."""
+    order (``claude_accounts.agent_pick``), then the fallbacks.
+
+    ``measure`` is whether that rung may read accounts' usage, as a launch does: a headroom
+    pick across agents reads it, up to ``USAGE_TIMEOUT_SECONDS`` when the cache is cold.
+    ``measure=False`` is for a caller that only DISPLAYS the agent (a doctor row, a printed
+    hint): the order alone, no read, so it may differ from what a launch then picks when
+    headroom puts a later account's agent first. A UI thread passes neither: it asks in a
+    worker (``cli.ui.spawn``)."""
     profile = harness.resolve_profile(role, env_overrides=env_overrides, extra_args=extra_args)
     chosen_binary = harness.resolve_binary(role, override=binary)
     try:
@@ -214,7 +222,7 @@ def resolve(
     # agent is the default agent's wrapper, as it always was.
     unpinned = not pinned and chosen_binary.source == "default"
     named = account_agent(account, role) if unpinned else None
-    pick = accounts_pick() if unpinned and not named else None
+    pick = accounts_pick(measure=measure) if unpinned and not named else None
     choices = (
         (agent, "flag"),
         (bound.agent if bound else None, "role"),
@@ -272,13 +280,13 @@ def account_agent(account: str | None, role: str) -> str | None:
     return claude_accounts.account_agent(account, role=role)
 
 
-def accounts_pick() -> AgentPick | None:
+def accounts_pick(*, measure: bool = True) -> AgentPick | None:
     """The accounts rung (``claude_accounts.agent_pick``); ``None`` on any failure, as a
     damaged store must not prevent launching."""
     from aisquare.services import claude_accounts
 
     try:
-        return claude_accounts.agent_pick()
+        return claude_accounts.agent_pick(measure=measure)
     except Exception:
         return None
 

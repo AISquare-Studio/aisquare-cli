@@ -780,7 +780,7 @@ def harness_status() -> None:
         # Once per role, for the JSON and the text alike: each resolve reads every
         # secret file the role's binding names (`env_files`).
         try:
-            selected = agent_launch.resolve(name)
+            selected = agent_launch.resolve(name, measure=False)
             resolution = agent_launch.model_for(
                 selected, name, probe=False, raw_args=selected.profile.args
             )
@@ -908,7 +908,7 @@ def _bound_agent(role: str, agent: str | None) -> str:
     from aisquare.services import agent_launch
 
     try:
-        return agent_launch.resolve(role).adapter.id
+        return agent_launch.resolve(role, measure=False).adapter.id
     except Exception:  # an unresolvable role is the launch's to refuse, not the bind's
         return DEFAULT_AGENT
 

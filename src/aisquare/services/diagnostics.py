@@ -1065,7 +1065,7 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
 
     try:
         uses_claude = any(
-            agent_launch.resolve(role, cwd=cwd).adapter.id == info.name
+            agent_launch.resolve(role, cwd=cwd, measure=False).adapter.id == info.name
             for role in harness.ROLE_PROFILES
         )
     except ValueError:
@@ -3343,7 +3343,7 @@ def _agents_own_browser(cwd: Path) -> DoctorCheck | None:
 
     name = "browser tools"
     try:
-        selected = agent_launch.resolve("ui-tester", cwd=cwd)
+        selected = agent_launch.resolve("ui-tester", cwd=cwd, measure=False)
         tools = selected.adapter.browser_tools(selected.config_dir)
     except Exception:
         return None
@@ -3821,7 +3821,7 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
         selected_roles = []
         for role in harness.ROLE_PROFILES:
             try:
-                selected = agent_launch.resolve(role, cwd=cwd)
+                selected = agent_launch.resolve(role, cwd=cwd, measure=False)
             except ValueError:
                 continue
             if selected.adapter.capabilities.model_ladders:
@@ -4194,7 +4194,7 @@ def _launch_hooks_off(adapter: AgentAdapter, cwd: Path | None) -> list[DoctorChe
     roles: dict[str, list[str]] = {}
     for role in harness.ROLE_PROFILES:
         try:
-            selected = agent_launch.resolve(role, cwd=cwd)
+            selected = agent_launch.resolve(role, cwd=cwd, measure=False)
         except ValueError:
             continue  # the configuration check explains this
         if selected.adapter.id != adapter.id:
@@ -4291,7 +4291,7 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
     checks = []
     selected = None
     try:
-        selected = agent_launch.resolve(cwd=cwd)
+        selected = agent_launch.resolve(cwd=cwd, measure=False)
     except ValueError as exc:
         fix = (
             exc.fix

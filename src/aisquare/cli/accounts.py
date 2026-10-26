@@ -729,7 +729,7 @@ def _role_agent(role: str, account: str | None = None) -> str:
     from aisquare.services import agent_launch
 
     try:
-        return agent_launch.resolve(role, account=account).adapter.id
+        return agent_launch.resolve(role, account=account, measure=False).adapter.id
     except Exception:
         return core.AGENT
 

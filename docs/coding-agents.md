@@ -347,10 +347,10 @@ fleet, captain and asq code asks as #113's 0.8.2 lanes wire it in. The last rows
 | `aisquare watch` (0.9.0's W2) | One process composes the phone's needs-you scan, the captain queue's stale rule, GitHub pull requests and operator commands, and wakes the manager with a count and a file path | Same: its needs are `remote_needs.scan_needs_you`, whose Codex reads (a dialog, a limit, a crash, a stall) are the *Remote* rows' above; the watcher classifies nothing itself. | `tests/test_codex_parity_for_mains_090.py` (W2); `tests/test_remote_needs_codex.py`; `tests/test_remote_dialogs_codex.py` |
 | asq's one tmux read per tick (0.9.0's W3) | One `list-panes -a` per server answers for every project | Same: the merged `fleet._observe` takes the tick's answer for the rows a launch record places, any agent's. | `tests/test_ui_tick_budget.py` |
 | Stale model routing (0.9.0's W4: doctor's `anthropic routing`, `explainability disable`) | Finds and clears an `ANTHROPIC_BASE_URL` or custom header the tracing left in a settings file, a binding or the server's environment | **N-A:** Codex's model traffic never goes through the explainability proxy (`capabilities.model_proxy` is false; its telemetry is native OTLP), so aisquare leaves no Codex base URL to go stale and the scan reads Claude Code's variables alone. | Adapter answer (`model_proxy`) |
-| The symbol index (0.9.0's W5): `code_lookup` and the session-start refresh | `aisquare code find\|refs\|similar`; the `code_lookup` MCP tool where an index exists; a detached incremental refresh at session start | `code_lookup` is a tool of the one aisquare server Codex launches (`[agents] mcp = true`, `-c mcp_servers.aisquare.*`), and `hook codex`'s SessionStart refreshes the index. The 0.9.0 directive line is gone (#399). **Open:** `aisquare code find\|refs\|similar` typed in a sandboxed Codex's shell is not on the broker's whitelist (`services.store_broker.WHITELIST`); the MCP tool is the path. | `tests/test_codex_parity_for_mains_090.py` (W5); `tests/test_code_cli.py` |
+| The symbol index (0.9.0's W5): `code_lookup` and the session-start refresh | `aisquare code find\|refs\|similar`; the `code_lookup` MCP tool where an index exists; a detached incremental refresh at session start | `code_lookup` is a tool of the one aisquare server Codex launches (`[agents] mcp = true`, `-c mcp_servers.aisquare.*`), and `hook codex`'s SessionStart refreshes the index. The 0.9.0 directive line is gone (#399). `aisquare code find\|refs\|similar` typed in a sandboxed Codex's shell run through its broker (they are on `services.store_broker.WHITELIST` and `READS`; `code index` writes the index and stays out), beside the MCP tool. | `tests/test_codex_parity_for_mains_090.py` (W5); `tests/test_code_cli.py`; `tests/test_store_broker.py` (the whitelist; a sandboxed launch runs `code find`) |
 | A parent manager over a group (0.9.0's W6) | `project group` parent, routing rules, linked tasks, subtree pause, a cap | Same: board events and the manager's nudge, which is the *Waking a waiting manager* row. A Codex parent manager, sandboxed, cannot spawn: a fleet operation is never brokered. | `tests/test_parent_manager.py`; live nudge: `tests/test_codex_native.py` |
 | Sharing between accounts (0.9.0's W7: `[accounts] share`, `accounts share`) | `memory`, `skills`, `agents`, `commands`, `claude_md` (and `plugins`) shared across slots; the session's account read from the launch's own home first | The session's account is the row's, then the agent's own home variable, then the transcript (every adapter). **Open:** nothing but the folder trust is shared between Codex slots (`core/codex_sharing`: AGENTS.md, skills and prompts are not), and the doctor's `claude-accounts sharing` row reads Claude Code's alone. | `tests/test_adapter_contract.py` (the account of a session) |
-| The evidence gate (0.9.0's #417): work briefs, `asq exec` reports, the gate on `task done` | A task linked to a brief's requirements is done only on a fresh pass from a report; the session start shows the requirements | The requirements block reaches Codex's SessionStart as the board does, and `task done` is gated at the store. **Open:** `aisquare brief …` and `aisquare exec` are not on a sandboxed Codex's broker whitelist, so it cannot record evidence; `exec` must run inside the sandbox and the broker adopt its report. | `tests/test_codex_parity_for_mains_090_evidence.py` |
+| The evidence gate (0.9.0's #417): work briefs, `asq exec` reports, the gate on `task done` | A task linked to a brief's requirements is done only on a fresh pass from a report; the session start shows the requirements | The requirements block reaches Codex's SessionStart as the board does, and `task done` is gated at the store. A sandboxed Codex records evidence: `aisquare brief …` is on its broker's whitelist, `asq exec` runs in its sandbox and saves its report in the launch's own `reports/`, the broker seals it when the run ends, and `brief evidence --report` adopts it into the home ([the broker's whitelist](#the-brokers-whitelist)). A report that is not sealed, changed since, not owner-only, holding a link, or naming a directory or board outside the launch is refused, and `task done` is refused without the evidence. **Differs:** a Claude Code agent's report is written in the home by its own `exec`; a sandboxed agent's is copied there once checked, and the broker cannot know the run happened as the report says. | `tests/test_codex_parity_for_mains_090_evidence.py`; `tests/test_a_sandboxed_codex_records_evidence.py`; `tests/test_store_broker.py` |
 | Restart & update (0.9.0's #301) | asq offers each release, installs it with the fleet running, and the reopened asq restarts each recorded agent whose pane is gone, resuming its session | Same: the restart is `fleet.restart`, pinned to the recorded row, so a Codex agent is resumed on its thread. | `tests/test_codex_parity_for_mains_090.py` (#301); `tests/test_release_check.py` |
 | The installer hands off to the release's own (0.9.0's #402) | An unstamped `install.sh` runs the latest release's own, with the same arguments, when it parses every option given | `--agent codex` is an option too: until a release has it, this copy carries on with its own Codex route, and from then on it hands off. | `tests/test_codex_parity_for_mains_090.py` (#402) |
 | TLS through the OS trust store (0.9.0's #403) | The usage endpoint, PyPI, GitHub and the rest ask the same verified context; the doctor's `tls` row says what failed | **N-A for Codex's own traffic**, which uses its own stack. aisquare's calls are agent-neutral, and Codex's usage is read offline. | `tests/test_tls.py` |
@@ -714,6 +714,7 @@ The profile, `aisquare`, is defined by the launch (`CodexAdapter.store_access`, 
      "<tree>/.agents" = "read", "<tree>/.aisquare" = "read", "<tree>/.git" = "read",
      "<project>/.aisquare-worktrees" = "read", "/tmp/tmux-<uid>" = "read", …,
      "<aisquare home>/broker/<launch id>/in" = "write",
+     "<aisquare home>/broker/<launch id>/reports" = "write",  # its `asq exec` reports
      "<project>/.aisquare-worktrees/<its own>" = "write"}  # a workspace seat's alone
 ```
 
@@ -1013,10 +1014,42 @@ this list to it, and every board call a role's cycle teaches to it:
 - `aisquare context search`
 - `aisquare context preview`
 - `aisquare context add`
+- `aisquare code find` (reads the symbol index; a first query builds it, outside the sandbox)
+- `aisquare code refs`
+- `aisquare code similar`
+- `aisquare brief create`
+- `aisquare brief list`
+- `aisquare brief show`
+- `aisquare brief update`
+- `aisquare brief link`
+- `aisquare brief evidence` (an `--artifact` only from the launch's own tree; a `--report`
+  from the sandbox is adopted first, below)
+- `aisquare brief check`
+- `aisquare brief finding`
+- `aisquare reports seal` (hidden: what `asq exec` asks of its broker when a run ends)
 
 Global output flags (`--json`, `-q`, `-v`, `--no-color`) and `--help` are fine; `aisquare
 --version` runs in the sandbox, reading nothing. Everything else is refused there,
-`aisquare fleet …` with the reason that the broker never runs a fleet operation.
+`aisquare fleet …` with the reason that the broker never runs a fleet operation, and
+`aisquare code index`, which writes the index.
+
+**`asq exec` and `asq reports` run in the sandbox, not through the broker.** The broker
+runs outside it, so `exec` on its whitelist would run the agent's argv unsandboxed. The
+CLI runs them itself (`store_broker.LOCAL`), `exec`'s command as sandboxed as the agent's
+own, and the report goes to the launch's own `reports/`, beside the broker's inbox and the
+only other place in the store its sandbox may write (`reports_dir()`; every seat's, a
+reviewer's too). With `--project` the report fingerprints the tree it ran in, which needs
+no store (read-only there). When the run ends `exec` has the broker seal the report
+(`reports seal`: its files' digest, recorded in the launch's `seals/`, which the sandbox
+cannot write, once). `brief evidence --report` then adopts it into the home's `reports/`,
+and the evidence cites the copy: the report must be sealed and unchanged since; owner-only,
+with its own files and nothing else, none a link or a pipe; its directory and checkout
+inside the launch's tree and its board the launch's. The copy is written from the bytes that
+were checked. A pass is judged as for any report, by the broker reading the source again
+(the same files before the run, after it and now), and `task done` is gated at the store.
+What this does not settle: that the command ran as the report says. An agent that writes
+a report by hand and seals it gets it adopted, as a Claude Code agent that writes one into
+`reports/` is trusted; the validator's check of the source is the second look.
 
 ## Identity, MCP and telemetry
 
@@ -1290,7 +1323,7 @@ keep, so a second telemetry agent edits nothing there).
 | `permission_args(intent, role, native)` | A `types.PermissionArgs(args, notes)`: the flags for a `PermissionIntent` (below), less what the `native` arguments already settle, with `store_access` for its write scope, and what the spawn's receipt says of them; `ValueError` for one it cannot express. An agent with no reviewer of its own (`capabilities.approves_for_me` False) runs `auto` approvals as `ask` (`types.stepped_down`), so the built-in `workspace:auto` is not refused for every role, and the receipt and the Settings page's launch line say "<agent> has no reviewer of its own: workspace:auto runs as workspace:ask"; Claude Code's `auto` mode and Codex's `--approve-for-me` are reviewers. `fleet.roles.<role>.permission` and `--permission-mode WRITE:APPROVALS` reach every agent through it (`services.fleet.permission_flags`). |
 | `store_access(write, store)` | The launch arguments that hold the aisquare store in `store` (`types.store_dir()`) read-only in a session sandboxed at `write`, all of it (`types.store_read_only(store)`), made first by `types.prepare_store` ([the sandbox and the store](#the-sandbox-and-the-aisquare-store)). `[]` without `sandboxes_tools` and for a scope run unsandboxed. |
 | `sandbox_writes(args, cwd, home)` | What the sandbox of a session launched with `args` in `cwd` may write (a `types.SandboxWrites`: its writable roots, the read-only paths within them, its workspace and temporary roots), read as the agent reads its settings: its config in `home`, the profile `args` select, then `args`, whatever chose the sandbox (`store_access`'s profile, a native flag or setting, the directories added). `None` only where the session runs unsandboxed. `services.store_broker.refuse_inside` refuses a launch whose sandbox may write an aisquare its hooks or broker run, or a directory inside one, from this answer alone; the conformance suite fails an agent with `sandboxes_tools` that answers `None` for a sandboxed scope. |
-| `broker_access(args, store, inbox, *, protect=(), writable=())` | `args` with the launch's broker inbox the one writable path under `store`, `protect` (the launch inputs of every tree the launch touches, the other worktrees, the tmux sockets: `services.store_broker.launch_paths`) read-only and `writable` (the agent's own worktree, for a seat that writes its workspace) writable, the rest of `store` read-only whatever `args` recorded, applied by every launch (`services.store_broker.start_for_launch`); `None` where `args` run no sandbox of `store_access`'s. An adapter with `sandboxes_tools` declares one, and the conformance suite fails one that does not. |
+| `broker_access(args, store, inbox, *, protect=(), writable=())` | `args` with the launch's broker inbox the one writable path under `store` (and its `reports/`, handed in as one more `writable` path: where a sandboxed `asq exec` saves), `protect` (the launch inputs of every tree the launch touches, the other worktrees, the tmux sockets: `services.store_broker.launch_paths`) read-only and `writable` (the agent's own worktree, for a seat that writes its workspace) writable, the rest of `store` read-only whatever `args` recorded, applied by every launch (`services.store_broker.start_for_launch`); `None` where `args` run no sandbox of `store_access`'s. An adapter with `sandboxes_tools` declares one, and the conformance suite fails one that does not. |
 | `fleet_args(role, label, mode, ...)` | A fleet spawn's flags from the role's native permission settings, then `label_args(label)`'s arguments. |
 | `resume_args(native_id, transcript)` | The arguments that resume a session, put first: `fleet restart`, `fleet switch` and Restart resume the native id the first hook bound (Codex: `codex <options> resume <id> -- <continue line>`). |
 | `fork_args(native_id, transcript)` | A `types.ForkArgs`: the arguments, put first as `resume_args` are, that start a NEW session carrying this one's conversation (a hand-off's Fork), and `mints_id`, whether the launch names the new session (Claude Code: `--resume <transcript> --fork-session`, beside the `--session-id` the fleet mints) or its first hook does (Codex: `fork <id>`, measured on 0.162.1: a new rollout and thread id, the source's turns carried). In the session's own config dir unless `resumes_across_homes`. `None` for an agent that cannot fork: the fork starts fresh with a hand-off prompt, and the receipt says so. |

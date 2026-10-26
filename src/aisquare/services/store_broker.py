@@ -46,6 +46,16 @@ on a read-only path too. So each launch has its own directory ``<home>/broker/<l
 CLI puts a request; ``bell``, a FIFO it writes a byte to; and ``out/``, read-only to the
 sandbox, where the broker answers. No command on the whitelist reads its stdin, so none
 is forwarded: the broker's command reads ``/dev/null``.
+
+``aisquare exec`` runs a command and saves a report of it; the broker runs outside the
+sandbox, so it never runs one (:data:`LOCAL`: the CLI runs it in the sandbox, where its
+child is as sandboxed as the agent's own commands). Its report goes to the launch's own
+``reports/`` (:func:`launch_dir`), the second path in the store that launch's sandbox may
+write, and ``reports seal`` (the one report command on the whitelist) has the broker record
+what the report held when the run ended, where the sandbox cannot write
+(``seals/``). ``brief evidence --report`` then adopts the report into the home's
+``reports/`` (``services.command_reports.adopt_sandboxed``): only a sealed, unchanged,
+owner-only report of this launch's tree and board, copied from the bytes that were checked.
 """
 
 from __future__ import annotations
@@ -96,6 +106,12 @@ the one board it writes and the one whose tasks it may name (``services.team``).
 POOL_ENV = "AISQUARE_BROKERED_POOL"
 """The launch's project (an id), in the environment of the command a broker runs: the one
 memory pool a brokered ``remember`` or ``context add`` writes (``services.context``)."""
+REPORTS_ENV = "AISQUARE_BROKERED_REPORTS"
+"""The launch's ``reports/`` (:data:`REPORTS`), in the environment of the command a broker
+runs: where a sandboxed ``asq exec`` saved its reports, which the command adopts or seals
+(``services.command_reports``)."""
+SEALS_ENV = "AISQUARE_BROKERED_SEALS"
+"""The launch's ``seals/`` (:data:`SEALS`), in the environment of the command a broker runs."""
 ROOTS_ENV = "AISQUARE_BROKERED_ROOTS"
 """The launch's tree (its directories, ``os.pathsep``-joined), in the environment of the
 command a broker runs: the command refuses to run anywhere else (:func:`check_cwd`)."""
@@ -123,9 +139,23 @@ READS: frozenset[tuple[str, ...]] = frozenset(
         ("context", "show"),
         ("context", "search"),
         ("context", "preview"),
+        ("code", "find"),
+        ("code", "refs"),
+        ("code", "similar"),
+        ("brief", "list"),
+        ("brief", "show"),
+        ("brief", "check"),
     }
 )
 INBOX, OUTBOX, BELL, READY = "in", "out", "bell", "ready.json"
+REPORTS, SEALS = "reports", "seals"
+"""A launch's directories beside :data:`INBOX`: ``reports/``, which its sandbox may write (the
+reports a sandboxed ``asq exec`` saves), and ``seals/``, which it may not (what the broker
+saw of each report when the run ended)."""
+LOCAL = frozenset({"exec", "reports"})
+"""The commands the CLI runs in the sandbox itself instead of handing them to the broker:
+``exec`` runs the agent's own command, which the broker, outside the sandbox, must never
+run for it; ``reports`` reads what ``exec`` saved. Neither writes the store."""
 MAX_REQUEST = 1_000_000
 MAX_OUTPUT = 4_000_000
 COMMAND_TIMEOUT = 300.0
@@ -167,12 +197,27 @@ WHITELIST: dict[tuple[str, ...], str] = {
     ("context", "search"): "search context entries",
     ("context", "preview"): "preview injected context",
     ("context", "add"): "add a context entry",
+    ("code", "find"): "find where a name is defined",
+    ("code", "refs"): "list the uses of a name",
+    ("code", "similar"): "find helpers like a name",
+    ("brief", "create"): "create a work brief",
+    ("brief", "list"): "list the work briefs",
+    ("brief", "show"): "show a work brief",
+    ("brief", "update"): "correct a work brief",
+    ("brief", "link"): "link a task to requirements",
+    ("brief", "evidence"): "record a check, backed by a report or a file",
+    ("brief", "check"): "check a work brief against the source",
+    ("brief", "finding"): "record a failure found in a task's work",
+    ("reports", "seal"): "seal the report an `asq exec` saved here (for `brief evidence`)",
 }
 """Every command a sandboxed agent's broker runs, by its path: what the role protocols
 (``core.harness``) and the memory use, the MCP server's tools' set
-(``services.mcp_server``). Never a fleet operation (spawn, stop, restart, switch, tell,
-shutdown …), a launch, a hook, a binding, the config or an account: those choose or run
-something outside the sandbox."""
+(``services.mcp_server``), the symbol index's reads (``code find|refs|similar``: ``code
+index`` writes the index, so it stays out) and the work briefs (``brief …``: store-only, the
+paths they name held to the launch's tree, :func:`outside_tree`). Never a fleet operation
+(spawn, stop, restart, switch, tell, shutdown …), a launch, a hook, a binding, the config
+or an account: those choose or run something outside the sandbox. Never ``exec``, which
+would run the agent's argv unsandboxed (:data:`LOCAL`)."""
 #: The CLI's command groups, whose commands are two words, by every name they go by.
 _GROUPS = {
     **{
@@ -181,12 +226,15 @@ _GROUPS = {
             "accounts",
             "agents",
             "auth",
+            "brief",
+            "code",
             "config",
             "context",
             "explainability",
             "fleet",
             "hook",
             "project",
+            "reports",
             "task",
             "team",
         )
@@ -272,6 +320,23 @@ def check_cwd(environ: Mapping[str, str] | None = None) -> str | None:
     if any(here == root or here.is_relative_to(root) for root in roots):
         return None
     return f"{here} is outside this agent's tree: its broker runs commands only there"
+
+
+def outside_tree(path: Path, environ: Mapping[str, str] | None = None) -> str | None:
+    """Why a command a broker runs may not read ``path`` (an artifact, a checkout), or
+    ``None``: it must be in the launch's tree (:data:`ROOTS_ENV`), as the command's own
+    directory must (:func:`check_cwd`). The broker reads outside the sandbox, so a path the
+    agent names is read as the user: ``/etc``, ``~/.ssh`` and another project's files would
+    be read, hashed and (an artifact) kept in the store, which the sandbox reads. ``None``
+    for any command that is not brokered."""
+    source = os.environ if environ is None else environ
+    if not brokered_call(source) or not source.get(ROOTS_ENV):
+        return None
+    roots = [Path(root) for root in source[ROOTS_ENV].split(os.pathsep) if root]
+    there = _resolved(path.expanduser())
+    if any(there == root or there.is_relative_to(root) for root in roots):
+        return None
+    return f"{path} is outside this agent's tree: its broker reads only there"
 
 
 def record_refusal(kind: str, detail: str, *, board: str | None = None) -> None:
@@ -451,7 +516,8 @@ def _writable(home: Path) -> bool:
 def forward(argv: Sequence[str]) -> int | None:
     """Run ``argv`` through the launch's broker when this process is sandboxed
     (:func:`brokered`), printing what the command printed; its exit status, or ``None``
-    when the CLI runs it itself. ``--version`` reads nothing and runs here, and a hook
+    when the CLI runs it itself. ``--version`` reads nothing and runs here, so do the
+    commands of :data:`LOCAL` (``exec`` and ``reports``), and a hook
     here is a nested agent's, whose sessions bind nothing (``core.agent_sessions.
     own_process``): it does nothing, quietly."""
     broker = brokered()
@@ -462,6 +528,8 @@ def forward(argv: Sequence[str]) -> int | None:
         return None
     if first == "hook":
         return 0
+    if first in LOCAL:
+        return None
     try:
         answer = ask(broker, list(argv))
     except BrokerUnavailable as exc:
@@ -760,7 +828,9 @@ class Broker:
         self.directory = directory
         self.nonce = nonce
         self.environ = {
-            key: value for key, value in environ.items() if key not in (DIR_ENV, NONCE_ENV)
+            key: value
+            for key, value in environ.items()
+            if key not in (DIR_ENV, NONCE_ENV, REPORTS_ENV, SEALS_ENV)
         }
         self.environ[CALLER_ENV] = "1"
         self._scope = scope
@@ -848,6 +918,8 @@ class Broker:
         env = dict(self.environ)
         env[BOARD_ENV], env[POOL_ENV] = scope.board, scope.pool
         env[ROOTS_ENV] = os.pathsep.join(str(root) for root in scope.roots)
+        env[REPORTS_ENV] = str(self.directory / REPORTS)
+        env[SEALS_ENV] = str(self.directory / SEALS)
         columns = request.get("columns")
         if isinstance(columns, int) and 20 <= columns <= 1000:
             env["COLUMNS"] = str(columns)
@@ -1587,6 +1659,9 @@ def start_for_launch(
         # for a seat that writes its workspace: a `:read-only` one (a reviewer's, in its
         # own worktree) writes none of it.
         writable = ()
+    # The reports its `asq exec` saves: writable to every seat, as its inbox is, since a
+    # reviewer's checks are reports too. The seals beside them are not.
+    writable = (*writable, directory / REPORTS)
     access = adapter.broker_access(
         argv, store, directory / INBOX, protect=protect, writable=writable
     )
@@ -1612,6 +1687,8 @@ def start_for_launch(
         directory.mkdir(parents=True, mode=0o700)
         (directory / INBOX).mkdir(mode=0o700)
         (directory / OUTBOX).mkdir(mode=0o700)
+        (directory / REPORTS).mkdir(mode=0o700)
+        (directory / SEALS).mkdir(mode=0o700)
         os.mkfifo(directory / BELL, 0o600)
         broker_env = {key: value for key, value in env.items() if key != DIR_ENV}
         broker_env[NONCE_ENV] = nonce

@@ -154,6 +154,7 @@ def exec_command(
             "The command may already have run; check before retrying.",
             error="command_report_failed",
         )
+    _seal_in_sandbox(report)
     try:
         _emit_report(report, raw=raw)
     except BrokenPipeError:
@@ -169,6 +170,28 @@ def exec_command(
             signal.signal(report.signal, signal.SIG_DFL)
         os.kill(os.getpid(), report.signal)
     raise typer.Exit(report.exit_code)
+
+
+def _seal_in_sandbox(report: service.CommandReport) -> None:
+    """In an agent's sandbox, ask its broker to seal the report just saved: the record of what
+    it held when the run ended, which `brief evidence --report` requires before it adopts the
+    report. A refusal or a broker that does not answer is said, never the command's status."""
+    from aisquare.services import store_broker
+
+    broker = store_broker.brokered()
+    if broker is None:
+        return
+    try:
+        answer = store_broker.ask(broker, ["reports", "seal", report.id])
+    except store_broker.BrokerUnavailable as exc:
+        why = str(exc)
+    else:
+        if answer.get("code") == 0:
+            return
+        why = str(answer.get("stderr") or "refused").strip().removeprefix("aisquare: ")
+    sys.stderr.write(
+        f"asq: report {report.id} is not sealed ({why}); it cannot back `brief evidence`\n"
+    )
 
 
 def _project_id(ref: str) -> str:
@@ -230,6 +253,19 @@ def show(
         _emit_report(service.load_report(report_id), raw=raw, stream=chosen)
     except (OSError, ValueError) as exc:
         fail(f"Cannot read report: {exc}", error="report_unavailable")
+
+
+@app.command("seal", hidden=True)
+def seal(report_id: Annotated[str, typer.Argument(help="The complete report ID.")]) -> None:
+    """Record what a sandboxed run's report holds (the agent's broker runs this, for `exec`)."""
+    try:
+        service.seal_sandboxed(report_id)
+    except (OSError, ValueError) as exc:
+        fail(f"Cannot seal report {report_id[:12]}: {exc}", error="seal_refused")
+    if get_state().json_output:
+        typer.echo(json.dumps({"sealed": report_id}))
+    else:
+        typer.echo(f"sealed {report_id}")
 
 
 @app.command("list")

@@ -54,8 +54,19 @@ adapter.**
   index's `code_lookup` tool and session-start refresh, a parent manager, Restart & update,
   the installer's hand-off, the role-less agent, rank 1 as the machine default and *Log in
   again*; not applicable to Codex for stale model routing, TLS and the usage back-off; and
-  open for sharing between accounts (`[accounts] share`), `aisquare brief`, `exec` and `code`
-  typed in a sandboxed Codex's shell, and the doctor's sharing row.
+  open for sharing between accounts (`[accounts] share`) and the doctor's sharing row.
+- A sandboxed Codex reads the symbol index and records evidence. `aisquare code find`, `refs`
+  and `similar` (the reads; `code index` writes and stays out) and `aisquare brief …` run
+  through its launch's broker, with the paths they name held to the launch's tree. `asq exec`
+  runs in the sandbox, not through the broker (which runs outside it and would run the agent's
+  command unsandboxed), and saves its report in the launch's own `reports/`, the one other
+  place in the store its sandbox may write; the broker seals the report when the run ends, and
+  `brief evidence --report` adopts it into the home once it checks it: sealed and unchanged,
+  owner-only, nothing in it but a report's files and no link or pipe, its directory and
+  checkout inside the launch's tree and its board the launch's. `task done` is gated at the
+  store as for any agent. A report is still the agent's word that the command ran as it says
+  (a Claude Code agent writes its own into the home), and the source is read again by the
+  broker at every check ([the broker's whitelist](docs/coding-agents.md#the-brokers-whitelist)).
 - [Adding a terminal agent](docs/coding-agents.md#adding-a-terminal-agent):
   one adapter file and one registration line, held to a conformance suite
   that a synthetic third agent passes. A new agent's adapter touches nine files

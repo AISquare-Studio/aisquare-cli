@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -133,6 +134,16 @@ def test_the_whitelist_is_the_one_the_docs_list() -> None:
         ["team", "log", "--by", "abc", "--json"],
         ["task", "--help"],
         ["note", "--help"],
+        ["code", "find", "Broker"],
+        ["--json", "code", "refs", "forward", "--defs"],
+        ["code", "similar", "src/aisquare/services/store_broker.py:1"],
+        ["brief", "show", "B1"],
+        ["brief", "evidence", "B1", "R1", "--task", "3", "--verdict", "pass", "--summary", "ok"],
+        ["brief", "check", "B1", "--json"],
+        ["brief", "create", "A request", "-r", "a requirement"],
+        ["reports", "seal", "0" * 32],
+        ["brief", "--help"],
+        ["code", "--help"],
     ],
 )
 def test_the_broker_runs_board_calls(argv: list[str]) -> None:
@@ -159,6 +170,11 @@ def test_the_broker_runs_board_calls(argv: list[str]) -> None:
         (["context", "export", "/tmp/out.json"], "cannot run"),
         (["context", "import", "/etc/passwd"], "cannot run"),
         (["upgrade"], "cannot run"),
+        (["code", "index"], "cannot run from this agent's sandbox"),
+        (["code", "index", "--full"], "cannot run from this agent's sandbox"),
+        (["exec", "--", "true"], "cannot run from this agent's sandbox"),
+        (["reports", "show", "0" * 32], "cannot run from this agent's sandbox"),
+        (["reports", "prune"], "cannot run from this agent's sandbox"),
         (["board", "--watch"], "full-screen"),
         (["board", "-w"], "full-screen"),
         (["board", "-wi", "1"], "full-screen"),
@@ -170,7 +186,7 @@ def test_the_broker_refuses_what_is_not_a_board_call(argv: list[str], why: str) 
     refusal = store_broker.vet(argv)
     assert refusal is not None and why in refusal
     if "board --watch" not in refusal:
-        assert "Its broker runs only: board, context add" in refusal
+        assert "Its broker runs only: board, brief check" in refusal
 
 
 # --- a request --------------------------------------------------------------------------
@@ -486,6 +502,12 @@ def test_aisquare_launch_gives_a_sandboxed_codex_its_broker(
     table = argv[-1].partition("=")[2]
     assert f'{json.dumps(str(directory / store_broker.INBOX))} = "write"' in table
     assert f'{json.dumps(str(store_dir()))} = "read"' in table
+    # The reports its `asq exec` saves are the one other place in the store it writes; the
+    # seals the broker keeps of them are not (task #21).
+    assert f'{json.dumps(str(directory / store_broker.REPORTS))} = "write"' in table
+    assert str(directory / store_broker.SEALS) not in table
+    for name in (store_broker.REPORTS, store_broker.SEALS):
+        assert stat.S_IMODE((directory / name).stat().st_mode) == 0o700
 
     result = runner.invoke(app, ["launch", "coder", "--agent", "codex", "--sandbox", "read-only"])
     assert result.exit_code == 0, result.output
@@ -1377,6 +1399,8 @@ def test_a_read_only_seat_in_its_own_worktree_may_write_none_of_it(
     assert table("workspace").get(own) == "write"
     read_only = table("read_only")
     assert own not in read_only
+    reports = str(store_broker.launch_dir(store_dir(), LAUNCH) / store_broker.REPORTS)
+    assert read_only.get(reports) == "write", "a reviewer's checks are reports too"
     assert read_only.get(str((root / ".aisquare-worktrees").resolve())) == "read"
 
 

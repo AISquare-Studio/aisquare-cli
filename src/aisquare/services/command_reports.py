@@ -17,6 +17,8 @@ written: a run in progress lives in ``.pending-<id>`` and is renamed at the end.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import math
 import os
@@ -29,7 +31,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Collection, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,7 +43,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from aisquare.core import orchestrator
 from aisquare.core.insights import RUN_KEY_ENV_VAR
 from aisquare.core.paths import aisquare_home
-from aisquare.core.source_revision import fingerprint_of, source_root_for, source_state
+from aisquare.core.source_revision import (
+    checkout_of,
+    fingerprint_of,
+    source_root_for,
+    source_state,
+)
 from aisquare.core.store import store_session
 
 DEFAULT_STREAM_LIMIT = 1024 * 1024
@@ -174,7 +181,25 @@ class SourceFiles(BaseModel):
     after_stamps: dict[str, str] | None = None
 
 
+def sandbox_dir() -> Path | None:
+    """The launch's broker directory when this process runs in an agent's sandbox, where the
+    aisquare home is read-only (``store_broker.brokered``); ``None`` everywhere else."""
+    from aisquare.services import store_broker  # lazy: not every run's business
+
+    return store_broker.brokered()
+
+
 def reports_dir() -> Path:
+    """Where reports are saved: the aisquare home's ``reports/``; in an agent's sandbox, which
+    cannot write the home, the launch's own ``reports/`` beside its broker's inbox
+    (``store_broker.REPORTS``), the one place there it may write. A report made there backs
+    evidence only once its broker sealed it and ``brief evidence`` adopted it
+    (:func:`seal_sandboxed`, :func:`adopt_sandboxed`)."""
+    from aisquare.services import store_broker
+
+    sandbox = sandbox_dir()
+    if sandbox is not None:
+        return sandbox / store_broker.REPORTS
     return aisquare_home() / "reports"
 
 
@@ -297,7 +322,12 @@ def protected_report_ids() -> set[str] | None:
     turns a proven requirement unproven for good, so :func:`prune_reports` deletes no
     report at all on None. Never raises: a command must still run when the evidence
     store cannot be read.
+
+    In an agent's sandbox the reports are scratch copies, which no evidence cites (a report
+    is adopted into the home first), and its store cannot be read: none is protected.
     """
+    if sandbox_dir() is not None:
+        return set()
     try:
         return set(protected_reports_provider())
     except Exception:
@@ -740,6 +770,12 @@ def _source_before(
     if project_id is None:
         return None, None, None
     try:
+        if sandbox_dir() is not None:
+            # No store to ask in the sandbox: the source is the tree the command runs in.
+            # The broker checks it is the launch's own, and the board's, when it seals and
+            # adopts the report (:func:`_check_sandboxed`).
+            root = checkout_of(cwd)
+            return root, source_state(root), None
         with store_session() as store:
             project = store.get_project(project_id)
         if project is None:
@@ -932,3 +968,268 @@ def _publish(
     (pending / "wrapper.pid").unlink(missing_ok=True)
     pending.rename(_directory(report.id))
     return report
+
+
+# --------------------------------------------------------------------------- a sandbox's reports
+#
+# An agent that sandboxes its tools (Codex) runs `asq exec` in its sandbox, where the aisquare
+# home is read-only and `exec` saves its report in the launch's own `reports/`
+# (:func:`reports_dir`).
+# The broker, outside the sandbox, cannot take that directory's word for anything: it is the
+# agent's. What it does instead, in the two commands it runs for the agent:
+#
+# - `reports seal ID` (run when `exec` ends): reads the report as the sandbox left it, checks
+#   it (:func:`_check_sandboxed`) and records its digest where the sandbox cannot write
+#   (`seals/`), once.
+# - `brief evidence --report ID` (:func:`adopt_sandboxed`): reads the report again, requires
+#   the seal and the same digest, and copies the very bytes it read into the home's
+#   `reports/`, where evidence cites it and nothing in the sandbox can change it.
+#
+# What this settles: a report changed after its run is refused, and so is one that is not
+# owner-only, holds a link or a file of another name, or names a directory or a board
+# outside the launch's. What it cannot: that the run happened as the report says. An agent
+# that writes a report by hand and seals it gets it adopted, as a Claude Code agent that
+# writes one into `reports/` is trusted, and `brief check` re-reads the source itself (the
+# pass needs the same files before the run, after it and now, and the broker reads "now").
+
+
+class SandboxReportError(ValueError):
+    """A report a sandbox saved cannot be sealed or adopted; the message says why."""
+
+
+#: What a report holds, and what a complete one holds besides ``source.json`` (``--project``).
+_SANDBOX_FILES: Mapping[str, int] = {
+    "report.json": _REPORT_JSON_LIMIT,
+    "stdout.bin": MAX_STREAM_LIMIT,
+    "stderr.bin": MAX_STREAM_LIMIT,
+    "stdout.display": MAX_STREAM_LIMIT,
+    "stderr.display": MAX_STREAM_LIMIT,
+    "source.json": _SOURCE_JSON_LIMIT,
+}
+_REQUIRED_FILES = ("report.json", "stdout.bin", "stderr.bin", "stdout.display", "stderr.display")
+_SEAL = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _broker_command() -> tuple[Path, Path]:
+    """The launch's ``reports/`` and ``seals/`` for a command its broker runs; the refusal
+    for any other process."""
+    from aisquare.services import store_broker
+
+    if not store_broker.brokered_call():
+        raise SandboxReportError(
+            "only a command the agent's broker runs reads its sandbox's reports"
+        )
+    reports, seals = (
+        os.environ.get(store_broker.REPORTS_ENV),
+        os.environ.get(store_broker.SEALS_ENV),
+    )
+    if not reports or not seals:
+        raise SandboxReportError("this launch has no report directory")
+    return Path(reports), Path(seals)
+
+
+def _owner_only(status: os.stat_result, uid: int, what: str) -> None:
+    if status.st_uid != uid:
+        raise SandboxReportError(f"{what} is not owned by the user the broker runs as")
+    if status.st_mode & 0o077:
+        raise SandboxReportError(
+            f"{what} is not owner-only (mode {stat.S_IMODE(status.st_mode):o}): it could have "
+            "been changed by anyone"
+        )
+
+
+def _read_member(directory: int, name: str, limit: int, uid: int) -> bytes:
+    """One file of a sandbox's report, read by name in the directory already opened: never
+    through a link, never blocking on a FIFO, owner-only, a regular file, at most ``limit``."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    except OSError as exc:
+        raise SandboxReportError(f"{name} cannot be opened ({exc.strerror})") from None
+    with os.fdopen(fd, "rb") as handle:
+        status = os.fstat(handle.fileno())
+        if not stat.S_ISREG(status.st_mode):
+            raise SandboxReportError(f"{name} is not a regular file")
+        _owner_only(status, uid, name)
+        if status.st_size > limit:
+            raise SandboxReportError(f"{name} is over its {limit}-byte limit")
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise SandboxReportError(f"{name} is over its {limit}-byte limit")
+    return data
+
+
+def _digest(files: Mapping[str, bytes]) -> str:
+    """One digest of a report's files, by name and length, so no file's end can be read as
+    the next one's start."""
+    whole = hashlib.sha256()
+    for name in sorted(files):
+        whole.update(f"{name}\0{len(files[name])}\0".encode())
+        whole.update(files[name])
+    return whole.hexdigest()
+
+
+def _read_sandboxed(reports: Path, report_id: str) -> dict[str, bytes]:
+    """The files of report ``report_id`` in a launch's ``reports/``, as the sandbox left them:
+    nothing but a report's own files, each owner-only and regular, in a directory that is no
+    link; then checked as a report (:func:`_check_sandboxed`). The bytes read are the bytes
+    sealed and the bytes adopted: nothing is read twice."""
+    if sys.platform == "win32":
+        raise SandboxReportError("a sandbox's broker runs on POSIX only")
+    if not _REPORT_ID.fullmatch(report_id):
+        raise SandboxReportError("use the complete 32-character report ID")
+    uid = os.getuid()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        root_fd = os.open(reports, flags)
+    except OSError as exc:
+        raise SandboxReportError(
+            f"the launch's reports cannot be opened ({exc.strerror})"
+        ) from None
+    try:
+        _owner_only(os.fstat(root_fd), uid, "the launch's report directory")
+        try:
+            dir_fd = os.open(report_id, flags, dir_fd=root_fd)
+        except OSError as exc:
+            raise SandboxReportError(
+                f"no report {report_id[:12]} was saved in this agent's sandbox ({exc.strerror})"
+            ) from None
+        try:
+            _owner_only(os.fstat(dir_fd), uid, "the report's directory")
+            names = set(os.listdir(dir_fd))
+            strange = sorted(names - set(_SANDBOX_FILES))
+            if strange:
+                raise SandboxReportError(f"it holds {', '.join(strange)}, which no report does")
+            missing = [name for name in _REQUIRED_FILES if name not in names]
+            if missing:
+                raise SandboxReportError(f"it lacks {', '.join(missing)}: the run did not finish")
+            files = {name: _read_member(dir_fd, name, _SANDBOX_FILES[name], uid) for name in names}
+        finally:
+            os.close(dir_fd)
+    finally:
+        os.close(root_fd)
+    _check_sandboxed(report_id, files)
+    return files
+
+
+def _check_sandboxed(report_id: str, files: Mapping[str, bytes]) -> CommandReport:
+    """A sandbox's report as a report: it parses and is the one it names, its streams are the
+    lengths it says, and the directory it ran in and the checkout it fingerprinted are in the
+    launch's tree and its board is the launch's (the broker's scope)."""
+    from aisquare.services import store_broker
+
+    try:
+        report = CommandReport.model_validate_json(files["report.json"])
+        saved = (
+            SourceFiles.model_validate_json(files["source.json"])
+            if report.source_files_saved and "source.json" in files
+            else None
+        )
+    except ValueError as exc:
+        raise SandboxReportError(
+            f"report.json is not a report ({str(exc).splitlines()[0]})"
+        ) from None
+    if report.id != report_id:
+        raise SandboxReportError("its report.json names another report")
+    if report.source_files_saved and saved is None:
+        raise SandboxReportError(
+            "it says its source files were saved, and source.json is not there"
+        )
+    if not report.source_files_saved and "source.json" in files:
+        raise SandboxReportError("it holds a source.json it does not account for")
+    for stream in ("stdout", "stderr"):
+        retained = getattr(report, stream).retained_bytes
+        if len(files[f"{stream}.bin"]) != retained:
+            raise SandboxReportError(f"{stream}.bin is not the {retained} bytes the report kept")
+        if len(files[f"{stream}.display"]) != getattr(report, f"display_{stream}_bytes"):
+            raise SandboxReportError(f"{stream}.display is not what the report displayed")
+    for what, where in (("it ran in", report.cwd), ("it fingerprinted", report.source_root)):
+        if where is None:
+            continue
+        why = store_broker.outside_tree(Path(where))
+        if why is not None:
+            raise SandboxReportError(f"{what} {why}")
+    board = store_broker.own_board()
+    if board is not None and report.project_id is not None and report.project_id != board:
+        raise SandboxReportError(
+            f"it was taken for the board {report.project_id}, not this agent's ({board}): run "
+            f"`asq exec --project {board} --task … -- …`"
+        )
+    return report
+
+
+def seal_sandboxed(report_id: str) -> str:
+    """Record what the sandbox's report ``report_id`` holds now, once, where the sandbox
+    cannot write (the launch's ``seals/``); its digest. The broker runs this for ``reports
+    seal`` when a sandboxed ``asq exec`` ends. :class:`SandboxReportError` for a report that
+    fails :func:`_read_sandboxed`, or one sealed already."""
+    reports, seals = _broker_command()
+    digest = _digest(_read_sandboxed(reports, report_id))
+    try:
+        fd = os.open(seals / report_id, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        raise SandboxReportError(f"report {report_id[:12]} is sealed already") from None
+    except OSError as exc:
+        raise SandboxReportError(f"the seal cannot be written ({exc.strerror})") from None
+    with os.fdopen(fd, "w", encoding="ascii") as handle:
+        handle.write(digest + "\n")
+    return digest
+
+
+def _sealed(seals: Path, report_id: str) -> str | None:
+    try:
+        fd = os.open(seals / report_id, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return None
+        text = handle.read(128).decode("ascii", errors="replace").strip()
+    return text if _SEAL.fullmatch(text) else None
+
+
+def adopt_sandboxed(report_id: str) -> bool:
+    """Copy the sandbox's report ``report_id`` into the home's ``reports/``, so evidence can
+    cite it; ``True`` when it did. ``False`` when there is nothing to do: not a command the
+    agent's broker runs, or the home holds the report already.
+
+    The report must be sealed and still hold what its seal says, and fail none of
+    :func:`_read_sandboxed`'s checks. The copy is written from the bytes that were checked,
+    into a directory that appears whole or not at all, as a run's own report does.
+    :class:`SandboxReportError` otherwise."""
+    from aisquare.services import store_broker
+
+    if not store_broker.brokered_call() or not os.environ.get(store_broker.REPORTS_ENV):
+        return False
+    if not _REPORT_ID.fullmatch(report_id):
+        raise SandboxReportError("use the complete 32-character report ID")
+    if _directory(report_id).exists():
+        return False
+    reports, seals = _broker_command()
+    files = _read_sandboxed(reports, report_id)
+    sealed = _sealed(seals, report_id)
+    if sealed is None:
+        raise SandboxReportError(
+            f"report {report_id[:12]} was not sealed by this agent's broker when its run "
+            "ended: run the check again with `asq exec` in the sandbox"
+        )
+    if not hmac.compare_digest(sealed, _digest(files)):
+        raise SandboxReportError(
+            f"report {report_id[:12]} changed after its run: it is not what the broker sealed"
+        )
+    root = reports_dir()
+    _private_directory(root)
+    pending = root / f".pending-adopt-{uuid.uuid4().hex}"
+    pending.mkdir(mode=0o700)
+    try:
+        for name, data in files.items():
+            _write_file(pending / name, data)
+        pending.rename(_directory(report_id))
+    except OSError:
+        shutil.rmtree(pending, ignore_errors=True)
+        if _directory(report_id).is_dir():
+            return False  # adopted meanwhile, by the same bytes: the seal is once
+        raise
+    except BaseException:
+        shutil.rmtree(pending, ignore_errors=True)
+        raise
+    return True

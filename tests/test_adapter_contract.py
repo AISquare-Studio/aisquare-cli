@@ -1118,8 +1118,15 @@ def test_the_fake_agent_runs_through_the_fleet_like_any_other(
     # the broker named in its environment where one runs (POSIX: its bell is a FIFO).
     broker = store_broker.launch_dir(store_dir(), launched_env["AISQUARE_LAUNCH_ID"])
     protect, writable = store_broker.launch_paths(launched_env, Path.cwd())
+    # And the launch's own reports, the other place its sandbox writes (task #21): handed to
+    # any adapter as one more writable path, so a new agent's sandboxed `asq exec` needs no
+    # more than its `broker_access` already takes.
     expected = fake_agent.broker_access(
-        native, store_dir(), broker / store_broker.INBOX, protect=protect, writable=writable
+        native,
+        store_dir(),
+        broker / store_broker.INBOX,
+        protect=protect,
+        writable=(*writable, broker / store_broker.REPORTS),
     )
     assert expected is not None and argv[-len(expected) :] == expected
     if sys.platform != "win32":

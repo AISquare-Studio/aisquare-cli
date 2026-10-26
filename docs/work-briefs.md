@@ -45,6 +45,12 @@ aisquare brief evidence B1 R1 --task 12 --verdict pass \
   --summary "the login tests pass" --report 3f9c…
 ```
 
+In an agent that sandboxes its tools (Codex), the same commands work: `aisquare brief …`
+goes through the agent's store broker, and `asq exec` runs in the sandbox, saves its report
+in the launch's own report directory and has the broker seal it; `brief evidence --report`
+adopts it into the home, so `task done` passes for a sandboxed agent as for any other. See
+[the broker's whitelist](coding-agents.md#the-brokers-whitelist).
+
 Each linked task proves its own part: `R2` above stands at `missing` until both #12 and
 #13 have recorded a check of it. `aisquare brief show B1` prints every requirement's
 standing, the checks behind it, and the corrections the brief has had;

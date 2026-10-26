@@ -148,6 +148,21 @@ def source_root_for(project_root: Path, cwd: Path | None = None) -> Path:
     return start
 
 
+def checkout_of(start: Path) -> Path:
+    """The checkout ``start`` is in, asked of the files alone: git's top for it, else the
+    nearest directory with a marker (``.git``, ``.hg``, ``.aisquare``), else ``start``. For a
+    process that cannot ask the board which project a directory is in (an agent's sandbox,
+    where the store is read-only): the source it fingerprints is the tree it runs in."""
+    start = start.resolve()
+    top = _toplevel(start)
+    if top is not None:
+        return top
+    for directory in (start, *start.parents):
+        if any((directory / marker).exists() for marker in (".git", ".hg", ".aisquare")):
+            return directory
+    return start
+
+
 def _refuse_home(root: Path) -> None:
     """A root that is, or holds, AI Square's home or the user's home is not a checkout.
 

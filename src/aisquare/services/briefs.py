@@ -62,7 +62,7 @@ from aisquare.models import (
     TeamTask,
     WorkBrief,
 )
-from aisquare.services import command_reports, install_route, team
+from aisquare.services import command_reports, install_route, store_broker, team
 
 #: Distinct failures by one task against one revision of a requirement that block
 #: the task, so the manager re-plans instead of the task looping through review.
@@ -177,6 +177,11 @@ def _read_artifact(path: Path) -> _Artifact:
         resolved = path.expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         raise ValueError(f"artifact {path} cannot be read ({exc})") from None
+    # A command an agent's broker runs reads as the user, outside the sandbox, and keeps a
+    # copy in the store: only a file of the launch's own tree (`store_broker.outside_tree`).
+    why = store_broker.outside_tree(resolved)
+    if why is not None:
+        raise store_broker.OutOfScope(why, kind="path")
     if not resolved.is_file():
         raise ValueError(f"artifact {path} is not a regular file")
     limit = MAX_ARTIFACT_BYTES // (1024 * 1024)
@@ -1314,6 +1319,9 @@ def _record(
     report_sha256: str | None = None
     if report_id is not None:
         try:
+            # A report an agent's sandbox saved is copied into the home first, when its broker
+            # sealed it and it is unchanged: evidence cites the copy, which nothing there writes.
+            command_reports.adopt_sandboxed(report_id.strip())
             report = command_reports.load_report(report_id.strip())
             saved = command_reports.load_source_files(report.id)
             report_sha256 = _report_digest(report.id)

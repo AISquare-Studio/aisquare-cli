@@ -343,7 +343,15 @@ def _configure(*, tracing: bool, modes: dict[str, str] | None = None) -> None:
 
 
 def _doctor_row() -> Any:
-    return next((c for c in diagnostics.doctor() if c.name == auto_mode.CHECK_NAME), None)
+    """The line as ``aisquare explainability doctor`` prints it: it was ``aisquare doctor``'s
+    row, and is the explainability section's now (``doctor`` has no row named for it)."""
+    from typer.testing import CliRunner
+
+    from aisquare.cli.app import app
+
+    rows = json.loads(CliRunner().invoke(app, ["--json", "explainability", "doctor"]).stdout)
+    assert auto_mode.CHECK_NAME not in {c.name for c in diagnostics.doctor()}
+    return next((row for row in rows if row["name"] == auto_mode.CHECK_NAME), None)
 
 
 def test_the_doctor_line_exists_only_for_auto_mode_behind_a_configured_proxy(
@@ -364,7 +372,7 @@ def test_the_doctor_line_exists_only_for_auto_mode_behind_a_configured_proxy(
     assert check.fix and "--permission-mode acceptEdits" in check.fix
     assert "AISquare-Explainability-SDK/issues/1144" in check.fix
     assert "explainability disable" in check.fix
-    assert _doctor_row() is not None, "it reaches the real doctor"
+    assert _doctor_row() is not None, "it reaches `explainability doctor`"
 
 
 def test_the_doctor_line_names_the_agents_still_running_in_auto(
@@ -517,7 +525,7 @@ def test_a_transcript_doctor_may_not_stat_does_not_crash_doctor(
     assert [sample.session_id for sample in baseline.samples] == ["s-small"]
     check = auto_mode.doctor_check()
     assert check is not None and "72k" in check.detail
-    assert _doctor_row() is not None, "the whole doctor still runs"
+    assert _doctor_row() is not None, "the whole section still runs"
 
 
 # --- the spawn receipt ----------------------------------------------------------------------
@@ -559,6 +567,28 @@ def test_the_spawn_note_needs_auto_mode_a_proxy_and_evidence(
     _session(project, "s-hit", _sized(tmp_path / "t" / "hit.jsonl", 80_000, refusals=3))
     hit = _note("auto")
     assert hit is not None and "1 of the last 3 sessions were refused" in hit
+
+
+def test_the_spawn_note_points_at_the_command_that_carries_the_line(
+    isolated_home: Path, tmp_path: Path, runner: CliRunner
+) -> None:
+    """The ``explainability auto-mode`` row moved from ``aisquare doctor`` to
+    ``aisquare explainability doctor``, and the note's "or see ..." followed it: a receipt
+    that named ``aisquare doctor`` sent the reader to a report with no such row. The command
+    it names is one that prints the row, and ``aisquare doctor`` is not."""
+    paths.ensure_home()
+    _configure(tracing=True, modes={"coder": "auto"})
+    project = _project(tmp_path / "repo")
+    _session(project, "s-big", _sized(tmp_path / "t" / "big.jsonl", 141_000))
+
+    note = _note("auto")
+
+    assert note is not None
+    assert note.endswith(f"or see `aisquare explainability doctor` ({auto_mode.CHECK_NAME})"), note
+    named = runner.invoke(app, ["--json", "explainability", "doctor"]).stdout
+    assert auto_mode.CHECK_NAME in {row["name"] for row in json.loads(named)}
+    plain = runner.invoke(app, ["--json", "doctor"]).stdout
+    assert auto_mode.CHECK_NAME not in {row["name"] for row in json.loads(plain)}
 
 
 def test_the_spawn_note_names_a_step_a_restart_or_a_switch_receipt_can_follow(

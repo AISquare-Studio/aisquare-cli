@@ -879,6 +879,11 @@ def connect_proxy() -> Iterator[tuple[str, list[str]]]:
             seen.append(line)
             host, port = line.split()[1].rsplit(":", 1)
             upstream = socket.create_connection((host, int(port)), timeout=5)
+            # The 5 s was for the connect: left on the socket it also ended the tunnel at the
+            # first read that waited that long, and a loaded windows-latest runner left the
+            # client reading the end of a tunnel in the middle of its handshake
+            # (SSLEOFError, CI run 40269567279).
+            upstream.settimeout(None)
             self.request.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
 
             def pump(src: socket.socket, dst: socket.socket) -> None:

@@ -1,9 +1,9 @@
 """``core.locking.holding``: the one bounded wait every lock file in the home goes through.
 
-``state.json``'s, the credentials file's and a brain's each had their own copy of the
-open-then-poll loop, and the fleet's branch lock a fourth (review of #259, round 17, 11/12).
-The copies had drifted: a brain read every ``OSError`` as "held" and waited out its whole
-``wait_s`` for an error no retry clears. Remote's ``remote.json`` lock and its claim of the
+``state.json``'s and the credentials file's each had their own copy of the open-then-poll
+loop, and the fleet's branch lock a third (review of #259, round 17, 11/12). The copies had
+drifted: one read every ``OSError`` as "held" and waited out its whole ``wait_s`` for an
+error no retry clears. Remote's ``remote.json`` lock and its claim of the
 home were two more (round 18, 8/12).
 """
 
@@ -19,7 +19,7 @@ from typing import Any, cast
 
 import pytest
 
-from aisquare.core import brain, credentials, locking, state_file
+from aisquare.core import credentials, locking, state_file
 from aisquare.services import remote_server
 
 
@@ -30,11 +30,6 @@ def _state(home: Path) -> None:
 def _credentials(home: Path) -> None:
     with credentials._locked(home / "credentials.json"):
         pass
-
-
-def _brain(home: Path) -> None:
-    with brain._lock(home / "brain", wait_s=5.0) as won:
-        assert won
 
 
 def _remote_json(home: Path) -> None:
@@ -56,7 +51,6 @@ def _remote_claim(home: Path) -> None:
 TAKERS: dict[str, Callable[[Path], None]] = {
     "state.json": _state,
     "credentials": _credentials,
-    "brain": _brain,
     "remote.json": _remote_json,
     "remote claim": _remote_claim,
 }
@@ -85,19 +79,23 @@ def test_every_lock_file_waits_through_held_in_the_one_loop(
     assert len(attempts) == 3
 
 
-def test_a_brain_lock_the_platform_refuses_is_not_won_at_once(
+def test_a_lock_the_platform_refuses_is_raised_at_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A brain read every ``OSError`` as "held" and polled out its ``wait_s`` (five seconds for
-    a recall) for an ``ENOLCK`` no retry clears. Not won, still — at once."""
+    """A lock loop that read every ``OSError`` as "held" polled out its whole ``wait_s`` for an
+    ``ENOLCK`` no retry clears. Raised, and at once."""
 
     def no_locks(fd: int) -> None:
         raise OSError(errno.ENOLCK, "No locks available")
 
     monkeypatch.setattr(locking, "lock_exclusive", no_locks)
     started = time.monotonic()
-    with brain._lock(tmp_path / "brain", wait_s=5.0) as won:
-        assert not won
+    with (
+        pytest.raises(OSError) as refused,
+        locking.holding(tmp_path / "x.lock", wait_s=5.0),
+    ):
+        pytest.fail("the lock was taken")
+    assert refused.value.errno == errno.ENOLCK
     assert time.monotonic() - started < 1.0
 
 

@@ -170,7 +170,7 @@ CREATE INDEX team_event_project_seq ON team_event (project_id, seq);
 
 # v4: the review stage of the task lifecycle (coder → review → runner verifies)
 # — a CHECK constraint cannot be altered in SQLite, so the table is rebuilt —
-# and team_meta, small durable key/values (e.g. the distiller's watermark).
+# and team_meta, small durable key/values.
 _SCHEMA_V4 = """
 DROP INDEX team_task_project_status;
 ALTER TABLE team_task RENAME TO team_task_v3;
@@ -628,7 +628,7 @@ def _remove_old_packs() -> None:
 
     Only a directory named ``snapshot``, directly in a project's data directory, and
     only while it resolves to one inside ``projects/``: a symlink is never followed out
-    of the home, and ``brain/`` beside it is never touched. Best effort: what cannot be
+    of the home, and anything beside it is never touched. Best effort: what cannot be
     deleted stays, and the open goes on. ``RuntimeError`` too: on Python 3.11 and 3.12
     ``Path.resolve()`` raises it for a symlink loop, and a ``projects/`` that points at
     itself made every command a traceback (review of #399).
@@ -1550,6 +1550,9 @@ class ContextStore(Protocol):
     def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo: ...
     def forget_project(self, project_id: str) -> None: ...
     def purge_project(self, project_id: str) -> dict[str, int]: ...
+    def reset_project(
+        self, project_id: str, *, memory: bool = False, prompts: bool = False, apply: bool
+    ) -> dict[str, int]: ...
     def project_activity(self) -> dict[str, str]: ...
     def add_prompt(
         self, text: str, project_id: str | None, source: str = "claude-code"
@@ -2666,12 +2669,11 @@ class SqliteStore:
         keyed; the metric rows are written even with the CI test bed off, and
         left behind they resurfaced in ``metrics list --all`` and in the
         project's own scope if its root was registered again. ``team_meta`` is a
-        key/value bag whose keys embed either the project id (the distiller's
-        watermark, signals) or a session id (nudge debounce, continuation
-        counters), so its rows are matched on both — in bounded statements, see
-        :meth:`_purge_team_meta`. LIVE fleet agents are the caller's problem to
-        refuse before getting here: this deletes their rows too, and a pane that
-        is still running would then be unaccounted for.
+        key/value bag whose keys embed either the project id (signals) or a session id
+        (nudge debounce, continuation counters), so its rows are matched on both — in
+        bounded statements, see :meth:`_purge_team_meta`. LIVE fleet agents are the
+        caller's problem to refuse before getting here: this deletes their rows too, and
+        a pane that is still running would then be unaccounted for.
 
         A key the CLI minted for the project (#142) is detached first, in the
         same transaction, and its revocation owed (:meth:`_owe_revocation`):
@@ -2760,22 +2762,114 @@ class SqliteStore:
         500 sessions.
         """
         removed = self._conn.execute(
-            "DELETE FROM team_meta WHERE key = ? OR key GLOB ? OR key GLOB ?",
+            "DELETE FROM team_meta WHERE key GLOB ? OR key GLOB ?",
             (
-                f"distill_seq:{project_id}",
                 f"signal/{_glob_escape(project_id)}/*",
                 # the processes that run this board's sessions (``services.mcp_host``)
                 f"host/{_glob_escape(project_id)}/*",
             ),
         ).rowcount
-        for start in range(0, len(sessions), _META_BATCH):
-            batch = sessions[start : start + _META_BATCH]
-            keys = [f"{kind}:{sid}" for sid in batch for kind in _SESSION_META_KINDS]
-            globs = [f"continuations:{_glob_escape(sid)}:*" for sid in batch]
-            clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
-            removed += self._conn.execute(
-                f"DELETE FROM team_meta WHERE {' OR '.join(clauses)}", (*keys, *globs)
-            ).rowcount
+        for where, params in _session_meta_terms(sessions):
+            removed += self._conn.execute(f"DELETE FROM team_meta WHERE {where}", params).rowcount
+        return removed
+
+    def reset_project(
+        self, project_id: str, *, memory: bool = False, prompts: bool = False, apply: bool
+    ) -> dict[str, int]:
+        """Empty the project's board and fleet rows in one transaction ("Start fresh"), and
+        say what each table gave up; with ``apply`` off, count them and change nothing.
+        ``apply`` has no default: a call that left it out deleted (review of #429).
+
+        The board is its ``team_task``, ``team_event``, ``team_session`` and ``brief`` rows
+        (the next brief is #1 again, as the next task is), and in
+        ``team_meta`` its signals (``signal/<id>/*``) and the keys of the sessions that go
+        (:func:`_session_meta_terms`: the nudge debounce, the continuation counters, …).
+        The ``ui_state`` rows the before-limit hand-over keeps per label
+        (:data:`_FLEET_LABEL_STATE`) go with them, counted with the ``team_meta`` keys: the
+        next fleet reuses a label (``coder-1``), and a stale "warned" row would hide its first
+        warning. Keys no board owns stay.
+
+        The ``host/<project id>/<pid>`` keys (``services.mcp_host``) stay too, on purpose.
+        They name the Claude Code processes that run sessions, not board content, and the
+        process overwrites its own when it next registers. ``host_of`` needs the session's
+        row as well as the key, and the row goes here, so a live solo session's own MCP
+        server cannot prove itself until its next SessionStart or UserPromptSubmit writes
+        the record again, whether the key stayed or not. Narrow, and it heals itself.
+
+        The fleet is its ``fleet_agent`` rows, and a live one refuses the reset
+        (``ValueError``): asked under the write lock, so an agent a spawn recorded after the
+        caller stopped the rest is never left without its row. ``memory`` takes the
+        project's context entries too (the FTS follows through ``entry_ad``), ``prompts``
+        its prompt log and turn metrics. The registration and every other project's rows are
+        not touched; the next task added is #1 again, as a number is its board's highest
+        plus one."""
+        scope = [
+            ("team_task", "project_id = ?"),
+            ("team_event", "project_id = ?"),
+            ("team_session", "project_id = ?"),
+            ("fleet_agent", "project_id = ?"),
+            ("brief", "project_id = ?"),
+        ]
+        if memory:
+            scope.append(("entry", "pool = 'project' AND project_id = ?"))
+        if prompts:
+            scope += [("prompt", "project_id = ?"), ("metric", "project_id = ?")]
+
+        def meta() -> list[tuple[str, str, tuple[str, ...]]]:
+            """``(table, where, params)`` for each group of keys the reset clears."""
+            sessions = [
+                str(row["id"])
+                for row in self._conn.execute(
+                    "SELECT id FROM team_session WHERE project_id = ?", (project_id,)
+                ).fetchall()
+            ]
+            signals = ("key GLOB ?", (f"signal/{_glob_escape(project_id)}/*",))
+            labels = (
+                " OR ".join(["key GLOB ?"] * len(_FLEET_LABEL_STATE)),
+                tuple(f"{prefix}{_glob_escape(project_id)}:*" for prefix in _FLEET_LABEL_STATE),
+            )
+            return [
+                *(
+                    ("team_meta", where, params)
+                    for where, params in (signals, *_session_meta_terms(sessions))
+                ),
+                ("ui_state", *labels),
+            ]
+
+        if not apply:
+            count = "SELECT COUNT(*) FROM {} WHERE {}"
+            counts = {
+                table: int(
+                    self._conn.execute(count.format(table, where), (project_id,)).fetchone()[0]
+                )
+                for table, where in scope
+            }
+            counts["team_meta"] = sum(
+                int(self._conn.execute(count.format(table, where), params).fetchone()[0])
+                for table, where, params in meta()
+            )
+            return counts
+        removed: dict[str, int] = {}
+        with self._conn:  # one BEGIN…COMMIT: a reset is whole or it is nothing
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            live = self._conn.execute(
+                "SELECT label FROM fleet_agent WHERE project_id = ? AND ended_at IS NULL "
+                "ORDER BY created_at",
+                (project_id,),
+            ).fetchall()
+            if live:
+                labels = ", ".join(str(row["label"]) for row in live)
+                raise ValueError(f"{len(live)} fleet agent(s) still live: {labels}")
+            keys = meta()  # read under the lock: a session that joined since goes too
+            for table, where in scope:
+                removed[table] = self._conn.execute(
+                    f"DELETE FROM {table} WHERE {where}", (project_id,)
+                ).rowcount
+            removed["team_meta"] = sum(
+                self._conn.execute(f"DELETE FROM {table} WHERE {where}", params).rowcount
+                for table, where, params in keys
+            )
         return removed
 
     def project_activity(self) -> dict[str, str]:
@@ -5903,6 +5997,24 @@ _SESSION_META_KINDS: tuple[str, ...] = (
 """The ``team_meta`` keys kept per session as ``<kind>:<session id>``: the manager's nudge
 debounce, the solo session's not-yet-briefed mark (#346), and the quiet compaction's mark,
 its newest refusal and its latest arm (P1 WS-4)."""
+
+
+_FLEET_LABEL_STATE: tuple[str, ...] = ("before-limit:", "before-limit-warned:")
+"""The ``ui_state`` keys kept per fleet label as ``<prefix><project id>:<label>``: the turn
+end that last started a before-limit move, and the crossing a ``warn`` has named
+(``services.hooks``). A reset clears a project's (:meth:`SqliteStore.reset_project`)."""
+
+
+def _session_meta_terms(sessions: Sequence[str]) -> Iterator[tuple[str, tuple[str, ...]]]:
+    """``(where, params)`` matching the ``team_meta`` keys of ``sessions``: each of
+    :data:`_SESSION_META_KINDS`, and its continuation counters. In statements of at most
+    :data:`_META_BATCH` sessions each, as SQLite refuses an expression tree past 1000 terms."""
+    for start in range(0, len(sessions), _META_BATCH):
+        batch = sessions[start : start + _META_BATCH]
+        keys = [f"{kind}:{sid}" for sid in batch for kind in _SESSION_META_KINDS]
+        globs = [f"continuations:{_glob_escape(sid)}:*" for sid in batch]
+        clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
+        yield " OR ".join(clauses), (*keys, *globs)
 
 
 class GroupSettings(NamedTuple):

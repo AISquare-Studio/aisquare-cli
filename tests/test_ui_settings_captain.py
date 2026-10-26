@@ -2,7 +2,7 @@
 
 On a fresh install the owner could not find how to turn the captain on (it took ``aisquare
 config set experimental.captain true`` and a restart) or how to talk to it. Settings' box
-switches it at once, *▶ Start captain* in its section opens what the ``★`` opens when there
+switches it at once, *▶ Start captain* in the actions block opens the Spawn dialog when there
 is no captain, and the captain's view has a one-line box that types by What's up's path.
 Driven headless through ``tests.test_ui_shell``'s ``drive``; every claim reads what a widget
 shows or what the one door typed.
@@ -10,6 +10,7 @@ shows or what the one door typed.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from pathlib import Path
 
@@ -21,9 +22,9 @@ from aisquare.cli.ui.receiver import ui_receiver
 from aisquare.cli.ui.sidebar import (
     CAPTAIN_READING,
     AgentRow,
-    CaptainButton,
     CaptainSection,
     SettingsRow,
+    SpawnButton,
     StartCaptain,
 )
 from aisquare.cli.ui.spawn import SpawnDialog
@@ -37,6 +38,7 @@ from aisquare.services.captain import state as captain_state
 from tests import test_captain_say as say_suite
 from tests import test_ui_shell as ui_suite
 from tests.captain_screens import INPUT_BOX, REAL_TRUST
+from tests.fleet_fakes import list_agents_as
 from tests.test_captain_say import Captain, Clock
 from tests.test_captain_sidebar import until
 from tests.test_captain_view import _captain, _open_view, drive
@@ -75,13 +77,13 @@ async def _tick(pilot: Pilot[None], box: Checkbox) -> None:
 def test_ticking_the_captain_box_shows_the_captain_at_once_and_unticking_hides_it(
     tmp_path: Path, script: Script, captain_off: None
 ) -> None:
-    """Off, as it ships: no ``★``, no Captain section, no ui receiver. A tick saves the setting
-    and shows all of it with no restart, the captain's row read into its section; an untick
-    takes it all away again, the setting saved off."""
+    """Off, as it ships: no Start captain, no captain slot, no ui receiver — and Spawn agent,
+    which stays. A tick saves the setting and shows all of it with no restart, the captain's
+    row read into its slot; an untick takes it all away again, the setting saved off."""
     seed(tmp_path, ("prj_aaa", "alpha", "amber-otter"))
     home = captain_state.home_project()
     script[home.id] = [_captain("waiting")]
-    Seen = tuple[bool, bool, list[str], bool, bool]
+    Seen = tuple[bool, bool, list[str], bool, bool, bool]
 
     async def body(pilot: Pilot[None]) -> tuple[Seen, Seen, Seen]:
         app = fleet_app(pilot)
@@ -89,11 +91,12 @@ def test_ticking_the_captain_box_shows_the_captain_at_once_and_unticking_hides_i
         def seen() -> Seen:
             rows = [row.status.agent.label for row in app.query(AgentRow) if _in_section(row)]
             return (
-                bool(app.query(CaptainButton)),
+                bool(app.query(StartCaptain)),
                 bool(app.query(CaptainSection)),
                 rows,
                 ui_receiver(app) is not None,
                 load_config().experimental.captain,
+                bool(app.query(SpawnButton)),
             )
 
         await refreshed(app)
@@ -107,9 +110,11 @@ def test_ticking_the_captain_box_shows_the_captain_at_once_and_unticking_hides_i
         return before, ticked, seen()
 
     before, ticked, unticked = drive(body)
-    assert before == (False, False, [], False, False)
-    assert ticked == (True, True, ["captain"], True, True), "★, section, its row, receiver, saved"
-    assert unticked == (False, False, [], False, False)
+    assert before == (False, False, [], False, False, True)
+    assert ticked == (True, True, ["captain"], True, True, True), (
+        "start, slot, row, receiver, saved"
+    )
+    assert unticked == (False, False, [], False, False, True)
 
 
 def test_reset_all_and_reload_move_the_box_and_the_shell_with_the_file(
@@ -117,7 +122,7 @@ def test_reset_all_and_reload_move_the_box_and_the_shell_with_the_file(
 ) -> None:
     """The box sits in App settings' form now (#41), whose Reset all and Reload re-read the
     file: the box and the shell follow it. Reset all with the captain ticked put the file's
-    captain back to off while the box stayed ticked and the ``★`` stayed lit until a restart;
+    captain back to off while the box stayed ticked and the captain's slot stayed until a restart;
     a ``config set`` from a shell, then Reload, left both as they were."""
     seed(tmp_path, ("prj_aaa", "alpha", "amber-otter"))
     Seen = tuple[bool, bool, bool]
@@ -127,7 +132,7 @@ def test_reset_all_and_reload_move_the_box_and_the_shell_with_the_file(
 
         def seen() -> Seen:
             box = app.query_one("#captain-toggle", Checkbox)
-            return box.value, app.captain_on, bool(app.query(CaptainButton))
+            return box.value, app.captain_on, bool(app.query(CaptainSection))
 
         await refreshed(app)
         toggle = await _settings(pilot)
@@ -149,7 +154,7 @@ def test_reset_all_and_reload_move_the_box_and_the_shell_with_the_file(
 
     ticked, reset, reloaded = drive(body)
     assert ticked == (True, True, True)
-    assert reset == (False, False, False), "the box, the switch, the ★: off with the file"
+    assert reset == (False, False, False), "the box, the switch, the slot: off with the file"
     assert reloaded == (True, True, True), "a shell's config set, after Reload"
 
 
@@ -171,6 +176,19 @@ def test_a_read_begun_before_the_tick_is_not_taken_for_no_captain(
     seed(tmp_path, ("prj_aaa", "alpha", "amber-otter"))
     home = captain_state.home_project()
     script[home.id] = [_captain("waiting")]
+    begun = threading.Event()
+    gate = threading.Event()  # shut while the read begun with the captain off is held in flight
+    gate.set()
+
+    def noting(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        """What the script answers for a project, as every frame's read asks it (a read that
+        asks is in it from its start, with the captain switch already read): says it began, and
+        waits at the gate."""
+        begun.set()
+        assert gate.wait(10), "a fleet read held past the test"
+        return list(script.get(project.id, []))
+
+    list_agents_as(monkeypatch, noting)
     scripted = fleet_service.list_agents
     permits = threading.Semaphore(1000)
 
@@ -184,11 +202,19 @@ def test_a_read_begun_before_the_tick_is_not_taken_for_no_captain(
         app = fleet_app(pilot)
         await refreshed(app)
         toggle = await _settings(pilot)
-        while permits.acquire(blocking=False):  # from here on, one read at a time
+        while permits.acquire(blocking=False):  # from here on, the captain's reads are held
             pass
+        gate.clear()
+        begun.clear()
         app.refresh_data()
         before = app._fleet_worker
         assert before is not None and not before.is_finished
+        # The read is "begun with the captain off" once it is reading the fleet: its thread
+        # takes the switch as it STARTS, and one that started after the tick took it on,
+        # asked about the captain, and rightly cleared the notice (CI run 40282058672, ubuntu
+        # py3.12 shard 1/4: the section said nothing, Start captain hidden). It is held there
+        # while the box is ticked, and let go after, so it is the frame painted AFTER the tick.
+        assert await asyncio.to_thread(begun.wait, 30), "the read never began"
         toggle.query_one("#captain-toggle", Checkbox).toggle()
         start_said: list[bool] = []
 
@@ -205,9 +231,9 @@ def test_a_read_begun_before_the_tick_is_not_taken_for_no_captain(
             section.query_one(StartCaptain),
         )
         mounted = shown(notice), start.display
-        permits.release()  # the read begun with the captain off: alpha alone
+        gate.set()  # the read begun with the captain off: alpha alone
         await until(pilot, lambda: app._fleet_worker is not before, what="its frame painted")
-        landed = shown(notice), start.display
+        landed = shown(notice), start.display  # the read the tick asked for is held, unpainted
         permits.release(1000)  # the read the tick asked for, and every one after it
         await refreshed(app)
         rows = [row.status.agent.label for row in section.query(AgentRow)]
@@ -247,14 +273,14 @@ def test_the_environment_variable_greys_the_box_in_the_state_it_forces_and_says_
 def test_start_captain_opens_the_spawn_dialog_with_the_captain_chosen(
     tmp_path: Path, script: Script
 ) -> None:
-    """The section's line where there is no captain is a *Start captain* that does what the dim
-    ``★`` does: the Spawn dialog, on the home board, with the captain chosen."""
+    """The slot's line where there is no live captain is a *Start captain*: the Spawn dialog, on
+    the home board, with the captain chosen."""
 
     async def body(pilot: Pilot[None]) -> tuple[str, str, bool]:
         app = fleet_app(pilot)
         await refreshed(app)
         start = app.query_one("#captain-empty", Static)
-        assert start.display and shown(start) == "▶ Start captain"
+        assert start.display and shown(start) == "▶  Start captain"
         await pilot.click(start)
         await pilot.pause()
         dialog = app.screen

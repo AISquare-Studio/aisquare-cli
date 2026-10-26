@@ -209,7 +209,6 @@ app.add_typer(task.app, name="task")
 app.add_typer(brief.app, name="brief")
 app.command("note")(team.note)
 app.command("board")(team.board)
-app.command("recall")(team.recall)
 launch.register(app)  # needs context_settings to forward agent args
 command_reports.register(app)  # `exec` forwards everything after -- to the command
 app.command("serve")(serve.serve)

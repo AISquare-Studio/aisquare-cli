@@ -38,7 +38,6 @@ from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.sidebar import AccountsSelected, AddProject, ProjectSelected
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views import doctor as doctor_view
-from aisquare.cli.ui.views import explainability as explainability_view
 from aisquare.cli.ui.views import onboard as onboard_view
 from aisquare.cli.ui.views import welcome as welcome_view
 from aisquare.cli.ui.views.doctor import DoctorView
@@ -711,8 +710,8 @@ async def _settle_reads(app: ui_app.FleetApp) -> None:
 def _starts_with_a_hand_over(
     pending: bool, monkeypatch: pytest.MonkeyPatch, *, then: Then | None = None
 ) -> list[str]:
-    """The workers asq's own starts begin: a project's page opened (its Explainability and
-    Settings tabs read on mount, and the shell's doctor runs for it), its Doctor tab, the
+    """The workers asq's own starts begin: a project's page opened (its Settings tab reads
+    on mount, and the shell's doctor runs for it), its Doctor tab, the
     Accounts page's minute tick with a session and a signed-in slot, and Welcome's look and
     list. With a hand-over ``pending``, held by a worker it waits for; ``then``, what to do
     once the starts have been made, and so what to return.
@@ -722,7 +721,6 @@ def _starts_with_a_hand_over(
     ui_app._remember_ui_state(ui_app.SELECTED_KEY, None)
     monkeypatch.setattr(accounts_view, "_read_credits", lambda _session: [])
     monkeypatch.setattr(accounts_service, "cached_usage_with_trends", lambda _accounts, **_: {})
-    monkeypatch.setattr(explainability_view, "status_report", lambda _project: None)
     # Every start, read as it begins: a quick worker has left ``app.workers`` by the time
     # the steps end, and a read held for the hand-over begins only if it is called off.
     names: list[str] = []
@@ -985,7 +983,6 @@ def test_no_start_on_asqs_own_schedule_begins_once_a_hand_over_is_pending(
 
     assert started == sorted(
         {
-            explainability_view.STATUS_WORKER,
             ui_app._DOCTOR_WORKER,  # the shell's, for the project now chosen
             accounts_view.USAGE_WORKER,
             # The status line's dot, read again from the cache as the page's usage lands.

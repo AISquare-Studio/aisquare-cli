@@ -69,8 +69,69 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   first in batches of 31, so a server that is not deployed yet loses nothing. `DO_NOT_TRACK=1`,
   `AISQUARE_NO_TELEMETRY=1` and any `CI` run force it off and skip the question; turning it off
   purges what was kept and sends one opt-out notice. The server end is a separate change.
+- **Start fresh: `aisquare project fresh`** (alias `project reset`) clears an onboarded
+  project's board and fleet and starts a blank manager, without onboarding it again.
+  Every live agent is stopped as `fleet shutdown` stops it, and the project's tmux
+  session is killed whenever it stands, a live row or none, so a dead pane or a process
+  whose row says it died goes with it; each agent's worktree is removed, and the
+  project's tasks, notes and events, sessions, signals and marks (a session's, and the
+  before-limit rows of its fleet labels), work briefs (with the evidence
+  they keep under `~/.aisquare/briefs/<id>/`) and fleet rows are deleted, with the
+  manager's state (`~/.aisquare/projects/<id>/manager/state.md`), so the next task and
+  brief are #1 again and the new manager does not read the old goal back (none is started
+  while that file cannot be removed). Its context entries, prompt log and turn
+  metrics and its local `fleet/<codename>/…` branches stay unless `--memory`, `--prompts`
+  or `--branches` says otherwise. The checkout, every other branch, the registration and
+  its settings, the symbol index, the captain and every other project are never touched.
+  Nor are the command reports, but once their briefs are gone none of them is pinned by
+  them as evidence any more (a report another board's brief cites stays pinned):
+  `asq reports prune`'s retention takes them as it takes any other.
+  A worktree or branch that holds uncommitted changes or commits no remote has refuses
+  the reset, naming each tree, its branch and the commit count, unless
+  `--discard-unpushed`; a count git cannot give refuses it too, never reading as pushed.
+  At a terminal the discard covers what the plan listed and you confirmed, at the tips
+  it showed (uncommitted changes in a listed tree go as they are when the reset runs),
+  and work found since refuses it before anything is stopped (work committed during the
+  stop itself is refused after it, with how to start the fleet again);
+  with `--yes`, the flag covers whatever the run finds. It prints the plan with its
+  counts and asks at a terminal (a second time before discarding); `--dry-run` prints
+  the plan and changes nothing, off a terminal it is a dry run unless `--yes`, and
+  `--json` prints the plan, or with `--yes` the counts it planned and the counts it
+  cleared: the stop writes an `agent_exited` for each agent it stops, which goes too and
+  is said apart ("11 notes and events (4 written during the reset)"), as are the tmux
+  session it ended (killed, or gone with its last window) and the worktrees it removed.
+  A reset that stops part-way (an agent or a tmux session left standing, work found
+  nobody agreed to discard, a store that would not take the lock) clears nothing on the
+  board and starts no manager, removing no tree while the fleet still stands or such work
+  is found; it names the next step (`fleet shutdown`) and prints its partial report, in
+  text or under the error with `--json`, whose refusals all carry their detail. It
+  is refused from inside one of the project's own fleet agents, from inside the fleet's
+  tmux server when it has something to stop, and, as `project forget` is, while another
+  project's fleet agents read its board. The service behind it (`services.fresh`:
+  `plan`, then `start_fresh`) is what the UI's Start fresh… calls. In `asq`, **↺ Start
+  fresh…** is on a project card's menu (just above *Remove from fleet…*) and on the
+  project's *Settings* tab: one dialog shows the plan's counts and that a new blank
+  manager starts, with *Project memory (context entries)*, *Prompt log &
+  metrics* and *Fleet git branches*
+  off by default; unpushed work is listed in a second dialog (*Discard and start
+  fresh*), and work found after it opens brings the dialog back on what was found; a
+  refused plan says why and cannot be confirmed; one run a project at a time, off the
+  UI thread, ending in a toast of what was cleared, with the project's open boards read
+  again from their start.
 
 ### Changed
+
+- **The sidebar has one *Start captain* and one *Spawn agent*, not a spawn row under every
+  project.** Under the Fleet header, two full-width one-line actions: *▶ Start captain*
+  (with the experimental captain on; its own row takes that place while it is live, and an
+  exited one keeps its row with the start under it) and *＋ Spawn agent*. The "Captain"
+  heading and the ★ beside Fleet are gone. *Spawn agent* opens the Spawn dialog with a new
+  first field, **Project**: every listed project in the sidebar's order, preselected to the
+  selected card or the selected agent's project, else the first. Changing it re-reads what
+  depends on the project (git, a running manager, hand-off sources, tasks, personas and the
+  prefilled label) and keeps the account, binary, permission mode, extra args and first
+  prompt. With no project yet it says so in a toast and opens nothing. The captain's dialog
+  and the Personas tab's flow open on their own project, with no Project field.
 
 - **CI runs each leg's suite in shards: a sub-PR's CI takes about 8 minutes, the full
   matrix about 10-13, down from 22 and 64.** The suite is ~13k tests and its time is a
@@ -174,13 +235,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   measurements and the process trees, is docs/plans/mcp-own-row.md.
 
 - **`aisquare serve --stdio` keeps its protocol pipe to itself.** Its stdin is the pipe the client
-  writes requests into, and its tools started `git` (every call, twice) and `gbrain` with that
+  writes requests into, and its tools started `git` (every call, twice) with that
   stdin inherited, so a child held the pipe. On Windows a process started with a pipe that
   another thread is blocked reading can stall as it starts, which is the suspected cause (not
   confirmed on Windows) of a tool call that never answered. The server now reads requests from a
   private copy of stdin and points its own stdin at the null device before it serves, so
-  no process a tool starts, `git`, `gbrain` or a tmux nudge, can hold or read the pipe; the `git`
-  and `gbrain` calls a tool reaches also name no stdin of their own.
+  no process a tool starts, `git` or a tmux nudge, can hold or read the pipe; the `git`
+  calls a tool reaches also name no stdin of their own.
+
+- **Explainability and the CI test bed are dormant: out of `aisquare doctor` and out of
+  every UI, still there through their own commands.** Both are unmaintained and unused,
+  and a row or a tab each was noise. `aisquare doctor` has no `explainability…` row (nor
+  `explainability auto-mode`) and no `ci …` row, takes no `--target` or `--project`, and
+  its `--fix` only creates the home; `--yes` is still accepted. The section moved to
+  `aisquare explainability doctor [--live] [--target T] [--project P] [--fix] [--yes]`,
+  which runs the same checks and repairs and exits 1 on a failed row, and every hint that
+  said `doctor --live` for tracing names it. The test bed's rows are parked in
+  `services/ci_doctor.py`, which nothing imports; its `ci_*` modules, the `AISQUARE_CI`
+  gate, the hooks and the `ci_recall` tool are untouched. In the fleet UI a project has
+  the tabs Manager, Board, Settings and Personas (no AISquare tab), the Doctor page has no
+  "explainability enable" button, and nothing starts an explainability worker; the view
+  stays in `cli/ui/views/explainability.py`, unmounted, with how to mount it again. The
+  Remote page's agent view has Live and Transcript (no Card tab), and
+  `GET api/explainability/<agent>` still answers. `init` and its `--no-explainability`,
+  and the shipping line of `aisquare status`, are as they were.
+
+### Removed
+
+- **The project brain (gbrain) is gone.** It was an optional third-party CLI that
+  nobody maintained or used, and it only added noise: `aisquare recall` and
+  `aisquare team distill` are removed (so is the `recall` tool of `aisquare serve`, now
+  eight tools), as are the detached drain every board write started, the `brain` row of
+  `aisquare doctor` and `AISQUARE_BRAIN`, `AISQUARE_BRAIN_EMBED` and
+  `AISQUARE_BRAIN_EMBED_MODEL`. Nothing on disk is deleted: an existing
+  `~/.aisquare/projects/<id>/brain` stays where it is, and the store's schema is
+  untouched. `install.sh` still expects the `brain` row from a release that has it
+  (`--version 0.9.0` and older), alongside the codebase-snapshot rows.
 
 ## [0.9.0] - 2026-10-25
 

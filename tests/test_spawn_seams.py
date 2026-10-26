@@ -14,7 +14,6 @@ seams most likely to leak are exactly the rarely-run ones.
 from __future__ import annotations
 
 import ast
-import os
 import subprocess
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -32,14 +31,6 @@ from aisquare.core.spawn import (
     git_env,
     untraced_env,
 )
-from aisquare.services import distill as _distill
-
-#: The REAL ``spawn_drain``, captured at import. conftest's autouse
-#: ``no_detached_distill`` replaces the module attribute so the suite never
-#: launches a detached process — correct for every other test, and fatal for
-#: this one, which exists to inspect what that launch would pass. Collection
-#: imports this module before any fixture runs, so this binding is the original.
-_REAL_SPAWN_DRAIN = _distill.spawn_drain
 
 #: Callables that start a process. Matched on the ``os.``/``subprocess.``
 #: attribute form the package actually uses; a bare ``from subprocess import
@@ -434,45 +425,6 @@ def test_the_probe_still_gets_what_it_needs_to_run(traced_parent: None) -> None:
     assert "PATH" in env
     assert env["AISQUARE_TEAM"] == "0"
     assert env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] == "1"
-
-
-def test_the_gbrain_worker_never_inherits_a_role_identity(
-    traced_parent: None, tmp_path: Path
-) -> None:
-    """gbrain is not an agent session. Its own env builder already guards the
-    Anthropic KEY, which is the tell that an Anthropic path exists — so an
-    inherited base URL would route it through our proxy under the parent."""
-    from aisquare.core import brain
-
-    env = brain._env(tmp_path)
-
-    for name in IDENTITY_ENV_VARS:
-        assert name not in env, f"{name} reaches gbrain"
-
-
-def test_the_detached_distiller_never_inherits_a_role_identity(
-    traced_parent: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A background worker of ours is not an agent session — and this one
-    OUTLIVES the process that started it, so a live pipeline id would attach
-    its work to a Run that may already have ended."""
-    seen: dict[str, Any] = {}
-
-    def fake_popen(argv: list[str], **kwargs: Any) -> Any:
-        seen.update(argv=argv, env=kwargs.get("env"))
-        return None
-
-    monkeypatch.setattr("aisquare.core.brain.brain_enabled", lambda: True)
-    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/gbrain")
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
-
-    _REAL_SPAWN_DRAIN(root=tmp_path)
-
-    env = seen["env"]
-    assert env is not None, "the drain must pass an environment, not inherit one wholesale"
-    for name in IDENTITY_ENV_VARS:
-        assert name not in env, f"{name} reaches the detached distiller"
-    assert env.get("PATH") == os.environ.get("PATH")
 
 
 def test_every_git_seam_runs_in_the_one_git_environment(

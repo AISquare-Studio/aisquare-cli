@@ -140,7 +140,7 @@ with `--persona`, whose `AISQUARE_PERSONA` holds only the value it was launched
 with. The variable applies when the agent has no fleet row, or a row with no
 persona, and either one wins over a persona a session recorded earlier. Attaching
 another persona replaces it, and the agent is told which one it replaces.
-In `asq`, the Spawn dialog (`＋ spawn agent` under a project) asks for the
+In `asq`, the Spawn dialog (`＋ Spawn agent`, at the top of the sidebar) asks for the
 persona in its **Advanced** section, right after who runs the agent — *Pick…*,
 binary — with the role's default preselected and the persona's description under the field; `(none)`
 spawns without one even when the role has a default. The Settings tab sets each
@@ -246,7 +246,7 @@ account** takes you to the Accounts page and starts its sign-in for a new slot;
 come back to the Personas tab when it has signed in.
 
 The same picker is the Spawn dialog's **Pick…**, under **Advanced**: from
-`＋ spawn agent`, Pick… opens it with Binds first and fills the dialog's role, binary or account from
+`＋ Spawn agent`, Pick… opens it with Binds first and fills the dialog's role, binary or account from
 what you choose, keeping everything else you typed. **Import…** beside the
 dialog's Persona field imports a persona and selects it.
 

@@ -2492,7 +2492,9 @@ def test_help_from_the_board_opens_at_its_section_with_every_icon_in_view(
     )
 
 
-def test_keyboard_cursor_walks_the_rows_and_enter_activates(tmp_path: Path, script: Script) -> None:
+def test_keyboard_cursor_walks_the_rows_and_enter_activates(
+    tmp_path: Path, script: Script, captain_off: None
+) -> None:
     seed(tmp_path, ("prj_a", "alpha", None))
     script["prj_a"] = [status("prj_a", "manager", "manager", "waiting")]
 
@@ -2502,31 +2504,25 @@ def test_keyboard_cursor_walks_the_rows_and_enter_activates(tmp_path: Path, scri
         await pilot.pause()
         cursors_before = len(app.query(".cursor"))
         walk: list[str] = []
-        await pilot.press("up")  # at the top already: stays on the first row
-        await settle(app)
-        walk.append(type(app.query_one(".cursor")).__name__)
-        await pilot.press("down")
-        await settle(app)
-        walk.append(type(app.query_one(".cursor")).__name__)
-        await pilot.press("down")
-        await settle(app)
-        walk.append(type(app.query_one(".cursor")).__name__)
-        await pilot.press("up")
-        await settle(app)
-        walk.append(type(app.query_one(".cursor")).__name__)
+        # Up at the top already stays on the first row; then down past Spawn agent to the
+        # card, its agent row, and back up to the title (the captain's walk: test_sidebar_actions).
+        for key in ("up", "down", "down", "down", "up"):
+            await pilot.press(key)
+            await settle(app)
+            walk.append(type(app.query_one(".cursor")).__name__)
         await pilot.press("enter")
         await settle(app)
         return cursors_before, walk, app.content.current
 
     before, walk, current = drive(go)
     assert before == 0  # no cursor until a key is pressed
-    assert walk == ["AddButton", "ProjectTitle", "AgentRow", "ProjectTitle"]
+    assert walk == ["AddButton", "SpawnButton", "ProjectTitle", "AgentRow", "ProjectTitle"]
     assert current == "project-prj_a"  # Enter on the title opened the project
     assert len(walk) == len(set(walk)) + 1  # the cursor moved, it did not stick
 
 
 def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
-    tmp_path: Path, script: Script
+    tmp_path: Path, script: Script, captain_off: None
 ) -> None:
     """A row is a non-focusable Static: mouse-down focuses its nearest focusable ancestor.
 
@@ -2536,7 +2532,7 @@ def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
     focus landed on ``VerticalScroll``, no ``.cursor`` row existed and each
     ``down`` moved ``scroll_y`` by one instead.
     """
-    specs = [(f"prj_{index:02d}", f"p{index:02d}", None) for index in range(15)]
+    specs = [(f"prj_{index:02d}", f"p{index:02d}", None) for index in range(25)]
     seed(tmp_path, *specs)
     for project_id, _, _ in specs:
         script[project_id] = [status(project_id, "manager", "manager", "waiting")]
@@ -2570,13 +2566,13 @@ def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
     overflow, focused, walk, scrolls, on_pane = drive(go)
     assert overflow > 0, "the list must overflow, or the bug cannot show"
     assert focused == "Sidebar"
-    assert walk == ["agent:agt_00_manager", "spawn:prj_00"]  # the arrows moved the cursor…
+    assert walk == ["agent:agt_00_manager", "project:prj_01"]  # the arrows moved the cursor…
     assert scrolls == [0.0, 0.0]  # …and not the scroll
     assert on_pane == "RecordingPane"
 
 
 def test_collapsing_the_card_under_the_cursor_leaves_one_cursor_and_moves_beside_it(
-    tmp_path: Path, script: Script
+    tmp_path: Path, script: Script, captain_off: None
 ) -> None:
     """Exactly one row may render as the keyboard cursor, collapsed cards included.
 
@@ -2598,7 +2594,7 @@ def test_collapsing_the_card_under_the_cursor_leaves_one_cursor_and_moves_beside
 
         app.sidebar.focus()
         await pilot.pause()
-        for _ in range(3):  # add → project:prj_a → agent:agt_a_manager
+        for _ in range(4):  # add → spawn-agent → project:prj_a → agent:agt_a_manager
             await pilot.press("down")
             await settle(app)
         walked = cursors()
@@ -2620,7 +2616,9 @@ def test_collapsing_the_card_under_the_cursor_leaves_one_cursor_and_moves_beside
     assert onwards == ["agent:agt_b_manager"]
 
 
-def test_the_cursor_skips_the_rows_of_a_collapsed_card(tmp_path: Path, script: Script) -> None:
+def test_the_cursor_skips_the_rows_of_a_collapsed_card(
+    tmp_path: Path, script: Script, captain_off: None
+) -> None:
     """Collapsing hides the rows through their ``#agents`` holder, not their own flag."""
 
     def walk(*, collapse: bool) -> list[str]:
@@ -2634,7 +2632,7 @@ def test_the_cursor_skips_the_rows_of_a_collapsed_card(tmp_path: Path, script: S
             app.sidebar.focus()
             await pilot.pause()
             keys: list[str] = []
-            for _ in range(4):
+            for _ in range(5):
                 await pilot.press("down")
                 await settle(app)
                 keys.append(app.query_one(".cursor", Activatable).selection_key)
@@ -2647,16 +2645,23 @@ def test_the_cursor_skips_the_rows_of_a_collapsed_card(tmp_path: Path, script: S
     script["prj_b"] = [status("prj_b", "manager", "manager", "waiting")]
 
     collapsed = walk(collapse=True)
-    assert collapsed == ["add", "project:prj_a", "project:prj_b", "agent:agt_b_manager"]
-    assert not any(key.endswith("agt_a_manager") or key == "spawn:prj_a" for key in collapsed), (
+    assert collapsed == [
+        "add",
+        "spawn-agent",
+        "project:prj_a",
+        "project:prj_b",
+        "agent:agt_b_manager",
+    ]
+    assert not any(key.endswith("agt_a_manager") for key in collapsed), (
         "the cursor must not land on a row hidden inside the collapsed card"
     )
     # Control: expanded, the very same keys walk through those rows.
     assert walk(collapse=False) == [
         "add",
+        "spawn-agent",
         "project:prj_a",
         "agent:agt_a_manager",
-        "spawn:prj_a",
+        "project:prj_b",
     ]
 
 
@@ -3481,8 +3486,16 @@ def test_the_agent_view_offers_stop_exactly_while_there_is_a_process(
         app = fleet_app(pilot)
         offered: set[str] = set()
         for state in states:
-            await pilot.click(row_for(app, f"agt_a_agent-{state}"))
-            await pilot.pause()
+            wanted = f"agt_a_agent-{state}"
+
+            def opened(wanted: str = wanted) -> bool:
+                view = app.current_view()
+                return isinstance(view, AgentView) and view.status.agent.id == wanted
+
+            await pilot.click(row_for(app, wanted))
+            # The row's own view, waited for: a pause after the click read the button of
+            # the view the last row had opened, on windows-latest (run 40208805943).
+            await settle_until_held(app, opened, what=f"the view of {wanted}")
             view = app.current_view()
             assert isinstance(view, AgentView)
             if view.query_one("#agent-stop", Button).display:

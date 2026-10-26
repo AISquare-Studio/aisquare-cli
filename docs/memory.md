@@ -66,7 +66,7 @@ walking up to the nearest marker.
 Registrations accumulate — every directory a command once ran in is one, and
 the fleet UI loads state for all of them. `aisquare project forget` drops one
 (its context, prompt history and board rows stay in the store, hidden, until
-the root is registered again; `--purge` deletes them and its brain too), and
+the root is registered again; `--purge` deletes them and its data directory too), and
 `aisquare project prune` sweeps the stale ones: roots that no longer exist, and
 worktrees of a repository that is itself registered. It shows the plan and asks
 before dropping anything; off a terminal it is a dry run unless `--yes`. Both
@@ -80,6 +80,27 @@ the sweep agree.
 ```sh
 aisquare project forget ../old-checkout       # one registration; --purge deletes its history too
 aisquare project prune --missing --worktrees  # the stale ones, after a confirmation (or --yes)
+```
+
+A project you reuse piece of work after piece of work can **start fresh**
+instead: `aisquare project fresh` (alias `reset`) stops its fleet, removes the
+agents' worktrees, clears its board (tasks, notes, sessions, signals and its work
+briefs, with the evidence they keep under `~/.aisquare/briefs/<id>/`) and its
+fleet rows, deletes the manager's state (`~/.aisquare/projects/<id>/manager/`,
+its `state.md`), so task and brief numbers start at #1 again and the new manager
+starts blank, and starts that manager. It keeps the registration and its
+settings and the symbol index (`~/.aisquare/projects/<id>/code`). It does not
+delete the command reports (`~/.aisquare/reports/`), but with their briefs gone
+they are no longer pinned as evidence (unless another board's brief cites one
+too): retention takes them as it takes any other
+([command reports](command-reports.md)). Its context entries, prompt log and
+fleet branches stay unless `--memory`, `--prompts` or `--branches`. Work in a
+worktree or branch that no remote has refuses it unless `--discard-unpushed`.
+`--dry-run` shows the plan.
+
+```sh
+aisquare project fresh --dry-run              # what it would clear
+aisquare project fresh --memory --yes         # clear the context entries too, without asking
 ```
 
 `aisquare project onboard` adds a folder as a project on purpose and seeds its

@@ -70,6 +70,7 @@ from aisquare.models import (
     ClaudeIdentity,
     ClaudeInstall,
     ClaudeUsage,
+    UsageCause,
 )
 from aisquare.services import auth as auth_service
 from aisquare.services import claude_accounts as accounts_service
@@ -318,6 +319,13 @@ def line(view: AccountsView, slot: int) -> str:
     return "  ".join(text for text in cells(view, slot).values() if text)
 
 
+def why(view: AccountsView, slot: int) -> str:
+    """What hovering the row's ``!`` says — why it has no usage, then the fix — or ``""``
+    when the row shows no ``!``."""
+    problem = row(view, slot).cell(accounts_view.PROBLEM_COLUMN.key)
+    return str(problem.tooltip or "") if problem.display else ""
+
+
 def notice(view: AccountsView) -> str:
     return shown(view.query_one("#accounts-notice", Static))
 
@@ -368,26 +376,41 @@ def test_account_cells_say_who_how_much_what_is_wrong_and_the_plan_last() -> Non
 
     pending = account_cells(_status(2, "two@example.com"), None)
     assert pending["session"].plain == "…" and pending["week"].plain == "…"
-    unavailable = ClaudeUsage(available=False, reason="HTTP 503 from the usage endpoint")
-    # What the status column said reads where the usage would be.
-    assert reason_of(_status(2, "two@example.com"), unavailable) == (
-        "HTTP 503 from the usage endpoint",
-        "—",
+    # No reading to show: one '!' where the usage would be, the week empty, never '—' or
+    # the reason; why, and the fix, are the tooltip's (accounts_view.problem_tooltip).
+    unavailable = accounts_service.unreadable_usage(
+        UsageCause.http_error, "HTTP 503 from the usage endpoint", slot=2
+    )
+    assert reason_of(_status(2, "two@example.com"), unavailable) == ("!", "")
+    assert accounts_view.problem_tooltip(_status(2, "two@example.com"), unavailable) == (
+        f"HTTP 503 from the usage endpoint\n{accounts_service.NO_FIX}"
     )
 
     absent = {k: t.plain for k, t in account_cells(_status(3, None), usage).items()}
-    assert absent["name"] == "account 3" and absent["session"] == "not signed in"
-    assert absent["email"] == absent["plan"] == "" and absent["week"] == "—"
+    assert absent["name"] == "account 3" and absent["session"] == "!"
+    assert absent["email"] == absent["plan"] == absent["week"] == ""
+    assert accounts_view.problem_tooltip(_status(3, None), usage) == (
+        "not signed in\nfix: press Log in (in a terminal: aisquare accounts run 3, then /login)"
+    )
+
+    def said(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> str:
+        return (accounts_view.problem_tooltip(status, reading) or "").partition("\n")[0]
 
     expired = _status(1, "me@example.com", token_state="expired")
-    assert reason_of(expired, None) == ("⚠ token expired", "—")
+    assert reason_of(expired, None) == ("!", "")
+    assert said(expired, None) == "the stored token has expired"
     logged_out = _status(2, "two@example.com", signed_in=False)
-    assert reason_of(logged_out, usage)[0] == "⚠ token missing"
-    assert "▮" not in "".join(t.plain for t in account_cells(logged_out, usage).values())
-    rejected = ClaudeUsage(available=False, reason="the token was rejected", needs_login=True)
-    assert reason_of(_status(2, "two@example.com"), rejected)[0] == "⚠ token rejected"
+    assert reason_of(logged_out, usage) == ("!", "") and "not signed in" in said(logged_out, usage)
+    cut_out = account_cells(logged_out, usage).values()
+    assert "▮" not in "".join(t.plain for t in cut_out)  # nor its resets: no reading of it
+    assert all(not t.plain for k, t in account_cells(logged_out, usage).items() if "resets" in k)
+    rejected = accounts_service.unreadable_usage(
+        UsageCause.token_rejected, "the token was rejected (HTTP 401)", needs_login=True
+    )
+    assert reason_of(_status(2, "two@example.com"), rejected) == ("!", "")
+    assert said(_status(2, "two@example.com"), rejected) == "the token was rejected (HTTP 401)"
     off = _arranged(_status(2, "two@example.com", token_state="expired"), disabled=True)
-    assert reason_of(off, None)[0] == "⚠ token expired"  # the thing to fix first
+    assert said(off, rejected) == "the stored token has expired"  # the thing to fix first
     assert "dim" in str(account_cells(off, None)["name"].style)  # disabled reads dimmed
     named = _arranged(_status(1, "me@example.com"), alias="Work laptop")
     assert account_cells(named, usage)["name"].plain == "Work laptop"
@@ -869,7 +892,8 @@ def test_a_backed_off_row_with_no_reading_repaints_when_its_wait_ends(
     no_network: dict[str, Any],
 ) -> None:
     """Review of #401, m1, on the page: a backed-off account with no kept reading says its
-    wait in the session cell, and says it has ended the moment it does, with no re-read."""
+    wait on hover over its ``!`` (#13), and says it has ended the moment it does, with no
+    re-read."""
     no_network["usage"] = ClaudeUsage(available=True, session_percent=40, week_percent=10)
     overview = _overview(_status(2, "two@example.com"))
 
@@ -885,9 +909,9 @@ def test_a_backed_off_row_with_no_reading_repaints_when_its_wait_ends(
                 slot=2, until=until, attempts=1, since=datetime.now(tz=UTC)
             ).reading(datetime.now(tz=UTC)),
         )
-        during = cells(view, 2)["session"]
+        during = why(view, 2)
         await pilot.pause(1.5)  # the wait is over; the page's next re-read is a minute away
-        return until.astimezone().strftime("%H:%M"), during, cells(view, 2)["session"]
+        return until.astimezone().strftime("%H:%M"), during, why(view, 2)
 
     clock, during, after = drive(go, overview=overview)
     assert during.startswith(f"rate-limited until {clock}"), during
@@ -1051,48 +1075,58 @@ def test_usage_is_fetched_only_for_signed_in_slots_and_painted_into_their_rows(
         _status(1, "me@example.com"), _status(2, "two@example.com"), _status(3, None)
     )
 
-    async def go(pilot: Pilot[None]) -> tuple[list[int], str, str, str]:
+    async def go(pilot: Pilot[None]) -> tuple[list[int], str, str, tuple[str, str]]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         await settle_until(app, lambda: len(no_network["usage_calls"]) >= 2 and painted(view, 1, 2))
-        return sorted(no_network["usage_calls"]), line(view, 1), line(view, 2), line(view, 3)
+        third = (line(view, 3), why(view, 3))
+        return sorted(no_network["usage_calls"]), line(view, 1), line(view, 2), third
 
-    calls, first, second, third = drive(go, overview=overview)
+    calls, first, second, (third, hover) = drive(go, overview=overview)
     assert calls == [1, 2]  # slot 3 has no token to ask with
     assert "▮▯▯▯▯ 12%" in first and "▮▮▯▯▯ 40%" in first
     assert "▮▮▮▮▮ 90%" in second
-    assert "▮" not in third and "not signed in" in third
+    assert "▮" not in third and "!" in third and hover.startswith("not signed in\n")
 
 
-def test_usage_that_cannot_be_read_says_why_on_the_row(no_network: dict[str, Any]) -> None:
+def test_usage_that_cannot_be_read_says_why_on_hover(no_network: dict[str, Any]) -> None:
     no_network["usage"] = ClaudeUsage(available=False, reason="the stored token has expired")
 
-    async def go(pilot: Pilot[None]) -> str:
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         await settle_until(app, lambda: painted(view, 1))
-        return line(view, 1)
+        return line(view, 1), why(view, 1)
 
-    assert "the stored token has expired" in drive(go)
+    shown_line, hover = drive(go)
+    assert "!" in shown_line and "the stored token has expired" not in shown_line
+    # A reading without a cause (none is made without one) still says so: no fix known.
+    assert hover == f"the stored token has expired\n{accounts_service.NO_FIX}"
 
 
 def test_an_account_in_a_locked_keychain_is_asked_and_its_row_says_why(
     no_network: dict[str, Any],
 ) -> None:
-    """macOS: signed in, its Keychain locked — the service's reason must reach the row."""
-    no_network["usage"] = ClaudeUsage(available=False, reason=core.KEYCHAIN_LOCKED)
+    """macOS: signed in, its Keychain locked — the service's reason and fix must reach the
+    row's '!'."""
+    no_network["usage"] = accounts_service.unreadable_usage(
+        UsageCause.keychain_locked, core.KEYCHAIN_LOCKED_REASON, slot=1
+    )
     overview = _overview(_status(1, "me@example.com", token_state="unreadable"))
 
-    async def go(pilot: Pilot[None]) -> tuple[list[int], str]:
+    async def go(pilot: Pilot[None]) -> tuple[list[int], str, str]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         await settle_until(app, lambda: no_network["usage_calls"] and painted(view, 1))
-        return no_network["usage_calls"], line(view, 1)
+        return no_network["usage_calls"], line(view, 1), why(view, 1)
 
-    calls, first = drive(go, overview=overview)
+    calls, first, hover = drive(go, overview=overview)
     assert calls == [1]  # asked, although its token could not be read
-    assert "the login Keychain is locked — unlock it" in first
-    assert "reading usage…" not in first
+    assert hover == (
+        "the login Keychain is locked\nfix: unlock the login keychain (Keychain Access, or "
+        "log out and back in), then ↻ Refresh usage (or --refresh)"
+    )
+    assert "Keychain" not in first and "reading usage…" not in first
 
 
 def test_a_page_on_screen_before_its_first_frame_reads_the_usage_when_the_frame_comes(
@@ -1132,7 +1166,7 @@ def test_a_page_on_screen_before_its_first_frame_reads_the_usage_when_the_frame_
             finally:
                 release.set()
             await settle_until(app, lambda: no_network["usage_calls"] and painted(view, 1))
-            return shown_first, no_network["usage_calls"], line(view, 1)
+            return shown_first, no_network["usage_calls"], why(view, 1)
 
     shown_first, calls, first = asyncio.run(run())
     assert shown_first, "precondition: the page was on screen before it had a frame"
@@ -1169,7 +1203,7 @@ def test_a_slot_that_signs_in_on_a_later_frame_is_read_when_that_frame_comes(
             app.refresh_accounts()  # the same slots again
             await accounts_read(app)
             await settle(app)
-            return before, signed_in, list(calls), line(view, 2)
+            return before, signed_in, list(calls), why(view, 2)
 
     before, signed_in, again, two = asyncio.run(run())
     assert before == [1]
@@ -2097,7 +2131,12 @@ def test_log_in_over_a_rejected_token_waits_for_a_fresh_login_and_the_row_recove
         creds = core.credentials(acct)
         if creds is not None and creds.access_token == fresh_token:
             return ClaudeUsage(available=True, session_percent=40, week_percent=12)
-        return ClaudeUsage(available=False, reason="the token was rejected", needs_login=True)
+        return accounts_service.unreadable_usage(
+            UsageCause.token_rejected,
+            "the token was rejected (HTTP 401)",
+            slot=acct.slot,
+            needs_login=True,
+        )
 
     no_network["usage"] = reading
     opened: list[int] = []
@@ -2145,7 +2184,9 @@ def test_log_in_over_a_rejected_token_waits_for_a_fresh_login_and_the_row_recove
             await settle(app)
             view = await open_accounts(pilot)
             await settle_until(app, lambda: painted(view, 2))
-            out: dict[str, Any] = {"before": (cells(view, 2), offered(view, 2, "login"))}
+            out: dict[str, Any] = {
+                "before": (cells(view, 2), offered(view, 2, "login"), why(view, 2))
+            }
             await press(pilot, "#account-login-2")
             await settle(app)
             out["header"] = shown(view.query_one("#login-header", Static))
@@ -2167,9 +2208,10 @@ def test_log_in_over_a_rejected_token_waits_for_a_fresh_login_and_the_row_recove
             return out
 
     out = asyncio.run(run())
-    before, offered_before = out["before"]
-    assert before["session"] == "⚠ token rejected" and before["week"] == "—"
-    assert offered_before  # Log in, beside the usage cells that say why
+    before, offered_before, hover = out["before"]
+    assert before["session"] == "!" and before["week"] == ""
+    assert hover.startswith("the token was rejected (HTTP 401)\nfix: press Log in")
+    assert offered_before  # Log in, beside the '!' that says why
     assert opened == [2]  # the row's own slot, in the login pane
     assert out["header"].startswith("Logging in to Work laptop")
     assert "type /login if Claude Code does not prompt you" in out["header"]
@@ -2297,23 +2339,35 @@ def test_an_emoji_name_shows_whole_and_every_column_stays_under_its_header() -> 
         _arranged(_status(3, "three@example.com"), alias="work", position=3),
     )
 
-    async def go(pilot: Pilot[None]) -> tuple[str, list[int], dict[int, list[int]]]:
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[str, list[int], dict[int, list[int]], dict[int, list[int]]]:
         view = await open_accounts(pilot)
         header = view.query_one(accounts_view.AccountsHeader)
         # Log in is offered on none of these rows, signed in all three: it is not drawn.
         columns = [cell.region.x for cell in header.query(".cell").exclude(".col-login")]
         rows = {
-            slot: [cell.region.x for cell in row(view, slot).query(".cell").exclude(".col-login")]
+            slot: [
+                cell.region.x
+                for cell in row(view, slot).query(".cell").exclude(".col-login")
+                if cell.display
+            ]
+            for slot in (1, 2, 3)
+        }
+        # A row whose '!' stands in for its two usage cells has no cell at the week's x.
+        week = header.query_one(".col-week").region.x
+        under = {
+            slot: [x for x in columns if x != week] if why(view, slot) else columns
             for slot in (1, 2, 3)
         }
         named = view.query_one("#account-name-2", accounts_view.NameCell)
         (strip,) = named.render_lines(Region(0, 0, named.size.width, 1))
-        return strip.text, columns, rows
+        return strip.text, columns, rows, under
 
-    drawn, columns, rows = drive(go, overview=overview)
+    drawn, columns, rows, under = drive(go, overview=overview)
     assert drawn.rstrip() == name, "whole: no joiner dropped, nothing cut"
     assert len(columns) == len(accounts_view.LAYOUT) - 1
-    assert rows == {1: columns, 2: columns, 3: columns}, "every column under its header"
+    assert rows == under, "every column under its header"
 
 
 def test_move_and_disable_buttons_write_through_the_service_and_refresh(
@@ -3291,7 +3345,7 @@ def _columns_at(view: AccountsView) -> dict[str, list[tuple[int, int]]]:
         spans = [
             (cell.region.x, cell.region.width)
             for cell in account_row.query(".cell")
-            if cell.parent is account_row and not isinstance(cell, Button)
+            if cell.parent is account_row and not isinstance(cell, Button) and cell.display
         ]
         lines[f"row {account_row.slot}"] = spans
         for button in account_row.query(Button):
@@ -3299,6 +3353,15 @@ def _columns_at(view: AccountsView) -> dict[str, list[tuple[int, int]]]:
                 stem = (button.id or "").rsplit("-", 1)[0]
                 lines.setdefault(stem, []).append((button.region.x, button.region.width))
     return lines
+
+
+def _with_the_problem_span(header: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The header's ``(x, width)`` spans as a row with no usage to show draws them: the session
+    and week columns as ONE span, from the session's x to the week's right edge."""
+    keys = [column.key for column in accounts_view.LAYOUT if column.key not in _BUTTON_COLUMNS]
+    session, week = keys.index("session"), keys.index("week")
+    (x, _), (week_x, week_width) = header[session], header[week]
+    return [*header[:session], (x, week_x + week_width - x), *header[week + 1 :]]
 
 
 @pytest.mark.parametrize("size", [(100, 40), (140, 40), (240, 40)], ids=["100", "140", "240"])
@@ -3350,13 +3413,21 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
     out = asyncio.run(run())
     closed = out["closed"]
     widths = [column.width for column in accounts_view.LAYOUT if column.key not in _BUTTON_COLUMNS]
+    # A row with no usage to show (2: rejected, 3: unsigned, 4: expired) draws one '!' cell
+    # from the session column's x to the week column's right edge, in place of the two.
+    header = closed["header"]
+    merged = _with_the_problem_span(header)
+    assert len(merged) == len(header) - 1
+    assert accounts_view.PROBLEM_COLUMN.width in [width for _, width in merged]
     for name, spans in closed.items():
         if name.startswith("account-"):  # one button on every row that offers it
             assert len(set(spans)) == 1, name  # the action column lines up too
         elif name.startswith("header-"):  # the header's ↑, ↓ and gap are over their buttons
             assert spans == closed[f"account-{name.removeprefix('header-')}"][:1], name
+        elif name in ("row 2", "row 3", "row 4"):
+            assert spans == merged, name  # the '!' spans the two usage columns exactly
         else:
-            assert spans == closed["header"], name  # every column at the header's x
+            assert spans == header, name  # every column at the header's x
             assert [width for _, width in spans] == widths, name
     starts = [x for x, _ in closed["header"]]
     assert starts == sorted(starts) and len(set(starts)) == len(starts)  # left to right
@@ -3371,22 +3442,25 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
     # Log in on the rejected, unsigned and expired rows; Log in again on the healthy one.
     assert len(closed["account-login"]) == 4
     for name, spans in out["scrolled"].items():  # scrolled sideways, all lines moved as one
-        if name.startswith("row "):
+        if name == "row 1":
             assert spans == out["scrolled"]["header"], name
+        elif name.startswith("row "):
+            assert spans == _with_the_problem_span(out["scrolled"]["header"]), name
     if size[0] >= 240:
         assert out["scrolls"] == 0  # it fits: nothing scrolls
     else:
         assert out["scrolls"] > 0 and out["scrolled"] != closed
 
 
-def test_an_expired_rows_reason_and_log_in_are_on_screen_at_160_columns_unscrolled(
+def test_an_expired_rows_mark_and_log_in_are_on_screen_at_160_columns_unscrolled(
     no_network: dict[str, Any],
 ) -> None:
     """The human: "it does tell me when something is logged out or login has expired etc,
     make that also surface a login button next to it". At 160 columns with the sidebar at
     its default width the status and *Log in* sat past the right edge, behind both resets
-    columns (the tester's measure). The reason reads in the usage cells now (#8 on the
-    board: no status column), *Log in* right after them, before the resets: no scroll."""
+    columns (the tester's measure). The row's '!' stands where the usage would (#8 on the
+    board: no status column; #13: one mark, the reason on hover), *Log in* right after it,
+    before the resets: no scroll."""
     no_network["usage"] = _table_usage
 
     async def run() -> dict[str, Any]:
@@ -3398,27 +3472,139 @@ def test_an_expired_rows_reason_and_log_in_are_on_screen_at_160_columns_unscroll
             table = view.query_one("#claude-table")
             seen = table.scrollable_content_region
             expired = row(view, 4)  # slot 4: the token expired
-            reason, week = expired.cell("session"), expired.cell("week")
+            mark = expired.cell(accounts_view.PROBLEM_COLUMN.key)
             login = expired.query_one("#account-login-4", Button)
             return {
                 "sidebar": app.sidebar.outer_size.width,
                 "scroll": table.scroll_x,
-                "status": (shown(reason), seen.contains_region(reason.region)),
+                "status": (shown(mark), why(view, 4), seen.contains_region(mark.region)),
                 "login": (
                     offered(view, 4, "login"),
                     seen.contains_region(login.region),
                     login.region.right <= app.size.width,
-                    login.region.x - week.region.right,
+                    login.region.x - mark.region.right,
                 ),
             }
 
     out = asyncio.run(run())
     assert out["sidebar"] == 30 and out["scroll"] == 0  # the default sidebar; never scrolled
-    text, status_seen = out["status"]
-    assert text.startswith("⚠ token expired") and status_seen
+    text, hover, status_seen = out["status"]
+    assert text == "!" and hover.startswith("the stored token has expired\nfix: press Log in")
+    assert status_seen
     offered_here, login_seen, on_screen, gap = out["login"]
     assert offered_here and login_seen and on_screen
     assert gap == 1  # right beside the usage cells: one cell apart
+
+
+def _painted(app: FleetApp) -> list[str]:
+    """Every row of the screen as the terminal shows it: the composited strips, not the
+    widgets' geometry (``tests/test_ui_remote.py``'s ``painted``)."""
+    strips = app.screen._compositor.render_full_update(simplify=True).strips
+    return ["".join(segment.text for segment in strip) for (strip,) in strips]
+
+
+def _unreadable_frame() -> AccountsOverview:
+    """One row of each kind the '!' is about, and one of each it is not: slot 1 read,
+    slot 2 a kept reading (F1 of #400), slot 3 unreadable with nothing kept, slot 4
+    never signed in."""
+    return _overview(
+        _arranged(_status(1, "me@example.com"), position=1),
+        _arranged(_status(2, "two@example.com"), position=2),
+        _arranged(_status(3, "three@example.com"), position=3),
+        _arranged(_status(4, None), position=4),
+    )
+
+
+_UNREACHABLE = "could not reach the usage endpoint (URLError)"
+
+
+def _unreadable_usage(account: ClaudeAccount) -> ClaudeUsage:
+    if account.slot == 3:
+        return accounts_service.unreadable_usage(UsageCause.unreachable, _UNREACHABLE, slot=3)
+    if account.slot == 2:
+        return ClaudeUsage(
+            available=True,
+            session_percent=33,
+            week_percent=10,
+            fetched_at=datetime.now(tz=UTC) - timedelta(minutes=12, seconds=5),
+            last_failed_at=datetime.now(tz=UTC),
+            last_failed_reason=_UNREACHABLE,
+        )
+    return _table_usage(account)
+
+
+def test_an_unreadable_account_shows_one_mark_across_its_usage_and_says_why_on_hover(
+    no_network: dict[str, Any],
+) -> None:
+    """The owner (#13): with no reading to show and none kept, the row read '⚠ token
+    missing' cut to 16 cells and '—', which looks like no usage, not an error. Now ONE '!'
+    stands across the session and week columns, nothing else there and no reason on the
+    row, and hovering it shows what is wrong and the fix. A kept reading (#408) still
+    shows its numbers and age, and the table at 160 columns is laid out as before: the
+    mark's row has every other column, *Log in* and the arranging buttons where the read
+    row has them."""
+    no_network["usage"] = _unreadable_usage
+
+    async def run() -> dict[str, Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_unreadable_frame)
+        app.TOOLTIP_DELAY = 0.01  # a timer of 0 divides by it
+        async with app.run_test(size=(160, 50), tooltips=True) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 3))
+            header = view.query_one("#claude-header")
+            session = header.query_one(".col-session").region
+            week = header.query_one(".col-week").region
+            painted_rows = {slot: _painted(app)[row(view, slot).region.y] for slot in (1, 2, 3, 4)}
+            usage_span = slice(session.x, week.right)
+            mark = row(view, 3).cell(accounts_view.PROBLEM_COLUMN.key)
+            after = {  # where everything right of the usage is drawn, on each row
+                slot: [
+                    (widget.id or "").rsplit("-", 1)[0] + f"@{widget.region.x}"
+                    for widget in row(view, slot).query("Button, .cell")
+                    if widget.display and widget.region.x >= week.right
+                ]
+                for slot in (2, 3)  # two managed slots: both offer Remove
+            }
+            await pilot.hover(mark)
+            tooltip = app.screen.query_one("#textual-tooltip", Static)
+            await settle_until(app, lambda: tooltip.display, group=_NO_WORKER)
+            return {
+                "rows": {slot: text[usage_span] for slot, text in painted_rows.items()},
+                "lines": painted_rows,
+                "hover": shown(tooltip),
+                "why": why(view, 3),
+                "kept": cells(view, 2)["session"],
+                "after": after,
+                "scroll": view.query_one("#claude-table").scroll_x,
+                "header": [shown(cell) for cell in header.query(Static)][:3],
+            }
+
+    out = asyncio.run(run())
+    three = out["rows"][3]
+    assert three.strip() == "!" and three.count("!") == 1, three  # one mark, nothing else
+    assert three.startswith("!"), "where the session's bar would start"
+    line_three = out["lines"][3]
+    assert "—" not in line_three and "could not reach" not in line_three, line_three
+    assert out["why"] == f"{_UNREACHABLE}\nfix: check the network or HTTPS_PROXY"
+    assert out["hover"] == out["why"], "hovering the '!' shows the reason and the fix"
+    # Never signed in: the same mark, and the same on hover, with Log in beside it.
+    assert out["rows"][4].strip() == "!" and "not signed in" not in out["lines"][4]
+    # A kept reading still shows its numbers and their age (#408), and no mark.
+    assert out["kept"] == "▮▮▯▯▯ 33% · 12m" and "!" not in out["rows"][2]
+    assert "▯▯▯▯▯ 7%" in out["rows"][1] and "!" not in out["rows"][1]
+    # 160 columns: nothing scrolled, the arrows first, and right of the usage the mark's
+    # row is drawn exactly as a read row: Log in, both resets, the plan, Disable, Remove.
+    assert out["scroll"] == 0 and out["header"] == ["↑", "↓", "#"]
+    assert out["after"][3] == out["after"][2], out["after"]
+    assert [where.split("@")[0] for where in out["after"][3]] == [
+        "account-login",
+        "account-cell-session-resets",
+        "account-cell-week-resets",
+        "account-cell-plan",
+        "account-toggle",
+        "account-remove",
+    ]
 
 
 def test_log_in_again_reads_whole_on_screen_at_160_columns_unscrolled(

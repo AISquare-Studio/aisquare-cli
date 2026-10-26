@@ -104,7 +104,8 @@ def _percent(value: float | None) -> str:
 
 
 def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> tuple[str, str]:
-    """``(session used, week used)`` as the table shows them; the reason when there is nothing.
+    """``(session used, week used)`` as the table shows them; the reason when there is nothing,
+    with what to do about it (``explain_usage``: the fix the Accounts page shows on hover).
 
     The columns say USED in their headers: a bare ``40%`` read as the room left
     to an agent on a fresh install, which then rationed a nearly empty account.
@@ -116,7 +117,7 @@ def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> t
     if usage is None:
         return _DASH, _DASH
     if not usage.available:
-        return usage.reason or "unavailable", ""
+        return accounts_service.explain_usage(usage), ""
     session = _window_cell(usage.session_percent, usage.session_resets_at, now=now)
     week = _window_cell(usage.week_percent, usage.week_resets_at, now=now)
     # The per-family weeks (#277), each with its own reset: they bind that family alone.
@@ -273,10 +274,19 @@ def _refreshed_line(statuses: list[ClaudeAccountStatus]) -> Text | None:
     )
 
 
+def _say_why(statuses: list[ClaudeAccountStatus]) -> None:
+    """Give each row with no usage to show the reading that says why and the fix
+    (``usage_problem``, what the Accounts page's '!' says on hover), asked or not: a
+    signed-out slot printed ``—`` and ``--json`` said ``"usage": null`` (review of #421)."""
+    for status in statuses:
+        status.usage = accounts_service.usage_problem(status, status.usage) or status.usage
+
+
 def _kept_lines(statuses: list[ClaudeAccountStatus]) -> list[Text]:
     """One line per row showing an older reading because the newest try read nothing:
-    ``account 2: rate-limited until 14:32 — …; showing the reading from 12m ago`` (F1 of
-    #400). The numbers in the table are that reading's; this says how old, and why."""
+    ``account 2: rate-limited until 14:32 — …; showing the reading from 12m ago; fix: …``
+    (F1 of #400). The numbers in the table are that reading's; this says how old, why, and
+    what to do about the failed try (``kept_fix_line``, from its cause)."""
     lines: list[Text] = []
     for status in statuses:
         usage = status.usage
@@ -287,7 +297,9 @@ def _kept_lines(statuses: list[ClaudeAccountStatus]) -> list[Text]:
             if usage.fetched_at is not None
             else ""
         )
-        lines.append(Text(f"{status.label}: {usage.last_failed_reason}{age}", style="yellow"))
+        fix = accounts_service.kept_fix_line(usage, slot=status.account.slot)
+        then = f"; {fix}" if fix is not None else ""
+        lines.append(Text(f"{status.label}: {usage.last_failed_reason}{age}{then}", style="yellow"))
     return lines
 
 
@@ -315,6 +327,7 @@ def list_(
         )
         for status in signed:
             status.usage = readings.get(status.account.slot)
+        _say_why(overview.accounts)
     if get_state().json_output:
         typer.echo(_overview_json(overview))
         return
@@ -351,6 +364,7 @@ def usage_(
     readings = accounts_service.cached_usage([status.account for status in asked], force=refresh)
     for status in asked:
         status.usage = readings.get(status.account.slot)
+    _say_why(statuses)
     if get_state().json_output:
         typer.echo(json.dumps([status.model_dump(mode="json") for status in statuses]))
         return

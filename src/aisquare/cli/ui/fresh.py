@@ -105,6 +105,8 @@ def plan_text(plan: FreshPlan) -> Text:
     text.append(" · ".join(always))
     if plan.live_agents:
         text.append(f"\nStopped first: {', '.join(plan.live_agents)}")
+    if plan.sessions:
+        text.append(f"\nIts tmux session is killed: {', '.join(plan.sessions)}")
     if also:
         text.append("\nAlso cleared: ", style="bold")
         text.append(" · ".join(also))

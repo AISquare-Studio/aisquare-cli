@@ -473,8 +473,13 @@ def fresh(
     except fresh_service.FreshRefused as exc:
         fail(str(exc), error=exc.code, ref=target.id, exit_code=2)
     except fresh_service.FreshIncomplete as exc:
-        if not get_state().json_output:
-            _emit_fresh(exc.report)
+        if get_state().json_output:
+            # The partial report too, under the error: what was stopped and removed before
+            # it stood still, which a script cannot read off a bare error object.
+            payload = {"error": "fresh_incomplete", "ref": target.id, "detail": str(exc)}
+            typer.echo(json.dumps({**payload, "report": exc.report.model_dump(mode="json")}))
+            raise typer.Exit(code=1) from None
+        _emit_fresh(exc.report)
         fail(str(exc), error="fresh_incomplete", ref=target.id)
     _emit_fresh(report)
     if report.manager_error is not None:
@@ -507,6 +512,8 @@ def _emit_fresh_plan(plan: FreshPlan, *, discard: bool) -> None:
     console.print(f"  clears  {' · '.join(fresh_service.count_words(plan.counts))}", markup=False)
     if plan.live_agents:
         console.print(f"  stops   {', '.join(plan.live_agents)} first", markup=False)
+    if plan.sessions:
+        console.print(f"  kills   tmux session {', '.join(plan.sessions)}", markup=False)
     for path in plan.worktrees:
         console.print(f"  🗑 {path}", markup=False)
     for branch in plan.fleet_branches:
@@ -541,7 +548,7 @@ def _emit_fresh(report: FreshReport) -> None:
     project = report.project
     name = project_service.display_name(project)
     if report.cleared != FreshCounts():
-        cleared = ", ".join(fresh_service.count_words(report.cleared))
+        cleared = ", ".join(fresh_service.cleared_words(report))
         console.print(f"✓ started {name} fresh — cleared {cleared}", markup=False)
     if report.stopped:
         console.print(f"  stopped: {', '.join(report.stopped)}", markup=False)

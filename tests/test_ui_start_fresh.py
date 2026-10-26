@@ -76,8 +76,13 @@ def _board(project_id: str) -> dict[str, list[tuple[Any, ...]]]:
 
 
 @pytest.fixture
-def alpha(tmp_path: Path, script: Script) -> ProjectInfo:
-    """Alpha onboarded, with two tasks, a note, a remembered fact and a prompt on it."""
+def alpha(tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch) -> ProjectInfo:
+    """Alpha onboarded, with two tasks, a note, a remembered fact and a prompt on it. No tmux
+    session of its stands: ``fleet shutdown``'s plan, which the dialog's plan asks, would
+    probe the fleet's socket, which a UI test never addresses."""
+    monkeypatch.setattr(
+        fleet_service, "shutdown_plan", lambda *_, **__: fleet_service.ShutdownPlan()
+    )
     (tmp_path / "alpha").mkdir()
     (project,) = seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
     with store_session() as store:

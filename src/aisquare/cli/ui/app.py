@@ -2222,7 +2222,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         result = event.worker.result
         if event.state is WorkerState.SUCCESS and isinstance(result, FreshReport):
             name = project_service.display_name(result.project)
-            cleared = ", ".join(fresh_service.count_words(result.cleared))
+            cleared = ", ".join(fresh_service.cleared_words(result))
             manager = f"; new manager {result.manager.label} started" if result.manager else ""
             self.notify(
                 f"✓ {name} started fresh — cleared {cleared}{manager}", timeout=10, markup=False

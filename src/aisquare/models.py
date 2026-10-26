@@ -1343,6 +1343,9 @@ class FreshPlan(BaseModel):
     counts: FreshCounts = Field(default_factory=FreshCounts)
     live_agents: list[str] = Field(default_factory=list)
     """Labels of the live agents it stops first, the manager first."""
+    sessions: list[str] = Field(default_factory=list)
+    """``<socket>:<session>`` for each of its tmux sessions the stop kills, live rows or none:
+    what a dead pane or a stray process outlives its row in."""
     worktrees: list[Path] = Field(default_factory=list)
     fleet_branches: dict[str, str] = Field(default_factory=dict)
     """``--branches``: the local fleet branches it deletes, once no tree has them out, each
@@ -1354,7 +1357,12 @@ class FreshReport(BaseModel):
     """What ``project fresh`` did (``services.fresh.start_fresh``)."""
 
     project: ProjectInfo
+    planned: FreshCounts = Field(default_factory=FreshCounts)
+    """What the run's own plan counted, before anything was stopped."""
     cleared: FreshCounts = Field(default_factory=FreshCounts)
+    """What it deleted: past :attr:`planned` by what was written after the plan was read,
+    the stop's own ``agent_exited`` and released claims (and anything posted meanwhile),
+    which go with the board too (:meth:`stop_events`)."""
     stopped: list[str] = Field(default_factory=list)
     """Labels of the agents it stopped (or recorded gone) before clearing."""
     worktrees_removed: list[Path] = Field(default_factory=list)
@@ -1367,3 +1375,8 @@ class FreshReport(BaseModel):
     """The fresh manager it started; ``None`` when the spawn was refused."""
     manager_error: str | None = None
     """Why the fresh manager did not start: the board is clear all the same."""
+
+    def stop_events(self) -> int:
+        """The board events cleared that the plan did not count: written after it was read,
+        the stop's own (an ``agent_exited`` a stopped agent, a released claim's note)."""
+        return max(0, self.cleared.events - self.planned.events)

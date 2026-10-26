@@ -17,9 +17,14 @@ the one supported action safe to offer, held here:
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sqlite3
+import sys
+import time
 import uuid
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -35,12 +40,21 @@ from aisquare.core.entries import new_entry
 from aisquare.core.ids import new_agent_id, new_event_id, new_task_id
 from aisquare.core.orchestrator import FLEET_AGENT_ENV_VAR, team_project
 from aisquare.core.store import store_session
-from aisquare.models import FleetAgent, ProjectInfo, TeamEvent, TeamSession, TeamTask
+from aisquare.models import (
+    FleetAgent,
+    FreshReport,
+    ProjectInfo,
+    TeamEvent,
+    TeamSession,
+    TeamTask,
+)
 from aisquare.services import fleet as fleet_service
 from aisquare.services import fresh as fresh_service
 from tests.test_worktree import _git
 
 _BOARD = ("team_task", "team_event", "team_session", "fleet_agent")
+_NO_SESSIONS = fleet_service.ShutdownPlan()
+"""What ``fleet shutdown``'s plan says of a project with no tmux session standing."""
 _KEPT = ("entry", "prompt", "metric")
 
 
@@ -164,23 +178,44 @@ def spawned(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, str, di
     yield calls
 
 
+@dataclass
+class Stops:
+    """What the faked ``fleet.shutdown`` was asked, and the sessions its plan lists."""
+
+    asked: list[str] = field(default_factory=list)
+    sessions: list[str] = field(default_factory=list)
+
+
 @pytest.fixture
-def stops(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def stops(monkeypatch: pytest.MonkeyPatch) -> Stops:
     """``fleet.shutdown`` (and its plan) faked: each live row of the project ended as a stop
-    ends it; the project ids it was asked for."""
-    asked: list[str] = []
+    ends it, with the ``agent_exited`` a stop writes on the board; the plan lists
+    :attr:`Stops.sessions`."""
+    faked = Stops()
 
     def shutdown(project: ProjectInfo, **_: Any) -> fleet_service.ShutdownReport:
-        asked.append(project.id)
+        faked.asked.append(project.id)
         with store_session() as store:
             live = store.fleet_agents(project.id, live_only=True)
             for row in live:
                 store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
+                store.add_team_event(
+                    TeamEvent(
+                        id=new_event_id(),
+                        project_id=project.id,
+                        kind="agent_exited",
+                        text=f"{row.label} exited (0)",
+                        created_at=datetime.now(tz=UTC),
+                    )
+                )
         return fleet_service.ShutdownReport(stopped=live)
 
-    monkeypatch.setattr(fleet_service, "shutdown_plan", lambda *_, **__: None)
+    def shutdown_plan(project: ProjectInfo, **_: Any) -> fleet_service.ShutdownPlan:
+        return fleet_service.ShutdownPlan(sessions=list(faked.sessions))
+
+    monkeypatch.setattr(fleet_service, "shutdown_plan", shutdown_plan)
     monkeypatch.setattr(fleet_service, "shutdown", shutdown)
-    return asked
+    return faked
 
 
 # --- the service ---------------------------------------------------------------------------
@@ -275,18 +310,18 @@ def test_task_numbers_restart_at_one_signals_are_gone_and_a_new_manager_has_a_ne
 def test_live_agents_are_stopped_the_way_shutdown_stops_them_before_anything_goes(
     two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
     spawned: list[tuple[str, str, dict[str, Any]]],
-    stops: list[str],
+    stops: Stops,
 ) -> None:
     alpha, _, _, _ = two
     with store_session() as store:
         store.upsert_fleet_agent(_agent(alpha, "coder-1"))
 
     planned = fresh_service.plan(alpha)
-    assert planned.live_agents == ["coder-1"] and stops == []
+    assert planned.live_agents == ["coder-1"] and stops.asked == []
 
     report = fresh_service.start_fresh(alpha)
 
-    assert stops == [alpha.id]
+    assert stops.asked == [alpha.id]
     assert report.stopped == ["coder-1"]
     assert report.cleared.agents == 2
 
@@ -300,7 +335,7 @@ def test_an_agent_left_live_by_the_stop_clears_nothing(
     with store_session() as store:
         live = store.upsert_fleet_agent(_agent(alpha, "coder-1"))
     before = _rows(alpha.id)
-    monkeypatch.setattr(fleet_service, "shutdown_plan", lambda *_, **__: None)
+    monkeypatch.setattr(fleet_service, "shutdown_plan", lambda *_, **__: _NO_SESSIONS)
     monkeypatch.setattr(
         fleet_service,
         "shutdown",
@@ -574,7 +609,7 @@ def test_it_is_refused_from_inside_one_of_the_projects_own_fleet_agents(
     assert _rows(alpha.id) == before and spawned == []
     # Another project's agent is not this project's pane: its plan is not refused for it.
     monkeypatch.setenv(FLEET_AGENT_ENV_VAR, theirs.id)
-    monkeypatch.setattr(fleet_service, "shutdown_plan", lambda *_, **__: None)
+    monkeypatch.setattr(fleet_service, "shutdown_plan", lambda *_, **__: _NO_SESSIONS)
     assert fresh_service.plan(alpha).live_agents == ["coder-1"]
 
 
@@ -607,3 +642,152 @@ def test_a_project_nobody_onboarded_is_refused(runner: CliRunner, tmp_path: Path
     refused = runner.invoke(app, ["project", "fresh", "-P", str(loose), "--yes"])
 
     assert refused.exit_code != 0, refused.output
+
+
+# --- what outlives its rows: the tmux session (#3) -----------------------------------------
+
+
+def test_a_tmux_session_with_no_live_row_is_stopped_too(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    stops: Stops,
+) -> None:
+    """The stop ran only for a live row, and ``fleet shutdown -P`` also kills the project's
+    session when none is: a dead pane, or a process a row recorded as died, stayed beside
+    the new manager (tester-start-fresh at fa1e62b6). The plan lists the session, and the
+    stop runs for it."""
+    alpha, _, _, _ = two
+    stops.sessions = ["asq:asq-alpha-x"]
+
+    planned = fresh_service.plan(alpha)
+    report = fresh_service.start_fresh(alpha)
+
+    assert planned.live_agents == [] and planned.sessions == ["asq:asq-alpha-x"]
+    assert stops.asked == [alpha.id] and report.stopped == []
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("tmux") is None, reason="tmux is not installed"
+)
+def test_a_dead_pane_and_a_stray_process_go_and_only_the_new_managers_window_stays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a real tmux server (the test's own: ``no_real_fleet``'s ``TMUX_TMPDIR``): the
+    manager exited and its dead pane stays (``remain-on-exit``), and a coder's row was
+    recorded as died while its process still runs. No row is live. After the reset the old
+    session is gone with both, the process too, and the one window is the new manager's."""
+    alpha = _add(tmp_path / "alpha", "alpha-x")
+    srv = fleet_service.server()
+    session = fleet_service.session_name("alpha-x")
+    srv.run("new-session", "-d", "-s", session, "-n", "coder-1", "sleep 600")
+    srv.run("set-option", "-g", "remain-on-exit", "on")
+    srv.run("new-window", "-d", "-t", f"={session}:", "-n", "manager", "sh -c 'exit 3'")
+    panes: dict[str, tuple[str, int]] = {}
+    for line in srv.run(
+        "list-panes", "-s", "-t", f"={session}", "-F", "#{window_name} #{pane_id} #{pane_pid}"
+    ).splitlines():
+        name, pane, pid = line.split()
+        panes[name] = (pane, int(pid))
+    deadline = time.monotonic() + 10
+    while srv.run("display", "-p", "-t", panes["manager"][0], "#{pane_dead}").strip() != "1":
+        assert time.monotonic() < deadline, "the manager's pane never died"
+        time.sleep(0.05)
+    with store_session() as store:
+        for label, (pane, _) in panes.items():
+            row = store.upsert_fleet_agent(
+                _agent(alpha, label, pane_id=pane, tmux_socket=fleet_service.settings().tmux_socket)
+            )
+            store.end_fleet_agent(row.id, exit_status=None, ended_by="died")
+    stray = panes["coder-1"][1]
+    assert _alive(stray)
+
+    def spawn(project: ProjectInfo, role: str, **_: Any) -> fleet_service.SpawnReceipt:
+        srv.run("new-session", "-d", "-s", session, "-n", "manager", "sleep 600")
+        pane = srv.run("list-panes", "-s", "-t", f"={session}", "-F", "#{pane_id}").split()[0]
+        with store_session() as store:
+            row = store.upsert_fleet_agent(_agent(project, "manager", pane_id=pane))
+        return fleet_service.SpawnReceipt(agent=row, asked_label=None, tmux_session=session)
+
+    monkeypatch.setattr(fleet_service, "spawn", spawn)
+    planned = fresh_service.plan(alpha)
+
+    report = fresh_service.start_fresh(alpha)
+
+    assert planned.live_agents == [] and planned.sessions == [f"asq:{session}"], planned
+    assert report.manager is not None
+    deadline = time.monotonic() + 10
+    while _alive(stray):
+        assert time.monotonic() < deadline, "the stray process outlived the reset"
+        time.sleep(0.05)
+    assert srv.list_sessions() == [session]
+    windows = srv.run("list-windows", "-t", f"={session}", "-F", "#{window_name}").split()
+    assert windows == ["manager"]
+
+
+def test_the_plans_counts_are_the_reports_and_the_stops_own_events_are_said_apart(
+    runner: CliRunner,
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    stops: Stops,
+) -> None:
+    """The plan counted 7 notes and events and the run cleared 11: the stop writes an
+    ``agent_exited`` for each agent it stops, and those go with the board too. The report
+    carries both: what the plan counted (``planned``) and what went (``cleared``), the
+    difference said as the stop's own."""
+    alpha, _, _, _ = two
+    with store_session() as store:
+        store.upsert_fleet_agent(_agent(alpha, "coder-1"))
+    planned = fresh_service.plan(alpha)
+
+    result = runner.invoke(app, ["--json", "project", "fresh", "-P", "alpha-x", "--yes"])
+
+    report = FreshReport.model_validate_json(result.stdout)
+    assert report.planned == planned.counts
+    assert report.cleared.model_copy(update={"events": planned.counts.events}) == planned.counts
+    assert (report.cleared.events, report.stop_events()) == (planned.counts.events + 1, 1)
+    with store_session() as store:
+        store.upsert_fleet_agent(_agent(alpha, "coder-2"))
+        for row in store.fleet_agents(alpha.id, live_only=True):
+            if row.label == "manager":
+                store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
+    said = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--yes"])
+    assert said.exit_code == 0, said.output
+    assert "1 note or event (1 written by the stop)" in " ".join(said.output.split())
+
+
+def test_an_incomplete_reset_prints_its_partial_report_under_json(
+    runner: CliRunner,
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alpha, _, _, _ = two
+    with store_session() as store:
+        live = store.upsert_fleet_agent(_agent(alpha, "coder-1"))
+        stopped = store.upsert_fleet_agent(_agent(alpha, "coder-2"))
+    monkeypatch.setattr(fleet_service, "shutdown_plan", lambda *_, **__: _NO_SESSIONS)
+    monkeypatch.setattr(
+        fleet_service,
+        "shutdown",
+        lambda *_, **__: fleet_service.ShutdownReport(
+            stopped=[stopped], failed=[fleet_service.ShutdownRow(live, "its pane is still alive")]
+        ),
+    )
+
+    result = runner.invoke(app, ["--json", "project", "fresh", "-P", "alpha-x", "--yes"])
+
+    assert result.exit_code == 1, result.output
+    said = json.loads(result.stdout)
+    assert said["error"] == "fresh_incomplete" and said["ref"] == alpha.id
+    assert "coder-1: its pane is still alive" in said["detail"]
+    assert said["report"]["stopped"] == ["coder-2"]
+    assert said["report"]["cleared"]["tasks"] == 0 and said["report"]["manager"] is None
+    assert len(_rows(alpha.id)["team_task"]) == 3, "nothing on the board was cleared"

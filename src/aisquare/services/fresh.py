@@ -57,7 +57,12 @@ def plan(
     whose pane the stop would take down mid-reset, another project's fleet agents that read
     its board as a hub's, live or a restart away (``project forget``'s rule,
     :func:`project_service.board_readers`), and a fleet the stop could not take down from
-    here (``fleet shutdown``'s own refusals: no usable tmux, a call from inside its server)."""
+    here (``fleet shutdown``'s own refusals: no usable tmux, a call from inside its server).
+
+    The tmux sessions the stop kills are planned too (:func:`_sessions`), live rows or none:
+    a session outlives its rows (a dead pane ``remain-on-exit`` keeps, a process a row
+    recorded as died that still runs), and left standing it kept them beside the new
+    manager."""
     with store_session() as store:
         project = _refuse(store, project)
         rows = store.fleet_agents(project.id)
@@ -67,8 +72,7 @@ def plan(
         key=lambda row: row.label != fleet_service.MANAGER_LABEL,
     )
     try:
-        if live:
-            fleet_service.shutdown_plan(project)  # its refusals, before anything is touched
+        sessions = _sessions(project, live=bool(live))
         trees = fleet_service.fleet_trees(project, rows)
         tips = fleet_service.fleet_branch_tips(project, rows) if branches else {}
         unpushed = fleet_service.unpushed_work(project, trees, tips)
@@ -81,6 +85,7 @@ def plan(
         branches=branches,
         counts=_counts(tables, worktrees=len(trees), branches=len(tips) if branches else None),
         live_agents=[row.label for row in live],
+        sessions=sessions,
         worktrees=trees,
         fleet_branches=tips,
         unpushed=unpushed,
@@ -102,8 +107,9 @@ def start_fresh(
     Planned again first (:func:`plan`, whose refusals are this one's), and refused while
     any tree or branch it would remove holds work found nowhere else, unless
     ``discard_unpushed``. Then, in this order, so that a step that fails leaves what a run
-    again can finish: the live agents stopped (``fleet shutdown``'s path: claims released,
-    ``agent_exited`` said, the project's tmux session killed), the agents' worktrees removed
+    again can finish: the live agents stopped and the project's tmux sessions killed
+    (``fleet shutdown``'s path, whenever either is there: claims released, ``agent_exited``
+    said), the agents' worktrees removed
     (``--force`` only when discarding), with ``branches`` the fleet branches deleted, the
     rows cleared in one transaction (``store.reset_project``), and a manager spawned as
     ``fleet spawn manager`` spawns one, a new session id and the only one on the board.
@@ -117,8 +123,8 @@ def start_fresh(
     if planned.unpushed and not discard_unpushed:
         raise FreshRefused(unpushed_refusal(planned), code="unpushed_work", plan=planned)
     project = planned.project
-    report = FreshReport(project=project, discarded=planned.unpushed)
-    if planned.live_agents:
+    report = FreshReport(project=project, planned=planned.counts, discarded=planned.unpushed)
+    if planned.live_agents or planned.sessions:
         try:
             down = fleet_service.shutdown(project, actor=actor)
         except fleet_service.FleetInterrupted as exc:
@@ -188,6 +194,16 @@ def count_words(counts: FreshCounts) -> list[str]:
     return [f"{n} {one if n == 1 else many}" for n, one, many in words if n is not None]
 
 
+def cleared_words(report: FreshReport) -> list[str]:
+    """:func:`count_words` of what ``report`` cleared, its events with how many of them the
+    stop itself wrote (``FreshReport.stop_events``): the plan counted the rest, so a plan of
+    7 and a run that cleared 11 read ``11 notes and events (4 written by the stop)``."""
+    words = count_words(report.cleared)
+    if extra := report.stop_events():
+        words[1] += f" ({extra} written by the stop)"  # [1]: the events, never None
+    return words
+
+
 def unpushed_line(item: FreshUnpushed) -> str:
     """``<tree> on <branch>: <n> commit(s) on no remote, uncommitted changes``, or
     ``branch <name>: …`` for a branch no tree has out."""
@@ -238,6 +254,19 @@ def _refuse(store: ContextStore, project: ProjectInfo) -> ProjectInfo:
         busy = project_service.ProjectBusyError(stored, readers=readers)
         raise FreshRefused(f"can't start fresh: {busy}", code="project_busy")
     return stored
+
+
+def _sessions(project: ProjectInfo, *, live: bool) -> list[str]:
+    """``<socket>:<session>`` for each of the project's tmux sessions the stop kills, as
+    ``fleet shutdown``'s plan lists them, refusing as it refuses (:class:`FleetError`). With
+    no live row and no usable tmux here, none: nothing could be killed, and nothing is said
+    to run."""
+    try:
+        return fleet_service.shutdown_plan(project).sessions
+    except fleet_service.FleetUnavailable:
+        if live:
+            raise
+        return []
 
 
 def _stopped(report: fleet_service.ShutdownReport) -> list[str]:

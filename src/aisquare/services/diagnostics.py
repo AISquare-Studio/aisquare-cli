@@ -13,6 +13,7 @@ from collections.abc import Callable, Collection, Container, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from importlib import metadata
 from pathlib import Path, PurePath
+from urllib.parse import urlsplit
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core
@@ -30,7 +31,7 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.config import RETIRED_SECTIONS, load_config, retired_sections
 from aisquare.core.injection import load_last
 from aisquare.core.keys import EXTENDED_MINIMUM
-from aisquare.core.spawn import TEAM_ENV_VARS
+from aisquare.core.spawn import TEAM_ENV_VARS, tmux_client_env
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
 from aisquare.core.terminal import outer_terminal
@@ -142,6 +143,7 @@ def doctor(*, live: bool = False, cwd: Path | None = None) -> list[DoctorCheck]:
         _check_claude_code(cwd),
         *_planned_agent_checks(),
         *_claude_accounts_checks(),
+        *_check_role_bindings(),
         _check_tmux(),
         _check_gh(),
         # Never warns, so it moves no actionable row out of the sidebar's first three.
@@ -166,6 +168,9 @@ def doctor(*, live: bool = False, cwd: Path | None = None) -> list[DoctorCheck]:
         # Beside the fleet terminal row, which reads the same running server (fix 4 of the
         # fleet-board card): it can warn, so it waits with the other late rows.
         _check_fleet_server_env(cwd=cwd),
+        # Only while a role asks for Claude Code's Remote Control (#289): which roles, and
+        # what in their launch would make Claude Code refuse it.
+        *_optional(_check_remote_control()),
         *_check_manager_board_context(),
         # Can warn (memory below the floor, pressure at warn), so it waits with the late rows.
         _check_fleet_capacity(),
@@ -2094,6 +2099,68 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
     return checks
 
 
+#: A binding's variables that point Claude Code at a directory: its config directory,
+#: whose ``settings.json`` must carry aisquare's hooks, and its temp directory.
+_BOUND_CONFIG_DIR, _BOUND_TMPDIR = "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_TMPDIR"
+
+
+def _check_role_bindings() -> list[DoctorCheck]:
+    """``role bindings``: each role a binding points at another Claude Code directory runs
+    one that works (#98).
+
+    Only bindings that name an account were checked (:func:`_claude_account_default_checks`).
+    One whose ``env`` sets ``CLAUDE_CONFIG_DIR`` to a directory without aisquare's hooks
+    runs sessions the board never hears of, and one whose ``CLAUDE_CODE_TMPDIR`` cannot be
+    written starts a Claude Code that cannot keep its temp files. Each value is expanded as
+    a launch expands it (``harness.expand_value``), and "has the hooks" is the one shared
+    answer (``agents.claude_code_connected``), so this row and Welcome never disagree. A
+    variable bound to a file (``env_files``) holds a secret, not a path, and is not read.
+    No row at all when no binding sets either variable: a machine that never bound one
+    keeps the doctor output it had.
+    """
+    try:
+        bindings = settings_service.role_bindings()
+    except Exception:  # `_check_config` says why the file cannot be read
+        return []
+    fine: list[str] = []
+    problems: list[str] = []
+    fixes: list[str] = []
+    line = install_route.command_line  # a fix is pasted: quoted for this shell, Windows too
+    for role, profile in sorted(bindings.items()):
+
+        def unset(key: str, role: str = role) -> str:
+            return line(["aisquare", "team", "bind", role, "--unset", key])
+
+        raw = profile.env.get(_BOUND_CONFIG_DIR)
+        if raw is not None:
+            path = Path(harness.expand_value(raw))
+            if not path.is_dir():
+                problems.append(f"{role}: {_BOUND_CONFIG_DIR} {path} is not a directory")
+                fixes.append(unset(_BOUND_CONFIG_DIR))
+            elif not agents_service.claude_code_connected(path):
+                problems.append(
+                    f"{role}: {_BOUND_CONFIG_DIR} {path} has no aisquare hooks, so its "
+                    "sessions never reach the board"
+                )
+                connect = ["aisquare", "agents", "connect", "claude-code", "--config-dir"]
+                fixes.append(f"{line([*connect, str(path)])} (or {unset(_BOUND_CONFIG_DIR)})")
+            else:
+                fine.append(f"{role} → {path}")
+        raw = profile.env.get(_BOUND_TMPDIR)
+        if raw is not None:
+            path = Path(harness.expand_value(raw))
+            if path.is_dir() and os.access(path, os.W_OK | os.X_OK):
+                fine.append(f"{role} temp → {path}")
+            else:
+                problems.append(f"{role}: {_BOUND_TMPDIR} {path} is not writable")
+                fixes.append(f"{line(['mkdir', '-p', str(path)])} (or {unset(_BOUND_TMPDIR)})")
+    if problems:
+        return [_warn("role bindings", "; ".join(problems), "; ".join(dict.fromkeys(fixes)))]
+    if fine:
+        return [_ok("role bindings", "; ".join(fine) + " — hooks connected, temp dirs writable")]
+    return []
+
+
 # --- system tools the fleet needs (docs/plans/fleet-tui.md §5 "Doctor", §8.2) ---------
 
 _OS_RELEASE = Path("/etc/os-release")
@@ -3116,6 +3183,94 @@ def _fleet_labels(agents: list[FleetAgent], names: dict[str, str], *, limit: int
     if len(agents) > limit:
         shown.append(f"+{len(agents) - limit} more")
     return ", ".join(shown)
+
+
+REMOTE_CONTROL_HOST = "api.anthropic.com"
+
+
+def _window_environment(
+    environ: Mapping[str, str] | None, server: tmux_core.TmuxServer | None
+) -> tuple[Mapping[str, str], str]:
+    """The environment a fleet window inherits, and where it comes from.
+
+    A tmux server copies the environment of the client that started it, and every window
+    opened on it inherits that, before its own ``-e`` pairs (the role's binding). So it is
+    the running fleet server's global environment; with none running, what the fleet would
+    start one with: this shell's, less what ``core.spawn.tmux_client_env`` strips (a
+    tracing base URL among it). A server that will not answer is read as none.
+    """
+    try:
+        srv = server or _fleet_server(fleet_service.settings().tmux_socket)
+        if srv.available() and not srv.server_absent():
+            return _server_environment(srv), "on the fleet server"
+    except Exception:  # diagnostics must never crash
+        pass
+    return tmux_client_env(os.environ if environ is None else environ), "in this shell"
+
+
+def _check_remote_control(
+    environ: Mapping[str, str] | None = None, server: tmux_core.TmuxServer | None = None
+) -> DoctorCheck | None:
+    """``remote control``: the roles started with Claude Code's own Remote Control (#289),
+    and what in their launch would make Claude Code refuse it; ``None`` while no role asks.
+
+    A blocker is what ``launch`` steps aside for: a role bound to a binary that is not
+    Claude Code; an ``ANTHROPIC_BASE_URL`` naming another host than the Anthropic API, in
+    the role's binding or in what its window inherits (:func:`_window_environment`, not
+    this shell's: the agents never see it); explainability tracing, whose proxy is such a
+    base URL at every traced launch; a ``CLAUDE_CODE_OAUTH_TOKEN``, which can make model
+    requests only. ``launch`` says the same on each launch; this row says it before one.
+    """
+    name = "remote control"
+    try:
+        config = load_config()
+    except Exception:  # the config row has the verdict on a config that will not load
+        return None
+    roles = sorted(role for role, settings in config.fleet.roles.items() if settings.remote_control)
+    if not roles:
+        return None
+    inherited, source = _window_environment(environ, server)
+    blockers: list[str] = []
+    for role in roles:
+        profile = harness.resolve_profile(role)
+        binary = harness.resolve_binary(role).binary
+        if not harness.is_default_agent(binary):
+            blockers.append(f"{role} runs {os.path.basename(binary)!r}, not Claude Code")
+        env = {**inherited, **profile.env}
+        base_url = (env.get("ANTHROPIC_BASE_URL") or "").strip()
+        if base_url and urlsplit(base_url).hostname != REMOTE_CONTROL_HOST:
+            where = "in its binding" if "ANTHROPIC_BASE_URL" in profile.env else source
+            host = urlsplit(base_url).hostname or "another host"
+            blockers.append(f"{role}: ANTHROPIC_BASE_URL {where} points at {host}")
+        if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+            where = "in its binding" if "CLAUDE_CODE_OAUTH_TOKEN" in profile.env else source
+            blockers.append(f"{role}: CLAUDE_CODE_OAUTH_TOKEN is set {where}")
+    if config.explainability.enabled:
+        blockers.append("explainability tracing sends every traced launch through its proxy")
+    on = ", ".join(roles)
+    if not blockers:
+        return _ok(
+            name,
+            f"on for {on} — each session can be continued from claude.ai/code and the Claude "
+            "app, titled '<project> · <label>'",
+        )
+    fix = (
+        "Remote Control needs Claude Code on a Claude.ai login (Pro, Max, Team or "
+        "Enterprise) talking to the Anthropic API: unbind the base URL or the token from "
+        "these roles, or turn tracing off, which `aisquare explainability disable` does for "
+        "every launch on this machine, not for these roles alone"
+    )
+    if source == "on the fleet server" and any(source in blocker for blocker in blockers):
+        fix += (
+            "; a variable the fleet server holds reaches every agent it starts until the "
+            "server is restarted from a shell without it (with no agent running: tmux -L "
+            f"{fleet_service.settings().tmux_socket} kill-server)"
+        )
+    return _warn(
+        name,
+        f"on for {on}, but Claude Code will refuse it: {'; '.join(blockers)}",
+        f"{fix}; `aisquare launch` skips the flag and says why until then",
+    )
 
 
 def _check_fleet(

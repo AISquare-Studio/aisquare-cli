@@ -755,7 +755,10 @@ def _starts_with_a_hand_over(
             accounts = app.query_one(accounts_view.AccountsView)
             accounts._on_screen = True
             accounts.session = SimpleNamespace(source="file")  # type: ignore[assignment]
-            signed_in = SimpleNamespace(signed_in=True, account=SimpleNamespace(slot=2))
+            # label and disabled: what the fleet summary line reads (P3-W2a, #287).
+            signed_in = SimpleNamespace(
+                signed_in=True, label="2", account=SimpleNamespace(slot=2, disabled=False)
+            )
             accounts.overview = SimpleNamespace(accounts=[signed_in])  # type: ignore[assignment]
             accounts.refresh_readings()
             welcome = app.query_one(welcome_view.WelcomeView)
@@ -985,6 +988,8 @@ def test_no_start_on_asqs_own_schedule_begins_once_a_hand_over_is_pending(
         {
             ui_app._DOCTOR_WORKER,  # the shell's, for the project now chosen
             accounts_view.USAGE_WORKER,
+            # Sessions on this machine (#287, 2c), read with the page's usage.
+            accounts_view.SESSIONS_WORKER,
             # The status line's dot, read again from the cache as the page's usage lands.
             ui_app.HEADROOM_WORKER,
             accounts_view.CREDITS_WORKER,

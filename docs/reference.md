@@ -34,7 +34,8 @@ concurrency-tested against racing parallel sessions):
 ├── projects/     # per-project data — code/ (symbol index), explainability-key
 ├── reports/      # what `asq exec` saved: argv, the streams' first bytes, source hashes (0700)
 ├── briefs/       # copies of the artifacts brief checks recorded, per project and brief (0700)
-├── cache/        # disposable (e.g. last_injection.json)
+├── cache/        # disposable (e.g. last_injection.json; statusline/: one record per Claude Code
+│                 #   session carrying asq-statusline, kept a day, and fleet.json, the figure it prints)
 └── log/          # capture and diagnostic logs
 ```
 
@@ -76,7 +77,7 @@ aisquare
 │                   — the project's symbol index (docs/memory.md#symbol-index; [code] enabled, max_file_kb, ignore)
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
 │                                                  [--config-dir DIR]
-├── accounts        list [--usage] · add · run <slot> [… claude args] · usage [slot]
+├── accounts        list [--usage] · add · run <slot> [… claude args] · usage [slot] [--summary]
 │                   (--usage and usage read a five-minute cache; --refresh reads now,
 │                   except an account backed off after HTTP 429/503 — see docs/fleet.md)
 │                   remove <slot>            — Claude Code accounts the CLI owns (docs/fleet.md)
@@ -86,6 +87,9 @@ aisquare
 │                   disable <slot> · enable <slot>   — the order (its first enabled, signed-in
 │                     account is the machine default), the project defaults, the names
 │                   usage also shows the pace (≈ N min to the limit) — see [accounts] in config
+│                   statusline [--install [--wrap] | --uninstall] [--slot S | --all]
+│                                            — Claude Code's status line, asq-statusline, opt-in
+│                   sessions [--since 15m]   — every session on this machine that reported
 │                   share [--status | --enable PARTS | --disable PARTS]   — memory, skills,
 │                                agents, commands, claude_md shared across accounts
 ├── team            on · status · focus <text> · role <name> · log [-n N]
@@ -201,6 +205,7 @@ list` prints every key. The ones that need more than their name:
 | `fleet.first_prompt` | `argv` | how an agent's first message reaches it: `argv` gives a Claude Code agent its message on its command line and types it for any other binary; `type` types it for every agent ([fleet](fleet.md#the-first-message)). |
 | `fleet.prompt_ack_seconds` | `45` | how long `fleet spawn`, `restart` and `switch` wait for the agent's first turn to start, and how long a listing gives it before the agent reads `attention`: "first prompt not taken". |
 | `fleet.draft_quiet_seconds` | `10` | how long a key typed into an agent's pane in `asq` keeps every fleet write — a nudge, a tell, a typed first message, the Remote's paste — out of that pane. A draft in its input box holds them off for as long as it stays. |
+| `fleet.roles.<role>.remote_control` | `false` | start the role's Claude Code sessions with Claude Code's own Remote Control, titled `<project> · <label>`, so claude.ai/code and the Claude app can continue them ([remote](remote.md#claude-codes-own-remote-control)); `fleet spawn --remote-control` / `--no-remote-control` overrides it per spawn, and a restart keeps the choice |
 | `fleet.deliver_notes_at_turn_end` | `true` | an agent other than the manager is handed the notes addressed to its label or role when its turn ends, instead of at its next prompt ([fleet](fleet.md#fleet-tell)). |
 | `fleet.quiet_compact_at` | `0` | a manager's context size, in tokens, at which it is compacted at a quiet point; `0` is off ([fleet](fleet.md#long-lived-managers-state-file-start-pack-and-quiet-compaction)). |
 | `fleet.quiet_compact_delay` | `45` | seconds after a manager's quiet Stop before its compaction is checked again and typed. |

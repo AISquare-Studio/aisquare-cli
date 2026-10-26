@@ -90,7 +90,7 @@ aisquare doctor                        # is everything wired? (and how to fix an
 One agent above every project: the **captain** runs every fleet for you, and you
 talk to it, typed or spoken. `aisquare captain` starts it (or attaches to it),
 and `aisquare captain say "what is up"` asks it what needs you, across every
-board. Every effect is one of its 24 tools, each leaving one audit event with
+board. Every effect is one of its 26 tools, each leaving one audit event with
 your words; `stop`, `spawn` and `restart` happen only when your words name what
 they act on, and a refusal is said, never faked.
 
@@ -134,6 +134,7 @@ short alias.
 | [Memory](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/memory.md) | Your agent remembers preferences and project conventions, and starts every session oriented. For everyone; nothing to run after setup |
 | [The fleet](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/fleet.md) | The UI, the roles, `aisquare fleet …`, Claude accounts, and every default you can change |
 | [Orchestration](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/orchestration.md) | Several agent sessions work one problem as a team, with a shared task board. Opt-in, per repo |
+| [Which instructions an agent follows](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/instructions.md) | Your CLAUDE.md, the role cycle, the persona and memory: where each lands, and how to settle a conflict between them |
 | [Work briefs](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/work-briefs.md) | A request as numbered requirements linked to board tasks, with the checks, findings and corrections recorded against them |
 | [Phone control](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/remote.md) | Optional: the fleet on your phone through your own ngrok tunnel. What needs you across every project, each agent's screen, the board, and once you allow writes, the keys to answer |
 | [Command reports](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/command-reports.md) | `asq exec` runs a command once and saves how it ended and on which source, so a later step can cite it without running it again |

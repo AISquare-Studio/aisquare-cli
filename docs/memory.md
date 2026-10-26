@@ -43,6 +43,15 @@ aisquare why                       # explain the last injection
 aisquare log                       # your captured prompt history, per project
 ```
 
+`context search` finds the entries that hold any of the words you give it, each
+as a prefix (`lint` finds `linting`), in any script (`вход`, `ログイン`). Every
+word is a word: `AND`, `OR`, `NOT` and `NEAR` are searched for, never read as
+search operators, and punctuation only separates words. Words are split as the
+index splits them (SQLite FTS5's `unicode61`), which in scripts written with
+combining vowel signs, such as Devanagari, is at each sign: `हिन्दी` finds an
+entry holding it, along with any other entry holding a word that starts with
+one of its pieces.
+
 Prompts are recorded only in a project you added (`aisquare project onboard`,
 `init`, Welcome or `+` in `asq`, a fleet spawn): a hooked session anywhere else
 keeps nothing. `[projects] capture = true` records them in every directory, as
@@ -76,6 +85,14 @@ ones a restart would start under it again. `forget` names them, and what frees
 it. A `prune` that drops the reading project too, its agents all stopped, drops
 the hub with it: every hold is decided before anything goes, so the plan and
 the sweep agree.
+
+Neither ever moves or writes the pin. When the pin from `project switch` named
+the project that went, it is cleared ("the pin on alpha was cleared"), and the
+active project follows your working directory again. With no pin, or a pin on
+another project, nothing changes, even when you forget the project you are
+standing in. Before #271 the pin moved to the most recently touched project,
+and with no pin at all one was written. Every terminal and every fleet that ran
+without `--project` then followed it.
 
 ```sh
 aisquare project forget ../old-checkout       # one registration; --purge deletes its history too

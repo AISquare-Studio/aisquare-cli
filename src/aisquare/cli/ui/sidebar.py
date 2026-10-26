@@ -37,7 +37,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from rich.cells import cell_len
 from rich.text import Text
@@ -66,6 +66,9 @@ from aisquare.models import FleetAgentStatus, HeadroomSummary, ProjectGroup, Pro
 from aisquare.services import fleet as fleet_service
 from aisquare.services.project import NICKNAME_MAX, display_name
 from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
+
+if TYPE_CHECKING:
+    from aisquare.cli.ui.attach import ReturnTo
 
 ROLE_ICON: dict[str, str] = {
     "manager": "🧭",
@@ -158,7 +161,14 @@ class DoctorSelected(Message):
 
 
 class AccountsSelected(Message):
-    """The Accounts page: the AISquare sign-in and the Claude Code accounts."""
+    """The Accounts page: the AISquare sign-in and the Claude Code accounts.
+
+    ``return_to`` is where to go back once a sign-in started there lands: Welcome's
+    *Sign in* asks to come back to Welcome (#286). Every other way in carries none."""
+
+    def __init__(self, return_to: ReturnTo | None = None) -> None:
+        self.return_to = return_to
+        super().__init__()
 
 
 class UsageStatsSelected(Message):
@@ -446,14 +456,24 @@ def headroom_dot(
 
 
 def status_line_text(
-    aisquare: bool | None, headroom: HeadroomSummary | None, *, every_needs_login: bool = False
+    aisquare: bool | None,
+    headroom: HeadroomSummary | None,
+    *,
+    every_needs_login: bool = False,
+    width: int | None = None,
 ) -> Text:
-    """``● aisquare  ● 3x claude`` (the x a multiplication sign) — the line under *⚙ Settings*.
+    """``● aisquare  ● 3x claude 58%`` (the x a multiplication sign), under *⚙ Settings*.
 
     The AISquare dot is green signed in, red signed out, grey while unknown. The
-    Claude dot is :func:`headroom_dot`; the count is how many accounts are usable,
-    and a ``⚠`` follows when an account needs a login. ``headroom`` is ``None`` until
-    the first summary lands.
+    Claude dot is :func:`headroom_dot`; the count is how many accounts are usable;
+    the figure is the fleet's share LEFT (``HeadroomSummary.percent_left``, #287), in
+    the dot's colour, and absent until a reading; a ``⚠`` follows when an account
+    needs a login. ``headroom`` is ``None`` until the first summary lands.
+
+    ``width``, the cells the line has: the figure is left out where the line would not
+    fit it, so the ellipsis never cuts the ``⚠`` (something to do) nor a number in two.
+    In the 28 cells of the sidebar, ``2x claude 3% ⚠`` fits and ``2x claude 58% ⚠``
+    does not (review of #357).
     """
     text = Text(no_wrap=True, overflow="ellipsis")
     colour = "grey50" if aisquare is None else GREEN if aisquare else RED
@@ -465,8 +485,14 @@ def status_line_text(
     if headroom is not None:
         text.append(f"{headroom.usable}{TIMES} ", style="dim")
     text.append("claude", style="dim")
-    if headroom is not None and headroom.needs_login:
-        text.append(" ⚠", style="yellow")
+    warning = " ⚠" if headroom is not None and headroom.needs_login else ""
+    if headroom is not None and headroom.percent_left is not None:
+        # The figure the dot's band stands for (#287): percent LEFT, in the dot's colour.
+        figure = f" {round(headroom.percent_left)}%"
+        if width is None or text.cell_len + cell_len(figure + warning) <= width:
+            text.append(figure, style=colour)
+    if warning:
+        text.append(warning, style="yellow")
     return text
 
 
@@ -1403,6 +1429,33 @@ class StatusLine(Static):
 
     ALLOW_SELECT = False
 
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self.facts: tuple[bool | None, HeadroomSummary | None, bool] = (None, None, False)
+        """What the line says: the AISquare sign-in, the headroom, ``every_needs_login``."""
+
+    def show_facts(
+        self, aisquare: bool | None, headroom: HeadroomSummary | None, every_needs_login: bool
+    ) -> None:
+        self.facts = (aisquare, headroom, every_needs_login)
+        self.fit_line()
+
+    def on_resize(self) -> None:
+        self.fit_line()
+
+    def fit_line(self) -> None:
+        """The line for :attr:`facts`, fitted to the cells it has now (:func:`status_line_text`'s
+        ``width``); before the first layout, whole."""
+        aisquare, headroom, every_needs_login = self.facts
+        self.update(
+            status_line_text(
+                aisquare,
+                headroom,
+                every_needs_login=every_needs_login,
+                width=self.content_size.width or None,
+            )
+        )
+
     def on_click(self, event: events.Click) -> None:
         event.stop()
         self.post_message(AccountsSelected().set_sender(self))
@@ -1419,7 +1472,7 @@ class OthersSection(Vertical):
     def compose(self) -> ComposeResult:
         yield SettingsRow()
         yield UpdateRow()
-        yield StatusLine(status_line_text(None, None), id="status-line")
+        yield StatusLine(id="status-line")
 
 
 # --- the pane ---------------------------------------------------------------------
@@ -1967,10 +2020,7 @@ class Sidebar(Vertical):
         self.query_one(UpdateRow).offer(version, runnable=runnable)
 
     def _paint_status(self) -> None:
-        line = status_line_text(
-            self.aisquare, self.headroom, every_needs_login=self.every_needs_login
-        )
-        self.query_one(StatusLine).update(line)
+        self.query_one(StatusLine).show_facts(self.aisquare, self.headroom, self.every_needs_login)
 
     # --- what the Spawn dialog asks of the sidebar ------------------------------------
 

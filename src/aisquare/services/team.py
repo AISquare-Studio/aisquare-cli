@@ -14,12 +14,14 @@ so repos that never opted in never see team output.
 from __future__ import annotations
 
 import enum
+import hashlib
 import json
 import logging
 import os
 import re
 import sqlite3
 import sys
+import unicodedata
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -722,7 +724,33 @@ def account_label(account: str | None, labels: Mapping[int, str] | None = None) 
 
 
 def task_key(title: str) -> str:
-    """Derive the idempotency key for a task: a slug of its title."""
+    """Derive the idempotency key for a task: a slug of its title, in any script (#270).
+
+    The title is NFKC-normalised and casefolded, and every run of characters that are not
+    letters, digits or marks (Unicode ``L*``, ``N*``, ``M*``) becomes one ``-``. A mark is
+    kept only after a letter, digit or mark it belongs to: Devanagari is not split at the
+    virama, and the variation selector after an emoji (U+FE0F) is not a key of its own, as
+    it was for ``⚠️`` and ``✔️`` alike (review of #314). ``[a-z0-9]`` alone keyed every title
+    with no ASCII letter ``task``, so the second such ``task add`` returned the first. An
+    ASCII title keys exactly as before (:func:`_legacy_task_key`); a title with nothing
+    left to slug, only emoji, is keyed by a hash of it.
+    """
+    folded = unicodedata.normalize("NFKC", title).casefold()
+    kept: list[str] = []
+    for char in folded:
+        category = unicodedata.category(char)[0]
+        belongs = category in "LN" or (category == "M" and bool(kept) and kept[-1] != "-")
+        kept.append(char if belongs else "-")
+    slug = re.sub(r"-+", "-", "".join(kept)).strip("-")
+    if slug:
+        return slug[:64]
+    if title.isascii():
+        return "task"
+    return "t-" + hashlib.sha256(folded.encode()).hexdigest()[:12]
+
+
+def _legacy_task_key(title: str) -> str:
+    """The key a title had before #270, which tasks added then are stored under."""
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     return slug[:64] or "task"
 
@@ -1651,12 +1679,21 @@ def add_task(
                 raise ValueError(f"--needs {ref}: that task belongs to another project's board")
             if needed.id not in resolved_needs:
                 resolved_needs.append(needed.id)
+        derived = key or task_key(title)
+        legacy = _legacy_task_key(title)
+        if key is None and legacy not in (derived, "task"):
+            # A title with non-ASCII words keyed differently before #270. The task added
+            # then under this very title is this one, so the re-add stays idempotent; the
+            # old key alone is not enough, as two titles shared it (`Fix вход`, `Fix тесты`).
+            stored = store.team_tasks(board.id)
+            if any(task.key == legacy and task.title == title for task in stored):
+                derived = legacy
         now = _now()
         task, created = store.upsert_task(
             TeamTask(
                 id=new_task_id(),
                 project_id=board.id,
-                key=key or task_key(title),
+                key=derived,
                 title=title,
                 detail=detail,
                 role=role,

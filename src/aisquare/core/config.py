@@ -316,6 +316,12 @@ class FleetRoleSettings(BaseModel):
     """The persona every spawn of this role gets unless ``--persona`` names another
     (docs/plans/spawn-personas.md §3.8). Checked at spawn, not at load: a name the
     project does not have refuses the spawn with this key in the message."""
+    remote_control: bool = False
+    """Start this role's Claude Code sessions with Claude Code's own Remote Control
+    (``--remote-control "<project> · <label>"``), so claude.ai/code and the Claude app can
+    continue them (#289). Off for every role by default; ``fleet spawn --remote-control``
+    / ``--no-remote-control`` overrides it for one spawn, and a restart replays the choice.
+    ``launch`` steps aside, saying why, where Claude Code refuses it."""
     deny_tools: list[str] = Field(default_factory=list)
     """Tools this role launches without, on top of ``[fleet] deny_tools`` and the role's
     own safety list (``harness.RoleProfile.denied_tools``)."""

@@ -1765,6 +1765,7 @@ class ContextStore(Protocol):
     def fleet_board(self, project_id: str) -> str | None: ...
     def fleet_manager_board(self, project_id: str) -> str | None: ...
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None: ...
+    def fleet_session_ids(self) -> set[str]: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
     def replace_ui_state(self, key: str, expected: str | None, value: str | None) -> bool: ...
@@ -2230,10 +2231,15 @@ def _fts_match(query: str) -> str:
     """Turn free text into a safe FTS5 query: prefix-match every word token.
 
     Building the MATCH expression ourselves (rather than passing raw user input)
-    keeps arbitrary punctuation from being parsed as FTS5 operators.
+    keeps arbitrary punctuation from being parsed as FTS5 operators. Each word is a
+    quoted FTS5 string, so ``AND``, ``OR``, ``NOT`` and ``NEAR`` are words too: a
+    bareword ``AND*`` was a syntax error (#269). Words are Unicode letters and
+    digits, as the index's ``unicode61`` tokenizer splits them, where
+    ``[A-Za-z0-9]+`` dropped every word in another script. A word never holds a
+    ``"``; doubling one is a guard should that split ever change.
     """
-    tokens = re.findall(r"[A-Za-z0-9]+", query)
-    return " OR ".join(f"{token}*" for token in tokens)
+    tokens = re.findall(r"[^\W_]+", query)
+    return " OR ".join('"' + token.replace('"', '""') + '"*' for token in tokens)
 
 
 #: The project rows a read may see. ``project forget`` tombstones a registration
@@ -5489,6 +5495,15 @@ class SqliteStore:
             (session_id,),
         ).fetchone()
         return _row_to_fleet_agent(row) if row is not None else None
+
+    def fleet_session_ids(self) -> set[str]:
+        """Every session id a fleet row has recorded, live or ended, in any project: the
+        conversations the fleet already owns, which ``fleet adopt`` neither lists nor takes
+        (#290). An ended row comes back with ``fleet restart``, not by adoption."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT session_id FROM fleet_agent WHERE session_id IS NOT NULL"
+        ).fetchall()
+        return {str(row[0]) for row in rows}
 
     def adopt_fleet_agent_session(
         self, agent_id: str, previous: str | None, session_id: str, lease_until: datetime

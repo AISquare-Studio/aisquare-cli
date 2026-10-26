@@ -59,10 +59,12 @@ LAUNCHERS = frozenset({"uv", "uvx", "pipx"})
 #: for a wrapper nobody measured); a longer chain is not read.
 MAX_LAUNCHERS = 4
 
-#: A process record older than this is dropped the next time one is written. The record of
-#: a process that is gone matches no live server (its pid and start token are taken by
-#: nothing), so this only keeps ``team_meta`` from growing.
-KEEP_SECONDS = 14 * 24 * 3600
+#: A record younger than this is kept without a look. An older one is kept only while its
+#: process is still there with the same start token: the record of a process that is gone
+#: matches no live server (its pid and start token are taken by nothing), so dropping it only
+#: keeps ``team_meta`` from growing. A session that runs for weeks (a manager) keeps its
+#: record for as long as it runs, however old it is.
+CHECK_AFTER_SECONDS = 24 * 3600
 
 
 #: The ``team_meta`` keys, ``host/<project id>/<pid>``. Under the project, as ``signal/``
@@ -132,18 +134,38 @@ def register(
             _key(project_id, process.pid),
             json.dumps({"session": session_id, "started": process.started, "at": now}),
         )
-        _forget_old(store, project_id, now)
+        _forget_old(store, project_id, now, look)
         return True
     except Exception:
         _log.debug("could not record the process of session %s", session_id, exc_info=True)
         return False
 
 
-def _forget_old(store: ContextStore, project_id: str, now: float) -> None:
+def _forget_old(
+    store: ContextStore, project_id: str, now: float, look: procs.Inspect | None = None
+) -> None:
+    """Drop the records of this board that prove nothing any more: garbage, and the records
+    of processes that are gone (or whose pid went to another process). A process that cannot
+    be read is read as gone: its record is lost, which costs its session its own row until
+    its hook registers again, never a teammate hidden."""
+    inspect = look or procs.inspect
     for key, raw in store.list_meta(f"{_PREFIX}{project_id}/").items():
         record = _parse(raw)
-        if record is None or now - record[2] > KEEP_SECONDS:
+        if record is None or _is_dead(key, record, now, inspect):
             store.delete_meta(key)
+
+
+def _is_dead(key: str, record: tuple[str, str, float], now: float, inspect: procs.Inspect) -> bool:
+    """Whether the process a record names is gone: asked only of a record older than
+    :data:`CHECK_AFTER_SECONDS`, so the common start (every record young) runs no process
+    lookup at all."""
+    if now - record[2] <= CHECK_AFTER_SECONDS:
+        return False
+    pid = key.rsplit("/", 1)[-1]
+    if not pid.isdigit():
+        return True
+    info = inspect(int(pid))
+    return info is None or info.started != record[1]
 
 
 def _parse(raw: str | None) -> tuple[str, str, float] | None:

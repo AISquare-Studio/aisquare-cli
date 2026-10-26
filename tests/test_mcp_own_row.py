@@ -734,25 +734,95 @@ def test_a_session_that_joins_at_its_first_prompt_registers_too(
     assert _rows() == [SOLO]
 
 
-def test_records_are_kept_per_board_dropped_when_old_and_purged_with_the_project(
+def test_records_are_kept_per_board_and_purged_with_the_project(
     runner: CliRunner, work_dir: Path, tree: Tree, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _team_on(runner)
     project_id = current_project().id
-    old = _claude_session(runner, tree, monkeypatch, SOLO, work_dir)
+    first = _claude_session(runner, tree, monkeypatch, SOLO, work_dir)
     with store_session() as store:
-        key = f"host/{project_id}/{old}"
-        record = json.loads(store.get_meta(key) or "{}")
-        record["at"] -= mcp_host.KEEP_SECONDS + 60
-        store.set_meta(key, json.dumps(record))
         store.set_meta(f"host/{project_id}/12345", "not a record")
 
-    fresh = _claude_session(runner, tree, monkeypatch, OTHER, work_dir)
+    second = _claude_session(runner, tree, monkeypatch, OTHER, work_dir)
     with store_session() as store:
-        assert list(store.list_meta(f"host/{project_id}/")) == [f"host/{project_id}/{fresh}"]
+        assert sorted(store.list_meta(f"host/{project_id}/")) == sorted(
+            [f"host/{project_id}/{first}", f"host/{project_id}/{second}"]
+        ), "a record that is not one goes, the two live processes' records stay"
         store.set_meta("host/prj_elsewhere/77", "{}")
         store.purge_project(project_id)
         assert list(store.list_meta("host/")) == ["host/prj_elsewhere/77"]
+
+
+def _age(project_id: str, pid: int, seconds: float) -> None:
+    """Make the record of ``pid`` ``seconds`` older than it is."""
+    with store_session() as store:
+        key = f"host/{project_id}/{pid}"
+        record = json.loads(store.get_meta(key) or "{}")
+        record["at"] -= seconds
+        store.set_meta(key, json.dumps(record))
+
+
+def _records(project_id: str) -> set[int]:
+    with store_session() as store:
+        return {int(key.rsplit("/", 1)[-1]) for key in store.list_meta(f"host/{project_id}/")}
+
+
+OLD = mcp_host.CHECK_AFTER_SECONDS + 60
+FIFTEEN_DAYS = 15 * 24 * 3600
+
+
+def test_the_record_of_a_session_that_is_still_running_outlives_any_age(
+    runner: CliRunner, work_dir: Path, tree: Tree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manager that runs for weeks keeps its own row: another session starting on the board
+    does not take the record of a process that is still there (review of #397, minor-2)."""
+    _team_on(runner)
+    project_id = current_project().id
+    manager = _claude_session(runner, tree, monkeypatch, SOLO, work_dir)
+    _age(project_id, manager, FIFTEEN_DAYS)
+
+    _claude_session(runner, tree, monkeypatch, OTHER, work_dir)
+    assert manager in _records(project_id)
+    _own_server_of(tree, monkeypatch, manager, "weeks in")
+    assert _notes() == {"weeks in": SOLO}
+    assert _rows() == [SOLO, OTHER]
+
+
+@pytest.mark.parametrize("how", ["gone", "reused"])
+def test_the_record_of_a_process_that_is_gone_goes_once_it_is_old(
+    runner: CliRunner, work_dir: Path, tree: Tree, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    _team_on(runner)
+    project_id = current_project().id
+    old = _claude_session(runner, tree, monkeypatch, SOLO, work_dir)
+    _age(project_id, old, OLD)
+    if how == "gone":
+        tree.gone(old)
+    else:
+        tree.reuse(old, CLAUDE)  # the pid is another process's now
+
+    fresh = _claude_session(runner, tree, monkeypatch, OTHER, work_dir)
+    assert _records(project_id) == {fresh}
+
+
+def test_a_young_record_is_kept_without_a_look_at_its_process(
+    runner: CliRunner, work_dir: Path, tree: Tree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every start would otherwise run a process lookup per record of the board."""
+    _team_on(runner)
+    project_id = current_project().id
+    young = _claude_session(runner, tree, monkeypatch, SOLO, work_dir)
+    tree.gone(young)
+    asked: list[int] = []
+
+    def look(pid: int) -> procs.ProcInfo | None:
+        asked.append(pid)
+        return tree.look(pid)
+
+    monkeypatch.setattr(procs, "inspect", look)
+    fresh = _claude_session(runner, tree, monkeypatch, OTHER, work_dir)
+    assert young not in asked
+    assert _records(project_id) == {young, fresh}
 
 
 @pytest.mark.parametrize(

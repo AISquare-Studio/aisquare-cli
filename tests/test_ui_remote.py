@@ -798,9 +798,10 @@ def test_the_panels_first_paint_never_waits_for_another_processs_lock_on_remote_
     once the writer's thread has read it.
 
     Bounded by half the lock's wait, not by a wall time: a paint that waits for the lock
-    takes all of it (10 s), and a slow runner took 1.6 s to open a panel that did not (seq
-    370)."""
-    lock_wait = 10.0
+    takes all of it, and a slow runner took 1.6 s to open a panel that did not (seq 370), and
+    5.9 s on a box running a hundred other things. The lock's wait is a minute, so a paint
+    that waits for it is half a minute past the bound however slow the box."""
+    lock_wait = 60.0
     monkeypatch.setattr(remote_server, "STATE_LOCK_WAIT_SECONDS", lock_wait)
     state = paths.remote_state_path()
     state.parent.mkdir(parents=True, exist_ok=True)

@@ -103,6 +103,15 @@ def patient_landing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(receiver, "LAND_S", 10.0)
 
 
+@pytest.fixture
+def patient_ui_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The captain's ``ui`` tool, asking as it does but waiting longer for the answer: these
+    pins are about what the tool is told, not about its 2 s (``actions.UI_TIMEOUT_S``, which
+    the budget pins above and below keep). On a box running a hundred other things the answer
+    took longer than two seconds, and the tool said asq did not answer."""
+    monkeypatch.setattr(actions, "UI_TIMEOUT_S", 60.0)
+
+
 def test_a_silent_client_plus_a_landing_fit_t1s_two_seconds() -> None:
     assert receiver.READ_S + LAND_S_AS_SHIPPED < actions.UI_TIMEOUT_S
 
@@ -530,7 +539,7 @@ def test_focus_project_on_a_card_in_a_folded_group_selects_it_and_says_the_curso
 @UNIX_SOCKETS
 @pytest.mark.needs_captain
 def test_the_captains_ui_tool_reaches_asq_and_the_action_runs(
-    tmp_path: Path, script: Script, ui_path: Path
+    tmp_path: Path, script: Script, ui_path: Path, patient_ui_client: None
 ) -> None:
     fleet(tmp_path, script)
 
@@ -550,7 +559,7 @@ def test_the_captains_ui_tool_reaches_asq_and_the_action_runs(
 @UNIX_SOCKETS
 @pytest.mark.needs_captain
 def test_the_captains_ui_tool_is_told_why_asq_said_no(
-    tmp_path: Path, script: Script, ui_path: Path
+    tmp_path: Path, script: Script, ui_path: Path, patient_ui_client: None
 ) -> None:
     """A direct call raises the frame's own Refused, in the words the captain is told; the
     SDK's ToolError wraps it only at the server boundary (T5, actions._as_sdk_tool)."""
@@ -578,6 +587,7 @@ def test_under_a_long_home_the_receiver_binds_where_the_ui_tool_dials(
     never the machine's shared ``/tmp/aisquare-<uid>``.
     """
     monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / ("h" * 60) / ("o" * 60) / "home"))
+    monkeypatch.setattr(actions, "UI_TIMEOUT_S", 60.0)  # where it dials is asked, not how soon
     fleet(tmp_path, script)
 
     async def body(pilot: Pilot[None]) -> tuple[Path | None, dict[str, Any]]:

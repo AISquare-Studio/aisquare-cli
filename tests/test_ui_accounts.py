@@ -2604,16 +2604,25 @@ def test_every_row_is_renamed_in_place_by_double_click_enter_or_f2() -> None:
             "buttons": [b.id for b in view.query(Button) if "rename" in (b.id or "")]
         }
         await pilot.click("#account-name-2")  # one click: the row, focused, not renamed
-        await pilot.pause()
+        await settle_until(app, lambda: app.focused is row(view, 2), group=_NO_WORKER)
         seen["single"] = (app.focused is row(view, 2), row(view, 2).renaming)
+
+        async def until_row(slot: int, done: Callable[[int], bool]) -> None:
+            await settle_until(app, lambda: done(slot), group=_NO_WORKER)
+
         for slot, how in ((1, "double"), (2, "enter"), (3, "f2")):
             if how == "double":
                 await rename(pilot, slot)
             else:
+                # The key goes to the row once it has the focus, and the field is read once it
+                # is open and focused: a pause for each read the row before it was focused, and
+                # the field before it was (f2: 1 run in 3 repeats of the module under load).
                 row(view, slot).focus()
-                await pilot.pause()
+                await until_row(slot, lambda n: app.focused is row(view, n))
                 await pilot.press(how)
-                await pilot.pause()
+                await until_row(
+                    slot, lambda n: row(view, n).renaming and app.focused is field(view, n)
+                )
             seen[how] = (
                 row(view, slot).renaming,
                 app.focused is field(view, slot),
@@ -2621,7 +2630,7 @@ def test_every_row_is_renamed_in_place_by_double_click_enter_or_f2() -> None:
                 row(view, slot).query_one(accounts_view.NameCell).display,
             )
             await pilot.press("escape")
-            await pilot.pause()
+            await until_row(slot, lambda n: not row(view, n).renaming)
         return seen
 
     seen = drive(go, overview=overview)
@@ -3323,10 +3332,13 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
             table = view.query_one("#claude-table")
             out["scrolls"] = table.max_scroll_x
             table.scroll_to(x=table.max_scroll_x, animate=False, immediate=True)
-            # Settled until the table stands at its far edge, not paused for once: the
-            # columns were read before the scroll had been laid out (1 run in a full suite
-            # under load, at 140 columns).
-            await settle_until(app, lambda: table.scroll_x == table.max_scroll_x)
+            # Settled until the columns have moved, which is what is read next, not paused for
+            # once: they were read before the scroll had been laid out (1 run in a full suite
+            # under load at 140 columns, and 3 in 3 repeats of it at 100 and 140). Where the
+            # table fits there is nothing to scroll, and nothing to wait for.
+            await settle_until(
+                app, lambda: not out["scrolls"] or _columns_at(view) != out["closed"], timeout=30
+            )
             out["scrolled"] = _columns_at(view)
             return out
 

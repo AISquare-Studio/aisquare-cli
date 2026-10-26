@@ -177,6 +177,47 @@ def test_a_swap_that_cannot_be_made_leaves_stdin_as_it_was_and_no_descriptor_ope
         os.fstat(taken[0])  # closed again
 
 
+@pytest.mark.parametrize("how", ["no idle deadline", "an idle deadline", "the captain's server"])
+def test_run_stdio_takes_the_pipe_once_before_it_builds_or_serves(
+    monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    """The swap is only worth what calls it: the tests above run the function, and the per-site
+    belts keep every other test green without it. Dropped, or moved below the build or the
+    reader, from ``run_stdio``, nothing else here would say so (the order test of the captain's
+    speaker does the same for its drainer)."""
+    order: list[str] = []
+
+    def swap() -> bool:
+        order.append("keep the pipe")
+        return True
+
+    class Stub:
+        def run(self, transport: str) -> None:
+            order.append(f"serve over {transport}")
+
+    def build(**_: object) -> Stub:
+        order.append("build")
+        return Stub()
+
+    async def until_idle(server: object, close_after: int, command: str) -> None:
+        order.append("serve until idle")
+
+    monkeypatch.setattr(mcp_server, "_stdio", False)  # run_stdio sets it: put back afterwards
+    monkeypatch.setattr(mcp_server, "keep_the_protocol_pipe_to_ourselves", swap)
+    monkeypatch.setattr(mcp_server, "build_server", build)
+    monkeypatch.setattr(mcp_server, "_serve_stdio_until_idle", until_idle)
+
+    if how == "no idle deadline":
+        mcp_server.run_stdio(close_after=0)
+        assert order == ["keep the pipe", "build", "serve over stdio"]
+    elif how == "an idle deadline":
+        mcp_server.run_stdio(close_after=300)
+        assert order == ["keep the pipe", "build", "serve until idle"]
+    else:
+        mcp_server.run_stdio(close_after=0, server=Stub())  # type: ignore[arg-type]
+        assert order == ["keep the pipe", "serve over stdio"]
+
+
 # --- every spawn a tool reaches names its stdin ------------------------------------------------
 
 

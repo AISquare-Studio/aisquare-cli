@@ -21,7 +21,7 @@ from aisquare.core import insights, outbox, paths
 from aisquare.core.config import AppConfig, ExperimentSettings, save_config
 from aisquare.core.injection import FRAME_VERSION, INJECTION_CAP_CHARS, load_last, record_injection
 from aisquare.models import ClientReason, ContextEntry, ProjectInfo, RedactionLevel, TurnMetric
-from aisquare.services import ci_augment, ci_client, ci_descriptor
+from aisquare.services import ci_augment, ci_client, ci_descriptor, ci_snapshot
 from aisquare.services import hooks as hooks_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services import team as team_service
@@ -30,6 +30,7 @@ from tests.ci_schemas import assert_valid, fixture
 from tests.ci_support import RUN, SESSION, repo, wire
 from tests.stub_ci_server import StubCI, live_descriptor, serve
 
+from .test_ci_snapshot import SUITE_GIT_SECONDS
 from .test_shipping_redaction import SECRETS
 
 # These record in a directory nobody added (``tmp_path``), as they were written to:
@@ -402,8 +403,18 @@ def test_the_row_carries_every_join_key_and_verdict(
 
 
 def test_the_snapshot_travels_as_an_object_id_and_lands_on_the_row(
-    wired: StubCI, isolated_home: Path, tmp_path: Path
+    wired: StubCI, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """On the budget tests/test_ci_snapshot.py gives its git calls (``unhurried_git``): the
+    capture and ``project_ref`` share the product's 2 s, and on a loaded Windows runner the
+    dirty tree's capture spent it, so ``project_ref`` failed open as designed and read here
+    as a failure (CI shard windows-py3.12 1/8, run 40236762852, three attempts of three).
+    What this pins is where the snapshot goes, not how long git may take."""
+    monkeypatch.setattr(
+        ci_snapshot,
+        "new_budget",
+        lambda: ci_snapshot._Budget(SUITE_GIT_SECONDS, clock=lambda: 0.0),
+    )
     root = repo(tmp_path / "r")
     (root / "tracked.txt").write_text("edited\n", encoding="utf-8")
     hooks_service.prompt_submitted("q", root, session_id=SESSION)

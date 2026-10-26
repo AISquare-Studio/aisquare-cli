@@ -1,57 +1,58 @@
 """A pull request into ``rc/**`` runs lean CI; everything else runs the full matrix.
 
 Owner decision 2026-10-23: shared runners give about 21 concurrent jobs and a
-``check`` leg takes about 45 minutes, so a train's workstream sub-PRs queued behind
-one another for hours. A sub-PR into ``rc/**`` runs lint, typecheck and the suite on
-one Linux leg (py3.12, captain on), the Linux package job and the lock job; the
+``check`` leg took about 45 minutes, so a train's workstream sub-PRs queued behind
+one another for hours. A sub-PR into ``rc/**`` runs lint, the py3.12 leg (captain on,
+no ambient) in its shards, the shard check, the Linux package job and ``ci-ok``; the
 other legs never start a runner. A push to ``rc/**`` or ``main`` (every merge), a PR
 into ``main`` (a train), the nightly and a run by hand keep the full matrix, so
 nothing reaches ``main`` that the full matrix has not seen.
 
 Read as YAML, then each ``fromJSON(<lean> && '<a>' || '<b>')`` is evaluated for both
-events here: the strings are what GitHub parses, so pinning them pins the split.
+events and expanded as GitHub expands a matrix (``tests/ci_matrix.py``): the strings
+are what GitHub parses, so pinning them pins the split.
 """
 
 from __future__ import annotations
 
-import json
-import re
-from pathlib import Path
 from typing import Any
 
-import yaml
+from tests.ci_matrix import LEAN, choose, jobs, workflow
 
-ROOT = Path(__file__).resolve().parent.parent
-LEAN = "github.event_name == 'pull_request' && startsWith(github.base_ref, 'rc/')"
-_CHOICE = re.compile(
-    r"^\$\{\{\s*fromJSON\(\s*(?P<cond>.+?)\s*&&\s*'(?P<lean>[^']*)'\s*\|\|\s*'(?P<full>[^']*)'\s*\)\s*\}\}$",
-    re.DOTALL,
-)
+#: Each leg of the full matrix: (os, python, captain, ambient, shards).
+FULL_LEGS = {
+    "py3.11-ambient-proxy-down": ("ubuntu-latest", "3.11", "on", "proxy-down", 4),
+    "py3.12": ("ubuntu-latest", "3.12", "on", "none", 4),
+    "py3.13-ambient-proxy-up": ("ubuntu-latest", "3.13", "on", "proxy-up", 4),
+    "py3.12-captain-off": ("ubuntu-latest", "3.12", "off", "none", 4),
+    "windows-py3.12": ("windows-latest", "3.12", "on", "none", 10),
+}
 
-
-def _workflow(name: str) -> dict[Any, Any]:
-    loaded: dict[Any, Any] = yaml.safe_load(
-        (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
-    )
-    return loaded
-
-
-def _choose(value: Any, *, lean: bool) -> Any:
-    """``value`` as GitHub resolves it for a sub-PR (``lean``) or any other event."""
-    match = _CHOICE.match(" ".join(str(value).split()))
-    assert match is not None, f"not a lean/full choice: {value!r}"
-    cond = " ".join(match["cond"].split())
-    assert cond == f"({LEAN})", f"the lean test is spelled differently here: {cond}"
-    return json.loads(match["lean" if lean else "full"])
+#: What only the ``lint`` job runs, once, rather than every leg: each step and its command.
+LINT = {
+    "Lint (ruff)": "ruff check src tests",
+    "Format check (ruff)": "ruff format --check src tests",
+    "Type check (mypy)": "mypy",
+    "Type check as Windows (mypy --platform win32)": "mypy --platform win32",
+    "Check the lock": "uv lock --check",
+}
+LINT_STEPS = set(LINT)
 
 
-def _legs(matrix: dict[str, Any]) -> list[dict[str, Any]]:
-    """The jobs a matrix expands to: its cross-product plus ``include``."""
-    axes = {key: values for key, values in matrix.items() if key not in ("include", "exclude")}
-    legs: list[dict[str, Any]] = [{}] if axes else []  # include alone is its own legs
-    for key, values in axes.items():
-        legs = [{**leg, key: value} for leg in legs for value in values]
-    return legs + list(matrix.get("include", []))
+def _legs(matrix_jobs: list[dict[str, Any]]) -> dict[str, tuple[Any, ...]]:
+    """Each leg's settings, asserting every job of the leg agrees on them."""
+    legs: dict[str, tuple[Any, ...]] = {}
+    for job in matrix_jobs:
+        settings = tuple(job[k] for k in ("os", "python", "captain", "ambient", "shards"))
+        assert legs.setdefault(job["leg"], settings) == settings, job
+    return legs
+
+
+def _shards(matrix_jobs: list[dict[str, Any]]) -> dict[str, list[int]]:
+    shards: dict[str, list[int]] = {}
+    for job in matrix_jobs:
+        shards.setdefault(job["leg"], []).append(job["shard"])
+    return {leg: sorted(numbers) for leg, numbers in shards.items()}
 
 
 def _skipped_on_sub_prs(job: dict[str, Any]) -> bool:
@@ -59,54 +60,86 @@ def _skipped_on_sub_prs(job: dict[str, Any]) -> bool:
     return condition in (f"${{{{ !({LEAN}) }}}}", f"!({LEAN})")
 
 
-def test_a_sub_pr_runs_one_linux_check_leg() -> None:
-    check = _workflow("ci.yml")["jobs"]["check"]
-    assert _legs(_choose(check["strategy"]["matrix"], lean=True)) == [
-        {"os": "ubuntu-latest", "python-version": "3.12", "captain": "on"}
-    ]
-    steps = [step.get("name", "") for step in check["steps"]]
-    assert {"Lint (ruff)", "Format check (ruff)", "Type check (mypy)", "Test (pytest)"} <= set(
-        steps
-    )
+def test_a_sub_pr_runs_one_linux_leg_in_its_shards() -> None:
+    lean = jobs("test", lean=True)
+    assert _legs(lean) == {"py3.12": ("ubuntu-latest", "3.12", "on", "none", 4)}
+    assert _shards(lean) == {"py3.12": [1, 2, 3, 4]}
+    steps = {step.get("name", "") for step in workflow()["jobs"]["test"]["steps"]}
+    assert "Test (pytest)" in steps
 
 
-def test_everything_else_runs_the_full_check_matrix() -> None:
-    check = _workflow("ci.yml")["jobs"]["check"]
-    legs = _legs(_choose(check["strategy"]["matrix"], lean=False))
-    assert sorted((leg["os"], leg["python-version"], leg["captain"]) for leg in legs) == [
-        ("ubuntu-latest", "3.11", "on"),
-        ("ubuntu-latest", "3.12", "off"),
-        ("ubuntu-latest", "3.12", "on"),
-        ("ubuntu-latest", "3.13", "on"),
-        ("windows-latest", "3.12", "on"),
-    ]
+def test_everything_else_runs_the_full_matrix() -> None:
+    full = jobs("test", lean=False)
+    assert _legs(full) == FULL_LEGS
+    assert _shards(full) == {
+        leg: list(range(1, shards + 1)) for leg, (*_, shards) in FULL_LEGS.items()
+    }, "a leg runs some shard twice, or not at all"
+
+
+def test_lint_runs_once_and_on_no_leg() -> None:
+    """ruff, the format check, mypy and the lock ran on every leg; once is the same check."""
+    steps = workflow()["jobs"]
+    lint = {step.get("name", "") for step in steps["lint"]["steps"]}
+    assert lint >= LINT_STEPS
+    assert "strategy" not in steps["lint"], "lint is one job, not a matrix"
+    leg = {step.get("name", "") for step in steps["test"]["steps"]}
+    assert not leg & LINT_STEPS, f"a test leg still runs {leg & LINT_STEPS}"
+
+
+def test_lint_runs_each_check_as_a_check() -> None:
+    """The commands, not only the names: ``ruff check --exit-zero``, ``ruff format`` without
+    ``--check``, an ``echo mypy`` or a ``mypy`` where the Windows run was all keep every step
+    name and check nothing."""
+    run = {step.get("name", ""): str(step.get("run", "")).strip() for step in lint_steps()}
+    assert {name: run.get(name) for name in LINT} == LINT
+
+
+def test_every_install_takes_the_pinned_ruff_and_mypy() -> None:
+    """ci/constraints.txt pins the versions; an install without it resolves the newest."""
+    for job in ("lint", "test"):
+        installs = [
+            str(step["run"])
+            for step in workflow()["jobs"][job]["steps"]
+            if step.get("name") == "Install"
+        ]
+        assert len(installs) == 1 and "-c ci/constraints.txt" in installs[0], (job, installs)
+
+
+def lint_steps() -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = workflow()["jobs"]["lint"]["steps"]
+    return steps
 
 
 def test_a_sub_pr_packages_on_linux_only() -> None:
-    package = _workflow("ci.yml")["jobs"]["package"]
+    package = workflow()["jobs"]["package"]
     matrix = package["strategy"]["matrix"]
-    assert _choose(matrix["os"], lean=True) == ["ubuntu-latest"]
-    assert _choose(matrix["os"], lean=False) == ["ubuntu-latest", "windows-latest"]
+    assert choose(matrix["os"], lean=True) == ["ubuntu-latest"]
+    assert choose(matrix["os"], lean=False) == ["ubuntu-latest", "windows-latest"]
 
 
 def test_a_sub_pr_skips_the_ambient_legs() -> None:
-    assert _skipped_on_sub_prs(_workflow("ci.yml")["jobs"]["ambient"])
+    """Its merge runs both on ``rc/**``; a sub-PR's one leg runs in no ambient."""
+    assert {job["ambient"] for job in jobs("test", lean=True)} == {"none"}
+    assert {job["ambient"] for job in jobs("test", lean=False)} >= {"proxy-down", "proxy-up"}
 
 
-def test_every_other_job_runs_on_sub_prs() -> None:
-    """The lock job, once present, and any job added later, run unless skipped here."""
-    jobs = _workflow("ci.yml")["jobs"]
-    assert [name for name, job in jobs.items() if _skipped_on_sub_prs(job)] == ["ambient"]
+def test_every_job_runs_on_sub_prs() -> None:
+    """A sub-PR's lean set is chosen by the matrices, so no job is skipped for it whole.
+
+    ``ci-ok`` needs every job, and a job skipped for a sub-PR would have to be told
+    apart from one skipped because something broke.
+    """
+    assert [name for name, job in workflow()["jobs"].items() if _skipped_on_sub_prs(job)] == []
 
 
 def test_ci_still_runs_on_every_event_it_did() -> None:
-    triggers = _workflow("ci.yml")[True]  # PyYAML reads the bare key `on` as True
+    triggers = workflow()[True]  # PyYAML reads the bare key `on` as True
     assert triggers["pull_request"]["branches"] == ["main", "rc/**"]
     assert triggers["push"]["branches"] == ["main", "rc/**"]
     assert "schedule" in triggers and "workflow_dispatch" in triggers
 
 
 def test_the_demo_renders_on_trains_and_pushes_not_sub_prs() -> None:
-    triggers = _workflow("demo.yml")[True]
+    triggers = workflow("demo.yml")[True]
     assert triggers["pull_request"]["branches"] == ["main"]
     assert triggers["push"]["branches"] == ["main", "rc/**"]

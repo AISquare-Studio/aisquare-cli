@@ -1029,8 +1029,10 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   another account signed into the slot is asked at once. In `--json` a reading that
   is not live says `"kept": true`. If you script usage, poll no more often than the cache's five minutes
   (`aisquare accounts usage --json`, without `--refresh`): every surface shares the
-  one cached reading. A token the
-  endpoint refuses shows at once (`⚠ token rejected`), and an expired one says
+  one cached reading. To hear that an agent has hit a usage limit, run
+  `aisquare watch` ([Watching the fleet](#watching-the-fleet)), which reports it with
+  the rest of what needs you, rather than a loop of your own around `accounts usage`.
+  A token the endpoint refuses shows at once (`⚠ token rejected`), and an expired one says
   so (`⚠ token expired`). Nothing else on the page is affected. On macOS the
   token is read from the login Keychain, from the item Claude Code keeps for
   each account (plain and every managed slot), and from `.credentials.json` when

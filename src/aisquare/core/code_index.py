@@ -328,6 +328,7 @@ def _git_files(root: Path) -> list[str] | None:
         completed = subprocess.run(
             ["git", "ls-files", "-co", "--exclude-standard", "-z"],
             cwd=root,
+            stdin=subprocess.DEVNULL,  # not the MCP protocol pipe a server's tool may run under
             capture_output=True,
             timeout=_GIT_TIMEOUT,
             check=False,

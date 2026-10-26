@@ -23,6 +23,7 @@ from aisquare.core.store import store_session
 from aisquare.core.workspace import current_project
 from aisquare.services import mcp_server
 from aisquare.services import team as team_service
+from tests import proc_tree
 
 pytestmark = pytest.mark.usefixtures("project_capture")
 
@@ -303,34 +304,34 @@ def test_a_plain_agent_with_a_persona_is_a_member_in_both_places(
     assert "<aisquare-team>" in _start(runner, SOLO, work_dir)
 
 
-def test_known_limitation_a_solo_sessions_own_board_tool_reads_as_a_team_until_it_goes_stale(
+def test_a_solo_sessions_own_board_tool_stays_solo(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """DELIBERATE, a pinned known limitation (#45 m1; owner decision 2026-10-24, option A).
-    A solo session that calls one of aisquare's board tools writes its own MCP server's row,
-    ``mcp:remote:<project>``, and every live ``mcp:`` row counts as a teammate: no row tells
-    a session's own server from a remote teammate's for sure. Two attempts to skip it read a
-    real teammate as solo (#46's blanket skip, #47 MAJOR-1; #48's ``CLAUDE_CODE_SESSION_ID``,
-    which Claude Code exports to every shell, #49 MAJOR-1). So the session reads as a team,
-    and gets the board, until that row goes stale (``_STALE_AFTER``): tokens, never a
-    hidden teammate. Precise detection is option B, planned in draft PR #397
-    (https://github.com/AISquare-Studio/aisquare-cli/pull/397, docs/plans/mcp-own-row.md
-    there). If this test fails because the session stays solo, that is option B landing:
-    update it there."""
+    """The known limitation of #45 m1 (option A, owner decision 2026-10-24) is fixed by
+    option B (#397, docs/plans/mcp-own-row.md). A solo session that calls one of aisquare's
+    board tools used to write its own MCP server's row, ``mcp:remote:<project>``, which every
+    live-row count took for a teammate: it got the board on its next prompt and the team's
+    instructions for a client that started next, until the row went stale (``_STALE_AFTER``).
+    Its server now proves it is the session's own (the session's hook registered the Claude
+    Code process, and that process is the server's parent) and acts as the session: no row,
+    no team. Everything that cannot prove it stays a team, below and in
+    ``tests/test_mcp_own_row.py``."""
+    tree = proc_tree.install(monkeypatch)
     _team_on(runner)
-    assert "<aisquare-team>" not in _start(runner, SOLO, work_dir)
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SOLO)  # as Claude Code starts its server
-    mcp_server.team_board()
-    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
+    claude = tree.spawn("claude")
+    monkeypatch.setenv("CLAUDE_PID", str(claude))
+    with tree.child_of(claude, monkeypatch):
+        assert "<aisquare-team>" not in _start(runner, SOLO, work_dir)
+    monkeypatch.delenv("CLAUDE_PID")
+    with tree.child_of(claude, monkeypatch):
+        mcp_server.team_board()  # as Claude Code starts its server, and the session calls it
+        assert mcp_server.server_instructions() == mcp_server.SOLO_INSTRUCTIONS
+    with store_session() as store:
+        assert [s.id for s in store.team_sessions(current_project().id)] == [SOLO]
 
-    assert "<aisquare-team>" in _prompt(runner, SOLO, work_dir), "the board comes back"
-    assert mcp_server.server_instructions() == mcp_server.TEAM_INSTRUCTIONS
-    assert "<aisquare-team>" in _start(runner, OTHER, work_dir)
-
-    later = team_service._now() + team_service._STALE_AFTER + timedelta(minutes=1)
-    monkeypatch.setattr(team_service, "_now", lambda: later)
-    assert mcp_server.server_instructions() == mcp_server.SOLO_INSTRUCTIONS, "stale: solo again"
-    assert "<aisquare-team>" not in _start(runner, THIRD, work_dir)
+    assert _prompt(runner, SOLO, work_dir) == "", "no board comes back"
+    assert "<aisquare-team>" in _start(runner, OTHER, work_dir), "a second session is a team"
+    assert "<aisquare-team>" in _prompt(runner, SOLO, work_dir)
 
 
 def test_the_gate_asks_for_an_open_task_and_never_reads_the_board_s_tasks(
@@ -423,7 +424,7 @@ def test_a_prune_keeps_the_mark_of_a_session_silent_under_the_claim_clock(
     assert "<aisquare-team>" in _prompt(runner, SOLO, work_dir)
 
 
-# --- #52 (option A): #49's repros, a team member never read as solo --------------------
+# --- #52, kept by option B (#397): #49's repros, a team member never read as solo -------
 
 
 def test_a_serve_started_from_a_claude_code_shell_still_shows_its_clients_as_a_team(
@@ -432,7 +433,8 @@ def test_a_serve_started_from_a_claude_code_shell_still_shows_its_clients_as_a_t
     """#49 MAJOR-1: Claude Code exports ``CLAUDE_CODE_SESSION_ID`` to every shell it runs,
     so an ``aisquare serve`` started from session S's Bash tool inherits S's id. #48 named
     every client's row after S (``mcp:cc-S``) and skipped it: S beside a live Desktop
-    teammate read as solo. Every row counts now."""
+    teammate read as solo. Every row counts, and this server, a child of a shell, proves
+    nothing (``tests/test_mcp_own_row.py`` runs it with a process tree and the hook's record)."""
     _team_on(runner)
     assert "<aisquare-team>" not in _start(runner, SOLO, work_dir)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SOLO)  # inherited by the serve process
@@ -495,7 +497,7 @@ def test_a_remote_teammate_over_serve_makes_the_board_a_team(
     """The final review's MAJOR-1: #46 skipped every ``mcp:`` row, and a remote teammate's
     row is one (docs/orchestration.md, *Remote agents over MCP*). A hand-run session beside
     it read solo: no block, the SOLO line, nothing on its prompts. Every live ``mcp:`` row
-    counts (option A), whoever started its server."""
+    counts, whoever started its server."""
     _team_on(runner)
     assert "<aisquare-team>" not in _start(runner, SOLO, work_dir)  # alone, before it
 

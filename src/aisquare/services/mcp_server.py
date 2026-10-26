@@ -7,8 +7,11 @@ the same board.
 
 Remote callers act through a **virtual session** (``mcp:<client>``), so their
 traffic is attributed on the board and flows into every local session's
-deltas like any teammate's. The tool surface is deliberately small — nine
-tools — because giant MCP surfaces burn context before any work happens.
+deltas like any teammate's. A Claude Code session's OWN stdio server is not
+remote: where it can prove whose it is (:mod:`aisquare.services.mcp_host`) it acts
+as that session, so the board shows one session per agent. The tool surface is
+deliberately small — nine tools — because giant MCP surfaces burn context before
+any work happens.
 
 Failing tools surface as real MCP error results (``isError: true``), never as
 error-prefixed success strings, and the error wording is a contract: remote
@@ -32,6 +35,7 @@ aisquare-cli[serve]``); the CLI imports it lazily and explains if missing.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import logging
 import os
@@ -44,9 +48,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 from aisquare.core import code_index, paths
 from aisquare.core import credentials as credentials_store
-from aisquare.core.store import BriefChangedError, is_locked_error
+from aisquare.core.store import BriefChangedError, ContextStore, is_locked_error
 from aisquare.models import TaskStatus, TeamSession
 from aisquare.services import code as code_service
+from aisquare.services import mcp_host
 from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError, DeliveryUnconfirmedError, TeamDisabledError
@@ -92,6 +97,31 @@ instead of quietly turning the CLI's notice into a lie.
 _log = logging.getLogger(__name__)
 
 
+#: Whether this process serves over stdio: set by :func:`run_stdio` for this module's own
+#: server, before it is built. Only a stdio server has one client, the process that started
+#: it (and so a parent to prove it by); an HTTP server's clients are not its parent, and a
+#: tool called in process (the tests') has none.
+_stdio = False
+
+
+def _hosting_session(store: ContextStore, project_id: str) -> TeamSession | None:
+    """The session of this board that this server is the own MCP server of, or ``None``.
+
+    Only a stdio server whose client set no identity of its own: ``AISQUARE_SERVE_CLIENT``
+    and ``AISQUARE_SERVE_ROLE`` say "I am a teammate called this", and are believed over a
+    process tree. The proof itself is :func:`~aisquare.services.mcp_host.host_of`; any
+    doubt, a read that fails included, is ``None``, and the caller is a teammate."""
+    if not _stdio:
+        return None
+    if _client_named() or _role_named():
+        return None
+    try:
+        return mcp_host.host_of(store, project_id)
+    except Exception:
+        _log.debug("could not tell whose own server this is", exc_info=True)
+        return None
+
+
 def client_session_id(project_id: str) -> str:
     """The virtual team-session id remote calls act as, scoped per project.
 
@@ -99,16 +129,32 @@ def client_session_id(project_id: str) -> str:
     every other project's board would render the remote unattributed while
     the first kept a phantom live session forever.
     """
-    client = os.environ.get("AISQUARE_SERVE_CLIENT", "").strip() or "remote"
+    client = _client_named() or "remote"
     return f"mcp:{client}:{project_id.removeprefix('prj_')[:6]}"
 
 
+def _client_named() -> str:
+    """What ``AISQUARE_SERVE_CLIENT`` calls this client, ``""`` when it names none."""
+    return os.environ.get("AISQUARE_SERVE_CLIENT", "").strip()
+
+
+def _role_named() -> str:
+    """What ``AISQUARE_SERVE_ROLE`` calls this client's role, ``""`` when it names none."""
+    return os.environ.get("AISQUARE_SERVE_ROLE", "").strip()
+
+
 def _client_role() -> str:
-    return os.environ.get("AISQUARE_SERVE_ROLE", "").strip() or "remote"
+    return _role_named() or "remote"
 
 
 def _ensure_virtual_session() -> str:
-    """Register (or revive) the virtual session with the orchestrator; returns its id.
+    """Register (or revive) the session the caller acts as with the orchestrator; returns
+    its id.
+
+    A server that proves it is a session's own (:func:`_hosting_session`) acts AS that
+    session: no row of its own, its notes, claims and ``team_log(by_session='me')`` are the
+    session's, and one agent is one session on the board. Its presence is the host's row,
+    kept alive by the call. Anyone else is a virtual session, ``mcp:<client>:<project>``.
 
     Gated like every other orchestrator entry point: the master switch must be on and
     the project must already be activated (``aisquare serve`` activates its
@@ -134,6 +180,10 @@ def _ensure_virtual_session() -> str:
         if not project_service.tracked(store, project):
             raise project_service.NotAdded(project)  # capture off, and nobody added it
         project_service.capture(store, project)  # on: the session row needs one
+        host = _hosting_session(store, project.id)
+        if host is not None:
+            store.touch_session(host.id)  # a call is proof of life; its state stays its own
+            return host.id
         session_id = client_session_id(project.id)
         now = datetime.now(tz=UTC)
         store.upsert_session(
@@ -313,7 +363,7 @@ def team_log(since_seq: int = 0, limit: int = 20, by_session: str | None = None)
     """Team events after ``since_seq`` (track the returned seq as your cursor).
 
     ``by_session`` filters to one author: a session id/prefix, or the literal
-    ``"me"`` for your own virtual session — read back your own recent writes.
+    ``"me"`` for yourself — read back your own recent writes.
     """
 
     def run() -> str:
@@ -467,11 +517,13 @@ SOLO_INSTRUCTIONS = "aisquare's shared task board (team_board) and saved project
 def _serves_a_team() -> bool:
     """Whether the session this server starts for has a team: a member by its environment
     (:func:`~aisquare.services.team.member_by_env`, as the hooks ask it), or, on an active
-    board, an open task, a live fleet agent or ANY
-    live session (:func:`~aisquare.services.team.board_has_team`): the server has no
-    session id, so it cannot tell its own row from a teammate's, and counts it as one.
-    The instructions are read once, at the client's start, and rode every request of a
-    solo session for nothing.
+    board, an open task, a live fleet agent or a live session
+    (:func:`~aisquare.services.team.board_has_team`) other than its own. A server that has
+    proved whose it is (:func:`_hosting_session`) passes that session's id, so its own row,
+    written by its SessionStart hook, is not a teammate. One that has not, because the hook
+    has not run yet (the two start together) or never will, cannot tell its own row from a
+    teammate's, and counts every one. The instructions are read once, at the client's
+    start, and rode every request of a solo session for nothing.
 
     Fail-open: any doubt, a read that fails included, is a team."""
     from aisquare.core import orchestrator
@@ -482,7 +534,12 @@ def _serves_a_team() -> bool:
     try:
         with store_session() as store:
             project = orchestrator.team_project(None)
-            return store.team_active(project.id) and team_service.board_has_team(store, project.id)
+            if not store.team_active(project.id):
+                return False
+            host = _hosting_session(store, project.id)
+            return team_service.board_has_team(
+                store, project.id, host=host.id if host is not None else None
+            )
     except Exception:
         _log.debug("could not tell whether this session has a team", exc_info=True)
         return True
@@ -760,6 +817,52 @@ async def _serve_stdio_until_idle(
         tg.cancel_scope.cancel()  # EOF: stop the watchdog, exit normally
 
 
+def keep_the_protocol_pipe_to_ourselves() -> bool:
+    """Read the protocol from a private copy of stdin and point stdin itself at the null device.
+
+    A stdio server's stdin is its protocol pipe: the client writes requests into it and the
+    server's reader blocks on it for as long as the server lives. A child that inherits it can
+    read the client's bytes, and on Windows a process started with a pipe handle that another
+    thread is blocked reading synchronously can wait on it as it starts (every C runtime asks the
+    type of its standard handles), so a tool that runs ``git`` never answers. Which children a
+    tool starts, now or after the next edit, is not something to audit site by site: after this,
+    none has the pipe to inherit.
+
+    ``os.dup`` makes the private copy non-inheritable, ``os.dup2`` puts the null device on fd 0
+    (inheritable, as a standard stream is) and, on Windows, the C runtime sets the standard input
+    handle with it, which is what ``Popen(stdin=None)`` hands a child. ``sys.stdin`` becomes a
+    reader of the private copy, so the transport, which takes ``sys.stdin.buffer``, is unchanged.
+
+    ``False``, and nothing touched, when ``sys.stdin`` is not this process's own (a test's
+    stand-in, a caller's pipe), fd 0 is not there to take, or any step fails: the server then
+    starts as before, with the sites that name their own stdin as its belts, not one that does
+    not start.
+    """
+    if sys.stdin is None or sys.stdin is not sys.__stdin__:
+        return False
+    try:
+        private = os.dup(0)
+    except OSError:
+        return False
+    try:
+        reader = io.TextIOWrapper(os.fdopen(private, "rb"), encoding="utf-8", errors="replace")
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.close(private)
+        return False
+    try:
+        null = os.open(os.devnull, os.O_RDONLY)
+        try:
+            os.dup2(null, 0)
+        finally:
+            os.close(null)
+    except OSError:
+        reader.close()  # the private copy goes with it; fd 0 is as it was
+        return False
+    sys.stdin = reader
+    return True
+
+
 def run_stdio(
     *,
     close_after: int = DEFAULT_CLOSE_AFTER,
@@ -776,6 +879,10 @@ def run_stdio(
     ``server`` defaults to this module's; the captain passes its own, and
     ``command`` is how the idle notice on stderr names the process.
     """
+    global _stdio
+    keep_the_protocol_pipe_to_ourselves()  # before anything is built or started
+    if server is None:
+        _stdio = True  # before the build: its instructions ask whose server this is
     served = server if server is not None else build_server()
     if close_after <= 0:
         served.run(transport="stdio")

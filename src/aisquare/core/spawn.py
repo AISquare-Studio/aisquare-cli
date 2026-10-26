@@ -87,6 +87,9 @@ narrowing their environment would be change without a reason:
   * ``core/clipboard.py::_ask`` — ``tmux show-environment SSH_CONNECTION`` in the
     user's own tmux, and ``ps`` for this process's ancestors: whether the session
     is remote. Strings, no model.
+  * ``core/procs.py::_inspect_ps`` — ``ps -o ppid=,lstart=,comm=`` on macOS and the BSDs:
+    one process's parent, start and image, for the proof behind a session's own MCP
+    server row (``services/mcp_host``). A string, no model.
   * ``cli/watch.py::action_open_transcript`` — a pager/viewer on a file.
   * ``cli/ui/terminal.py::wsl_path`` — ``wslpath -u`` on a Windows path pasted into a
     pane under WSL (#288). A path converter, no model.
@@ -346,6 +349,11 @@ SEAMS: dict[str, Seam] = {
     ),
     "aisquare/core/clipboard.py::_ask": Seam(
         EXCLUDED, "`tmux show-environment` and `ps`, asking whether the session is remote"
+    ),
+    "aisquare/core/procs.py::_inspect_ps": Seam(
+        EXCLUDED,
+        "`ps -o ppid=,lstart=,comm=` on macOS and the BSDs: one process's parent, start and "
+        "image, for the proof behind a session's own MCP server row (#397). A string, no model",
     ),
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"

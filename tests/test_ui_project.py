@@ -89,7 +89,7 @@ from aisquare.services import explainability_ops as ops
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from tests.ci_support import git
-from tests.ui_workers import settle_page
+from tests.ui_workers import settle_page, settle_until_held
 
 T = TypeVar("T")
 
@@ -383,7 +383,7 @@ def test_project_view_has_the_five_tabs_with_their_widgets(project: ProjectInfo)
         ):
             assert view.query_one(pane_id).query_one(widget_type)
         view.active = "tab-personas"  # built when first opened
-        await pilot.pause()
+        await settle_page(pilot.app)
         assert view.query_one("#tab-personas").query_one(PersonasTab)
         view.active = "tab-manager"
         await pilot.pause()
@@ -421,7 +421,15 @@ def test_the_personas_tab_reads_nothing_until_it_is_opened(
 ) -> None:
     """Built with the view, the Personas tab read the whole catalogue as every project view
     mounted, on the UI thread, for a tab that may never be opened (review of #201, R1-F10).
-    It is built when first opened, reads then, and re-reads at each later opening."""
+    It is built when first opened, reads then, and re-reads at each later opening.
+
+    Each count is taken once the page has gone quiet, so a read that comes late is still
+    counted. The first opening's read is in ``PersonasTab.on_mount``, after a mount
+    ``open_personas`` does not await, and one pause after ``active`` did not wait for it: P3's
+    layers row made that mount longer, and every windows-latest job counted the tab before
+    its read (run 40238412702). An opening waits for its read, bounded. The board's opening
+    has nothing to wait for, since no read is the claim, so the page is settled before the
+    count, and a read it started would land in time to fail it."""
     reads: list[Path | None] = []
     read_entries = personas_tab.read_entries
 
@@ -431,12 +439,21 @@ def test_the_personas_tab_reads_nothing_until_it_is_opened(
 
     monkeypatch.setattr(personas_tab, "read_entries", counted)
 
+    async def read_since(pilot: Pilot[None], before: int) -> None:
+        await settle_until_held(
+            pilot.app, lambda: len(reads) > before, what="a read on opening tab-personas"
+        )
+
     async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[int, int]]:
         view = host.query_one(ProjectView)
+        await settle_page(pilot.app)
         seen = [(len(view.query(PersonasTab)), len(reads))]
         for tab in ("tab-personas", "tab-board", "tab-personas"):
+            before = len(reads)
             view.active = tab
-            await pilot.pause()
+            if tab == "tab-personas":
+                await read_since(pilot, before)
+            await settle_page(pilot.app)
             seen.append((len(view.query(PersonasTab)), len(reads)))
         return seen
 

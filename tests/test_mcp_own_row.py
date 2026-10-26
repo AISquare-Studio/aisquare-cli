@@ -581,6 +581,39 @@ def test_two_coders_that_each_call_a_board_tool_are_two_sessions_not_four(
     assert "aaaa1111 coder" in board and "bbbb2222 coder" in board
 
 
+def test_a_claim_taken_through_mcp_is_the_claim_the_session_finishes_from_its_shell(
+    runner: CliRunner, work_dir: Path, tree: Tree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The point of acting as the session: ``task next --claim`` through MCP, then the board
+    its next start shows (the task ``[doing @`` the session), then ``aisquare task done`` from
+    its shell are one session's, with no hand-over between an ``mcp:`` row and the agent."""
+    _team_on(runner)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    claude = _claude_session(runner, tree, monkeypatch, CODER_A, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    with tree.child_of(claude, monkeypatch):
+        mcp_server.task_add("wire the login page", role="coder")
+        claimed = json.loads(mcp_server.task_next(role="coder", claim=True))
+    task_id = claimed["id"]
+
+    resumed = _start(
+        runner,
+        CODER_A,
+        work_dir,
+        source="resume",
+        tree=tree,
+        claude=claude,
+        monkeypatch=monkeypatch,
+    )
+    assert f"{task_id} [doing @aaaa1111]" in resumed, "the board lists it under the session"
+
+    team_service.finish_task(task_id, session_ref=CODER_A)
+    with store_session() as store:
+        finished = [e for e in store.recent_events(current_project().id, limit=50)]
+    assert [e.session_id for e in finished if e.kind == "task_done"] == [CODER_A]
+    assert _rows() == [CODER_A], "no row of an mcp: session was ever there"
+
+
 def test_a_hosted_session_reads_its_own_writes_back_as_me(
     runner: CliRunner, work_dir: Path, tree: Tree, monkeypatch: pytest.MonkeyPatch
 ) -> None:

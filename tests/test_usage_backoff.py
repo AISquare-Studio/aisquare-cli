@@ -18,19 +18,27 @@ requests it is sent:
 from __future__ import annotations
 
 import json
+import ssl
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
 
 import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.cli.ui.views.accounts import account_cells, kept_tooltip
+from aisquare.cli.ui.views.accounts import (
+    PROBLEM_MARK,
+    account_cells,
+    kept_tooltip,
+    problem_tooltip,
+)
 from aisquare.core import claude_accounts as core
+from aisquare.core import tls
 from aisquare.core.store import store_session
-from aisquare.models import ClaudeAccountStatus, ClaudeIdentity, ClaudeUsage
+from aisquare.models import ClaudeAccountStatus, ClaudeIdentity, ClaudeUsage, UsageCause
 from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics
 from tests.test_claude_accounts import NOW
@@ -304,7 +312,8 @@ def test_the_row_says_how_old_the_kept_reading_is_and_why() -> None:
 def test_a_backed_off_account_with_no_kept_reading_never_names_a_past_until() -> None:
     """Review of #401, m1: with no kept reading, a backed-off account's session cell printed
     the wait's reason as frozen at the read ('rate-limited until <a past time>') until the
-    page's next tick, a minute on. It reads from the wait's end as of the paint."""
+    page's next tick, a minute on. It reads from the wait's end as of the paint, on hover
+    over the row's '!' (#13)."""
     from aisquare.models import ClaudeAccount
 
     status = ClaudeAccountStatus(
@@ -318,8 +327,12 @@ def test_a_backed_off_account_with_no_kept_reading_never_names_a_past_until() ->
     waiting = service.UsageBackoff(slot=2, until=until, attempts=1, since=NOW).reading(NOW)
     clock = until.astimezone().strftime("%H:%M")
 
-    during = account_cells(status, waiting, now=NOW)["session"].plain
-    after = account_cells(status, waiting, now=until + timedelta(seconds=1))["session"].plain
+    # The row reads '!' (#13); the wait is on hover over it, as of the paint.
+    assert account_cells(status, waiting, now=NOW)["session"].plain == PROBLEM_MARK
+    during = (problem_tooltip(status, waiting, now=NOW) or "").partition("\n")[0]
+    after = (problem_tooltip(status, waiting, now=until + timedelta(seconds=1)) or "").partition(
+        "\n"
+    )[0]
 
     assert waiting.reason == service.backoff_reason(until), "control: the frozen reason"
     assert during == f"rate-limited until {clock} — logging in again does not clear it"
@@ -643,7 +656,8 @@ def test_a_family_week_that_has_reset_shows_live_and_cached(
     }
     monkeypatch.setattr(service, "_http_get", _Endpoint({"tok-work": payload}))
     _at(monkeypatch, NOW)
-    monkeypatch.setenv("COLUMNS", "200")  # one line a row: the week cell unwrapped
+    # One line a row: the week cell unwrapped beside slot 1's not-signed-in fix (#13).
+    monkeypatch.setenv("COLUMNS", "300")
     live = runner.invoke(app, ["accounts", "usage", "--refresh"])
     monkeypatch.setattr(service, "_http_get", _Endpoint({"tok-work": 503}))  # never asked
     _new_process()
@@ -656,7 +670,8 @@ def test_a_family_week_that_has_reset_shows_live_and_cached(
         assert "sonnet reset 1h ago" in shown.stdout, shown.stdout
         assert "45%" not in shown.stdout and "resets now" not in shown.stdout
         assert "opus 60% resets in" in shown.stdout, "a week still running is as before"
-    [row] = [row for row in json.loads(as_json.stdout) if row.get("usage")]
+    # Slot 1, never signed in, has a usage too since #13: its cause and fix.
+    [row] = [row for row in json.loads(as_json.stdout) if row["account"]["slot"] == 2]
     assert row["usage"]["family_week_percent"] == {"opus": 60.0}, row["usage"]
     assert set(row["usage"]["family_week_resets_at"]) == {"opus", "sonnet"}
 
@@ -678,6 +693,69 @@ def test_the_cli_shows_a_kept_readings_reset_window_as_reset(
     assert "40% ·" not in shown.stdout, "never the old figure beside its reset"
     assert "7% · resets" in shown.stdout  # the week's window is still open: its figure stays
     assert "showing the reading from 2h ago" in shown.stdout
+
+
+@pytest.mark.parametrize(
+    ("error", "cause", "fix"),
+    [
+        (
+            tls.CABundleError("SSL_CERT_FILE=/dev/null: no certificate in it"),
+            UsageCause.tls_bundle,
+            tls.BUNDLE_FIX,
+        ),
+        (
+            URLError(ssl.SSLCertVerificationError(1, "certificate verify failed")),
+            UsageCause.tls_cert,
+            tls.CERT_HINT,
+        ),
+        (ConnectionRefusedError(61, "refused"), UsageCause.unreachable, "check the network"),
+    ],
+    ids=["tls-bundle", "tls-cert", "unreachable"],
+)
+def test_a_kept_reading_says_the_failed_tries_fix_on_the_page_and_in_the_cli(
+    fake_home: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    error: OSError,
+    cause: UsageCause,
+    fix: str,
+) -> None:
+    """Review of #432, (1): TLS usually breaks on an account that read fine the day before,
+    so the row shows that older figure, not the '!'. 0.9.0 printed #403's fix inside the
+    reason; since #13 the fix comes from the cause (USAGE_FIXES), and the kept figure's
+    tooltip and CLI line never read it. The kept reading carries the cause, and both say
+    its fix — for #13's other causes too."""
+    work = _slot("work@example.com", "tok-work")
+    monkeypatch.setattr(
+        service,
+        "_http_get",
+        _Endpoint({"tok-work": _payload(40, resets_at=NOW + timedelta(hours=9))}),
+    )
+    _at(monkeypatch, NOW)
+    assert runner.invoke(app, ["accounts", "usage"]).exit_code == 0
+
+    def failing(*_args: Any) -> tuple[int, bytes]:
+        raise error
+
+    monkeypatch.setattr(service, "_http_get", failing)
+    _new_process()
+    later = NOW + timedelta(minutes=10)
+    _at(monkeypatch, later)
+    reading = service.cached_usage([work], force=True, now=later)[work.slot]
+    assert reading.available and reading.kept, reading
+    assert reading.last_failed_cause is cause
+
+    # The page: the session cell's tooltip says how old, why, then the fix.
+    tooltip = kept_tooltip(reading, slot=work.slot, now=later) or ""
+    assert tooltip.startswith("reading from 10m ago · "), tooltip
+    assert tooltip.splitlines()[-1].startswith(f"fix: {fix}"), tooltip
+
+    # The CLI: the line under the table, the same fix after it.
+    monkeypatch.setenv("COLUMNS", "300")
+    _new_process()
+    shown = runner.invoke(app, ["accounts", "usage", "--refresh"])
+    assert shown.exit_code == 0, shown.stdout
+    assert f"showing the reading from 10m ago; fix: {fix}" in shown.stdout, shown.stdout
 
 
 def test_during_a_wait_the_cli_says_no_try_was_made_now(

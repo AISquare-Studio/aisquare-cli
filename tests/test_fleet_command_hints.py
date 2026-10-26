@@ -176,6 +176,10 @@ PROJECT_OF: dict[tuple[str, str], str] = {
         "the limited agent's own row's project (``agent.project_id``), which the "
         "hand-over moves it in (#277)"
     ),
+    ("services/hooks.py", "_warn"): (
+        "the agent's own row's project (``agent.project_id``), which ``before_limit = "
+        '"warn"`` names the switch in (F2 of #400)'
+    ),
     ("services/project.py", "BoardReader.frees"): (
         "each project whose fleet agents read a hub's board (``ProjectBusyError``, and doctor's "
         "capture-off line of a captured row's board)"

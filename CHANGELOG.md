@@ -6,6 +6,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Move an agent before its account runs out** (F2 of #400): `[accounts] before_limit`,
+  `off` by default for this release. With `switch`, a fleet agent whose account reads at or
+  over `switch_at` is handed to an account under the line at its next turn end or idle
+  notice, never mid-turn, and never while its turn left background work running (a
+  background command, a `Monitor`, a background subagent or forked skill, read off its
+  transcript until its final notice), which an `/exit` would kill, or with a message queued
+  for its next turn. The move waits five seconds after the turn end, then, before the stop
+  and again once the agent is marked as being moved, checks that nothing began since (the
+  board's prompt stamp, a queued message or notice taken in the transcript) and that the
+  pane shows Claude Code idle at its prompt — the check that catches a prompt typed in the
+  last moment, whose spinner shows before it reaches the board or the transcript — and
+  leaves the agent alone if not. Work a subagent launched counts too (its own transcript,
+  under the session's `subagents/`). The manager and the captain are not moved before a
+  limit. The board says `switched … (before limit)`, and the manager is woken only if the
+  move fails.
+  `warn` puts one `before_limit` line on the board per crossing of the line (for you; it
+  reaches no agent's prompt). No move when the windows over the line reset within
+  `wait_if_reset_within_minutes`, when no other account is under the line, for an agent put
+  on its account by name (`--account`, a role's account binding, a binding that sets
+  `CLAUDE_CONFIG_DIR`), in a paused fleet, for a finished worker auto-stop is about to stop
+  (its task closed or its result posted: moved, it would run a whole turn on the new account
+  first), or within ten minutes of the agent's start or the last look at it. No polling, and
+  no usage request from a hook: the turn end decides from the usage cache whether to look,
+  and a detached worker (`aisquare hook before-limit`) does the reads, through the cache and
+  honouring a back-off; a kept reading moves nobody. The spawn records whether its account
+  was named (`account_pinned` in the row's launch spec), which a restart, a switch and a fork
+  keep; rows spawned before this read as not pinned.
+
 ### Changed
 
 - **CI runs each leg's suite in shards: a sub-PR's CI takes about 8 minutes, the full
@@ -30,6 +60,57 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   23:45 to midnight every Sunday in Toronto: they fired `resets Mon 12:00am`, which then
   lifts inside `wait_if_reset_within_minutes`, so the hook waited instead of switching;
   they fire a weekly limit that lifts three days out, whatever the clock says.
+- **An account with no usage to show reads `!` on the Accounts page, and says
+  why on hover** (#13 on the board). With no reading and none kept, the row read
+  `⚠ token missing` cut to its 16-wide cell and `—`, which looked like no usage
+  rather than an error. Now one `!` stands across the session and week used
+  columns, the resets are empty, and hovering it shows what is wrong and the
+  fix: `the login Keychain is locked`, then `fix: unlock the login keychain
+  (Keychain Access, or log out and back in), then ↻ Refresh usage (or
+  --refresh)`. Where nothing done on the machine helps (an HTTP 5xx, an answer
+  it cannot read) it says so. *Log in* stays beside the rows that need one, and
+  a kept reading still shows its numbers and age. `accounts list --usage` and
+  `accounts usage` have no hover, so they print the reason with the same fix
+  after it (`the stored token has expired; fix: press Log in, …`), a slot with
+  no login too, which printed `—`. In `--json` such a row's `usage` carries
+  `cause` (`token_expired`, `not_signed_in`, `keychain_locked`, `rate_limited`,
+  `tls_bundle`, `tls_cert`…) and `fix`, where a slot with no login said `null`.
+  Its `reason` no longer carries a fix of its own, so a token that expired or
+  was rejected reads `the stored token has expired` or `the token was rejected
+  (HTTP 401)`, a locked or refusing Keychain reads without the `— unlock it …`
+  tail, and 0.9.0's two TLS reasons read `TLS: the CA bundle could not be
+  loaded` and `TLS certificate could not be verified`, their fix (the same
+  words as before, and as `doctor`'s tls row) beside them. A row that still shows
+  an older reading because the newest try failed (a TLS failure on an account
+  that read fine the day before, say) gives that try's fix too: on the second
+  line of the session cell's tooltip, and after `showing the reading from …` in
+  the CLI. `--json` carries the try's cause as `last_failed_cause`.
+
+### Fixed
+
+- **The Spawn dialog's Account field says what a spawn with no account runs on**
+  (#12 on the board). With rank 1 the default (#406), the field still opened on
+  `(this shell's)`, which read as if the spawn skipped the accounts while it ran
+  on rank 1. It now names the account and the rung that picks it — `(default:
+  rank 1 · work)`, `(default: headroom · work)`, `(default: bound to tester ·
+  account 2)`, `(default: project default · work)` — for the role in the form
+  and a `--model` in its Extra agent args (the family a headroom pick reads),
+  read again when either changes; the captain's dialog says the captain's. It
+  reads `(this shell's)` only when no account is signed in, and `(default:
+  <role>'s CLAUDE_CONFIG_DIR)` for a role bound to a directory by hand (#9).
+  What is sent is unchanged: no `--account`, so the spawn asks the same ladder
+  when it runs. A headroom pick is shown from the shared five-minute usage
+  cache, so the label sends no request the status line would not.
+- **A headroom pick no longer overrides a hand-written `CLAUDE_CONFIG_DIR`
+  binding.** With `[accounts] pick = "headroom"` (the default) and usage
+  readable, a role bound with `team bind <role> --env CLAUDE_CONFIG_DIR=…` (or
+  `--env-file`) launched on the picked account instead of its own directory;
+  the rank-1 default already left it alone. Both silent defaults now do. The
+  flag, an account binding, a project default and a hand-over still win over it.
+  **Upgrade note:** this completes 0.9.0's note on the rank-1 default, which
+  said a headroom pick still overrides such a binding: after this upgrade it
+  does not, so a role bound by hand launches on its own directory whatever
+  headroom would pick. A hand-over still moves it.
 
 ### Fixed
 

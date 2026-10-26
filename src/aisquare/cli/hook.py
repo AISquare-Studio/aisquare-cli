@@ -258,6 +258,24 @@ def hand_over(
         hooks_service.hand_over(session_id, reason=reason)
     except Exception as exc:  # the board carries the refusal; nothing else to disrupt
         _cost_of_failing_open("hand-over", exc, cost="the limited agent was not moved")
+
+
+@app.command("before-limit", hidden=True)
+def before_limit(
+    session_id: Annotated[str, typer.Argument(help="The session whose turn ended.")],
+) -> None:
+    """The detached half of ``accounts.before_limit`` (no output; started by ``stop`` and
+    ``notification``: F2 of #400).
+
+    Not a Claude Code hook: the turn end's hook decides from what is on record whether the
+    agent's account is worth a look, and this worker does the reads that may reach the usage
+    endpoint, then warns or hands the agent over, so no request is made from a hook. Silent
+    like every hook; the board carries what it did.
+    """
+    try:
+        hooks_service.before_limit_worker(session_id)
+    except Exception as exc:  # the board carries a refusal; nothing else to disrupt
+        _cost_of_failing_open("before-limit", exc, cost="the agent was not moved before its limit")
         return
 
 
@@ -319,6 +337,7 @@ def notification() -> None:
             session_id=_str(payload, "session_id"),
             message=_str(payload, "message"),
             notification_type=_str(payload, "notification_type"),
+            transcript_path=_str(payload, "transcript_path"),
         )
     except Exception as exc:  # never disrupt the agent
         _cost_of_failing_open("notification", exc)

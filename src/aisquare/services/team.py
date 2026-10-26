@@ -165,6 +165,12 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
 LIMITED_HANDING_OVER = "limited_handing_over"
 #: Every kind a usage-limit line is written as, for the readers that show one.
 LIMITED_KINDS: frozenset[str] = frozenset({"limited", LIMITED_HANDING_OVER})
+#: The line ``[accounts] before_limit = "warn"`` writes when an agent's account reads over
+#: ``switch_at`` and another has room (F2 of #400): the move ``switch`` would have made, named,
+#: once per crossing of the line. The operator's to act on, so a human-board kind: no wake,
+#: and in no teammate's delta (:data:`HUMAN_BOARD_KINDS`), where six agents on one full
+#: account took a slot of every delta each. ``switch`` writes ``switched`` instead.
+BEFORE_LIMIT_KIND = "before_limit"
 #: What that line says of the hand-over.
 HANDING_OVER_SAID = "moving it to another account automatically"
 
@@ -176,7 +182,8 @@ WakeClass = Literal["own", "wake", "info"]
 #: prompt, and each one would take a ``_DELTA_LIMIT`` slot from the real news.
 #: ``captain_action`` is the captain's audit line (``services.captain.actions``):
 #: one per tool call, reads included, for the owner — the effects it records
-#: (a note, a claim, a tell) reach teammates as their own events.
+#: (a note, a claim, a tell) reach teammates as their own events. ``before_limit`` is
+#: ``[accounts] before_limit = "warn"``'s line: a move for the operator to make.
 #:
 #: No agent-facing reader shows any of them: not the delta or the wake-up, and not
 #: the recent updates of a briefing (:func:`_briefing_events`) or of the MCP
@@ -185,7 +192,9 @@ WakeClass = Literal["own", "wake", "info"]
 #: captain briefed the next coder with five audit lines and no decision, and a run
 #: of 62 of them hid a coder's result from a waiting manager's wake-up (review of
 #: #240, finding 11).
-HUMAN_BOARD_KINDS: frozenset[str] = frozenset({"attention", "notice", "captain_action"})
+HUMAN_BOARD_KINDS: frozenset[str] = frozenset(
+    {"attention", "notice", "captain_action", BEFORE_LIMIT_KIND}
+)
 
 #: The one of them the human board's own recent list leaves out too (``aisquare
 #: board``, its watch): the audit is one line per captain tool call, with the tool's
@@ -3015,6 +3024,14 @@ QUIET_NOTIFICATIONS: frozenset[str] = frozenset(
 _IDLE_MESSAGE = "waiting for your input"
 
 
+def is_idle_notice(notification_type: str | None, message: str | None) -> bool:
+    """Whether a notification is Claude Code's idle notice: the agent has sat at its prompt for
+    a minute, a safe point to move it before its limit (F2 of #400) as a turn end is."""
+    if notification_type:
+        return notification_type == "idle_prompt"
+    return _IDLE_MESSAGE in (message or "").lower()
+
+
 def classify_notification(notification_type: str | None, message: str | None) -> str:
     """``attention`` · ``quiet`` · ``notice`` — what a Claude Code notification means for the board.
 
@@ -3396,6 +3413,28 @@ def _take_quiet_compaction(store: ContextStore, session: TeamSession, source: st
         return False
     write_quiet_mark(store, session.id, mark._replace(acked_at=now))
     return True
+
+
+def hook_before_limit(project_id: str, text: str, *, session_id: str | None = None) -> None:
+    """``[accounts] before_limit = "warn"``'s line (:data:`BEFORE_LIMIT_KIND`): an agent's
+    account is over the line and another has room. Nobody is woken (F2 of #400)."""
+    if not orchestrator.team_enabled():
+        return
+    with store_session() as store:
+        _emit(store, project_id, BEFORE_LIMIT_KIND, text, session_id=session_id)
+
+
+def fleet_paused(store: ContextStore, agent: FleetAgent) -> bool:
+    """Whether ``fleet pause`` holds ``agent``'s project: its ``fleet-paused`` signal is on, on
+    the board the row reads (``FleetAgent.board``), by the project's name there
+    (``harness.pause_signal``) — under a hub, the hub's board, where its manager reads it.
+    A signal that does not parse reads as paused: a move nobody can check is not made."""
+    board = agent.board or agent.project_id
+    try:
+        state = _read_signal(store, board, harness.pause_signal(agent.project_id, board))
+    except (ValueError, TypeError, AttributeError):
+        return True
+    return state is not None and state.value == "on"
 
 
 def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = None) -> None:

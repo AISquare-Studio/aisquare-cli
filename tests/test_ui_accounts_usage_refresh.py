@@ -28,7 +28,7 @@ from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views.accounts import AccountsView
 from aisquare.core import claude_accounts as core
 from aisquare.core.store import store_session
-from aisquare.models import AccountsOverview, ClaudeAccount, ClaudeUsage, UsageSample
+from aisquare.models import AccountsOverview, ClaudeAccount, ClaudeUsage, UsageCause, UsageSample
 from aisquare.services import claude_accounts as accounts_service
 from tests.test_ui_accounts import (
     NOW,
@@ -41,6 +41,7 @@ from tests.test_ui_accounts import (
     open_accounts,
     settle,
     shown,
+    why,
 )
 from tests.test_ui_accounts import no_network as _no_network
 from tests.test_ui_accounts import no_real_tmux as _no_real_tmux
@@ -433,23 +434,24 @@ def test_nothing_read_yet_says_never_and_the_failure_beside_the_oldest_good_read
 NEEDS_LOGIN: dict[str, tuple[str, ClaudeUsage]] = {
     "expired": (
         "expired",
-        ClaudeUsage(
-            available=False,
-            reason="the stored token has expired — open a session on this account to refresh it",
-            needs_login=True,
+        accounts_service.unreadable_usage(
+            UsageCause.token_expired, "the stored token has expired", slot=4, needs_login=True
         ),
     ),
     "rejected": (
         "ok",
-        ClaudeUsage(
-            available=False,
-            reason="the token was rejected — open a session on this account to refresh it",
+        accounts_service.unreadable_usage(
+            UsageCause.token_rejected,
+            "the token was rejected (HTTP 401)",
+            slot=4,
             needs_login=True,
         ),
     ),
     "keychain": (
         "unreadable",
-        ClaudeUsage(available=False, reason=core.KEYCHAIN_LOCKED),
+        accounts_service.unreadable_usage(
+            UsageCause.keychain_locked, core.KEYCHAIN_LOCKED_REASON, slot=4
+        ),
     ),
 }
 
@@ -479,13 +481,15 @@ def test_an_expired_account_beside_a_good_one_adds_nothing_to_the_line_for_ten_m
             view.refresh_readings()
             await settle(app)
             said.append(_age(view))
-        return said, no_network["usage_calls"].count(2), line(view, 4), offered(view, 4, "login")
+        return said, no_network["usage_calls"].count(2), why(view, 4), offered(view, 4, "login")
 
-    said, read, row, log_in = drive(go, overview=frame)
+    said, read, hover, log_in = drive(go, overview=frame)
     ages = ["just now", "1m ago", "2m ago", "3m ago", "4m ago"]
     assert said == [f"last refreshed {age}" for age in [*ages, *ages, "just now"]]
     assert read == 3, "slot 2 read on opening, and again at 5m05s and 10m10s"
-    assert "token expired" in row and log_in, "the row says why, and offers Log in"
+    assert hover.startswith("the stored token has expired\n") and log_in, (
+        "the row's '!' says why on hover, and the row offers Log in"
+    )
 
 
 @pytest.mark.parametrize("kind", sorted(NEEDS_LOGIN))

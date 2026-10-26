@@ -2675,8 +2675,13 @@ class SqliteStore:
         500 sessions.
         """
         removed = self._conn.execute(
-            "DELETE FROM team_meta WHERE key = ? OR key GLOB ?",
-            (f"distill_seq:{project_id}", f"signal/{_glob_escape(project_id)}/*"),
+            "DELETE FROM team_meta WHERE key = ? OR key GLOB ? OR key GLOB ?",
+            (
+                f"distill_seq:{project_id}",
+                f"signal/{_glob_escape(project_id)}/*",
+                # the processes that run this board's sessions (``services.mcp_host``)
+                f"host/{_glob_escape(project_id)}/*",
+            ),
         ).rowcount
         for where, params in _session_meta_terms(sessions):
             removed += self._conn.execute(f"DELETE FROM team_meta WHERE {where}", params).rowcount
@@ -5479,10 +5484,9 @@ class SqliteStore:
         after the upgrade. Two do change. An old default that is signed out or disabled
         is skipped by the preferred rung, so the launch goes to the next enabled,
         signed-in account (before, a signed-out one opened on its login screen). And
-        where headroom does not pick (``pick = "default"``, or no usage readable), a
-        role with a hand-written ``team bind <role> --env CLAUDE_CONFIG_DIR=…`` ran on
-        the old default and now runs on its own directory, since a binding wins over
-        the preferred account; a headroom pick still overrides that binding, as before.
+        a role with a hand-written ``team bind <role> --env CLAUDE_CONFIG_DIR=…`` that
+        ran on the old default or on a headroom pick now runs on its own directory,
+        since a binding wins over both silent defaults (#9).
         Keyed on the DATA, not on a schema
         version: a store any line carried past whatever version a step would have had
         still holds the flag, and is promoted on its next read all the same. Clearing

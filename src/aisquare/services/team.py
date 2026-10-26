@@ -50,7 +50,7 @@ from aisquare.models import (
     TeamTask,
 )
 from aisquare.services import distill as distill_service
-from aisquare.services import install_route
+from aisquare.services import install_route, mcp_host
 from aisquare.services import project as project_service
 
 #: The fail-open reads of the fleet row say here what they swallowed. Nothing
@@ -165,6 +165,12 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
 LIMITED_HANDING_OVER = "limited_handing_over"
 #: Every kind a usage-limit line is written as, for the readers that show one.
 LIMITED_KINDS: frozenset[str] = frozenset({"limited", LIMITED_HANDING_OVER})
+#: The line ``[accounts] before_limit = "warn"`` writes when an agent's account reads over
+#: ``switch_at`` and another has room (F2 of #400): the move ``switch`` would have made, named,
+#: once per crossing of the line. The operator's to act on, so a human-board kind: no wake,
+#: and in no teammate's delta (:data:`HUMAN_BOARD_KINDS`), where six agents on one full
+#: account took a slot of every delta each. ``switch`` writes ``switched`` instead.
+BEFORE_LIMIT_KIND = "before_limit"
 #: What that line says of the hand-over.
 HANDING_OVER_SAID = "moving it to another account automatically"
 
@@ -176,7 +182,8 @@ WakeClass = Literal["own", "wake", "info"]
 #: prompt, and each one would take a ``_DELTA_LIMIT`` slot from the real news.
 #: ``captain_action`` is the captain's audit line (``services.captain.actions``):
 #: one per tool call, reads included, for the owner — the effects it records
-#: (a note, a claim, a tell) reach teammates as their own events.
+#: (a note, a claim, a tell) reach teammates as their own events. ``before_limit`` is
+#: ``[accounts] before_limit = "warn"``'s line: a move for the operator to make.
 #:
 #: No agent-facing reader shows any of them: not the delta or the wake-up, and not
 #: the recent updates of a briefing (:func:`_briefing_events`) or of the MCP
@@ -185,7 +192,9 @@ WakeClass = Literal["own", "wake", "info"]
 #: captain briefed the next coder with five audit lines and no decision, and a run
 #: of 62 of them hid a coder's result from a waiting manager's wake-up (review of
 #: #240, finding 11).
-HUMAN_BOARD_KINDS: frozenset[str] = frozenset({"attention", "notice", "captain_action"})
+HUMAN_BOARD_KINDS: frozenset[str] = frozenset(
+    {"attention", "notice", "captain_action", BEFORE_LIMIT_KIND}
+)
 
 #: The one of them the human board's own recent list leaves out too (``aisquare
 #: board``, its watch): the audit is one line per captain tool call, with the tool's
@@ -2315,6 +2324,10 @@ def hook_session_start(
         )
         if role is not None and known is not None and known.role != role:
             session = store.update_session(session.id, role=role)
+        # Which process runs this session: its own MCP server proves itself against it
+        # (``mcp_host``), and writes as this row. Every start records it, a /clear's and a
+        # fork's new id included, so the record follows the session the process serves now.
+        mcp_host.register(store, project.id, session.id)
         if source != _COMPACT_SOURCE or _take_quiet_compaction(store, session, source):
             # A session that just started, cleared or resumed sits at its prompt until
             # something is typed — whose own hook says `working`. Left at the upsert's
@@ -2467,18 +2480,20 @@ def _has_team(store: ContextStore, project_id: str, session_id: str | None) -> b
     task, a live fleet agent, or a live session (seen within :data:`_STALE_AFTER`, not
     ended) other than the caller's own row. Three reads on indexed columns.
 
-    ``session_id`` is the caller's row where it is known (the hooks). Where it is not —
-    the MCP server, started by its client alongside SessionStart and before that hook
-    writes the row — ANY live session is a team: it may be a teammate, and the board is
-    the fail-safe answer. A session restarting beside its own not-yet-ended previous row
-    reads as a team for that reason.
+    ``session_id`` is the caller's row where it is known: the hooks, and an MCP server that
+    has proved which session it is the own server of (``mcp_host``, option B of
+    docs/plans/mcp-own-row.md). Where it is not, ANY live session is a team: the MCP server
+    starts alongside SessionStart and may do so before that hook writes the row, or may be
+    a remote teammate's, and the board is the fail-safe answer. A session restarting beside
+    its own not-yet-ended previous row reads as a team for that reason.
 
-    Every live ``mcp:`` row counts, a session's own MCP server's too: a remote teammate
-    over ``aisquare serve`` writes one, and no row tells the two apart for sure (owner
-    decision, 2026-10-24, option A). So a solo session that calls a board tool reads as a
-    team until that row goes stale (#45 m1, a known limitation; docs/orchestration.md).
-    Precise detection is option B, planned in draft PR #397
-    (https://github.com/AISquare-Studio/aisquare-cli/pull/397).
+    Every live ``mcp:`` row counts, which is why a session's own server must not write one:
+    a remote teammate over ``aisquare serve`` writes one, and no row tells the two apart.
+    A server that proves it is a session's own writes as that session instead, and the
+    row it would have written never exists. One that cannot prove it (an older server, a
+    session whose hooks never ran on this board, a named client, a ``serve`` started from a
+    shell) writes the ``mcp:`` row, and the board counts it until it goes stale (owner
+    decision of 2026-10-24: the hard rule comes before the trim).
     """
     if store.has_team_task_in(project_id, _OPEN_TASKS):
         return True
@@ -2488,10 +2503,11 @@ def _has_team(store: ContextStore, project_id: str, session_id: str | None) -> b
     return any(other.id != session_id and other.ended_at is None for other in seen)
 
 
-def board_has_team(store: ContextStore, project_id: str) -> bool:
+def board_has_team(store: ContextStore, project_id: str, *, host: str | None = None) -> bool:
     """:func:`_has_team` for a caller that is not a session yet (the MCP server, started by
-    its client): its own row is not known, so any live session counts."""
-    return _has_team(store, project_id, None)
+    its client): its own row is not known, so any live session counts, unless the server
+    has proved which session it is the own server of (``host``, its id)."""
+    return _has_team(store, project_id, host)
 
 
 def hook_prompt_heartbeat(
@@ -2559,6 +2575,7 @@ def hook_prompt_heartbeat(
                     prompted_at=now,
                 )
             )
+            mcp_host.register(store, project.id, session.id)  # as at session start
             if solo:
                 store.set_meta(_unbriefed(session.id), "1")
                 return ""
@@ -3007,6 +3024,14 @@ QUIET_NOTIFICATIONS: frozenset[str] = frozenset(
 _IDLE_MESSAGE = "waiting for your input"
 
 
+def is_idle_notice(notification_type: str | None, message: str | None) -> bool:
+    """Whether a notification is Claude Code's idle notice: the agent has sat at its prompt for
+    a minute, a safe point to move it before its limit (F2 of #400) as a turn end is."""
+    if notification_type:
+        return notification_type == "idle_prompt"
+    return _IDLE_MESSAGE in (message or "").lower()
+
+
 def classify_notification(notification_type: str | None, message: str | None) -> str:
     """``attention`` · ``quiet`` · ``notice`` — what a Claude Code notification means for the board.
 
@@ -3388,6 +3413,28 @@ def _take_quiet_compaction(store: ContextStore, session: TeamSession, source: st
         return False
     write_quiet_mark(store, session.id, mark._replace(acked_at=now))
     return True
+
+
+def hook_before_limit(project_id: str, text: str, *, session_id: str | None = None) -> None:
+    """``[accounts] before_limit = "warn"``'s line (:data:`BEFORE_LIMIT_KIND`): an agent's
+    account is over the line and another has room. Nobody is woken (F2 of #400)."""
+    if not orchestrator.team_enabled():
+        return
+    with store_session() as store:
+        _emit(store, project_id, BEFORE_LIMIT_KIND, text, session_id=session_id)
+
+
+def fleet_paused(store: ContextStore, agent: FleetAgent) -> bool:
+    """Whether ``fleet pause`` holds ``agent``'s project: its ``fleet-paused`` signal is on, on
+    the board the row reads (``FleetAgent.board``), by the project's name there
+    (``harness.pause_signal``) — under a hub, the hub's board, where its manager reads it.
+    A signal that does not parse reads as paused: a move nobody can check is not made."""
+    board = agent.board or agent.project_id
+    try:
+        state = _read_signal(store, board, harness.pause_signal(agent.project_id, board))
+    except (ValueError, TypeError, AttributeError):
+        return True
+    return state is not None and state.value == "on"
 
 
 def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = None) -> None:
@@ -4243,8 +4290,9 @@ def _fleet_row_hint(
 
     A session bound to a row is that row. Without one — no session at all (the
     plain ``task next --status review`` of a cycle typed by hand), or a session
-    no row is bound to (the MCP server's virtual ``mcp:`` session, whose process
-    is the agent's own child) — the window's variable still says which row this
+    no row is bound to (an MCP server's virtual ``mcp:`` session, whose process
+    is the agent's own child; a session whose own server acts as it is the
+    session, and bound as any other) — the window's variable still says which row this
     process works under, and for the order that is enough: the worst a misread
     costs is a nested child being shown its parent's task first, which it may
     not claim anyway. Two testers spawned for two review tasks were both handed

@@ -13,6 +13,9 @@ lost the race it closes on windows-latest.
 ``settle_until`` is that settle, repeated until the fact a test is about to
 assert holds.
 
+``watch_until`` is the look for a fact that does not last (a toast), on the event loop's own
+clock: no settle comes before it, because on Windows a settle can outlast the fact.
+
 ``released`` waits out a Button's press effect before the next click on it.
 """
 
@@ -126,6 +129,36 @@ async def settle_until(
     deadline = time.monotonic() + timeout
     while True:
         await settle_page(app, group=group)
+        with contextlib.suppress(NoMatches):
+            if done():
+                return
+        if time.monotonic() >= deadline:
+            return
+        await asyncio.sleep(_UNTIL_POLL_S)
+
+
+async def watch_until(done: Callable[[], object], *, timeout: float = 10.0) -> None:
+    """Look for ``done()`` every 20 ms on the event loop's own clock, until it holds or ``timeout``
+    seconds pass.
+
+    For a fact that does not last, a toast: it is on screen ``timeout`` seconds from its
+    ``notify`` and then gone. ``settle_until`` looks once per ``settle_page``, and on Windows a
+    settle can last seconds. Textual's pending timers each hold a thread of asyncio's default
+    executor (8 on a 4-vCPU runner; the shell's own are 6, and the two toasts the scripted pane
+    raises on opening an agent hold two more for 5 s each), a thread worker and the stopping
+    of a dismissed screen's timers need one too, and under that emulation one ``Pilot.pause``
+    after a stop took 4.2 s, with the stop's toast gone 6.2 s after its ``notify``: the look
+    had 1.8 s to spare; 1.5 s more on the looks after the notify turns the stop test's pass into
+    the ``[]`` that windows-latest gave twice (shard 5/10 at 658bf0c6, runs 40288588152 and
+    40288592937).
+
+    ``asyncio.sleep`` holds no thread, so this looks as often on Windows as anywhere. The page is
+    NOT settled when it returns: ``done`` keeps what it saw at its look, and a caller that reads
+    the settled page settles after. Bounded and quiet, as ``settle_until`` is: when ``timeout``
+    passes it returns, and the test's own assertion fails with what ``done`` kept.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
         with contextlib.suppress(NoMatches):
             if done():
                 return

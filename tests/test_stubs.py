@@ -110,6 +110,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("watch",),
     ("watch", "show"),
     ("hook", "compact-check"),
+    ("hook", "before-limit"),
     ("hook", "session-end"),
     ("hook", "stop"),
     ("hook", "notification"),

@@ -29,6 +29,7 @@ import subprocess
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from typing import Any
 
 from aisquare.core import paths, spawn
 from aisquare.core.locking import holding
@@ -70,6 +71,7 @@ def gbrain_version() -> str | None:
     try:
         result = subprocess.run(
             [binary, "--version"],
+            stdin=subprocess.DEVNULL,  # a tool's child must not hold an MCP server's protocol pipe
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -224,10 +226,14 @@ def _run(home: Path, argv: list[str], *, stdin: str | None = None, timeout: int)
     binary = shutil.which("gbrain")
     if binary is None:
         return None
+    # no stdin of its own, an MCP server's protocol pipe least of all; `input=` and `stdin=` may
+    # not both be passed, so it is `input=`'s pipe when there is text for one
+    no_stdin: dict[str, Any] = {} if stdin is not None else {"stdin": subprocess.DEVNULL}
     try:
         result = subprocess.run(
             [binary, *argv],
             input=stdin,
+            **no_stdin,
             capture_output=True,
             text=True,
             encoding="utf-8",

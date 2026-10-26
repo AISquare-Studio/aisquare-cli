@@ -3340,6 +3340,7 @@ def spawn(
     ack_wait: float = 0.0,
     board_context: str | None = None,
     replaces: str | None = None,
+    account_pinned: bool | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -3411,7 +3412,11 @@ def spawn(
     whatever the server had (review of #203, round 4).
     ``account`` is resolved through the one account resolver (flag, role
     binding, project default, machine default — #145) and the chosen slot is
-    both passed to ``launch`` as ``--account`` and recorded on the row.
+    both passed to ``launch`` as ``--account`` and recorded on the row. An ``account`` the
+    caller names pins the agent there (``LaunchSpec.account_pinned``): ``[accounts]
+    before_limit`` does not move it (F2 of #400). A replacement or a fork names the account
+    the row already had, which is no pin of anyone's, so it says with ``account_pinned``
+    whether the agent was pinned; ``None`` is a caller's own ``--account``.
     ``persona`` — the flag, else ``[fleet.roles.<role>].persona``, else none — is
     checked against the project's personas before anything starts, travels to the
     window as ``launch --persona`` and is recorded on the row
@@ -3951,6 +3956,11 @@ def spawn(
                 permission_mode=mode,
                 extra_args=recorded_args,
                 account_slot=choice.account.slot if choice.account is not None else None,
+                account_pinned=(
+                    account_pinned
+                    if account_pinned is not None
+                    else choice.account is not None and choice.source == "flag"
+                ),
                 worktree=use_worktree,
                 command=list(command),
                 recorded_by=__version__,
@@ -8167,6 +8177,8 @@ def switch(
     before_stop: Callable[[], None] | None = None,
     ack_wait: float = 0.0,
     force: bool = False,
+    max_age: float | None = None,
+    after_mark: Callable[[], None] | None = None,
 ) -> SwitchReceipt:
     """Move a running agent to another Claude account — the hand-over of #146.
 
@@ -8229,6 +8241,18 @@ def switch(
     been done then. The phone's dialog guard is one: the Escape it may send
     must not come before a refusal this function makes up front, such as a
     ``to`` that names no account.
+
+    ``max_age`` is the pick's, ``None`` (read every candidate now) but for the move
+    ``[accounts] before_limit`` makes (F2 of #400, its ``reason`` the core's
+    ``BEFORE_LIMIT_REASON``): the agent is not limited, and its hook has just read the
+    candidates through the cache, a launch's minute deep, so the pick reads them from there
+    and asks the endpoint nothing more. An agent named to its account
+    (``LaunchSpec.account_pinned``) stays pinned on the one it is moved to.
+
+    ``after_mark`` is a last check asked once the session is marked handing over, before the
+    ``/exit``: what ``before_stop`` saw can have changed by then, and the mark hides a turn's
+    ``working`` from every later reader. It raises to refuse; the mark is taken back and
+    nothing has been stopped.
     """
     with store_session() as store:
         agent = _live_agent(store, project, label, agent_id=agent_id)
@@ -8288,6 +8312,7 @@ def switch(
             exclude=() if current is None else (current,),
             automatic=automatic,
             family=harness.model_family(session.model if session is not None else None),
+            max_age=max_age,
         )
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc
@@ -8300,9 +8325,15 @@ def switch(
         # unsaid there, blamed on usage, with an empty `()` (the #205 fold, round 2).
         said = f" ({'; '.join(choice.notes)})" if choice.notes else ""
         if automatic:
+            # Moved before its limit, the agent is not parked: it goes on where it is.
+            stays = (
+                "it carries on on its own account"
+                if reason == claude_accounts_core.BEFORE_LIMIT_REASON
+                else "it stays parked until a reset"
+            )
             raise FleetError(
                 f"no account under the line for {label!r}{where} — every other account is "
-                "over switch_at or unreadable; it stays parked until a reset, or "
+                f"over switch_at or unreadable; {stays}, or "
                 f"`{project_service.fleet_command('switch', project, label)}` moves it by "
                 f"hand{said}"
             )
@@ -8337,6 +8368,12 @@ def switch(
         _live_agent(store, project, label, agent_id=agent.id)
     if session is not None:
         _mark_handing_over(project, agent, session, "switch", label)
+        if after_mark is not None:
+            try:
+                after_mark()
+            except BaseException:
+                _unmark_handing_over(session)
+                raise
     try:
         handed_over = stop(project, label, handover=True, agent_id=agent.id)
     finally:
@@ -8369,10 +8406,15 @@ def switch(
             fresh=fresh,
             # What a FRESH replacement is told it takes over from: the account move is
             # the one thing it cannot read off the board.
-            reason=f"it stopped on {reason or 'a usage limit'} under another Claude account",
+            reason=(
+                "it was moved to another Claude account before its usage limit"
+                if reason == claude_accounts_core.BEFORE_LIMIT_REASON
+                else f"it stopped on {reason or 'a usage limit'} under another Claude account"
+            ),
             resume_prompt=_resume_prompt(stopped, reason),
             takes_over=True,
             spawned_by=spawned_by,
+            account_pinned=_account_pinned(agent),
             # The hook's hand-over is nobody's add (#139): `spawn`'s `onboard`.
             onboard=not automatic,
             board_and_hub=board_and_hub,
@@ -8442,6 +8484,7 @@ def _respawn(
     ack_wait: float = 0.0,
     team_line: str | None = None,
     replaces: str | None = None,
+    account_pinned: bool = False,
 ) -> tuple[SpawnReceipt, bool, list[str]]:
     """Start ``agent`` again — same label, role, task and worktree — resuming when it can.
 
@@ -8469,7 +8512,9 @@ def _respawn(
     agent's replacement works in the same tree, as it stands: its branch is
     the one the agent was on, whatever its task or the codename says now
     (``spawn(own_worktree=…)``). ``board_and_hub`` is the board it reads and its window's
-    hub, asked before the stop (:func:`_board_and_hub`). ``replaces`` is :func:`spawn`'s.
+    hub, asked before the stop (:func:`_board_and_hub`). ``replaces`` is :func:`spawn`'s, and
+    so is ``account_pinned``: ``account`` is the row's slot or the target's, never a pin of
+    itself.
     """
     notes: list[str] = []
     if task is not None and agent.task_id != task.id:
@@ -8545,6 +8590,7 @@ def _respawn(
         # both name the task already.
         kickoff=False,
         ack_wait=ack_wait,
+        account_pinned=account_pinned,
         replaces=replaces,
     )
     if agent.launch_spec is not None and replay:
@@ -8955,6 +9001,8 @@ def restart(
         )
     except (FleetError, claude_accounts_service.NoSuchAccount) as exc:
         raise FleetError(f"cannot restart {label!r}: {exc}") from exc
+    # The row's own slot is no new pin; a take-over's account is the human's choice.
+    pinned = _account_pinned(agent) if account is None else account != THIS_SHELL_ACCOUNT
     account = str(choice.account.slot) if choice.account is not None else None
     # The ladder's notes travel with the slot it chose; with none chosen, `spawn`
     # asks the same ladder and gives them itself.
@@ -9063,6 +9111,7 @@ def restart(
             # (last delta review, m3). Not a hand-over, whose own stop writes `stopped`, nor
             # a row stopped already, which this restart was asked to bring back.
             replaces=agent.id if handed_over is None and agent.ended_by != "stopped" else None,
+            account_pinned=pinned and account is not None,
         )
     except Exception:
         if handed_over is not None and handed_over.withheld:
@@ -9269,6 +9318,10 @@ def hand_off(
         prompt=first,
         spawned_by=spawned_by,
         account=_account_wanted(account, slot),
+        # The source's slot is no new pin; an account the dialog names is the human's.
+        account_pinned=(
+            _account_pinned(agent) if account is None else account != THIS_SHELL_ACCOUNT
+        ),
         resume=resume,
         size=size,
         spec=agent.launch_spec if replay else None,
@@ -9338,6 +9391,12 @@ def _handoff_row(
             f"{agent_id} is labelled {agent.label!r}, not {label!r} — nothing was done"
         )
     return agent
+
+
+def _account_pinned(agent: FleetAgent) -> bool:
+    """Whether ``agent`` was put on its account by name (``LaunchSpec.account_pinned``), which
+    its replacement, a fork of it and a switch of it keep (F2 of #400)."""
+    return agent.launch_spec is not None and agent.launch_spec.account_pinned
 
 
 def _account_wanted(account: str | None, slot: int | None) -> str | None:
@@ -9590,9 +9649,13 @@ def _resume_prompt(agent: FleetAgent, reason: str | None) -> str:
     #205, finding 5). One line on purpose: :func:`_type_prompt` types a
     single-line prompt past its timeout and refuses a multi-line one.
     """
-    why = reason or "a usage limit"
+    why = (
+        "before its usage limit"
+        if reason == claude_accounts_core.BEFORE_LIMIT_REASON
+        else f"after {reason or 'a usage limit'}"
+    )
     return (
-        f"You are {agent.label}, moved to another Claude account after {why} and resumed "
+        f"You are {agent.label}, moved to another Claude account {why} and resumed "
         "mid-task: re-read `aisquare board` and `git status`, then continue exactly where "
         "you left off without redoing work that is already committed."
     )

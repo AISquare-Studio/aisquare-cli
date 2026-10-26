@@ -35,6 +35,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   honouring a back-off; a kept reading moves nobody. The spawn records whether its account
   was named (`account_pinned` in the row's launch spec), which a restart, a switch and a fork
   keep; rows spawned before this read as not pinned.
+- **Settings ▸ Usage & stats, and `aisquare metrics stats`: what every Claude Code session on
+  this machine spent, by day, repository, account and model.** A new page under Settings
+  (Today / 7 days / 30 days / Lifetime, keys `1`-`4`) with tiles for tokens, input + output,
+  cost at list prices, sessions, turns, active days and repositories; a bar per day (per hour
+  for Today); the weekdays and hours you work; your ten biggest repositories; your accounts
+  and their plans, with the top one starred; the busiest days; the model mix; and the features
+  you use most. It loads off the UI thread and says so when there is nothing yet. The same
+  figures print as text or `--json`. **Every session counts, whether or not aisquare launched
+  it:** a sweep reads Claude Code's transcripts under `~/.claude` and every registered
+  account, when the page opens and from the TUI every ten minutes, and as
+  `aisquare metrics backfill` - the first run records the history Claude Code has not yet
+  deleted. A session the Stop hook counted is never counted again (one scan position per
+  session; a compare-and-set on write), and a turn that crosses local midnight is cut in two.
+  Totals equal `aisquare metrics tokens` for the same sessions. Sessions now record their
+  account (slot and subscription) and repository; repositories get a cached profile (host,
+  main language, size, monorepo); commands and TUI pages are counted by name per day, an
+  appended line, never an argument. Schema v40. Everything stays on this machine
+  (`docs/usage-stats.md`).
 
 ### Changed
 

@@ -463,12 +463,13 @@ def test_update_does_not_wait_for_a_worker_that_is_safe_to_cut_off(
     """A pending AISquare sign-in waits for the browser until a token arrives, a quit
     cancels the wait (``on_unmount``) and nothing is stored past a cancel. Counted, it held
     Update and Uninstall for as long as the device code lived, 10 to 15 minutes (round 16
-    of #257)."""
+    of #257). The usage sweep and the Usage & stats page's read are cut off too: each session
+    is recorded in a transaction of its own, so a quit loses only what was not yet read."""
     monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
 
     while_running, said, _ = _held_hand_off(name)
 
-    assert name == accounts_view.SIGN_IN_WORKER and name not in WRITING
+    assert name in CUT_OFF and name not in WRITING
     assert while_running == ("upgrade", "--reopen") and said == [], said
 
 

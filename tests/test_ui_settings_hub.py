@@ -157,7 +157,7 @@ def test_settings_opens_the_hub_and_each_link_opens_its_page_under_settings() ->
         await pilot.click(app.query_one(SettingsRow))
         await settle_page(app)
         seen.append((app.content.current, app.sidebar.selected_key))
-        for link in ("#hub-app-settings", "#hub-accounts", "#hub-doctor"):
+        for link in ("#hub-app-settings", "#hub-accounts", "#hub-usage-stats", "#hub-doctor"):
             await pilot.click(app.query_one(SettingsRow))
             await settle_page(app)
             await pilot.click(link)
@@ -170,6 +170,7 @@ def test_settings_opens_the_hub_and_each_link_opens_its_page_under_settings() ->
         ("settings-hub", SETTINGS_KEY),
         ("app-settings", SETTINGS_KEY),
         ("accounts", SETTINGS_KEY),
+        ("usage-stats", SETTINGS_KEY),
         ("doctor", SETTINGS_KEY),
     ]
 
@@ -288,11 +289,12 @@ def test_the_hub_is_titled_settings_and_says_what_each_link_opens() -> None:
         "Remote control",
         "Captain",
         "Accounts",
+        "Usage & stats",
         "Doctor",
         "Restart all…",
         "Stop all…",
     ]
-    assert len(about) == 6 and all(about)  # the Fleet section's two share one line
+    assert len(about) == 7 and all(about)  # the Fleet section's two share one line
 
 
 # --- what the doctor found (review of #261, m9) ----------------------------------------

@@ -2658,7 +2658,7 @@ def test_a_switch_reads_the_no_account_label_again_for_the_new_project(
     work = _account(3, alias="work", position=1)
 
     def defaults(
-        project: ProjectInfo, role: str, args: list[str]
+        project: ProjectInfo, role: str, args: list[str], model: str | None
     ) -> accounts_service.LaunchDefault:
         asked.append((project.id, role))
         if project.id == other_project.id:

@@ -99,6 +99,8 @@ from aisquare.models import (
     FleetAgent,
     FleetAgentState,
     FleetAgentStatus,
+    FreshKept,
+    FreshUnpushed,
     LaunchSpec,
     ProjectInfo,
     TeamEvent,
@@ -2026,6 +2028,150 @@ def _squashed(root: Path, tips: Mapping[str, str], default: str) -> set[str]:
         if merge.returncode == 0 and merge.stdout.split()[:1] == tree.stdout.split():
             same.add(branch)
     return same
+
+
+# --- start fresh: every tree and branch of a project's fleet (``project fresh``) ----------
+
+
+def fleet_trees(project: ProjectInfo, rows: Sequence[FleetAgent]) -> list[Path]:
+    """The worktrees ``rows`` (the project's fleet rows) ran in that are on disk now, each
+    once, in the order of their rows: never the project's root, the owner's checkout, and
+    never a folder that is no git worktree. One that cannot be looked at is left out, as
+    reap leaves it (:func:`_remove_finished_worktrees`)."""
+    root = _tree_at(project.root)
+    seen: set[Path] = set()
+    trees: list[Path] = []
+    for row in rows:
+        here = _tree_at(row.cwd) if row.worktree else None
+        if here is None or here == root or here in seen:
+            continue
+        try:
+            if not _present(row.cwd / ".git"):
+                continue
+        except OSError:
+            continue
+        seen.add(here)
+        trees.append(row.cwd)
+    return trees
+
+
+def fleet_branch_tips(project: ProjectInfo, rows: Sequence[FleetAgent]) -> dict[str, str]:
+    """The local branches ``project fresh --branches`` deletes, with their tips: each
+    ``fleet/<codename>/…`` branch, and each other ``fleet/…`` one ``rows`` recorded (from
+    before a ``fleet rename``). Never a remote branch, nor any other local one; ``{}`` for a
+    project that is no git checkout. Raises :class:`FleetError` when git cannot be run."""
+    if not is_git_project(project.root):
+        return {}
+    own = f"{_FLEET_BRANCH_PREFIX}{project.codename}/" if project.codename else None
+    recorded = {row.branch for row in rows if row.branch}
+    return {
+        branch: tip
+        for branch, tip in (_fleet_branches(project.root) or {}).items()
+        if (own is not None and branch.startswith(own)) or branch in recorded
+    }
+
+
+def unpushed_work(
+    project: ProjectInfo, trees: Sequence[Path], branches: Mapping[str, str]
+) -> list[FreshUnpushed]:
+    """What of ``trees`` and ``branches`` (:func:`fleet_trees`, :func:`fleet_branch_tips`)
+    holds work found nowhere else: a tree with changes not committed, or a tree or a branch
+    no tree has out with commits neither the default branch nor any remote-tracking branch
+    has (reap's rule, :func:`_why_kept`). A tree git cannot read is said to hold uncommitted
+    work: nothing there is known to be safe. Raises :class:`FleetError` when git cannot be
+    run."""
+    if not trees and not branches:
+        return []
+    root = project.root
+    default = _default_branch(root)
+
+    def alone(rev: str) -> int:
+        # Asked in the root, where `default` is the checkout's: in a tree, HEAD is the tree's.
+        counted = _git(root, "rev-list", "--count", rev, "--not", default, "--remotes", "--")
+        return int(counted.stdout.strip() or 0) if counted.returncode == 0 else 0
+
+    found: list[FreshUnpushed] = []
+    out: set[str] = set()
+    for tree in trees:
+        status = _git(tree, "status", "--porcelain", "--untracked-files=normal")
+        branch = _spawned_on(tree)
+        if branch is not None:
+            out.add(branch)
+        head = _git(tree, "rev-parse", "--verify", "--quiet", "HEAD")
+        commits = alone(head.stdout.strip()) if head.returncode == 0 and head.stdout else 0
+        dirty = status.returncode != 0 or bool(status.stdout.strip())
+        if commits or dirty:
+            found.append(
+                FreshUnpushed(path=tree, branch=branch, commits=commits, uncommitted=dirty)
+            )
+    for branch, tip in branches.items():
+        if branch not in out and (commits := alone(tip)):
+            found.append(FreshUnpushed(branch=branch, commits=commits))
+    return found
+
+
+def remove_fleet_trees(
+    project: ProjectInfo, trees: Sequence[Path], *, force: bool
+) -> tuple[list[Path], list[FreshKept]]:
+    """``git worktree remove`` each of ``trees``, with ``--force`` when ``force`` (the owner
+    said the work found only there may go); without it git refuses a tree with changes, so
+    one made since the plan asked stays. Under the branch lock a spawn makes its tree under
+    (:func:`_branches_locked`), then ``git worktree prune``. What went, and what stayed with
+    why; a git that cannot be run keeps them all, said so."""
+    if not trees:
+        return [], []
+    root = project.root
+    removed: list[Path] = []
+    kept: list[FreshKept] = []
+    try:
+        common = _git_common_dir(root)
+        with _branches_locked(common, wait=_BRANCHES_LOCK_WAIT):
+            for tree in trees:
+                forced = ["--force"] if force else []
+                result = _git(root, "worktree", "remove", *forced, str(tree))
+                if result.returncode == 0:
+                    removed.append(tree)
+                    continue
+                why = result.stderr.strip() or "no reason"
+                kept.append(FreshKept(path=tree, reason=f"git worktree remove refused: {why}"))
+            _git(root, "worktree", "prune")
+    except FleetError as exc:
+        done = set(removed)
+        kept += [FreshKept(path=tree, reason=str(exc)) for tree in trees if tree not in done]
+    return removed, kept
+
+
+def delete_fleet_branches(
+    project: ProjectInfo, tips: Mapping[str, str]
+) -> tuple[list[str], list[FreshKept]]:
+    """Delete each of ``tips`` (branch → the tip that was judged, :func:`fleet_branch_tips`)
+    that no worktree has out, rebases or bisects (:func:`_branches_in_use`, the owner's
+    checkout included), at that tip and no other (``update-ref -d``, as the sweep deletes:
+    :func:`_sweep_fleet_branches`), with its ``branch.<name>`` config. Local only: no remote
+    is asked or told. What went, and what stayed with why."""
+    if not tips:
+        return [], []
+    root = project.root
+    deleted: list[str] = []
+    kept: list[FreshKept] = []
+    try:
+        common = _git_common_dir(root)
+        with _branches_locked(common, wait=_BRANCHES_LOCK_WAIT):
+            out = _branches_in_use(root, common)
+            for branch, tip in tips.items():
+                if out is None:
+                    kept.append(FreshKept(branch=branch, reason="git would not list the trees"))
+                elif branch in out:
+                    kept.append(FreshKept(branch=branch, reason="a worktree has it out"))
+                elif _git(root, "update-ref", "-d", f"refs/heads/{branch}", tip).returncode:
+                    kept.append(FreshKept(branch=branch, reason="it moved since it was looked at"))
+                else:
+                    _git(root, "config", "--remove-section", f"branch.{branch}")  # none: fine
+                    deleted.append(branch)
+    except FleetError as exc:
+        done = set(deleted)
+        kept += [FreshKept(branch=branch, reason=str(exc)) for branch in tips if branch not in done]
+    return deleted, kept
 
 
 # --- what tmux knows about a pane -----------------------------------------------------

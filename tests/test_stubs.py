@@ -172,6 +172,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "onboard",
             "forget",
             "prune",
+            "fresh",
+            "reset",
             "pin",
             "unpin",
             "move",

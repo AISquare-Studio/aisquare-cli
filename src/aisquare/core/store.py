@@ -1402,6 +1402,9 @@ class ContextStore(Protocol):
     def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo: ...
     def forget_project(self, project_id: str) -> None: ...
     def purge_project(self, project_id: str) -> dict[str, int]: ...
+    def reset_project(
+        self, project_id: str, *, memory: bool = False, prompts: bool = False, apply: bool = True
+    ) -> dict[str, int]: ...
     def project_activity(self) -> dict[str, str]: ...
     def add_prompt(
         self, text: str, project_id: str | None, source: str = "claude-code"
@@ -2530,14 +2533,82 @@ class SqliteStore:
             "DELETE FROM team_meta WHERE key = ? OR key GLOB ?",
             (f"distill_seq:{project_id}", f"signal/{_glob_escape(project_id)}/*"),
         ).rowcount
-        for start in range(0, len(sessions), _META_BATCH):
-            batch = sessions[start : start + _META_BATCH]
-            keys = [f"{kind}:{sid}" for sid in batch for kind in _SESSION_META_KINDS]
-            globs = [f"continuations:{_glob_escape(sid)}:*" for sid in batch]
-            clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
-            removed += self._conn.execute(
-                f"DELETE FROM team_meta WHERE {' OR '.join(clauses)}", (*keys, *globs)
-            ).rowcount
+        for where, params in _session_meta_terms(sessions):
+            removed += self._conn.execute(f"DELETE FROM team_meta WHERE {where}", params).rowcount
+        return removed
+
+    def reset_project(
+        self, project_id: str, *, memory: bool = False, prompts: bool = False, apply: bool = True
+    ) -> dict[str, int]:
+        """Empty the project's board and fleet rows in one transaction ("Start fresh"), and
+        say what each table gave up; with ``apply`` off, count them and change nothing.
+
+        The board is its ``team_task``, ``team_event`` and ``team_session`` rows, and in
+        ``team_meta`` its signals (``signal/<id>/*``) and the keys of the sessions that go
+        (:func:`_session_meta_terms`: the nudge debounce, the continuation counters, …).
+        The distiller's watermark stays: ``team_event.seq`` is one stream for every board,
+        so the next event is past it whatever went. The fleet is its ``fleet_agent`` rows,
+        and a live one refuses the reset (``ValueError``): asked under the write lock, so an
+        agent a spawn recorded after the caller stopped the rest is never left without its
+        row. ``memory`` takes the project's context entries too (the FTS follows through
+        ``entry_ad``), ``prompts`` its prompt log and turn metrics. The registration and
+        every other project's rows are not touched; the next task added is #1 again, as a
+        number is its board's highest plus one."""
+        scope = [
+            ("team_task", "project_id = ?"),
+            ("team_event", "project_id = ?"),
+            ("team_session", "project_id = ?"),
+            ("fleet_agent", "project_id = ?"),
+        ]
+        if memory:
+            scope.append(("entry", "pool = 'project' AND project_id = ?"))
+        if prompts:
+            scope += [("prompt", "project_id = ?"), ("metric", "project_id = ?")]
+
+        def meta() -> list[tuple[str, tuple[str, ...]]]:
+            sessions = [
+                str(row["id"])
+                for row in self._conn.execute(
+                    "SELECT id FROM team_session WHERE project_id = ?", (project_id,)
+                ).fetchall()
+            ]
+            signals = ("key GLOB ?", (f"signal/{_glob_escape(project_id)}/*",))
+            return [signals, *_session_meta_terms(sessions)]
+
+        if not apply:
+            count = "SELECT COUNT(*) FROM {} WHERE {}"
+            counts = {
+                table: int(
+                    self._conn.execute(count.format(table, where), (project_id,)).fetchone()[0]
+                )
+                for table, where in scope
+            }
+            counts["team_meta"] = sum(
+                int(self._conn.execute(count.format("team_meta", where), params).fetchone()[0])
+                for where, params in meta()
+            )
+            return counts
+        removed: dict[str, int] = {}
+        with self._conn:  # one BEGIN…COMMIT: a reset is whole or it is nothing
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            live = self._conn.execute(
+                "SELECT label FROM fleet_agent WHERE project_id = ? AND ended_at IS NULL "
+                "ORDER BY created_at",
+                (project_id,),
+            ).fetchall()
+            if live:
+                labels = ", ".join(str(row["label"]) for row in live)
+                raise ValueError(f"{len(live)} fleet agent(s) still live: {labels}")
+            keys = meta()  # read under the lock: a session that joined since goes too
+            for table, where in scope:
+                removed[table] = self._conn.execute(
+                    f"DELETE FROM {table} WHERE {where}", (project_id,)
+                ).rowcount
+            removed["team_meta"] = sum(
+                self._conn.execute(f"DELETE FROM team_meta WHERE {where}", params).rowcount
+                for where, params in keys
+            )
         return removed
 
     def project_activity(self) -> dict[str, str]:
@@ -5224,6 +5295,18 @@ _SESSION_META_KINDS: tuple[str, ...] = (
 """The ``team_meta`` keys kept per session as ``<kind>:<session id>``: the manager's nudge
 debounce, the solo session's not-yet-briefed mark (#346), and the quiet compaction's mark,
 its newest refusal and its latest arm (P1 WS-4)."""
+
+
+def _session_meta_terms(sessions: Sequence[str]) -> Iterator[tuple[str, tuple[str, ...]]]:
+    """``(where, params)`` matching the ``team_meta`` keys of ``sessions``: each of
+    :data:`_SESSION_META_KINDS`, and its continuation counters. In statements of at most
+    :data:`_META_BATCH` sessions each, as SQLite refuses an expression tree past 1000 terms."""
+    for start in range(0, len(sessions), _META_BATCH):
+        batch = sessions[start : start + _META_BATCH]
+        keys = [f"{kind}:{sid}" for sid in batch for kind in _SESSION_META_KINDS]
+        globs = [f"continuations:{_glob_escape(sid)}:*" for sid in batch]
+        clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
+        yield " OR ".join(clauses), (*keys, *globs)
 
 
 class GroupSettings(NamedTuple):

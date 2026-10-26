@@ -8,6 +8,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Start fresh: `aisquare project fresh`** (alias `project reset`) clears an onboarded
+  project's board and fleet and starts a blank manager, without onboarding it again.
+  Every live agent is stopped as `fleet shutdown` stops it, each agent's worktree is
+  removed, and the project's tasks, notes and events, sessions, signals and fleet rows
+  are deleted, so the next task is #1 again. Its context entries, prompt log and turn
+  metrics and its local `fleet/<codename>/…` branches stay unless `--memory`,
+  `--prompts` or `--branches` says otherwise; the checkout, every other branch, the
+  registration and its settings, the onboarding snapshot, the captain and every other
+  project are never touched. A worktree or branch that holds uncommitted changes or
+  commits no remote has refuses the reset, naming each tree, its branch and the commit
+  count, unless `--discard-unpushed`. It prints the plan with its counts and asks at a
+  terminal (a second time before discarding); `--dry-run` prints the plan and changes
+  nothing, off a terminal it is a dry run unless `--yes`, and `--json` prints the plan,
+  or with `--yes` the counts it cleared. It is refused from inside one of the project's
+  own fleet agents, and, as `project forget` is, while another project's fleet agents
+  read its board. The service behind it (`services.fresh`: `plan`, then `start_fresh`)
+  is what the UI's Start fresh… calls.
 - **Exact token usage per session** — `aisquare metrics tokens [--session S]
   [--project P | --all]` (`--json` too). The Stop, StopFailure and SessionEnd hooks
   read only the bytes the session's transcript gained since the last record, plus its

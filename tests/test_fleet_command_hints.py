@@ -141,6 +141,7 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ),
     ("cli/fleet.py", "_emit_shutdown"): _TARGET,
     ("cli/fleet.py", "attach"): _TARGET,
+    ("cli/project.py", "_emit_fresh"): _TARGET,
     ("cli/ui/views/project.py", "no_manager_text"): _SHOWN,
     ("cli/ui/views/welcome.py", "WelcomeView._paint_fleet"): _SHOWN,
     ("services/auto_mode.py", "_restart_off_auto"): (

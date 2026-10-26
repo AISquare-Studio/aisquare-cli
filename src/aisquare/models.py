@@ -1284,3 +1284,86 @@ class FleetAgentStatus(BaseModel):
     run on where no client reaches it. Its state is ``unknown`` whatever its board says, and
     its pane id is no pane of its own there: that server numbers its panes from ``%0``
     again."""
+
+
+class FreshUnpushed(BaseModel):
+    """Work a ``project fresh`` would throw away: a fleet agent's worktree, or a fleet branch
+    ``--branches`` would delete, holding what no remote and no default branch has."""
+
+    path: Path | None = None
+    """The worktree; ``None`` for a branch no tree has out."""
+    branch: str | None = None
+    """The branch the tree is on (``None`` on a detached HEAD), or the branch itself."""
+    commits: int = 0
+    """Commits on no remote-tracking branch and not on the default branch."""
+    uncommitted: bool = False
+    """The tree has changes not committed: modified, staged or untracked (not ignored)."""
+
+
+class FreshKept(BaseModel):
+    """A worktree or branch a ``project fresh`` meant to remove and could not, with why."""
+
+    path: Path | None = None
+    branch: str | None = None
+    reason: str
+
+
+class FreshCounts(BaseModel):
+    """What a ``project fresh`` clears (its plan) or cleared (its report). An extra not asked
+    for is ``None``: kept, not counted."""
+
+    tasks: int = 0
+    events: int = 0
+    """Board events: notes, decisions, claims, reviews, exits."""
+    sessions: int = 0
+    meta: int = 0
+    """``team_meta`` rows: the board's signals and the gone sessions' marks."""
+    agents: int = 0
+    """Fleet agent rows, live and ended."""
+    worktrees: int = 0
+    entries: int | None = None
+    """``--memory``: the project's context entries."""
+    prompts: int | None = None
+    """``--prompts``: the prompt log."""
+    metrics: int | None = None
+    """``--prompts``: the turn metrics."""
+    branches: int | None = None
+    """``--branches``: local fleet branches."""
+
+
+class FreshPlan(BaseModel):
+    """What ``project fresh`` would do, read-only (``services.fresh.plan``): the counts it
+    clears, the agents it stops first, the trees and branches it removes, and the work in
+    them found nowhere else, which it refuses to discard unless told to."""
+
+    project: ProjectInfo
+    memory: bool = False
+    prompts: bool = False
+    branches: bool = False
+    counts: FreshCounts = Field(default_factory=FreshCounts)
+    live_agents: list[str] = Field(default_factory=list)
+    """Labels of the live agents it stops first, the manager first."""
+    worktrees: list[Path] = Field(default_factory=list)
+    fleet_branches: dict[str, str] = Field(default_factory=dict)
+    """``--branches``: the local fleet branches it deletes, once no tree has them out, each
+    with the tip it was judged at (and is deleted at)."""
+    unpushed: list[FreshUnpushed] = Field(default_factory=list)
+
+
+class FreshReport(BaseModel):
+    """What ``project fresh`` did (``services.fresh.start_fresh``)."""
+
+    project: ProjectInfo
+    cleared: FreshCounts = Field(default_factory=FreshCounts)
+    stopped: list[str] = Field(default_factory=list)
+    """Labels of the agents it stopped (or recorded gone) before clearing."""
+    worktrees_removed: list[Path] = Field(default_factory=list)
+    branches_deleted: list[str] = Field(default_factory=list)
+    kept: list[FreshKept] = Field(default_factory=list)
+    """Trees and branches it could not remove; their rows went all the same."""
+    discarded: list[FreshUnpushed] = Field(default_factory=list)
+    """The unpushed work ``--discard-unpushed`` let it throw away."""
+    manager: FleetAgent | None = None
+    """The fresh manager it started; ``None`` when the spawn was refused."""
+    manager_error: str | None = None
+    """Why the fresh manager did not start: the board is clear all the same."""

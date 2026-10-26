@@ -83,6 +83,19 @@ aisquare project forget ../old-checkout       # one registration; --purge delete
 aisquare project prune --missing --worktrees  # the stale ones, after a confirmation (or --yes)
 ```
 
+A project you reuse piece of work after piece of work can **start fresh**
+instead: `aisquare project fresh` (alias `reset`) stops its fleet, removes the
+agents' worktrees, clears its board and fleet rows (task numbers start at #1
+again) and starts a blank manager, keeping the registration, its settings and
+its snapshot. Its context entries, prompt log and fleet branches stay unless
+`--memory`, `--prompts` or `--branches`; work in a worktree or branch that no
+remote has refuses it unless `--discard-unpushed`. `--dry-run` shows the plan.
+
+```sh
+aisquare project fresh --dry-run              # what it would clear
+aisquare project fresh --memory --yes         # clear the remembered context too, without asking
+```
+
 `aisquare project onboard` packs the codebase on demand with Repomix (`init`
 no longer does, and no agent is pointed at the pack) into three artifacts
 under `~/.aisquare/projects/<id>/snapshot/`: a **full pack** (every file), a

@@ -21,7 +21,7 @@ from aisquare.cli.app import app
 from aisquare.core import feature_use, paths, repo_profile
 from aisquare.core import usage as usage_core
 from aisquare.core.store import store_session
-from aisquare.models import UsageStats
+from aisquare.models import SessionUsage, TurnUsage, UsageStats
 from aisquare.services import hooks as hooks_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services import usage_stats
@@ -974,6 +974,22 @@ def test_metrics_stats_on_an_empty_machine_says_how_to_fill_it() -> None:
     assert "aisquare metrics backfill" in result.output
 
 
+def test_an_empty_range_says_nothing_is_in_it_when_other_ranges_have_something(
+    machine: Machine,
+) -> None:
+    _one_turn(machine, machine.repo("old"), SESSION, _day(-20, 9))  # long before the real today
+    usage_stats.sweep(tz=IST)
+    runner = CliRunner()
+
+    quiet = runner.invoke(app, ["metrics", "stats", "--range", "today", "--no-sweep"])
+    everything = runner.invoke(app, ["metrics", "stats", "--range", "lifetime", "--no-sweep"])
+
+    assert "Nothing in today: Claude Code was not used in it." in quiet.output
+    assert "1 turns are recorded in all: try --range lifetime." in quiet.output
+    assert "backfill" not in quiet.output
+    assert "Usage — Lifetime" in everything.output
+
+
 def test_metrics_stats_refuses_a_range_it_does_not_know() -> None:
     result = CliRunner().invoke(app, ["metrics", "stats", "--range", "yesterday"])
     assert result.exit_code == 2
@@ -1014,3 +1030,178 @@ def test_forgetting_a_project_for_good_removes_its_repository_profile(
         store.purge_project(profile.repo_id)
         assert store.repo_profiles() == {}
         assert store.usage_turn_rows(None, None) == []
+
+
+# --- lifetime is everything recorded -----------------------------------------------------------
+
+
+def _seed_turn(session_id: str, recorded_at: datetime, *, cache_read: int = 5000) -> None:
+    """A session with one turn recorded at ``recorded_at``, as a hook with a skewed clock (or a
+    sweep before the clamp) left it."""
+    usage = usage_core.Usage(
+        models={
+            MODEL: usage_core.ModelUsage(requests=1, input=10, cache_read=cache_read, output=20)
+        }
+    )
+    total = usage.totals()
+    with store_session() as store:
+        store.record_usage(
+            SessionUsage(
+                session_id=session_id,
+                project_id="prj_x",
+                repo_id="prj_x",
+                usage=usage.to_dict(),
+                turns=1,
+                total_tokens=total.total,
+                started_at=recorded_at,
+                updated_at=recorded_at,
+            ),
+            TurnUsage(
+                id=f"use_{session_id}",
+                session_id=session_id,
+                project_id="prj_x",
+                seq=1,
+                trigger="stop",
+                recorded_at=recorded_at,
+                usage=usage.to_dict(),
+                total_tokens=total.total,
+            ),
+            previous_state=None,
+        )
+
+
+def test_a_turn_dated_after_today_is_in_lifetime_as_in_metrics_tokens(machine: Machine) -> None:
+    _seed_turn("now", NOW, cache_read=1000)
+    _seed_turn("skewed", datetime(2030, 1, 1, 8, tzinfo=UTC), cache_read=7000)  # a clock ahead
+
+    lifetime = _read("lifetime")
+    summary = metrics_service.summarize_tokens(metrics_service.session_usages())
+
+    assert lifetime.tokens.total == summary.total_tokens == 2 * 30 + 1000 + 7000
+    assert (lifetime.sessions, lifetime.turns) == (summary.sessions, summary.turns) == (2, 2)
+    assert lifetime.until == "2030-01-01" and lifetime.days[-1].date == "2030-01-01"
+    assert sum(day.tokens.total for day in lifetime.days) == lifetime.tokens.total
+    assert (
+        len(lifetime.days) == 2
+    )  # today, and the one later day that has a turn: not 1,200 empty ones
+    # the fixed ranges end today: the skewed turn is in none of them
+    assert _read("30d").tokens.total == 30 + 1000 and _read("30d").until == "2026-10-26"
+
+
+def test_the_sweep_never_dates_a_turn_after_now(machine: Machine) -> None:
+    repo = machine.repo("skew")
+    when = datetime(
+        2030, 1, 1, 8, tzinfo=UTC
+    )  # a transcript synced from a machine with its clock ahead
+    machine.session(
+        1,
+        repo,
+        SESSION,
+        prompt(when - timedelta(seconds=5), cwd=repo),
+        request(when, "future", cwd=repo, cache_read=7000),
+    )
+    usage_stats.sweep(now=NOW, tz=IST)
+
+    with store_session() as store:
+        (turn,) = store.turn_usages(SESSION)
+    lifetime = _read("lifetime")
+    summary = metrics_service.summarize_tokens(metrics_service.session_usages())
+
+    assert turn.recorded_at == NOW.astimezone(UTC)  # clamped to the sweep's now
+    assert lifetime.tokens.total == summary.total_tokens == tokens(cache_read=7000)
+    assert lifetime.until == "2026-10-26"  # no day in 2030, in the page, the rollups or a batch
+    assert _read("today").tokens.total == tokens(cache_read=7000)
+
+
+def test_the_hooks_clock_is_the_stats_clock_in_these_tests(machine: Machine) -> None:
+    """The fixture pins what the Stop hook stamps: three tests read at ``NOW`` what the hook
+    recorded at the wall clock, and failed on every run after 18:30 UTC on 2026-10-26."""
+    repo = machine.repo("clock")
+    add_project(repo)
+    transcript = _one_turn(machine, repo, SESSION, _day(0, 9))
+    hooks_service.turn_stopped(repo, session_id=SESSION, transcript_path=str(transcript))
+
+    with store_session() as store:
+        (turn,) = store.turn_usages(SESSION)
+        session = store.session_usage(SESSION)
+
+    assert turn.recorded_at == NOW.astimezone(UTC)
+    assert session is not None and session.updated_at == NOW.astimezone(UTC)
+    assert _read("today").turns == 1
+
+
+# --- one repository, however many clones --------------------------------------------------------
+
+
+def test_clones_and_checkouts_of_one_remote_are_one_repository(machine: Machine) -> None:
+    app = "git@github.com:Org/App.git"
+    main = machine.repo("ws2-app", remote=app)
+    clone = machine.repo("ws3-app", remote="https://user:token@github.com/org/app.git")
+    other = machine.repo("other", remote="https://github.com/org/other")
+    local = machine.repo("local-only")
+    _one_turn(machine, main, "a", _day(0, 9), cache_read=5000)
+    _one_turn(machine, clone, "b", _day(0, 10), cache_read=3000)
+    _one_turn(machine, clone, "c", _day(-1, 10), cache_read=1000)
+    _one_turn(machine, other, "d", _day(0, 11))
+    _one_turn(machine, local, "e", _day(0, 12))
+    usage_stats.sweep(tz=IST)
+
+    week = _read("7d").repos
+    merged = next(row for row in week.rows if row.sessions == 3)
+    (day,) = [
+        d
+        for d in usage_stats.daily_rollups(date(2026, 10, 26), date(2026, 10, 26), now=NOW, tz=IST)
+    ]
+
+    assert week.active == 3 and len(week.rows) == 3  # not 4: ws2 and ws3 are one
+    assert merged.tokens.total == tokens(cache_read=5000) + tokens(cache_read=3000) + tokens(
+        cache_read=1000
+    )
+    assert merged.name == "ws2-app"  # the checkout that spent the most names it
+    assert merged.repo_id == "remote:github.com/org/app"
+    assert sorted(row.name for row in week.rows) == ["local-only", "other", "ws2-app"]
+    # in a day's rollup too: one DayRepo per repository, whose key is the remote
+    assert day.repos_active == 3 and len(day.repos) == 3
+    keys = sorted(repo.key for repo in day.repos)
+    assert keys == sorted(["github.com/org/app", "github.com/org/other", str(local.resolve())])
+    app_row = next(repo for repo in day.repos if repo.key == "github.com/org/app")
+    assert (app_row.sessions, app_row.tokens_total) == (
+        2,
+        tokens(cache_read=5000) + tokens(cache_read=3000),
+    )
+
+
+def test_a_repository_not_profiled_yet_is_counted_as_recorded_and_merges_once_it_is(
+    machine: Machine,
+) -> None:
+    remote = "https://github.com/org/app"
+    first, second = machine.repo("one", remote=remote), machine.repo("two", remote=remote)
+    _one_turn(machine, first, "a", _day(0, 9))
+    _one_turn(machine, second, "b", _day(0, 10))
+    usage_stats.sweep(tz=IST)
+    with store_session() as store:
+        profiles = store.repo_profiles()
+        store._conn.execute("DELETE FROM repo_profile")  # type: ignore[attr-defined]
+        store._conn.commit()  # type: ignore[attr-defined]
+    assert len(profiles) == 2
+    assert _read("today").repos.active == 2  # no profile, no remote known: two
+
+    with store_session() as store:
+        roots = {profile.repo_id: Path(profile.root) for profile in profiles.values()}
+        usage_stats.refresh_profiles(store, roots, now=NOW)
+
+    assert _read("today").repos.active == 1
+
+
+def test_a_nickname_names_the_repository_it_was_given_to(machine: Machine) -> None:
+    repo = machine.repo("dirname", remote="https://github.com/org/app")
+    project = add_project(repo)
+    with store_session() as store:
+        store._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE project SET nickname = ? WHERE id = ?", ("the big one", project.id)
+        )
+        store._conn.commit()  # type: ignore[attr-defined]
+    _one_turn(machine, repo, SESSION, _day(0, 9))
+    usage_stats.sweep(tz=IST)
+
+    assert [row.name for row in _read("today").repos.rows] == ["the big one"]

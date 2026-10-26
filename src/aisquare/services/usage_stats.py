@@ -24,7 +24,14 @@ same rows into one :class:`~aisquare.models.DailyRollup` per local day, which is
 opt-in sharing path ships. Both are aggregations on read of the same loader, so the figures
 are the same wherever they are shown, and the totals are the ones ``aisquare metrics tokens``
 reports for the same sessions. Days are LOCAL days; a turn belongs to the day it ended on
-(a sweep cuts a turn that crosses midnight in two).
+(a sweep cuts a turn that crosses midnight in two), and none is dated after the moment it was
+read. A repository is its normalised git remote, else its root, so the clones of one remote are
+one (:func:`_identity`).
+
+**Known limitation.** Requests are deduplicated per session, by message id: the same messages in
+two session files (a transcript copied or forked) would be counted twice, as the Stop hook always
+did. None of the transcripts this was developed on share a message id; a machine-wide index of
+ids would cost a lookup per request for a case not seen.
 """
 
 from __future__ import annotations
@@ -521,7 +528,7 @@ def _sweep_one(
     if not scanned.chunks and (existing is not None or delta.is_empty()):
         outcome.unchanged = 1
         return outcome
-    recorded_at = now or datetime.now(UTC)
+    recorded_at = now or datetime.now(UTC)  # no turn is recorded as later than this
     cwd = session_cwd(transcript) if existing is None or not existing.repo_id else None
     if cwd is not None and cwd not in repos:
         repos[cwd] = repo_of(cwd)
@@ -542,7 +549,7 @@ def _sweep_one(
                 project_id=project_id,
                 seq=seq,
                 trigger="stop",
-                recorded_at=_transcript_stamp(chunk.ended_at) or recorded_at,
+                recorded_at=min(_transcript_stamp(chunk.ended_at) or recorded_at, recorded_at),
                 usage=chunk.usage.to_dict(),
                 total_tokens=figures.total,
                 weighted=figures.weighted,
@@ -703,6 +710,9 @@ class _Turn:
     weekday: int
     session_id: str
     repo_id: str
+    """The repository it is COUNTED under (:func:`_identity`): clones of one remote share it."""
+    member: str
+    """The checkout it ran in (the id the session recorded)."""
     slot: int | None
     kind: str | None
     models: dict[str, usage_core.ModelUsage]
@@ -751,17 +761,37 @@ class _Sums:
         return self.input + self.cache_write + self.cache_read + self.output
 
 
-def _load(store: ContextStore, first: date | None, last: date, tz: tzinfo | None) -> list[_Turn]:
-    """The turns of local days ``first`` to ``last``, oldest first."""
+def _identity(profiles: dict[str, RepoProfile]) -> Callable[[str], str]:
+    """How a recorded repository id is counted: a repository is identified by its normalised
+    git remote, else by its root. So the clones and checkouts of one remote (``ws2`` to ``ws9``
+    of the same project) are ONE repository on the page, in ``repos_active`` and in a day's
+    rollup, and one with no remote stays its own. A repository not profiled yet is counted as
+    it was recorded, and merges once it is."""
+
+    def identify(repo_id: str) -> str:
+        profile = profiles.get(repo_id)
+        if repo_id != TEMP_REPO and profile is not None and profile.remote:
+            return f"remote:{profile.remote}"
+        return repo_id
+
+    return identify
+
+
+def _load(
+    store: ContextStore,
+    first: date | None,
+    last: date | None,
+    tz: tzinfo | None,
+    identify: Callable[[str], str],
+) -> list[_Turn]:
+    """The turns of local days ``first`` to ``last``, oldest first; no ``first`` is from the
+    beginning and no ``last`` is to the end, whenever a turn is dated (``lifetime``)."""
     since = _day_start(first, tz) if first is not None else None
-    until = _day_start(last + timedelta(days=1), tz)
-    turns: list[_Turn] = []
-    for row in store.usage_turn_rows(since, until):
-        turns.append(_place(row, tz))
-    return turns
+    until = _day_start(last + timedelta(days=1), tz) if last is not None else None
+    return [_place(row, tz, identify) for row in store.usage_turn_rows(since, until)]
 
 
-def _place(row: UsageTurnRow, tz: tzinfo | None) -> _Turn:
+def _place(row: UsageTurnRow, tz: tzinfo | None, identify: Callable[[str], str]) -> _Turn:
     local = _local(row.recorded_at, tz)
     raw = row.usage.get("models")
     models = (
@@ -778,7 +808,8 @@ def _place(row: UsageTurnRow, tz: tzinfo | None) -> _Turn:
         hour=local.hour,
         weekday=local.weekday(),
         session_id=row.session_id,
-        repo_id=row.repo_id,
+        repo_id=identify(row.repo_id),
+        member=row.repo_id,
         slot=row.account_slot,
         kind=row.account_type,
         models=models,
@@ -825,21 +856,39 @@ def _labels(store: ContextStore) -> dict[int, str]:
     return labels
 
 
-def _repo_names(store: ContextStore, repo_ids: Iterable[str]) -> dict[str, str]:
-    profiles = store.repo_profiles()
+def _main_members(turns: Iterable[_Turn]) -> dict[str, str]:
+    """For each repository counted, the checkout that spent the most in it (the one whose
+    profile names and describes the repository when it has several)."""
+    spent: dict[str, Counter[str]] = {}
+    for turn in turns:
+        counts = spent.setdefault(turn.repo_id, Counter())
+        counts[turn.member] += sum(
+            u.input + u.cache_write + u.cache_read + u.output for u in turn.models.values()
+        )
+    return {
+        repo: min(members, key=lambda member: (-members[member], member))
+        for repo, members in spent.items()
+    }
+
+
+def _repo_names(
+    store: ContextStore, turns: Iterable[_Turn], profiles: dict[str, RepoProfile]
+) -> dict[str, str]:
+    """Each repository counted → its name: its main checkout's profile name (the project's
+    nickname, else the folder's), else the project's, else the end of its id."""
     names: dict[str, str] = {}
-    for repo_id in repo_ids:
-        if repo_id == TEMP_REPO:
-            names[repo_id] = TEMP_NAME
+    for repo, member in _main_members(turns).items():
+        if repo == TEMP_REPO:
+            names[repo] = TEMP_NAME
             continue
-        profile = profiles.get(repo_id)
+        profile = profiles.get(member)
         if profile is not None:
-            names[repo_id] = profile.name
+            names[repo] = profile.name
             continue
-        project = store.get_project(repo_id)
-        names[repo_id] = (
+        project = store.get_project(member)
+        names[repo] = (
             (project.nickname or project.root.name) if project is not None else ""
-        ) or repo_id[-8:]
+        ) or member[-8:]
     return names
 
 
@@ -849,7 +898,10 @@ def _stats_in(
     feature_use.fold(store)
     today = _today(now, tz)
     first, last = window(range_, today)
-    turns = _load(store, first, last, tz)
+    profiles = store.repo_profiles()
+    # ``lifetime`` is everything recorded, so it has no end: a turn dated after today (a clock
+    # that was ahead, a transcript synced from another machine) is in it, as in ``metrics tokens``.
+    turns = _load(store, first, None if range_ == "lifetime" else last, tz, _identity(profiles))
     start = first if first is not None else (turns[0].day if turns else today)
     total = _Sums()
     for turn in turns:
@@ -859,22 +911,16 @@ def _stats_in(
     days: list[UsageDay] = []
     cursor = start
     while cursor <= last and (turns or first is not None):
-        sums = by_day.get(cursor, _Sums())
-        days.append(
-            UsageDay(
-                date=cursor.isoformat(),
-                tokens=sums.tokens(),
-                cost_usd=sums.cost,
-                sessions=len(sums.sessions),
-                turns=sums.turns,
-            )
-        )
+        days.append(_usage_day(cursor, by_day.get(cursor, _Sums())))
         cursor += timedelta(days=1)
+    later = sorted(day for day in by_day if day > last)
+    days += [_usage_day(day, by_day[day]) for day in later]  # only the days that have a turn
     busiest = sorted((d for d in days if d.tokens.total), key=lambda d: (-d.tokens.total, d.date))
     stats = UsageStats(
         range=range_,
         since=start.isoformat() if turns or first is not None else None,
-        until=last.isoformat(),
+        until=(later[-1] if later else last).isoformat(),
+        recorded_turns=store.usage_turn_count(),
         tz_offset_minutes=_offset_minutes(today, tz),
         tokens=total.tokens(),
         cost_usd=total.cost,
@@ -904,7 +950,7 @@ def _stats_in(
         key=lambda row: (-row.tokens.total, row.model),
     )
     stats.accounts = _accounts_of(store, turns, total)
-    stats.repos = _repos_of(store, turns)
+    stats.repos = _repos_of(store, turns, profiles)
     uses: Counter[str] = Counter()
     for _, name, count in store.feature_uses(
         first.isoformat() if first else None, last.isoformat()
@@ -915,6 +961,16 @@ def _stats_in(
         for name, count in sorted(uses.items(), key=lambda item: (-item[1], item[0]))[:TOP_FEATURES]
     ]
     return stats
+
+
+def _usage_day(day: date, sums: _Sums) -> UsageDay:
+    return UsageDay(
+        date=day.isoformat(),
+        tokens=sums.tokens(),
+        cost_usd=sums.cost,
+        sessions=len(sums.sessions),
+        turns=sums.turns,
+    )
 
 
 def _accounts_of(store: ContextStore, turns: list[_Turn], total: _Sums) -> UsageAccounts:
@@ -954,9 +1010,11 @@ def _accounts_of(store: ContextStore, turns: list[_Turn], total: _Sums) -> Usage
     )
 
 
-def _repos_of(store: ContextStore, turns: list[_Turn]) -> UsageRepos:
+def _repos_of(
+    store: ContextStore, turns: list[_Turn], profiles: dict[str, RepoProfile]
+) -> UsageRepos:
     by_repo = _sums_by(turns, lambda t: t.repo_id)
-    names = _repo_names(store, by_repo)
+    names = _repo_names(store, turns, profiles)
     rows = [
         UsageRepoRow(
             repo_id=repo_id,
@@ -1011,7 +1069,8 @@ def daily_rollups(
 
     def run(active: ContextStore) -> list[DailyRollup]:
         feature_use.fold(active)
-        turns = _load(active, since, until, tz)
+        profiles = active.repo_profiles()
+        turns = _load(active, since, until, tz, _identity(profiles))
         uses: dict[date, dict[str, int]] = {}
         for day_text, name, count in active.feature_uses(since.isoformat(), until.isoformat()):
             with contextlib.suppress(ValueError):
@@ -1019,7 +1078,6 @@ def daily_rollups(
         by_day: dict[date, list[_Turn]] = {}
         for turn in turns:
             by_day.setdefault(turn.day, []).append(turn)
-        profiles = active.repo_profiles()
         registered = len(accounts_core.list_accounts())
         known_types = account_types(active, refresh=False)
         return [
@@ -1054,10 +1112,11 @@ def _rollup(
         kinds[stamped.most_common(1)[0][0] if stamped else known_types.get(slot, UNKNOWN_TYPE)] += 1
     top = max((sums.total for sums in by_slot.values()), default=0)
     by_repo = _sums_by(turns, lambda t: t.repo_id)
+    mains = _main_members(turns)
     ranked = sorted(by_repo.items(), key=lambda item: (-item[1].total, item[0]))
     repos: list[DayRepo] = []
     for repo_id, sums in ranked[:ROLLUP_REPOS]:
-        profile = profiles.get(repo_id)
+        profile = profiles.get(mains[repo_id])
         repos.append(
             DayRepo(
                 repo_id=repo_id,

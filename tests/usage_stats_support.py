@@ -12,9 +12,11 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from aisquare.core import claude_accounts as core
 
@@ -100,6 +102,23 @@ def tokens(**kinds: int) -> int:
     """The total of one :func:`request` with ``kinds`` overriding its default usage."""
     base = {"input": 10, "cache_write": 100, "cache_read": 1000, "output": 20}
     return sum({**base, **kinds}.values())
+
+
+def pin_hook_clock(monkeypatch: pytest.MonkeyPatch, at: datetime = NOW) -> None:
+    """Stamp what the Stop hook records at ``at``, not at the wall clock.
+
+    ``services.metrics`` stamps a hook's turn with the real ``datetime.now``, and the stats tests
+    read at the fixed :data:`NOW`: a turn recorded after that day's end fell out of the range
+    they read, and three tests failed on every run after 18:30 UTC on 2026-10-26 (CI's red).
+    Every test of the hook beside the stats pins it (the ``machine`` fixture does)."""
+    from aisquare.services import metrics as metrics_service
+
+    class Pinned(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Pinned:
+            return cls.fromtimestamp(at.timestamp(), tz)
+
+    monkeypatch.setattr(metrics_service, "datetime", Pinned)
 
 
 @dataclass

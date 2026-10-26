@@ -17,6 +17,12 @@ def _head(text: str) -> Text:
 def emit_usage_stats(stats: UsageStats) -> None:
     console = stdout_console()
     label = fmt.RANGE_LABELS[stats.range]
+    if not stats.turns and stats.recorded_turns:
+        console.print(
+            f"Nothing in {label.lower()}: Claude Code was not used in it. "
+            f"{stats.recorded_turns:,} turns are recorded in all: try --range lifetime."
+        )
+        return
     if not stats.turns:
         console.print(
             f"No usage recorded for {label.lower()} yet. Claude Code's transcripts are read "

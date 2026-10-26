@@ -1642,6 +1642,7 @@ class ContextStore(Protocol):
         self, since: datetime | None, until: datetime | None
     ) -> list[UsageTurnRow]: ...
     def usage_transcripts(self) -> dict[str, str]: ...
+    def usage_turn_count(self) -> int: ...
     def unattributed_usage(self, limit: int = 5_000) -> list[SessionUsage]: ...
     def attribute_usage(
         self,
@@ -3788,6 +3789,10 @@ class SqliteStore:
             )
             for row in rows
         ]
+
+    def usage_turn_count(self) -> int:
+        """How many turn rows are recorded, of any date."""
+        return int(self._conn.execute("SELECT COUNT(*) FROM usage_turn").fetchone()[0])
 
     def usage_transcripts(self) -> dict[str, str]:
         """Every transcript path a session row recorded → that session's id: what the sweep

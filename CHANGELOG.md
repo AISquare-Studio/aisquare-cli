@@ -51,8 +51,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Totals equal `aisquare metrics tokens` for the same sessions. Sessions now record their
   account (slot and subscription) and repository; repositories get a cached profile (host,
   main language, size, monorepo); commands and TUI pages are counted by name per day, an
-  appended line, never an argument. Schema v40. Everything stays on this machine
-  (`docs/usage-stats.md`).
+  appended line, never an argument. A repository is its normalised git remote (else its
+  root), so the clones of one project count once. Schema v40. Everything stays on this
+  machine (`docs/usage-stats.md`).
 
 ### Changed
 

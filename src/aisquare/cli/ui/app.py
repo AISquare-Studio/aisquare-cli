@@ -203,13 +203,13 @@ ACCOUNTS_WORKER = "shell-accounts"
 HEADROOM_WORKER = "sidebar-headroom"
 """The thread worker that reads the status line's headroom (``FleetApp.refresh_headroom``)."""
 HOUSEKEEPING_SECONDS = 30.0
+"""How often asq's housekeeping tick runs (:meth:`FleetApp._housekeeping`): Remote's auto-off,
+the release check's hourly ask and the usage sweep, none of which has a timer of its own."""
 USAGE_SWEEP_WORKER = "usage-sweep"
 """The worker that reads Claude Code's transcripts for the Usage & stats page's numbers
 (``services.usage_stats.maybe_sweep``), off the UI thread, at most every ten minutes."""
 USAGE_SWEEP_FIRST_SECONDS = 45.0
 """How long after start the first sweep waits: the first frame and the first reads go first."""
-"""How often asq's housekeeping tick runs (:meth:`FleetApp._housekeeping`): Remote's auto-off,
-and the release check's hourly ask, which has no timer of its own."""
 HEADROOM_SECONDS = 60.0
 """How often the status line's headroom is re-read — never on the two-second tick. A read
 goes to the network only for an account whose cached usage is over five minutes old."""
@@ -3318,7 +3318,14 @@ def _cut_off_workers() -> frozenset[str]:
     """
     from aisquare.cli.ui.views import accounts, usage_stats
 
-    return frozenset({accounts.SIGN_IN_WORKER, USAGE_SWEEP_WORKER, usage_stats.LOAD_WORKER})
+    return frozenset(
+        {
+            accounts.SIGN_IN_WORKER,
+            USAGE_SWEEP_WORKER,
+            usage_stats.LOAD_WORKER,
+            usage_stats.SWEEP_WORKER,
+        }
+    )
 
 
 REMOTE_QUIT_QUIET_SECONDS = 0.5

@@ -965,7 +965,11 @@ class UsageStats(BaseModel):
     """The first local date counted: the range's start, or the first recorded day for
     ``lifetime``; ``None`` when nothing is recorded."""
     until: str
-    """The last local date counted: today."""
+    """The last local date counted: today, or for ``lifetime`` the date of a later turn there is
+    (a clock that was ahead): everything recorded is in it."""
+    recorded_turns: int = 0
+    """Turns recorded in all, whatever the range: it tells a range with nothing in it from a
+    machine with nothing recorded."""
     tz_offset_minutes: int = 0
     tokens: UsageTokens = Field(default_factory=UsageTokens)
     cost_usd: float = 0.0

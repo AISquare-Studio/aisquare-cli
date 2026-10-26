@@ -7,11 +7,14 @@ tokens, cost at list prices, sessions, turns, active days and repositories; a ba
 *Today*, a bar per hour); when the work happens (weekdays, hours); the ten repositories with
 the most tokens; the accounts; the busiest days; the models; and the features used most.
 
-**Everything is read off the UI thread** (:data:`LOAD_WORKER`). Opening the page also sweeps
-Claude Code's transcripts for sessions no hook saw (``usage_stats.maybe_sweep``, at most once
-in ten minutes, the first time reading history that still exists), and says how far it is
-while it reads; a range switch only reads what is recorded. With nothing recorded the page
-says so and how to record it, instead of a page of zeros.
+**Everything is read off the UI thread.** Opening the page reads what is recorded
+(:data:`LOAD_WORKER`) and paints it at once, and sweeps Claude Code's transcripts for sessions
+no hook saw in a worker of its own (:data:`SWEEP_WORKER`; ``usage_stats.maybe_sweep``, at most
+once in ten minutes, the first time reading history that still exists), saying how far it is.
+A range key only reads what is recorded and never touches the sweep, which can take half a
+minute the first time: when it ends, the page reads again whatever range it is on, so it
+catches up by itself. With nothing in a range the page says so (and, when other ranges have
+something, that they do), instead of a page of zeros.
 
 **The slot at the top** (``#usage-sharing-slot``, between the title and the range switcher) is
 where the opt-in sharing switch goes (the next task of this feature). It is empty here: this
@@ -41,7 +44,10 @@ from aisquare.models import USAGE_RANGES, UsageRange, UsageStats
 from aisquare.services import usage_stats as usage_service
 
 LOAD_WORKER = "usage-stats-load"
-"""The worker a read of the stats (and, on opening the page, the sweep before it) runs in."""
+"""The worker a read of the stats runs in: one at a time, a newer read replacing an older."""
+SWEEP_WORKER = "usage-stats-sweep"
+"""The worker the sweep of the transcripts runs in, on opening the page: never replaced by a
+read, so a range key pressed meanwhile cannot drop what the sweep found."""
 
 Progress = Callable[[int, int], None]
 Loader = Callable[[UsageRange, bool, Progress | None], UsageStats]
@@ -64,6 +70,12 @@ TILES: tuple[tuple[str, str], ...] = (
     ("repos", "repositories"),
 )
 """The tiles, row by row: each one's id stem and label."""
+
+EMPTY_RANGE = (
+    "Nothing in {range} — Claude Code was not used in it.\n\n"
+    "{turns:,} turns are recorded in all: press 4 for Lifetime, or 2 / 3 for a longer range."
+)
+"""What an empty range says when another range has something."""
 
 EMPTY = (
     "No usage recorded yet.\n\n"
@@ -285,14 +297,38 @@ class UsageStatsView(VerticalScroll):
         self.query_one("#usage-status", Static).update(Text("Reading your usage…"))
 
     def on_show(self) -> None:
-        """The page is opened: read it again (and sweep the transcripts, at most every ten
-        minutes), on whatever range it was left on."""
+        """The page is opened: read what is recorded now, and sweep the transcripts (at most
+        every ten minutes), on whatever range it was left on."""
         self.reload(sweep=True)
 
     # --- reading -----------------------------------------------------------------------
 
+    @property
+    def sweeping(self) -> bool:
+        """Whether the sweep this page started is still running."""
+        return any(w.name == SWEEP_WORKER and not w.is_finished for w in self.workers)
+
     def reload(self, *, sweep: bool = False) -> None:
-        """Read :attr:`range` off the UI thread; with ``sweep``, sweep the transcripts first."""
+        """Read :attr:`range` off the UI thread now; with ``sweep``, also sweep the transcripts,
+        in a worker of its own (none is started while one runs: it repaints when it ends)."""
+        self._read()
+        if sweep and not self.sweeping:
+            self._sweep()
+
+    def _read(self) -> None:
+        """What is recorded, for the range on show. A newer read replaces an older: only the
+        newest one's answer is painted."""
+        range_ = self.range
+        self.run_worker(
+            lambda: self._loader(range_, False, None),
+            name=LOAD_WORKER,
+            group=LOAD_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _sweep(self) -> None:
         range_ = self.range
         app = self.app
 
@@ -303,10 +339,9 @@ class UsageStatsView(VerticalScroll):
                 return
 
         self.run_worker(
-            lambda: self._loader(range_, sweep, progress if sweep else None),
-            name=LOAD_WORKER,
-            group=LOAD_WORKER,
-            exclusive=True,
+            lambda: self._loader(range_, True, progress),
+            name=SWEEP_WORKER,
+            group=SWEEP_WORKER,
             thread=True,
             exit_on_error=False,
         )
@@ -319,17 +354,25 @@ class UsageStatsView(VerticalScroll):
 
     @on(Worker.StateChanged)
     def _loaded(self, event: Worker.StateChanged) -> None:
-        if event.worker.name != LOAD_WORKER:
+        worker = event.worker
+        if worker.name not in (LOAD_WORKER, SWEEP_WORKER):
             return
         status = self.query_one("#usage-status", Static)
-        if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, UsageStats):
-            stats = event.worker.result
-            if stats.range != self.range:
+        if event.state is WorkerState.ERROR:
+            status.update(Text(f"Could not read usage: {worker.error}", style="red"))
+        elif event.state is not WorkerState.SUCCESS:
+            return  # cancelled: a newer read answers
+        if worker.name == SWEEP_WORKER:
+            # Whatever range was asked meanwhile, and whatever a read in flight saw of a sweep
+            # half done: read again, which replaces it. The sweep's own answer is not painted.
+            self._read()
+            return
+        if event.state is WorkerState.SUCCESS and isinstance(worker.result, UsageStats):
+            if worker.result.range != self.range:
                 return  # a range asked for since: its own read paints
-            self.paint(stats)
-            status.update(Text(f"Updated {datetime.now().strftime('%H:%M:%S')}"))
-        elif event.state is WorkerState.ERROR:
-            status.update(Text(f"Could not read usage: {event.worker.error}", style="red"))
+            self.paint(worker.result)
+            if not self.sweeping:  # while it runs, the status says how far it is
+                status.update(Text(f"Updated {datetime.now().strftime('%H:%M:%S')}"))
 
     # --- the ranges ----------------------------------------------------------------------
 
@@ -363,6 +406,16 @@ class UsageStatsView(VerticalScroll):
         self.query_one("#usage-empty").display = empty
         self.query_one("#usage-body").display = not empty
         if empty:
+            elsewhere = stats.recorded_turns > 0
+            self.query_one("#usage-empty", Static).update(
+                Text(
+                    EMPTY_RANGE.format(
+                        range=fmt.RANGE_LABELS[stats.range].lower(), turns=stats.recorded_turns
+                    )
+                    if elsewhere
+                    else EMPTY
+                )
+            )
             return
         values = {
             "tokens": (fmt.tokens(stats.tokens.total), "tokens"),

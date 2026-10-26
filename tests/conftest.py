@@ -34,7 +34,7 @@ from aisquare.services import ci_client
 from aisquare.services import hooks as hooks_service
 from aisquare.services import project as project_service
 from tests import private_fleets, shards
-from tests.usage_stats_support import Machine
+from tests.usage_stats_support import Machine, pin_hook_clock
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -865,10 +865,12 @@ def machine(tmp_path: Path, fake_home: Path, monkeypatch: pytest.MonkeyPatch) ->
     """A machine with Claude Code accounts, repositories and transcripts to build
     (``tests/usage_stats_support.py``). Its repositories are repositories: the scratch
     directories the usage stats count as one "temporary directories" are none here, the
-    suite's own living in a temporary directory."""
+    suite's own living in a temporary directory. The Stop hook's clock is pinned to the stats
+    tests' ``NOW``: stamped by the wall clock, its turns fell out of the range they read."""
     from aisquare.services import usage_stats
 
     monkeypatch.setattr(usage_stats, "_ephemeral_roots", lambda: ())
+    pin_hook_clock(monkeypatch)  # a hook's turn is stamped NOW, not whenever the suite runs
     return Machine(root=tmp_path, home=fake_home)
 
 

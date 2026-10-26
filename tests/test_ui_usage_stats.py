@@ -30,11 +30,12 @@ from aisquare.cli.ui.views.usage_stats import (
     EMPTY,
     KEYS,
     LOAD_WORKER,
+    SWEEP_WORKER,
     UsageStatsView,
     chart_text,
 )
 from aisquare.core.store import store_session
-from aisquare.models import USAGE_RANGES, UsageRange, UsageStats
+from aisquare.models import USAGE_RANGES, UsageDay, UsageRange, UsageStats, UsageTokens
 from aisquare.services import usage_stats
 from tests.test_ui_settings_hub import GOOD
 from tests.ui_workers import settle_page, settle_until
@@ -334,7 +335,8 @@ def test_the_range_buttons_show_which_range_is_on_and_a_click_switches(machine: 
     assert before == ["default", "primary", "default", "default"]  # 7 days, the default
     assert after == ["default", "default", "primary", "default"]
     assert now_on == "30d" and DEFAULT_RANGE == "7d"
-    assert calls[0] == ("7d", True, True)  # opening reads, sweeping first and saying how far
+    # opening reads what is recorded and sweeps in a worker of its own, saying how far it is
+    assert {("7d", False, False), ("7d", True, True)} <= set(calls)
     assert calls[-1] == ("30d", False, False)  # a switch only reads what is recorded
 
 
@@ -349,9 +351,12 @@ def test_the_keys_are_one_to_four_and_r_reads_again_with_the_sweep(machine: Mach
 
     _drive_page(real_loader(calls), go)
 
-    assert [(r, sweep) for r, sweep, _ in calls[1:]] == [
-        ("today", False), ("7d", False), ("30d", False), ("lifetime", False), ("lifetime", True),
-    ]  # fmt: skip
+    reads = [r for r, sweep, _ in calls if not sweep]
+    sweeps = [r for r, sweep, _ in calls if sweep]
+    # each key read its range (reads after a sweep ends are the page catching up, between them)
+    keyed = iter(reads)
+    assert all(any(r == wanted for r in keyed) for wanted in ("today", "7d", "30d", "lifetime"))
+    assert sweeps == ["7d", "lifetime"]  # opening, and `r`; the keys never sweep
     assert KEYS == {"today": "1", "7d": "2", "30d": "3", "lifetime": "4"}
 
 
@@ -420,7 +425,7 @@ def test_the_page_reads_off_the_ui_thread() -> None:
     _drive_page(loader, go)
 
     assert seen and all(thread != threading.main_thread().name for thread, _ in seen)
-    assert {worker for _, worker in seen} == {LOAD_WORKER}
+    assert {worker for _, worker in seen} == {LOAD_WORKER, SWEEP_WORKER}
 
 
 # --- nothing to show, and no answer ---------------------------------------------------
@@ -451,18 +456,112 @@ def test_each_range_with_nothing_in_it_is_the_empty_state_not_a_page_of_zeros(
     )  # twenty days ago: in 30 days and lifetime, not in today or 7 days
     usage_stats.sweep(tz=IST)
 
-    async def go(pilot: Pilot[None], view: UsageStatsView) -> dict[str, bool]:
+    async def go(
+        pilot: Pilot[None], view: UsageStatsView
+    ) -> tuple[dict[str, bool], dict[str, str]]:
         shown: dict[str, bool] = {}
+        said: dict[str, str] = {}
         for range_ in USAGE_RANGES:
             await pilot.press(KEYS[range_])
             await settle_page(view.app)
             await settle_until(view.app, partial(_painted, view, range_))
             shown[range_] = view.query_one("#usage-body").display
-        return shown
+            said[range_] = _text(view.query_one("#usage-empty", Static))
+        return shown, said
 
-    assert _drive_page(real_loader(), go) == {
-        "today": False, "7d": False, "30d": True, "lifetime": True,
-    }  # fmt: skip
+    shown, said = _drive_page(real_loader(), go)
+
+    assert shown == {"today": False, "7d": False, "30d": True, "lifetime": True}
+    # an empty range is not an empty machine: it says so, and where the turns are
+    for quiet in ("today", "7d"):
+        assert said[quiet].startswith(f"Nothing in {fmt.RANGE_LABELS[quiet].lower()}")
+        assert "1 turns are recorded in all" in said[quiet]
+        assert "backfill" not in said[quiet]
+
+
+def test_a_range_key_pressed_during_the_first_long_sweep_does_not_lose_the_sweeps_repaint(
+    machine: Machine,
+) -> None:
+    """The tester's repro: a range key pressed while the first sweep read the history cancelled
+    the worker that was sweeping, so its repaint was dropped; the sweep finished anyway and the
+    page stayed on what it had read before, its status stuck on "Reading…", until ``r``."""
+    release = threading.Event()
+    sweeping = threading.Event()
+    recorded = {"tokens": 1000}
+
+    def versioned(range_: UsageRange) -> UsageStats:
+        spent = recorded["tokens"]
+        tokens = UsageTokens(input=spent)
+        return UsageStats(
+            range=range_,
+            since="2026-10-26",
+            until="2026-10-26",
+            turns=3,
+            sessions=1,
+            active_days=1,
+            tokens=tokens,
+            days=[UsageDay(date="2026-10-26", tokens=tokens, turns=3, sessions=1)],
+        )
+
+    def loader(range_: UsageRange, sweep: bool, progress: Any) -> UsageStats:
+        if sweep:
+            progress(1, 638)
+            sweeping.set()
+            release.wait(timeout=10)
+            recorded["tokens"] = 2000  # what the sweep found
+            progress(638, 638)
+        return versioned(range_)
+
+    async def go(
+        pilot: Pilot[None], view: UsageStatsView
+    ) -> tuple[str, str, str, UsageRange | None]:
+        await settle_until(view.app, sweeping.is_set, group=HELD)
+        await pilot.press("3")
+        await settle_until(
+            view.app, lambda: view.stats is not None and view.stats.range == "30d", group=HELD
+        )
+        during = _text(view.query_one("#usage-tile-tokens", Static)).splitlines()[0]
+        mid_status = _text(view.query_one("#usage-status", Static))
+        release.set()
+        await settle_page(view.app)
+        await settle_until(
+            view.app, lambda: "2.0K" in _text(view.query_one("#usage-tile-tokens", Static))
+        )
+        return (
+            during,
+            mid_status,
+            _text(view.query_one("#usage-status", Static)),
+            view.stats.range if view.stats else None,
+        )
+
+    during, mid_status, status, shown_range = _drive_page(loader, go, settle=False)
+
+    assert during == "1.0K", "a range key paints what is recorded at once, mid-sweep"
+    assert mid_status == "Reading Claude Code's transcripts… 1/638"
+    assert shown_range == "30d"
+    assert status.startswith("Updated "), status  # not stuck on "Reading…"; and no `r` needed
+
+
+def test_pressing_r_while_the_sweep_runs_does_not_start_a_second_sweep(machine: Machine) -> None:
+    release = threading.Event()
+    sweeps: list[UsageRange] = []
+
+    def loader(range_: UsageRange, sweep: bool, progress: Any) -> UsageStats:
+        if sweep:
+            sweeps.append(range_)
+            release.wait(timeout=10)
+        return UsageStats(range=range_, until="2026-10-26")
+
+    async def go(pilot: Pilot[None], view: UsageStatsView) -> int:
+        await settle_until(view.app, lambda: bool(sweeps), group=HELD)
+        await pilot.press("r")
+        await pilot.press("r")
+        await settle_until(view.app, lambda: True, group=HELD)
+        release.set()
+        await settle_page(view.app)
+        return len(sweeps)
+
+    assert _drive_page(loader, go, settle=False) == 1
 
 
 def test_a_read_that_fails_says_why_and_keeps_what_was_shown(machine: Machine) -> None:

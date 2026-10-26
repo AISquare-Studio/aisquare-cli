@@ -33,11 +33,31 @@ Everything here is recorded and shown **on this machine only**. Nothing is sent 
   `uninstall` runs are not counted. Counting is one appended line to `~/.aisquare/feature-use.log`
   (microseconds, no database, failing silent) that the next read folds into the store.
 
+## Repositories
+
+A repository is identified by its **normalised git remote** (`github.com/org/repo`), and by its
+root path when it has none. So the clones and checkouts of one remote — `ws2` to `ws9` of the same
+project — are **one repository** on the page, in the count of active repositories and in a day's
+rollup (one entry per repository, keyed by the remote). The name shown is the one of the checkout
+that spent the most. A repository is merged once it has been profiled (the sweep profiles a few
+a pass), so a repository seen for the first time counts alone until then.
+
 ## How days are cut
 
 Days are **local** calendar days. A turn belongs to the day it ended on; the sweep cuts a turn
 that crosses local midnight in two, each half charged to its own day. *Today* is since local
-midnight; *7 days* and *30 days* are that many local days, today included.
+midnight; *7 days* and *30 days* are that many local days, today included. *Lifetime* is
+everything recorded, with no end: it equals `aisquare metrics tokens` for the same sessions. The
+sweep never dates a turn after the moment it reads it, so a transcript from a machine whose clock
+was ahead is charged to today rather than to a day that has not come.
+
+## Known limitation
+
+Counting is deduplicated per session, by message id. Two session files that carry the *same*
+messages — a transcript copied or forked from another — would count them twice. Claude Code's
+own transcripts do not do this (none of ~640 on the development machine shared a message id
+with another), and the Stop hook has always had the same limit; a machine-wide message-id
+index was left out as the cost of a lookup per request for a case not seen.
 
 ## Where it lives
 

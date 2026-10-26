@@ -31,7 +31,7 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import expected_config_write_errors, fail, project_for_ref
+from aisquare.cli.common import emit_doctor, expected_config_write_errors, fail, project_for_ref
 from aisquare.core import orchestrator, outbox
 from aisquare.core.config import ExplainabilitySettings, load_config, save_config
 from aisquare.core.state import get_state
@@ -475,7 +475,7 @@ def _routing_lines(report: dest.RosterReport) -> list[str]:
 def _next_check(target: ops.ResolvedTarget, project: ProjectInfo) -> str:
     """The step ``use`` names once tracing is on: one that puts the key ``use`` set up to use.
 
-    ``doctor --live --project`` resolves the key the project's launches take,
+    ``explainability doctor --live --project`` resolves the key the project's launches take,
     its own key (minted or attached by hand) first, and posts a real span to the
     gateway with it. ``use`` named ``explainability status`` for the project's
     own key, which only probes the proxy, so a revoked key or another
@@ -492,7 +492,9 @@ def _next_check(target: ops.ResolvedTarget, project: ProjectInfo) -> str:
             )
             + "   (pipe the workspace's key on stdin, or name its variable with --from-env)"
         )
-    return install_route.command_line(["aisquare", "doctor", "--live", "--project", project.id])
+    return install_route.command_line(
+        ["aisquare", "explainability", "doctor", "--live", "--project", project.id]
+    )
 
 
 @app.command()
@@ -742,7 +744,7 @@ def status(
     """Show the tracing config and whether the proxy would accept a session.
 
     Exits non-zero only when tracing is enabled and the proxy lane is RED --
-    ``ProxyState.problem``, the same verdict ``doctor`` and the fleet tab
+    ``ProxyState.problem``, the same verdict ``explainability doctor`` and the fleet tab
     render. Red is two states, and the second is newer than the first: the
     proxy would not take a session (launches silently fall back to untraced),
     or the proxy is alive and REPORTS that it ships to another deployment than
@@ -767,7 +769,7 @@ def status(
     # one `env`, `launch` and the key commands use — so the origin shown is the
     # key a launch would authenticate with; a project with its own key shows
     # that, everything else the machine's. `--project` names another one (#142);
-    # the check `use` sends the operator to is `doctor --live --project`, which
+    # the check `use` sends the operator to is `explainability doctor --live --project`, which
     # puts the key to the gateway, and this one does not.
     target = ops.resolve_target(settings, target_name, project_id=_key_project_id(project_ref))
     # One description of the proxy lane for both surfaces. It also decides
@@ -829,7 +831,7 @@ def status(
                     # The verdict as a FIELD, not only as prose in `probe`. A
                     # script watching for a misroute had to regex an English
                     # sentence that this PR is free to reword; `probe_severity`
-                    # is the same vocabulary `doctor --json` publishes.
+                    # is the same vocabulary `explainability doctor --json` publishes.
                     "probe_severity": str(proxy.severity),
                     "probe_fix": proxy.remediation or None,
                     "redaction": str(level),
@@ -880,7 +882,7 @@ def status(
         # "A red line without its next command is half a doctor" -- this
         # module's own rule, and the amber verdict reached the operator without
         # one: `status` and the fleet tab both rendered `summary` and dropped
-        # `remediation`, so the only surface carrying the fix was `doctor`.
+        # `remediation`, so the only surface carrying the fix was `explainability doctor`.
         if proxy.remediation and proxy.severity is not CheckStatus.ok:
             typer.echo(f"          → {proxy.remediation}")
         typer.echo(f"shipping: {state.reason}{ops.spool_key_note(target, state)}")
@@ -896,13 +898,76 @@ def status(
         # first without the second is the person this line exists for.
         typer.echo(f"redaction: {ops.redaction_summary(level)}")
     # Non-zero exactly when the lane is red -- the ONE derived verdict, so this
-    # cannot disagree with what `doctor` and the tab render. Red is the proxy
+    # cannot disagree with what `explainability doctor` and the tab render. Red is the proxy
     # refusing a session OR a live proxy shipping to another deployment (see
     # the docstring); amber is not red. This read a separate `healthy` boolean
     # until it was removed, and agreed with the severity only because every
     # construction site happened to set both consistently.
     if settings.enabled and proxy.problem:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def doctor(
+    live: Annotated[
+        bool,
+        typer.Option(
+            "--live",
+            help="Also run the checks that leave this machine (gateway reachability, key "
+            "acceptance, a real span round-trip).",
+        ),
+    ] = False,
+    fix: Annotated[
+        bool,
+        typer.Option("--fix", help="Repair what can be repaired, then re-check."),
+    ] = False,
+    target_name: Annotated[
+        str | None,
+        typer.Option(
+            "--target",
+            help="Deployment to check, e.g. stg or prod; with --fix, the one tracing is "
+            "turned on for (without it, --fix leaves tracing off).",
+        ),
+    ] = None,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Answer yes to every --fix prompt.")
+    ] = False,
+    project: Annotated[
+        str | None,
+        typer.Option(
+            "--project",
+            "-P",
+            help="Check the key this project's launches use, by codename, name or id "
+            "prefix (default: the machine's key).",
+        ),
+    ] = None,
+) -> None:
+    """Check the tracing setup and suggest fixes: the section `aisquare doctor` used to carry.
+
+    ``--project`` resolves the key for one project, its own key (#141) first, as ``launch``
+    does. Without it the check reads the machine's key and opens no store. With ``--live``
+    that is the check that puts a project's key to the gateway: ``use`` names it once
+    tracing is on, and ``explainability status``, which it used to name, only probes the
+    proxy, so a revoked or wrong-workspace key passed it (review of #172, D2 round 2).
+
+    Exits 1 when a check fails, as `aisquare doctor` does. Nothing is a failure while
+    tracing is off: an unwired machine is not a broken one.
+    """
+    from aisquare.services import auto_mode  # lazy: the import cost of this group's commands
+
+    project_id = project_for_ref(project).id if project is not None else None
+    if fix:
+        for action in ops.apply_fixes(target=target_name, assume_yes=yes, confirm=typer.confirm):
+            typer.echo(f"fix: {action}")
+    checks = ops.checks(live=live, target_name=target_name, project_id=project_id)
+    # Only when a fleet role runs `auto` behind a configured proxy (#150); offline. It was
+    # `aisquare doctor`'s own row, named for explainability, and is this section's now.
+    auto_mode_row = auto_mode.doctor_check()
+    if auto_mode_row is not None:
+        checks = [*checks, auto_mode_row]
+    emit_doctor(checks)
+    if any(check.status is CheckStatus.fail for check in checks):
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -987,7 +1052,7 @@ def enable(
     typer.echo(f"  key from: {resolved.key_origin} {'(set)' if resolved.api_key else '(NOT set)'}")
     typer.echo(f"  proxy:    {resolved.proxy_url}")
     typer.echo(f"  agents:   {', '.join(resolved.agent_names) or '(none)'}")
-    typer.echo("  next:     aisquare doctor --live")
+    typer.echo("  next:     aisquare explainability doctor --live")
 
 
 @app.command()

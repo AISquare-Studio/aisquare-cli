@@ -1312,12 +1312,14 @@ def test_routes_are_built_only_from_ids_that_validate(node_report: dict[str, Any
         "#/p/prj_x/a/%3Cimg%3E/live",
         "#/n/ny_0123456789ABCDEF",
         "#/p/prj_x/a/coder-1/evil",
+        "#/p/prj_x/a/coder-1/card",  # the Card tab is gone with the explainability card
         "#/%E0%A4%A",
         "#/settings/extra",
     ):
         assert routes[hostile] is None, hostile
     hashes = node_report["hashes"]
     assert hashes["card"] == "#/n/ny_0123456789abcdef/p/prj_x/a/coder-1"
+    assert hashes["agent"] == "#/p/prj_x/a/coder-1/transcript"
     assert hashes["badCard"] == hashes["badAgent"] == hashes["nothing"] == "#/"
     assert hashes["badTab"] == "#/p/prj_x/fleet"
 
@@ -2508,7 +2510,7 @@ def test_a_screen_reader_is_told_which_tab_is_open_and_that_a_sheet_is_a_modal_d
     focus in it, and back on what opened it once Escape closes it."""
     said = boot_report["spoken"]
     assert said["dots"] == ["Live", "Stale: nothing heard for 25 s"], "the dot said it by colour"
-    assert said["tabs"] == [["Live", "true"], ["Transcript", "false"], ["Card", "false"]]
+    assert said["tabs"] == [["Live", "true"], ["Transcript", "false"]]
     assert said["nav"] == ["false", "page", "false", "false"]
     assert said["opened"] == {
         "dialog": ["dialog", "true", "sheet-title"],
@@ -3168,7 +3170,7 @@ def test_each_listing_screen_shows_what_the_spec_lists(boot_report: dict[str, An
     """SPEC §6.3's screens: the feed's empty state; a NEEDS YOU count on a project's row, and
     a NEEDS YOU badge on an agent the feed has a card for; tasks grouped doing, review,
     blocked, todo, done; memory without what was deleted; a cleared card that says what its
-    agent does now and leads back to the feed; an empty transcript; the Card tab's model.
+    agent does now and leads back to the feed; an empty transcript.
     Each could be dropped with every test green."""
     screens = boot_report["screensListed"]
     assert screens["feed"] == "Nothing needs you."
@@ -3191,7 +3193,6 @@ def test_each_listing_screen_shows_what_the_spec_lists(boot_report: dict[str, An
         "back": "#/",
     }
     assert screens["transcript"] == ["No conversation recorded yet."]
-    assert screens["card"].splitlines()[:2] == ["Explainability: on", "model: claude-x"]
 
 
 def test_a_board_whose_tasks_were_all_dropped_says_so_instead_of_drawing_nothing(

@@ -153,10 +153,11 @@ used to call that green.
 
 Two ways not to get it wrong:
 
-- **In `asq`** — the **Setup** form on a project's *AISquare* tab (its
-  Explainability section) fills it in from the
-  gateway you type. Leave the proxy field blank. Three things about that form
-  worth knowing before the first press:
+- **In `asq`** — not any more: the **Setup** form on a project's *AISquare* tab
+  went with the tab, which `asq` no longer shows (tracing is dormant; the view is
+  parked in `views/explainability.py`). For the record, it filled the proxy in from
+  the gateway you typed (leave the proxy field blank), and three things about it are
+  the rules of the one writer behind it, which `explainability enable` follows too:
   - The **deployment** field names the entry these settings belong to. It does
     not move this machine to that deployment unless **make active** is ticked —
     correcting prod's gateway from a machine on stg leaves the machine on stg,
@@ -240,9 +241,10 @@ its endpoint while you have it on.
 ## 8. Verify
 
 ```bash
-aisquare doctor --live
+aisquare explainability doctor --live
 ```
 
+(The tracing checks are their own command; `aisquare doctor` has no explainability row.)
 Six explainability rows. These three are the ones that matter:
 
 - `explainability proxy` — the proxy answers and is the right kind of service
@@ -361,19 +363,18 @@ project's key. A key for ANOTHER workspace traces nothing until that workspace
 knows this machine's agent identities — every span is refused 409
 `agent_not_registered` — so run `explainability register` there once;
 `register [--project P]` registers under the same project's key. `status`
-shows the origin for that project, and each project page's *AISquare* tab
-shows the key its launches use — the project they join from the page's root,
-so the hub's under `$AISQUARE_TEAM_HUB` — and a *Register roster* button that
-registers under it. The **Setup** form's workspace key field attaches a key to
-that project when **this project only** is ticked (the key is pasted, never
+shows the origin for that project. (The project page's *AISquare* tab used to show the key
+its launches use, with a *Register roster* button, and its **Setup** form's workspace key
+field attached a key to that project when **this project only** was ticked; the tab is
+parked, and `key set --project P` is the command.) The form attached it (the key is pasted, never
 echoed), bound to the deployment the form names, or — when the field is blank —
 the one the project's destination names (#142), else the one an exported
 `$AISQUARE_EXPLAINABILITY_TARGET` names, else the active one, as `key set` and
 the project's launches resolve it; typed
 beside other settings that would go to a different deployment, it is refused
 until the field names one. The client lane — the insights this CLI buffers and `ship` drains — still
-ships under the machine key, and `doctor --live` checks the machine's
-workspace (`doctor --live --project P` checks P's key instead); per-project
+ships under the machine key, and `explainability doctor --live` checks the machine's
+workspace (`explainability doctor --live --project P` checks P's key instead); per-project
 shipping is a follow-up.
 `init --explainability` keeps writing the machine key, so a single-workspace
 machine is unaffected.
@@ -436,7 +437,7 @@ reported on its own line:
   destination comes before that variable, which moves only the projects without
   one (`--target` overrides both, and `status` says when the variable is not in
   play). `use` asks about the same target, and once tracing is on it ends with
-  the check for what it set up: `aisquare doctor --live --project <id>`, which
+  the check for what it set up: `aisquare explainability doctor --live --project <id>`, which
   resolves the key the project's launches take (its own first, else the
   machine's) and posts a real span with it, or
   `aisquare explainability key set --project <id>` when there is no key yet.
@@ -509,7 +510,7 @@ the line says `credits unavailable` with the reason and nothing else changes.
 
 | Symptom | Cause |
 |---|---|
-| `doctor` shows no `explainability` rows | Pre-0.5.0 build. `--version` cannot distinguish them; `aisquare explainability` should list six subcommands |
+| `explainability doctor` shows no `explainability` rows | Pre-0.5.0 build. `--version` cannot distinguish them; `aisquare explainability` should list six subcommands |
 | `ModuleNotFoundError: No module named 'aisquare.cli'` | An **editable** install plus the SDK: they share the `aisquare` import name and the SDK wins. `pip uninstall aisquare`, then reinstall non-editable |
 | `ImportError: cannot import name '__version__'` | A pre-0.5.0 build with the SDK installed alongside. Upgrade |
 | `CERTIFICATE_VERIFY_FAILED` / hostname mismatch | Wrong gateway hostname |
@@ -560,11 +561,10 @@ stay) from each settings file (a `settings.json.bak-<stamp>` copy kept beside it
 Claude Code's own lock), from the bindings, and from the fleet tmux server. A
 shell cannot be changed from here: it prints the `unset` line and the rc files
 that mention the variables, and edits neither. A second run says "nothing to
-reset". `disable` (the button and the command) names the leftovers it finds,
-and the Explainability tab then offers **Reset routing**.
+reset". `disable` names the leftovers it finds, and `aisquare explainability reset` clears them.
 
-`doctor --fix` turns tracing on only with `--target <name>`; without it, a fix
-run leaves a Disable in place.
+`explainability doctor --fix` turns tracing on only with `--target <name>`; without it, a
+fix run leaves a Disable in place. (`aisquare doctor --fix` only creates the home.)
 
 ### What tracing costs a session
 
@@ -604,7 +604,7 @@ starting at ~137k were refused from their first shell command, manager and
 coders alike; probes at ~98k passed. `/compact` does not help a fresh agent —
 the baseline cannot be compacted.
 
-**What the CLI tells you.** `aisquare doctor` gains an `explainability
+**What the CLI tells you.** `aisquare explainability doctor` gains an `explainability
 auto-mode` line whenever a fleet role runs `auto` behind a configured proxy, or
 a running agent was launched in `auto` (a restart replays that mode, whatever
 the role says now, so the line names the agent): it reads the first-turn size of your recent sessions from their transcripts and

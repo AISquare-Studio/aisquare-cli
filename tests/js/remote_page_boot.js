@@ -3338,8 +3338,7 @@ async function statusStrip() {
 
 /* The screens that list (SPEC §6.3): the feed with nothing in it; the Projects screen and a
  * project's Fleet tab with two cards for coder-1; the Tasks and Memory tabs; a card that
- * cleared, opened from its push link, then Back to the feed; an agent's empty transcript; and
- * its Card tab. */
+ * cleared, opened from its push link, then Back to the feed; and an agent's empty transcript. */
 async function screensListed() {
   const open = async (hash, routes) => {
     const page = bootPage(hash, signedIn(routes));
@@ -3377,9 +3376,6 @@ async function screensListed() {
   click(buttonNamed(cleared.main(), "Back to the feed"));
   await settle();
   const transcript = await open("#/p/" + PROJECT + "/a/coder-1/transcript", { "GET api/transcript/coder-1": () => transcriptPage([], null, false) });
-  const card = await open("#/p/" + PROJECT + "/a/coder-1/card", {
-    "GET api/explainability/coder-1": () => ({ status: 200, json: { available: true, model: "claude-x", tokens_in: 1200, tokens_out: 300 } }),
-  });
   return {
     feed: find(feed.main(), (node) => node.className === "empty").textContent,
     projects: textsOf(projects.main().querySelectorAll("span.badge")),
@@ -3388,7 +3384,6 @@ async function screensListed() {
     memory: textsOf(memory.main().querySelectorAll("p.text")),
     cleared: { said: clearedSaid, back: cleared.location.hash },
     transcript: textsOf(transcript.main().querySelectorAll("pre.transcript")[0].childNodes),
-    card: card.main().querySelectorAll("pre.mono")[0].textContent,
   };
 }
 

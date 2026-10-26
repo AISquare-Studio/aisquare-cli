@@ -7,7 +7,7 @@ that is process-wide and a race with every worker — so it runs them here, as
 call (~350 ms); the gain is crash isolation and a cwd that is exactly right.
 
 This is a registered spawn seam (``core.spawn.SEAMS``), ruled EXCLUDED and not
-stripped: it starts no model process, and ``doctor --live`` needs the
+stripped: it starts no model process, and ``explainability doctor --live`` needs the
 ``EXPLAINABILITY_*`` environment to diagnose the machine it is on.
 """
 

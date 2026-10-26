@@ -13,10 +13,16 @@ train `rc/v2026.08.18` @ `0b5cfd1`.
 **Refreshed:** 2026-08-17 ~06:00 by `coder3`, against the train at the commit
 this file ships with. The original was 49 commits stale and predated every
 command purpose-built for this cutover — `explainability enable`, `register`,
-`ship`, `disable`, and `doctor --live` — so following it produced a cutover with
+`ship`, `disable`, and `explainability doctor --live` — so following it produced a cutover with
 no registered identities and no insight delivery, while every step appeared to
 succeed. Steps I re-executed carry my markers; where I could not execute
 something I say so and name who did.
+
+> **Since 0.9.1 the explainability section of `aisquare doctor` is its own command.**
+> Where this runbook says `doctor` for tracing's rows, `--live`, `--target`, `--project`
+> or `--fix` (`aisquare doctor --live`, `doctor --fix --target …`), run
+> `aisquare explainability doctor` with the same options: `aisquare doctor` has no
+> explainability row and takes none of them. The measurements below are as they were taken.
 
 **How to read the evidence markers.** Every step is marked, and the markers are
 load-bearing — they tell you which steps I actually executed and which ones you
@@ -159,7 +165,7 @@ aisquare doctor
 > `outbox`, `redaction`, `credentials`, `spawn` and `version`: the entire client
 > lane. It still exits `0`, and so does the train build, so **neither the exit
 > code nor `--version` distinguishes them.**
-> So presence of the section is the check: **if `aisquare doctor` shows you no
+> So presence of the section is the check: **if `aisquare explainability doctor` shows you no
 > `explainability` rows, you are not running this train** — expected before the
 > install above, and a red flag after it.
 >
@@ -827,7 +833,7 @@ EXPLAINABILITY_INBOX_PATH=/home/work/.aisquare/claude_proxy_inbox.db
 > prevent, arriving through the path instead of the key. Setting an ABSOLUTE
 > path here fixes that as well as the doctor row: all four sites read this one
 > variable. So with
-> the variable unset, `doctor --live` prints
+> the variable unset, `explainability doctor --live` prints
 > `✓ sdk:delivery_backlog: No inbox database … (nothing recorded yet)` over a
 > live inbox. Measured both ways on a probe inbox holding one pending row: unset
 > → "No inbox database"; set → `pending=1`.
@@ -843,7 +849,7 @@ EXPLAINABILITY_INBOX_PATH=/home/work/.aisquare/claude_proxy_inbox.db
 > ⚠️ **[verified-train] Do NOT put `AISQUARE_AGENT_NAME` in this file.** An
 > earlier version of this runbook set it to `aisquare-runner`. That variable is
 > the **SDK's routing identity**, not ours — the CLI only ever reads it and
-> never writes it — and it is SDK-wide: `doctor --live` reports it as the
+> never writes it — and it is SDK-wide: `explainability doctor --live` reports it as the
 > default identity that stamps rootless spans. Pin it to a role in a shared env
 > file and every session that sources the file routes as that role, which is
 > exactly the misattribution the whole correlation spine exists to prevent.
@@ -906,7 +912,7 @@ is what a hosted proxy authenticates on. Pointing at one needs no local process:
 ```bash
 aisquare explainability enable --target prod \
   --proxy-url https://explainability-api.aisquare.studio:9443
-aisquare doctor --live | grep explainab      # proxy, gateway and ingest all ✓
+aisquare explainability doctor --live | grep explainab      # proxy, gateway and ingest all ✓
 ```
 
 Verified end to end on 2026-08-27: three real `claude` sessions traced through the
@@ -1162,7 +1168,7 @@ sample from one proxy is all anyone has.
 
 **[verified-train]** This replaces the two `aisquare config set` calls an
 earlier version of this runbook used. Those still work, but they cannot set a
-target, and everything downstream (`register`, `doctor --live`, `ship`) is
+target, and everything downstream (`register`, `explainability doctor --live`, `ship`) is
 target-aware.
 
 ```bash
@@ -1180,7 +1186,7 @@ Run by me against staging, output verbatim (prod values will differ):
   key from: $EXPLAINABILITY_API_KEY (set)
   proxy:    http://127.0.0.1:9190
   agents:   aisquare-planner, aisquare-coder, aisquare-runner
-  next:     aisquare doctor --live
+  next:     aisquare explainability doctor --live
 ```
 
 **`--key-env` names the VARIABLE, never the key.** The key itself is never
@@ -1377,12 +1383,12 @@ clear.
 
 ## 5. The one command that proves it green (1 min)
 
-**[verified-stg]** `doctor --live` is the real round-trip — gateway ready, key
+**[verified-stg]** `explainability doctor --live` is the real round-trip — gateway ready, key
 accepted, a test span actually ingested — not a ping. Run it, and read the
 `ingest` line:
 
 ```bash
-aisquare doctor --live
+aisquare explainability doctor --live
 ```
 
 Run by me against staging, the explainability section verbatim:
@@ -1396,7 +1402,7 @@ Run by me against staging, the explainability section verbatim:
 ✓ explainability gateway: https://…/ready — HTTP 200
 ✓ explainability ingest: test span accepted as 'aisquare-planner' (HTTP 202)
 ⚠ explainability governance: traces land, but runs stay UNGOVERNED until a rule book is attached to the studio (an ingest key cannot verify this from here)
-    → Attach a rule book to the studio in the dashboard, then re-run aisquare doctor --live
+    → Attach a rule book to the studio in the dashboard, then re-run aisquare explainability doctor --live
 ✓ sdk:gateway_live: Alive        ✓ sdk:gateway_ready: Ready
 ```
 
@@ -2023,8 +2029,8 @@ others, which is correct and not a missing check:
 | `pydantic_settings IncompleteFieldDefinitionWarning` in the test suite | pre-existing, unrelated |
 
 **Genuinely red** — same catalog, spanning `explainability-doctor`,
-`aisquare doctor --live`, the proxy log and the CLI's own errors. The credit-band
-row in particular comes from `aisquare doctor --live` (§5), not from the command
+`aisquare explainability doctor --live`, the proxy log and the CLI's own errors. The credit-band
+row in particular comes from `aisquare explainability doctor --live` (§5), not from the command
 above:
 
 | Line | Meaning |
@@ -2104,7 +2110,7 @@ above:
 > **What `doctor` actually does at each band, measured through the real CLI
 > against a stub gateway** (`8dd460fb`):
 >
-> | gateway answers | `doctor --live` | ingest row |
+> | gateway answers | `explainability doctor --live` | ingest row |
 > |---|---|---|
 > | `202` clean | exit 0 | `ok` — test span accepted |
 > | `202` + band `hard` | exit 0 | **warn** — accepted, "but the workspace credit balance is in the 'hard' band" |
@@ -2232,7 +2238,7 @@ aisquare explainability reset --yes
 It prints the shell `unset` line and the rc files that mention the variables;
 it never edits them. Run it again and it says "nothing to reset".
 
-`doctor --fix` turns tracing on only with `--target prod`, so a fix run no
+`explainability doctor --fix` turns tracing on only with `--target prod`, so a fix run no
 longer undoes this rollback.
 
 ---
@@ -2251,7 +2257,7 @@ longer undoes this rollback.
 | 3 Proxy build | the §3 check prints `IN FORCE` | reinstall `aisquare>=1.1.0` |
 | 4 Enable | `status` shows your target, gateway and proxy | `aisquare explainability disable`, then §7 |
 | 4b Register | each agent printed with a `publication_id` | none needed — additive and idempotent |
-| 5 Green | `doctor --live` → `ingest: test span accepted … (HTTP 202)` | `aisquare explainability disable`, then §7 |
+| 5 Green | `explainability doctor --live` → `ingest: test span accepted … (HTTP 202)` | `aisquare explainability disable`, then §7 |
 | 5b Insights | `.shipping.gateway` equals your prod URL; `spool:` counts move after `ship` **and keep moving** — a growing `N buffered` means draining stopped | `aisquare init --no-explainability` (spool kept) |
 | 5c Join | one id in three local places: the traced process's `AISQUARE_PIPELINE_ID`, its record in `joins.jsonl`, and its board row — anchor on the RUNNING session, not `tail -1` | none — read-only |
 

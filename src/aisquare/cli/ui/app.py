@@ -3126,9 +3126,10 @@ def _writing_workers() -> dict[str, str]:
 
     One rule on the app's worker manager, where views kept a flag each (a bool, a set, a
     property) and the next writer was missed: the Project tab's Start manager, an agent's
-    Stop and Restart, and Explainability's writes all quit under an Update (round 16 of
-    #257). The views' own name constants, imported here so the import block stays as it
-    is. The AISquare sign-in is left out (:func:`_cut_off_workers`).
+    Stop and Restart all quit under an Update (round 16 of #257; Explainability's writes
+    were on the list until its view went dormant). The views' own name constants, imported
+    here so the import block stays as it is. The AISquare sign-in is left out
+    (:func:`_cut_off_workers`).
 
     Every other thread worker is waited out rather than refused
     (``FleetApp._holding_the_quit``), so a writer missing here is still never cut off;
@@ -3140,7 +3141,6 @@ def _writing_workers() -> dict[str, str]:
         agent,
         captain,
         doctor,
-        explainability,
         fleet_bulk,
         onboard,
         personas_tab,
@@ -3168,10 +3168,6 @@ def _writing_workers() -> dict[str, str]:
         settings_remote.TOKEN_WORKER: "Settings ▸ Remote's save of the ngrok token",
         agent.RESTART_WORKER: "an agent's restart",
         fleet_bulk.BULK_WORKER: "Settings ▸ Fleet's restart or stop of every agent",
-        explainability.SAVE_WORKER: "Explainability's setup",
-        explainability.REGISTER_WORKER: "Explainability's registration",
-        explainability.SHIP_WORKER: "Explainability's ship",
-        explainability.RESET_WORKER: "Explainability's routing reset",
         accounts.SIGN_OUT_WORKER: "an AISquare sign-out",
         accounts.COMPLETE_WORKER: "a Claude sign-in",
         accounts.ABANDON_WORKER: "a Claude sign-in's discard",
@@ -3199,7 +3195,6 @@ def _waited_reads() -> dict[str, str]:
         app_settings,
         captain,
         doctor,
-        explainability,
         fleet_bulk,
         settings_remote,
         welcome,
@@ -3220,8 +3215,6 @@ def _waited_reads() -> dict[str, str]:
         accounts.LOGIN_POLL_WORKER: "a Claude sign-in's check",
         agent.LABELS_WORKER: "an agent's account names",
         board.LABELS_WORKER: "a board's account names",
-        explainability.STATUS_WORKER: "Explainability's status",
-        explainability.LEFTOVERS_WORKER: "Explainability's check for leftover routing",
         fleet_bulk.PLAN_WORKER: "Settings ▸ Fleet's read of the running agents",
         app_settings.ACCOUNTS_WORKER: "App settings' accounts",
         welcome.worker_name("look"): "Welcome's checks",

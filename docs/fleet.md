@@ -1346,7 +1346,7 @@ session is large — and a fleet agent's very first request is already the whole
 system prompt, tool schemas and skills (~140k tokens on a machine with several
 MCP connectors), so every tool call is refused with *"… is temporarily
 unavailable (server error), so auto mode cannot determine the safety of Bash"*
-while the chat itself keeps working. `aisquare doctor` says so (`explainability
+while the chat itself keeps working. `aisquare explainability doctor` says so (`explainability
 auto-mode`), the spawn receipt repeats it, and a session launched through the
 proxy that has been refused three times is put in 🔔 attention with one
 `auto_mode_blocked` board line (one that a restart or a switch is taking down

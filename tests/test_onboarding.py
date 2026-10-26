@@ -454,18 +454,12 @@ def test_fix_commands_maps_each_known_hint_to_its_non_interactive_argv() -> None
     checks = [
         WARN_CONNECT,
         WARN_FACTS,
-        _fix("explainability", "Turn it on: aisquare explainability enable"),
-        _fix(
-            "explainability-config",
-            "tracing is off (turn it on with: aisquare explainability enable)",
-        ),
         _fix("sdk", "Repair what can be repaired: aisquare doctor --fix"),
     ]
     fixes = fix_commands(checks)
     assert [(fix.check, fix.argv, fix.scope) for fix in fixes] == [
         ("claude-code", ("agents", "connect", "claude-code"), "machine"),
         ("facts", ("project", "onboard", "--refresh"), "project"),
-        ("explainability", ("explainability", "enable"), "machine"),
         ("sdk", ("doctor", "--fix", "--yes"), "machine"),
     ]
     assert fixes[0].label == "aisquare agents connect claude-code"
@@ -491,6 +485,10 @@ def test_fix_commands_leaves_everything_that_is_not_our_command_as_text() -> Non
             "target",
             "Point it at a deployment: aisquare explainability enable --target prod --gateway-url https://x",
         ),
+        # Explainability is no one-click fix any more: its view is dormant, and the Doctor page
+        # no longer offers to turn tracing on for you.
+        _fix("explainability", "Turn it on: aisquare explainability enable"),
+        _fix("tracing", "tracing is off (turn it on with: aisquare explainability enable)"),
         _fix("odd", "aisquare project onboarding is not a thing"),  # a longer word, not the command
     ]
     assert fix_commands(not_buttons) == []

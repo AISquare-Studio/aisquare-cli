@@ -2083,6 +2083,92 @@ def test_a_picked_agent_needs_no_wait_for_the_roles_own(
     assert seen == ["claude-code", False]
 
 
+def test_a_role_and_binary_already_being_asked_are_not_asked_a_second_time(
+    git_project: ProjectInfo,
+    fake_home: Path,
+    spawns: SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The key (role, binary) is asked in one worker: a second ask for it while the first is
+    out (the Binary field resting on the same text again, a role picked twice) would start a
+    worker that replaces the first and reads the same usage again (tester-14's survivor)."""
+    slots = _two_agents_codex_on_top(monkeypatch)
+    started, release, _threads, ui = _usage_read_held(monkeypatch, slots)
+    asked: list[tuple[str, str]] = []
+    real = SpawnDialog._ask_role_agent
+
+    def counting(
+        self: SpawnDialog, role: str, binary: str, settle: float = 0.0
+    ) -> tuple[str, str, str] | None:
+        asked.append((role, binary))
+        return real(self, role, binary, settle)
+
+    monkeypatch.setattr(SpawnDialog, "_ask_role_agent", counting)
+
+    async def run() -> list[Any]:
+        host = Host(git_project, accounts=lambda: agents_overview(*MIXED))
+        ui.append(threading.get_ident())
+        async with host.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            dialog = host.screen
+            assert isinstance(dialog, SpawnDialog)
+            assert await asyncio.to_thread(started.wait, 10), "the first ask never read usage"
+            key = dialog._current_agent_key()
+            for _ in range(3):
+                dialog._ask_agent_of(*key)
+            await pilot.pause()
+            release.set()
+            await settle(pilot)
+            dialog._ask_agent_of(*key)  # answered now: kept, never asked again
+            await settle(pilot)
+            return [list(asked), key, str(select(dialog, "agent")._options[0][0])]
+
+    try:
+        asked_once, key, shown_agent = asyncio.run(run())
+    finally:
+        release.set()
+
+    assert asked_once == [key], "one ask for the key, however often it was asked for"
+    assert shown_agent == "(role's: Codex)"
+
+
+def test_a_preset_account_brings_its_agent_when_the_accounts_land_after_the_roles_agent(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """The other order of ``_agent_of_the_role_landed`` (which adopts the owner of a preset
+    account once the accounts are known): the role's agent answers first and the accounts are
+    read after it, and the Codex slot the Personas tab picked still starts the form on Codex."""
+    gate = threading.Event()
+
+    def late() -> AccountsOverview:
+        gate.wait(10)
+        return agents_overview(*MIXED)
+
+    async def run() -> list[Any]:
+        host = Host(git_project, accounts=late, presets={"account": "5"})
+        async with host.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            dialog = host.screen
+            assert isinstance(dialog, SpawnDialog)
+            for _ in range(200):
+                if dialog._role_agents:
+                    break
+                await pilot.pause(0.05)
+            assert dialog._role_agents, "the role's agent answered first"
+            before = select(dialog, "agent").value
+            gate.set()
+            await settle(pilot)
+            return [before, select(dialog, "agent").value]
+
+    try:
+        before, after = asyncio.run(run())
+    finally:
+        gate.set()
+
+    assert before != "codex", "nothing knew the slot's agent yet"
+    assert after == "codex"
+
+
 def test_a_failed_ask_never_leaves_the_form_waiting_for_an_agent(
     git_project: ProjectInfo, spawns: SpawnRecorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:

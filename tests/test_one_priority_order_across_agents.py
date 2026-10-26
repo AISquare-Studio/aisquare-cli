@@ -455,6 +455,45 @@ def test_reset_soonest_compares_the_readings_there_are_and_never_prefers_an_unre
     assert agent_launch.resolve("coder").adapter.id == CLAUDE, "unread is not passed over"
 
 
+def test_reset_soonest_among_two_measured_accounts_never_passes_over_an_unread_top_one(
+    machine: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tester-14's 3-account case: an unread Claude on top, two measured Codex accounts below
+    whose weeks reset on different days. ``reset-soonest`` takes, of the accounts it can
+    compare, the one that resets first; it does not do so over an unmeasured first account,
+    which keeps its place (a guard only a case with TWO measured accounts reaches: with one,
+    there is nothing to compare)."""
+    claude = _claude("c@example.com")
+    far = _codex("far@example.com")
+    near = _codex("near@example.com")
+    now = datetime.now(tz=UTC)
+    _pick(prefer="reset-soonest")
+    _usage(
+        monkeypatch,
+        {claude.slot: EXPIRED, far.slot: 10.0, near.slot: 10.0},
+        resets={far.slot: now + timedelta(days=5), near.slot: now + timedelta(days=1)},
+    )
+
+    selected = agent_launch.resolve("coder")
+
+    assert selected.adapter.id == CLAUDE, "the unread account on top keeps its place"
+    assert selected.pick is not None and selected.pick.account is None, "no reading decided it"
+
+    _usage(
+        monkeypatch,
+        {claude.slot: 10.0, far.slot: 10.0, near.slot: 10.0},
+        resets={
+            claude.slot: now + timedelta(days=7),
+            far.slot: now + timedelta(days=5),
+            near.slot: now + timedelta(days=1),
+        },
+    )
+    again = agent_launch.resolve("coder")
+    assert again.adapter.id == CODEX, "control: with all three measured, the week that ends first"
+    assert again.pick is not None and again.pick.account is not None
+    assert again.pick.account.slot == near.slot
+
+
 def test_an_unread_account_is_never_a_hand_overs_target(
     machine: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

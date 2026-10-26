@@ -2458,6 +2458,37 @@ def test_with_no_role_the_empty_persona_says_plain_claude_not_its_role_alone(
     assert with_role == back == "(no persona — the agent runs as its role alone)"  # the control
 
 
+@pytest.mark.parametrize(
+    ("agent", "plain"), [("codex", "Codex"), ("claude-code", "Claude")], ids=["codex", "claude"]
+)
+def test_the_role_less_note_names_the_agent_it_starts_not_claude(
+    agent: str, plain: str, git_project: ProjectInfo
+) -> None:
+    """Role *(none)* with Agent = Codex said "plain Claude", main's wording (review r23 of
+    #113, 6). It follows the Agent field, picked after the role or before it, and the
+    role's own agent while the field is blank; Claude Code's reads as it always did."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "role").value = spawn_module.NO_ROLE
+        await settle(pilot)
+        seen: list[Any] = [note(dialog, "#spawn-persona-description")]  # the role's own agent
+        select(dialog, "agent").value = agent  # the Agent field changes under a role-less form
+        await settle(pilot)
+        seen.append(note(dialog, "#spawn-persona-description"))
+        select(dialog, "role").value = "coder"
+        await settle(pilot)
+        seen.append(note(dialog, "#spawn-persona-description"))  # the control: a role speaks
+        select(dialog, "role").value = spawn_module.NO_ROLE
+        await settle(pilot)
+        seen.append(note(dialog, "#spawn-persona-description"))  # role-less again, agent kept
+        return seen
+
+    blank, picked, with_role, back = drive(git_project, scenario)
+    assert blank == "(plain Claude: no role, no persona)"  # the role's agent: Claude Code's
+    assert picked == back == f"(plain {plain}: no role, no persona)"
+    assert with_role == "(no persona — the agent runs as its role alone)"
+
+
 def test_a_role_change_re_describes_the_note_under_the_owners_own_empty_persona(
     git_project: ProjectInfo,
 ) -> None:

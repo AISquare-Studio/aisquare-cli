@@ -576,7 +576,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         answered for what the Binary field holds; ``None`` while that is being asked.
 
         Never asked here: the answer reads the config and the store, and with accounts of two
-        agents their usage, up to ``USAGE_TIMEOUT_SECONDS`` when the cache is cold, which on
+        agents their usage, up to ``core.USAGE_TIMEOUT_SECONDS`` when the cache is cold, which on
         the UI thread froze the app as it opened (review of #14, M2). It is asked once per
         role and binary in a worker (:meth:`_ask_agent_of`, :meth:`_binary_changed`) and kept;
         until it lands the form says :data:`PICKING` and *Spawn* waits."""
@@ -1126,6 +1126,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     @on(Select.Changed, "#spawn-approval")
     def _agent_changed(self) -> None:
         self._follow_agent()
+        self._describe_persona()  # a role-less note names the agent
         if self._source is not None:
             self._apply_handoff()  # its note and its Start fresh follow the agent picked
 
@@ -1222,6 +1223,16 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             field.value = name
         self._describe_persona()
 
+    def _plain_agent(self) -> str:
+        """The agent the launch starts, as a plain session of it is called: the Agent field's
+        own pick, else the role's (:meth:`launch_agent`), by its accounts' noun (``Claude``,
+        ``Codex``), else its label for an agent with no accounts; ``agent`` until it is known."""
+        agent = self.launch_agent()
+        if agent is None:
+            return "agent"
+        adapter = get_adapter(agent)
+        return adapter.accounts.noun if adapter.accounts is not None else adapter.label
+
     def _describe_persona(self) -> None:
         """The description under the field — or why there is none."""
         value = self._persona_value()
@@ -1229,7 +1240,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         if self._personas_unavailable:
             text, style = self._personas_unavailable, "dim"
         elif not value and self._role == NO_ROLE:
-            text, style = "(plain Claude: no role, no persona)", "dim"
+            text, style = f"(plain {self._plain_agent()}: no role, no persona)", "dim"
         elif not value:
             text, style = "(no persona — the agent runs as its role alone)", "dim"
         elif found is None:

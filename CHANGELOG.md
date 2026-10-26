@@ -71,7 +71,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `AISQUARE_NO_TELEMETRY=1` and any `CI` run force it off and skip the question; turning it off
   stops a shipment under way, purges what was kept and sends one opt-out notice. Only the
   contract's reply (`{accepted_days, linked}`) counts as delivered, and a redirect is never
-  followed, so the token goes to one origin only. The server end is a separate change.
+  followed, so the token goes to one origin only. `share on` while it is on keeps the first day and the
+  days still waiting; `preview --json` says whether it is a sample. The server end is a separate
+  change.
 - **Start fresh: `aisquare project fresh`** (alias `project reset`) clears an onboarded
   project's board and fleet and starts a blank manager, without onboarding it again.
   Every live agent is stopped as `fleet shutdown` stops it, and the project's tmux

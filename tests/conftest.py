@@ -862,6 +862,20 @@ test_claude_accounts.py), so a token they mint and the clock that grades it agre
 """
 
 
+@pytest.fixture(autouse=True)
+def no_background_shipper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test starts the REAL detached ``aisquare metrics ship``.
+
+    Any command a test runs through the CLI starts one when sharing is on and a shipment is due
+    (``core.sharing.start_background_ship`` from the root callback); a real one is a process that
+    outlives the test, minds the test's home and, under load, mints an identity mid-test (a test
+    of "no identity yet" failed once in the full run, never alone). A test of the spawn itself
+    replaces ``_spawn`` with its own recorder."""
+    from aisquare.core import sharing
+
+    monkeypatch.setattr(sharing, "_spawn", lambda: None)
+
+
 @pytest.fixture
 def sharing_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Usage sharing may be turned on: none of the three things that force it off is set

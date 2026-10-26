@@ -60,7 +60,7 @@ ABOUT_PREVIEW = (
     "nothing. Repositories are salted hashes."
 )
 ABOUT_SAMPLE = (
-    "Sharing is off, so this is a SAMPLE: your last 31 days, with placeholder ids, to show what "
+    "This is a SAMPLE, not a shipment: your last 31 days, with placeholder ids, to show what "
     "would be sent. Nothing is sent while sharing is off, and once it is on only days from then "
     "on are sent. Repositories are salted hashes."
 )

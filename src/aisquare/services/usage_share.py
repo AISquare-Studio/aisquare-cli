@@ -64,6 +64,8 @@ purges what was kept: the shipment re-checks the switch before every POST and st
 BY_TYPE_KEYS = frozenset({"pro", "max", "team", "enterprise", "api", "unknown"})
 """The plans a shipment names (contract v1.1); any other is counted as ``other``."""
 PLACEHOLDER_ID = "00000000-0000-4000-8000-000000000000"
+PLACEHOLDER_SALT = "00" * 32
+"""A sample is hashed with this, so that two previews of one history agree."""
 
 _MODEL_ID = re.compile(r"^claude-[a-z0-9.-]{1,60}$")
 _SALT = re.compile(r"^[0-9a-f]{64}$")
@@ -234,17 +236,17 @@ def build_batches(
     today. Empty when there is nothing to send.
 
     ``sample`` builds what the batches WOULD be had sharing been turned on a month ago: for
-    showing a person what is sent before they agree to it (it is the default while sharing was
-    never on). A real shipment is never a sample.
+    showing a person what is sent before they agree to it (it is the default unless a shipment
+    would send exactly this: see :func:`sample_reason`). A real shipment is never a sample.
 
     ``identity`` is ``(install id, salt)``; without it the installation's own is read, and one
     sharing never minted gets placeholders (nothing is stored by building a batch)."""
     moment = now or datetime.now(UTC)
     held = state if state is not None else sharing.read()
     if sample is None:
-        sample = held.since is None and not sharing.switch_on()
+        sample = _sample_reason(held) is not None
     if identity is None:
-        identity = _held_identity(held) or (PLACEHOLDER_ID, os.urandom(32).hex())
+        identity = _held_identity(held) or (PLACEHOLDER_ID, PLACEHOLDER_SALT)
     install_id, salt = identity
     today = _local_today(moment, tz)
     first = _first_day(held, today, sample=sample)
@@ -321,10 +323,29 @@ def _batch(moment: datetime, install_id: str, days: list[dict[str, Any]]) -> dic
     }
 
 
+def _sample_reason(held: SharingState) -> str | None:
+    if not sharing.switch_on():
+        return "sharing is off"
+    forced = sharing.forced_off_reason()
+    if forced is not None:
+        return f"sharing is off: {forced}"
+    if _held_identity(held) is None:
+        return "this installation has no id yet, as when sharing is switched on by hand"
+    return None
+
+
+def sample_reason() -> str | None:
+    """Why :func:`preview` shows a SAMPLE (the last 31 days with placeholder ids) and not the body
+    of the next POST, in words; ``None`` when it IS that body: sharing is on, nothing forces it
+    off, and the installation has its id and salt. Building a body stores nothing, so an
+    installation sharing was switched on for by hand (``config set sharing.enabled true``) that
+    has no id yet is a sample until its first shipment mints one."""
+    return _sample_reason(sharing.read())
+
+
 def is_sample() -> bool:
-    """Whether :func:`preview` shows a SAMPLE: sharing was never turned on, so nothing is yet to
-    be sent and the preview is the last 31 days with placeholder ids, not the next POST."""
-    return sharing.read().since is None and not sharing.switch_on()
+    """Whether :func:`preview` is a SAMPLE (see :func:`sample_reason`)."""
+    return sample_reason() is not None
 
 
 def preview(*, sweep: bool = True, **kwargs: Any) -> str:
@@ -615,18 +636,26 @@ def _failed(
 
 def enable(*, now: datetime | None = None) -> SharingStatus:
     """Turn sharing on: mint the identity (once), set the switch, record the consent, and make a
-    shipment due. Raises :class:`SharingForcedOff` when something forces it off."""
+    shipment due. Raises :class:`SharingForcedOff` when something forces it off.
+
+    Turning it on when it IS on changes nothing about what is to be sent: the first day shared,
+    the days acknowledged and the schedule stay as they are (a script or a person that says
+    *on* again must not throw away the days still waiting for a server). They start afresh only
+    on a change from off to on."""
     reason = sharing.forced_off_reason()
     if reason is not None:
         raise SharingForcedOff(reason)
     moment = now or datetime.now(UTC)
     ensure_identity()
+    was_on = sharing.switch_on()
     settings_service.set_value("sharing.enabled", "true")
 
     def record(state: SharingState) -> None:
         if state.consent_answer is None:
             state.consent_asked_at = moment.isoformat(timespec="seconds")
             state.consent_answer = "share"
+        if was_on and state.since is not None:
+            return  # already on, from a day already agreed: keep since, acked and the schedule
         # Only what happens from now on is shared: a day before this one was not agreed to.
         state.since = moment.astimezone().date().isoformat()
         state.acked = {}

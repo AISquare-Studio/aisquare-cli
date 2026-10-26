@@ -224,6 +224,13 @@ def share_on() -> None:
             error="sharing_forced_off",
             hint="unset it to share, or leave sharing off",
         )
+    except Exception as exc:  # state.json that cannot be updated (damaged, unreadable)
+        fail(
+            "sharing could not be turned on: its state file cannot be updated",
+            error="sharing_state_unwritable",
+            detail=f"{type(exc).__name__}: {exc}"[:200],
+            hint="repair or remove ~/.aisquare/state.json and try again",
+        )
     sharing.start_background_ship()
     if get_state().json_output:
         _json(status.model_dump(mode="json"))
@@ -259,11 +266,12 @@ def share_status() -> None:
 def share_preview() -> None:
     """Print the body the next shipment would POST (JSON), built as a shipment builds it.
 
-    With sharing on, exactly that body. With sharing off it is a SAMPLE of your last 31 days with
+    With sharing on, exactly that body. Otherwise it is a SAMPLE of your last 31 days with
     placeholder ids, to show what would be sent: nothing is sent by looking, and once sharing is
-    on only the days from then on are sent."""
+    on only the days from then on are sent. With --json the body is wrapped:
+    ``{"sample": bool, "sample_reason": str|null, "body": {...}}``."""
     try:
-        sample = usage_share.is_sample()
+        reason = usage_share.sample_reason()
         body = usage_share.preview()
     except Exception as exc:  # the state file is damaged, or the store would not open
         fail(
@@ -271,10 +279,13 @@ def share_preview() -> None:
             error="preview_unavailable",
             detail=f"{type(exc).__name__}: {exc}"[:200],
         )
-    if sample and not get_state().json_output:
+    if get_state().json_output:
+        _json({"sample": reason is not None, "sample_reason": reason, "body": json.loads(body)})
+        return
+    if reason is not None:
         typer.echo(
-            "sharing is off: this is a SAMPLE of your last 31 days with placeholder ids, "
-            "not what a shipment would send; once sharing is on only days from then on are sent",
+            f"this is a SAMPLE of your last 31 days with placeholder ids, not what a shipment "
+            f"would send ({reason}); once sharing is on only days from then on are sent",
             err=True,
         )
     typer.echo(body)
@@ -284,7 +295,15 @@ def share_preview() -> None:
 def share_reset_id() -> None:
     """Forget this installation's random id and salt for a new pair: what was sent before can no
     longer be tied to what is sent next."""
-    install_id, _salt = usage_share.reset_identity()
+    try:
+        install_id, _salt = usage_share.reset_identity()
+    except Exception as exc:  # state.json that cannot be updated
+        fail(
+            "the installation id could not be changed: the state file cannot be updated",
+            error="sharing_state_unwritable",
+            detail=f"{type(exc).__name__}: {exc}"[:200],
+            hint="repair or remove ~/.aisquare/state.json and try again",
+        )
     if get_state().json_output:
         _json({"install_id": install_id})
         return

@@ -1419,3 +1419,164 @@ def test_a_state_file_that_is_not_json_is_met_quietly(machine: Machine) -> None:
 
     assert "Traceback" not in result.output + result.stderr
     assert result.exit_code in (0, 1)
+
+
+# --- turning it on when it is on keeps the backlog (review of #5, F5) -------------------------
+
+
+def test_turning_it_on_again_keeps_the_first_day_the_backlog_and_the_schedule(
+    machine: Machine,
+) -> None:
+    """A dotfile or a person that says `share on` again while the server is down must not throw
+    the days still waiting away: ten days of silent failures are ten days to send."""
+    _history(machine)
+    _on(days_back=10)
+    failed = usage_share.ship(
+        now=NOW, tz=IST, transport=Server(status(503, "unavailable"))
+    )  # silent: the days stay unsent
+    before = sharing.read()
+    queued = [day["date"] for day in _build().days]
+
+    usage_share.enable(now=NOW)
+    usage_share.enable(now=NOW + timedelta(days=3))
+
+    after = sharing.read()
+    assert failed.error == "HTTP 503" and len(queued) == 3
+    assert after.since == before.since == (NOW - timedelta(days=10)).astimezone().date().isoformat()
+    assert [day["date"] for day in _build().days] == queued  # the days to send are unchanged
+    assert (after.acked, after.settled_through) == (before.acked, before.settled_through)
+    assert (after.failures, after.last_error, after.next_due_at) == (
+        before.failures, before.last_error, before.next_due_at,
+    )  # fmt: skip
+    assert (after.install_id, after.salt, after.consent_answer) == (
+        before.install_id, before.salt, before.consent_answer,
+    )  # fmt: skip
+
+
+def test_turning_it_on_again_after_a_delivery_keeps_what_was_acknowledged(machine: Machine) -> None:
+    _history(machine)
+    _on(days_back=10)
+    usage_share.ship(now=NOW, tz=IST, transport=Server())
+    before = sharing.read()
+
+    usage_share.enable(now=NOW + timedelta(hours=1))
+
+    after = sharing.read()
+    assert before.acked and after.acked == before.acked
+    assert (after.since, after.last_sent_at, after.next_due_at) == (
+        before.since, before.last_sent_at, before.next_due_at,
+    )  # fmt: skip
+    server = Server()
+    usage_share.ship(now=NOW + timedelta(hours=1), tz=IST, transport=server, force=True)
+    assert [len(call.body["days"]) for call in server.calls] == [1]  # today only: nothing resent
+
+
+def test_off_then_on_starts_afresh_from_the_day_it_is_turned_on(machine: Machine) -> None:
+    _history(machine)
+    _on(days_back=10)
+    usage_share.ship(now=NOW, tz=IST, transport=Server())
+
+    usage_share.disable(now=NOW, transport=Server())
+    usage_share.enable(now=NOW + timedelta(days=1))
+
+    after = sharing.read()
+    assert after.since == (NOW + timedelta(days=1)).astimezone().date().isoformat()
+    assert after.acked == {} and after.last_sent_at is None
+
+
+def test_a_switch_turned_on_by_hand_is_started_by_the_first_turning_on(machine: Machine) -> None:
+    """`config set sharing.enabled true` leaves no first day; `share on` sets it."""
+    settings_service.set_value("sharing.enabled", "true")
+    assert sharing.read().since is None
+
+    usage_share.enable(now=NOW)
+
+    assert sharing.read().since == NOW.astimezone().date().isoformat()
+
+
+# --- a preview is a sample unless a shipment would send exactly it (e), (f) -------------------
+
+
+def test_a_switch_turned_on_by_hand_with_no_identity_previews_as_a_sample(
+    machine: Machine,
+) -> None:
+    _history(machine)
+    settings_service.set_value("sharing.enabled", "true")  # as `aisquare config set` does
+    runner = CliRunner()
+
+    first = runner.invoke(app, ["metrics", "share", "preview"])
+    second = runner.invoke(app, ["metrics", "share", "preview"])
+
+    assert usage_share.is_sample() is True and "no id yet" in (usage_share.sample_reason() or "")
+    assert "SAMPLE" in first.stderr and "placeholder ids" in first.stderr
+    one, two = json.loads(first.stdout), json.loads(second.stdout)
+    assert one["install_id"] == usage_share.PLACEHOLDER_ID
+    hashes = [r["repo_hash"] for day in one["days"] for r in day["repos"]]
+    assert hashes and hashes == [r["repo_hash"] for day in two["days"] for r in day["repos"]]
+    assert sharing.read().install_id is None  # looking stored nothing
+
+
+def test_once_the_first_shipment_minted_the_identity_the_preview_is_that_shipment(
+    machine: Machine,
+) -> None:
+    _history(machine)
+    settings_service.set_value("sharing.enabled", "true")
+    server = Server()
+    usage_share.ship(now=NOW, tz=IST, transport=server, force=True)
+
+    assert usage_share.is_sample() is False and usage_share.sample_reason() is None
+    shown = json.loads(usage_share.preview(now=NOW, tz=IST))
+    again = Server()
+    usage_share.ship(now=NOW, tz=IST, transport=again, force=True)
+    assert again.calls[0].body["install_id"] == shown["install_id"] != usage_share.PLACEHOLDER_ID
+    assert again.calls[0].body["days"] == shown["days"]
+
+
+def test_a_forced_off_preview_is_a_sample_too(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _history(machine)
+    _on()
+    monkeypatch.setenv("DO_NOT_TRACK", "1")
+
+    assert "DO_NOT_TRACK" in (usage_share.sample_reason() or "")
+
+
+def test_under_json_the_preview_says_whether_it_is_a_sample(machine: Machine) -> None:
+    _history(machine)
+    runner = CliRunner()
+
+    off = json.loads(runner.invoke(app, ["--json", "metrics", "share", "preview"]).stdout)
+    _on(days_back=0)
+    on = json.loads(runner.invoke(app, ["--json", "metrics", "share", "preview"]).stdout)
+
+    assert off["sample"] is True and off["sample_reason"] == "sharing is off"
+    assert on["sample"] is False and on["sample_reason"] is None
+    for envelope in (off, on):
+        assert set(envelope) == {"sample", "sample_reason", "body"}
+        check_contract(envelope["body"])
+
+
+# --- a state file that cannot be updated ends `share on` cleanly (g) --------------------------
+
+
+def test_share_on_with_a_state_file_that_is_not_json_exits_cleanly_and_stays_off(
+    machine: Machine,
+) -> None:
+    state = paths.state_path()
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text("{not json", encoding="utf-8")
+    runner = CliRunner()
+
+    human = runner.invoke(app, ["metrics", "share", "on"])
+    machine_readable = runner.invoke(app, ["--json", "metrics", "share", "on"])
+    reset = runner.invoke(app, ["metrics", "share", "reset-id"])
+
+    for result in (human, machine_readable, reset):
+        assert result.exit_code == 1, result.output
+        assert "Traceback" not in result.output + result.stderr
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "state file" in human.stderr
+    assert json.loads(machine_readable.stdout)["error"] == "sharing_state_unwritable"
+    assert sharing.switch_on() is False  # failed closed: it did not turn on
+    assert state.read_text(encoding="utf-8") == "{not json"  # and the file was left as it was

@@ -10,9 +10,12 @@ Turn it on or off, either way:
   *Settings ▸ Usage & stats* (*Turn sharing on* / *Turn sharing off*, and *What's shared*);
 - `aisquare metrics share on`, `aisquare metrics share off`, `aisquare metrics share status`;
 - see the body of the next shipment: `aisquare metrics share preview`. With sharing on it is
-  exactly that body (built by the same code, the transcripts read first). With sharing off it is
-  captioned as what it is: a **sample** of your last 31 days with placeholder ids, to show the
-  shape; the days before you turn sharing on are never sent.
+  exactly that body (built by the same code, the transcripts read first). Otherwise (sharing off,
+  forced off, or switched on by hand with `config set sharing.enabled true` before this
+  installation has an id) it is captioned as what it is: a **sample** of your last 31 days with
+  placeholder ids, to show the shape; the days before you turn sharing on are never sent. With
+  `--json` the answer is `{"sample": bool, "sample_reason": str|null, "body": {…}}`, so a script
+  can tell a sample from the body of a shipment.
 
 ## What we collect
 
@@ -57,7 +60,9 @@ sent anonymously, and is only tied to the random installation id.
 Never while you are waiting: a command you run starts at most one background shipment every 6
 hours, and the UI sends from a background thread; a shipment has 5-second timeouts and does not
 touch the command or hook that started it. Sharing starts from the day you turn it on: the days
-before it were not agreed to and are never sent. Each day is sent again whenever its counts
+before it were not agreed to and are never sent. Turning it on *again* while it is on changes
+nothing (the first day, what was sent and the schedule stay): only a change from off to on starts
+afresh. Each day is sent again whenever its counts
 change, and today's every time.
 
 A shipment that cannot be delivered (offline, a server that is not there yet, a refusal)

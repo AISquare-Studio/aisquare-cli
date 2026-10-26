@@ -1200,21 +1200,21 @@ def test_an_empty_answer_takes_the_default_and_opens_the_ui(
 # ---------------------------------------------------------------------------
 
 
-def test_the_expected_amber_is_brain_and_the_releases_snapshot_rows(tmp_path: Path) -> None:
-    """`brain`, and the installed release's rows for the codebase snapshot this tree
-    removed (`repomix`, `snapshot`, `tiktoken`), with a project or without one: the
+def test_the_expected_amber_is_the_releases_removed_rows(tmp_path: Path) -> None:
+    """The installed release's rows for what this tree removed, `brain` and the codebase
+    snapshot's (`repomix`, `snapshot`, `tiktoken`), with a project or without one: the
     script installs the latest release, whose doctor still has them (review of #399,
     MAJOR 1). This tree's own doctor has none, and an expected row that is not amber is
     good news, so a cell grading this tree is unaffected."""
     for setup in ("WANT_PROJECT=0", 'WANT_PROJECT=1; PROJECT_DIR=""', "PROJECT_DIR=/p"):
         result = sh(f"{setup}; expected_amber; echo", path=base_path(tmp_path))
-        assert result.stdout.strip() == "brain repomix snapshot tiktoken", (
+        assert result.stdout.split() == ["brain", "repomix", "snapshot", "tiktoken"], (
             f"with `{setup}` expected_amber said {result.stdout.strip()!r}\n{result.stderr}"
         )
     flags = sh("WANT_AGENT=0; WANT_SYSTEM_DEPS=0; expected_amber; echo", path=base_path(tmp_path))
-    assert flags.stdout.strip() == "brain claude-code gh repomix snapshot tiktoken tmux", (
-        "alphabetical, as doctor_amber sorts"
-    )
+    assert sorted(flags.stdout.split()) == [
+        *("brain", "claude-code", "gh", "repomix", "snapshot", "tiktoken", "tmux")
+    ], "what the flags asked for, beside the release's rows"
 
 
 def test_doctor_amber_is_sorted_so_the_comparison_is_about_the_set(tmp_path: Path) -> None:

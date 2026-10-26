@@ -207,8 +207,12 @@ def test_a_child_is_seen_under_this_process_with_a_start_of_its_own(
     assert info is not None
     assert info.ppid == os.getpid()
     assert info.started != ""
-    assert procs.inspect(child.pid) == info, "a process keeps its token"
-    assert procs.image_stem(info.image).startswith("python")
+    again = procs.inspect(child.pid)
+    assert again is not None
+    # the image is not compared: on a macOS framework-Python venv ps shows ``.venv/bin/python``
+    # until the interpreter has re-executed into ``Python.app``, a moment after the start
+    assert again.started == info.started, "a process keeps its token"
+    assert again.ppid == info.ppid
 
 
 def test_a_process_sees_the_same_token_for_its_parent_as_the_parent_does() -> None:

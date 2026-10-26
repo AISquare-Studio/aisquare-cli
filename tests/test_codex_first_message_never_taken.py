@@ -114,6 +114,13 @@ class Spawned:
         given = json.loads(raw)
         self.home, self.cwd = Path(given["home"]), Path(given["cwd"])
 
+    def given_at(self) -> datetime:
+        """When the spawn gave the message (``_note_first_prompt``), as it noted it."""
+        with store_session() as store:
+            raw = store.get_meta(f"{fleet_service.FIRST_PROMPT_META}{self.agent.id}")
+        assert raw is not None
+        return datetime.fromisoformat(json.loads(raw)["at"])
+
     def later(self, seconds: float) -> None:
         moved = datetime.now(tz=UTC) + timedelta(seconds=seconds)
         self.monkeypatch.setattr(fleet_service, "_now", lambda: moved)
@@ -242,6 +249,131 @@ def test_only_a_rollout_of_this_folder_after_the_spawn_with_the_message_counts(
     assert spawned.row().first_prompt == "unsent"
 
 
+def test_a_rollout_begun_a_few_seconds_before_the_spawns_clock_is_still_the_rows(
+    spawned: Spawned,
+) -> None:
+    """The spawn notes its clock when it gives the message, and Codex names its rollout when
+    it starts, which a loaded machine can put either side of it: one within
+    ``FIRST_PROMPT_LEAD`` before is the row's, one a quarter minute before is not."""
+    assert timedelta(seconds=10) == fleet_service.FIRST_PROMPT_LEAD
+    given = spawned.given_at()
+    _rollout(spawned.home, spawned.cwd, [MESSAGE], began=given - timedelta(seconds=5))
+    spawned.later(46)
+
+    spawned.listed()
+
+    assert spawned.row().first_prompt == "acked"
+
+
+def test_a_rollout_begun_beyond_the_lead_before_the_spawns_clock_is_not_the_rows(
+    spawned: Spawned,
+) -> None:
+    given = spawned.given_at()
+    _rollout(spawned.home, spawned.cwd, [MESSAGE], began=given - timedelta(seconds=25))
+    spawned.later(46)
+
+    assert spawned.listed().state == "attention"
+    assert spawned.row().first_prompt == "unsent"
+
+
+def test_a_rollouts_name_may_be_two_seconds_older_than_the_moment_asked_about(
+    tmp_path: Path,
+) -> None:
+    """Its name holds whole seconds: one begun at 11:59:59.9 is named 11:59:59, a second
+    before 12:00:00.0 and still the moment's (``SLACK``)."""
+    folder = tmp_path / "work"
+    folder.mkdir()
+    since = datetime(2026, 10, 26, 12, 0, 0).astimezone()
+    assert timedelta(seconds=2) == codex_prompts.SLACK
+    for ago, found in ((0, True), (1, True), (2, True), (3, False), (60, False)):
+        home = tmp_path / f"home{ago}"
+        _rollout(home, folder, ["a prompt"], began=since - timedelta(seconds=ago))
+
+        got = codex_prompts.prompts_since(home, folder, since)
+
+        assert (got == ["a prompt"]) is found, ago
+
+
+# --- with the agent's hooks not trusted, a later prompt takes the row ---------------------------
+
+
+def _unsent(spawned: Spawned, instead: str = "something the human typed instead") -> None:
+    _rollout(spawned.home, spawned.cwd, [instead])
+    spawned.later(46)
+    assert spawned.listed().state == "attention"
+    assert spawned.row().first_prompt == "unsent"
+
+
+def test_a_prompt_the_agent_runs_after_the_row_read_unsent_takes_it(spawned: Spawned) -> None:
+    """No hook fires for an agent whose hooks are not trusted, so nothing but its rollout can
+    tell a ``fleet tell`` of other words from nothing: the attention's own advice (``tell …``)
+    cleared a Claude Code row by its hook and left this one to read ``attention`` for good."""
+    _unsent(spawned)
+    for _ in range(2):  # the prompt it already ran when the row was read does not clear it
+        assert spawned.listed().state == "attention"
+    _rollout(
+        spawned.home,
+        spawned.cwd,
+        ["a fleet tell of other words"],
+        began=datetime.now(tz=UTC) + timedelta(seconds=50),
+    )
+
+    status = spawned.listed()
+
+    assert status.state != "attention"
+    assert spawned.row().first_prompt == "acked"
+    with store_session() as store:
+        assert store.get_meta(f"{fleet_service.FIRST_PROMPT_META}{spawned.agent.id}") is None
+    assert len(spawned.unsent_events()) == 1, "said once, and not said again"
+
+
+def test_a_row_read_unsent_by_a_build_that_kept_no_record_of_what_it_saw_is_not_cleared(
+    spawned: Spawned,
+) -> None:
+    """Without what the record held when the row was read, a prompt cannot be told from one
+    that was there already: the row stays as it was."""
+    _unsent(spawned)
+    with store_session() as store:
+        key = f"{fleet_service.FIRST_PROMPT_META}{spawned.agent.id}"
+        kept = json.loads(store.get_meta(key) or "{}")
+        kept.pop("seen")
+        store.set_meta(key, json.dumps(kept))
+    _rollout(
+        spawned.home,
+        spawned.cwd,
+        ["another prompt"],
+        began=datetime.now(tz=UTC) + timedelta(seconds=50),
+    )
+
+    assert spawned.listed().state == "attention"
+    assert spawned.row().first_prompt == "unsent"
+
+
+def test_what_the_record_held_when_the_row_read_unsent_is_kept_as_digests_never_text(
+    spawned: Spawned,
+) -> None:
+    _unsent(spawned, "a zebrasecret thing the human typed")
+
+    with store_session() as store:
+        raw = store.get_meta(f"{fleet_service.FIRST_PROMPT_META}{spawned.agent.id}") or ""
+    kept = json.loads(raw)
+
+    assert kept["seen"] == [
+        fleet_service._first_prompt_digest("a zebrasecret thing the human typed")
+    ]
+    assert "zebrasecret" not in raw
+
+
+def test_a_message_noted_late_is_noted_as_of_the_moment_it_was_given() -> None:
+    moment = datetime(2026, 10, 26, 12, 0, 0, tzinfo=UTC)
+
+    fleet_service._note_first_prompt("agt_x", "hello", Path("/h"), Path("/c"), at=moment)
+
+    with store_session() as store:
+        raw = store.get_meta(f"{fleet_service.FIRST_PROMPT_META}agt_x") or "{}"
+    assert datetime.fromisoformat(json.loads(raw)["at"]) == moment
+
+
 def test_the_message_is_matched_as_the_spawn_wrote_it_whatever_its_whitespace(
     spawned: Spawned,
 ) -> None:
@@ -336,6 +468,7 @@ def test_a_huge_rollout_beside_the_row_is_read_at_its_ends_and_in_time(
         handle.truncate(64 * 1024 * 1024)  # the rest is the working agent's, nothing readable
     spawned.later(46)
     codex_prompts._KEPT.clear()
+    codex_prompts._FOLDERS.clear()
     listed: list[str] = []
     real_listdir = os.listdir
 
@@ -372,6 +505,7 @@ def test_a_rollout_unchanged_since_it_was_read_is_not_read_again(
     rollout gave is kept against its size and modification time."""
     path = _rollout(spawned.home, spawned.cwd, ["something else"])
     codex_prompts._KEPT.clear()
+    codex_prompts._FOLDERS.clear()
     reads: list[Path] = []
     real = codex_prompts._read
 
@@ -426,3 +560,58 @@ def test_a_rollouts_head_and_tail_are_read_and_the_middle_is_not(tmp_path: Path)
 
     assert "head prompt" in found and "tail prompt" in found
     assert "middle prompt" not in found
+
+
+def test_a_busy_home_does_not_thrash_the_cache_of_a_row_waiting_for_days(
+    spawned: Spawned, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """More than 256 rollouts of other folders begun since a long-lived unsent row (a shared
+    home with other agents at work): the cache of what a rollout gave held 256 and lost the
+    row's own to them, so every listing opened all of them again (270 ms at 1,100, tester on
+    #17). Which folder a rollout began in never changes: it is read once."""
+    for index in range(1_100):
+        _rollout(spawned.home, spawned.cwd / f"other-{index}", [f"theirs {index}"])
+    mine = _rollout(spawned.home, spawned.cwd, ["something the human typed instead"])
+    codex_prompts._KEPT.clear()
+    codex_prompts._FOLDERS.clear()
+    spawned.later(46)
+    assert spawned.listed().state == "attention"  # the first listing reads each first line
+
+    opened: list[str] = []
+    real_open = Path.open
+
+    def counting(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self.name.startswith("rollout-"):
+            opened.append(self.name)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counting)
+    started = os.times()[4]
+    for _ in range(3):
+        assert spawned.listed().state == "attention"
+    elapsed = os.times()[4] - started
+
+    assert opened == [], ("a rollout was opened again", len(opened), mine.name)
+    assert elapsed < budget(1.5), f"three listings took {elapsed:.2f} s"
+
+
+def test_the_folder_a_rollout_began_in_is_read_once_and_a_file_not_yet_written_is_not_kept(
+    tmp_path: Path,
+) -> None:
+    codex_prompts._FOLDERS.clear()
+    folder = tmp_path / "work"
+    folder.mkdir()
+    path = _rollout(tmp_path / "home", folder, ["x"])
+    young = path.with_name("rollout-2026-10-26T12-00-00-young.jsonl")
+    young.write_bytes(b"")
+
+    assert codex_prompts._folder_of(path) == os.path.realpath(folder)
+    path.unlink()  # the answer outlives the file: a session_meta never changes
+    assert codex_prompts._folder_of(path) == os.path.realpath(folder)
+    assert codex_prompts._folder_of(young) is None
+    assert str(young) not in codex_prompts._FOLDERS, "an empty file may still become anyone's"
+    young.write_text(
+        json.dumps({"type": "session_meta", "payload": {"cwd": str(folder)}}) + "\n",
+        encoding="utf-8",
+    )
+    assert codex_prompts._folder_of(young) == os.path.realpath(folder)

@@ -281,7 +281,10 @@ def test_real_codex_first_message_that_never_ran_reads_attention_until_the_human
             (fleet._now().isoformat(), agent.id),
         )
         store._conn.commit()  # type: ignore[attr-defined]
-    fleet._note_first_prompt(agent.id, lost, home, cwd)
+    # Noted as of the spawn, which is when a real spawn notes it: Codex names its rollout when
+    # it starts, which a loaded machine puts well after the spawn and before this test's own
+    # quiet prompt, so noted as of "now" the rollout was older than the lead allows.
+    fleet._note_first_prompt(agent.id, lost, home, cwd, at=agent.created_at)
 
     def unsent() -> bool:
         [status] = fleet.list_agents(loopback.project)
@@ -308,3 +311,52 @@ def test_real_codex_first_message_that_never_ran_reads_attention_until_the_human
 def agent_home_and_cwd(loopback: Loopback, agent: FleetAgent) -> tuple[Path, Path]:
     """The home the agent records its sessions under and the folder it runs in."""
     return loopback.home, Path(agent.cwd)
+
+
+def test_real_codex_with_its_hooks_untrusted_a_tell_of_other_words_takes_an_unsent_row(
+    loopback: Loopback,
+) -> None:
+    """The tester's (b) on #17: with Codex's hooks not trusted (reviewed and passed with Esc, so
+    none ever fires) the row's attention said ``tell …`` and a tell of other words ran but did
+    not clear it, because only the message's own digest did. The rollout is all such a row has,
+    and it shows the agent took input after the row read ``unsent``: that clears it."""
+    lost = "a first message that never reached Codex"
+    config = load_config()
+    config.fleet.prompt_ack_seconds = 3.0
+    save_config(config)
+    agent = fleet.spawn(loopback.project, "coder", agent="codex", worktree=False).agent
+    loopback.until(
+        lambda: "Hooks need review" in loopback.screen(agent.pane_id),
+        30,
+        "the hook review",
+        agent.pane_id,
+    )
+    loopback.srv.run("send-keys", "-t", agent.pane_id, "Escape")
+    loopback.until(
+        lambda: loopback.quiet_at_its_prompt(agent), 30, "a quiet empty prompt", agent.pane_id
+    )
+    assert fleet.status_of(agent).session is None, "hooks unreviewed: none fires"
+    home, cwd = agent_home_and_cwd(loopback, agent)
+    with store_session() as store:
+        store._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE fleet_agent SET first_prompt = 'pending', first_prompt_at = ? WHERE id = ?",
+            (fleet._now().isoformat(), agent.id),
+        )
+        store._conn.commit()  # type: ignore[attr-defined]
+    fleet._note_first_prompt(agent.id, lost, home, cwd, at=agent.created_at)
+
+    def unsent() -> bool:
+        [status] = fleet.list_agents(loopback.project)
+        return status.state == "attention"
+
+    loopback.until(unsent, 30, "the message read as not taken", agent.pane_id)
+    other = "do something else instead"
+    assert fleet.tell(loopback.project, agent.label, other).delivered
+    loopback.until(lambda: loopback.ran(other), 30, "the tell ran", agent.pane_id)
+
+    def cleared() -> bool:
+        [now] = fleet.list_agents(loopback.project)
+        return now.agent.first_prompt == "acked" and now.state != "attention"
+
+    loopback.until(cleared, 20, "the rollout took the tell", agent.pane_id)
+    assert fleet.status_of(agent).session is None, "no hook ever fired: the rollout alone did it"

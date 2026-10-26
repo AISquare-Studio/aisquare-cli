@@ -3622,7 +3622,8 @@ def _with_first_prompts(
 
 FIRST_PROMPT_META = "first-prompt:"
 """``team_meta`` key prefix, before an agent id, of what a spawn's first message was given as:
-``{"digest", "home", "cwd", "at"}``, for :func:`_first_prompt_off_its_transcript`."""
+``{"digest", "home", "cwd", "at"}``, for :func:`_first_prompt_off_its_transcript`; and, once a
+row reads ``unsent``, ``"seen"``: the digests of the prompts its agent's record held then."""
 FIRST_PROMPT_LEAD = timedelta(seconds=10)
 """How long before the spawn's own clock a session may have begun and still be this row's."""
 
@@ -3631,14 +3632,17 @@ def _first_prompt_digest(text: str) -> str:
     return hashlib.sha256(" ".join(text.split()).encode()).hexdigest()
 
 
-def _note_first_prompt(agent_id: str, text: str, home: Path, cwd: Path) -> None:
+def _note_first_prompt(
+    agent_id: str, text: str, home: Path, cwd: Path, *, at: datetime | None = None
+) -> None:
     """Keep what a spawn's first message was given as, never its text: its digest, and the
-    home and folder its agent records its sessions under. Never raises."""
+    home and folder its agent records its sessions under, and when (``at``, now by default:
+    a test that notes a message late gives the moment it was given). Never raises."""
     value = {
         "digest": _first_prompt_digest(text),
         "home": str(home),
         "cwd": str(cwd),
-        "at": _now().isoformat(),
+        "at": (at or _now()).isoformat(),
     }
     with contextlib.suppress(Exception), store_session() as store:
         store.set_meta(f"{FIRST_PROMPT_META}{agent_id}", json.dumps(value))
@@ -3673,7 +3677,13 @@ def _first_prompt_off_its_transcript(
         return agent
     if ran is None:
         return agent
-    if given["digest"] in {_first_prompt_digest(text) for text in ran}:
+    digests = {_first_prompt_digest(text) for text in ran}
+    seen = given.get("seen")
+    later = agent.first_prompt == "unsent" and isinstance(seen, list) and digests - set(seen)
+    if given["digest"] in digests or later:
+        # The message ran; or, with the agent's hooks not trusted (none ever fires, so nothing
+        # else takes the row), a prompt it ran after the row read ``unsent``: someone told it
+        # something, which is what the row asked for, as a hook's own prompt takes it.
         with contextlib.suppress(Exception), store_session() as store:
             store.take_first_prompt(now, session_id="", agent_id=agent.id)
             store.delete_meta(f"{FIRST_PROMPT_META}{agent.id}")
@@ -3690,6 +3700,12 @@ def _first_prompt_off_its_transcript(
         f"{adapter.label} sessions hold no such prompt"
     )
     if _first_prompt_unsent(agent, why):
+        # What the record held when the row was read as not taken: a prompt it holds later is
+        # one that was given since.
+        with contextlib.suppress(Exception), store_session() as store:
+            store.set_meta(
+                f"{FIRST_PROMPT_META}{agent.id}", json.dumps({**given, "seen": sorted(digests)})
+            )
         return agent.model_copy(update={"first_prompt": "unsent"})
     with contextlib.suppress(Exception), store_session() as store:
         return store.get_fleet_agent(agent.id) or agent

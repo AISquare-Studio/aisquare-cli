@@ -56,6 +56,7 @@ from aisquare.models import (
 from aisquare.services import fleet as fleet_service
 from aisquare.services import fresh as fresh_service
 from aisquare.services import team as team_service
+from tests.fsperms import can_symlink
 from tests.test_worktree import _git
 
 _BOARD = ("team_task", "team_event", "team_session", "fleet_agent")
@@ -1781,7 +1782,7 @@ def test_a_brain_entry_that_cannot_be_removed_is_named_as_left_behind(
 
     assert not (home / "notes.md").exists() and (home / ".gbrain").is_dir()
     assert [(kept.path, kept.reason) for kept in report.kept] == [
-        (home, f"could not be removed: Permission denied; left in {home}: .gbrain")
+        (home, "could not be removed: Permission denied; left behind: .gbrain")
     ]
     assert not list(home.parent.glob(".brain-cleared-*"))
 
@@ -1837,11 +1838,13 @@ def test_a_brain_part_of_which_cannot_be_deleted_is_reported_kept_not_cleared(
 
     assert report.cleared.brain == 0
     assert [kept.path for kept in report.kept] == [home]
-    assert report.kept[0].reason.endswith(f"left in {home}: .gbrain")
+    assert report.kept[0].reason.endswith("left behind: .gbrain")
+    assert str(home) not in report.kept[0].reason, "the kept line names the folder once"
     assert (locked / "1").exists()
     assert not list(home.parent.glob(".brain-cleared-*"))
 
 
+@pytest.mark.skipif(not can_symlink(), reason="needs a symlink")
 def test_a_symlinked_folder_is_kept_with_a_reason_a_person_can_read(
     two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
     spawned: list[tuple[str, str, dict[str, Any]]],
@@ -1866,3 +1869,41 @@ def test_a_symlinked_folder_is_kept_with_a_reason_a_person_can_read(
     assert "Errno" not in report.kept[0].reason
     assert (elsewhere / "state.md").exists() and manager.is_symlink()
     assert report.manager is None and spawned == []
+
+
+# --- follow-ups to the final review on #429 (#10) ------------------------------------------
+
+
+@pytest.mark.skipif(not can_symlink(), reason="needs a symlink")
+def test_a_symlinked_brain_and_evidence_folder_are_kept_and_what_they_point_at_is_untouched(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    tmp_path: Path,
+) -> None:
+    """A brain moved to a bigger disk and linked back is not the project's to empty:
+    reviewer-fresh-7 deleted ``brain.clear``'s ``is_symlink`` guard and no test failed, while
+    the link's target was left holding only the lock file. Both folders are kept with a
+    reason a person can read, the target's files are all there, and the board is cleared."""
+    alpha, _, _, _ = two
+    disk = tmp_path / "bigger-disk"
+    links = {
+        brain_core.brain_home(alpha.id): disk / "brain",
+        paths.aisquare_home() / "briefs" / alpha.id: disk / "evidence",
+    }
+    for link, target in links.items():
+        (target / "inside").mkdir(parents=True)
+        (target / "keep.txt").write_text("not the project's to delete\n", encoding="utf-8")
+        (target / "inside" / "page.md").write_text("a page\n", encoding="utf-8")
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(target, target_is_directory=True)
+
+    report = fresh_service.start_fresh(alpha, memory=True)
+
+    reason = "could not be removed: it is a symbolic link, not followed"
+    assert sorted((kept.path, kept.reason) for kept in report.kept) == sorted(
+        (link, reason) for link in links
+    )
+    assert report.cleared.brain == 0 and report.cleared.tasks == 3
+    for link, target in links.items():
+        assert link.is_symlink()
+        assert (target / "keep.txt").exists() and (target / "inside" / "page.md").exists()

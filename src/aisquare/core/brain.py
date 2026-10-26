@@ -135,6 +135,10 @@ def _env(home: Path) -> dict[str, str]:
     return env
 
 
+LOCK_NAME = ".aisquare.lock"
+"""The file aisquare's own lock on a brain lives in (:func:`_lock`), inside the brain."""
+
+
 @contextmanager
 def _lock(home: Path, *, wait_s: float) -> Iterator[bool]:
     """aisquare's own exclusive lock around a brain; yields whether it was won.
@@ -148,16 +152,12 @@ def _lock(home: Path, *, wait_s: float) -> Iterator[bool]:
     home.mkdir(parents=True, exist_ok=True)
     with ExitStack() as stack:
         try:
-            stack.enter_context(holding(home / ".aisquare.lock", wait_s=wait_s))
+            stack.enter_context(holding(home / LOCK_NAME, wait_s=wait_s))
         except OSError:
             won = False
         else:
             won = True
         yield won
-
-
-LOCK_NAME = ".aisquare.lock"
-"""The file aisquare's own lock on a brain lives in (:func:`_lock`), inside the brain."""
 
 
 def held_content(project_id: str) -> bool:
@@ -184,10 +184,12 @@ def clear(project_id: str) -> bool:
     in it is open, and the lock is, and deleting the lock file after letting go of it would
     let the next run lock one file while a third locked another. A run that comes next finds
     no brain and makes a new, empty one. An entry that cannot be removed raises the
-    ``OSError``, naming every entry left behind."""
+    ``OSError``, naming every entry left behind; a brain folder that is a symbolic link
+    raises one too, and is not followed. Neither names the folder: the caller does, beside
+    the reason (``FreshKept``)."""
     home = brain_home(project_id)
     if home.is_symlink():  # what it points at is not this project's to empty
-        raise OSError(f"{home} is a symbolic link, not followed")
+        raise OSError("it is a symbolic link, not followed")
     if not held_content(project_id):
         return False
     with ExitStack() as stack:
@@ -213,7 +215,7 @@ def clear(project_id: str) -> bool:
                 (arg for arg in failure.args if isinstance(arg, str) and arg),
                 type(failure).__name__,
             )
-            raise OSError(failure.errno, f"{said}; left in {home}: {', '.join(left)}")
+            raise OSError(failure.errno, f"{said}; left behind: {', '.join(left)}")
     return True
 
 

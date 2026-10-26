@@ -1413,8 +1413,9 @@ details):
 - **Usage is read offline**, from the `rate_limits` the account's own sessions
   recorded in their rollouts — never over the network — so a Codex bar is as
   fresh as that account's last turn and says how old it is.
-- **Defaults are per agent**, and every rung of the launch order answers with
-  an account of the role's agent: a Codex role gets a Codex slot, and naming a
+- **The machine default is one for every agent** (rank 1 of the priority order),
+  **a project's default is per agent**, and every rung of the launch order answers
+  with an account of the role's agent: a Codex role gets a Codex slot, and naming a
   Claude slot for it (or the reverse) is refused, naming both.
 - **A usage limit** is read off the end of the session's rollout when its turn
   stops (Codex has no `StopFailure`), and the row turns **⏳ limited** the same
@@ -1456,7 +1457,7 @@ aisquare accounts default 2            # the machine default: moves slot 2 to ra
 aisquare accounts default 3 --project . # this project's default (codename, name, id prefix, or . for here)
 aisquare accounts default 1 --role coder # coders run on the plain claude (= team bind coder --account 1)
 aisquare accounts default              # the three levels, as they stand
-aisquare accounts default --clear --agent codex   # defaults are per agent
+aisquare accounts default --clear --project . --agent codex   # clears this project's Codex default; the machine's (rank 1) cannot be cleared: reorder
 aisquare accounts alias 2 work         # a name: --account work, [work] on the board
 aisquare accounts order work 3         # the priority order; the rest follow as they were
 aisquare accounts move 3 top           # up · down · top · bottom

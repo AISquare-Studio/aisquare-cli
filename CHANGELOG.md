@@ -238,7 +238,8 @@ adapter.**
   they were); v45 adds `account_rank`, the one priority order over every agent's accounts,
   seeded on the first read with the fallback coding agent's accounts first and each
   agent's in the order it had (a build before v45 sharing the store keeps each agent's own
-  order, and an account it adds is ranked last). That keeps the agent of every launch the
+  order, and an account it adds is ranked last; once ranks exist the per-agent `position`
+  columns are no longer read, so a reorder that build makes is dropped, not merged). That keeps the agent of every launch the
   order alone decided; it is not a promise for the settings the order now sits above:
   `[agents] default = "codex"` with no usable Codex account but a signed-in Claude Code one,
   `AISQUARE_CODING_AGENT` and a Codex-launched parent's family now give way to the order
@@ -653,6 +654,14 @@ adapter.**
 
 ### Fixed
 
+- **Words and costs that named one agent or ignored another's rows** (r23 of the 0.9.0 merge).
+  asq's one tmux process per tick holds once a project has a stopped worker: the windows of
+  ended rows are read out of the tick's one answer (it asked tmux twice a project). The Spawn
+  dialog's note under role *(none)* names the agent the launch starts (`plain Codex`, not
+  `plain Claude`), `aisquare accounts default` with no account says `whatever codex the shell
+  has` under `[agents] default = "codex"`, a Codex slot removed meanwhile is "no Codex
+  account in slot N", and auto-stop names a draft in Claude Code's box before someone typing
+  in the pane, as 0.9.0 did.
 - **A restart keeps an agent that ran on no account on its own home.** An agent spawned
   with no account (*(this shell's)*, or before any default was set) ran under the plain
   home, but `fleet restart`, *Restart all…* and a hand-off's Take over asked the account

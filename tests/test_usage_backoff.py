@@ -981,3 +981,17 @@ def test_sample_usage_honours_the_wait(fake_home: Path) -> None:
     endpoint.by_token["tok-work"] = _payload(30)
     held = service.sample_usage(work, now=NOW + timedelta(minutes=5), fetch=endpoint)
     assert held.rate_limited and endpoint.calls == ["tok-work"]
+
+
+def test_the_docs_point_a_scripter_at_watch_and_not_at_a_loop_of_accounts_usage() -> None:
+    """F1's "Spend fewer reads": the polling floor (the cache's five minutes) comes with the
+    other half of the advice, ``aisquare watch`` for whoever wants to hear that an agent hit a
+    limit, instead of a loop of their own around ``accounts usage``. Its link lands on a
+    heading that is there."""
+    page = (Path(__file__).parents[1] / "docs" / "fleet.md").read_text(encoding="utf-8")
+    text = " ".join(page.split())
+    floor = text.index("If you script usage, poll no more often than the cache's five minutes")
+    advice = text[floor : floor + 600]
+    assert "run `aisquare watch` ([Watching the fleet](#watching-the-fleet))" in advice, advice
+    assert "rather than a loop of your own around `accounts usage`" in advice, advice
+    assert "\n### Watching the fleet\n" in page, "the link's target heading"

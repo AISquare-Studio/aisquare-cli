@@ -37,7 +37,6 @@ and with Esc, a ``request_user_input`` in Plan mode answered with a digit, a pla
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import suppress
@@ -589,44 +588,3 @@ def _said_rows(text: str, width: int) -> list[str]:
     if rest.strip():
         lines.extend(wrap(rest.strip() if lines else rest, width))
     return lines
-
-
-def prompts_since(home: Path, cwd: Path, since: datetime) -> list[str]:
-    """The prompts Codex's sessions under ``home`` started in ``cwd`` ran since ``since``: the
-    ``user`` messages of every rollout written since then whose ``session_meta`` names that
-    folder, Codex's own context left out (:func:`_own`). Measured on 0.164.0: a prompt is
-    recorded so whether or not its hooks run, a positional one included, and a message
-    held behind its hook review is recorded once the review is passed (#113's #17)."""
-    folder = os.path.realpath(cwd)
-    cutoff = since.timestamp()
-    found: list[str] = []
-    root = home / "sessions"
-    for path in sorted(root.rglob("rollout-*.jsonl")) if root.is_dir() else []:
-        try:
-            if path.stat().st_mtime < cutoff:
-                continue
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
-        mine = False
-        for line in lines:
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            payload = record.get("payload") if isinstance(record, dict) else None
-            if not isinstance(payload, dict):
-                continue
-            if record.get("type") == "session_meta":
-                where = payload.get("cwd")
-                mine = isinstance(where, str) and os.path.realpath(where) == folder
-            elif (
-                mine
-                and record.get("type") == "response_item"
-                and payload.get("type") == "message"
-                and payload.get("role") == "user"
-            ):
-                text = _message_text(payload)
-                if text.strip() and not _own(text):
-                    found.append(text)
-    return found

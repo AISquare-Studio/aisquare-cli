@@ -3622,7 +3622,9 @@ def _with_first_prompts(
 
 FIRST_PROMPT_META = "first-prompt:"
 """``team_meta`` key prefix, before an agent id, of what a spawn's first message was given as:
-``{"digest", "home", "cwd"}``, for :func:`_first_prompt_off_its_transcript`."""
+``{"digest", "home", "cwd", "at"}``, for :func:`_first_prompt_off_its_transcript`."""
+FIRST_PROMPT_LEAD = timedelta(seconds=10)
+"""How long before the spawn's own clock a session may have begun and still be this row's."""
 
 
 def _first_prompt_digest(text: str) -> str:
@@ -3632,7 +3634,12 @@ def _first_prompt_digest(text: str) -> str:
 def _note_first_prompt(agent_id: str, text: str, home: Path, cwd: Path) -> None:
     """Keep what a spawn's first message was given as, never its text: its digest, and the
     home and folder its agent records its sessions under. Never raises."""
-    value = {"digest": _first_prompt_digest(text), "home": str(home), "cwd": str(cwd)}
+    value = {
+        "digest": _first_prompt_digest(text),
+        "home": str(home),
+        "cwd": str(cwd),
+        "at": _now().isoformat(),
+    }
     with contextlib.suppress(Exception), store_session() as store:
         store.set_meta(f"{FIRST_PROMPT_META}{agent_id}", json.dumps(value))
 
@@ -3657,12 +3664,11 @@ def _first_prompt_off_its_transcript(
         with store_session() as store:
             raw = store.get_meta(f"{FIRST_PROMPT_META}{agent.id}")
         given = json.loads(raw) if raw else None
-        since = agent.first_prompt_at
-        if adapter is None or not isinstance(given, dict) or since is None:
+        if adapter is None or not isinstance(given, dict):
             return agent
-        ran = adapter.first_prompts_since(
-            Path(given["home"]), Path(given["cwd"]), since - timedelta(seconds=10)
-        )
+        # The spawn's own clock, never the row's `first_prompt_at`, which `unsent` rewrites.
+        since = datetime.fromisoformat(given["at"]) - FIRST_PROMPT_LEAD
+        ran = adapter.first_prompts_since(Path(given["home"]), Path(given["cwd"]), since)
     except Exception:
         return agent
     if ran is None:
@@ -5306,8 +5312,9 @@ def spawn(
     done: list[str] = []
     typed: Typed | None = None
     acked: bool | None = None
-    if first is not None:
-        # What a session-less row's first message is settled by (`_first_prompt_off_its_
+    if first is not None and not selected.adapter.capabilities.starts_at_its_prompt:
+        # An agent whose start comes with its first prompt (Codex's) has no session until
+        # one runs. What the row's first message is then settled by (`_first_prompt_off_its_
         # transcript`): its digest, and the home and folder its agent records sessions under.
         home = choice.account.config_dir if choice.account is not None else selected.config_dir
         _note_first_prompt(stored.id, first, home, stored.cwd)

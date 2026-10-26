@@ -19104,13 +19104,14 @@ def test_a_refused_hand_over_is_handover_failed_and_wakes_the_manager(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    from tests.test_usage_aware_accounts import WEEKLY_LIMIT_DAYS_OUT
+
     _two_slots_with_usage(monkeypatch, work=95, personal=99)  # nowhere under the line
 
+    # Days out, not `Mon 12:00am`: every Sunday from 23:45 that lifts inside the wait window,
+    # the hook waits instead of handing over, and no hand-over is refused.
     _agent, nudges = _limit_handed_over_inline(
-        project,
-        monkeypatch,
-        tmp_path,
-        message="You've hit your weekly limit · resets Mon 12:00am (America/Toronto)",
+        project, monkeypatch, tmp_path, message=WEEKLY_LIMIT_DAYS_OUT
     )
 
     assert _events(project, "switched") == []

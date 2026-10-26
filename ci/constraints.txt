@@ -8,7 +8,7 @@
 # 2.3.1 to 2.4.0 without a commit. These are the versions the last green run on
 # rc/first-run resolved in all six jobs that install `.[dev]` (run 37575035874).
 # Move them on purpose, in a commit of their own, with a green run.
-ruff==0.17.0
+ruff==0.17.2
 mypy==2.4.0
 
 # The TLS trust (#403): what uv.lock holds, so CI verifies HTTPS with the versions a uv

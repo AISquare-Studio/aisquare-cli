@@ -56,7 +56,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which test ran before it in its process, which a shard changes. The snapshot test runs
   git on the suite's unhurried budget, as `test_ci_snapshot` does: a slow Windows runner
   spent the product's 2 s on the capture, and failed it every time once sharding placed
-  it beside a heavier test.
+  it beside a heavier test. Ten tests of the usage-limit hand-over no longer fail from
+  23:45 to midnight every Sunday in Toronto: they fired `resets Mon 12:00am`, which then
+  lifts inside `wait_if_reset_within_minutes`, so the hook waited instead of switching;
+  they fire a weekly limit that lifts three days out, whatever the clock says.
 - **An account with no usage to show reads `!` on the Accounts page, and says
   why on hover** (#13 on the board). With no reading and none kept, the row read
   `⚠ token missing` cut to its 16-wide cell and `—`, which looked like no usage

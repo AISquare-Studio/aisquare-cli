@@ -1941,3 +1941,20 @@ def test_the_before_limit_rows_of_the_project_go_with_its_signals_and_marks_and_
     assert _raw("SELECT key FROM ui_state WHERE key GLOB ?", (f"*{alpha.id}*",)) == []
     assert _raw("SELECT * FROM ui_state WHERE key IN (?, ?, ?)", tuple(others)) == others_before
     assert len(others_before) == len(others)
+
+
+def test_a_reset_keeps_the_host_records_of_the_processes_that_run_sessions(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+) -> None:
+    """``host/<project>/<pid>`` (``services.mcp_host``) is kept on purpose: it names a process,
+    not board content, and the process writes it again at its next hook."""
+    alpha, _, _, _ = two
+    key = f"host/{alpha.id}/4242"
+    with store_session() as store:
+        store.set_meta(key, '{"session": "sess-alpha", "started": "t", "at": 1.0}')
+    before = _meta()[key]
+
+    fresh_service.start_fresh(alpha)
+
+    assert _meta()[key] == before

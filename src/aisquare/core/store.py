@@ -2704,6 +2704,13 @@ class SqliteStore:
         warning. The distiller's watermark stays: ``team_event.seq`` is one stream for every
         board, so the next event is past it whatever went.
 
+        The ``host/<project id>/<pid>`` keys (``services.mcp_host``) stay too, on purpose.
+        They name the Claude Code processes that run sessions, not board content, and the
+        process overwrites its own when it next registers. ``host_of`` needs the session's
+        row as well as the key, and the row goes here, so a live solo session's own MCP
+        server cannot prove itself until its next SessionStart or UserPromptSubmit writes
+        the record again, whether the key stayed or not. Narrow, and it heals itself.
+
         The fleet is its ``fleet_agent`` rows, and a live one refuses the reset
         (``ValueError``): asked under the write lock, so an agent a spawn recorded after the
         caller stopped the rest is never left without its row. ``memory`` takes the

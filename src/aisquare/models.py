@@ -733,6 +733,16 @@ class SessionUsage(BaseModel):
     started_at: datetime
     updated_at: datetime
     ended_at: datetime | None = None
+    account_slot: int | None = None
+    """The Claude Code account the session ran under (``claude_account`` slot; 1 is the
+    machine's plain ``claude``); ``None`` for a directory no slot names, or before it was read."""
+    account_type: str | None = None
+    """That account's subscription type (``pro``, ``max``, ``team``, ``api`` …) when the
+    session was recorded or first attributed; ``None`` until it could be read."""
+    repo_id: str | None = None
+    """The repository the session ran in, by working directory (``core.workspace.project_id_for``
+    of its root) — whatever ``project_id`` is, which a pinned project overrides. ``None`` for
+    a row from before it was recorded: ``project_id`` then stands for it."""
 
 
 class TurnUsage(BaseModel):
@@ -752,6 +762,9 @@ class TurnUsage(BaseModel):
     cost_usd: float = 0.0
     scan_ms: float | None = None
     """How long reading the transcript took on the hook's path."""
+    source: Literal["hook", "sweep"] | None = None
+    """Who read it: a Stop hook (``None`` for a row from before this was recorded), or the
+    transcript sweep over sessions no hook watched (``services.usage_stats``)."""
 
 
 class TokenSummary(BaseModel):
@@ -784,6 +797,236 @@ class TokenSummary(BaseModel):
     median_tool_calls_before_edit: int | None = None
     prices_as_of: str = ""
     prices_source: str = ""
+
+
+# --- local usage stats: Settings ▸ Usage & stats, ``aisquare metrics stats`` ------------
+
+UsageRange = Literal["today", "7d", "30d", "lifetime"]
+"""The windows the dashboard shows: today, the last 7 or 30 local days (today included), or
+everything recorded."""
+
+USAGE_RANGES: tuple[UsageRange, ...] = ("today", "7d", "30d", "lifetime")
+
+
+class UsageTurnRow(BaseModel):
+    """A recorded turn with the account and repository its session ran under: what the
+    dashboard sums (``store.usage_turn_rows``)."""
+
+    session_id: str
+    repo_id: str
+    recorded_at: datetime
+    usage: dict[str, Any] = Field(default_factory=dict)
+    total_tokens: int = 0
+    cost_usd: float = 0.0
+    account_slot: int | None = None
+    account_type: str | None = None
+
+
+class TokenCounts(BaseModel):
+    """Tokens in the four kinds the API bills."""
+
+    input: int = 0
+    cache_write: int = 0
+    cache_read: int = 0
+    output: int = 0
+
+    def plus(self, other: TokenCounts) -> TokenCounts:
+        return type(self)(
+            input=self.input + other.input,
+            cache_write=self.cache_write + other.cache_write,
+            cache_read=self.cache_read + other.cache_read,
+            output=self.output + other.output,
+        )
+
+    def sum(self) -> int:
+        return self.input + self.cache_write + self.cache_read + self.output
+
+
+class DayTokens(TokenCounts):
+    """The telemetry contract's ``tokens``: the four kinds and their ``total``."""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def total(self) -> int:
+        return self.sum()
+
+
+class UsageTokens(DayTokens):
+    """Tokens summed; ``total`` is the four kinds added — the figure ``aisquare metrics
+    tokens`` calls ``total_tokens`` — and ``input_output`` the typed-in and written-back
+    part of it, caches left out."""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def input_output(self) -> int:
+        return self.input + self.output
+
+
+class RepoTraits(BaseModel):
+    """What a repository looks like from outside, coarsely: no name, path or remote."""
+
+    host: Literal["github", "gitlab", "bitbucket", "other", "none"] = "none"
+    language: str | None = None
+    """The extension most files have (``python``, ``typescript`` …), ``None`` when unknown."""
+    size_bucket: Literal["xs", "s", "m", "l", "xl"] = "xs"
+    monorepo: bool = False
+
+
+class RepoProfile(BaseModel):
+    """What the CLI knows about one repository, cached and refreshed at most daily."""
+
+    repo_id: str
+    name: str
+    root: str
+    remote: str | None = None
+    """The git remote, normalised (``github.com/org/repo``): no scheme, credentials or ``.git``."""
+    traits: RepoTraits = Field(default_factory=RepoTraits)
+    files: int = 0
+    refreshed_at: datetime
+
+
+class UsageAccountRow(BaseModel):
+    """One Claude Code account's share of a range."""
+
+    slot: int | None
+    """``None`` for sessions no registered account's directory holds."""
+    label: str
+    subscription: str = "unknown"
+    tokens: UsageTokens = Field(default_factory=UsageTokens)
+    cost_usd: float = 0.0
+    sessions: int = 0
+    turns: int = 0
+    share: float = 0.0
+    """Its tokens over the range's."""
+
+
+class UsageRepoRow(BaseModel):
+    """One repository's share of a range."""
+
+    repo_id: str
+    name: str
+    tokens: UsageTokens = Field(default_factory=UsageTokens)
+    cost_usd: float = 0.0
+    sessions: int = 0
+    turns: int = 0
+    last_active: str | None = None
+    """The local date it was last worked in, within the range."""
+
+
+class UsageModelRow(BaseModel):
+    model: str
+    tokens: UsageTokens = Field(default_factory=UsageTokens)
+    cost_usd: float = 0.0
+    priced: bool = True
+    share: float = 0.0
+
+
+class UsageFeatureRow(BaseModel):
+    name: str
+    count: int
+
+
+class UsageDay(BaseModel):
+    """One LOCAL calendar day."""
+
+    date: str
+    """``YYYY-MM-DD``."""
+    tokens: UsageTokens = Field(default_factory=UsageTokens)
+    cost_usd: float = 0.0
+    sessions: int = 0
+    turns: int = 0
+
+
+class UsageAccounts(BaseModel):
+    registered: int = 0
+    """The Claude Code accounts this machine has (the plain ``claude`` and every slot)."""
+    active: int = 0
+    """How many of them ran a turn in the range."""
+    by_type: dict[str, int] = Field(default_factory=dict)
+    """The active ones, by subscription type."""
+    top: UsageAccountRow | None = None
+    rows: list[UsageAccountRow] = Field(default_factory=list)
+
+
+class UsageRepos(BaseModel):
+    active: int = 0
+    top: UsageRepoRow | None = None
+    rows: list[UsageRepoRow] = Field(default_factory=list)
+    """The ten with the most tokens."""
+
+
+class UsageStats(BaseModel):
+    """``aisquare metrics stats``, and the Usage & stats page: what this machine's Claude
+    Code sessions spent in a range, summed on read from what the hooks and the sweep recorded.
+    Days are LOCAL days (``tz_offset_minutes`` is today's offset)."""
+
+    range: UsageRange
+    since: str | None = None
+    """The first local date counted: the range's start, or the first recorded day for
+    ``lifetime``; ``None`` when nothing is recorded."""
+    until: str
+    """The last local date counted: today."""
+    tz_offset_minutes: int = 0
+    tokens: UsageTokens = Field(default_factory=UsageTokens)
+    cost_usd: float = 0.0
+    """List price over the priced models only (``core.pricing``)."""
+    unpriced_models: list[str] = Field(default_factory=list)
+    sessions: int = 0
+    """Distinct sessions that ran a turn in the range."""
+    turns: int = 0
+    active_days: int = 0
+    days: list[UsageDay] = Field(default_factory=list)
+    """Every local day of the range, oldest first, quiet ones with zeros; for ``lifetime``,
+    from the first recorded day."""
+    busiest_days: list[UsageDay] = Field(default_factory=list)
+    """The five days with the most tokens."""
+    by_weekday: list[int] = Field(default_factory=lambda: [0] * 7)
+    """Turns by weekday, Monday first."""
+    by_hour: list[int] = Field(default_factory=lambda: [0] * 24)
+    """Turns by hour of the local day."""
+    accounts: UsageAccounts = Field(default_factory=UsageAccounts)
+    repos: UsageRepos = Field(default_factory=UsageRepos)
+    models: list[UsageModelRow] = Field(default_factory=list)
+    features: list[UsageFeatureRow] = Field(default_factory=list)
+    """The features used most, by command path or TUI view; never arguments."""
+    prices_as_of: str = ""
+
+
+class DayRepo(BaseModel):
+    repo_id: str
+    """The local id; the sharing path replaces it with a salted hash and drops the rest."""
+    key: str
+    """What that hash is taken of: the normalised git remote, else the repo root path."""
+    tokens_total: int = 0
+    sessions: int = 0
+    turns: int = 0
+    traits: RepoTraits = Field(default_factory=RepoTraits)
+
+
+class DayAccounts(BaseModel):
+    active: int = 0
+    registered: int = 0
+    by_type: dict[str, int] = Field(default_factory=dict)
+    top_account_share: float = 0.0
+
+
+class DailyRollup(BaseModel):
+    """One local day, shaped as the telemetry contract's ``days[]`` entry (docs/usage-telemetry.md)
+    before hashing: the sharing task builds its batches from these."""
+
+    date: str
+    tz_offset_minutes: int
+    active: bool = True
+    tokens: DayTokens = Field(default_factory=DayTokens)
+    cost_usd_list: float = 0.0
+    sessions: int = 0
+    turns: int = 0
+    models: dict[str, TokenCounts] = Field(default_factory=dict)
+    accounts: DayAccounts = Field(default_factory=DayAccounts)
+    repos_active: int = 0
+    repos: list[DayRepo] = Field(default_factory=list)
+    """The 25 with the most tokens that day."""
+    features: dict[str, int] = Field(default_factory=dict)
 
 
 TaskStatus = Literal["todo", "doing", "review", "blocked", "done", "dropped"]

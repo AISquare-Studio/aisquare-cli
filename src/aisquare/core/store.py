@@ -53,6 +53,8 @@ from aisquare.models import (
     ProjectGroup,
     ProjectInfo,
     PromptRecord,
+    RepoProfile,
+    RepoTraits,
     SessionUsage,
     TaskStatus,
     TeamEvent,
@@ -62,6 +64,7 @@ from aisquare.models import (
     TurnMetric,
     TurnUsage,
     UsageSample,
+    UsageTurnRow,
 )
 
 _SCHEMA_V1 = """
@@ -1209,6 +1212,50 @@ CREATE TABLE IF NOT EXISTS brief (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS brief_number ON brief (project_id, number);
 """
+
+# v40 (local usage stats, Settings ▸ Usage & stats): what the dashboard needs beyond the tokens
+# v35 records.
+#
+# ``usage_session`` gains the account it ran under (``account_slot``: the ``claude_account``
+# slot of the config directory its transcript lives in, ``account_type``: that account's
+# subscription type) and ``repo_id``, the repository by working directory (``project_id`` is
+# the PINNED project when one is pinned, which is not where the work happened). ``usage_turn``
+# gains ``source``: ``NULL`` for a Stop hook's row, ``sweep`` for one the transcript sweep read
+# (``services.usage_stats``); a CHECK on ``trigger`` cannot be altered, so the origin is a
+# column of its own. All four are nullable and in :data:`_PRODUCTS`, added only where absent; a
+# row from before them reads NULL, and the sweep attributes it from the transcript path it
+# kept. ``usage_turn_recorded`` serves the range reads.
+#
+# ``repo_profile`` is one row per repository (its display name, root, normalised remote and
+# coarse traits), refreshed at most daily. ``feature_use`` is a (local day, name) → count: the
+# command paths and TUI views used, never an argument.
+#
+# Other rc lines have stamped a v40 of their own before (see v39 above). Every statement is
+# ``IF NOT EXISTS`` and every column is converged by presence, so a store that ran another
+# line's v40 gains this step's objects at its next open whatever it is stamped.
+_SCHEMA_V40 = """
+CREATE TABLE IF NOT EXISTS repo_profile (
+    repo_id      TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    root         TEXT NOT NULL,
+    remote       TEXT,
+    host         TEXT NOT NULL DEFAULT 'none',
+    language     TEXT,
+    size_bucket  TEXT NOT NULL DEFAULT 'xs',
+    monorepo     INTEGER NOT NULL DEFAULT 0,
+    files        INTEGER NOT NULL DEFAULT 0,
+    refreshed_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS feature_use (
+    day   TEXT NOT NULL,
+    name  TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, name)
+);
+
+CREATE INDEX IF NOT EXISTS usage_turn_recorded ON usage_turn (recorded_at);
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1250,6 +1297,7 @@ _MIGRATIONS = (
     _SCHEMA_V37,
     _SCHEMA_V38,
     _SCHEMA_V39,
+    _SCHEMA_V40,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1327,6 +1375,15 @@ _PRODUCTS: dict[int, _Products] = {
         )
     ),
     38: _Products(("brief", "brief_number")),
+    39: _Products(
+        ("repo_profile", "feature_use", "usage_turn_recorded"),
+        (
+            ("usage_session", "account_slot", "INTEGER"),
+            ("usage_session", "account_type", "TEXT"),
+            ("usage_session", "repo_id", "TEXT"),
+            ("usage_turn", "source", "TEXT"),
+        ),
+    ),
 }
 
 _PROJECT_COLUMNS = (
@@ -1571,6 +1628,7 @@ class ContextStore(Protocol):
         *,
         previous_state: str | None,
         metric_counts: tuple[int, int, int] | None = None,
+        more_turns: Sequence[TurnUsage] = (),
     ) -> bool: ...
     def session_usages(
         self,
@@ -1580,6 +1638,25 @@ class ContextStore(Protocol):
         limit: int = 10_000,
     ) -> list[SessionUsage]: ...
     def turn_usages(self, session_id: str) -> list[TurnUsage]: ...
+    def usage_turn_rows(
+        self, since: datetime | None, until: datetime | None
+    ) -> list[UsageTurnRow]: ...
+    def usage_transcripts(self) -> dict[str, str]: ...
+    def unattributed_usage(self, limit: int = 5_000) -> list[SessionUsage]: ...
+    def attribute_usage(
+        self,
+        session_id: str,
+        *,
+        account_slot: int | None,
+        account_type: str | None,
+        repo_id: str | None,
+    ) -> None: ...
+    def repo_profiles(self) -> dict[str, RepoProfile]: ...
+    def save_repo_profile(self, profile: RepoProfile) -> None: ...
+    def add_feature_uses(self, counts: Mapping[tuple[str, str], int]) -> None: ...
+    def feature_uses(
+        self, since_day: str | None, until_day: str | None
+    ) -> list[tuple[str, str, int]]: ...
     def get_meta(self, key: str) -> str | None: ...
     def set_meta(self, key: str, value: str) -> None: ...
     def delete_meta(self, key: str) -> None: ...
@@ -1925,11 +2002,11 @@ def _maybe_dt(value: str | None) -> datetime | None:
 
 _SESSION_USAGE_COLUMNS = (
     "session_id, project_id, transcript_path, state, usage, turns, total_tokens, weighted, "
-    "cost_usd, started_at, updated_at, ended_at"
+    "cost_usd, started_at, updated_at, ended_at, account_slot, account_type, repo_id"
 )
 _TURN_USAGE_COLUMNS = (
     "id, session_id, project_id, trace_id, seq, trigger, recorded_at, usage, total_tokens, "
-    "weighted, cost_usd, scan_ms"
+    "weighted, cost_usd, scan_ms, source"
 )
 
 
@@ -1961,6 +2038,9 @@ def _row_to_session_usage(row: sqlite3.Row) -> SessionUsage:
         started_at=datetime.fromisoformat(row["started_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
         ended_at=_maybe_dt(row["ended_at"]),
+        account_slot=row["account_slot"],
+        account_type=row["account_type"],
+        repo_id=row["repo_id"],
     )
 
 
@@ -1978,6 +2058,7 @@ def _row_to_turn_usage(row: sqlite3.Row) -> TurnUsage:
         weighted=row["weighted"],
         cost_usd=row["cost_usd"],
         scan_ms=row["scan_ms"],
+        source=row["source"],
     )
 
 
@@ -2625,6 +2706,9 @@ class SqliteStore:
                     f"DELETE FROM {table} WHERE project_id = ?", (project_id,)
                 )
                 removed[table] = cursor.rowcount
+            # The repository's cached profile (its root and remote) goes with it; not counted
+            # in ``removed``, which names the tables a purge reports.
+            self._conn.execute("DELETE FROM repo_profile WHERE repo_id = ?", (project_id,))
             removed["team_meta"] = self._purge_team_meta(project_id, sessions)
             cursor = self._conn.execute("DELETE FROM project WHERE id = ?", (project_id,))
             removed["project"] = cursor.rowcount
@@ -3552,16 +3636,22 @@ class SqliteStore:
         *,
         previous_state: str | None,
         metric_counts: tuple[int, int, int] | None = None,
+        more_turns: Sequence[TurnUsage] = (),
     ) -> bool:
         """Write a scan's result as ONE transaction; ``False`` when another writer won.
 
         The session row is a compare-and-set on the state the scan started from
         (``previous_state``; ``None`` for a session with no row yet): two hooks
-        that scanned the same bytes — a Stop and a SessionEnd racing — cannot
-        both count them, and the loser writes nothing at all, its turn row
-        included. ``metric_counts`` (tokens in, tokens out, tool calls) fill the
-        CI test bed's columns on the ``metric`` row the turn closed: the
-        transcript is the evidence those columns were waiting for.
+        that scanned the same bytes — a Stop and a SessionEnd racing, or a Stop and
+        the transcript sweep — cannot both count them, and the loser writes nothing at
+        all, its turn rows included. ``metric_counts`` (tokens in, tokens out, tool
+        calls) fill the CI test bed's columns on the ``metric`` row the turn closed: the
+        transcript is the evidence those columns were waiting for. ``more_turns`` are
+        the further turn rows of a scan that read several (the sweep's), written with
+        ``turn``.
+
+        The account and repository the session ran in are written once known and never
+        unset: a later record that does not know them leaves what an earlier one did.
         """
         values = (
             session.project_id,
@@ -3575,49 +3665,56 @@ class SqliteStore:
             session.updated_at.isoformat(),
             session.ended_at.isoformat() if session.ended_at else None,
         )
+        attribution = (session.account_slot, session.account_type, session.repo_id)
         try:
             if previous_state is None:
                 cursor = self._conn.execute(
                     "INSERT INTO usage_session (project_id, transcript_path, state, usage, turns, "
                     "total_tokens, weighted, cost_usd, updated_at, ended_at, session_id, "
-                    "started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "started_at, account_slot, account_type, repo_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT (session_id) DO NOTHING",
-                    (*values, session.session_id, session.started_at.isoformat()),
+                    (*values, session.session_id, session.started_at.isoformat(), *attribution),
                 )
             else:
                 cursor = self._conn.execute(
                     "UPDATE usage_session SET project_id = ?, transcript_path = ?, state = ?, "
                     "usage = ?, turns = ?, total_tokens = ?, weighted = ?, cost_usd = ?, "
-                    "updated_at = ?, ended_at = ? WHERE session_id = ? AND state = ?",
-                    (*values, session.session_id, previous_state),
+                    "updated_at = ?, ended_at = ?, account_slot = COALESCE(?, account_slot), "
+                    "account_type = COALESCE(?, account_type), repo_id = COALESCE(?, repo_id) "
+                    "WHERE session_id = ? AND state = ?",
+                    (*values, *attribution, session.session_id, previous_state),
                 )
             if cursor.rowcount == 0:
                 self._conn.rollback()
                 return False
-            if turn is not None:
+            for row in (turn, *more_turns):
+                if row is None:
+                    continue
                 self._conn.execute(
                     f"INSERT INTO usage_turn ({_TURN_USAGE_COLUMNS}) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        turn.id,
-                        turn.session_id,
-                        turn.project_id,
-                        turn.trace_id,
-                        turn.seq,
-                        turn.trigger,
-                        turn.recorded_at.isoformat(),
-                        json.dumps(turn.usage, separators=(",", ":")),
-                        turn.total_tokens,
-                        turn.weighted,
-                        turn.cost_usd,
-                        turn.scan_ms,
+                        row.id,
+                        row.session_id,
+                        row.project_id,
+                        row.trace_id,
+                        row.seq,
+                        row.trigger,
+                        row.recorded_at.isoformat(),
+                        json.dumps(row.usage, separators=(",", ":")),
+                        row.total_tokens,
+                        row.weighted,
+                        row.cost_usd,
+                        row.scan_ms,
+                        row.source,
                     ),
                 )
-                if turn.trace_id is not None and metric_counts is not None:
+                if row.trace_id is not None and metric_counts is not None:
                     self._conn.execute(
                         "UPDATE metric SET tokens_in = ?, tokens_out = ?, tool_calls = ? "
                         "WHERE trace_id = ?",
-                        (*metric_counts, turn.trace_id),
+                        (*metric_counts, row.trace_id),
                     )
             self._conn.commit()
         except BaseException:
@@ -3658,6 +3755,157 @@ class SqliteStore:
             (session_id,),
         ).fetchall()
         return [_row_to_turn_usage(row) for row in rows]
+
+    def usage_turn_rows(self, since: datetime | None, until: datetime | None) -> list[UsageTurnRow]:
+        """The turn rows recorded in ``[since, until)`` (either end open), oldest first, each
+        with the account and repository its session ran under: the dashboard's raw material."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if since is not None:
+            clauses.append("t.recorded_at >= ?")
+            params.append(since.astimezone(UTC).isoformat())
+        if until is not None:
+            clauses.append("t.recorded_at < ?")
+            params.append(until.astimezone(UTC).isoformat())
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        rows = self._conn.execute(
+            "SELECT t.session_id, COALESCE(s.repo_id, t.project_id) AS repo_id, t.recorded_at, "
+            "t.usage, t.total_tokens, t.cost_usd, s.account_slot, s.account_type "
+            "FROM usage_turn t LEFT JOIN usage_session s ON s.session_id = t.session_id "
+            f"{where}ORDER BY t.recorded_at, t.id",
+            tuple(params),
+        ).fetchall()
+        return [
+            UsageTurnRow(
+                session_id=row["session_id"],
+                repo_id=row["repo_id"],
+                recorded_at=datetime.fromisoformat(row["recorded_at"]),
+                usage=_json_object(row["usage"]),
+                total_tokens=row["total_tokens"],
+                cost_usd=row["cost_usd"],
+                account_slot=row["account_slot"],
+                account_type=row["account_type"],
+            )
+            for row in rows
+        ]
+
+    def usage_transcripts(self) -> dict[str, str]:
+        """Every transcript path a session row recorded → that session's id: what the sweep
+        asks before it reads a file, so that a file already counted is never counted again."""
+        rows = self._conn.execute(
+            "SELECT transcript_path, session_id FROM usage_session "
+            "WHERE transcript_path IS NOT NULL"
+        ).fetchall()
+        return {row["transcript_path"]: row["session_id"] for row in rows}
+
+    def unattributed_usage(self, limit: int = 5_000) -> list[SessionUsage]:
+        """Sessions whose repository was never noted (recorded before it was), or whose account
+        is known but not its subscription type: what the sweep has still to attribute. An
+        attribution always sets the repository, so a session is asked about once."""
+        rows = self._conn.execute(
+            f"SELECT {_SESSION_USAGE_COLUMNS} FROM usage_session "
+            "WHERE repo_id IS NULL OR (account_slot IS NOT NULL AND account_type IS NULL) "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [_row_to_session_usage(row) for row in rows]
+
+    def attribute_usage(
+        self,
+        session_id: str,
+        *,
+        account_slot: int | None,
+        account_type: str | None,
+        repo_id: str | None,
+    ) -> None:
+        """Fill what a session's row does not know yet; what it knows is left as it is."""
+        self._conn.execute(
+            "UPDATE usage_session SET account_slot = COALESCE(account_slot, ?), "
+            "account_type = COALESCE(account_type, ?), repo_id = COALESCE(repo_id, ?) "
+            "WHERE session_id = ?",
+            (account_slot, account_type, repo_id, session_id),
+        )
+        self._conn.commit()
+
+    def repo_profiles(self) -> dict[str, RepoProfile]:
+        """Every repository profile, by repo id."""
+        rows = self._conn.execute(
+            "SELECT repo_id, name, root, remote, host, language, size_bucket, monorepo, files, "
+            "refreshed_at FROM repo_profile"
+        ).fetchall()
+        return {
+            row["repo_id"]: RepoProfile(
+                repo_id=row["repo_id"],
+                name=row["name"],
+                root=row["root"],
+                remote=row["remote"],
+                traits=RepoTraits(
+                    host=row["host"],
+                    language=row["language"],
+                    size_bucket=row["size_bucket"],
+                    monorepo=bool(row["monorepo"]),
+                ),
+                files=row["files"],
+                refreshed_at=datetime.fromisoformat(row["refreshed_at"]),
+            )
+            for row in rows
+        }
+
+    def save_repo_profile(self, profile: RepoProfile) -> None:
+        self._conn.execute(
+            "INSERT INTO repo_profile (repo_id, name, root, remote, host, language, size_bucket, "
+            "monorepo, files, refreshed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (repo_id) DO UPDATE SET name = excluded.name, root = excluded.root, "
+            "remote = excluded.remote, host = excluded.host, language = excluded.language, "
+            "size_bucket = excluded.size_bucket, monorepo = excluded.monorepo, "
+            "files = excluded.files, refreshed_at = excluded.refreshed_at",
+            (
+                profile.repo_id,
+                profile.name,
+                profile.root,
+                profile.remote,
+                profile.traits.host,
+                profile.traits.language,
+                profile.traits.size_bucket,
+                int(profile.traits.monorepo),
+                profile.files,
+                profile.refreshed_at.isoformat(),
+            ),
+        )
+        self._conn.commit()
+
+    def add_feature_uses(self, counts: Mapping[tuple[str, str], int]) -> None:
+        """Add to the (local day, name) counters, in one transaction."""
+        if not counts:
+            return
+        try:
+            self._conn.executemany(
+                "INSERT INTO feature_use (day, name, count) VALUES (?, ?, ?) "
+                "ON CONFLICT (day, name) DO UPDATE SET count = count + excluded.count",
+                [(day, name, count) for (day, name), count in counts.items()],
+            )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+
+    def feature_uses(
+        self, since_day: str | None, until_day: str | None
+    ) -> list[tuple[str, str, int]]:
+        """``(day, name, count)`` for the local days in ``[since_day, until_day]``."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if since_day is not None:
+            clauses.append("day >= ?")
+            params.append(since_day)
+        if until_day is not None:
+            clauses.append("day <= ?")
+            params.append(until_day)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT day, name, count FROM feature_use {where}ORDER BY day, name", tuple(params)
+        ).fetchall()
+        return [(row["day"], row["name"], row["count"]) for row in rows]
 
     def get_meta(self, key: str) -> str | None:
         row = self._conn.execute("SELECT value FROM team_meta WHERE key = ?", (key,)).fetchone()

@@ -446,8 +446,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # #279, stamped v35 on rc/p1-token-diet), v38 a group's parent manager and a task's
     # origin (P2-W6, #199, stamped v36 on rc/p2-capacity-setup), v39 work briefs
     # (docs/plans/evidence-gate.md, part 2; stamped v34, v36, v37 and v38 on #306's, #341's
-    # and #417's branches)
-    assert version == SCHEMA_VERSION == 39
+    # and #417's branches), v40 local usage stats (the account and repo of a session, the
+    # repo profile and the feature counters)
+    assert version == SCHEMA_VERSION == 40
 
 
 def test_a_v14_store_gains_nullable_persona_columns_through_the_persona_step() -> None:
@@ -1340,6 +1341,25 @@ _BRIEF_STEP = {
         for column in ("id", "project_id", "number", "revision", "data", "created_at", "updated_at")
     ),
 }
+#: v40, local usage stats: the account and repository a session ran under, the origin of a
+#: turn row, the repository profile and the feature counters (``_PRODUCTS[39]``).
+_USAGE_STATS_STEP = {
+    ("table", "repo_profile"),
+    ("table", "feature_use"),
+    ("index", "usage_turn_recorded"),
+    *(
+        ("column", f"repo_profile.{column}")
+        for column in (
+            "repo_id", "name", "root", "remote", "host", "language", "size_bucket", "monorepo",
+            "files", "refreshed_at",
+        )
+    ),
+    *(("column", f"feature_use.{column}") for column in ("day", "name", "count")),
+    ("column", "usage_session.account_slot"),
+    ("column", "usage_session.account_type"),
+    ("column", "usage_session.repo_id"),
+    ("column", "usage_turn.source"),
+}  # fmt: skip
 # Main's v22 to v24 by name: SQLite's automatic index for the primary key is left out.
 _MAINS_STEPS_PAST_21 = {
     ("table", "pending_revocation"),
@@ -1538,6 +1558,7 @@ def test_mains_v24_store_gains_the_persona_columns_and_keeps_every_row() -> None
         | _EVENT_ACTOR_COLUMNS
         | _PARENT_COLUMNS
         | _BRIEF_STEP
+        | _USAGE_STATS_STEP
     )
     assert shape == _built(SCHEMA_VERSION), "not the schema a fresh store has"
     assert after == before, "a row the store held changed on a column it had"
@@ -1610,8 +1631,9 @@ def test_one_schema_is_mains_v32_with_the_persona_columns_and_the_rcs_v21_with_m
     fresh = _built(SCHEMA_VERSION)
     persona = _built(33)
 
-    assert SCHEMA_VERSION == 39
-    assert fresh == _built(38) | _BRIEF_STEP
+    assert SCHEMA_VERSION == 40
+    assert fresh == _built(39) | _USAGE_STATS_STEP
+    assert _built(39) == _built(38) | _BRIEF_STEP
     assert _built(38) == _built(37) | _PARENT_COLUMNS
     assert _built(37) == _built(36) | _EVENT_ACTOR_COLUMNS
     assert _built(36) == persona | _ENDED_BY_COLUMN | _USAGE_STEP | _FIRST_PROMPT_COLUMNS
@@ -1721,7 +1743,7 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
     _schema_again, rows_again = _contents(db)
     version, shape, notnull = _persona_shape(db)
 
-    assert version == SCHEMA_VERSION == 39, label
+    assert version == SCHEMA_VERSION == 40, label
     assert shape == _built(SCHEMA_VERSION), label
     assert notnull == {"team_session": 0, "fleet_agent": 0}, label
     assert old_session is not None and old_session.persona == persona, label
@@ -1736,7 +1758,7 @@ def test_a_fresh_store_is_built_with_the_persona_step() -> None:
     open_store().close()
     version, shape, notnull = _persona_shape(_db_path())
 
-    assert version == SCHEMA_VERSION == 39
+    assert version == SCHEMA_VERSION == 40
     assert shape == _built(SCHEMA_VERSION)
     assert {("column", "team_session.persona"), ("column", "fleet_agent.persona")} <= shape
     assert notnull == {"team_session": 0, "fleet_agent": 0}
@@ -1822,7 +1844,7 @@ def test_the_two_v34_steps_are_v34_and_v35_each_idempotent() -> None:
     Run twice on one store, each leaves what it left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 39
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 40
     assert _MIGRATIONS[33] == ""
     assert _PRODUCTS[33] == _Products(columns=(("fleet_agent", "ended_by", "TEXT"),))
     assert _PRODUCTS[34] == _Products(
@@ -1846,6 +1868,7 @@ def test_the_two_v34_steps_are_v34_and_v35_each_idempotent() -> None:
         | _EVENT_ACTOR_COLUMNS
         | _PARENT_COLUMNS
         | _BRIEF_STEP
+        | _USAGE_STATS_STEP
     )
 
 
@@ -2005,7 +2028,7 @@ def test_the_first_prompt_step_is_v36_past_mains_two_and_idempotent() -> None:
     it left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 39
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 40
     assert _MIGRATIONS[35] == ""
     assert _PRODUCTS[33] == _Products(columns=(("fleet_agent", "ended_by", "TEXT"),))
     assert _PRODUCTS[35] == _Products(
@@ -2025,7 +2048,12 @@ def test_the_first_prompt_step_is_v36_past_mains_two_and_idempotent() -> None:
     finally:
         conn.close()
     assert once == (
-        _built(35) | _FIRST_PROMPT_COLUMNS | _EVENT_ACTOR_COLUMNS | _PARENT_COLUMNS | _BRIEF_STEP
+        _built(35)
+        | _FIRST_PROMPT_COLUMNS
+        | _EVENT_ACTOR_COLUMNS
+        | _PARENT_COLUMNS
+        | _BRIEF_STEP
+        | _USAGE_STATS_STEP
     )
 
 
@@ -2035,7 +2063,7 @@ def test_the_event_actor_step_is_v37_past_the_first_prompt_and_idempotent() -> N
     left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 39
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 40
     assert _MIGRATIONS[36] == ""
     assert _PRODUCTS[36] == _Products(
         columns=(("team_event", "actor", "TEXT"), ("team_event", "meta", "TEXT"))
@@ -2049,7 +2077,9 @@ def test_the_event_actor_step_is_v37_past_the_first_prompt_and_idempotent() -> N
         assert _shape(conn) == once
     finally:
         conn.close()
-    assert once == _built(36) | _EVENT_ACTOR_COLUMNS | _PARENT_COLUMNS | _BRIEF_STEP
+    assert once == (
+        _built(36) | _EVENT_ACTOR_COLUMNS | _PARENT_COLUMNS | _BRIEF_STEP | _USAGE_STATS_STEP
+    )
 
 
 def test_the_parent_step_is_v38_past_the_event_actor_and_idempotent() -> None:
@@ -2058,7 +2088,7 @@ def test_the_parent_step_is_v38_past_the_event_actor_and_idempotent() -> None:
     leaves what it left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 39
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 40
     assert _MIGRATIONS[37] == ""
     assert _PRODUCTS[37] == _Products(
         columns=(
@@ -2078,7 +2108,7 @@ def test_the_parent_step_is_v38_past_the_event_actor_and_idempotent() -> None:
         assert _shape(conn) == once
     finally:
         conn.close()
-    assert once == _built(37) | _PARENT_COLUMNS | _BRIEF_STEP
+    assert once == _built(37) | _PARENT_COLUMNS | _BRIEF_STEP | _USAGE_STATS_STEP
 
 
 @pytest.mark.parametrize(
@@ -2261,7 +2291,7 @@ def test_the_brief_step_is_v39_and_idempotent() -> None:
     leaves what it left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 39
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 40
     assert _PRODUCTS[38] == _Products(("brief", "brief_number"))
     conn = sqlite3.connect(":memory:")
     try:
@@ -2272,7 +2302,7 @@ def test_the_brief_step_is_v39_and_idempotent() -> None:
         assert _shape(conn) == once
     finally:
         conn.close()
-    assert once == _built(38) | _BRIEF_STEP
+    assert once == _built(38) | _BRIEF_STEP | _USAGE_STATS_STEP
 
 
 @pytest.mark.parametrize(
@@ -2392,6 +2422,104 @@ def test_a_store_main_stamped_v38_takes_the_briefs_step() -> None:
     assert shape == _built(SCHEMA_VERSION) and shape >= _BRIEF_STEP
     assert after_rows == before
     assert _contents(db) == once, "a second open changed the store"
+
+
+def test_the_usage_stats_step_is_v40_and_idempotent() -> None:
+    """The usage-stats step is v40: an ``IF NOT EXISTS`` script for ``repo_profile``,
+    ``feature_use`` and the range index, and four nullable columns in ``_PRODUCTS[39]``. Run
+    twice on one store, it leaves what it left once; a fresh store has all of it."""
+    from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
+
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 40
+    assert _PRODUCTS[39] == _Products(
+        ("repo_profile", "feature_use", "usage_turn_recorded"),
+        (
+            ("usage_session", "account_slot", "INTEGER"),
+            ("usage_session", "account_type", "TEXT"),
+            ("usage_session", "repo_id", "TEXT"),
+            ("usage_turn", "source", "TEXT"),
+        ),
+    )
+    conn = sqlite3.connect(":memory:")
+    try:
+        for step in range(SCHEMA_VERSION):
+            _run_step(conn, step)
+        once = _shape(conn)
+        _run_step(conn, 39)
+        assert _shape(conn) == once
+    finally:
+        conn.close()
+    assert once == _built(39) | _USAGE_STATS_STEP
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        assert _shape(raw) == once, "a fresh store is not the schema the ladder builds"
+    finally:
+        raw.close()
+
+
+def test_a_store_at_the_v39_schema_gains_the_usage_stats_step_and_keeps_every_row() -> None:
+    """A store as rc/0.9.1 left it (v39) holds usage rows that know no account, repository
+    or origin: it opens at v40, each of those reads NULL, the rows are unchanged and a second
+    open changes nothing. The new tables take writes at once."""
+    db = _at_version(39)
+    raw = sqlite3.connect(str(db))
+    try:
+        raw.execute(
+            "INSERT INTO usage_session (session_id, project_id, transcript_path, state, usage, "
+            "turns, total_tokens, weighted, cost_usd, started_at, updated_at) VALUES "
+            "('old', 'prj_a', '/t/old.jsonl', '{}', '{}', 1, 9, 0, 0, '2026-10-01T00:00:00+00:00', "
+            "'2026-10-01T00:00:00+00:00')"
+        )
+        raw.execute(
+            "INSERT INTO usage_turn (id, session_id, project_id, seq, trigger, recorded_at, "
+            "usage, total_tokens, weighted, cost_usd) VALUES "
+            "('t1', 'old', 'prj_a', 1, 'stop', '2026-10-01T00:00:00+00:00', '{}', 9, 0, 0)"
+        )
+        raw.commit()
+        assert ("column", "usage_session.account_slot") not in _shape(raw), "the fixture"
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+        session = store.session_usage("old")
+        turns = store.turn_usages("old")
+        store.add_feature_uses({("2026-10-26", "cli.fleet.spawn"): 2})
+    once = _contents(db)
+    open_store().close()
+
+    raw = sqlite3.connect(str(db))
+    try:
+        version = raw.execute("PRAGMA user_version").fetchone()[0]
+        shape = _shape(raw)
+    finally:
+        raw.close()
+    assert (version, missing) == (SCHEMA_VERSION, [])
+    assert shape == _built(SCHEMA_VERSION) and shape >= _USAGE_STATS_STEP
+    assert session is not None and session.total_tokens == 9
+    assert (session.account_slot, session.account_type, session.repo_id) == (None, None, None)
+    assert [(t.total_tokens, t.source) for t in turns] == [(9, None)]
+    assert _contents(db) == once, "a second open changed the store"
+
+
+def test_a_store_another_line_stamped_v40_gains_the_usage_stats_objects() -> None:
+    """Another rc line has stamped a v40 of its own before: a store claiming v40 without
+    this step's tables and columns gets them by presence at its next open."""
+    db = _at_version(39, stamp=40)
+    raw = sqlite3.connect(str(db))
+    try:
+        assert ("table", "feature_use") not in _shape(raw), "the fixture"
+    finally:
+        raw.close()
+    with store_session() as store:
+        assert store.missing_schema() == []
+        store.add_feature_uses({("2026-10-26", "tui.view.usage_stats"): 1})
+    raw = sqlite3.connect(str(db))
+    try:
+        assert _shape(raw) >= _USAGE_STATS_STEP
+    finally:
+        raw.close()
 
 
 # --- doctor's database row reads the schema, not only the file (review of #203) ---------------

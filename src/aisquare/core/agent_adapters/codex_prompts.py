@@ -23,6 +23,17 @@ Read for a listing, so bounded (review r22 of #113, finding 2):
   the first, however many a busy home holds; what one of this folder gave is kept against
   its size and modification time (:data:`_KEPT`), so a listing that finds it unchanged reads
   none of it again.
+
+Whose (review of #113's #24, tester-24). A rollout is named for the time it began and holds
+the folder, and nothing of the process that wrote it, and Codex makes none until its first
+prompt runs (none after 33 s at a quiet prompt, 0.164.0): so a row's own is born with the
+prompt in question, and another agent's, begun in the same folder on the same home after the
+spawn, looks the same. What tells them apart is the process: the one that writes a rollout
+holds it open for as long as the session lives, and it is below the pane's own
+(``core.process_table``). Of the rollouts that pass the three cuts above, only those the
+row's pane holds are its prompts; when the process table cannot be read they all are, said so
+(``PromptRecord.own``), and the caller does not take the row for a prompt that is not the
+message's own words.
 """
 
 from __future__ import annotations
@@ -37,6 +48,8 @@ from pathlib import Path
 from typing import Any
 
 from aisquare.core.agent_adapters.codex_transcript import _message_text, _own
+from aisquare.core.agent_adapters.types import PromptRecord
+from aisquare.core.process_table import PaneProcesses
 
 HEAD_BYTES = 1_000_000
 """How much of a rollout's head is read: its ``session_meta`` and the opening prompts."""
@@ -57,14 +70,25 @@ _FOLDERS_MAX = 50_000
 _LOCK = threading.Lock()
 
 
-def prompts_since(home: Path, cwd: Path, since: datetime) -> list[str]:
+def prompts_since(home: Path, cwd: Path, since: datetime, pane: PaneProcesses) -> PromptRecord:
     """The prompts the sessions under ``home`` that began in ``cwd`` at or after ``since``
-    ran, as typed, in the order their rollouts began; Codex's own context is left out."""
+    ran, as typed, in the order their rollouts began; Codex's own context is left out.
+
+    Of the rollouts that gave any, the ones the pane's processes hold open are the row's own
+    (``own=True``); with none to tell, nothing is asked of the process table, and when it
+    cannot be read every one is returned, as not known to be the row's (``own=False``)."""
     folder = os.path.realpath(cwd)
-    found: list[str] = []
+    ran: list[tuple[Path, tuple[str, ...]]] = []
     for path in _begun_since(home / "sessions", since):
-        found.extend(_prompts_of(path, folder))
-    return found
+        if prompts := _prompts_of(path, folder):
+            ran.append((path, prompts))
+    if not ran:
+        return PromptRecord((), own=True)
+    held = pane.held_below(home / "sessions")
+    if held is None:
+        return PromptRecord(tuple(text for _, prompts in ran for text in prompts), own=False)
+    mine = (prompts for path, prompts in ran if os.path.realpath(path) in held)
+    return PromptRecord(tuple(text for prompts in mine for text in prompts), own=True)
 
 
 def _begun_since(root: Path, since: datetime) -> list[Path]:

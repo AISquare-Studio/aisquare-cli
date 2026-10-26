@@ -37,6 +37,7 @@ from aisquare.core.agent_adapters.types import (
     PermissionIntent,
     PluginInstall,
     PriceTable,
+    PromptRecord,
     SandboxWrites,
     ScreenPrompt,
     SkillDirs,
@@ -60,6 +61,7 @@ from aisquare.core.codex_accounts import CodexAccounts, _records_from_end, appro
 from aisquare.core.config import FleetSettings
 from aisquare.core.paths import expand_user
 from aisquare.core.pricing import Price
+from aisquare.core.process_table import PaneProcesses
 
 #: ``model_reasoning_effort`` levels Codex names (0.162.1). Which of them a model
 #: takes is Codex's to say, so another level is passed through with a note.
@@ -1051,13 +1053,17 @@ class CodexAdapter:
         (:meth:`browser_tools`), not a flag; Claude Code's ``--chrome`` is not Codex's."""
         return harness.RoleDefaults()
 
-    def first_prompts_since(self, home: Path, cwd: Path, since: datetime) -> list[str] | None:
+    def first_prompts_since(
+        self, home: Path, cwd: Path, since: datetime, pane: PaneProcesses
+    ) -> PromptRecord | None:
         """Its rollouts' ``user`` messages (``codex_prompts``): Codex fires its first hook only
         with its first prompt, and none at all with its hooks untrusted, so its rollout is what
-        says a first message ran."""
+        says a first message ran. A rollout is named for no process, so it is the row's when the
+        pane's processes hold it open (measured on 0.164.0): another agent's, begun in the same
+        folder on the same home, is not."""
         from aisquare.core.agent_adapters.codex_prompts import prompts_since
 
-        return prompts_since(home, cwd, since)
+        return prompts_since(home, cwd, since, pane)
 
     def tool_policy(
         self,

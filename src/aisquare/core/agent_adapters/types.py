@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from aisquare.core.config import FleetSettings
     from aisquare.core.ledger import SessionLedger
     from aisquare.core.pricing import Price, RequestTokens
+    from aisquare.core.process_table import PaneProcesses
     from aisquare.core.usage import Usage
     from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
 
@@ -964,6 +965,21 @@ class UsageScan:
     first_edit: FirstEdit
 
 
+@dataclass(frozen=True)
+class PromptRecord:
+    """The prompts an agent's own record says its sessions ran
+    (:meth:`AgentAdapter.first_prompts_since`)."""
+
+    prompts: tuple[str, ...]
+    """As typed, in the order their sessions began."""
+    own: bool
+    """Whether every one of them is this row's agent's, the record having told its sessions
+    from other sessions' in the same folder on the same account home (Codex's rollouts, by the
+    process that holds each: ``core.process_table``). ``False`` when it could not: a prompt
+    may be another session's, so a listing takes the row for the first message's own words
+    alone and for no other prompt (``services.fleet``)."""
+
+
 class AgentTranscript(Protocol):
     """One agent's session transcript (the path its hooks report, ``TeamSession.
     transcript_path``), read for Remote: the needs-you scan's facts
@@ -1358,13 +1374,18 @@ class AgentAdapter(Protocol):
         browser), less what ``args`` already says, with a note for each it withholds."""
         ...
 
-    def first_prompts_since(self, home: Path, cwd: Path, since: datetime) -> list[str] | None:
+    def first_prompts_since(
+        self, home: Path, cwd: Path, since: datetime, pane: PaneProcesses
+    ) -> PromptRecord | None:
         """The prompts the agent's sessions under ``home`` started in ``cwd`` since ``since``
         ran, as typed, from its own record of them (Codex's rollouts), whether or not its hooks
         ran: what settles a first message no session has spoken for (``services.fleet``,
-        #113's #17). ``None`` for an agent whose hooks always say it (Claude Code's
-        ``SessionStart`` fires at rest, before its first prompt), or that keeps no such
-        record."""
+        #113's #17). ``pane`` is the row's pane: of the sessions in that folder on that home,
+        the row's own are the ones its processes hold (``PaneProcesses.held_below``), and a
+        record that is named for no process tells them apart by that, answering ``own=False``
+        when ``pane`` cannot say; an agent that cannot tell them apart declares it so. ``None``
+        for an agent whose hooks always say it (Claude Code's ``SessionStart`` fires at rest,
+        before its first prompt), or that keeps no such record."""
         ...
 
     def tool_policy(

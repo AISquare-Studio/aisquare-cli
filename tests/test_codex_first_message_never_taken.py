@@ -15,6 +15,9 @@ which records every prompt it ran, hooks or not (measured on 0.164.0), so the li
 
 The reader is bounded: it lists the day directories from the spawn on, opens only the rollouts
 whose names began after it, and reads the head and tail of one in this folder.
+
+Whose prompt it is (#24, tester-24) is ``tests/test_codex_first_message_whose_rollout.py``'s:
+here every rollout is held by the row's own pane, as the one its agent writes is.
 """
 
 from __future__ import annotations
@@ -30,8 +33,10 @@ from typing import Any
 
 import pytest
 
+from aisquare.core import process_table
 from aisquare.core.agent_adapters import codex_prompts, register, unregister
 from aisquare.core.config import FleetSettings
+from aisquare.core.process_table import PaneProcesses
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import fleet as fleet_service
@@ -48,6 +53,7 @@ from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
 )
 
 MESSAGE = "start on tsk_1 and read the board first"
+PANE_PID = 4100
 WORKING = [
     "  >_ OpenAI Codex (v0.164.0)",
     "",
@@ -95,24 +101,88 @@ def _rollout(
     return path
 
 
+class Processes:
+    """The machine's process table as a listing reads it (``core.process_table``), made up: which
+    processes are below which pane's, and which files each holds open. A pane's agent, as Codex's
+    is, sits two below the pane's own pid and holds its rollout from its first prompt on.
+    ``readable`` false is a machine whose table cannot be read (no ``lsof``, a process that hides
+    its descriptors)."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.below: dict[int, set[int]] = {}
+        self.files: dict[int, set[str]] = {}
+        self.readable = True
+        self.reads = 0
+        monkeypatch.setattr(process_table, "HELD_FOR", 0.0)
+        monkeypatch.setattr(process_table, "descendants", self._tree)
+        monkeypatch.setattr(process_table, "open_files", self._open)
+
+    def _tree(self, root: int) -> frozenset[int] | None:
+        return frozenset({root, *self.below.get(root, ())}) if self.readable else None
+
+    def _open(self, pids: Any) -> frozenset[str] | None:
+        self.reads += 1
+        if not self.readable:
+            return None
+        return frozenset(path for pid in pids for path in self.files.get(pid, ()))
+
+    def pane(self, root: int) -> int:
+        """A pane whose pid is ``root``, its agent below it; the agent's pid."""
+        self.below[root] = {root + 1, root + 2}
+        return root + 2
+
+    def hold(self, agent_pid: int, path: Path) -> None:
+        self.files.setdefault(agent_pid, set()).add(os.path.realpath(path))
+
+
+@pytest.fixture
+def processes(monkeypatch: pytest.MonkeyPatch) -> Processes:
+    return Processes(monkeypatch)
+
+
 class Spawned:
     """A Codex coder given a first message, its pane idle at the empty prompt, no session."""
 
     def __init__(
-        self, where: ProjectInfo, server: FakeTmux, monkeypatch: pytest.MonkeyPatch
+        self,
+        where: ProjectInfo,
+        server: FakeTmux,
+        monkeypatch: pytest.MonkeyPatch,
+        table: Processes,
+        *,
+        message: str = MESSAGE,
+        pane_pid: int = PANE_PID,
     ) -> None:
-        self.project, self.tmux, self.monkeypatch = where, server, monkeypatch
+        self.project, self.tmux, self.monkeypatch, self.table = where, server, monkeypatch, table
         self.agent: FleetAgent = fleet_service.spawn(
-            where, "coder", agent="codex", worktree=False, prompt=MESSAGE
+            where, "coder", agent="codex", worktree=False, prompt=message
         ).agent
         assert self.agent.session_id is None, "Codex's session binds at its first prompt"
         server.set_command(self.agent.pane_id, "codex")
         server.screens[self.agent.pane_id] = IDLE_PROMPT
+        server.pids[self.agent.pane_id] = pane_pid
+        self.pid = table.pane(pane_pid)
         with store_session() as store:
             raw = store.get_meta(f"{fleet_service.FIRST_PROMPT_META}{self.agent.id}")
         assert raw is not None, "the spawn noted what its first message was given as"
         given = json.loads(raw)
         self.home, self.cwd = Path(given["home"]), Path(given["cwd"])
+
+    def rollout(
+        self,
+        prompts: list[str],
+        *,
+        began: datetime | None = None,
+        cwd: Path | None = None,
+        held: bool = True,
+        own_context: bool = True,
+    ) -> Path:
+        """A rollout of ``cwd`` (this row's folder by default), held open by this row's agent
+        (``held``) or by some other process, another agent's, which is not this row's."""
+        path = _rollout(self.home, cwd or self.cwd, prompts, began=began, own_context=own_context)
+        if held:
+            self.table.hold(self.pid, path)
+        return path
 
     def given_at(self) -> datetime:
         """When the spawn gave the message (``_note_first_prompt``), as it noted it."""
@@ -132,8 +202,10 @@ class Spawned:
         return row
 
     def listed(self) -> Any:
-        [status] = fleet_service.list_agents(self.project)
-        return status
+        """This row's listing, among the project's."""
+        return next(
+            s for s in fleet_service.list_agents(self.project) if s.agent.id == self.agent.id
+        )
 
     def unsent_events(self) -> list[str]:
         with store_session() as store:
@@ -147,8 +219,9 @@ def spawned(
     codex_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
+    processes: Processes,
 ) -> Spawned:
-    return Spawned(project, tmux, monkeypatch)
+    return Spawned(project, tmux, monkeypatch, processes)
 
 
 # --- the three outcomes ---------------------------------------------------------------------------
@@ -157,7 +230,7 @@ def spawned(
 def test_a_prompt_the_rollout_records_is_a_first_message_taken(spawned: Spawned) -> None:
     """The row has no session and no hook ever spoke for it; its rollout holds the message
     among Codex's own context, so it is ``acked`` and no listing reads ``attention``."""
-    _rollout(spawned.home, spawned.cwd, [MESSAGE])
+    spawned.rollout([MESSAGE])
     spawned.later(46)
 
     status = spawned.listed()
@@ -174,7 +247,7 @@ def test_no_such_prompt_at_an_idle_prompt_is_unsent_and_attention_once(spawned: 
     idle at the empty prompt past ``prompt_ack_seconds``: the message is not going to be
     taken. ``attention`` with what to do, one ``prompt_unsent`` however many listings look;
     when the human's Enter later runs it, the rollout says so and the row is ``acked``."""
-    _rollout(spawned.home, spawned.cwd, ["something the human typed instead"])
+    spawned.rollout(["something the human typed instead"])
     spawned.later(46)
     with store_session() as store:
         named = store.get_project(spawned.project.id) or spawned.project  # its codename
@@ -186,9 +259,7 @@ def test_no_such_prompt_at_an_idle_prompt_is_unsent_and_attention_once(spawned: 
     assert spawned.row().first_prompt == "unsent"
     assert len(spawned.unsent_events()) == 1
 
-    _rollout(
-        spawned.home, spawned.cwd, [MESSAGE], began=datetime.now(tz=UTC) + timedelta(seconds=50)
-    )
+    spawned.rollout([MESSAGE], began=datetime.now(tz=UTC) + timedelta(seconds=50))
     assert spawned.listed().state != "attention"
     assert spawned.row().first_prompt == "acked"
 
@@ -238,11 +309,11 @@ def test_only_a_rollout_of_this_folder_after_the_spawn_with_the_message_counts(
 ) -> None:
     now = datetime.now(tz=UTC)
     if other == "folder":
-        _rollout(spawned.home, tmp_path / "elsewhere", [MESSAGE])
+        spawned.rollout([MESSAGE], cwd=tmp_path / "elsewhere")
     elif other == "before":
-        _rollout(spawned.home, spawned.cwd, [MESSAGE], began=now - timedelta(minutes=5))
+        spawned.rollout([MESSAGE], began=now - timedelta(minutes=5))
     else:
-        _rollout(spawned.home, spawned.cwd, [], own_context=True)
+        spawned.rollout([], own_context=True)
     spawned.later(46)
 
     assert spawned.listed().state == "attention"
@@ -257,7 +328,7 @@ def test_a_rollout_begun_a_few_seconds_before_the_spawns_clock_is_still_the_rows
     ``FIRST_PROMPT_LEAD`` before is the row's, one a quarter minute before is not."""
     assert timedelta(seconds=10) == fleet_service.FIRST_PROMPT_LEAD
     given = spawned.given_at()
-    _rollout(spawned.home, spawned.cwd, [MESSAGE], began=given - timedelta(seconds=5))
+    spawned.rollout([MESSAGE], began=given - timedelta(seconds=5))
     spawned.later(46)
 
     spawned.listed()
@@ -269,7 +340,7 @@ def test_a_rollout_begun_beyond_the_lead_before_the_spawns_clock_is_not_the_rows
     spawned: Spawned,
 ) -> None:
     given = spawned.given_at()
-    _rollout(spawned.home, spawned.cwd, [MESSAGE], began=given - timedelta(seconds=25))
+    spawned.rollout([MESSAGE], began=given - timedelta(seconds=25))
     spawned.later(46)
 
     assert spawned.listed().state == "attention"
@@ -289,16 +360,16 @@ def test_a_rollouts_name_may_be_two_seconds_older_than_the_moment_asked_about(
         home = tmp_path / f"home{ago}"
         _rollout(home, folder, ["a prompt"], began=since - timedelta(seconds=ago))
 
-        got = codex_prompts.prompts_since(home, folder, since)
+        got = codex_prompts.prompts_since(home, folder, since, PaneProcesses(lambda: None))
 
-        assert (got == ["a prompt"]) is found, ago
+        assert (got.prompts == ("a prompt",)) is found, ago
 
 
 # --- with the agent's hooks not trusted, a later prompt takes the row ---------------------------
 
 
 def _unsent(spawned: Spawned, instead: str = "something the human typed instead") -> None:
-    _rollout(spawned.home, spawned.cwd, [instead])
+    spawned.rollout([instead])
     spawned.later(46)
     assert spawned.listed().state == "attention"
     assert spawned.row().first_prompt == "unsent"
@@ -311,11 +382,8 @@ def test_a_prompt_the_agent_runs_after_the_row_read_unsent_takes_it(spawned: Spa
     _unsent(spawned)
     for _ in range(2):  # the prompt it already ran when the row was read does not clear it
         assert spawned.listed().state == "attention"
-    _rollout(
-        spawned.home,
-        spawned.cwd,
-        ["a fleet tell of other words"],
-        began=datetime.now(tz=UTC) + timedelta(seconds=50),
+    spawned.rollout(
+        ["a fleet tell of other words"], began=datetime.now(tz=UTC) + timedelta(seconds=50)
     )
 
     status = spawned.listed()
@@ -338,12 +406,7 @@ def test_a_row_read_unsent_by_a_build_that_kept_no_record_of_what_it_saw_is_not_
         kept = json.loads(store.get_meta(key) or "{}")
         kept.pop("seen")
         store.set_meta(key, json.dumps(kept))
-    _rollout(
-        spawned.home,
-        spawned.cwd,
-        ["another prompt"],
-        began=datetime.now(tz=UTC) + timedelta(seconds=50),
-    )
+    spawned.rollout(["another prompt"], began=datetime.now(tz=UTC) + timedelta(seconds=50))
 
     assert spawned.listed().state == "attention"
     assert spawned.row().first_prompt == "unsent"
@@ -377,7 +440,7 @@ def test_a_message_noted_late_is_noted_as_of_the_moment_it_was_given() -> None:
 def test_the_message_is_matched_as_the_spawn_wrote_it_whatever_its_whitespace(
     spawned: Spawned,
 ) -> None:
-    _rollout(spawned.home, spawned.cwd, ["  start on tsk_1 and\nread the board   first\n"])
+    spawned.rollout(["  start on tsk_1 and\nread the board   first\n"])
     spawned.later(46)
 
     spawned.listed()
@@ -430,7 +493,12 @@ def test_an_agent_that_keeps_no_record_of_its_prompts_leaves_the_row_as_it_was(
                 }
             ),
         )
-    assert fake_registered.first_prompts_since(project.root, project.root, datetime.now()) is None
+    assert (
+        fake_registered.first_prompts_since(
+            project.root, project.root, datetime.now(), PaneProcesses(lambda: None)
+        )
+        is None
+    )
     moved = datetime.now(tz=UTC) + timedelta(seconds=46)
 
     row = fleet_service._first_prompt_off_its_transcript(
@@ -449,6 +517,9 @@ class _Pane:
     def captured(self) -> list[str]:
         raise AssertionError("an agent with no record of its prompts is never asked about its pane")
 
+    def pid(self) -> int:
+        raise AssertionError("nor about its processes")
+
 
 # --- bounded ------------------------------------------------------------------------------------
 
@@ -463,7 +534,7 @@ def test_a_huge_rollout_beside_the_row_is_read_at_its_ends_and_in_time(
     for index in range(1_500):
         began = old - timedelta(days=index % 20, seconds=index)
         _rollout(spawned.home, spawned.cwd, [f"old {index}"], began=began)
-    big = _rollout(spawned.home, spawned.cwd, [MESSAGE])
+    big = spawned.rollout([MESSAGE])
     with big.open("r+b") as handle:
         handle.truncate(64 * 1024 * 1024)  # the rest is the working agent's, nothing readable
     spawned.later(46)
@@ -503,7 +574,7 @@ def test_a_rollout_unchanged_since_it_was_read_is_not_read_again(
 ) -> None:
     """Listings come every second or two for as long as the row is pending or unsent: what a
     rollout gave is kept against its size and modification time."""
-    path = _rollout(spawned.home, spawned.cwd, ["something else"])
+    path = spawned.rollout(["something else"])
     codex_prompts._KEPT.clear()
     codex_prompts._FOLDERS.clear()
     reads: list[Path] = []
@@ -525,6 +596,56 @@ def test_a_rollout_unchanged_since_it_was_read_is_not_read_again(
         handle.write(json.dumps({"type": "event_msg", "payload": {"type": "token_count"}}) + "\n")
     spawned.listed()
     assert reads == [path, path]
+
+
+def test_several_rollouts_of_this_folder_are_each_read_once_however_many_listings_ask(
+    spawned: Spawned, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cache of what a rollout gave holds more than the one: a folder where several agents
+    have worked since a long-lived unsent row (tester-24: a ``_KEPT_MAX`` of 1 passed every test
+    and opened each of them again at every listing)."""
+    paths = [spawned.rollout([f"prompt {n}"]) for n in range(4)]
+    codex_prompts._KEPT.clear()
+    codex_prompts._FOLDERS.clear()
+    reads: list[Path] = []
+    real = codex_prompts._read
+
+    def counting(read: Path, folder: str, size: int) -> list[str]:
+        reads.append(read)
+        return real(read, folder, size)
+
+    monkeypatch.setattr(codex_prompts, "_read", counting)
+    spawned.later(46)
+
+    for _ in range(3):
+        spawned.listed()
+
+    assert sorted(reads) == sorted(paths), "each read once, however many listings asked"
+
+
+def test_the_cache_drops_the_rollout_least_recently_asked_about_not_the_oldest(
+    spawned: Spawned, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Listings ask about the same few rollouts in turn: one asked about again is kept over one
+    that was not, however much older its first reading is."""
+    first, second, third = (spawned.rollout([f"prompt {n}"]) for n in range(3))
+    folder = os.path.realpath(spawned.cwd)
+    codex_prompts._KEPT.clear()
+    codex_prompts._FOLDERS.clear()
+    monkeypatch.setattr(codex_prompts, "_KEPT_MAX", 2)
+    reads: list[Path] = []
+    real = codex_prompts._read
+
+    def counting(read: Path, where: str, size: int) -> list[str]:
+        reads.append(read)
+        return real(read, where, size)
+
+    monkeypatch.setattr(codex_prompts, "_read", counting)
+
+    for path in (first, second, first, third, first):
+        codex_prompts._prompts_of(path, folder)
+
+    assert reads == [first, second, third], "the first, asked about again, stayed; the second went"
 
 
 def test_a_rollouts_head_and_tail_are_read_and_the_middle_is_not(tmp_path: Path) -> None:
@@ -555,8 +676,11 @@ def test_a_rollouts_head_and_tail_are_read_and_the_middle_is_not(tmp_path: Path)
         handle.write(tail + "\n")
 
     found = codex_prompts.prompts_since(
-        tmp_path / "home", folder, datetime.now(tz=UTC) - timedelta(minutes=1)
-    )
+        tmp_path / "home",
+        folder,
+        datetime.now(tz=UTC) - timedelta(minutes=1),
+        PaneProcesses(lambda: None),
+    ).prompts
 
     assert "head prompt" in found and "tail prompt" in found
     assert "middle prompt" not in found
@@ -571,7 +695,7 @@ def test_a_busy_home_does_not_thrash_the_cache_of_a_row_waiting_for_days(
     #17). Which folder a rollout began in never changes: it is read once."""
     for index in range(1_100):
         _rollout(spawned.home, spawned.cwd / f"other-{index}", [f"theirs {index}"])
-    mine = _rollout(spawned.home, spawned.cwd, ["something the human typed instead"])
+    mine = spawned.rollout(["something the human typed instead"])
     codex_prompts._KEPT.clear()
     codex_prompts._FOLDERS.clear()
     spawned.later(46)

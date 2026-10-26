@@ -35,11 +35,11 @@ from typing import Any
 
 import pytest
 
-from aisquare.core import agents, paths, selfcli
+from aisquare.core import agents, paths, process_table, selfcli
 from aisquare.core.config import load_config, save_config
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxServer
-from aisquare.models import FleetAgent, ProjectInfo
+from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet, quiet_compact, team
 from tests.test_codex_native import _answer, _message, _user_texts
 
@@ -281,9 +281,10 @@ def test_real_codex_first_message_that_never_ran_reads_attention_until_the_human
             (fleet._now().isoformat(), agent.id),
         )
         store._conn.commit()  # type: ignore[attr-defined]
-    # Noted as of the spawn, which is when a real spawn notes it: Codex names its rollout when
-    # it starts, which a loaded machine puts well after the spawn and before this test's own
-    # quiet prompt, so noted as of "now" the rollout was older than the lead allows.
+    # Noted as of the spawn, as a real spawn notes it. On 0.164.0 Codex makes no rollout until its
+    # first prompt runs (none after 33 s at a quiet prompt), so the human's Enter below is what
+    # creates it, after the note whichever moment this gives; a Codex that named its rollout when
+    # it starts would put it before a note made as of "now", which is what the lead is for.
     fleet._note_first_prompt(agent.id, lost, home, cwd, at=agent.created_at)
 
     def unsent() -> bool:
@@ -360,3 +361,87 @@ def test_real_codex_with_its_hooks_untrusted_a_tell_of_other_words_takes_an_unse
 
     loopback.until(cleared, 20, "the rollout took the tell", agent.pane_id)
     assert fleet.status_of(agent).session is None, "no hook ever fired: the rollout alone did it"
+
+
+def test_real_codex_with_its_hooks_untrusted_another_agents_prompt_in_the_folder_is_not_the_rows(
+    loopback: Loopback,
+) -> None:
+    """tester-24's live repro on #24: the row read ``unsent`` (its agent at the empty prompt,
+    hooks unreviewed so none ever fires), and ANOTHER Codex agent in the same folder on the same
+    home ran its own task. That prompt is in the folder's rollouts, but it is not the row's: its
+    agent ran nothing and its message is lost, so the attention stays. The rollout is told
+    apart by the process that holds it, which is below the pane's own (``core.process_table``);
+    the row's own ``fleet tell`` still clears it."""
+    lost = "a first message that never reached Codex"
+    theirs = "agent B own task"
+    config = load_config()
+    config.fleet.prompt_ack_seconds = 3.0
+    save_config(config)
+    a = fleet.spawn(loopback.project, "coder", agent="codex", worktree=False).agent
+    loopback.until(
+        lambda: "Hooks need review" in loopback.screen(a.pane_id), 30, "the hook review", a.pane_id
+    )
+    loopback.srv.run("send-keys", "-t", a.pane_id, "Escape")
+    loopback.until(lambda: loopback.quiet_at_its_prompt(a), 30, "a quiet empty prompt", a.pane_id)
+    home, cwd = agent_home_and_cwd(loopback, a)
+    with store_session() as store:
+        store._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE fleet_agent SET first_prompt = 'pending', first_prompt_at = ? WHERE id = ?",
+            (fleet._now().isoformat(), a.id),
+        )
+        store._conn.commit()  # type: ignore[attr-defined]
+    fleet._note_first_prompt(a.id, lost, home, cwd, at=a.created_at)
+
+    def status_of_a() -> FleetAgentStatus:
+        return next(s for s in fleet.list_agents(loopback.project) if s.agent.id == a.id)
+
+    loopback.until(lambda: status_of_a().state == "attention", 30, "A read as unsent", a.pane_id)
+    assert status_of_a().agent.first_prompt == "unsent"
+
+    # B: the same folder, the same home, its hooks trusted, its own task.
+    b = fleet.spawn(
+        loopback.project,
+        "coder",
+        agent="codex",
+        worktree=False,
+        agent_args=TRUSTED,
+        prompt=theirs,
+    ).agent
+    assert b.cwd == a.cwd
+    loopback.until(lambda: loopback.ran(theirs), 60, "B ran its own task", b.pane_id)
+
+    # Several listings, for as long as a false clear took to show (the first one after B's
+    # rollout appeared): A's agent is at its empty prompt and its message has not run.
+    for _ in range(6):
+        now = status_of_a()
+        assert now.state == "attention" and now.agent.first_prompt == "unsent", loopback.screen(
+            a.pane_id
+        )
+        time.sleep(1)
+    assert "Ask Codex to do anything" in loopback.screen(a.pane_id)
+    assert not loopback.ran(lost)
+
+    pids = {}
+    for row in (a, b):
+        placed = fleet.resolve_place(row)
+        assert isinstance(placed, fleet.Placed)
+        pids[row.id] = placed.pane.pid()
+    held_a = process_table.held_by_pane(pids[a.id] or 0)
+    held_b = process_table.held_by_pane(pids[b.id] or 0)
+    rollouts = {os.path.realpath(p) for p in (loopback.home / "sessions").rglob("rollout-*.jsonl")}
+    if held_b is not None:  # the process table can be read on this machine
+        assert held_a is not None
+        assert rollouts and rollouts <= held_b, "B's agent holds the rollout its task made"
+        assert not rollouts & held_a, "A's agent holds none: it ran nothing"
+    else:  # a machine that hides a process's descriptors: the stricter rule, with B gone
+        fleet.stop(loopback.project, b.label, force=True)
+
+    other = "do something else instead"
+    assert fleet.tell(loopback.project, a.label, other).delivered
+    loopback.until(lambda: loopback.ran(other), 30, "the tell ran", a.pane_id)
+
+    def cleared() -> bool:
+        now = status_of_a()
+        return now.agent.first_prompt == "acked" and now.state != "attention"
+
+    loopback.until(cleared, 20, "the rollout took the row's own tell", a.pane_id)

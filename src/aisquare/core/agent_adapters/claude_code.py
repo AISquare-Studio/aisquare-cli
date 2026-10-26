@@ -35,6 +35,7 @@ from aisquare.core.agent_adapters.types import (
     PermissionIntent,
     PluginInstall,
     PriceTable,
+    PromptRecord,
     SandboxWrites,
     SessionFlags,
     SkillDirs,
@@ -54,6 +55,7 @@ from aisquare.core.claude_accounts import (
     ClaudeCodeAccounts,
 )
 from aisquare.core.config import FleetSettings
+from aisquare.core.process_table import PaneProcesses
 
 #: ``--permission-mode`` for each approvals intent (``core.config.CLAUDE_PERMISSION_MODES``);
 #: ``never`` is ``bypassPermissions`` with a ``full`` write scope, else ``dontAsk``.
@@ -547,7 +549,9 @@ class ClaudeCodeAdapter:
             return harness.withheld_defaults(role, binary, self.binary)
         return harness.profile_defaults(role, args)
 
-    def first_prompts_since(self, home: Path, cwd: Path, since: datetime) -> list[str] | None:
+    def first_prompts_since(
+        self, home: Path, cwd: Path, since: datetime, pane: PaneProcesses
+    ) -> PromptRecord | None:
         """None: its ``SessionStart`` fires at rest, before its first prompt, so its hooks say
         whether a first message ran (``store.mark_prompted``)."""
         return None

@@ -90,6 +90,7 @@ from aisquare.core.config import (
 )
 from aisquare.core.ids import new_agent_id
 from aisquare.core.locking import holding
+from aisquare.core.process_table import PaneProcesses
 from aisquare.core.spawn import git_env, untraced_env
 from aisquare.core.store import (
     AmbiguousIdError,
@@ -3703,7 +3704,13 @@ def _first_prompt_off_its_transcript(
     row reads ``acked``. Not there past ``[fleet] prompt_ack_seconds``, with the agent idle at
     its prompt as its own screen reads it: ``unsent``, said on the board once, as Claude
     Code's (:func:`_first_prompt_unsent`). An agent whose adapter keeps no such record, a row
-    given no message, or one that cannot be read: as it was."""
+    given no message, or one that cannot be read: as it was.
+
+    Whose prompt it is matters (#24, tester-24): the record holds every session of the folder
+    on that account home, and another agent's prompt there is not this row's. The adapter
+    tells them apart by the pane's processes (``PromptRecord.own``); where it cannot, the
+    message's own words still take the row, and no other prompt does unless this is the only
+    live row in its folder (:func:`_alone_in_its_folder`)."""
     if agent.first_prompt not in ("pending", "unsent"):
         return agent
     adapter = recorded_adapter(agent.agent)
@@ -3715,18 +3722,26 @@ def _first_prompt_off_its_transcript(
             return agent
         # The spawn's own clock, never the row's `first_prompt_at`, which `unsent` rewrites.
         since = datetime.fromisoformat(given["at"]) - FIRST_PROMPT_LEAD
-        ran = adapter.first_prompts_since(Path(given["home"]), Path(given["cwd"]), since)
+        record = adapter.first_prompts_since(
+            Path(given["home"]), Path(given["cwd"]), since, PaneProcesses(lambda: pane.pid())
+        )
     except Exception:
         return agent
-    if ran is None:
+    if record is None:
         return agent
-    digests = {_first_prompt_digest(text) for text in ran}
+    digests = {_first_prompt_digest(text) for text in record.prompts}
     seen = given.get("seen")
-    later = agent.first_prompt == "unsent" and isinstance(seen, list) and digests - set(seen)
+    later = (
+        agent.first_prompt == "unsent"
+        and isinstance(seen, list)
+        and bool(digests - set(seen))
+        and (record.own or _alone_in_its_folder(agent))
+    )
     if given["digest"] in digests or later:
         # The message ran; or, with the agent's hooks not trusted (none ever fires, so nothing
-        # else takes the row), a prompt it ran after the row read ``unsent``: someone told it
-        # something, which is what the row asked for, as a hook's own prompt takes it.
+        # else takes the row), a prompt its own session ran after the row read ``unsent``:
+        # someone told it something, which is what the row asked for, as a hook's own prompt
+        # takes it. Another session's prompt in the folder is neither.
         with contextlib.suppress(Exception), store_session() as store:
             store.take_first_prompt(now, session_id="", agent_id=agent.id)
             store.delete_meta(f"{FIRST_PROMPT_META}{agent.id}")
@@ -3753,6 +3768,21 @@ def _first_prompt_off_its_transcript(
     with contextlib.suppress(Exception), store_session() as store:
         return store.get_fleet_agent(agent.id) or agent
     return agent
+
+
+def _alone_in_its_folder(agent: FleetAgent) -> bool:
+    """Whether no other live fleet row, of any agent or project, runs in ``agent``'s folder:
+    what lets a prompt a record cannot attribute (``PromptRecord.own`` false) stand for the
+    row's own. Another row there may have run it; a session outside the fleet in the same
+    folder on the same home still can, and is said so (docs/coding-agents.md). A store that
+    will not answer says no."""
+    here = os.path.realpath(agent.cwd)
+    with contextlib.suppress(Exception), store_session() as store:
+        return not any(
+            other.id != agent.id and os.path.realpath(other.cwd) == here
+            for other in store.live_fleet_agents()
+        )
+    return False
 
 
 def unsent_detail(project: ProjectInfo, label: str) -> str:

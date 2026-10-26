@@ -70,6 +70,7 @@ from aisquare.core.agent_adapters.types import (
     PermissionArgs,
     PermissionIntent,
     PriceTable,
+    PromptRecord,
     SandboxWrites,
     SharedMemory,
     SharePart,
@@ -91,6 +92,7 @@ from aisquare.core.claude_sharing import SharingError, TrustScope
 from aisquare.core.config import FleetSettings
 from aisquare.core.ledger import SessionLedger
 from aisquare.core.pricing import Price, RequestTokens
+from aisquare.core.process_table import PaneProcesses
 from aisquare.core.shell_line import command_line
 from aisquare.core.usage import Usage
 from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage, UsageWindow
@@ -831,7 +833,9 @@ class GeminiShapedAdapter:
     def role_defaults(self, role: str, *, binary: str, args: Sequence[str]) -> harness.RoleDefaults:
         return harness.RoleDefaults()
 
-    def first_prompts_since(self, home: Path, cwd: Path, since: datetime) -> list[str] | None:
+    def first_prompts_since(
+        self, home: Path, cwd: Path, since: datetime, pane: PaneProcesses
+    ) -> PromptRecord | None:
         return None
 
     def tool_policy(

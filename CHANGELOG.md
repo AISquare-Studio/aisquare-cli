@@ -564,6 +564,22 @@ adapter.**
 - `install.sh --agent codex` installs a missing Codex with its own installer and
   connects it alone; `--agent both` (or `--agent` twice) installs both agents.
   `install.ps1` takes the agent from `AISQUARE_INSTALL_AGENT`.
+- **`install.sh --with chrome-devtools` registers the Chrome DevTools MCP with each
+  agent the run sets up.** Claude Code as before (`claude mcp add … --scope user`),
+  and Codex through its own command, `codex mcp add chrome-devtools -- npx
+  chrome-devtools-mcp@latest`, which writes a `[mcp_servers.chrome-devtools]`
+  table into `CODEX_HOME/config.toml`; an `--agent codex` run no longer says Claude
+  Code is not installed and registers nothing. Codex replaces a server of that name
+  without a word, so the installer reads `config.toml` first and leaves an entry
+  the operator wrote (or the package under another name) as it is. The summary says
+  how to undo it (`codex mcp remove chrome-devtools`). How an agent registers one is
+  its adapter's (`AgentAdapter.mcp_registration`, optional), which `install.sh`
+  mirrors in shell and a test holds it to; doctor's browser tools row names the
+  server for a Codex ui-tester, and tells one without a browser the command.
+- **CI.** `mypy --platform win32` is clean (the report broker's POSIX-only open
+  flags, three POSIX-only tests), so Windows' pytest runs again; the real-Codex install
+  cell is no longer `continue-on-error`: only Codex's own installer failing is a
+  warning, and every other failure of it fails the job.
 - **Remote on Codex.** The phone's needs-you scan, quick answers and Transcript
   tab read a Codex agent's own rollout, through its adapter's transcript reader
   (`AgentAdapter.transcript_reader`; Claude Code's reads its JSONL as before).

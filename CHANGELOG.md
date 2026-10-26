@@ -6,7 +6,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-
 **Codex beside Claude Code: the same memory, board, fleet, accounts, Welcome
 and doctor, each agent with its own hooks, flags and sign-in behind one
 adapter.**
@@ -323,7 +322,8 @@ adapter.**
     the request's developer message). A `-c developer_instructions=` on the
     operator's line wins. The seam is the bound agent's whatever its binary is
     called: a wrapper bound as Claude Code gets Claude Code's flag, as it gets the
-    adapter's other launch arguments. A Codex thread keeps the system prompt it
+    adapter's other launch arguments. An agent whose adapter has no seam gets the
+    briefing alone, said in one dim line, as is a cache the launch cannot write. A Codex thread keeps the system prompt it
     began with across `codex resume`, so a persona attached since reaches a
     restarted Codex through the briefing.
   - `persona export --skill --user|--project --agent <agent>` writes into that
@@ -825,7 +825,6 @@ adapter.**
   persona at every resume while the row's persona differs from it. Only the first
   restart after a `persona attach` said it.
 
-
 ## [0.9.0] - 2026-10-25
 
 **The captain: an experimental voice-and-text agent that runs every project's fleet
@@ -1153,9 +1152,9 @@ its own installer.**
   session-start briefing that survives `/clear`, so a persona holds over a long
   session as hook context alone may not (plan §9, #210). `[persona]
   system_prompt = false` keeps the briefing alone; an `--append-system-prompt`
-  of either spelling on the operator's line wins. An agent whose adapter has no
-  seam gets the briefing alone, said in one dim line, as is a cache the launch
-  cannot write (Codex's seam: the entry below). The
+  of either spelling on the operator's line wins. codex, aider and any wrapper
+  not named `claude` have no seam this launcher knows and get the briefing
+  alone, said in one dim line, as is a cache the launch cannot write. The
   system prompt is the launch's for the life of the process, `/clear`
   included: a persona attached since reaches the agent through the briefing
   until a restart replays the row's. `fleet restart` and `fleet switch` replay the
@@ -1181,8 +1180,8 @@ its own installer.**
 - **Attach a persona in two steps, from `asq`.** The Personas tab's *Attach to
   existing* / *Attach to new* open one **target picker**: this project's running
   **Agents** (each with the persona it runs), the **Binds** `aisquare team bind`
-  pinned (with the binary and the account each environment points at) and every
-  agent's **Accounts** — Agents first for "existing", Binds then Accounts for
+  pinned (with the binary and the account each environment points at) and the
+  Claude **Accounts** — Agents first for "existing", Binds then Accounts for
   "new", every section selectable either way, and a filter across all three.
   Choosing an agent confirms ("it replaces mentor") and calls
   `fleet_service.attach_persona` in a thread worker; the toast says whether the
@@ -1190,9 +1189,8 @@ its own installer.**
   dialog preset with the seat, its binary or the slot, and the persona. **+ New
   bind** is `team bind` as a form, saved through `services.settings.bind_role`,
   the seat checked by the rule `spawn` applies and the binary by `PATH`, an
-  account filling its agent's variables as `launch --account` would
-  (`CLAUDE_CONFIG_DIR`/`CLAUDE_CODE_TMPDIR`, or `CODEX_HOME`); the list re-reads
-  with the new bind selected. **+ New account** opens
+  account filling `CLAUDE_CONFIG_DIR`/`CLAUDE_CODE_TMPDIR` as `launch --account`
+  would; the list re-reads with the new bind selected. **+ New account** opens
   the Accounts page's own add-account flow. The Spawn dialog's *Pick…* opens the
   same picker in "new" order and fills its role, binary or account without losing
   what was typed, and *Import…* beside its Persona field imports a persona and
@@ -1375,11 +1373,10 @@ its own installer.**
   Update behave as before; the new `upgrade --one-click` and `ui --after-update`
   are hidden.
 - **No role at all**: `aisquare fleet spawn agent` and `aisquare launch agent` start a
-  plain, general-purpose session of the agent (Claude Code by default; `--agent codex`
-  for Codex), labelled `agent-1` and on, that joins the board and its fleet row like any
-  agent but has no standing cycle, no mission and no model ladder. It is the Spawn
-  dialog's new first Role option, *(none) — general-purpose agent*; `coder` stays the one
-  preselected.
+  plain, general-purpose Claude Code session (labelled `agent-1` and on) that joins the
+  board and its fleet row like any agent but has no standing cycle, no mission and no
+  model ladder. It is the Spawn dialog's new first Role option, *(none) —
+  general-purpose Claude*; `coder` stays the one preselected.
 
 - **`aisquare metrics ledger`: what each agent session spent in tokens, counted
   live from its transcript.** Beside `metrics tokens` (the usage the hooks record, with

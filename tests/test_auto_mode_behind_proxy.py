@@ -569,6 +569,28 @@ def test_the_spawn_note_needs_auto_mode_a_proxy_and_evidence(
     assert hit is not None and "1 of the last 3 sessions were refused" in hit
 
 
+def test_the_spawn_note_points_at_the_command_that_carries_the_line(
+    isolated_home: Path, tmp_path: Path, runner: CliRunner
+) -> None:
+    """The ``explainability auto-mode`` row moved from ``aisquare doctor`` to
+    ``aisquare explainability doctor``, and the note's "or see ..." followed it: a receipt
+    that named ``aisquare doctor`` sent the reader to a report with no such row. The command
+    it names is one that prints the row, and ``aisquare doctor`` is not."""
+    paths.ensure_home()
+    _configure(tracing=True, modes={"coder": "auto"})
+    project = _project(tmp_path / "repo")
+    _session(project, "s-big", _sized(tmp_path / "t" / "big.jsonl", 141_000))
+
+    note = _note("auto")
+
+    assert note is not None
+    assert note.endswith(f"or see `aisquare explainability doctor` ({auto_mode.CHECK_NAME})"), note
+    named = runner.invoke(app, ["--json", "explainability", "doctor"]).stdout
+    assert auto_mode.CHECK_NAME in {row["name"] for row in json.loads(named)}
+    plain = runner.invoke(app, ["--json", "doctor"]).stdout
+    assert auto_mode.CHECK_NAME not in {row["name"] for row in json.loads(plain)}
+
+
 def test_the_spawn_note_names_a_step_a_restart_or_a_switch_receipt_can_follow(
     isolated_home: Path, tmp_path: Path, runner: CliRunner
 ) -> None:

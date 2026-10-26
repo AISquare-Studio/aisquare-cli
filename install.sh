@@ -130,6 +130,7 @@ TRANSIENT_AMBER="claude-account-backoff"
 # `brain` is the latest, answers `brain` amber on a machine with no brain CLI. To
 # drop them, gate each on the version being installed: below 0.9.0 for the
 # snapshot rows, below 0.9.1 for `brain`.
+# `brain` can go once 0.9.1 is the oldest release this script or CI installs (follow-up of #435).
 RELEASE_ERA_AMBER="brain repomix snapshot tiktoken"
 
 # --- options (§3.5) ---------------------------------------------------------

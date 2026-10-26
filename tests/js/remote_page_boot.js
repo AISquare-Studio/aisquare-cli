@@ -2845,6 +2845,27 @@ async function spoken() {
   return { dots, tabs, nav, opened, replaced, escaped, toggles: [shut, toggles()] };
 }
 
+/* A bookmark to the retired Card tab (#/p/<id>/a/<agent>/card): the agent's Live view opens
+ * in its place, the history entry is replaced by the Live one, and nothing asks the machine
+ * for api/explainability. What the page holds once it settles. */
+async function retiredCardTab() {
+  const page = bootPage("#/p/" + PROJECT + "/a/coder-1/card", signedIn());
+  await settle();
+  page.acceptSockets();
+  page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  paneCame(page);
+  await settle();
+  const bar = page.main().querySelectorAll("div.tabs")[0];
+  return {
+    hash: page.location.hash,
+    tabs: bar ? bar.childNodes.map((tab) => [tab.textContent, tab.attrs["aria-selected"] || null]) : null,
+    pane: page.main().querySelectorAll("pre.pane").length,
+    inputBar: page.main().querySelectorAll("div.inputbar").length,
+    explainability: page.requests.filter((one) => one.path.indexOf("api/explainability") >= 0).length,
+    asked: page.requests.filter((one) => one.method === "GET").map((one) => one.path).sort(),
+  };
+}
+
 /* The writes no other scenario sends, as the machine received them: Post on the Board tab,
  * Reply on a board question, and Restart and Switch from an agent's Actions menu; and which
  * names writePath refuses, a listed one the control. */
@@ -3893,6 +3914,7 @@ async function main() {
     buttonsInFlight: await buttonsInFlight(),
     stripCap: await stripCap(),
     spoken: await spoken(),
+    retiredCardTab: await retiredCardTab(),
     writesReachTheirRoutes: await writesReachTheirRoutes(),
     wakes: await wakes(),
     dismissals: await dismissals(),

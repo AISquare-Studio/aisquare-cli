@@ -45,6 +45,9 @@ const REF = /^(?!\.{1,2}$)[A-Za-z0-9_.-]{1,64}$/;
 const DEVICE_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const PROJECT_TABS = ["fleet", "board", "tasks", "memory"];
 const AGENT_TABS = ["live", "transcript"];
+/* The Card tab drew the explainability card and is gone. A bookmark or a notification link to
+ * it opens the agent's Live view, and the entry is replaced by that (see renderRoute). */
+const RETIRED_AGENT_TAB = "card";
 const STALE_AFTER_MS = 25000;
 /* How long after its tap a write whose request was lost is still sent again. */
 const RETRY_WITHIN_MS = 15000;
@@ -582,8 +585,11 @@ function parseRoute(hash) {
     if (n === 2) return { name: "project", pid: seg[1], tab: "fleet" };
     if (n === 3 && PROJECT_TABS.indexOf(seg[2]) >= 0) return { name: "project", pid: seg[1], tab: seg[2] };
     if ((n === 4 || n === 5) && seg[2] === "a" && REF.test(seg[3])) {
-      const tab = n === 5 ? seg[4] : "live";
-      if (AGENT_TABS.indexOf(tab) >= 0) return { name: "agent", pid: seg[1], label: seg[3], tab };
+      const retired = n === 5 && seg[4] === RETIRED_AGENT_TAB;
+      const tab = retired ? "live" : n === 5 ? seg[4] : "live";
+      if (AGENT_TABS.indexOf(tab) >= 0) {
+        return retired ? { name: "agent", pid: seg[1], label: seg[3], tab, retired: true } : { name: "agent", pid: seg[1], label: seg[3], tab };
+      }
     }
   }
   return null;
@@ -1528,6 +1534,7 @@ const VIEWS = {};
 function renderRoute() {
   const route = parseRoute(location.hash);
   if (!route) return pageGo("#/", true);
+  if (route.retired) return pageGo({ name: route.name, pid: route.pid, label: route.label, tab: route.tab }, true);
   const from = S.route;
   if (S.view && typeof S.view.cleanup === "function") S.view.cleanup();
   S.view = null;

@@ -1306,13 +1306,20 @@ def test_routes_are_built_only_from_ids_that_validate(node_report: dict[str, Any
         "label": "coder-1",
     }
     assert routes["#/p/prj_x/a/coder-1/transcript"]["tab"] == "transcript"
+    # The retired Card tab reads as the agent's Live view, marked, for the page to replace.
+    assert routes["#/p/prj_x/a/coder-1/card"] == {
+        "name": "agent",
+        "pid": "prj_x",
+        "label": "coder-1",
+        "tab": "live",
+        "retired": True,
+    }
     for hostile in (
         "#/n/javascript:alert(1)",
         "#/p/../fleet",
         "#/p/prj_x/a/%3Cimg%3E/live",
         "#/n/ny_0123456789ABCDEF",
         "#/p/prj_x/a/coder-1/evil",
-        "#/p/prj_x/a/coder-1/card",  # the Card tab is gone with the explainability card
         "#/%E0%A4%A",
         "#/settings/extra",
     ):
@@ -3193,6 +3200,21 @@ def test_each_listing_screen_shows_what_the_spec_lists(boot_report: dict[str, An
         "back": "#/",
     }
     assert screens["transcript"] == ["No conversation recorded yet."]
+
+
+def test_an_old_bookmark_to_the_retired_card_tab_opens_the_live_view_and_asks_for_no_card(
+    boot_report: dict[str, Any],
+) -> None:
+    """The agent view's Card tab drew the explainability card and is gone. A bookmark to
+    ``#/p/<id>/a/<agent>/card`` read as no route at all and sent the page to the feed, not to
+    the agent; it opens the agent's Live view now, the history entry becomes the Live one
+    (Back does not return to a tab that is not there), and nothing asks the machine for
+    ``api/explainability``."""
+    opened = boot_report["retiredCardTab"]
+    assert opened["hash"] == "#/p/prj_x/a/coder-1/live", "the entry was replaced by Live's"
+    assert opened["tabs"] == [["Live", "true"], ["Transcript", "false"]]
+    assert opened["pane"] == 1 and opened["inputBar"] == 1, "the Live view is drawn, not a blank"
+    assert opened["explainability"] == 0, opened["asked"]
 
 
 def test_a_board_whose_tasks_were_all_dropped_says_so_instead_of_drawing_nothing(

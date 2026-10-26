@@ -3574,8 +3574,8 @@ def spawn(
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
     # The hub as THIS process resolves it, blank for none: the window's
-    # `launch` joins the project the spawner — and the UI's Explainability tab
-    # beside it — resolves, and takes that project's key, not the one the tmux
+    # `launch` joins the project the spawner — and the UI's Explainability view
+    # (parked, but kept to agree) — resolves, and takes that project's key, not the one the tmux
     # server's frozen environment would name (review of #170, D1b round 2, B1).
     # A replacement's is the hub of the board its row recorded (`_board_and_hub`).
     env[orchestrator.TEAM_HUB_ENV_VAR] = hub

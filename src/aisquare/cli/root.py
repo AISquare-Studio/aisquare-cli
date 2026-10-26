@@ -146,13 +146,14 @@ def doctor(
         typer.Option("--fix", help="Repair what can be repaired, then re-check."),
     ] = False,
     yes: Annotated[
-        bool, typer.Option("--yes", "-y", help="Answer yes to every --fix prompt.")
+        bool,
+        typer.Option("--yes", "-y", help="Accepted and ignored: --fix asks nothing."),
     ] = False,
 ) -> None:
     """Run diagnostics and suggest fixes for common problems."""
     # --fix creates the aisquare home when it is missing (looking never does), then checks
-    # again. It asks nothing, so --yes changes nothing: the fleet UI's one-click fix passes it
-    # (services.onboarding.KNOWN_FIXES).
+    # again. It asks nothing, so --yes changes nothing; it stays because the fleet UI's
+    # one-click fix (services.onboarding.KNOWN_FIXES), scripts and the runbooks pass it.
     del yes
     if fix:
         for action in diagnostics_service.apply_fixes():

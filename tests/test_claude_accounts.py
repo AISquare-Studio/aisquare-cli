@@ -541,10 +541,19 @@ def test_usage_parses_the_live_payload_and_sends_the_token_only_to_the_usage_end
     assert usage.week_resets_at == datetime(2026, 9, 9, 21, 59, 59, 618443, tzinfo=UTC)
     assert usage.fetched_at == NOW
     [(url, headers, timeout)] = fetch.calls
-    assert url == service.USAGE_URL and url.startswith("https://api.anthropic.com/")
+    assert url == core.USAGE_URL and url.startswith("https://api.anthropic.com/")
     assert headers["Authorization"] == "Bearer sk-ant-oat01-secret"
-    assert headers["anthropic-beta"] == service.OAUTH_BETA
-    assert timeout == service.USAGE_TIMEOUT_SECONDS
+    assert headers["anthropic-beta"] == core.OAUTH_BETA
+    assert timeout == core.USAGE_TIMEOUT_SECONDS
+
+
+def test_the_usage_endpoint_constants_have_one_home() -> None:
+    """``USAGE_URL``, ``OAUTH_BETA`` and ``USAGE_TIMEOUT_SECONDS`` were copied into the service
+    when the usage code moved to ``core``, where nothing read the copies: a test that patched
+    only the service's would have reached the real endpoint (review r23 of #113, nit)."""
+    for name in ("USAGE_URL", "OAUTH_BETA", "USAGE_TIMEOUT_SECONDS"):
+        assert hasattr(core, name)
+        assert not hasattr(service, name), f"service.{name} is a second copy of core.{name}"
 
 
 def test_usage_reads_the_two_windows_out_of_the_w0_shape_and_ignores_the_rest(

@@ -488,6 +488,45 @@ def test_a_slot_removed_between_the_reconcile_and_the_write_is_a_sentence(
             call()
 
 
+def test_a_codex_slot_removed_meanwhile_is_a_codex_sentence(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "no Claude account in slot N" was said for any agent's slot (review r23 of #113,
+    nit): a Codex slot removed between the lookup and the write is a Codex account."""
+    from aisquare.core.store import SqliteStore
+
+    gone = core.create_account("codex")
+
+    def vanished(self: Any, *args: Any, **kwargs: Any) -> None:
+        raise KeyError(gone.slot)
+
+    monkeypatch.setattr(SqliteStore, "set_agent_account_alias", vanished)
+    monkeypatch.setattr(SqliteStore, "set_agent_account_disabled", vanished)
+    calls: list[Callable[[], object]] = [
+        lambda: service.set_alias(str(gone.slot), "work"),
+        lambda: service.set_disabled(str(gone.slot), True),
+    ]
+    for call in calls:
+        with pytest.raises(service.NoSuchAccount, match=f"no Codex account in slot {gone.slot} "):
+            call()
+
+
+def test_a_codex_machine_default_removed_after_it_was_resolved_says_codex(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gone = core.create_account("codex")
+    resolve = service.resolve
+
+    def removed_meanwhile(ref: str, **kwargs: Any) -> Any:
+        account = resolve(ref, **kwargs)
+        shutil.rmtree(gone.config_dir)  # by another process, after the lookup
+        return account
+
+    monkeypatch.setattr(service, "resolve", removed_meanwhile)
+    with pytest.raises(service.NoSuchAccount, match=f"no Codex account in slot {gone.slot} any"):
+        service.set_default(str(gone.slot))
+
+
 def test_a_machine_default_on_a_slot_removed_after_it_was_resolved_is_refused(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:
@@ -765,6 +804,25 @@ def test_a_damaged_store_costs_the_arrangement_never_the_listing_or_the_launch(
 
 
 # --------------------------------------------------------------------------- the commands
+
+
+def test_accounts_default_without_an_account_names_the_default_agents_binary(
+    fake_home: Path, runner: CliRunner
+) -> None:
+    """ "launches run on whatever claude the shell has" was said under ``agents.default =
+    codex`` too (review r23 of #113, 7): it is the default agent's binary, and a Claude
+    Code user's line reads as it always did."""
+    plain = runner.invoke(app, ["accounts", "default"])
+    assert plain.exit_code == 0, plain.output
+    assert "launches run on whatever claude the shell has" in plain.stdout
+
+    config = load_config()
+    config.agents.default = "codex"
+    save_config(config)
+    codex = runner.invoke(app, ["accounts", "default"])
+    assert codex.exit_code == 0, codex.output
+    assert "launches run on whatever codex the shell has" in codex.stdout
+    assert "claude" not in codex.stdout.split("machine default:")[1].splitlines()[0]
 
 
 def test_accounts_default_sets_shows_and_clears_at_all_three_levels(

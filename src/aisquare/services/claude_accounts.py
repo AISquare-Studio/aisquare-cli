@@ -21,7 +21,7 @@ accounts SHARE is the exception, and touches no login: a folder's trust entry
 (opt-in) ``settings.json`` as a link to the plain claude's (:func:`share_for_launch`).
 
 **Usage is best effort, on purpose.** The percentages come from the endpoint
-Claude Code's own ``/usage`` reads (:data:`USAGE_URL`), called with the access
+Claude Code's own ``/usage`` reads (``core.USAGE_URL``), called with the access
 token the account's stored login holds (``core.stored_login``: the credentials
 file, or on macOS the login Keychain). It is not a documented API: it
 answered on 2026-09-09 with Claude Code 2.1.266 and its shape is recorded in
@@ -88,11 +88,6 @@ from aisquare.models import (
 from aisquare.services import agents as agents_service
 from aisquare.services import install_route
 from aisquare.services import settings as settings_service
-
-USAGE_URL = core.USAGE_URL
-"""What Claude Code's ``/usage`` reads; ``anthropic-beta: oauth-2025-04-20`` is required."""
-OAUTH_BETA = core.OAUTH_BETA
-USAGE_TIMEOUT_SECONDS = core.USAGE_TIMEOUT_SECONDS
 
 SIGN_IN_SESSION = "asq-accounts"
 """The fleet server's tmux session that hosts sign-in windows (one window per attempt)."""
@@ -315,7 +310,7 @@ def _promote_retired_defaults(store: ContextStore) -> list[int]:
     return promoted
 
 
-def _default_agent() -> str:
+def default_agent() -> str:
     """The user's coding agent (``[agents] default``), else the built-in default; never raises."""
     try:
         chosen = load_config().agents.default
@@ -340,6 +335,10 @@ def _ranked(
     each goes ahead of that agent's first account in the order, so the account a launch of
     that agent took before is the one it takes after.
     Written only when it changed.
+
+    Once any rank exists the per-agent ``position`` columns are not read again: they are what
+    an older build writes when it reorders a store it shares with this one, and that reorder
+    is dropped, not merged (review r23 of #113, nit). The ranks are the one order.
     """
     ranks = store.account_ranks()
     if ranks:
@@ -353,7 +352,7 @@ def _ranked(
             at = next((i for i, a in enumerate(order) if a.agent == mover.agent), len(order))
             order.insert(at, mover)
     else:
-        first = _default_agent()
+        first = default_agent()
         order = sorted(arranged, key=lambda a: a.agent != first)
     slots = [a.slot for a in order]
     if ranks != {slot: rank for rank, slot in enumerate(slots, start=1)}:
@@ -928,17 +927,19 @@ def set_default(
                     raise KeyError(account.slot)
                 _rank_first(store, [account])
     except KeyError as exc:
-        raise NoSuchAccount(_vanished(account)) from exc
+        raise NoSuchAccount(_vanished(account, whose)) from exc
     except sqlite3.Error as exc:
         raise AccountsUnreadable(f"the accounts registry cannot be written ({exc})") from exc
     return account
 
 
-def _vanished(account: ClaudeAccount | None) -> str:
-    """The store refused a slot the reconcile had just seen: removed underneath us."""
+def _vanished(account: ClaudeAccount | None, agent: str = AGENT) -> str:
+    """The store refused a slot the reconcile had just seen: removed underneath us. Worded
+    by the slot's own agent (``AgentAccounts.noun``), as every not-found message here is."""
     slot = account.slot if account is not None else "?"
+    noun = core.kind(account.agent if account is not None else agent).noun
     return (
-        f"no Claude account in slot {slot} any more — it was removed meanwhile; "
+        f"no {noun} account in slot {slot} any more — it was removed meanwhile; "
         "see: aisquare accounts"
     )
 
@@ -1141,7 +1142,7 @@ def usage(
 
     Claude Code's are read from the endpoint (``core.endpoint_usage``): the token,
     from where Claude Code keeps it (``core.stored_login``: the credentials file,
-    or on macOS the login Keychain), goes to :data:`USAGE_URL` only, through
+    or on macOS the login Keychain), goes to ``core.USAGE_URL`` only, through
     ``fetch`` (:func:`_http_get` unless given); a token that has already expired
     is not sent at all, because Claude Code refreshes it on the account's next
     session and this module never does. A Keychain that would not show the token
@@ -1683,7 +1684,7 @@ def read_usage(
     The one fetcher behind every usage surface — a hand-over's pick and
     ``doctor --live`` call it directly, everything else through
     :func:`cached_usage` (review of #205, finding 11): four accounts and a slow
-    endpoint cost one ``USAGE_TIMEOUT_SECONDS``, not four. A reader that raises
+    endpoint cost one ``core.USAGE_TIMEOUT_SECONDS``, not four. A reader that raises
     costs its own slot a reading, never the others'.
 
     The threads only fetch; every answered reading is then recorded in ONE

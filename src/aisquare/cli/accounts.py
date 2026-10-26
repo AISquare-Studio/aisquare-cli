@@ -591,9 +591,12 @@ def _show_defaults(project: ProjectInfo | None) -> None:
         return
     console = stdout_console()
     if machine is None:
+        # The binary of the agent a launch with nothing else to say runs (`[agents] default`):
+        # `claude` as it always read, `codex` for a Codex user.
+        shell_has = get_adapter(accounts_service.default_agent()).binary
         console.print(
             "machine default: none — no enabled account is signed in, so launches run on "
-            "whatever claude the shell has",
+            f"whatever {shell_has} the shell has",
             markup=False,
         )
     else:
@@ -659,7 +662,8 @@ def default(
     account — so at machine level this is an alias of ``accounts move <ref> top``.
     A launch resolves them top-down: ``--account`` on the command line, then the
     role's binding, then the project's default, then the machine's; with no
-    account signed in it runs on whatever ``claude`` the shell already has.
+    account signed in it runs on whatever binary of the default agent (``claude``, or
+    ``codex`` under ``[agents] default``) the shell already has.
 
     A project's default is per agent: an account sets its own agent's, and
     ``--clear --project`` clears Claude Code's unless ``--agent codex`` says

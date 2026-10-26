@@ -193,7 +193,7 @@ def resolve(
     order (``claude_accounts.agent_pick``), then the fallbacks.
 
     ``measure`` is whether that rung may read accounts' usage, as a launch does: a headroom
-    pick across agents reads it, up to ``USAGE_TIMEOUT_SECONDS`` when the cache is cold.
+    pick across agents reads it, up to ``core.USAGE_TIMEOUT_SECONDS`` when the cache is cold.
     ``measure=False`` is for a caller that only DISPLAYS the agent (a doctor row, a printed
     hint): the order alone, no read, so it may differ from what a launch then picks when
     headroom puts a later account's agent first. A UI thread passes neither: it asks in a

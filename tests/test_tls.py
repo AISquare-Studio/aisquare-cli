@@ -210,8 +210,7 @@ def test_usage_reads_percentages_over_the_shared_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _certifi_only(monkeypatch, https_server.ca_file)
-    monkeypatch.setattr(service, "USAGE_URL", https_server.url)
-    monkeypatch.setattr(core, "USAGE_URL", https_server.url)  # where the Claude slot reads it
+    monkeypatch.setattr(core, "USAGE_URL", https_server.url)
     account = core.create_account()
     _sign_in(account, "two@example.com")
 
@@ -260,8 +259,7 @@ def test_a_certificate_that_does_not_verify_is_named_as_tls_not_urlerror(
     (tmp_path / "other").mkdir()
     other_ca, _, _ = _private_ca(tmp_path / "other")
     _certifi_only(monkeypatch, other_ca)
-    monkeypatch.setattr(service, "USAGE_URL", https_server.url)
-    monkeypatch.setattr(core, "USAGE_URL", https_server.url)  # where the Claude slot reads it
+    monkeypatch.setattr(core, "USAGE_URL", https_server.url)
     account = core.create_account()
     _sign_in(account, "two@example.com")
 
@@ -954,8 +952,7 @@ def test_a_bundle_that_will_not_load_is_named_on_the_usage_row(
     "could not reach the usage endpoint (FileNotFoundError)" on every row, while doctor's
     tls row already said the bundle could not be loaded. The row says it too now."""
     monkeypatch.setenv("SSL_CERT_FILE", bundle)
-    monkeypatch.setattr(service, "USAGE_URL", https_server.url)
-    monkeypatch.setattr(core, "USAGE_URL", https_server.url)  # where the Claude slot reads it
+    monkeypatch.setattr(core, "USAGE_URL", https_server.url)
     account = core.create_account()
     _sign_in(account, "two@example.com")
 

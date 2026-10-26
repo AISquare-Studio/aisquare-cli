@@ -16,14 +16,15 @@ from pathlib import Path
 import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Static
-from textual.widgets._toast import Toast
 
 from aisquare.cli.ui import autosave as autosave_mod
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.core import state_file
 from aisquare.core.atomic import write_replacing
 from aisquare.core.state_file import StateUnwritableError, read_state, update_state
+from tests import toast_log
 from tests.budgets import budget
+from tests.ui_workers import settle_page
 
 
 class _Host(App[None]):
@@ -271,10 +272,11 @@ def test_an_unexpected_error_is_a_toast_that_names_it(
     seen: list[str] = []
 
     async def go(saver: Autosave, app: App[None]) -> None:
+        told = toast_log.record(app)  # as it is raised: the saver's thread tells the loop of it
         saver.remember(34)
         await _settled(saver)
-        await asyncio.sleep(0.05)  # the toast is posted to the loop after the refusal
-        seen.extend(toast.render().plain for toast in app.screen.query(Toast))
+        await settle_page(app)
+        seen.extend(told)
 
     _run(go, notifications=True)
     assert len(seen) == 1
@@ -299,11 +301,12 @@ def test_a_refusal_after_a_save_that_landed_is_said_again(
     seen: list[str] = []
 
     async def go(saver: Autosave, app: App[None]) -> None:
+        told = toast_log.record(app)
         for value in (1, 2, 3, 4):  # refused, refused, landed, refused
             saver.remember(value)
             await _settled(saver)
-        await asyncio.sleep(0.05)  # the toast is posted to the loop after the refusal
-        seen.extend(toast.render().plain for toast in app.screen.query(Toast))
+        await settle_page(app)
+        seen.extend(told)
 
     _run(go, notifications=True)
     assert writer.calls == [1, 2, 3, 4]

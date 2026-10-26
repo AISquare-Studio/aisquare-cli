@@ -14,8 +14,10 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.cli.watch import feed_line
 from aisquare.services import team as team_service
+from tests import toast_log
 from tests.fake_clipboard import NEEDS_POSIX, TEXT, install
 from tests.projects import add_project
+from tests.ui_workers import settle_page
 
 
 @pytest.fixture(autouse=True)
@@ -510,8 +512,6 @@ def test_the_board_says_once_when_the_theme_cannot_be_remembered(
     it, and the board said nothing. The save is debounced and runs on a worker, so the test
     waits for both."""
     pytest.importorskip("textual", reason="the [tui] extra is not installed")
-    from textual.widgets._toast import Toast
-
     from aisquare.cli import watch as watch_mod
 
     team_service.activate()
@@ -523,12 +523,14 @@ def test_the_board_says_once_when_the_theme_cannot_be_remembered(
         app_cls = watch_mod._build_app_class(interval=60.0)
         async with app_cls().run_test(size=(120, 40), notifications=True) as pilot:
             await pilot.pause()
+            # What was said, recorded as it is raised: the refusal is told to the loop from the
+            # saver's thread, and a toast read off the screen after one pause was not there yet.
+            told = toast_log.record(pilot.app)
             for name in ("nord", "dracula"):
                 pilot.app.theme = name
                 assert await asyncio.to_thread(pilot.app._theme_autosave.settled, 5.0)
-                await pilot.pause()
-            toasts = list(pilot.app.screen.query(Toast))
-            return len(toasts), toasts[0].render().plain if toasts else ""
+                await settle_page(pilot.app)
+            return len(told), told[0] if told else ""
 
     count, text = asyncio.run(pick())
     assert count == 1 and "the theme could not be saved; it will be retried" in text

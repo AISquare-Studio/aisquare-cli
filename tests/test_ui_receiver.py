@@ -131,8 +131,13 @@ def request(action: str, arg: str | None = None) -> bytes:
     return (json.dumps({"v": 1, "action": action, "arg": arg}) + "\n").encode()
 
 
-def ask(path: Path, line: bytes, *, timeout: float = 2.0) -> dict[str, Any]:
-    """One exchange the way T1's client makes it: one line out, one line back, 2 s at most."""
+def ask(path: Path, line: bytes, *, timeout: float = 60.0) -> dict[str, Any]:
+    """One exchange the way T1's client makes it: one line out, one line back.
+
+    T1's client gives up after ``actions.UI_TIMEOUT_S`` (2 s), and the tests that pin that
+    budget say so (``timeout=actions.UI_TIMEOUT_S``, or a clock of their own). What the
+    others ask is what the receiver answers, and a reply that took more than 2 s on a
+    machine running forty other things was a ``TimeoutError`` and no answer to read."""
     with _unix_socket() as conn:
         conn.settimeout(timeout)
         conn.connect(str(path))
@@ -964,7 +969,7 @@ def test_a_client_that_says_nothing_is_cut_off_in_time_for_the_next(
     def timed() -> tuple[dict[str, Any], float]:
         """The client's own wait, from its connect to its answer — what T1's 2 s bounds."""
         began = time.monotonic()
-        reply = ask(ui_path, request("copy_row", "alpha/coder-1"))  # lands at once
+        reply = ask(ui_path, request("copy_row", "alpha/coder-1"), timeout=actions.UI_TIMEOUT_S)
         return reply, time.monotonic() - began
 
     async def body(pilot: Pilot[None]) -> tuple[dict[str, Any], float, dict[str, Any]]:

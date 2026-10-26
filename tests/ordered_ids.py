@@ -1,12 +1,11 @@
 """Ids that sort in the order they were minted, however fast a test mints them. Not a test module.
 
 ``aisquare.core.ids`` makes ids time-sortable to the millisecond and random inside it, and the
-store lists tasks and events ``ORDER BY id``. A test that adds two hundred tasks in a loop
-puts several in one millisecond, and those list in no particular order: the start pack's
-budget test read ``t073`` before ``t047`` on a loaded runner (ubuntu py3.11 and py3.12, the
-ambient legs of CI run 40249440798 and others). A test that asserts the order it added in
-installs this first; the ids then differ by a millisecond each at least, the way they would
-had each been added a moment apart.
+store lists tasks and events ``ORDER BY id``. A test that adds two hundred tasks in a loop can
+put two in one millisecond, and those list in either order. A test that asserts the order it
+added in installs this first; the ids then differ by a millisecond each at least, the way they
+would had each been added a moment apart. (The start pack's budget test did: it was red for
+another reason too, which its own comment says.)
 """
 
 from __future__ import annotations

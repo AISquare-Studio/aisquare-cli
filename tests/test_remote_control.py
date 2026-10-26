@@ -2820,7 +2820,7 @@ class LockedServer(FakeServer):
     def _write_remote_json(self) -> None:
         self.writers.append(threading.get_ident())
         self.waiting.set()
-        assert self.free.wait(10), "the lock was never let go"
+        assert self.free.wait(60), "the lock was never let go"
         super()._write_remote_json()
 
 
@@ -2842,17 +2842,31 @@ def test_the_panels_controls_write_remote_json_on_a_thread_of_their_own() -> Non
     controller = RemoteController(server=server, tunnel_factory=factory, now=lambda: clock[0])
     done = heard_news(controller)
     controller.on_done, controller.on_news = controller.on_news, None
-    # Who waited for the lock is asked of the writes, not of a stopwatch: the lock is held
-    # until the test lets it go, so a control that waited for it on its caller's thread did
-    # not return, and its write is recorded under the caller's own id. (A bound of one
-    # second on the five calls went red on windows-latest, run 40232807941.)
-    controller.turn_on(wait=False)
-    controller.set_allow_write(True, wait=False)
-    controller.set_auto_off(30, wait=False)
-    assert controller.regenerate_password(wait=False) is None
-    assert controller.revoke_device("dev_0000000a", wait=False) is False
+    # Not a stopwatch: the lock is held until the test lets it go, so the five calls return
+    # while it is held or not at all. They are made on a thread of their own and waited for
+    # as long as a hung one would take to be called hung, which is not how fast they are
+    # when they are right. (A bound of one second on them went red on windows-latest, run
+    # 40232807941.) And none of the writes was made on the thread that asked.
+    results: list[object] = []
+
+    def ask_for_all() -> None:
+        controller.turn_on(wait=False)
+        controller.set_allow_write(True, wait=False)
+        controller.set_auto_off(30, wait=False)
+        results.append(controller.regenerate_password(wait=False))
+        results.append(controller.revoke_device("dev_0000000a", wait=False))
+
+    asker = threading.Thread(target=ask_for_all, name="asks-for-the-controls", daemon=True)
+    asker.start()
+    asker.join(30)
+    stuck = asker.is_alive()
+    if stuck:
+        server.free.set()  # let the stuck one go, so that nothing is left holding the lock
+        asker.join(30)
+    assert not stuck, "a control waited for remote.json's lock"
+    assert results == [None, False]
     assert server.waiting.wait(5)
-    assert threading.get_ident() not in server.writers, "a control waited for remote.json's lock"
+    assert asker.ident not in server.writers, "a control wrote remote.json on its caller's thread"
     assert controller.running and controller.message == remote_control.STARTING
     assert tunnels == [], "no ngrok before the start's deadline is written"
     assert controller.write_actions_allowed() is True, "the switch shows the press"

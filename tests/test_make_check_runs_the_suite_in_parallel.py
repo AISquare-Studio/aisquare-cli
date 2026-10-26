@@ -191,7 +191,10 @@ def _parallel_probe() -> subprocess.CompletedProcess[str]:
         env=env,
         capture_output=True,
         text=True,
-        timeout=120,
+        # A hang guard, not a bound on the run: it takes a few seconds, and on a shard busy
+        # with the whole suite's other workers its interpreter starts, imports and brings up
+        # two workers of its own beside them. What it must catch is a child that never ends.
+        timeout=600,
         check=False,
     )
 

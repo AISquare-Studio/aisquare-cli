@@ -1180,8 +1180,10 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   is under the line (the agent goes on where it is, and nobody is woken), for an agent put
   on its account by name (`--account` at the spawn or in the Spawn dialog, `team bind <role>
   --account`, or a binding that sets `CLAUDE_CONFIG_DIR` by hand), in a project `fleet
-  pause` holds (on the board its agents read, the hub's under one), or for an agent started
-  or looked at in the last ten minutes. The manager is woken only when a move that went
+  pause` holds (on the board its agents read, the hub's under one), for a worker auto-stop
+  is about to stop (it has finished: see [Capacity](#capacity); moved, it would run a whole
+  turn on the new account before the stop), or for an agent started or looked at in the
+  last ten minutes. The manager is woken only when a move that went
   ahead fails (`handover_failed`). `warn` makes no move: it puts one `before_limit` line on
   the board for each crossing of the line, naming the account, the account with room and
   the `fleet switch` that moves it; it is said again only once the account has read under

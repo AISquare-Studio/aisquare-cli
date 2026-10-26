@@ -27,8 +27,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reaches no agent's prompt). No move when the windows over the line reset within
   `wait_if_reset_within_minutes`, when no other account is under the line, for an agent put
   on its account by name (`--account`, a role's account binding, a binding that sets
-  `CLAUDE_CONFIG_DIR`), in a paused fleet, or within ten minutes of the agent's start or the
-  last look at it. No polling, and no usage request from a hook: the turn end decides from
+  `CLAUDE_CONFIG_DIR`), in a paused fleet, for a finished worker auto-stop is about to stop
+  (its task closed or its result posted: moved, it would run a whole turn on the new account
+  first), or within ten minutes of the agent's start or the last look at it. No polling, and no usage request from a hook: the turn end decides from
   the usage cache whether to look, and a detached worker (`aisquare hook before-limit`) does
   the reads, through the cache and honouring a back-off; a kept reading moves nobody. The
   spawn records whether its account was named (`account_pinned` in the row's launch spec),

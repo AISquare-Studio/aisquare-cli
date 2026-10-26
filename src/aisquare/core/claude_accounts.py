@@ -71,7 +71,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aisquare.core import paths
@@ -482,6 +482,8 @@ class StoredLogin:
 
     credentials: ClaudeCredentials | None
     unreadable: str | None = None
+    problem: KeychainProblem | None = None
+    """The kind of :attr:`unreadable`, when it is set."""
 
 
 def stored_login(account: ClaudeAccount, *, fresh: bool = False) -> StoredLogin:
@@ -497,7 +499,7 @@ def stored_login(account: ClaudeAccount, *, fresh: bool = False) -> StoredLogin:
     if keychain_platform():
         read = read_keychain(keychain_service(account), keychain_account(), fresh=fresh)
         if read.found or read.unreadable is not None:
-            return StoredLogin(read.credentials, read.unreadable)
+            return StoredLogin(read.credentials, read.unreadable, read.problem)
         return StoredLogin(credentials_in(_read_json(plaintext_credentials_path(account))))
     return StoredLogin(credentials_in(_read_json(credentials_path(account))))
 
@@ -559,11 +561,15 @@ puts its unlock dialog up for every read, which every tick of asq's would repeat
 SECURE_STORAGE_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
 """Claude Code's override of the directory its secure storage is keyed on: it wins."""
 KEYCHAIN_ACCOUNT_FALLBACK = "claude-code-user"
-KEYCHAIN_LOCKED = "the login Keychain is locked — unlock it (or log in to the Mac) and refresh"
-KEYCHAIN_REFUSED = (
-    "macOS refused aisquare access to the Claude Code item — allow it in Keychain Access"
-)
+KEYCHAIN_LOCKED_REASON = "the login Keychain is locked"
+KEYCHAIN_LOCKED = f"{KEYCHAIN_LOCKED_REASON} — unlock it (or log in to the Mac) and refresh"
+KEYCHAIN_REFUSED_REASON = "macOS refused aisquare access to the Claude Code item"
+KEYCHAIN_REFUSED = f"{KEYCHAIN_REFUSED_REASON} — allow it in Keychain Access"
 """Said for errSecAuthFailed (51): the Deny button on the item's access prompt."""
+KeychainProblem = Literal["locked", "refused", "timeout", "failed"]
+"""The kind of a Keychain that would not say (:attr:`KeychainRead.problem`), beside its words:
+a usage reading's cause is read from it, never from the words (``services.claude_accounts``).
+``*_REASON`` is what is wrong alone, for a reading whose fix is said apart from it."""
 
 _KEYCHAIN_SERVICE = "Claude Code"
 _KEYCHAIN_OAUTH_SUFFIX = ""
@@ -650,6 +656,8 @@ class KeychainRead:
     credentials: ClaudeCredentials | None = None
     unreadable: str | None = None
     """Why the Keychain would not say: locked, refused, timed out (:func:`read_keychain`)."""
+    problem: KeychainProblem | None = None
+    """The kind of :attr:`unreadable`, when it is set."""
 
 
 _KEYCHAIN_READS: dict[tuple[str, str], tuple[float, KeychainRead]] = {}
@@ -715,11 +723,14 @@ def _ask_keychain(service: str, account: str) -> KeychainRead:
         return KeychainRead(
             found=False,
             unreadable=f"could not read the Keychain (no answer in {KEYCHAIN_TIMEOUT_SECONDS:g} s)",
+            problem="timeout",
         )
     except OSError as exc:
         why = exc.strerror or "not run"
         return KeychainRead(
-            found=False, unreadable=f"could not read the Keychain ({KEYCHAIN_TOOL}: {why})"
+            found=False,
+            unreadable=f"could not read the Keychain ({KEYCHAIN_TOOL}: {why})",
+            problem="failed",
         )
     if done.returncode == 0:
         text = done.stdout.decode("utf-8", "replace").strip()
@@ -728,7 +739,8 @@ def _ask_keychain(service: str, account: str) -> KeychainRead:
         return KeychainRead(found=True, credentials=credentials_in(_item_json(text)))
     if done.returncode == _ITEM_NOT_FOUND or done.returncode in _NO_KEYCHAIN:
         return KeychainRead(found=False)
-    return KeychainRead(found=False, unreadable=_keychain_problem(done.returncode, done.stderr))
+    problem, said = _keychain_problem(done.returncode, done.stderr)
+    return KeychainRead(found=False, unreadable=said, problem=problem)
 
 
 def _item_json(text: str) -> dict[str, Any] | None:
@@ -754,20 +766,21 @@ def _unhex(text: str) -> str | None:
         return None
 
 
-def _keychain_problem(code: int, stderr: bytes) -> str:
-    """Why ``security`` exited ``code``, in the row's words. By the exit code first, which
-    is the OSStatus's low byte, then by what it said, as Claude Code classifies it."""
+def _keychain_problem(code: int, stderr: bytes) -> tuple[KeychainProblem, str]:
+    """Why ``security`` exited ``code``: its kind, and the row's words. By the exit code
+    first, which is the OSStatus's low byte, then by what it said, as Claude Code
+    classifies it."""
     said = stderr.decode("utf-8", "replace").lower()
     if code in _LOCKED or any(
         words in said
         for words in ("interaction is not allowed", "interactionnotallowed", "canceled")
     ):
-        return KEYCHAIN_LOCKED
+        return "locked", KEYCHAIN_LOCKED
     if code in _REFUSED or any(words in said for words in ("name or passphrase", "authfailed")):
-        return KEYCHAIN_REFUSED
+        return "refused", KEYCHAIN_REFUSED
     if "locked" in said or "unlock" in said:
-        return KEYCHAIN_LOCKED
-    return f"could not read the Keychain (security exited {code})"
+        return "locked", KEYCHAIN_LOCKED
+    return "failed", f"could not read the Keychain (security exited {code})"
 
 
 def token_state(creds: ClaudeCredentials | None, now: datetime | None = None) -> str:
@@ -804,6 +817,11 @@ def subscription_label(creds: ClaudeCredentials | None) -> str | None:
 
 
 # --- what a usage-limit error says (#146) ----------------------------------------------------
+
+BEFORE_LIMIT_REASON = "before limit"
+"""The reason of a hand-over ``[accounts] before_limit = "switch"`` makes (F2 of #400): the
+agent's account read over ``switch_at`` at a turn end, and no limit was hit. The ``switched``
+line says it, ``(before limit)``, and the replacement is told it moved before its limit."""
 
 # The time is matched by a BOUNDED pattern (an optional weekday, a clock time,
 # am/pm — the shape ``_RESET_TIME`` reads) and nothing anchors the end: the

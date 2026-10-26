@@ -256,6 +256,7 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "share_settings": False,
             "prefer": "priority",  # added by P0-W3 (#277)
             "share": [],  # what every account has in common (P2-W7, #198)
+            "before_limit": "off",  # added by F2 of #400
         },
         "projects": {"capture": False},
         # The persona train and the captain's switch, added since (#201, #240).

@@ -94,15 +94,23 @@ def model_family(model: str | None) -> str | None:
     return next((family for family in MODEL_FAMILIES.values() if family in lowered), None)
 
 
+def model_arg(args: Sequence[str]) -> str | None:
+    """The model ``args`` name, the first ``--model X`` or ``--model=X``; ``None`` for none."""
+    for index, arg in enumerate(args):
+        if arg == "--model" and index + 1 < len(args):
+            return args[index + 1]
+        if arg.startswith("--model="):
+            return arg.partition("=")[2]
+    return None
+
+
 def launch_family(role: str, args: Sequence[str] = ()) -> str | None:
     """The family a launch of ``role`` will run: its ``--model`` when ``args`` name one, else
     the role's ladder as resolved WITHOUT probing (a cached verdict, or the first rung) —
     a pick must not wait 150 s on a probe, and a wrong guess only costs the family window."""
-    for index, arg in enumerate(args):
-        if arg == "--model" and index + 1 < len(args):
-            return model_family(args[index + 1])
-        if arg.startswith("--model="):
-            return model_family(arg.partition("=")[2])
+    named = model_arg(args)
+    if named is not None:
+        return model_family(named)
     resolution = resolve_model(role, probe=False)
     return model_family(resolution.model) if resolution is not None else None
 

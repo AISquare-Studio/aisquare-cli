@@ -19,7 +19,8 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,7 @@ from aisquare.models import ProjectInfo
 from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics
 from aisquare.services import settings as settings_service
-from tests.test_claude_accounts import _installed, _sign_in
+from tests.test_claude_accounts import LIVE_USAGE, NOW, _installed, _sign_in
 
 CORRUPT = b"this is not a sqlite database, and the accounts surface must say so in words"
 
@@ -601,6 +602,54 @@ def test_rank_1_never_overrides_a_hand_written_config_dir_binding(
     assert service.choose(role="coder", project=work).source == "role binding"
 
 
+@pytest.mark.parametrize("bound", ["env", "env_files"])
+def test_a_headroom_pick_never_overrides_a_hand_written_config_dir_binding(
+    fake_home: Path,
+    work: ProjectInfo,
+    handover: dict[str, Any],
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    bound: str,
+) -> None:
+    """#9: with ``pick = "headroom"`` and usage READABLE, the headroom rung picked an account
+    and applying it replaced the directory ``team bind coder --env CLAUDE_CONFIG_DIR=…`` set
+    by hand. A headroom pick is a silent default like rank 1, so it leaves the binding alone
+    (the same guard as review of #406, M1, one rung up)."""
+    config = load_config()
+    config.accounts = AccountsSettings(pick="headroom")
+    save_config(config)
+    monkeypatch.setattr(
+        service, "_http_get", lambda url, headers, timeout: (200, json.dumps(LIVE_USAGE).encode())
+    )
+    core.create_account()
+    _signed_in(1)
+    _signed_in(2)
+    # The control first: usage is readable, so a role with no such binding IS picked by headroom.
+    assert service.choose(role="tester", project=work).source == "headroom"
+    if bound == "env":
+        settings_service.bind_role("coder", env={core.CONFIG_DIR_VAR: "/hand/written"})
+    else:
+        secret = fake_home / "config-dir.txt"
+        secret.write_text("/hand/written\n", encoding="utf-8")
+        settings_service.bind_role("coder", env_files={core.CONFIG_DIR_VAR: str(secret)})
+
+    choice = service.choose(role="coder", project=work)
+    assert choice.account is None and choice.source is None  # nothing chose: left as written
+    launched = runner.invoke(app, ["launch", "coder"])
+    assert launched.exit_code == 0, launched.output
+    assert handover["env"][core.CONFIG_DIR_VAR] == "/hand/written"
+
+    # A hand-over still moves the agent: that is what it is for.
+    assert service.choose(role="coder", project=work, spread=True).source == "headroom"
+    # The flag, a project default and an account binding still win over the hand-written
+    # directory.
+    assert service.choose("2", role="coder", project=work).source == "flag"
+    service.set_default("2", project=work)
+    assert service.choose(role="coder", project=work).source == "project default"
+    settings_service.bind_role("coder", account="2")
+    assert service.choose(role="coder", project=work).source == "role binding"
+
+
 def test_a_default_set_by_an_older_build_is_rank_1_on_the_next_read(fake_home: Path) -> None:
     """The retired ``is_default`` flag is folded into the order by the registry's read, keyed
     on the flag and not on a schema version (review of #406, C1)."""
@@ -1155,3 +1204,68 @@ def test_doctor_reads_no_registry_and_creates_no_store_before_one_exists(
     # gates on the home, not the file), so the file's absence is not asserted after it.
     doctor = runner.invoke(app, ["doctor"])
     assert "Traceback" not in doctor.output
+
+
+# --------------------------------------------------------------------------- what a form shows
+
+
+def test_launch_default_is_what_a_spawn_with_no_account_runs_on(
+    fake_home: Path, work: ProjectInfo
+) -> None:
+    """#12: the Spawn dialog's Account field read '(this shell's)' while the spawn ran on
+    rank 1. What it shows now is :func:`choose`'s answer with no flag, as ``fleet spawn``
+    asks it, rung for rung; and a role whose binding sets ``CLAUDE_CONFIG_DIR`` by hand,
+    which no rung overrides (#9), is said apart from "nothing chose"."""
+    _by_order()
+    core.create_account()
+    core.create_account()
+    _signed_in(3)
+    service.set_default("3")  # rank 1
+
+    shown = service.launch_default("coder", project=work)
+    launched = service.choose(role="coder", project=work)
+    assert shown.choice.account is not None and launched.account is not None
+    assert (shown.choice.account.slot, shown.choice.source) == (3, "preferred")
+    assert shown.choice.account.slot == launched.account.slot and shown.choice.account.position == 1
+    assert not shown.bound_directory
+    settings_service.bind_role("tester", account="2")
+    _signed_in(2)
+    bound = service.launch_default("tester", project=work)
+    assert bound.choice.account is not None and bound.choice.source == "role binding"
+
+    settings_service.bind_role("coder", env={core.CONFIG_DIR_VAR: "/hand/written"})
+    written = service.launch_default("coder", project=work)
+    assert written.choice.account is None and written.bound_directory
+
+    for slot in (2, 3):  # nothing signed in: nothing chose, and no binding's directory either
+        core.credentials_path(next(a for a in core.list_accounts() if a.slot == slot)).unlink()
+    alone = service.launch_default("reviewer", project=work)
+    assert alone.choice.account is None and not alone.bound_directory
+
+
+def test_launch_default_reads_a_headroom_pick_from_the_shared_cache_not_a_minute_deep(
+    fake_home: Path, work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Showing the pick must not cost the endpoint a request the status line would not send:
+    a reading three minutes old serves the form (the shared cache's five minutes), where a
+    launch, a minute deep, asks again."""
+    config = load_config()
+    config.accounts = AccountsSettings(pick="headroom")
+    save_config(config)
+    asked: list[str] = []
+
+    def fetch(url: str, headers: Mapping[str, str], timeout: float) -> tuple[int, bytes]:
+        asked.append(url)
+        return 200, json.dumps(LIVE_USAGE).encode()
+
+    monkeypatch.setattr(service, "_http_get", fetch)
+    core.create_account()
+    # Two candidates: a single one is the pick whatever it reads, and is not read at all.
+    both = [_signed_in(1), _signed_in(2)]
+    service.cached_usage(both, now=NOW - timedelta(minutes=3))
+    assert len(asked) == 2
+
+    shown = service.launch_default("coder", project=work)
+    assert shown.choice.source == "headroom" and len(asked) == 2, "served from the cache"
+    assert service.choose(role="coder", project=work).source == "headroom"
+    assert len(asked) == 4, "a launch reads a minute deep, as before"

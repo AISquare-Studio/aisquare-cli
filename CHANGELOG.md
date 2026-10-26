@@ -199,9 +199,13 @@ adapter.**
   the listing asks Codex's rollout, which records every prompt it ran, hooks or not. A prompt
   there that reads as the message is taken, whatever held it (the hook review, passed with
   Esc, runs it); none, past `prompt_ack_seconds` with the pane idle at its empty prompt, is
-  not going to be. With its hooks untrusted, a prompt it runs after the row read `unsent`
-  (a `fleet tell` of other words) takes the row too, as a hook's own prompt does for Claude
-  Code. The read is bounded for a listing: the day directories from the spawn on, the
+  not going to be. With its hooks untrusted, a prompt its own agent runs after the row read
+  `unsent` (a `fleet tell` of other words) takes the row too, as a hook's own prompt does for
+  Claude Code. A prompt another Codex agent runs in the same folder on the same home does
+  not: a rollout is the row's when the processes below its pane hold it open (measured on
+  0.164.0), and where the process table cannot be read only the message's own words take
+  the row, and any other prompt only when it is the row alone in its folder (a Codex session
+  outside the fleet there can still clear it). The read is bounded for a listing: the day directories from the spawn on, the
   rollouts begun after it, a megabyte at each end of one in this folder, kept against its
   size and modification time, and the folder each rollout began in read once, so a busy
   home costs a lookup per rollout (`AgentAdapter.first_prompts_since`).

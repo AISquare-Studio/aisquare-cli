@@ -1,9 +1,8 @@
 """The exclusive-lock primitive, per platform — one copy, for every lock FILE in the home.
 
-``core.brain`` guards a brain's directory with it, ``core.state_file``
-guards ``state.json``'s read-modify-write and ``core.credentials`` the
-credentials file's; Remote guards ``remote.json``'s and claims its home with it
-(``services.remote_server``). Each takes the lock on a small file that exists
+``core.state_file`` guards ``state.json``'s read-modify-write and
+``core.credentials`` the credentials file's; Remote guards ``remote.json``'s and claims its
+home with it (``services.remote_server``). Each takes the lock on a small file that exists
 only to be locked, never on the data file itself: the data file is replaced by
 rename, so a lock on its inode would not exclude a writer that opened the new one.
 :func:`holding` is the one bounded wait, for every caller, and each words its

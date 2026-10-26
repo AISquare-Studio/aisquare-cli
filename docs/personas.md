@@ -111,7 +111,9 @@ name: `persona:skeptic` on the session's line, `· skeptic` in `fleet ls`. A
 persona removed or broken after launch costs one line in the briefing
 (`… — launched without it`), never the session. Setting the variable by hand,
 `AISQUARE_PERSONA=skeptic aisquare launch coder`, works too; it is checked when
-the session starts rather than before.
+the session starts rather than before. Where the persona sits beside the role
+cycle and your own `CLAUDE.md`, and why a long one costs the briefing: [Which
+instructions an agent follows](instructions.md).
 
 `fleet spawn --persona` passes the name to `launch` inside the agent's window and
 records it on the fleet row; without the flag the role's
@@ -140,7 +142,7 @@ with `--persona`, whose `AISQUARE_PERSONA` holds only the value it was launched
 with. The variable applies when the agent has no fleet row, or a row with no
 persona, and either one wins over a persona a session recorded earlier. Attaching
 another persona replaces it, and the agent is told which one it replaces.
-In `asq`, the Spawn dialog (`＋ spawn agent` under a project) asks for the
+In `asq`, the Spawn dialog (`＋ Spawn agent`, at the top of the sidebar) asks for the
 persona in its **Advanced** section, right after who runs the agent — *Pick…*,
 binary — with the role's default preselected and the persona's description under the field; `(none)`
 spawns without one even when the role has a default. The Settings tab sets each
@@ -186,11 +188,25 @@ For the selected persona:
 
 - **Attach to existing** (`a`) and **Attach to new** (`n`) open the target
   picker — see *Attach in two steps* below.
-- **Edit** (`e`) opens the whole `SKILL.md` in the tab. It is checked as you
-  type — the first error, or the warnings — and *Save* is enabled only while it
-  parses; it saves through the same writer as `persona edit`, so a refused edit
-  leaves the file as it was. `Enter` on any row opens it too; a bundled persona
-  opens read-only, with *Save as…* to copy it into your layer or the project's.
+- **Edit** (`e`) opens your editor on the `SKILL.md`, in a pane inside the tab,
+  the way the Accounts page hosts a sign-in. The editor is `$VISUAL`, else
+  `$EDITOR`, else `vi`. It runs in a window on the fleet's tmux server and edits
+  a copy, never the file itself.
+  - **Save and quit** the editor, and the copy is checked and saved through the
+    same writer as `persona edit`. The list then re-reads.
+  - **A copy you didn't change** writes nothing: neither the `SKILL.md` nor its
+    provenance sidecar is touched.
+  - **Text that does not parse is not saved.** The dialog shows the first error,
+    and *Reopen editor* opens the same copy again, so nothing you typed is lost.
+  - **An editor that exits non-zero** (vi's `:cq`) saves nothing.
+  - *Cancel* closes the editor's window. The escape key (`F12` unless
+    `[fleet] escape_key` says otherwise) moves focus out of the pane to *Cancel*.
+
+  Without tmux, or with no editor to run, Edit opens the whole `SKILL.md` in a
+  text box instead. That box is checked as you type (the first error, or the
+  warnings), and *Save* is enabled only while it parses. `Enter` on any row opens
+  the persona too. A bundled persona opens read-only in the text box, with
+  *Save as…* to copy it into your layer or the project's.
 - **Export…** (`x`) writes it into Claude Code's personal skills, the
   project's `.claude/skills`, or a directory — after either skills target it is
   `/<name>` in Claude Code.
@@ -209,8 +225,10 @@ full — engine, model, size, frontmatter, body, what it dropped — before *Sav
 keeps it or *Discard* leaves it under `.drafts`. A refusal stays in the form
 with its reason. *Cancel* (or `Esc`) while it runs imports nothing and, under
 *Force*, replaces nothing (a draft an LLM already wrote stays under `.drafts`);
-once the persona is being written it is too late to cancel, so the form waits
-and a toast says what was imported. **+ New** asks
+an engine that is drafting is stopped, its `claude -p` and what it started ended
+within two seconds, and an API answer that arrives afterwards is dropped. Once the
+persona is being written it is too late to cancel, so the form waits and a toast
+says what was imported. **+ New** asks
 for a name, a layer and a description, creates the scaffold, and opens it in
 the editor.
 
@@ -246,7 +264,7 @@ account** takes you to the Accounts page and starts its sign-in for a new slot;
 come back to the Personas tab when it has signed in.
 
 The same picker is the Spawn dialog's **Pick…**, under **Advanced**: from
-`＋ spawn agent`, Pick… opens it with Binds first and fills the dialog's role, binary or account from
+`＋ Spawn agent`, Pick… opens it with Binds first and fills the dialog's role, binary or account from
 what you choose, keeping everything else you typed. **Import…** beside the
 dialog's Persona field imports a persona and selects it.
 
@@ -300,6 +318,36 @@ importing that skill needs `--name`.
 
 The default layer is `--user`. A name already taken in that layer is refused
 unless you pass `--force`; `--name` picks another directory name.
+
+### Import several at once
+
+```sh
+aisquare persona import ./skills/code-review ./notes/how-we-review.txt ./agents/reviewer.md
+aisquare persona import --from-dir ./team-skills --no-llm
+aisquare --json persona import --from-dir ./team-skills --yes
+```
+
+Name several sources, or `--from-dir DIR` for the personas in `DIR` (hidden
+entries aside, by name), and each goes through the same import, in turn.
+`--from-dir` reads a skill directory (one holding `SKILL.md`), a `SKILL.md`, and a
+Markdown or text file (`.md`, `.markdown`, `.txt`), and skips everything else
+without running an engine on it: a README, LICENSE, CHANGELOG or other repository
+file, a directory with no `SKILL.md`, a script. Text no skill parser recognises
+goes to an engine, so a README beside your skills used to be converted like a
+persona and spend its tokens. A source you name yourself is read whatever it is.
+One refusal does not stop the rest. The receipt is one table, SOURCE · NAME ·
+ENGINE · OUTCOME, with each refusal's code and reason, and each skip's reason, on
+its row and a count on stderr; `--json` prints a list, one object per source, with
+`outcome` `imported`, `refused` or `skipped` and, for a refusal, its `error` and
+`message` (a skip has a `message` and no `error`). The exit is 0 when nothing was
+refused and 1 when any was. `-` (stdin) can be named once. `--name` names one
+persona, so it is refused with more than one source. Without a terminal, an
+engine's draft is kept and its row reads `needs_confirmation` unless you pass
+`--yes`, as for one source. One source alone prints and exits as it always did.
+
+**Ctrl-C** ends an import: an engine's `claude -p` and what it started are ended
+within two seconds, nothing is written, and the exit is 130. In a batch, the
+sources before it stay imported, and the table says where it stopped.
 
 ### Import anything else — the LLM path
 

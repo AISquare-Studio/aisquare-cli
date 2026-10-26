@@ -139,7 +139,7 @@ def test_the_sidebar_has_the_projects_then_settings_and_its_status_and_nothing_e
         )
 
     sections, inside, order, settings, focusable, offered = _drive(go)
-    assert sections == ["fleet-header", "projects-notice", "projects", "others"]
+    assert sections == ["fleet-header", "actions", "projects-notice", "projects", "others"]
     assert inside == ["SettingsRow", "StatusLine"]
     # The ⬆ row (tests/test_ui_update_row.py) sits between the two, and shows only while a
     # newer release is offered: never here, as the suite runs from a checkout, which the
@@ -172,6 +172,32 @@ def test_settings_opens_the_hub_and_each_link_opens_its_page_under_settings() ->
         ("accounts", SETTINGS_KEY),
         ("doctor", SETTINGS_KEY),
     ]
+
+
+def test_app_settings_shown_again_reads_the_bindings_a_shell_wrote_meanwhile() -> None:
+    """The page is built once and kept: opened again from the hub, it showed the bindings
+    as they were when it was built, until ``asq`` restarted (review of #334)."""
+    from aisquare.services import settings as settings_service
+    from tests.test_ui_app_settings import _binding_shown
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, str | None]:
+        app = _app(pilot)
+
+        async def open_app_settings() -> None:
+            await pilot.click(app.query_one(SettingsRow))
+            await settle_page(app)
+            await pilot.click("#hub-app-settings")
+            await settle_page(app)
+
+        await open_app_settings()
+        before = _binding_shown(app, "coder")
+        settings_service.bind_role("coder", env={"GH_TOKEN": "x"})
+        await open_app_settings()
+        return before, _binding_shown(app, "coder")
+
+    before, after = _drive(go)
+    assert before is None
+    assert after is not None and "GH_TOKEN" in after
 
 
 def test_the_hubs_doctor_link_runs_the_checks() -> None:
@@ -298,7 +324,7 @@ def test_the_hub_is_titled_settings_and_says_what_each_link_opens() -> None:
 # --- what the doctor found (review of #261, m9) ----------------------------------------
 
 FAILING = DoctorCheck(name="tmux", status=CheckStatus.fail, detail="not installed")
-WARNING = DoctorCheck(name="brain", status=CheckStatus.warn, detail="distilled 9 days ago")
+WARNING = DoctorCheck(name="gh", status=CheckStatus.warn, detail="logged out 9 days ago")
 PASSING = DoctorCheck(name="store", status=CheckStatus.ok, detail="v30")
 NOT_THE_DOCTOR = "no-such-group"
 """A worker group nothing runs in: ``settle_page`` then waits for the messages alone, and not
@@ -395,11 +421,11 @@ def test_doctor_shows_the_report_from_start_while_it_runs_the_checks_again() -> 
     during, runs, after, row = _drive(go, doctor=doctor)
     header, report, status = during
     assert header == "checks for this machine"
-    assert "⚠ brain: distilled 9 days ago" in report, "the report from start, at once"
+    assert "⚠ gh: logged out 9 days ago" in report, "the report from start, at once"
     assert status == "… running the checks again"
     assert runs == 2, "start, then the page's own run (still held)"
     header, report, status = after
-    assert "✓ store: v30" in report and "distilled" not in report
+    assert "✓ store: v30" in report and "logged out" not in report
     assert status == "", "answered: the status line is clear again"
     assert row == "⚙︎ Settings", "the badge follows the newest report"
 
@@ -489,8 +515,40 @@ def test_the_aisquare_dot_is_the_sign_in(aisquare: bool | None, colour: str) -> 
 
 def test_a_login_due_puts_a_warning_on_the_line() -> None:
     due = HeadroomSummary(level="fair", percent_left=30.0, usable=1, needs_login=1)
-    assert status_line_text(True, due).plain == f"● aisquare  ● 1{TIMES} claude ⚠"
+    assert status_line_text(True, due).plain == f"● aisquare  ● 1{TIMES} claude 30% ⚠"
     assert "⚠" not in status_line_text(True, GOOD).plain
+
+
+def test_a_login_due_keeps_its_warning_in_the_cells_the_line_has() -> None:
+    """Review of #357: in the sidebar's 28 cells, ``2x claude 58% ⚠`` was painted
+    ``2x claude 58%…``: the warning, the one thing to do, went under the ellipsis. The
+    figure gives way where both do not fit; where they do, both show."""
+    due = {
+        left: HeadroomSummary(level="good", percent_left=left, usable=2, needs_login=1)
+        for left in (58.0, 3.0)
+    }
+
+    async def go(pilot: Pilot[None]) -> list[str]:
+        app = _app(pilot)
+        line = app.query_one(StatusLine)
+        painted: list[str] = []
+        for headroom in (
+            due[58.0],
+            due[3.0],
+            HeadroomSummary(level="good", percent_left=100.0, usable=9),
+        ):
+            app.sidebar.show_headroom(headroom)
+            await pilot.pause()
+            painted.append(composited(line).rstrip())
+        return painted
+
+    assert _drive(go) == [
+        f"● aisquare  ● 2{TIMES} claude ⚠",
+        f"● aisquare  ● 2{TIMES} claude 3% ⚠",
+        f"● aisquare  ● 9{TIMES} claude 100%",
+    ]
+    wide = status_line_text(True, due[58.0], width=40)
+    assert wide.plain == f"● aisquare  ● 2{TIMES} claude 58% ⚠", "with room, both"
 
 
 def test_the_line_paints_the_injected_headroom() -> None:
@@ -499,7 +557,7 @@ def test_the_line_paints_the_injected_headroom() -> None:
     async def go(pilot: Pilot[None]) -> str:
         return _shown(_app(pilot).query_one(StatusLine))
 
-    assert _drive(go, headroom=lambda accounts: critical) == f"● aisquare  ● 2{TIMES} claude ⚠"
+    assert _drive(go, headroom=lambda accounts: critical) == f"● aisquare  ● 2{TIMES} claude 3% ⚠"
 
 
 def _delta_e(one: Color, other: Color) -> float:
@@ -628,8 +686,11 @@ def test_a_signed_out_account_puts_a_warning_on_the_line(
     line, headroom = _drive(
         go, headroom=accounts_service.read_fleet_headroom, accounts=accounts_service.overview
     )
-    assert line.endswith(f"● 1{TIMES} claude ⚠"), line  # slot 1 signed out, slot 2 good
+    # Slot 1 signed out, slot 2 good. In the sidebar's 28 cells the 60% gives way to the ⚠
+    # (review of #357); the summary still holds it.
+    assert line.endswith(f"● 1{TIMES} claude ⚠"), line
     assert headroom is not None and headroom.needs_login == 1 and headroom.usable == 1
+    assert headroom.percent_left == 60.0
     assert calls == [good.slot], "only the signed-in slot was asked"
 
 
@@ -744,3 +805,13 @@ def test_a_sign_out_while_an_accounts_read_is_in_flight_reaches_the_warning_at_o
     before, after = _drive(go, headroom=lambda accounts: GOOD, accounts=overview)
     assert before == 0, "the premise: both signed in at first"
     assert after == 1, "the ⚠ follows the sign-out, not a minute later"
+
+
+def test_the_line_paints_the_fleets_share_left_beside_the_count() -> None:
+    """#287 slice 2a: the dot had no number. Percent LEFT, as the band means, in its colour."""
+    text = status_line_text(True, HeadroomSummary(level="fair", percent_left=41.6, usable=3))
+    assert text.plain == f"● aisquare  ● 3{TIMES} claude 42%"
+    figure = next(span for span in text.spans if text.plain[span.start : span.end] == " 42%")
+    assert str(figure.style) == headroom_dot(HeadroomSummary(level="fair", percent_left=41.6))[1]
+    unread = status_line_text(True, HeadroomSummary(level="unknown"))
+    assert unread.plain == f"● aisquare  ● 0{TIMES} claude", "no reading, no number"

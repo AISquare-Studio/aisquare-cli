@@ -44,6 +44,7 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse
 
 import typer
 from rich.text import Text
@@ -163,6 +164,61 @@ SYSTEM_PROMPT_FLAG = "--append-system-prompt-file"
 """Claude Code's seam for appending to its default system prompt — a FILE, so the body
 never sits in argv, which ``ps`` shows (the name travels as ``AISQUARE_PERSONA``)."""
 _SYSTEM_PROMPT_FLAGS = (SYSTEM_PROMPT_FLAG, "--append-system-prompt")
+REMOTE_CONTROL_FLAG = "--remote-control"
+"""Claude Code's Remote Control: the session, titled, can be continued from claude.ai/code
+and the Claude app (#289)."""
+_REMOTE_CONTROL_FLAGS = (REMOTE_CONTROL_FLAG, "--rc")
+ANTHROPIC_HOST = "api.anthropic.com"
+
+
+def _remote_control_args(
+    title: str, binary: str, args: Sequence[str], env: dict[str, str]
+) -> list[str]:
+    """``--remote-control <title>`` for Claude Code, where Claude Code would take it (#289).
+
+    Nothing, with one dim line naming why, when the binary is not Claude Code (no other
+    agent has it); when the launch line already carries ``--remote-control`` or ``--rc``,
+    the operator's own, which wins; when ``ANTHROPIC_BASE_URL`` names another host than
+    the Anthropic API, as the explainability proxy's does; or when
+    ``CLAUDE_CODE_OAUTH_TOKEN`` is set, a ``claude setup-token`` token that "can only make
+    model requests". Claude Code refuses Remote Control in the last two cases. ``env`` is
+    the agent's own, read after the tracing wiring, which may have set the base URL.
+    """
+
+    def stand_aside(why: str) -> list[str]:
+        stderr_console().print(f"remote control: {why} — not turned on", style="dim", markup=False)
+        return []
+
+    if any(
+        arg == flag or arg.startswith(f"{flag}=") for arg in args for flag in _REMOTE_CONTROL_FLAGS
+    ):
+        return stand_aside("the launch line already carries it, as given")
+    if not harness.is_default_agent(binary):
+        return stand_aside(f"{os.path.basename(binary)!r} is not Claude Code")
+    base_url = env.get("ANTHROPIC_BASE_URL", "").strip()
+    host = urlparse(base_url).hostname if base_url else None
+    if base_url and host != ANTHROPIC_HOST:
+        # The host only: a base URL can carry credentials in its user part or query.
+        return stand_aside(
+            f"ANTHROPIC_BASE_URL points at {host or 'another host'}, and Claude Code refuses "
+            "Remote Control behind any host but the Anthropic API"
+        )
+    if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return stand_aside(
+            "CLAUDE_CODE_OAUTH_TOKEN is set, and that token can make model requests only, "
+            "not Remote Control sessions"
+        )
+    return [REMOTE_CONTROL_FLAG, title]
+
+
+def _named(args: Sequence[str]) -> str | None:
+    """The ``--name`` a fleet spawn passes its window: the agent's label."""
+    for index, arg in enumerate(args):
+        if arg.startswith("--name="):
+            return arg.split("=", 1)[1] or None
+        if arg == "--name" and index + 1 < len(args):
+            return args[index + 1]
+    return None
 
 
 def _with_shared_memory(
@@ -271,6 +327,16 @@ def _persona_system_prompt(
         )
         return []
     return [SYSTEM_PROMPT_FLAG, str(path)]
+
+
+def _role_remote_control(role: str) -> bool:
+    """The role's ``[fleet.roles.<role>] remote_control``; off when the config is unreadable,
+    which a line above has already said."""
+    try:
+        settings = load_config().fleet.roles.get(role)
+    except Exception:
+        return False
+    return settings is not None and settings.remote_control
 
 
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
@@ -435,6 +501,16 @@ def launch(
             help="Persona this session runs as (see `aisquare persona list`): exported as "
             "AISQUARE_PERSONA and briefed once, at session start.",
             metavar="NAME",
+        ),
+    ] = None,
+    remote_control: Annotated[
+        bool | None,
+        typer.Option(
+            "--remote-control/--no-remote-control",
+            help="Start Claude Code with its Remote Control, titled '<project> · <label>', "
+            "so claude.ai/code and the Claude app can continue the session (default: the "
+            "role's \\[fleet.roles.<role>] remote_control).",
+            show_default=False,
         ),
     ] = None,
     first_prompt_file: Annotated[
@@ -728,8 +804,30 @@ def launch(
         if persona is not None
         else []
     )
+    # Claude Code's own Remote Control (#289): decided here, after the tracing wiring,
+    # whose proxy base URL Claude Code would refuse it behind.
+    wanted = remote_control if remote_control is not None else _role_remote_control(role)
+    board = (project.root.name or project.id) if project is not None else "no board"
+    remote_args = (
+        _remote_control_args(
+            f"{board} · {_named(ctx.args) or role}",
+            resolution.binary,
+            [*profile.args, *role_args, *ctx.args],
+            env,
+        )
+        if wanted
+        else []
+    )
     role_args = _with_shared_memory(resolution.binary, role_args, [*binding_args, *agent_args])
-    argv = [resolution.binary, *binding_args, *role_args, *persona_args, *agent_args, *pinned_id]
+    argv = [
+        resolution.binary,
+        *binding_args,
+        *role_args,
+        *persona_args,
+        *remote_args,
+        *agent_args,
+        *pinned_id,
+    ]
     # The first message (P0-W1a, #122), last: Claude Code's positional prompt, after `--`.
     # Read from a file and the file deleted, so the window's command, which tmux carries and
     # the row records, never holds the text, and a replay of that command finds no file and

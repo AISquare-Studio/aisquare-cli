@@ -135,6 +135,43 @@ def test_search_matches_prefix_tokens(store: ContextStore) -> None:
     assert store.search("") == []
 
 
+def test_search_reads_fts5_keywords_as_plain_words(store: ContextStore) -> None:
+    """#269: an upper-case bareword `AND`, `OR` or `NOT` is an FTS5 operator, so `AND*` was
+    a syntax error that crashed the search. Each word is a quoted string now: a keyword is
+    a word to find like any other, and finds the entries that hold it."""
+    store.add(_entry("rock and roll"))
+    store.add(_entry("near the shore"))
+    assert [e.text for e in store.search("AND")] == ["rock and roll"]
+    assert [e.text for e in store.search("NEAR")] == ["near the shore"]
+    assert store.search("OR") == [] and store.search("NOT") == []
+    # Read as operators this would leave the shore out; as words, each finds its own entry.
+    found = {e.text for e in store.search("roll AND NOT shore")}
+    assert found == {"rock and roll", "near the shore"}
+
+
+def test_search_matches_words_in_any_script(store: ContextStore) -> None:
+    """#269: the query kept `[A-Za-z0-9]+` only, so a word in another script left nothing to
+    match, while the index's `unicode61` tokenizer had stored it. The query is split into
+    Unicode letters and digits now, as the index is."""
+    store.add(_entry("вход через SSO"))
+    store.add(_entry("ログインする手順"))
+    store.add(_entry("हिन्दी में लिखा"))
+    store.add(_entry("prefer pytest"))
+    assert [e.text for e in store.search("вход")] == ["вход через SSO"]
+    assert [e.text for e in store.search("ログイン")] == ["ログインする手順"]
+    assert [e.text for e in store.search("हिन्दी")] == ["हिन्दी में लिखा"]
+
+
+def test_search_survives_quotes_and_fts5_syntax(store: ContextStore) -> None:
+    """#269: every word goes to FTS5 as a string whose own `"` is doubled, so no punctuation
+    a person types is read as query syntax."""
+    store.add(_entry("prefer pytest over unittest"))
+    for query in ('say "pytest', "pytest*)(", "text:pytest", "^pytest -unittest", "NEAR(pytest"):
+        assert [e.text for e in store.search(query)] == ["prefer pytest over unittest"], query
+    assert store.search('"') == [] and store.search('"""') == [], "no words, nothing to match"
+    assert store_module._fts_match('pytest AND "x') == '"pytest"* OR "AND"* OR "x"*'
+
+
 def test_search_excludes_deleted(store: ContextStore) -> None:
     entry = store.add(_entry("findable token"))
     assert len(store.search("findable")) == 1

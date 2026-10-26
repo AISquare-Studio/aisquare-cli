@@ -107,7 +107,7 @@ def configured_home(isolated_home: Path, runner: CliRunner) -> Path:
 #:
 #: This file shipped with FORTY-TWO of ninety-seven in this state, because the
 #: invocations left required arguments off. `task claim`, `note`, `remember`,
-#: `recall`, `context add`, `config set`, `explainability env` and 35 more were
+#: `context add`, `config set`, `explainability env` and 36 more were
 #: held to nothing but argument parsing while the file read as though it held
 #: ninety-seven to the property — a test narrower than the property it is named
 #: for, in the file written to close that class.

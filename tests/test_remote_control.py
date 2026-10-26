@@ -923,7 +923,8 @@ def test_a_fleet_ui_ended_by_a_hangup_or_a_sigterm_ends_its_ngrok_first(
         assert process.stdout.readline().strip() == "ready"
         real = pid_in(pid_file)
         process.send_signal(signum)
-        assert process.wait(10) == -signum, "the signal no longer ends the fleet UI"
+        # Half of the minute the process would otherwise sleep: ended by the signal, or not.
+        assert process.wait(30) == -signum, "the signal no longer ends the fleet UI"
         assert gone(real), "the fleet UI's ngrok outlived it"
     finally:
         process.kill()
@@ -2143,7 +2144,10 @@ def test_the_first_read_of_remote_json_never_waits_for_its_lock_on_the_callers_t
     Textual's thread, which froze for the 2 s another process held that lock (sweep 3 of
     #243). The paint gets what it gets for a file it cannot read; the read is the writer's."""
     monkeypatch.setattr(remote_server, "_runtime", None)
-    monkeypatch.setattr(remote_server, "STATE_LOCK_WAIT_SECONDS", 10.0)
+    # The lock is held for a minute, so a caller that waits for it is half a minute past the
+    # bound and one that does not is nowhere near it, however slow the runner (a bound of one
+    # second on a call that does not wait is a bound on the runner).
+    monkeypatch.setattr(remote_server, "STATE_LOCK_WAIT_SECONDS", 60.0)
     controller = RemoteController(tunnel_factory=fake_tunnel_factory(url="x"))
     state = paths.remote_state_path()
     state.parent.mkdir(parents=True, exist_ok=True)
@@ -2153,7 +2157,7 @@ def test_the_first_read_of_remote_json_never_waits_for_its_lock_on_the_callers_t
         started = time.monotonic()
         assert controller.write_actions_allowed() is False
         assert controller.remote_status() == {} and controller.devices() == []
-        assert time.monotonic() - started < 1.0, "the caller waited for remote.json's lock"
+        assert time.monotonic() - started < 30.0, "the caller waited for remote.json's lock"
         assert not state.exists(), "made on the writer's thread, once the lock is free"
     finally:
         unlock(held)
@@ -2814,21 +2818,51 @@ class LockedServer(FakeServer):
         super().__init__()
         self.free = threading.Event()
         self.waiting = threading.Event()
+        self.writers: list[int] = []
+        """The thread (``threading.get_ident``) of every write that began, in order."""
 
     def _write_remote_json(self) -> None:
+        self.writers.append(threading.get_ident())
         self.waiting.set()
-        assert self.free.wait(10), "the lock was never let go"
+        assert self.free.wait(60), "the lock was never let go"
         super()._write_remote_json()
 
 
-def test_the_panels_controls_write_remote_json_on_a_thread_of_their_own() -> None:
+@pytest.fixture
+def slow_server() -> Iterator[SlowServer]:
+    """A :class:`SlowServer` whose stop is held for a minute, so that a caller that waits for
+    the stopping is half a minute past a bound a caller that does not is nowhere near, however
+    slow the runner; let go at teardown whatever the test did (its stopping thread is not a
+    daemon, and the interpreter would wait out the minute after a red)."""
+    server = SlowServer(patience=60.0)
+    try:
+        yield server
+    finally:
+        server.release.set()
+
+
+@pytest.fixture
+def locked_server() -> Iterator[LockedServer]:
+    """A :class:`LockedServer`, its lock let go at teardown whatever the test did: a test that
+    failed before it freed the lock left every write queued behind it waiting out its minute,
+    and the pytest process with them (five of them: five minutes after a red)."""
+    server = LockedServer()
+    try:
+        yield server
+    finally:
+        server.free.set()
+
+
+def test_the_panels_controls_write_remote_json_on_a_thread_of_their_own(
+    locked_server: LockedServer,
+) -> None:
     """The write switch, the Auto-off picker, Regenerate, Revoke and the start's deadline each
     wrote ``remote.json`` on the caller's thread, Textual's in the fleet UI, waiting for the
     file's lock: two seconds a press while another process held it, the fleet UI frozen for
     them (sweep of #243). Each returns at once now, shows what it asked at once, says it is
     saving while the write waits, and lands, in the order asked, once the lock is free."""
     clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
-    server = LockedServer()
+    server = locked_server
     server.devices = [{"id": "dev_0000000a", "ua": "iPhone", "first_seen": "t0", "last_seen": "t1"}]
     tunnels: list[FakeTunnel] = []
 
@@ -2839,20 +2873,44 @@ def test_the_panels_controls_write_remote_json_on_a_thread_of_their_own() -> Non
     controller = RemoteController(server=server, tunnel_factory=factory, now=lambda: clock[0])
     done = heard_news(controller)
     controller.on_done, controller.on_news = controller.on_news, None
-    started = time.monotonic()
-    controller.turn_on(wait=False)
-    controller.set_allow_write(True, wait=False)
-    controller.set_auto_off(30, wait=False)
-    assert controller.regenerate_password(wait=False) is None
-    assert controller.revoke_device("dev_0000000a", wait=False) is False
-    assert time.monotonic() - started < 1.0, "a control waited for remote.json's lock"
+    # Not a stopwatch: the lock is held until the test lets it go, so the five calls return
+    # while it is held or not at all. They are made on a thread of their own and waited for
+    # as long as a hung one would take to be called hung, which is not how fast they are
+    # when they are right. (A bound of one second on them went red on windows-latest, run
+    # 40232807941.) And none of the writes was made on the thread that asked.
+    results: list[object] = []
+
+    def ask_for_all() -> None:
+        controller.turn_on(wait=False)
+        controller.set_allow_write(True, wait=False)
+        controller.set_auto_off(30, wait=False)
+        results.append(controller.regenerate_password(wait=False))
+        results.append(controller.revoke_device("dev_0000000a", wait=False))
+
+    asker = threading.Thread(target=ask_for_all, name="asks-for-the-controls", daemon=True)
+    asker.start()
+    asker.join(30)
+    stuck = asker.is_alive()
+    if stuck:
+        server.free.set()  # let the stuck one go, so that nothing is left holding the lock
+        asker.join(30)
+    assert not stuck, "a control waited for remote.json's lock"
+    assert results == [None, False]
     assert server.waiting.wait(5)
+    assert asker.ident not in server.writers, "a control wrote remote.json on its caller's thread"
     assert controller.running and controller.message == remote_control.STARTING
     assert tunnels == [], "no ngrok before the start's deadline is written"
     assert controller.write_actions_allowed() is True, "the switch shows the press"
     assert controller.auto_off_at == clock[0] + timedelta(minutes=30)
     assert controller.adopt_server_deadline() == clock[0] + timedelta(minutes=30)
-    time.sleep(remote_control.SAVING_AFTER)
+    # Until it says so, not a sleep of its own length: a monotonic clock that steps by 15.6 ms
+    # reads a little short of it after one.
+    saving_by = time.monotonic() + 30
+    while (
+        remote_control.SAVING not in controller.status_line().splitlines()
+        and time.monotonic() < saving_by
+    ):
+        time.sleep(0.02)
     assert remote_control.SAVING in controller.status_line().splitlines()
     assert not controller.writes_done(0.1)
 
@@ -2874,10 +2932,12 @@ def test_the_panels_controls_write_remote_json_on_a_thread_of_their_own() -> Non
     controller.turn_off()
 
 
-def test_turning_off_while_a_starts_deadline_waits_leaves_nothing_of_that_start() -> None:
+def test_turning_off_while_a_starts_deadline_waits_leaves_nothing_of_that_start(
+    locked_server: LockedServer,
+) -> None:
     """A Remote turned off before its start's deadline was written: the stopping waits for that
     write, then clears it, and nothing else of the start follows: no ngrok, no saved on."""
-    server = LockedServer()
+    server = locked_server
     tunnels: list[FakeTunnel] = []
 
     def factory(port: int) -> FakeTunnel:
@@ -2896,12 +2956,14 @@ def test_turning_off_while_a_starts_deadline_waits_leaves_nothing_of_that_start(
     assert read_state()["remote_enabled"] is False
 
 
-def test_a_remote_still_starting_as_the_ui_quits_is_saved_as_on_for_the_next_start() -> None:
+def test_a_remote_still_starting_as_the_ui_quits_is_saved_as_on_for_the_next_start(
+    locked_server: LockedServer,
+) -> None:
     """A start saves its switch only once its deadline is written, on the thread that drives
     the controller: a fleet UI that quit before then (a press, then q, while another process
     held remote.json's lock) took no more steps, and the Remote the human turned on did not
     come back at the next start."""
-    server = LockedServer()
+    server = locked_server
     controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
     dropped: list[Callable[[], None]] = []
     controller.call_back = dropped.append  # the UI is gone: what it was handed never runs
@@ -2947,7 +3009,7 @@ def test_a_starts_failure_found_on_the_writers_thread_stops_only_that_start() ->
 
 
 def test_turning_remote_off_reads_off_at_once_and_stops_on_a_thread_of_its_own(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, slow_server: SlowServer
 ) -> None:
     """The switch, auto-off and quit stopped uvicorn and ngrok on Textual's thread, which
     froze the fleet UI for as long as they took: seconds when a needs scan was in flight
@@ -2955,14 +3017,14 @@ def test_turning_remote_off_reads_off_at_once_and_stops_on_a_thread_of_its_own(
     turning off until the stopping is done, and a Remote turned on meanwhile waits a moment
     for it and then says to try again, rather than starting one the old stop would undo."""
     monkeypatch.setattr(remote_control, "OFF_WAIT_SECONDS", 0.2)
-    server = SlowServer()
+    server = slow_server
     controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
     controller.turn_on()
     tunnel = controller.tunnel
     assert isinstance(tunnel, FakeTunnel)
     started = time.monotonic()
     controller.turn_off(wait=False)
-    assert time.monotonic() - started < 1.0, "turning off waited for the server to stop"
+    assert time.monotonic() - started < 30.0, "turning off waited for the server to stop"
     assert server.stopping.wait(5), "the stopping runs all the same"
     assert not controller.running and controller.link_url() is None
     assert controller.message == remote_control.TURNING_OFF
@@ -2983,12 +3045,14 @@ def test_turning_remote_off_reads_off_at_once_and_stops_on_a_thread_of_its_own(
     assert controller.running
 
 
-def test_auto_off_stops_on_a_thread_and_says_what_the_stopping_could_not_do() -> None:
+def test_auto_off_stops_on_a_thread_and_says_what_the_stopping_could_not_do(
+    slow_server: SlowServer,
+) -> None:
     """The app's 30 s auto-off timer froze the fleet view for as long as the stopping took.
     The sentence that Remote is off shows at once; what the stopping could not do follows
     it once that is known."""
     clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
-    server = SlowServer()
+    server = slow_server
 
     def unwritable(reason: str) -> None:
         raise OSError("remote.json: read-only file system")
@@ -3001,7 +3065,7 @@ def test_auto_off_stops_on_a_thread_and_says_what_the_stopping_could_not_do() ->
     clock[0] += timedelta(minutes=60)
     started = time.monotonic()
     assert controller.enforce_auto_off(wait=False) is True
-    assert time.monotonic() - started < 1.0, "auto-off waited for the server to stop"
+    assert time.monotonic() - started < 30.0, "auto-off waited for the server to stop"
     assert not controller.running
     assert controller.message == "Remote turned off — the auto-off timer ran out"
     assert server.stopping.wait(5)

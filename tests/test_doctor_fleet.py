@@ -30,7 +30,6 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import brain as brain_core
 from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetSettings
@@ -40,7 +39,7 @@ from aisquare.core.terminal import outer_terminal
 from aisquare.core.tmux import PaneFacts, SocketAnswer, TmuxError, TmuxServer, TmuxUnavailable
 from aisquare.core.workspace import project_id_for
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, ProjectInfo
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, install_route
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from tests.fsperms import can_symlink
@@ -909,14 +908,13 @@ def test_real_tmux_reports_available_and_sees_a_pane_come_and_go(
 def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two directories, one process: ``cwd`` decides which project the three checks describe."""
+    """Two directories, one process: ``cwd`` decides which project the project-scoped checks
+    describe."""
     here = tmp_path / "here"
     there = tmp_path / "there"
     here.mkdir()
     there.mkdir()
     monkeypatch.chdir(here)
-    monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
-    monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
     # Activate the orchestrator in `there` only, with an off-ladder live session.
     monkeypatch.setenv("AISQUARE_ROLE", "runner")
     add_project(there)  # a role session joins a board only where the project was added
@@ -927,11 +925,8 @@ def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(
 
     assert there_rows["agent harness"].status is CheckStatus.warn
     assert "off-ladder" in there_rows["agent harness"].detail
-    assert there_rows["brain"].status is CheckStatus.warn
-    assert "not initialised" in there_rows["brain"].detail
     # The control: the process cwd is a different, never-activated project.
     assert here_rows["agent harness"].detail == "not activated for this project"
-    assert "orchestrator not active here" in here_rows["brain"].detail
 
 
 def test_doctor_without_cwd_means_the_process_cwd(
@@ -1030,7 +1025,8 @@ def test_cli_doctor_emits_the_fleet_rows_in_text_and_json(runner: CliRunner) -> 
         assert name in names, names
         assert f" {name}: " in text, text
     assert names.index("claude-code") < names.index("tmux") < names.index("gh")
-    assert names.index("brain") < names.index("fleet") < names.index("explainability")
+    assert "fleet" in names
+    assert not [name for name in names if name.startswith("explainability")], names
 
 
 def test_a_healthy_machine_yields_no_fleet_warning(runner: CliRunner) -> None:
@@ -1277,12 +1273,12 @@ def test_the_fleet_terminal_row_never_starts_a_server_and_survives_an_unknown_te
 def test_the_fleet_terminal_row_comes_after_the_actionable_checks() -> None:
     """It can warn (a server's kept prefix), and the not-ok rows are read in doctor
     order (the fleet sidebar showed only the first three): inserted beside
-    tmux, as #147 had it, that warning evicted one of brain / a logged-out
-    gh — the rows an operator can act on — from the one doctor
-    surface visible without a click. So it waits with browser tools."""
+    tmux, as #147 had it, that warning evicted a logged-out gh — a row an
+    operator can act on — from the one doctor surface visible without a click. So it waits
+    with browser tools."""
     names = [check.name for check in diagnostics.doctor()]
     terminal = names.index("fleet terminal")
-    for actionable in ("gh", "brain", "fleet"):
+    for actionable in ("gh", "fleet"):
         assert names.index(actionable) < terminal, (actionable, names)
     assert names.index("browser tools") < terminal, names
 
@@ -1559,6 +1555,167 @@ def test_the_fleet_server_row_warns_about_a_seats_identity_on_the_server(tmp_pat
 def test_the_fleet_server_row_reaches_the_real_doctor_after_the_fleet_terminal() -> None:
     names = [check.name for check in diagnostics.doctor()]
     assert names.index("fleet terminal") < names.index("fleet server env"), names
+
+
+# --- role bindings (#98) -----------------------------------------------------------------
+
+
+def _bound(role: str, **env: str) -> None:
+    from aisquare.services import settings as settings_service
+
+    settings_service.bind_role(role, env=dict(env))
+
+
+def test_doctor_says_nothing_of_bindings_with_no_environment() -> None:
+    """Silent when no binding sets a Claude Code directory: a machine that never bound
+    one keeps the doctor output it had."""
+    from aisquare.services import settings as settings_service
+
+    assert diagnostics._check_role_bindings() == []
+    settings_service.bind_role("coder", args=["--model", "opus"])
+    assert diagnostics._check_role_bindings() == []
+
+
+def test_doctor_warns_on_a_binding_whose_claude_dir_has_no_hooks(tmp_path: Path) -> None:
+    """#98: a seat bound to a config dir without aisquare's hooks runs sessions the board
+    never hears of; only bindings that name an account were checked."""
+    from aisquare.core import agents as agent_core
+
+    bare, hooked = tmp_path / "claude-bare", tmp_path / "claude-hooked"
+    bare.mkdir()
+    hooked.mkdir()
+    agent_core.install_hooks("claude-code", hooked)
+    _bound("coder", CLAUDE_CONFIG_DIR=str(bare))
+    _bound("reviewer", CLAUDE_CONFIG_DIR=str(hooked))
+
+    (row,) = diagnostics._check_role_bindings()
+    assert row.name == "role bindings"
+    assert row.status == CheckStatus.warn
+    assert "coder" in row.detail and str(bare) in row.detail and "no aisquare hooks" in row.detail
+    assert "reviewer" not in row.detail, "a connected binding is not a problem"
+    assert row.fix is not None and "aisquare team bind coder" in row.fix
+    connect = ["aisquare", "agents", "connect", "claude-code", "--config-dir", str(bare)]
+    assert install_route.command_line(connect) in row.fix, "a fix any shell can paste"
+
+
+def test_doctor_warns_on_a_binding_whose_tmpdir_cannot_be_written(tmp_path: Path) -> None:
+    missing = tmp_path / "no-such-tmp"
+    _bound("tester", CLAUDE_CODE_TMPDIR=str(missing))
+    (row,) = diagnostics._check_role_bindings()
+    assert row.status == CheckStatus.warn
+    assert "tester" in row.detail and "CLAUDE_CODE_TMPDIR" in row.detail
+    assert str(missing) in row.detail and "not writable" in row.detail
+
+
+def test_doctor_reads_a_binding_as_a_launch_expands_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`$VAR` and `~` expand as `harness.expand_value` does at launch, so the row judges
+    the directory the session will really use."""
+    from aisquare.core import agents as agent_core
+
+    hooked = tmp_path / "claude-2"
+    hooked.mkdir()
+    agent_core.install_hooks("claude-code", hooked)
+    monkeypatch.setenv("SECOND_CLAUDE", str(hooked))
+    _bound("coder", CLAUDE_CONFIG_DIR="$SECOND_CLAUDE", CLAUDE_CODE_TMPDIR=str(tmp_path))
+    (row,) = diagnostics._check_role_bindings()
+    assert row.status == CheckStatus.ok, row.detail
+    assert "coder" in row.detail and str(hooked) in row.detail
+
+
+# --- remote control (#289) ------------------------------------------------------------------
+
+
+def _roles_with_remote_control(*roles: str, tracing: bool = False) -> None:
+    from aisquare.core.config import AppConfig, FleetRoleSettings, save_config
+
+    config = AppConfig()
+    for role in roles:
+        config.fleet.roles[role] = FleetRoleSettings.model_validate({"remote_control": True})
+    config.explainability.enabled = tracing
+    save_config(config)
+
+
+def test_the_remote_control_row_is_absent_while_no_role_asks() -> None:
+    from aisquare.services import diagnostics
+
+    assert diagnostics._check_remote_control(environ={}) is None
+    assert "remote control" not in {check.name for check in diagnostics.doctor()}
+
+
+def test_the_remote_control_row_lists_the_roles_and_is_ok_with_nothing_in_the_way() -> None:
+    from aisquare.services import diagnostics
+
+    _roles_with_remote_control("reviewer", "coder")
+
+    check = diagnostics._check_remote_control(environ={})
+
+    assert check is not None and check.status.value == "ok"
+    assert check.detail.startswith("on for coder, reviewer — ")
+    assert "remote control" in {row.name for row in diagnostics.doctor()}
+
+
+def test_the_remote_control_row_names_each_blocker_without_its_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What `launch` would step aside for, said before a launch: an OAuth token, tracing's
+    proxy — the variable and where it is, never a secret. With no fleet server running,
+    the agents get what the fleet would start one with: this shell's, less the base URL
+    (`tmux_client_env` strips the tracing identity), so the shell's base URL is no blocker."""
+    from aisquare.services import diagnostics
+
+    _roles_with_remote_control("coder", tracing=True)
+    environ = {
+        "ANTHROPIC_BASE_URL": "https://user:secret@gateway.example/v1",
+        "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-example",
+    }
+
+    monkeypatch.setattr(diagnostics, "_fleet_server", lambda socket: FakeServer(absent=True))
+
+    check = diagnostics._check_remote_control(environ=environ)
+
+    assert check is not None and check.status.value == "warn"
+    assert "ANTHROPIC_BASE_URL" not in check.detail, "the fleet never hands the shell's on"
+    assert "coder: CLAUDE_CODE_OAUTH_TOKEN is set in this shell" in check.detail
+    assert "explainability tracing sends every traced launch through its proxy" in check.detail
+    assert "secret" not in check.detail and "sk-ant" not in check.detail
+    assert check.fix is not None and "aisquare explainability disable" in check.fix
+    assert "every launch on this machine, not for these roles alone" in check.fix
+
+
+def test_the_remote_control_row_reads_the_running_fleet_servers_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agents inherit the fleet server's environment, copied from whatever started it,
+    not the doctor's shell: a base URL and a token held there block every agent it starts,
+    though this shell has neither (#335's review)."""
+    from aisquare.services import diagnostics
+
+    _roles_with_remote_control("coder")
+    server = FakeServer(absent=False)
+    server.scripted = {
+        ("show-environment", "-g"): (
+            "ANTHROPIC_BASE_URL=https://user:secret@gateway.example/v1\n"
+            "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-example\n"
+        )
+    }
+
+    monkeypatch.setattr(diagnostics, "_fleet_server", lambda socket: server)
+
+    check = diagnostics._check_remote_control(environ={})
+
+    assert check is not None and check.status.value == "warn"
+    assert "coder: ANTHROPIC_BASE_URL on the fleet server points at gateway.example" in (
+        check.detail
+    )
+    assert "coder: CLAUDE_CODE_OAUTH_TOKEN is set on the fleet server" in check.detail
+    assert "secret" not in check.detail and "sk-ant" not in check.detail
+    assert check.fix is not None and "kill-server" in check.fix
+    # This shell's own pair, with an empty server: nothing in the way.
+    server.scripted = {("show-environment", "-g"): ""}
+    clear = diagnostics._check_remote_control(environ={"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-x"})
+    assert clear is not None and clear.status.value == "ok"
 
 
 def test_doctor_names_each_roles_denied_tools_and_skill_listing() -> None:

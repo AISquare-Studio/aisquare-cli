@@ -52,21 +52,13 @@ otherwise inherit a live identity:
     §3.9). A real model process but not a session — like the probe, one
     question and one answer — so a Run for it would be attributed to whoever
     happened to import.
-  * ``core/brain.py::_run`` — the gbrain worker. Not an agent session, and its
-    own ``_env`` already contemplates an Anthropic key path
-    (``ANTHROPIC_API_KEY`` is popped only when embeddings are off), so an
-    inherited base URL could route it through our proxy under the parent's
-    name.
-  * ``services/distill.py::spawn_drain`` — a detached ``aisquare team distill``
-    of our own. A background worker of ours is not an agent session and has no
-    business wearing one's identity.
   * ``services/hooks.py::_detach`` — a detached ``aisquare hook hand-over`` of
-    our own, for the same reason; it also outlives the pane whose hook started
-    it, which is the whole point of detaching it.
+    our own. A background worker of ours is not an agent session and has no
+    business wearing one's identity; it also outlives the pane whose hook
+    started it, which is the whole point of detaching it.
 
 Excluded, nothing stripped — these are not model processes at all, and
 narrowing their environment would be change without a reason:
-  * ``core/brain.py::gbrain_version`` — ``gbrain --version``, a string.
   * ``core/claude_accounts.py::_ask_keychain`` — ``/usr/bin/security
     find-generic-password`` on macOS: the Claude Code login an account's
     Keychain item holds, read for its usage. No model.
@@ -91,6 +83,8 @@ narrowing their environment would be change without a reason:
     one process's parent, start and image, for the proof behind a session's own MCP
     server row (``services/mcp_host``). A string, no model.
   * ``cli/watch.py::action_open_transcript`` — a pager/viewer on a file.
+  * ``cli/ui/terminal.py::wsl_path`` — ``wslpath -u`` on a Windows path pasted into a
+    pane under WSL (#288). A path converter, no model.
   * ``core/paths.py::restrict_to_owner`` — ``icacls``, locking the
     credentials file to this account on Windows. A permissions tool, not a
     model process; it is also the seam that guards the API key, so an
@@ -254,17 +248,6 @@ SEAMS: dict[str, Seam] = {
         "attributed to whoever imported",
         strips_identity=True,
     ),
-    "aisquare/core/brain.py::_run": Seam(
-        EXCLUDED,
-        "the gbrain worker — not an agent session, and it has an Anthropic key "
-        "path that an inherited base URL would redirect through our proxy",
-        strips_identity=True,
-    ),
-    "aisquare/services/distill.py::spawn_drain": Seam(
-        EXCLUDED,
-        "a detached `aisquare team distill` of ours — a background worker is not an agent session",
-        strips_identity=True,
-    ),
     "aisquare/services/github_prs.py::_run_gh": Seam(
         EXCLUDED,
         "`gh api` for `aisquare watch` and the captain queue's pull requests (P2-W2, #284). "
@@ -309,7 +292,6 @@ SEAMS: dict[str, Seam] = {
         "same reason",
         strips_identity=True,
     ),
-    "aisquare/core/brain.py::gbrain_version": Seam(EXCLUDED, "`gbrain --version`, a string"),
     "aisquare/core/claude_accounts.py::_ask_keychain": Seam(
         EXCLUDED,
         "`/usr/bin/security find-generic-password` on macOS — reads the login Claude Code keeps "
@@ -355,6 +337,9 @@ SEAMS: dict[str, Seam] = {
     ),
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"
+    ),
+    "aisquare/cli/ui/terminal.py::wsl_path": Seam(
+        EXCLUDED, "`wslpath -u` on a Windows path pasted into a pane under WSL; no model"
     ),
     "aisquare/core/paths.py::restrict_to_owner": Seam(
         EXCLUDED, "`icacls` — locks the credentials file to this account; no model"
@@ -415,8 +400,19 @@ SEAMS: dict[str, Seam] = {
         EXCLUDED,
         "our own CLI as a subprocess (`init`, `doctor`, `project onboard` for the "
         "fleet UI, run with cwd=<project>). Starts no model process. NOT stripped: "
-        "`doctor --live` needs the EXPLAINABILITY_* environment to diagnose the "
+        "`explainability doctor --live` needs the EXPLAINABILITY_* environment to diagnose the "
         "machine it is on, the same reason `sdk_doctor` is not",
+    ),
+    "aisquare/statusline.py::_wrapped": Seam(
+        EXCLUDED,
+        "`asq-statusline --wrap CMD`: the user's own Claude Code status line, run with the "
+        "payload Claude Code handed ours, as Claude Code would run it (#287); their command, "
+        "in their session's environment; no model process of ours",
+    ),
+    "aisquare/services/adopt.py::_process_args": Seam(
+        EXCLUDED,
+        "`ps -A -o pid=,args=` for `fleet adopt` (#290): whether a live claude names the "
+        "session it would adopt; pids and arguments, no model",
     ),
     "aisquare/cli/fleet.py::_exec_attach": Seam(
         EXCLUDED,

@@ -103,6 +103,15 @@ def patient_landing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(receiver, "LAND_S", 10.0)
 
 
+@pytest.fixture
+def patient_ui_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The captain's ``ui`` tool, asking as it does but waiting longer for the answer: these
+    pins are about what the tool is told, not about its 2 s (``actions.UI_TIMEOUT_S``, which
+    the budget pins above and below keep). On a box running a hundred other things the answer
+    took longer than two seconds, and the tool said asq did not answer."""
+    monkeypatch.setattr(actions, "UI_TIMEOUT_S", 60.0)
+
+
 def test_a_silent_client_plus_a_landing_fit_t1s_two_seconds() -> None:
     assert receiver.READ_S + LAND_S_AS_SHIPPED < actions.UI_TIMEOUT_S
 
@@ -131,8 +140,13 @@ def request(action: str, arg: str | None = None) -> bytes:
     return (json.dumps({"v": 1, "action": action, "arg": arg}) + "\n").encode()
 
 
-def ask(path: Path, line: bytes, *, timeout: float = 2.0) -> dict[str, Any]:
-    """One exchange the way T1's client makes it: one line out, one line back, 2 s at most."""
+def ask(path: Path, line: bytes, *, timeout: float = 60.0) -> dict[str, Any]:
+    """One exchange the way T1's client makes it: one line out, one line back.
+
+    T1's client gives up after ``actions.UI_TIMEOUT_S`` (2 s), and the tests that pin that
+    budget say so (``timeout=actions.UI_TIMEOUT_S``, or a clock of their own). What the
+    others ask is what the receiver answers, and a reply that took more than 2 s on a
+    machine running forty other things was a ``TimeoutError`` and no answer to read."""
     with _unix_socket() as conn:
         conn.settimeout(timeout)
         conn.connect(str(path))
@@ -525,7 +539,7 @@ def test_focus_project_on_a_card_in_a_folded_group_selects_it_and_says_the_curso
 @UNIX_SOCKETS
 @pytest.mark.needs_captain
 def test_the_captains_ui_tool_reaches_asq_and_the_action_runs(
-    tmp_path: Path, script: Script, ui_path: Path
+    tmp_path: Path, script: Script, ui_path: Path, patient_ui_client: None
 ) -> None:
     fleet(tmp_path, script)
 
@@ -545,7 +559,7 @@ def test_the_captains_ui_tool_reaches_asq_and_the_action_runs(
 @UNIX_SOCKETS
 @pytest.mark.needs_captain
 def test_the_captains_ui_tool_is_told_why_asq_said_no(
-    tmp_path: Path, script: Script, ui_path: Path
+    tmp_path: Path, script: Script, ui_path: Path, patient_ui_client: None
 ) -> None:
     """A direct call raises the frame's own Refused, in the words the captain is told; the
     SDK's ToolError wraps it only at the server boundary (T5, actions._as_sdk_tool)."""
@@ -573,6 +587,7 @@ def test_under_a_long_home_the_receiver_binds_where_the_ui_tool_dials(
     never the machine's shared ``/tmp/aisquare-<uid>``.
     """
     monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / ("h" * 60) / ("o" * 60) / "home"))
+    monkeypatch.setattr(actions, "UI_TIMEOUT_S", 60.0)  # where it dials is asked, not how soon
     fleet(tmp_path, script)
 
     async def body(pilot: Pilot[None]) -> tuple[Path | None, dict[str, Any]]:
@@ -964,7 +979,7 @@ def test_a_client_that_says_nothing_is_cut_off_in_time_for_the_next(
     def timed() -> tuple[dict[str, Any], float]:
         """The client's own wait, from its connect to its answer — what T1's 2 s bounds."""
         began = time.monotonic()
-        reply = ask(ui_path, request("copy_row", "alpha/coder-1"))  # lands at once
+        reply = ask(ui_path, request("copy_row", "alpha/coder-1"), timeout=actions.UI_TIMEOUT_S)
         return reply, time.monotonic() - began
 
     async def body(pilot: Pilot[None]) -> tuple[dict[str, Any], float, dict[str, Any]]:
@@ -985,26 +1000,47 @@ def test_a_client_that_says_nothing_is_cut_off_in_time_for_the_next(
 @UNIX_SOCKETS
 @pytest.mark.needs_captain
 def test_quit_does_not_wait_out_a_client_that_says_nothing(
-    tmp_path: Path, script: Script, ui_path: Path
+    tmp_path: Path, script: Script, ui_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fleet(tmp_path, script)
+    """The wait a quit must not sit out is made a minute long, so that sitting it out and
+    not doing so differ by a hundred times what a loaded runner costs a thread to wake
+    (0.72 s against a bound of 0.25 s, from a wait of 0.5 s, on one). The receiver is
+    waited for until it holds the client's line open, not for a tenth of a second.
 
-    async def body(pilot: Pilot[None]) -> tuple[float, dict[str, Any]]:
+    What a quit that sat the read out leaves behind is the receiver's thread, still in its
+    minute: the quit's own join gives up on it after ``JOIN_S`` (1 s) and moves on, so a
+    time taken by the quit cannot tell that from a slow runner. The thread is what is
+    asserted: gone (waited for, half a minute as a hang guard) once the quit has told it
+    to end, which a quit that woke the read is within milliseconds."""
+    fleet(tmp_path, script)
+    monkeypatch.setattr(receiver, "READ_S", 60.0)
+    waiting = threading.Event()
+    read_line = receiver._read_line
+
+    def noted_read_line(conn: socket.socket, wake: int) -> bytes | None:
+        waiting.set()
+        return read_line(conn, wake)
+
+    monkeypatch.setattr(receiver, "_read_line", noted_read_line)
+
+    async def body(pilot: Pilot[None]) -> dict[str, Any]:
         app = fleet_app(pilot)
+        listening = receiver_of(app)
         with _unix_socket() as silent:
             silent.settimeout(5)
             silent.connect(str(ui_path))
-            await asyncio.sleep(0.1)  # let the receiver take it and start waiting for its line
-            began = time.monotonic()
+            assert await asyncio.to_thread(waiting.wait, 30), "the receiver never took the client"
             receiver.stop_listening_for_ui(app)
-            took = time.monotonic() - began
+            # Before the client reads: a quit that sat out the read has no answer for it, and
+            # the client's own timeout would end the test before this said why.
+            assert listening.join(30.0), (
+                "quit left the receiver in the read of a line that never came"
+            )
             with silent.makefile("rb") as stream:
-                told = json.loads(stream.readline(64 * 1024))
-        return took, told
+                told: dict[str, Any] = json.loads(stream.readline(64 * 1024))
+        return told
 
-    took, told = drive(body)
-    assert took < receiver.READ_S / 2, f"quit waited {took:.2f}s for a line that never came"
-    assert told == {"ok": False, "said": "asq is quitting"}
+    assert drive(body) == {"ok": False, "said": "asq is quitting"}
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux blocks a connect to a full backlog")

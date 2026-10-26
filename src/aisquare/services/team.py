@@ -14,12 +14,14 @@ so repos that never opted in never see team output.
 from __future__ import annotations
 
 import enum
+import hashlib
 import json
 import logging
 import os
 import re
 import sqlite3
 import sys
+import unicodedata
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -28,8 +30,8 @@ from pathlib import Path
 from types import EllipsisType
 from typing import Any, Final, Literal, NamedTuple
 
-from aisquare.core import brain, experimental, harness, insights, orchestrator, paths, workspace
 from aisquare.core import claude_accounts as claude_accounts_core
+from aisquare.core import experimental, harness, insights, orchestrator, paths, workspace
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import (
@@ -49,7 +51,6 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import distill as distill_service
 from aisquare.services import install_route, mcp_host, model_memory
 from aisquare.services import project as project_service
 
@@ -506,12 +507,6 @@ def _emit(
     return stored
 
 
-def _project_root(store: ContextStore, project_id: str) -> Path | None:
-    """The registered root of a project — spares hot paths a git subprocess."""
-    project = store.get_project(project_id)
-    return project.root if project is not None else None
-
-
 def _resolve_session(store: ContextStore, ref: str | None) -> TeamSession | None:
     if ref is None:
         return None
@@ -587,9 +582,9 @@ def _board_of(store: ContextStore, project_id: str) -> _Board:
 
     One forgotten since is still named and rooted by its row: its tasks and events are
     kept, and the agents whose rows recorded it still read it. Read as one the store does
-    not hold, a note ``fleet tell`` or the phone put on a forgotten hub was named by its id,
-    and its drain ran in the caller's directory, with a ``git rev-parse``, distilling the
-    caller's board and not the hub's (review of #259, round 32, 7/9)."""
+    not hold, a note ``fleet tell`` or the phone put on a forgotten hub was named by its id
+    and rooted in the caller's directory, with a ``git rev-parse``, not the hub's (review of
+    #259, round 32, 7/9)."""
     project = store.get_project(project_id, include_forgotten=True)
     if project is None:
         return _Board(id=project_id, name=project_id, root=None)
@@ -729,7 +724,33 @@ def account_label(account: str | None, labels: Mapping[int, str] | None = None) 
 
 
 def task_key(title: str) -> str:
-    """Derive the idempotency key for a task: a slug of its title."""
+    """Derive the idempotency key for a task: a slug of its title, in any script (#270).
+
+    The title is NFKC-normalised and casefolded, and every run of characters that are not
+    letters, digits or marks (Unicode ``L*``, ``N*``, ``M*``) becomes one ``-``. A mark is
+    kept only after a letter, digit or mark it belongs to: Devanagari is not split at the
+    virama, and the variation selector after an emoji (U+FE0F) is not a key of its own, as
+    it was for ``⚠️`` and ``✔️`` alike (review of #314). ``[a-z0-9]`` alone keyed every title
+    with no ASCII letter ``task``, so the second such ``task add`` returned the first. An
+    ASCII title keys exactly as before (:func:`_legacy_task_key`); a title with nothing
+    left to slug, only emoji, is keyed by a hash of it.
+    """
+    folded = unicodedata.normalize("NFKC", title).casefold()
+    kept: list[str] = []
+    for char in folded:
+        category = unicodedata.category(char)[0]
+        belongs = category in "LN" or (category == "M" and bool(kept) and kept[-1] != "-")
+        kept.append(char if belongs else "-")
+    slug = re.sub(r"-+", "-", "".join(kept)).strip("-")
+    if slug:
+        return slug[:64]
+    if title.isascii():
+        return "task"
+    return "t-" + hashlib.sha256(folded.encode()).hexdigest()[:12]
+
+
+def _legacy_task_key(title: str) -> str:
+    """The key a title had before #270, which tasks added then are stored under."""
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     return slug[:64] or "task"
 
@@ -1543,8 +1564,6 @@ def add_note(
             else board.id
         )
     stored = _record_delivery(event, board)
-    if kind in distill_service.DISTILL_KINDS:
-        distill_service.spawn_drain(root=board.root, board=board.id)
     if kind in ("result", "question"):
         _nudge_manager(manager, reason=kind, board=board.id)
     elif _addressed_to_manager(to_role):
@@ -1660,12 +1679,21 @@ def add_task(
                 raise ValueError(f"--needs {ref}: that task belongs to another project's board")
             if needed.id not in resolved_needs:
                 resolved_needs.append(needed.id)
+        derived = key or task_key(title)
+        legacy = _legacy_task_key(title)
+        if key is None and legacy not in (derived, "task"):
+            # A title with non-ASCII words keyed differently before #270. The task added
+            # then under this very title is this one, so the re-add stays idempotent; the
+            # old key alone is not enough, as two titles shared it (`Fix вход`, `Fix тесты`).
+            stored = store.team_tasks(board.id)
+            if any(task.key == legacy and task.title == title for task in stored):
+                derived = legacy
         now = _now()
         task, created = store.upsert_task(
             TeamTask(
                 id=new_task_id(),
                 project_id=board.id,
-                key=key or task_key(title),
+                key=derived,
                 title=title,
                 detail=detail,
                 role=role,
@@ -1926,7 +1954,6 @@ def finish_task(
     task, board, manager = _finish_task(
         ref, "done", "task_done", note=note, session_ref=session_ref, cwd=cwd
     )
-    distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_done", board=board.id)
     _flush_routed()
     return task
@@ -1938,7 +1965,6 @@ def review_task(ref: str, *, note: str | None = None, session_ref: str | None = 
     task, board, manager = _finish_task(
         ref, "review", "task_review", note=note, session_ref=session_ref
     )
-    distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_review", board=board.id)
     _flush_routed()
     return task
@@ -1970,7 +1996,6 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
         _route_up(store, event)
         board = _board_of(store, reopened.project_id)
     _record_delivery(event, board)
-    distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_reopened", board=board.id)
     _flush_routed()
     return reopened
@@ -2047,7 +2072,6 @@ def block_task(ref: str, *, reason: str, session_ref: str | None = None) -> Team
     task, board, manager = _finish_task(
         ref, "blocked", "task_blocked", note=reason, session_ref=session_ref
     )
-    distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_blocked", board=board.id)
     _flush_routed()
     return task
@@ -2082,35 +2106,6 @@ def release_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
         board = _board_of(store, released.project_id)
     _record_delivery(event, board)
     return released
-
-
-def distill_now(
-    cwd: Path | None = None, *, rescan: bool = False, board: str | None = None
-) -> int | None:
-    """Drain the pipe into the project brain synchronously (``team distill``): this
-    directory's board, or ``board``, the one a detached drain was spawned for
-    (``distill.spawn_drain``).
-
-    ``None`` means another drain (usually a detached one) is already running.
-    """
-    _require_enabled()
-    return distill_service.drain(cwd, rescan=rescan, board=board)
-
-
-def recall(query: str, cwd: Path | None = None) -> str | None:
-    """Search the project brain (``recall``); ``None`` = brain unavailable.
-
-    Recall is human-invoked and latency-tolerant, so any undistilled backlog
-    is drained first — a first recall on a busy pipe initialises the brain
-    and takes a few seconds; subsequent ones are instant.
-    """
-    _require_enabled()
-    project = orchestrator.team_project(cwd)
-    with store_session() as store:
-        backlog = distill_service.pending(store, project.id)
-    if backlog:
-        distill_service.drain(board=project.id)  # a busy (None) drain still means progress
-    return brain.recall(project.id, query)
 
 
 # --- hook integration ---------------------------------------------------------
@@ -3488,9 +3483,6 @@ def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = 
                     "lists the pool",
                     file=sys.stderr,
                 )
-        root = _project_root(store, session.project_id)
-    # Safety drain: catch anything a per-command spawn missed this session, on its board.
-    distill_service.spawn_drain(cwd, root=root, board=session.project_id)
 
 
 @dataclass(frozen=True)
@@ -3607,7 +3599,7 @@ def prune_sessions(
     for callers that know the sessions are dead.
 
     Data-safe by construction: only session presence and orphaned CLAIMS
-    change; tasks, notes, events and the project brain are untouched.
+    change; tasks, notes and events are untouched.
     ``dry_run`` reports what would go without ending anything. ``keep`` spares
     one session (id prefix); a still-warm session is spared automatically (it
     is not past the threshold).

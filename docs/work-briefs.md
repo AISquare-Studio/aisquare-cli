@@ -283,5 +283,6 @@ never the board.
 A brief holds up to 64 requirements and 1,024 evidence records; a requirement or a
 check is up to 2,000 characters, a summary up to 4,000, and an artifact up to 16 MiB.
 Briefs live in the board's store (`context.db`) and their artifacts' copies under
-`briefs/`, and `project forget --purge` deletes both with the rest of the project's
-rows.
+`briefs/`. `project forget --purge` deletes both with the rest of the project's
+rows, and so does Start fresh (`aisquare project fresh`, or *Start fresh…* in
+`asq`) with the rest of the board: the next brief is B1 again.

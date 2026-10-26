@@ -250,9 +250,6 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_TEAM_DELTA",
     "AISQUARE_TEAM_LEASE_MIN",
     "AISQUARE_DB_BUSY_MS",
-    "AISQUARE_BRAIN",
-    "AISQUARE_BRAIN_EMBED",
-    "AISQUARE_BRAIN_EMBED_MODEL",
     "AISQUARE_HARNESS_PROBE",
     "AISQUARE_EFFORT",
     "AISQUARE_EFFORT_PLANNER",
@@ -507,9 +504,9 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
     home = tmp_path / "aisquare-home"
     monkeypatch.setenv(HOME_ENV_VAR, str(home))
-    # Read from the ambient env; cleared so the suite is hermetic (an embedding
-    # user's AISQUARE_BRAIN_EMBED=1 must not change what tests build/assert),
-    # each test opting in explicitly instead.
+    # Read from the ambient env; cleared so the suite is hermetic (a developer's own
+    # settings must not change what tests build/assert), each test opting in
+    # explicitly instead.
     for knob in AMBIENT_ENV_VARS:
         monkeypatch.delenv(knob, raising=False)
     for knob in [name for name in os.environ if name.startswith(AMBIENT_ENV_PREFIXES)]:
@@ -1095,19 +1092,6 @@ def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def no_detached_distill(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep tests from launching detached distiller processes.
-
-    Team commands fire-and-forget `aisquare team distill` after durable events;
-    in tests that would race the temp home and outlive the test. Distiller
-    behaviour is tested by calling ``distill.drain`` directly (test_brain.py).
-    """
-    from aisquare.services import distill
-
-    monkeypatch.setattr(distill, "spawn_drain", lambda cwd=None, *, root=None, board=None: None)
-
-
-@pytest.fixture(autouse=True)
 def no_real_llm_import(monkeypatch: pytest.MonkeyPatch) -> None:
     """No test may run a model.
 
@@ -1116,7 +1100,7 @@ def no_real_llm_import(monkeypatch: pytest.MonkeyPatch) -> None:
     binding, or a paid API call. Both are replaced with an engine that is
     unavailable, so such an import in any test ends in ``no_import_engine``.
     ``tests/test_persona_import.py`` tests the engines themselves by capturing the
-    real functions at import time, as ``test_spawn_seams.py`` does for the distiller.
+    real functions at import time, as ``test_spawn_seams.py`` does for its seams.
     """
     from aisquare.services import persona_import
 
@@ -1158,6 +1142,11 @@ carry it: a test that fails with the captain off and is not about the captain is
 of the off path, to be fixed in the code (review of #240)."""
 
 
+CAPTAIN_GATE = "captain_gate"
+"""The marker of a test of the captain's owner gate (#216): it runs with ``[captain] gate``
+as the config says. Every other test runs with the gate off, as Phase 1 had none."""
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     shards.add_option(parser)
 
@@ -1167,6 +1156,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         f"{NEEDS_CAPTAIN}: needs the experimental captain on; skipped when "
         f"{SUITE_CAPTAIN_ENV}=off runs the suite with it off, as it ships",
+    )
+    config.addinivalue_line(
+        "markers",
+        f"{CAPTAIN_GATE}: the owner gate applies as the config says; every other test runs "
+        "with it off",
     )
     config.addinivalue_line(
         "markers",
@@ -1207,6 +1201,24 @@ def captain_on(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(experimental.CAPTAIN_ENV, raising=False)
         return
     monkeypatch.setenv(experimental.CAPTAIN_ENV, "1")
+
+
+@pytest.fixture(autouse=True)
+def captain_gate_off(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The captain's owner gate (#216) off, unless the test is marked :data:`CAPTAIN_GATE`.
+
+    The gate is on by default while the captain is, and the suite runs with the captain on
+    (:func:`captain_on`), so every Phase 1 pin of a privileged tool would meet a locked
+    gate. Phase 1 had no gate: those pins run as they were. The gate's own pins
+    (``tests/test_captain_gate.py``) read ``[captain] gate`` from the config like a user.
+    Patched here, never through the environment: the product has no variable that
+    switches the gate off.
+    """
+    if request.node.get_closest_marker(CAPTAIN_GATE) is not None:
+        return
+    from aisquare.services.captain import gate
+
+    monkeypatch.setattr(gate, "configured", lambda: False)
 
 
 @pytest.fixture

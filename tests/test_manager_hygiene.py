@@ -25,6 +25,7 @@ from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.models import TeamSession
 from aisquare.services import team as team_service
+from tests import ordered_ids
 
 pytestmark = pytest.mark.usefixtures("project_capture")
 
@@ -114,6 +115,7 @@ def test_the_pack_stays_within_its_budget_and_says_what_it_left_out(
     """A 12,000-char state file is clipped at 4,000, the cycle's own limit, with its path;
     200 open tasks of 150 chars cannot all fit, and the line that ends them says how many did
     not and where they are. Every line it keeps is whole."""
+    ordered_ids.install(monkeypatch)  # 200 tasks in a loop, listed by id: two in one ms, either way
     _start(monkeypatch, work, MANAGER, "manager", "startup")
     for n in range(200):
         team_service.add_task(f"t{n:03d} " + "x" * 145, session_ref=MANAGER)
@@ -128,7 +130,11 @@ def test_the_pack_stays_within_its_budget_and_says_what_it_left_out(
     assert len(pack) <= 20_000, len(pack)
     assert "s" * 4_000 in pack and "s" * 4_001 not in pack
     assert f"… clipped at 4,000 chars; the rest is in {state}" in pack
-    shown = [n for n in range(200) if f"t{n:03d} " in pack]
+    # Each task's line, ``  - #n tsk_… [todo] t047 xxx…``: found by the bracket before its title.
+    # "t047 " alone is also the end of a random task id often enough (47 ids of twelve random
+    # characters each: about one run in twenty), and read as a task the pack had left out
+    # (ubuntu py3.11 and py3.12, CI runs 40249440798 and 40271428039, and 1 in 50 locally).
+    shown = [n for n in range(200) if f"] t{n:03d} " in pack]
     assert shown == list(range(len(shown))) and 0 < len(shown) < 200
     assert f"  … {200 - len(shown)} more open tasks — `aisquare task list`" in pack
     assert "wake events pending past your cursor: 0" in pack, "the short items are never cut"

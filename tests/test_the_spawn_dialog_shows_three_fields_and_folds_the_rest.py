@@ -30,12 +30,14 @@ from tests.test_ui_spawn import (
     UNTOUCHED,
     Host,
     SpawnRecorder,
+    add_task,
     advanced,
     drive,
     label_input,
     note,
     open_advanced,
     option_prompts,
+    resized,
     select,
     settle,
     submit,
@@ -130,11 +132,14 @@ def test_advanced_scrolls_on_a_short_terminal_and_the_buttons_stay_in_sight(
         ]
 
     async def short(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
-        await pilot.resize_terminal(SIZE[0], 24)
-        await settle(pilot)
+        await resized(pilot, SIZE[0], 24)
         return await scenario(pilot, host, dialog)
 
     assert drive(git_project, short) == [True, True, True]
+
+
+ON_THE_BOARD = "<a task on the board>"
+"""Stands in for a task id the test adds to the board before the dialog opens."""
 
 
 @pytest.mark.parametrize(
@@ -144,12 +149,28 @@ def test_advanced_scrolls_on_a_short_terminal_and_the_buttons_stay_in_sight(
         ({"binary": "claude2"}, True),
         ({"persona": "skeptic", "role": "tester", "binary": "claude2", "account": "2"}, True),
         ({"role": "tester", "account": "2"}, False),  # both are basic fields
+        ({"label": "coder-mine"}, True),  # a form reopened after a sign-in (#286)
+        ({"task_id": ON_THE_BOARD}, True),
+        ({"task_id": "tsk_notonthisboard"}, False),  # not offered: the field stays (none)
+        ({"prompt": "Start with the failing test."}, True),
     ],
-    ids=["persona", "binary", "the-picker-flow", "basic-only"],
+    ids=[
+        "persona",
+        "binary",
+        "the-picker-flow",
+        "basic-only",
+        "label",
+        "task",
+        "unknown-task",
+        "prompt",
+    ],
 )
 def test_a_preset_that_fills_an_advanced_field_opens_it_with_the_form(
     git_project: ProjectInfo, presets: dict[str, str], opened: bool
 ) -> None:
+    if presets.get("task_id") == ON_THE_BOARD:
+        presets = {**presets, "task_id": add_task(git_project, "Wire the auth flow").id}
+
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> bool:
         return not advanced(dialog).collapsed
 
@@ -159,8 +180,10 @@ def test_a_preset_that_fills_an_advanced_field_opens_it_with_the_form(
 def test_a_label_that_blocks_spawn_opens_advanced_and_folding_it_opens_it_again(
     git_project: ProjectInfo, spawns: SpawnRecorder
 ) -> None:
-    """A role too long for a label prefills one the rule refuses: *Spawn* is disabled for a
-    field in *Advanced*, so *Advanced* is open — and folding it does not hide the reason."""
+    """A role whose name the label rule refuses prefills a label it refuses: *Spawn* is
+    disabled for a field in *Advanced*, so *Advanced* is open — and folding it does not hide
+    the reason. Upper case, not length: a bound role keeps its own characters, and a role
+    too long for a label is trimmed to fit since #291."""
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         seen: list[Any] = [
@@ -175,9 +198,9 @@ def test_a_label_that_blocks_spawn_opens_advanced_and_folding_it_opens_it_again(
         return seen
 
     label, disabled, collapsed, rule, refolded = drive(
-        git_project, scenario, presets={"role": "a-very-long-custom-role"}
+        git_project, scenario, presets={"role": "QA-Bot"}
     )
-    assert len(label) > 24 and disabled is True
+    assert label == "QA-Bot-1" and disabled is True
     assert collapsed is False and rule == LABEL_RULE
     assert refolded is False
 

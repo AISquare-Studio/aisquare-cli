@@ -575,7 +575,7 @@ def _detach(argv: list[str], *, cwd: Path | None = None) -> None:
     ran — a dead agent, a live row on a gone pane, no replacement, no board
     line (review of #205, finding 1). ``start_new_session`` puts the worker
     outside the pane's session, so tmux's kill and its SIGHUP do not reach it
-    (the idiom ``distill.spawn_drain`` uses). The tracing identity and the
+    (the idiom for any worker that must outlive its caller). The tracing identity and the
     fleet row's name are dropped from its environment: the worker is neither
     this agent nor a session of its own. Raises ``OSError`` when the worker
     cannot be started, for the caller to put on the board.

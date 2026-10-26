@@ -42,10 +42,12 @@ from aisquare.core import store as core_store
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
     REVIEWER_ARGS,
+    AppConfig,
     FleetRoleSettings,
     FleetSettings,
     replacing_the_former_reviewer_default,
     replacing_the_former_reviewer_default_first,
+    save_config,
 )
 from aisquare.core.ids import new_agent_id, new_task_id
 from aisquare.core.orchestrator import FLEET_AGENT_ENV_VAR, team_project
@@ -702,8 +704,7 @@ def claude_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     shebanged script on POSIX, a ``.cmd`` on Windows, which is the shape pip and
     npm use and what makes PATHEXT match. `fleet.spawn` gates on exactly that
     call, so an extensionless file left every test using this fixture failing
-    with "'claude' is not on your PATH" — the same PATHEXT bug as the gbrain
-    fake in test_brain.py, in code written after that one was fixed.
+    with "'claude' is not on your PATH" — the PATHEXT bug `tests/fakebin.py` exists for.
     """
     bin_dir = tmp_path / "bin"
     script = fakebin.executable_fake(
@@ -1498,6 +1499,86 @@ def test_spawn_suffixes_a_label_a_live_agent_holds(
     fleet_service.stop(project, "coder-auth", force=True)
     third = fleet_service.spawn(project, "coder", worktree=False, label="coder-auth")
     assert third.agent.label == "coder-auth" and third.notes == []
+
+
+def test_a_held_label_of_24_characters_suffixes_to_one_of_24(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """#291: the suffix was appended to the whole label, so a live agent holding a label of
+    24 characters handed the next spawn `coder-authentication-ref-2`, 26 characters, a
+    label `is_label` refuses. The stem is trimmed so that `<stem>-N` fits."""
+    held = "coder-authentication-ref"
+    assert len(held) == 24 and fleet_service.is_label(held)
+    fleet_service.spawn(project, "coder", worktree=False, label=held)
+
+    second = fleet_service.spawn(project, "coder", worktree=False, label=held).agent
+    third = fleet_service.spawn(project, "coder", worktree=False, label=held).agent
+
+    assert (second.label, third.label) == ("coder-authentication-r-2", "coder-authentication-r-3")
+    assert fleet_service.is_label(second.label) and fleet_service.is_label(third.label)
+
+
+def test_a_long_custom_role_with_a_task_gets_a_label_that_fits(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """#291: `<role>-<task short id>` was never measured, so a role bound with `team bind`
+    whose name is near 24 characters made a label longer than any `--label` may be. The
+    role is trimmed and the task's short id kept whole: it is what names the task."""
+    from aisquare.services import settings as settings_service
+
+    role = "platform-security-auditor"
+    settings_service.bind_role(role, agent_bin="claude")
+    task = _add_task(project, "Audit the token store")
+    short = task.id.removeprefix("tsk_")[:8]
+
+    first = fleet_service.spawn(project, role, worktree=False, task_id=task.id).agent
+    second = fleet_service.spawn(project, role, worktree=False, task_id=task.id).agent
+    untasked = fleet_service.spawn(project, role, worktree=False).agent
+
+    assert first.label == f"platform-securi-{short}"
+    assert second.label == "platform-security-audi-2", "the suffix trims the role as well"
+    assert untasked.label == "platform-security-audi-1"
+    for agent in (first, second, untasked):
+        assert fleet_service.is_label(agent.label), agent.label
+
+
+def test_a_long_bound_role_with_an_underscore_is_trimmed_and_kept_as_it_is(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """#291 trims to 24 characters and no further: a bound role's own characters stay its
+    labels' (`test_a_forks_numbered_label_is_generated_as_a_spawns_is_not_checked_as_a_typed_one`
+    is the control), so the trim never turns a spawn that worked into a refusal."""
+    from aisquare.services import settings as settings_service
+
+    settings_service.bind_role("data_engineering_pipeline", agent_bin="claude")
+
+    agent = fleet_service.spawn(project, "data_engineering_pipeline", worktree=False).agent
+
+    assert agent.label == "data_engineering_pipel-1"
+
+
+def test_an_over_long_label_is_refused_with_a_label_that_fits(project: ProjectInfo) -> None:
+    """#291: the manager adds the task first and spawns second, so a refusal that only says
+    "not valid" left the task without an agent until someone noticed. It names the limit
+    and a label that passes `is_label`, which the manager can retry with in the same turn."""
+    with pytest.raises(FleetError) as refused:
+        fleet_service.next_label(project, "coder", wanted="coder-authentication-refactor")
+    assert str(refused.value) == (
+        "label 'coder-authentication-refactor' is 29 characters — at most 24; "
+        "try 'coder-authentication-ref'"
+    )
+    assert fleet_service.is_label("coder-authentication-ref")
+    # A label broken some other way keeps the whole rule, and gets a suggestion when one exists.
+    with pytest.raises(FleetError) as broken:
+        fleet_service.next_label(project, "coder", wanted="Coder.Auth")
+    assert str(broken.value).endswith("no '.', ':' or spaces; try 'coder-auth'")
+    with pytest.raises(FleetError) as hopeless:
+        fleet_service.next_label(project, "coder", wanted="9")
+    assert "not valid" in str(hopeless.value) and "try" not in str(hopeless.value)
+    # Never a label the retry would be refused for next: `manager` is the manager's alone.
+    with pytest.raises(FleetError) as reserved:
+        fleet_service.next_label(project, "coder", wanted="Manager")
+    assert "not valid" in str(reserved.value) and "try" not in str(reserved.value)
 
 
 def test_spawn_retries_the_label_when_the_live_index_trips(
@@ -6378,7 +6459,7 @@ def test_a_fleet_agents_cycle_names_its_own_project_under_a_hub(
     board = team_service.hook_session_start(session_id, project.root, "startup")
 
     assert "Your standing cycle (manager)" in board
-    commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+    commands = re.findall(r"aisquare fleet (?!adopt\b)[a-z]+(?: --project [\w.-]+)?", board)
     assert {command.split()[2] for command in commands} == {
         "spawn",
         "tell",
@@ -6418,7 +6499,7 @@ def test_under_a_hub_a_session_with_no_fleet_row_names_its_own_directorys_projec
 
     for board in (started, joined):
         assert "`aisquare fleet reap --project calm-otter` again, then" in board
-        commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+        commands = re.findall(r"aisquare fleet (?!adopt\b)[a-z]+(?: --project [\w.-]+)?", board)
         assert commands and all(c.endswith(f"--project {named.codename}") for c in commands)
         assert team_project(hub).id not in board
 
@@ -6429,7 +6510,8 @@ def test_under_a_hub_a_session_with_no_fleet_row_names_its_own_directorys_projec
     assert "Your standing cycle (manager)" in loose
     assert "`aisquare fleet reap --project <project>` again, then" in loose
     assert "The fleet commands below name <project>:" in loose
-    assert not re.search(r"aisquare fleet [a-z]+(?! --project)\b", loose), loose
+    # `fleet adopt` (#290) takes no --project: the conversation's own directory names it.
+    assert not re.search(r"aisquare fleet (?!adopt\b)[a-z]+(?! --project)\b", loose), loose
 
 
 def test_under_a_hub_a_session_with_no_project_is_told_a_pause_to_fill_in_not_the_hubs(
@@ -6491,7 +6573,7 @@ def test_a_cycle_with_no_fleet_row_names_its_project_by_its_codename(
     # (P1 WS-4): a path, not a command.
     state = str(paths.manager_state_file(project.id))
     for board in (started, joined):
-        commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+        commands = re.findall(r"aisquare fleet (?!adopt\b)[a-z]+(?: --project [\w.-]+)?", board)
         assert commands and all(c.endswith("--project calm-otter") for c in commands), board
         assert project.id not in board.replace(state, "")
 
@@ -6556,7 +6638,7 @@ def test_a_cycle_whose_project_cannot_be_read_still_gets_its_board(
 
     for board in (started, joined):
         assert "Your standing cycle (manager)" in board
-        commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+        commands = re.findall(r"aisquare fleet (?!adopt\b)[a-z]+(?: --project [\w.-]+)?", board)
         assert commands and all(c.endswith(f"--project {project.id}") for c in commands), board
     warned = [r.getMessage() for r in caplog.records if r.name == "aisquare.services.team"]
     assert len(warned) == 2 and all("OperationalError: database is locked" in w for w in warned)
@@ -8218,28 +8300,18 @@ def test_under_a_hub_each_read_and_write_goes_where_the_rule_says(
     assert case(hubbed) == expected
 
 
-def test_a_note_on_a_forgotten_hub_is_drained_there_and_named_by_it(hubbed: _Hubbed) -> None:
+def test_a_note_on_a_forgotten_hub_is_named_by_it(hubbed: _Hubbed) -> None:
     """Review of #259, round 32, 7/9: ``add_note(board_id=...)`` named its board through a
     lookup that read a forgotten project as none. A note ``fleet tell`` filed on a hub
     forgotten since, where its agents still read, went there, but its receipt named the hub
-    by its id, and its drain ran in the caller's directory (``spawn_drain(root=None)``),
-    distilling the caller's board, not the hub's. Both are the hub's own."""
-    from aisquare.services import distill as distill_service
-
+    by its id. The name is the hub's own."""
     w = hubbed
-    drained: list[tuple[Path | None, str | None]] = []
-    w.monkeypatch.setattr(
-        distill_service,
-        "spawn_drain",
-        lambda cwd=None, *, root=None, board=None: drained.append((root, board)),
-    )
     with store_session() as store:
         store.forget_project(w.hub.id)  # as 0.8.1 before round 32 allowed, to tidy the list
         assert store.get_project(w.hub.id) is None
 
     team_service.add_note("ship it", to_role="coder-1", board_id=w.hub.id)
 
-    assert drained == [(w.hub.root, w.hub.id)]
     receipt = team_service.last_delivery()
     assert receipt is not None and (receipt.board_id, receipt.board_name) == (w.hub.id, "hub")
     with store_session() as store:
@@ -20008,6 +20080,64 @@ def test_spawn_types_its_prompt_once_the_trust_question_is_answered(
     assert tmux.typed == [(pane, "paste", "start on tsk_1"), (pane, "key", "Enter")]
     assert receipt.notes == [] and clock.now < PROMPT_TIMEOUT
     assert claude_sharing.shows_trust_prompt(TRUST_SCREEN)  # the fixture is the question
+
+
+# --- Claude Code's own Remote Control, per role (#289) -------------------------------------
+
+
+def test_a_spawn_with_remote_control_keeps_it_through_a_restart(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """``fleet spawn --remote-control``: the window's launch is asked for it, the row's spec
+    records it, and ``fleet restart`` asks for it again from the spec."""
+    agent = fleet_service.spawn(project, "coder", worktree=False, remote_control=True).agent
+    spawned = _command(tmux)
+    tmux.die(agent.pane_id, 0)
+
+    restarted = fleet_service.restart(project, agent.label).started
+
+    assert "--remote-control" in spawned and "--no-remote-control" not in spawned
+    assert agent.launch_spec is not None and agent.launch_spec.remote_control is True
+    assert "--remote-control" in _command(tmux), "the restart replays it"
+    assert restarted.launch_spec is not None and restarted.launch_spec.remote_control is True
+
+
+def test_no_remote_control_turns_a_roles_default_off_and_nothing_asks_without_one(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    config = AppConfig()
+    config.fleet.roles["reviewer"] = FleetRoleSettings.model_validate({"remote_control": True})
+    save_config(config)
+
+    by_default = fleet_service.spawn(project, "reviewer", worktree=False).agent
+    default_command = _command(tmux)
+    turned_off = fleet_service.spawn(
+        project, "reviewer", worktree=False, remote_control=False
+    ).agent
+    off_command = _command(tmux)
+    plain = fleet_service.spawn(project, "coder", worktree=False).agent
+
+    assert "--remote-control" in default_command
+    assert by_default.launch_spec is not None and by_default.launch_spec.remote_control
+    assert "--no-remote-control" in off_command and "--remote-control" not in off_command
+    assert turned_off.launch_spec is not None and not turned_off.launch_spec.remote_control
+    plain_command = _command(tmux)
+    assert not any("remote-control" in part for part in plain_command), "as it was before"
+    assert plain.launch_spec is not None and not plain.launch_spec.remote_control
+
+
+def test_fleet_ls_json_says_whether_each_agent_asked_for_remote_control(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, runner: CliRunner
+) -> None:
+    fleet_service.spawn(project, "coder", label="coder-rc", worktree=False, remote_control=True)
+    fleet_service.spawn(project, "coder", label="coder-plain", worktree=False)
+
+    result = runner.invoke(app, ["--json", "fleet", "ls", "--project", project.id])
+
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.stdout)["agents"]
+    agents = {row["agent"]["label"]: row["remote_control"] for row in rows}
+    assert agents == {"coder-rc": True, "coder-plain": False}
 
 
 # --- admission: memory and the fleet-wide budget (#283, P2-W1a) -----------------------

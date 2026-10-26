@@ -807,12 +807,23 @@ def test_help_documents_the_hand_off_and_its_opt_outs(machine: Machine) -> None:
 
 
 def _interrupted(
-    machine: Machine, body: str, signum: signal.Signals, *, during_download: bool = False
+    machine: Machine,
+    body: str,
+    signum: signal.Signals,
+    *,
+    during_download: bool = False,
+    armed: str = "",
 ) -> tuple[int, str]:
     """Run main's script into a release whose script runs ``body``, signal the
     whole process group once that script has started (or, ``during_download``,
     while its download hangs), as Ctrl-C at a terminal does, and return the
     run's status and output.
+
+    "Started" is a marker the release touches, and it touches it AFTER the lines
+    in ``armed`` (a trap it must have set before it is signalled): a marker
+    touched first was seen, and the signal sent, before the release's shell had
+    reached its next line, which then died of the signal where the test meant it
+    to handle it (CI run 40359938463: ``SURVIVED`` never printed).
 
     Started with SIGINT and SIGTERM at their defaults, as a terminal gives them.
     A suite started as a background job (`pytest &` in a script) runs with
@@ -822,7 +833,8 @@ def _interrupted(
     than the script. Measured: it failed only when the suite ran under `&`.
     """
     started = machine.root / "release-started"
-    machine.serve_latest(reporting_release(body=f'touch "{started}"\n{body}'))
+    armed_lines = f"{armed}\n" if armed else ""
+    machine.serve_latest(reporting_release(body=f'{armed_lines}touch "{started}"\n{body}'))
     machine.pypi(STAMP)
     if during_download:
         (machine.served / "HANG").touch()
@@ -892,7 +904,7 @@ def test_a_release_that_survives_the_signal_keeps_its_status(machine: Machine) -
     """The run's status is the release's: a script that handles Ctrl-C and ends
     cleanly ends the run cleanly, rather than as the parent's 130."""
     returncode, output = _interrupted(
-        machine, "trap 'echo SURVIVED; exit 0' INT\nsleep 30\nexit 3", signal.SIGINT
+        machine, "sleep 30\nexit 3", signal.SIGINT, armed="trap 'echo SURVIVED; exit 0' INT"
     )
 
     assert "SURVIVED" in output, output
@@ -1059,7 +1071,7 @@ def current_machine(machine: Machine) -> Machine:
     payload = (
         '[{"name": "home", "status": "ok", "detail": "ok", "fix": null},'
         '{"name": "snapshot", "status": "warn", "detail": "no snapshot", "fix": "onboard"},'
-        '{"name": "brain", "status": "warn", "detail": "gbrain not found", "fix": "optional"}]'
+        '{"name": "brain", "status": "warn", "detail": "no brain CLI found", "fix": "optional"}]'
     )
     _executable(
         machine.bin / "aisquare",

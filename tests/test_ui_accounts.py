@@ -1845,6 +1845,42 @@ def test_cancel_stops_a_sign_in_and_a_sign_in_of_an_existing_slot_is_never_disca
     assert said.startswith("sign-in cancelled — cancelled; nothing changed")
 
 
+@pytest.mark.parametrize("lands", [True, False], ids=["landed", "cancelled"])
+def test_a_landed_sign_in_is_told_to_the_shell_once_and_a_cancelled_one_never(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lands: bool
+) -> None:
+    """#286: the shell goes back to where a sign-in was started from on ``SignInLanded``.
+    It is posted once per landing, and never for a sign-in that did not land: that one is
+    ``SignInAbandoned``, which reopens nothing."""
+    _script_claude_sign_in(monkeypatch, tmp_path, lands=lands)
+    told: list[str] = []
+
+    async def landed(self: FleetApp, event: accounts_view.SignInLanded) -> None:
+        told.append(f"landed:{event.slot}")
+
+    def abandoned(self: FleetApp, event: accounts_view.SignInAbandoned) -> None:
+        told.append("abandoned")
+
+    monkeypatch.setattr(FleetApp, "on_sign_in_landed", landed)
+    monkeypatch.setattr(FleetApp, "on_sign_in_abandoned", abandoned)
+
+    async def go(pilot: Pilot[None]) -> list[str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await pilot.click("#claude-add")
+        await settle(app)
+        if lands:
+            view._poll_login()
+        else:
+            await pilot.click("#login-cancel")
+        await pilot.pause()
+        await settle(app)
+        await pilot.pause()
+        return told
+
+    assert drive(go) == (["landed:2"] if lands else ["abandoned"])
+
+
 def test_cancel_after_the_login_landed_keeps_the_new_slot_and_wires_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2593,6 +2629,18 @@ def drive_held(reads: HeldReads, fn: Callable[[Pilot[None]], Awaitable[T]]) -> T
     return asyncio.run(run())
 
 
+async def _retype_as_late(pilot: Pilot[None], view: AccountsView) -> None:
+    """Slot 3's open field, which says "work", made to say "late": the old name taken out
+    first, and ``late`` typed once it is. ``pilot.press("end", backspace…, *"late")`` sent them
+    in one go, and on a loaded box the letters reached the field ahead of the keys that are
+    bindings (``end``, ``backspace``): "workl" less four was ``wate`` (13 runs in 60 here)."""
+    app = fleet_app(pilot)
+    await pilot.press("end", *["backspace"] * 4)
+    await settle_until(app, lambda: field(view, 3).value == "", group=_NO_WORKER)
+    await pilot.press(*"late")
+    await settle_until(app, lambda: field(view, 3).value == "late", group=_NO_WORKER)
+
+
 def field(view: AccountsView, slot: int) -> accounts_view.AliasInput:
     return row(view, slot).query_one(f"#account-alias-{slot}", accounts_view.AliasInput)
 
@@ -2646,16 +2694,25 @@ def test_every_row_is_renamed_in_place_by_double_click_enter_or_f2() -> None:
             "buttons": [b.id for b in view.query(Button) if "rename" in (b.id or "")]
         }
         await pilot.click("#account-name-2")  # one click: the row, focused, not renamed
-        await pilot.pause()
+        await settle_until(app, lambda: app.focused is row(view, 2), group=_NO_WORKER)
         seen["single"] = (app.focused is row(view, 2), row(view, 2).renaming)
+
+        async def until_row(slot: int, done: Callable[[int], bool]) -> None:
+            await settle_until(app, lambda: done(slot), group=_NO_WORKER)
+
         for slot, how in ((1, "double"), (2, "enter"), (3, "f2")):
             if how == "double":
                 await rename(pilot, slot)
             else:
+                # The key goes to the row once it has the focus, and the field is read once it
+                # is open and focused: a pause for each read the row before it was focused, and
+                # the field before it was (f2: 1 run in 3 repeats of the module under load).
                 row(view, slot).focus()
-                await pilot.pause()
+                await until_row(slot, lambda n: app.focused is row(view, n))
                 await pilot.press(how)
-                await pilot.pause()
+                await until_row(
+                    slot, lambda n: row(view, n).renaming and app.focused is field(view, n)
+                )
             seen[how] = (
                 row(view, slot).renaming,
                 app.focused is field(view, slot),
@@ -2663,7 +2720,7 @@ def test_every_row_is_renamed_in_place_by_double_click_enter_or_f2() -> None:
                 row(view, slot).query_one(accounts_view.NameCell).display,
             )
             await pilot.press("escape")
-            await pilot.pause()
+            await until_row(slot, lambda n: not row(view, n).renaming)
         return seen
 
     seen = drive(go, overview=overview)
@@ -2969,7 +3026,7 @@ def test_rename_reopened_after_its_write_landed_but_before_the_next_frame_says_t
         view = await open_accounts(pilot)
         said = heard(view, monkeypatch)
         await rename(pilot, 3)  # "work"
-        await pilot.press("end", *["backspace"] * 4, *"late")
+        await _retype_as_late(pilot, view)
         reads.holding = True  # the re-read the write asks for waits, as on a busy store
         await pilot.press("enter")
         await settle_until(
@@ -3015,7 +3072,8 @@ def test_a_frame_read_before_the_write_and_painted_after_it_does_not_bring_the_o
         app.refresh_accounts()  # a tick: its read takes the registry now ("work")…
         stale = await reads.next_held()  # …and waits
         await rename(pilot, 3)
-        await pilot.press("end", *["backspace"] * 4, *"late", "enter")
+        await _retype_as_late(pilot, view)
+        await pilot.press("enter")
         await settle_until(
             app, lambda: not row(view, 3).renaming, group=accounts_view.RENAME_WORKER
         )
@@ -3370,10 +3428,21 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
             out["open"] = _columns_at(view)
             out["field"] = (field(view, 2).region, name_box)
             await pilot.press("escape")
+            # The field is closed and the page quiet before the table is scrolled: a scroll made
+            # while the closing was still being laid out was undone by it (scroll_x back at 0
+            # for good, in 3 runs of 120 under load at 100 and 140 columns).
+            await settle_until(app, lambda: not row(view, 2).renaming, group=_NO_WORKER)
+            await settle_page(app, group=_NO_WORKER)
             table = view.query_one("#claude-table")
             out["scrolls"] = table.max_scroll_x
             table.scroll_to(x=table.max_scroll_x, animate=False, immediate=True)
-            await pilot.pause()
+            # Settled until the columns have moved, which is what is read next, not paused for
+            # once: they were read before the scroll had been laid out (1 run in a full suite
+            # under load at 140 columns). Where the table fits there is nothing to scroll, and
+            # nothing to wait for.
+            await settle_until(
+                app, lambda: not out["scrolls"] or _columns_at(view) != out["closed"], timeout=30
+            )
             out["scrolled"] = _columns_at(view)
             return out
 

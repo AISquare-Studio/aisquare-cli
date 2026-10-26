@@ -22,6 +22,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
@@ -90,7 +91,7 @@ from aisquare.core.config import load_config, save_config
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import update_state
 from aisquare.core.store import ContextStore, SqliteStore, store_session
-from aisquare.core.tmux import Completed
+from aisquare.core.tmux import Completed, TmuxServer
 from aisquare.models import (
     CheckStatus,
     ClaudeAccount,
@@ -2492,7 +2493,9 @@ def test_help_from_the_board_opens_at_its_section_with_every_icon_in_view(
     )
 
 
-def test_keyboard_cursor_walks_the_rows_and_enter_activates(tmp_path: Path, script: Script) -> None:
+def test_keyboard_cursor_walks_the_rows_and_enter_activates(
+    tmp_path: Path, script: Script, captain_off: None
+) -> None:
     seed(tmp_path, ("prj_a", "alpha", None))
     script["prj_a"] = [status("prj_a", "manager", "manager", "waiting")]
 
@@ -2502,31 +2505,25 @@ def test_keyboard_cursor_walks_the_rows_and_enter_activates(tmp_path: Path, scri
         await pilot.pause()
         cursors_before = len(app.query(".cursor"))
         walk: list[str] = []
-        await pilot.press("up")  # at the top already: stays on the first row
-        await settle(app)
-        walk.append(type(app.query_one(".cursor")).__name__)
-        await pilot.press("down")
-        await settle(app)
-        walk.append(type(app.query_one(".cursor")).__name__)
-        await pilot.press("down")
-        await settle(app)
-        walk.append(type(app.query_one(".cursor")).__name__)
-        await pilot.press("up")
-        await settle(app)
-        walk.append(type(app.query_one(".cursor")).__name__)
+        # Up at the top already stays on the first row; then down past Spawn agent to the
+        # card, its agent row, and back up to the title (the captain's walk: test_sidebar_actions).
+        for key in ("up", "down", "down", "down", "up"):
+            await pilot.press(key)
+            await settle(app)
+            walk.append(type(app.query_one(".cursor")).__name__)
         await pilot.press("enter")
         await settle(app)
         return cursors_before, walk, app.content.current
 
     before, walk, current = drive(go)
     assert before == 0  # no cursor until a key is pressed
-    assert walk == ["AddButton", "ProjectTitle", "AgentRow", "ProjectTitle"]
+    assert walk == ["AddButton", "SpawnButton", "ProjectTitle", "AgentRow", "ProjectTitle"]
     assert current == "project-prj_a"  # Enter on the title opened the project
     assert len(walk) == len(set(walk)) + 1  # the cursor moved, it did not stick
 
 
 def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
-    tmp_path: Path, script: Script
+    tmp_path: Path, script: Script, captain_off: None
 ) -> None:
     """A row is a non-focusable Static: mouse-down focuses its nearest focusable ancestor.
 
@@ -2536,7 +2533,7 @@ def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
     focus landed on ``VerticalScroll``, no ``.cursor`` row existed and each
     ``down`` moved ``scroll_y`` by one instead.
     """
-    specs = [(f"prj_{index:02d}", f"p{index:02d}", None) for index in range(15)]
+    specs = [(f"prj_{index:02d}", f"p{index:02d}", None) for index in range(25)]
     seed(tmp_path, *specs)
     for project_id, _, _ in specs:
         script[project_id] = [status(project_id, "manager", "manager", "waiting")]
@@ -2570,13 +2567,13 @@ def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
     overflow, focused, walk, scrolls, on_pane = drive(go)
     assert overflow > 0, "the list must overflow, or the bug cannot show"
     assert focused == "Sidebar"
-    assert walk == ["agent:agt_00_manager", "spawn:prj_00"]  # the arrows moved the cursor…
+    assert walk == ["agent:agt_00_manager", "project:prj_01"]  # the arrows moved the cursor…
     assert scrolls == [0.0, 0.0]  # …and not the scroll
     assert on_pane == "RecordingPane"
 
 
 def test_collapsing_the_card_under_the_cursor_leaves_one_cursor_and_moves_beside_it(
-    tmp_path: Path, script: Script
+    tmp_path: Path, script: Script, captain_off: None
 ) -> None:
     """Exactly one row may render as the keyboard cursor, collapsed cards included.
 
@@ -2598,7 +2595,7 @@ def test_collapsing_the_card_under_the_cursor_leaves_one_cursor_and_moves_beside
 
         app.sidebar.focus()
         await pilot.pause()
-        for _ in range(3):  # add → project:prj_a → agent:agt_a_manager
+        for _ in range(4):  # add → spawn-agent → project:prj_a → agent:agt_a_manager
             await pilot.press("down")
             await settle(app)
         walked = cursors()
@@ -2620,7 +2617,9 @@ def test_collapsing_the_card_under_the_cursor_leaves_one_cursor_and_moves_beside
     assert onwards == ["agent:agt_b_manager"]
 
 
-def test_the_cursor_skips_the_rows_of_a_collapsed_card(tmp_path: Path, script: Script) -> None:
+def test_the_cursor_skips_the_rows_of_a_collapsed_card(
+    tmp_path: Path, script: Script, captain_off: None
+) -> None:
     """Collapsing hides the rows through their ``#agents`` holder, not their own flag."""
 
     def walk(*, collapse: bool) -> list[str]:
@@ -2634,7 +2633,7 @@ def test_the_cursor_skips_the_rows_of_a_collapsed_card(tmp_path: Path, script: S
             app.sidebar.focus()
             await pilot.pause()
             keys: list[str] = []
-            for _ in range(4):
+            for _ in range(5):
                 await pilot.press("down")
                 await settle(app)
                 keys.append(app.query_one(".cursor", Activatable).selection_key)
@@ -2647,16 +2646,23 @@ def test_the_cursor_skips_the_rows_of_a_collapsed_card(tmp_path: Path, script: S
     script["prj_b"] = [status("prj_b", "manager", "manager", "waiting")]
 
     collapsed = walk(collapse=True)
-    assert collapsed == ["add", "project:prj_a", "project:prj_b", "agent:agt_b_manager"]
-    assert not any(key.endswith("agt_a_manager") or key == "spawn:prj_a" for key in collapsed), (
+    assert collapsed == [
+        "add",
+        "spawn-agent",
+        "project:prj_a",
+        "project:prj_b",
+        "agent:agt_b_manager",
+    ]
+    assert not any(key.endswith("agt_a_manager") for key in collapsed), (
         "the cursor must not land on a row hidden inside the collapsed card"
     )
     # Control: expanded, the very same keys walk through those rows.
     assert walk(collapse=False) == [
         "add",
+        "spawn-agent",
         "project:prj_a",
         "agent:agt_a_manager",
-        "spawn:prj_a",
+        "project:prj_b",
     ]
 
 
@@ -3481,8 +3487,16 @@ def test_the_agent_view_offers_stop_exactly_while_there_is_a_process(
         app = fleet_app(pilot)
         offered: set[str] = set()
         for state in states:
-            await pilot.click(row_for(app, f"agt_a_agent-{state}"))
-            await pilot.pause()
+            wanted = f"agt_a_agent-{state}"
+
+            def opened(wanted: str = wanted) -> bool:
+                view = app.current_view()
+                return isinstance(view, AgentView) and view.status.agent.id == wanted
+
+            await pilot.click(row_for(app, wanted))
+            # The row's own view, waited for: a pause after the click read the button of
+            # the view the last row had opened, on windows-latest (run 40208805943).
+            await settle_until_held(app, opened, what=f"the view of {wanted}")
             view = app.current_view()
             assert isinstance(view, AgentView)
             if view.query_one("#agent-stop", Button).display:
@@ -6496,3 +6510,238 @@ def test_the_settings_tab_follows_a_rename_made_on_the_card_or_in_a_shell(
     assert out["cleared"] == (("", "project settings — alpha"), None), (
         "a blank Save clears a nickname set elsewhere"
     )
+
+
+# --- a paste no focused widget took goes to the one live pane (#288) ------------------------
+
+
+class PasteRecordingPane(TerminalPane):
+    """A live pane on the test's socket whose ``_forward`` records instead of sending."""
+
+    def __init__(self, id: str = "paste-pane") -> None:
+        super().__init__("%9", server=TmuxServer(PRIVATE_SOCKET, binary=sys.executable), id=id)
+        self.forwarded: list[tuple[str, str | bytes]] = []
+
+    def _forward(self, kind: Any, value: str | bytes) -> bool:
+        self.forwarded.append((kind, value))
+        return True
+
+
+def test_a_paste_the_sidebar_got_reaches_the_one_live_pane_and_focuses_it(
+    tmp_path: Path, script: Script
+) -> None:
+    """#288: a terminal hands a dropped file over as a paste, and Textual gives a paste to
+    the focused widget alone. With the sidebar focused, a screenshot dropped on `asq`
+    reached no agent; it goes to the pane on screen now, which takes the keyboard."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str | bytes]], bool, bool]:
+        app = fleet_app(pilot)
+        pane = PasteRecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        app.sidebar.focus()
+        await pilot.pause()
+        was_sidebar = app.focused is app.sidebar
+        app.post_message(events.Paste("/tmp/shot.png"))
+        await settle(app)
+        return pane.forwarded, was_sidebar, app.focused is pane
+
+    forwarded, was_sidebar, focused = drive(go)
+    assert was_sidebar, "the premise: the sidebar had the keyboard"
+    assert forwarded == [("paste", "/tmp/shot.png")]
+    assert focused, "the pane took the keyboard with it"
+
+
+def test_a_paste_with_no_live_pane_on_screen_is_one_toast_and_no_tmux_call(
+    tmp_path: Path, script: Script, no_real_tmux: list[tuple[str, ...]]
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    toasts: list[str] = []
+
+    async def go(pilot: Pilot[None]) -> list[tuple[str, ...]]:
+        app = fleet_app(pilot)
+        real_notify = app.notify
+
+        def notify(message: str, **kwargs: Any) -> None:
+            toasts.append(message)
+            real_notify(message, **kwargs)
+
+        app.notify = notify  # type: ignore[method-assign]
+        app.sidebar.focus()
+        await pilot.pause()
+        before = list(no_real_tmux)
+        app.post_message(events.Paste("/tmp/shot.png"))
+        await settle(app)
+        return no_real_tmux[len(before) :]
+
+    tmux_calls = drive(go)
+    assert toasts == ["nothing to paste into — open an agent first"]
+    assert not any("paste" in " ".join(argv) or "buffer" in " ".join(argv) for argv in tmux_calls)
+
+
+def test_a_paste_with_two_live_panes_on_screen_says_to_pick_one(
+    tmp_path: Path, script: Script
+) -> None:
+    """With two live panes on screen the router does not guess, and the toast said "nothing to
+    paste into" (#340's review): it says what to do instead."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    toasts: list[str] = []
+
+    async def go(pilot: Pilot[None]) -> list[tuple[str, str | bytes]]:
+        app = fleet_app(pilot)
+        real_notify = app.notify
+
+        def notify(message: str, **kwargs: Any) -> None:
+            toasts.append(message)
+            real_notify(message, **kwargs)
+
+        app.notify = notify  # type: ignore[method-assign]
+        first = PasteRecordingPane()
+        await app.content.add_content(first, set_current=True)
+        second = PasteRecordingPane(id="paste-pane-2")
+        await app.screen.mount(second)
+        app.sidebar.focus()
+        await pilot.pause()
+        app.post_message(events.Paste("/tmp/shot.png"))
+        await settle(app)
+        return [*first.forwarded, *second.forwarded]
+
+    forwarded = drive(go)
+    assert forwarded == []
+    pastes = [toast for toast in toasts if "paste" in toast]  # not the fake panes' own
+    assert pastes == ["2 panes on screen — click the one to paste into, then paste again"]
+
+
+def test_a_windows_path_pasted_under_wsl_is_converted_off_the_ui_thread(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`wslpath` may take its whole 2 s timeout, and the paste ran it on the UI thread, so
+    a slow one froze asq (#340's review). It runs in a worker now, and the paste reaches
+    the agent, converted, when it answers."""
+    import subprocess
+    from types import SimpleNamespace
+
+    seed(tmp_path, ("prj_a", "alpha", None))
+    shot = tmp_path / "c" / "shot.png"
+    shot.parent.mkdir(parents=True)
+    shot.write_bytes(b"png")
+    on_ui_thread: list[bool] = []
+
+    run = subprocess.run  # patched on the module, so every other caller gets the real one
+
+    def wslpath(argv: list[str], **kwargs: Any) -> Any:
+        if argv[:1] != ["wslpath"]:
+            return run(argv, **kwargs)
+        on_ui_thread.append(threading.current_thread() is threading.main_thread())
+        return SimpleNamespace(returncode=0, stdout=f"{shot}\n", stderr="")
+
+    monkeypatch.setattr("aisquare.cli.ui.terminal.subprocess.run", wslpath)
+    monkeypatch.setattr("aisquare.cli.ui.terminal.in_wsl", lambda environ: True)
+
+    async def go(pilot: Pilot[None]) -> list[tuple[str, str | bytes]]:
+        app = fleet_app(pilot)
+        pane = PasteRecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        pane.focus()
+        await pilot.pause()
+        app.post_message(events.Paste("C:\\shot.png"))
+        await settle(app)
+        app.post_message(events.Paste("/tmp/plain.png"))  # no worker for a path as sent
+        await settle(app)
+        return pane.forwarded
+
+    forwarded = drive(go)
+    assert on_ui_thread == [False], "asked once, off the UI thread"
+    assert forwarded == [("paste", str(shot)), ("paste", "/tmp/plain.png")]
+
+
+def test_a_paste_into_a_dialogs_input_never_reaches_a_pane_and_nothing_passes_a_dialog(
+    tmp_path: Path, script: Script
+) -> None:
+    """The Spawn dialog's label keeps its own paste; and with the dialog open, a paste its
+    focused widget did not take is not handed to the pane behind it."""
+    from textual.widgets import Button, Input
+
+    from aisquare.cli.ui.spawn import SpawnDialog
+
+    [project] = seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[tuple[str, str | bytes]]]:
+        app = fleet_app(pilot)
+        pane = PasteRecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        app.push_screen(SpawnDialog(project, accounts=None))
+        await settle(app)
+        label = app.screen.query_one("#spawn-label", Input)
+        label.value = ""
+        label.focus()
+        await pilot.pause()
+        app.post_message(events.Paste("coder-pasted"))
+        await settle(app)
+        app.screen.query_one("#spawn-cancel", Button).focus()
+        await pilot.pause()
+        app.post_message(events.Paste("/tmp/shot.png"))
+        await settle(app)
+        return label.value, pane.forwarded
+
+    value, forwarded = drive(go)
+    assert value == "coder-pasted"
+    assert forwarded == []
+
+
+def test_a_paste_a_text_area_took_is_not_sent_to_the_pane_as_well(
+    tmp_path: Path, script: Script
+) -> None:
+    """Textual's ``TextArea`` inserts a paste without stopping it, so it bubbles on to the
+    shell: a text area on the main screen must not have its paste typed into the agent too."""
+    from textual.widgets import TextArea
+
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[tuple[str, str | bytes]]]:
+        app = fleet_app(pilot)
+        pane = PasteRecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        area = TextArea(id="paste-area")
+        await app.screen.mount(area)
+        area.focus()
+        await pilot.pause()
+        app.post_message(events.Paste("a note"))
+        await settle(app)
+        return area.text, pane.forwarded
+
+    text, forwarded = drive(go)
+    assert text == "a note"
+    assert forwarded == []
+
+
+def test_the_paste_log_records_each_paste_where_it_lands_only_when_asked(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#288's reproduction matrix is filled from what a terminal sends on a drop: with
+    `AISQUARE_PASTE_LOG` naming a file, each paste adds its length, its head and the
+    widget that had the keyboard. Without it, nothing is written."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    log = tmp_path / "paste.log"
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        pane = PasteRecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        app.sidebar.focus()
+        await pilot.pause()
+        app.post_message(events.Paste("/tmp/shot.png"))  # the router's: the sidebar had it
+        await settle(app)
+        app.post_message(events.Paste("again"))  # the pane's own: it has the keyboard now
+        await settle(app)
+
+    drive(go)
+    unasked = log.exists()
+    monkeypatch.setenv("AISQUARE_PASTE_LOG", str(log))
+    drive(go)
+
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert not unasked, "off by default: a paste may be a secret"
+    assert len(lines) == 2, lines
+    assert "focused=Sidebar" in lines[0] and "len=13 head='/tmp/shot.png'" in lines[0]
+    assert "focused=PasteRecordingPane#paste-pane" in lines[1] and "len=5" in lines[1]

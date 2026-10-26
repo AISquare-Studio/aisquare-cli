@@ -1400,6 +1400,9 @@ def _role_cycle_core(
             "and removes the agent's worktree once its work is pushed. When the validator's",
             f"gate is PASS: `{fleet('reap')}` again, then",
             f'`aisquare note "READY: <PRs + evidence>" --kind result --as {sid}` and stop.',
+            "Asked what the user was working on in Claude outside the CLI? Only then: show",
+            "`aisquare fleet adopt --list`, let them pick, `aisquare fleet adopt <id>`, and check",
+            "the new pane is working.",
             *_auto_stop_line(),
             *_state_rule(state_file),
             "Never watch panes, CI or pull requests with Monitor or sleep loops: `aisquare",
@@ -1408,13 +1411,13 @@ def _role_cycle_core(
                 [
                     "Never write code. Never merge. Blocked twice on one task? Ask your parent",
                     f'manager: `aisquare note "…" --kind question --to parent --as {sid}`. Labels',
-                    "are unique and descriptive",
+                    "are unique, descriptive and at most 24 characters",
                 ]
                 if escalate_to_parent
                 else [
                     "Never write code. Never merge. Blocked twice on one task? Ask the human:",
-                    f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and '
-                    "descriptive",
+                    f'`aisquare note "…" --kind question --as {sid}`. Labels are unique, '
+                    "descriptive and at most 24 characters",
                 ]
             ),
             "(coder-auth, not coder-2).",

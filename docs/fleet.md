@@ -79,7 +79,13 @@ tmux can see and its row says so (`no hooks`).
    the left and a Welcome page on the right that walks you to a fleet in three
    steps: pick a project, connect Claude Code (it names the install command
    when Claude Code is missing), then start the manager and two coders. Press
-   `w` in the sidebar to come back to it. No script ever meets a
+   `w` in the sidebar to come back to it. Step 2 is ✓ once Claude Code is
+   connected, signed in or not (it asks when it first starts), and *Sign in*
+   stays a Shift+Tab back from step 3 until you are. It opens Accounts, and
+   once that sign-in lands Welcome is shown again with the keyboard on the next
+   step, *Start manager* when the sign-in was all it waited for; a sign-in that
+   lands from nowhere in particular names the next step under the notice
+   instead ("Next: open alpha and press Start manager"). No script ever meets a
    full-screen app, and the two ways of getting no UI differ. **In a pipe or
    with `TERM=dumb`**: the help page on stdout and exit 2, byte for byte as
    before — the same ~5 KB either way (5,159 bytes at 80 columns, measured).
@@ -106,6 +112,25 @@ tmux can see and its row says so (`no hooks`).
    **Personas** tab lists the personas it can use, previews exactly what an
    agent is briefed with, and imports, edits, exports, removes and validates
    them (`docs/personas.md`).
+
+   Once the manager has spawned a team, a line under its info line counts it
+   per role and state, in the sidebar's icons and chips: `🔨 2▶  🧪 1⏸  👀 1🔔
+   · board for detail`. It is read from the same refresh as the sidebar, so it
+   costs nothing; click it for the **Board** tab. With only the manager
+   running, there is no line.
+
+   **3a. Reading the board.** The **Board** tab's top line says what needs
+   you: `needs you: 🔔 1 waiting · ❓ 2 questions · 👀 1 in review · ⛔ 1
+   blocked`, each count a button to the first thing it counts, or "nothing
+   needs you — the manager is working; talk to it on the Manager tab". 🔔 is a
+   pane waiting on a key and ❓ a question to you: press it, and the agent's
+   pane opens, where you answer. 👀 is a card waiting on a reviewer agent, or
+   on you on its PR; ⛔ is blocked, and its detail says on what. The counts are
+   the captain's attention queue's (`docs/captain.md`), read from the board's
+   own tick; stale agents are left to the captain. Nothing on the board is
+   typed into: you talk to the manager, and it writes the tasks. With none
+   open, the table says so: "No open tasks. The manager writes them when you
+   give it a goal on the Manager tab."
 4. **Watch the agents appear**, indented under the project, each with a role
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
    state chip — **▶ working**, **⏸ waiting** (a fresh agent reads waiting until its
@@ -128,9 +153,14 @@ tmux can see and its row says so (`no hooks`).
    the transcript when that is on disk (`fleet restart` below) — and the new row
    is shown if this view is still the one on screen. Both ignore a click in the
    second after they appear or move.
-   **`＋ spawn agent`** under a project opens the **Spawn dialog** for that
-   project, headed with its name and codename. It shows three fields: **role**
-   (`coder` preselected; first in the list *(none) — general-purpose Claude*, a
+   **`＋ Spawn agent`**, at the top of the sidebar under *Fleet* (one for the whole
+   list, not one per project), opens the **Spawn dialog**, headed with the project's
+   name and codename. Its first field is **project**: every listed project, in the
+   sidebar's order, preselected to the card or the agent's project you have selected,
+   else the first; changing it re-reads what depends on the project (git, a running
+   manager, teammates, tasks, personas, the prefilled label) and keeps what you typed
+   for the rest. With no project yet it says so and opens nothing. Under it come three
+   fields: **role** (`coder` preselected; first in the list *(none) — general-purpose Claude*, a
    plain Claude Code session with no standing cycle or mission, `fleet spawn
    agent` below; then the fleet's roles plus any role bound with `team bind`;
    `manager` is greyed out while one runs), **hand off from** (a teammate to
@@ -156,10 +186,12 @@ tmux can see and its row says so (`no hooks`).
    Then label (prefilled `<role>-1`, or `<role>-<task short id>` once a task is
    picked; 🎲 offers `<role>-<adjective>-<animal>`; a label that breaks the rule
    disables *Spawn* and shows the rule), task (the project's open tasks),
-   worktree (disabled with "not a git repository" outside one), permission mode,
-   **model** and **effort** (opened on your last pick, whatever the role, or on
-   what a role's settings pin for that role; blank is the account's own default,
-   and clearing a field makes that your pick too: [The roles](#the-roles)),
+   worktree (disabled with "not a git repository" outside one), *Claude Remote
+   Control* (Claude Code's own, at the role's `remote_control`; it follows the role
+   until you touch it), permission mode, **model** and **effort** (opened on your
+   last pick, whatever the role, or on what a role's settings pin for that role;
+   blank is the account's own default, and clearing a field makes that your pick
+   too: [The roles](#the-roles)),
    extra agent args (split like a shell would; a quoting error is shown inline)
    and a first prompt. A field left as it opened means the role's default,
    exactly as an omitted `fleet spawn` flag does; picking `(none)` over a role
@@ -168,7 +200,12 @@ tmux can see and its row says so (`no hooks`).
    reason; a spawn toasts its receipt and notes and opens the new agent's pane.
    `Esc` cancels, except while a spawn is already running: that one cannot be
    taken back, so the dialog waits for its answer, and *Pick…* and *Import…*
-   are disabled until it has it.
+   are disabled until it has it. *Pick… ▸ + New account* leaves for the
+   Accounts page's sign-in, and once it lands the dialog opens again as it was
+   typed (project, label, task, first prompt, persona, binary), on the new account; the
+   persona picker's *+ New account* comes back the same way, the new account
+   highlighted. A sign-in that does not land reopens nothing, and one toast says
+   so; going to another page first drops the way back.
 5. Selecting an agent gives its pane the keyboard at once — type, and it reaches
    Claude Code. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
    never forwards; configurable). With the sidebar focused: `t` picks a theme,
@@ -360,6 +397,7 @@ follows as a `⚠` line.
 | `--bin B` | the agent executable | the role's binding, else `claude` |
 | `--prompt TEXT` | the agent's first message: on Claude Code's command line, typed for any other binary ([the first message](#the-first-message)); after the kickoff with `--task`. Typed into Claude Code (`[fleet] first_prompt = "type"`), it goes in once its input box is drawn, past its first-run Security notes screen (Enter) | none |
 | `--persona NAME` | the persona the agent runs as ([docs/personas.md](personas.md)): passed to `launch`, briefed once at session start, recorded on the row | the role's `[fleet.roles.<role>].persona`, else none |
+| `--remote-control` / `--no-remote-control` | start it with Claude Code's own Remote Control, titled `<project> · <label>`, to continue from claude.ai/code or the Claude app ([remote](remote.md#claude-codes-own-remote-control)); recorded on the row, so a restart and a switch keep it; `fleet ls --json` reports it as `remote_control` | the role's `[fleet.roles.<role>].remote_control`, else off |
 | `--board-context all\|relevant\|none` | what of the board it reads: `relevant` keeps its own tasks, what is addressed to its role or label, and decisions; `none` gives no recent updates at start and no per-prompt deltas, its task, protocol and cycle unchanged. Set on its window as `AISQUARE_BOARD_CONTEXT` and recorded, so `restart` and `switch` keep it. A manager reads `all`, and a narrower one is refused | the role's `[fleet.roles.<role>].board_context`: `none` for the reviewer, `all` for the rest |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
@@ -1036,7 +1074,10 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   row reads its usage again. On a row that reads fine the same button says
   **Log in again**: the same flow, for a fresh login on a working slot, without
   `aisquare accounts run <slot>` and `/login` by hand. It does not clear a rate
-  limit (below).
+  limit (below). `/login` typed in an agent's own fleet pane works too: on macOS
+  the login goes to the Keychain, which each slot is read from (0.8.1, #263).
+  Where the Keychain refuses the write, as in an SSH session, Claude Code keeps it
+  in the slot's `.credentials.json` (mode 0600) instead.
 - **Remove** forgets a slot the CLI owns. Its directory is renamed beside
   itself as `<n>.removed-<stamp>` — the login, the settings and the transcripts
   kept, never listed again, deletable by hand — and the number is free for the
@@ -1095,6 +1136,49 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   distance and a clock time — `resets in 3h 10m (18:00)`, `resets in 2d 4h (Tue
   02:00)` — the same string on the page and in `aisquare accounts usage`, so a
   weekly window six days out never looks like tonight.
+- **The fleet at a glance** (#287). Under the usage bar, one line for every
+  account at once: `Fleet: 58% left now · week: 1.8 of 3 accounts left · next
+  weekly reset in 2d 4h (Thu 14:00) (account 3)`. *Left now* is the mean, over
+  the usable accounts, of each one's fuller window (the share a spawn has to
+  work with). *Week* is account-weeks: the sum of each account's weekly window
+  left, out of the accounts whose week was read. The reset is the soonest
+  weekly one. The status line under *⚙ Settings* carries the same *left now*
+  figure beside the count, `● 3× claude 58%`, in the colour of its dot.
+  `aisquare accounts usage` ends with an `all` row (the mean of each column,
+  percent USED like the rows above it) and the same line; `aisquare --json
+  accounts usage --summary` prints `{"accounts": [...], "summary": {...}}`, the
+  summary with `percent_left`, `week_percent_left`, `weeks_left`,
+  `week_left_by_slot` and `week_resets_soonest`. Plain `--json` stays the list.
+- **Claude Code's status line** (#287, opt-in). `aisquare accounts statusline
+  --install` sets `asq-statusline` as the status line of every account (or
+  `--slot N`), in each one's `settings.json`, only where none is set. Inside
+  every session it prints one line, `acct 3 · 5h 42% · wk 61% · fleet 58% left
+  (3×) · ctx 34%`: the account's five-hour and weekly use, the fleet's share left
+  and the session's context, shortened from the end to fit. The fleet's share is
+  shown only while its file (`fleet.json`, which `asq` rewrites every minute and
+  `aisquare accounts usage` on each run) is at most five minutes old, the usage
+  cache's own age; after that the part is left out, and the account's name stays.
+  A status line you set yourself is never replaced: `--install --wrap` keeps it
+  and prints its line first, and `--uninstall` (or `aisquare uninstall`) takes out
+  only what aisquare wrote, putting yours back as it was, byte for byte, from the
+  copy of `settings.json` made at install. A command that cannot be read back
+  from inside ours exactly as you wrote it is not wrapped: on Windows that is one
+  with a `"` in it, a quoted path under `Program Files`; `--install --wrap` leaves
+  it as it is, says so, and exits 0. `aisquare accounts statusline` alone says
+  what each account has. The status line runs on every message, so it imports
+  the standard library only, and it reads the session's JSON and prints its line
+  in UTF-8 whatever the code page of a Windows pipe (it would otherwise raise on
+  the `·`). The windows show for a Pro or Max login after the
+  session's first answer; an API-key session shows the rest.
+- **Sessions on this machine.** Each session carrying the status line keeps a
+  record under `~/.aisquare/cache/statusline/`: its id, cwd, model, account and
+  the figures above, never a prompt, deleted after a day. `aisquare accounts
+  sessions [--since 15m] [--json]` lists every session that reported in the
+  window, hand-launched ones and ones outside any project included: account,
+  short session id, cwd, model, context, five-hour use, age, and the fleet label
+  when a fleet spawn started it. The Accounts page lists the same under the
+  accounts. The usage cache also takes each record's reading as a sample of
+  that account, so the usage endpoint is asked less often.
 - **↑**/**↓** and **Disable** arrange the accounts. The arrows set the
   **priority order** — the order the rows are listed in, and the order a
   headroom-based pick will try them in. Its first enabled, signed-in account is
@@ -1337,7 +1421,11 @@ aisquare accounts list --usage         # …plus the two windows, percent USED (
 aisquare accounts add                  # a fresh slot; Claude Code opens for the sign-in, then exits
 aisquare accounts run 2                # a plain Claude Code session on account 2
 aisquare accounts run 2 --model opus   # arguments after the slot go to claude
-aisquare accounts usage                # the windows, per signed-in account; --refresh reads now (a rate-limited account waits out its Retry-After)
+aisquare accounts usage                # the windows, per signed-in account, then the fleet's; --refresh reads now (a rate-limited account waits out its Retry-After)
+aisquare --json accounts usage --summary # {accounts, summary}: the list beside the fleet's aggregate
+aisquare accounts statusline --install # Claude Code's status line on every account, where none is set (--wrap keeps yours)
+aisquare accounts statusline --uninstall # takes out only aisquare's (a wrapped one goes back)
+aisquare accounts sessions --since 1h  # every session on this machine that reported in the last hour
 aisquare accounts remove 2             # the directory is kept as 2.removed-<stamp>
 aisquare launch coder --account 2      # a board role on account 2
 aisquare fleet spawn coder --account 2 # a fleet agent on account 2
@@ -1377,12 +1465,62 @@ form and `add` refuses outside an interactive terminal. `aisquare doctor` gains 
 `claude-accounts` line naming any slot that still needs a sign-in, a
 `claude-account-default` line when the default is not signed in or is disabled,
 and a `claude-account-bindings` line when a role or project names an account the
-machine no longer has. Accounts laid
+machine no longer has. A `role bindings` line checks every binding that points a
+role at another Claude Code directory: its `CLAUDE_CONFIG_DIR` must hold aisquare's
+hooks (the same "connected" Welcome asks), or its sessions never reach the board,
+and its `CLAUDE_CODE_TMPDIR` must be a writable directory. Each value is expanded as
+a launch expands it (`$VAR`, `~`). The line warns with the fix, quoted for your shell
+(`aisquare agents connect claude-code --config-dir <dir>`, or `aisquare team bind <role>
+--unset KEY`), and is absent when no binding sets either variable. Accounts laid
 out some other way — a wrapper, a proxy, a directory of your own — still bind
 to a role as a launch profile (`aisquare team bind coder1 --env …`, see
 [Several accounts, one team](orchestration.md#several-accounts-one-team)).
 
 ---
+
+### Adopting a session
+
+A conversation you started by hand, `claude` in a terminal, can join the fleet
+and keep going there:
+
+```sh
+aisquare fleet adopt --list            # the recent ones no fleet agent owns, newest first
+aisquare fleet adopt 0636…e0 --role coder --label coder-login
+```
+
+The list shows each conversation's short id, account, directory, how long ago it
+was last written and the first thing you typed (`--limit N`, `--json`). Adopting
+one starts a fleet agent that resumes it (`claude --resume <transcript>`) on the
+account whose directory holds its transcript and in the directory it ran in, on
+that directory's project. It keeps its session id, so the board row is the
+conversation's own. It is refused, with the reason, when:
+
+- a `claude` is still running it (quit that one first: two processes would write
+  one conversation);
+- a fleet agent already owns it (restart that agent instead);
+- its directory is no onboarded project (`aisquare project onboard <dir>` first);
+- its transcript is not under one of the CLI's accounts (its slots and the plain
+  claude's `~/.claude`). A Claude directory the CLI did not create is never
+  adopted (decided with the owner, `docs/plans/claude-accounts.md`).
+
+In `asq`, the Accounts page's *Adopt a conversation…* (under *Sessions on this
+machine*) shows the same list: one a `claude` still runs, or whose directory is no
+onboarded project, says so and cannot be picked; Enter on another adopts it.
+
+Nothing lists or adopts conversations on its own. The manager offers the list
+only when you ask what you were working on in Claude outside the CLI.
+
+### Fresh start without losing accounts
+
+To start over without signing every account in again:
+
+1. `aisquare config reset` puts every setting back to its default (the old file
+   is kept beside it as `config.toml.bak-<stamp>`).
+2. `aisquare project prune` (or `project forget <id>`) drops the projects you are
+   done with; the sidebar's *Remove from fleet…* does the same for one.
+3. Leave `~/.aisquare/claude-accounts/` alone. Each slot's directory holds its
+   login (on macOS, a Keychain item keyed by that exact path), and deleting
+   `~/.aisquare`, or moving that directory, costs a fresh sign-in for every one.
 
 ## Permission modes and every default you can change
 
@@ -1414,7 +1552,7 @@ session is large — and a fleet agent's very first request is already the whole
 system prompt, tool schemas and skills (~140k tokens on a machine with several
 MCP connectors), so every tool call is refused with *"… is temporarily
 unavailable (server error), so auto mode cannot determine the safety of Bash"*
-while the chat itself keeps working. `aisquare doctor` says so (`explainability
+while the chat itself keeps working. `aisquare explainability doctor` says so (`explainability
 auto-mode`), the spawn receipt repeats it, and a session launched through the
 proxy that has been refused three times is put in 🔔 attention with one
 `auto_mode_blocked` board line (one that a restart or a switch is taking down
@@ -1573,6 +1711,26 @@ role or a key your file leaves out takes its default above; a role the table abo
 does not name gets `auto`, no worktree, no extra args, the `[fleet]` deny list and
 skill names only. A config file that will not parse costs you the customisation and
 never the fleet: the defaults apply and nothing refuses.
+
+**Role bindings are in App settings too** (#98). Its *Role bindings* section, the last
+under *Agent settings ▸ Advanced*, lists every role `team bind` bound: its binary, its
+args, and its environment, with `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR` shown with
+their values and any other variable by name only, since a value may be a token.
+- *Edit* opens the bind form on the binding as `config.toml` holds it at that moment,
+  so a `team bind` run in a shell since is never written away. Each environment
+  value shows as `••••` until you turn on *Show values*. A value left masked is
+  saved as the one stored; type over it to change it. Its *Save* replaces the
+  binary, environment and args, which `team bind <role> --clear` followed by a
+  fresh `team bind` would also do. Variables bound to a file and the account stay
+  as they were.
+- *Unset key…* is `team bind <role> --unset KEY`.
+- *Clear* (it asks first) is `team bind <role> --clear`.
+- *+ New bind* makes one.
+
+Each of these writes at once, apart from the page's *Save*, through the same writer
+`team bind` uses. The section re-reads the file after each write, on *Reload*, and
+whenever the page is shown again, so a binding made in a shell shows without
+restarting `asq`.
 
 ### Capacity
 
@@ -1851,6 +2009,18 @@ forget` does. Its folder and history are kept, and `aisquare project onboard
 live or stopped (a restart would start them under it again): a restart or a
 switch of one would add it back.
 
+*Start fresh…* — on the menu, just above *Remove from fleet…*, and on the
+project's *Settings* tab — clears the project for its next piece of work, as
+`aisquare project fresh` does: its agents stopped, their worktrees removed, its
+board (with its work briefs and their evidence) and fleet rows cleared (task and
+brief numbers start at #1 again), the manager's state file deleted, and a new
+blank manager started. The dialog reads the plan first and shows its counts,
+with three extras off by default that redraw it: *Project memory (context
+entries)*, *Prompt log & metrics* and *Fleet git branches*. Work a
+tree or branch holds that no remote has is listed in a second dialog, *Discard
+and start fresh* or Cancel; a refused plan (a board another project's agents
+read) says why and cannot be confirmed. Cancel has the focus, and Esc cancels.
+
 **Codename.** Every project that enters the fleet gets an `adjective-animal`
 codename — `amber-otter` — matching `^[a-z]{3,7}-[a-z]{3,7}$`, from two
 hand-curated, family-friendly word lists (96 by 96, so 9,216 pairs). It is
@@ -1942,12 +2112,25 @@ current codename — a rename never strands an agent.
 **Agent labels.** `manager` — always, one per project; a second is refused.
 Everything else matches `^[a-z][a-z0-9-]{1,23}$`: 2–24 characters, lowercase
 letters, digits and `-`, no `.`, `:` or spaces. The manager is briefed to make
-labels descriptive (`coder-auth`, `tester-py311`, not `coder-2`). Labels are
+labels descriptive (`coder-auth`, `tester-py311`, not `coder-2`) and told the
+24-character limit. Labels are
 unique per project among **live** agents — an ended agent frees its label. A
 collision appends `-2`, `-3` … and the receipt names the label actually used
 (`✓ spawned coder-auth-2 (asked: coder-auth)`) rather than failing: a manager
 mid-plan must not stall on a name. Without `--label`, the default is
 `<role>-<task short id>` when there is a `--task`, else `<role>-1`.
+
+No label the fleet makes is longer than 24 characters. Before a suffix (`-2`,
+`-3` …) or a task's short id, the label or role it follows is trimmed so the
+whole fits: a live `coder-authentication-ref` (24) makes the next one
+`coder-authentication-r-2`, and a role bound as `platform-security-auditor`
+spawned for a task makes `platform-securi-01k9q8p3`, the short id kept whole.
+A fork with no label is numbered and trimmed the same way. Only the length
+is fitted: a role bound under a name the rule would refuse as a
+`--label` (`data_eng`) keeps its own characters (`data_eng-1`). An over-long
+`--label` is refused with a label that fits — `label
+'coder-authentication-refactor' is 29 characters — at most 24; try
+'coder-authentication-ref'` — so it can be retried as it stands.
 
 **Branches and worktrees.** A coder's branch is
 `fleet/<codename>/<task-short-id>-<slug>` — `fleet/amber-otter/01k9q8p3-wire-auth`:
@@ -2219,6 +2402,29 @@ whether the running fleet server still has a prefix key.
 | ctrl+Z | `C-z` — suspends Claude Code *inside the pane*; type `fg` there to resume | same | every terminal |
 | ctrl+D | `C-d` — exits Claude Code; the pane reads 💤 exited and offers Restart | same | every terminal |
 | `[` in the transcript viewer | the character — inside tmux "native scrollback" is the pane's 50 000-line history, which shift+PgUp already reads | same | every terminal |
+
+**Images.** Claude Code takes an image three ways, and each works in `asq`:
+- **Drag a file onto the window.** Your terminal hands it to `asq` as a paste of the
+  file's path, quoted the way that terminal quotes it. It goes to the agent on screen
+  whether the pane or the sidebar had the keyboard, and the pane takes the keyboard
+  with it. A text field or a dialog keeps its own pastes. With no agent on screen,
+  nothing is sent and one toast says "nothing to paste into — open an agent first";
+  with more than one live pane, it says how many and to click the one you mean, then
+  paste again. Under WSL, a drop that is one Windows path (`C:\…`) of a file that
+  exists becomes its Linux path through `wslpath -u`, asked off the UI thread so asq
+  never waits on it; every other path reaches Claude Code exactly as the terminal
+  sent it.
+- **Ctrl+V** pastes an image from the clipboard (Alt+V on Windows and WSL; Cmd+V in
+  iTerm2). The key reaches the pane, and Claude Code reads the clipboard itself,
+  which is why each spawn carries this shell's display variables (below).
+- **Type the file's path** in your message.
+
+Claude Code's own Remote Control ([remote](remote.md#claude-codes-own-remote-control))
+is another way: the Claude app can attach a photo to the session. To record what your
+terminal sends on a drop or a paste (#288), start `asq` with
+`AISQUARE_PASTE_LOG=/tmp/paste.log`: each paste adds one line, with its length, its
+first 80 characters and the widget that had the keyboard. The log is off by default,
+because a paste may be a secret.
 
 **tmux pitfalls the fleet engineers around.** *Prefix:* the private server runs
 with `prefix None`, so in `fleet attach` ctrl+B is Claude Code's
@@ -2643,6 +2849,47 @@ brief links is done exactly as before.
 **Moving back** with `aisquare upgrade --version <v>` is safe for the store: an older build
 opens a v39 store as it is, without migrating it down, and never reads the `brief` table.
 
+### To the release with usage at a glance, adopt and the captain's gate (no store migration)
+
+**No store migration.** The status line's records and `fleet.json` are cache files
+under `~/.aisquare/cache/statusline/`, and its readings go into the `claude_usage`
+rows the usage cache already keeps. `fleet adopt` reads Claude Code's own transcripts
+and session registry and writes nothing beside them.
+
+**Two things change for what you already have.**
+
+- **Task keys** (#270): a title with words outside ASCII gets a new key (`Fix вход` is
+  `fix-вход`, was `fix`). Re-adding a title as the board has it still answers "already
+  tracked"; the CHANGELOG's *Upgrading* note has the edge cases.
+- **Pins** (#271): `project forget` and `project prune` no longer write a pin. A pin an
+  earlier build wrote stays until the next forget of that project or a `project unpin`.
+
+**New config keys**, each with a default ([reference](reference.md#configuration-keys)):
+
+| Key | Default | What it changes |
+| --- | --- | --- |
+| `[fleet.roles.<role>] remote_control` | `false` | The role's Claude Code sessions start with Claude Code's own Remote Control. |
+| `[captain] gate` | `true` | With the captain on, the tools that act as you need a code from your authenticator app. Set in `config.toml`, not with `config set` ([captain](captain.md)). |
+
+**What you will notice.**
+
+- The sidebar's status line carries a number (`● 3× claude 58%`), the Accounts page
+  and `accounts usage` end with the fleet's line, and the Manager tab counts the team
+  under the manager's info line.
+- **With the captain on**, its owner tools are shut until you run `aisquare captain gate
+  enroll` (and install the `gate` extra); `gate = false` under `[captain]` in
+  `~/.aisquare/config.toml` turns the gate off (it is no `config set` key).
+- `persona import --from-dir` skips a README or LICENSE (listed `skipped`) instead of
+  sending it to an engine.
+- No new agent label is longer than 24 characters.
+- New commands: `aisquare accounts statusline`, `accounts sessions`, `fleet adopt`,
+  and the `asq-statusline` program the status line runs. The status line is opt-in.
+
+**Moving back** to 0.9.0 or earlier is safe for the store and the config: an older build
+ignores the new keys and the cache files. If you installed the status line, run
+`aisquare accounts statusline --uninstall` first: an older build has no
+`asq-statusline`, so a status line left pointing at it fails in every session.
+
 ## Troubleshooting
 
 **`asq` lags with many projects listed.** Each tick reads only the projects
@@ -2897,5 +3144,8 @@ was never recorded, or is gone, is a row of zeros marked `(no transcript)`.
   and no wake-ups, and its row would say `no hooks`. v1 is Claude Code only
   (plan §8.5); nothing in the schema blocks the rest.
 - **Auto-merge on green** as an opt-in policy. In v1 a human merges (plan §3.5).
-- **Remote or multi-machine fleets** — the cloud roadmap is unchanged.
+- **Remote or multi-machine fleets** — postponed (#293). Today a manager can
+  drive another box's fleet over SSH:
+  [docs/runbooks/multi-machine-ssh.md](runbooks/multi-machine-ssh.md); the
+  design is in [docs/plans/multi-machine-fleet.md](plans/multi-machine-fleet.md).
 - **A tmux-less backend** for hosts without tmux (plan §3.1, option A).

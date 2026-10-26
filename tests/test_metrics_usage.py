@@ -300,27 +300,42 @@ def test_a_stop_reads_only_the_bytes_appended_since_the_last(
     assert json.loads(session.state)["offsets"][str(transcript)] == transcript.stat().st_size
 
 
-def test_the_stop_hooks_recording_has_no_lock_wait_in_it(tmp_path: Path) -> None:
-    """A budget, not a stopwatch (tests/budgets.py): it catches the catastrophic.
+def test_the_stop_hooks_recording_has_no_lock_wait_in_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Held on the lock, not on a stopwatch: the store's busy timeout is cut to a millisecond
+    (``AISQUARE_DB_BUSY_MS``), so a recording that WAITS on the store's lock, as one that
+    opens a second connection under its own open write does, fails at once with "database
+    is locked" and records nothing, where at the default 5 s it waited that long and
+    still passed. Its time says nothing about a lock: measured p95 per Stop (scan the
+    appended bytes, write both rows) is about 1.45 ms on a Mac behind this 2.6 MB history,
+    and a full rescan of it about 7.5 ms, so time cannot tell one from a slow runner
+    (the byte test above holds that). A bound on it was red for runner stalls alone:
+    p95 3375.5 ms for twenty Stops on windows-latest (CI run 40251283541), a hundred
+    times the 33.7 ms the same runner measured in run 40039412881.
 
-    Measured p95 per Stop (scan the appended bytes, write both rows): about 1.45 ms
-    on a Mac behind this 2.6 MB history; 33.7 ms on the windows-latest runner (CI run
-    40039412881, the test's earlier form, with no history behind it). A full rescan of
-    this history takes about 7.5 ms on that Mac, so time cannot tell one from a slow
-    runner; the byte test above holds that. What time can catch is a
-    write that waits on the store's lock, whose busy timeout is 5 s: 0.5 s is over an
-    order of magnitude above every measured figure and an order below that wait."""
+    What the old bound (p95 under 0.5 s) caught besides a lock wait is a recording that is
+    SLOW, and that is kept in two parts a stall cannot reach. The twenty Stops may take 10 s
+    of this process's own CPU in all (``process_time``, which a runner that was stalled,
+    a lock waited for or a ``sleep`` do not spend), 0.5 s each against the 1.45 ms. And the
+    FASTEST of the twenty, by the wall clock, must take under a quarter second: a stall
+    lands on some of the Stops, not on all twenty of them, where a ``sleep`` or a wait
+    on anything but the store's lock is in every one, and so in the fastest."""
+    monkeypatch.setenv("AISQUARE_DB_BUSY_MS", "1")
     transcript = tmp_path / f"{SESSION}.jsonl"
     _big_transcript(transcript)
-    metrics_service.record_usage(SESSION, str(transcript), tmp_path, trigger="stop")
-    timings: list[float] = []
+    first = metrics_service.record_usage(SESSION, str(transcript), tmp_path, trigger="stop")
+    assert first is not None, "the first Stop recorded nothing: see log/metrics.log"
+    cpu = time.process_time()
+    took: list[float] = []
     for n in range(20):
         _append(transcript, _assistant(f"m{n}", "Read"), _assistant(f"m{n}", "Read"))
         began = time.perf_counter()
-        metrics_service.record_usage(SESSION, str(transcript), tmp_path, trigger="stop")
-        timings.append(time.perf_counter() - began)
+        turn = metrics_service.record_usage(SESSION, str(transcript), tmp_path, trigger="stop")
+        took.append(time.perf_counter() - began)
+        assert turn is not None, f"Stop {n} recorded nothing: it waited on the store's lock"
+    spent = time.process_time() - cpu
+    assert spent < budget(10.0), f"twenty Stops took {spent:.1f} s of CPU"
+    assert min(took) < budget(0.25), f"even the fastest of twenty Stops took {min(took):.3f} s"
     with store_session() as store:
         assert len(store.turn_usages(SESSION)) == 21
-    timings.sort()
-    p95 = timings[int(len(timings) * 0.95) - 1]
-    assert p95 < budget(0.5), f"p95 {p95 * 1000:.1f} ms"

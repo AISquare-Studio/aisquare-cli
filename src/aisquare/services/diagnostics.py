@@ -16,7 +16,6 @@ from pathlib import Path, PurePath
 from urllib.parse import urlsplit
 
 from aisquare.core import agents as agent_core
-from aisquare.core import brain as brain_core
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import (
     claude_sharing,
@@ -32,7 +31,7 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.config import RETIRED_SECTIONS, load_config, retired_sections
 from aisquare.core.injection import load_last
 from aisquare.core.keys import EXTENDED_MINIMUM
-from aisquare.core.spawn import TEAM_ENV_VARS
+from aisquare.core.spawn import TEAM_ENV_VARS, tmux_client_env
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
 from aisquare.core.terminal import outer_terminal
@@ -51,26 +50,20 @@ from aisquare.models import (
     StatusReport,
 )
 from aisquare.services import agents as agents_service
+from aisquare.services import claude_accounts as claude_accounts_service
+from aisquare.services import credits as credits_service
 from aisquare.services import (
-    auto_mode,
-    ci_client,
-    ci_descriptor,
-    ci_override,
     destinations,
     explainability_ops,
     iam,
     install_route,
     model_memory,
 )
-from aisquare.services import claude_accounts as claude_accounts_service
-from aisquare.services import credits as credits_service
-from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
-from aisquare.services.ci_contract import DeliveryDescriptor
 
 
 def status() -> StatusReport:
@@ -119,21 +112,16 @@ def _shipping_status() -> ShippingStatus | None:
     )
 
 
-def doctor(
-    *,
-    live: bool = False,
-    target: str | None = None,
-    cwd: Path | None = None,
-    project_id: str | None = None,
-) -> list[DoctorCheck]:
+def doctor(*, live: bool = False, cwd: Path | None = None) -> list[DoctorCheck]:
     """Run health checks over the install, dependencies and integration.
 
-    ``live`` opts into the checks that leave this machine (today: the
-    explainability gateway round-trip). Everything else stays offline, so a
-    plain ``aisquare doctor`` still answers on a train.
+    ``live`` opts into the checks that leave this machine (today: the TLS
+    handshake, each account's usage, each workspace's balance and the revocation
+    of a key the CLI minted). Everything else stays offline, so a plain
+    ``aisquare doctor`` still answers on a train.
 
-    ``cwd`` is the directory whose PROJECT the project-scoped checks (brain,
-    harness, self-invocation) report on; ``None`` is the process cwd, which is
+    ``cwd`` is the directory whose PROJECT the project-scoped checks (harness,
+    self-invocation) report on; ``None`` is the process cwd, which is
     what the CLI means. The fleet UI hosts many projects in one process and
     must not ``os.chdir`` (docs/plans/fleet-tui.md §5.6), so it passes the
     selected project's root here and gets that project's report in-process.
@@ -141,9 +129,9 @@ def doctor(
     claude-code it is the folder whose project- or local-scope plugin a session
     there loads, as Welcome asks about the project it starts the fleet in.
 
-    ``project_id`` is the project whose explainability key the explainability
-    section resolves, as its launches do (``doctor --project``); ``None`` is
-    the machine's key.
+    Explainability's section is ``aisquare explainability doctor``
+    (``explainability_ops.checks``, and the ``explainability auto-mode`` row), and the CI
+    test bed's rows are parked in ``ci_doctor.checks``: neither is a row here.
     """
     return [
         _check_python(),
@@ -156,11 +144,11 @@ def doctor(
         _check_claude_code(cwd),
         *_planned_agent_checks(),
         *_claude_accounts_checks(),
+        *_check_role_bindings(),
         _check_tmux(),
         _check_gh(),
         # Never warns, so it moves no actionable row out of the sidebar's first three.
         _check_code_index(cwd),
-        _check_brain(cwd),
         _check_harness(cwd),
         *_optional(_check_model_pick_reader()),
         _check_self_invocation(cwd),
@@ -171,35 +159,33 @@ def doctor(
         *_check_captured_projects(),
         # After the actionable machine checks on purpose. The fleet UI's sidebar
         # showed the first three not-ok rows (a stable sort within the warn
-        # group), so a row inserted at position 12 evicted one of `brain` /
-        # a logged-out `gh` — the ones an operator can act on — from
-        # what was seen first; the Doctor page still lists them in this order. The
-        # fleet terminal row (#147) can warn too, about a running server's kept
-        # prefix, so it waits here with them rather than beside tmux.
+        # group), so a row inserted at position 12 evicted a logged-out `gh`
+        # — one an operator can act on — from what was seen first; the Doctor
+        # page still lists them in this order. The fleet terminal row (#147) can
+        # warn too, about a running server's kept prefix, so it waits here with
+        # them rather than beside tmux.
         _check_browser_tools(cwd),
         *_check_role_tools(),
         _check_fleet_terminal(),
         # Beside the fleet terminal row, which reads the same running server (fix 4 of the
         # fleet-board card): it can warn, so it waits with the other late rows.
         _check_fleet_server_env(cwd=cwd),
+        # Only while a role asks for Claude Code's Remote Control (#289): which roles, and
+        # what in their launch would make Claude Code refuse it.
+        *_optional(_check_remote_control()),
         *_check_manager_board_context(),
         # Can warn (memory below the floor, pressure at warn), so it waits with the late rows.
         _check_fleet_capacity(),
         _check_watcher(),
-        *_experiment_checks(),
         # Only while the experimental captain is off: one ok row saying how to turn it
         # on. On, doctor is as it was before the switch.
         *_optional(_captain_check()),
-        *explainability_ops.checks(live=live, target_name=target, project_id=project_id),
-        # Beside the section whose leftovers it finds, and independent of it: a stale
-        # ANTHROPIC_BASE_URL kills a launch whether or not tracing or the team is on (#51).
+        # A stale ANTHROPIC_BASE_URL kills a launch whether or not tracing or the team is on
+        # (#51), so it is a machine check of its own, and not part of explainability's section.
         _check_anthropic_routing(),
         # Only while a key the CLI minted is owed a revocation (#142); --live
         # tries each again first — one request per key, on the API that minted it.
         *_optional(_minted_keys_check(live)),
-        # Only when a fleet role runs `auto` behind a configured proxy (#150);
-        # offline — config, the store, the head of a few transcripts.
-        *_optional(auto_mode.doctor_check()),
         # One TLS handshake, nothing sent, so --live only. Before the headroom row,
         # whose every reading fails the same way when this one does.
         *_live_only(live, _check_tls),
@@ -208,6 +194,24 @@ def doctor(
         # One balance request per destination workspace (#143), so --live only.
         *_live_only(live, _workspace_credits_check),
     ]
+
+
+def apply_fixes() -> list[str]:
+    """What ``aisquare doctor --fix`` repairs, one line per action taken.
+
+    Only the home: looking does not create it (tests/test_doctor_does_not_create_state.py),
+    asking to fix does, and a repair says what it did. Explainability's repairs (turning
+    tracing on for a ``--target``, installing the SDK) are ``aisquare explainability doctor
+    --fix``'s, and nothing here asks for consent because nothing here needs it.
+    """
+    home = paths.aisquare_home()
+    if home.exists():
+        return []
+    try:
+        paths.ensure_home()
+    except OSError as exc:
+        return [f"could not create the aisquare home at {home} ({exc})"]
+    return [f"created the aisquare home at {home}"]
 
 
 def _optional(check: DoctorCheck | None) -> list[DoctorCheck]:
@@ -2097,6 +2101,68 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
     return checks
 
 
+#: A binding's variables that point Claude Code at a directory: its config directory,
+#: whose ``settings.json`` must carry aisquare's hooks, and its temp directory.
+_BOUND_CONFIG_DIR, _BOUND_TMPDIR = "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_TMPDIR"
+
+
+def _check_role_bindings() -> list[DoctorCheck]:
+    """``role bindings``: each role a binding points at another Claude Code directory runs
+    one that works (#98).
+
+    Only bindings that name an account were checked (:func:`_claude_account_default_checks`).
+    One whose ``env`` sets ``CLAUDE_CONFIG_DIR`` to a directory without aisquare's hooks
+    runs sessions the board never hears of, and one whose ``CLAUDE_CODE_TMPDIR`` cannot be
+    written starts a Claude Code that cannot keep its temp files. Each value is expanded as
+    a launch expands it (``harness.expand_value``), and "has the hooks" is the one shared
+    answer (``agents.claude_code_connected``), so this row and Welcome never disagree. A
+    variable bound to a file (``env_files``) holds a secret, not a path, and is not read.
+    No row at all when no binding sets either variable: a machine that never bound one
+    keeps the doctor output it had.
+    """
+    try:
+        bindings = settings_service.role_bindings()
+    except Exception:  # `_check_config` says why the file cannot be read
+        return []
+    fine: list[str] = []
+    problems: list[str] = []
+    fixes: list[str] = []
+    line = install_route.command_line  # a fix is pasted: quoted for this shell, Windows too
+    for role, profile in sorted(bindings.items()):
+
+        def unset(key: str, role: str = role) -> str:
+            return line(["aisquare", "team", "bind", role, "--unset", key])
+
+        raw = profile.env.get(_BOUND_CONFIG_DIR)
+        if raw is not None:
+            path = Path(harness.expand_value(raw))
+            if not path.is_dir():
+                problems.append(f"{role}: {_BOUND_CONFIG_DIR} {path} is not a directory")
+                fixes.append(unset(_BOUND_CONFIG_DIR))
+            elif not agents_service.claude_code_connected(path):
+                problems.append(
+                    f"{role}: {_BOUND_CONFIG_DIR} {path} has no aisquare hooks, so its "
+                    "sessions never reach the board"
+                )
+                connect = ["aisquare", "agents", "connect", "claude-code", "--config-dir"]
+                fixes.append(f"{line([*connect, str(path)])} (or {unset(_BOUND_CONFIG_DIR)})")
+            else:
+                fine.append(f"{role} → {path}")
+        raw = profile.env.get(_BOUND_TMPDIR)
+        if raw is not None:
+            path = Path(harness.expand_value(raw))
+            if path.is_dir() and os.access(path, os.W_OK | os.X_OK):
+                fine.append(f"{role} temp → {path}")
+            else:
+                problems.append(f"{role}: {_BOUND_TMPDIR} {path} is not writable")
+                fixes.append(f"{line(['mkdir', '-p', str(path)])} (or {unset(_BOUND_TMPDIR)})")
+    if problems:
+        return [_warn("role bindings", "; ".join(problems), "; ".join(dict.fromkeys(fixes)))]
+    if fine:
+        return [_ok("role bindings", "; ".join(fine) + " — hooks connected, temp dirs writable")]
+    return []
+
+
 # --- system tools the fleet needs (docs/plans/fleet-tui.md §5 "Doctor", §8.2) ---------
 
 _OS_RELEASE = Path("/etc/os-release")
@@ -2978,73 +3044,11 @@ def _check_code_index(cwd: Path | None = None) -> DoctorCheck:
     return _ok(name, detail)
 
 
-def _check_brain(cwd: Path | None = None) -> DoctorCheck:
-    """The team's long-term memory: gbrain presence, brain state, distill lag.
-
-    ``cwd`` picks the project the way the team hooks do (``team_project``);
-    ``None`` is the process cwd.
-    """
-    absent = _uncreated_home("brain")
-    if absent is not None:
-        return absent
-    if not brain_core.brain_enabled():
-        return _ok("brain", "brain layer disabled (AISQUARE_BRAIN=0)")
-    version = brain_core.gbrain_version()
-    if version is None:
-        return _warn(
-            "brain",
-            "gbrain not found — team decisions/results are not distilled",
-            "Optional: install the AISquare gbrain CLI to enable long-term memory "
-            "(not the unrelated 'gbrain' on public npm)",
-        )
-    try:
-        project = orchestrator.team_project(cwd)
-        with store_session() as store:
-            if not store.team_active(project.id):
-                return _ok("brain", f"gbrain {version} ready (orchestrator not active here)")
-            lag = distill_service.pending(store, project.id)
-    except Exception as exc:  # diagnostics must never crash
-        return _warn("brain", f"could not check the brain: {exc}", "Try: aisquare team distill")
-    if not brain_core.brain_ready(project.id):
-        return _warn(
-            "brain",
-            f"gbrain {version} found but this project's brain is not initialised",
-            "It initialises on the first distill: aisquare team distill",
-        )
-    # The embedding schema is fixed at create time, and the knob lives in
-    # per-shell env (never persisted), so BOTH mismatch directions are real and
-    # invisible without a signal. Surface either rather than reporting healthy.
-    knob = brain_core.embeddings_enabled()
-    embeds = brain_core.brain_embeds(project.id)
-    if knob and not embeds:
-        return _warn(
-            "brain",
-            f"gbrain {version}, brain ready — but it was created WITHOUT embeddings, "
-            "so AISQUARE_BRAIN_EMBED has no effect here (recall stays keyword-only)",
-            "Rebuild embedding-capable: remove ~/.aisquare/projects/<id>/brain, then "
-            "AISQUARE_BRAIN_EMBED=1 aisquare team distill --all",
-        )
-    if embeds and not knob:
-        return _warn(
-            "brain",
-            f"gbrain {version}, brain has embeddings but AISQUARE_BRAIN_EMBED is off — "
-            "recall stays keyword-only and new pages are distilled without vectors",
-            "Export AISQUARE_BRAIN_EMBED=1 (and OPENAI_API_KEY) in the shells that run "
-            "aisquare, or add them to your shell profile",
-        )
-    embed = " (embeddings on)" if embeds else ""
-    if lag > 0:
-        return _ok(
-            "brain", f"gbrain {version}, brain ready{embed} ({lag} pipe events awaiting distill)"
-        )
-    return _ok("brain", f"gbrain {version}, brain ready and fully distilled{embed}")
-
-
 def _captain_check() -> DoctorCheck | None:
     """``captain: off (experimental)`` while the switch is off; ``None`` while it is on.
 
-    Ok, not a warning, as the CI test bed's off row is: off is the shipped state
-    (``core.experimental``), and the row is there to say how to turn it on.
+    Ok, not a warning: off is the shipped state (``core.experimental``), and the row
+    is there to say how to turn it on.
     """
     if experimental.captain_enabled():
         return None
@@ -3053,233 +3057,6 @@ def _captain_check() -> DoctorCheck | None:
         "off (experimental) — turn it on with: aisquare config set experimental.captain true "
         f"(or {experimental.CAPTAIN_ENV}=1)",
     )
-
-
-def _experiment_checks() -> list[DoctorCheck]:
-    """The CI test bed's state, one line per question a developer would ask.
-
-    Off is reported as ``ok`` rather than as a warning: off is the intended
-    state for everyone who has not been asked to run the experiment, and a
-    permanent warning trains people to ignore the one line that matters.
-
-    Switched on, the questions are asked in the order the hooks would hit
-    them: is the URL usable, is there a token, is there a run; can the server
-    be reached at all (``GET /ready``, public); and does the descriptor come
-    back — which is the real question, because it is where a bad token, an
-    unknown run, an expired run or a contract skew each show up with their own
-    answer. The descriptor is fetched without caching it: a diagnostic must not
-    create state. Every probe is bounded by the transport's own deadline.
-    """
-    name = "ci test bed"
-    if not ci_client.enabled():
-        return [_ok(name, "off — no requests, no added latency (AISQUARE_CI=1 enables)")]
-    raw = ci_client.raw_endpoint()
-    if not raw:
-        return [
-            _warn(
-                name,
-                "enabled but no endpoint configured — every prompt records not_configured",
-                "Point it at the server: export AISQUARE_CI_URL=https://…",
-            )
-        ]
-    base = ci_client.endpoint()
-    if not base:
-        return [
-            _warn(
-                name,
-                f"enabled, but {_display_url(raw)} is not a usable URL — it needs an "
-                "http(s):// scheme; every prompt records not_configured",
-                "Give it a scheme: export AISQUARE_CI_URL=https://…",
-            )
-        ]
-    shown = _display_url(base)
-    key = ci_client.api_key()
-    raw_run = ci_client.raw_run_id()
-    run = ci_client.run_id()
-    checks: list[DoctorCheck] = []
-    if not key:
-        problem = ci_client.api_key_problem()
-        checks.append(
-            _warn(
-                name,
-                f"enabled for {shown}, but {problem} — not usable; the server will reject "
-                "every request"
-                if problem
-                else f"enabled for {shown}, but no bearer token — the server will reject every "
-                "request",
-                "Re-export the token on one line: export AISQUARE_CI_KEY=…"
-                if problem
-                else "Set the experiment token: export AISQUARE_CI_KEY=…",
-            )
-        )
-    elif not raw_run:
-        checks.append(
-            _warn(
-                name,
-                f"enabled for {shown}, but no run id — every prompt records no_run",
-                "Export the run the controller published: export AISQUARE_CI_RUN=run_…",
-            )
-        )
-    elif not run:
-        checks.append(
-            _warn(
-                name,
-                f"enabled for {shown}, but {raw_run!r} is not a run id (run_…) — "
-                "every prompt records no_run",
-                "Export the run the controller published: export AISQUARE_CI_RUN=run_…",
-            )
-        )
-    else:
-        checks.append(_ok(name, f"enabled for {shown}, run {run}"))
-    checks.append(_check_ci_endpoint(base, shown))
-    descriptor: DeliveryDescriptor | None = None
-    if key and run:
-        descriptor_check, descriptor = _check_ci_descriptor(base, key, run)
-        checks.append(descriptor_check)
-        stale = _check_ci_cache(run, descriptor)
-        if stale is not None:
-            checks.append(stale)
-    # Outside the gate above: a set override is named whenever it is set, even
-    # when no descriptor could be fetched for it to apply to.
-    override = _check_ci_override(descriptor)
-    if override is not None:
-        checks.append(override)
-    return checks
-
-
-_CI_PROBE_MS = 3_000
-"""Doctor must stay fast; an unreachable endpoint is the common case here, and
-the transport's wall-clock deadline is what bounds each probe."""
-
-
-def _check_ci_endpoint(base: str, shown: str) -> DoctorCheck:
-    """``GET /ready`` — public, cheap, and proof of a live server rather than a
-    listener. It follows the same proxies the hook does, because it is the
-    same transport."""
-    result = ci_client.exchange(
-        f"{base}/ready", method="GET", deadline_ms=_CI_PROBE_MS, max_body=4096
-    )
-    if result.reason is None and result.status == 200:
-        return _ok("ci endpoint", f"{shown}/ready answered 200 in {result.elapsed_ms} ms")
-    why = result.detail if result.reason is not None else f"http {result.status}"
-    return _warn(
-        "ci endpoint",
-        f"{shown}/ready did not answer ({why}) — prompts still work; whether the hooks can "
-        "deliver is what the descriptor line says, not this one",
-        "Check the server is up, or turn the test bed off: export AISQUARE_CI=0",
-    )
-
-
-def _check_ci_descriptor(
-    base: str, key: str, run: str
-) -> tuple[DoctorCheck, DeliveryDescriptor | None]:
-    """The question that matters: will the hooks be told how to deliver?
-
-    Returns the descriptor too, so the override line can be judged against it."""
-    result = ci_descriptor.fetch(run, base=base, key=key, cache=False, deadline_ms=_CI_PROBE_MS)
-    descriptor = result.descriptor
-    if descriptor is None:
-        detail = result.detail
-        # The fix follows the status the server sent, never a word in its
-        # message: an error.v1 sentence is quoted into the detail now, and a
-        # word inside it ("expired", the server's own contract_version_mismatch
-        # code, a TLS certificate that "has expired") must not pick a fix. The
-        # two phrase-based branches match the client's OWN parse details at
-        # their start, and nothing else.
-        if result.status in (401, 403):
-            fix = "Check AISQUARE_CI_KEY is the experiment token for this server"
-        elif result.status == 404:
-            fix = "Check AISQUARE_CI_RUN names a run this server has published"
-        elif detail.startswith("descriptor speaks contract_version"):
-            fix = "Upgrade aisquare-cli, or ask for a run published for this contract"
-        elif detail.startswith("descriptor expired at"):
-            fix = "Ask the experiment controller for a fresh run"
-        else:
-            fix = "Check the server, or turn the test bed off: export AISQUARE_CI=0"
-        return (
-            _warn(
-                "ci descriptor",
-                f"run {run}: {detail} — every turn records descriptor_unavailable",
-                fix,
-            ),
-            None,
-        )
-    # The server's ruling is always shown as the server's. But "the hooks will
-    # not call" is a promise the line beneath would break while the override is
-    # active, so that clause defers to it instead.
-    note = ci_override.DIRECT_API_NOTE
-    if ci_override.apply(descriptor).active:
-        note = "direct_api only — overridden, see ci delivery override below"
-    return (
-        _ok(
-            "ci descriptor",
-            f"run {run}: {ci_override.describe(descriptor, direct_api_note=note)}; "
-            f"ceiling {descriptor.client_safety_ms} ms; expires {descriptor.expires_at}",
-        ),
-        descriptor,
-    )
-
-
-def _check_ci_cache(run: str, fresh: DeliveryDescriptor | None) -> DoctorCheck | None:
-    """The hooks read the cached descriptor; this probe fetched a fresh one.
-
-    When the two disagree on delivery, every line above describes a descriptor
-    the hooks are not using until the cache expires — so say so, once.
-    """
-    cached = ci_descriptor.cached(run)
-    if cached is None or fresh is None or cached.delivery == fresh.delivery:
-        return None
-    return _warn(
-        "ci descriptor cache",
-        f"the hooks use a cached descriptor until {cached.expires_at} that lists "
-        f"{ci_override.describe(cached)}; the server now says "
-        f"{ci_override.describe(fresh)}",
-        "Wait for the cache to expire, or start a new session after it does",
-    )
-
-
-def _check_ci_override(descriptor: DeliveryDescriptor | None) -> DoctorCheck | None:
-    """The staging override, on its own line whenever the variable is set.
-
-    Silent when it is unset — the common case, and the one every row should
-    come from. Set, it is always a warning: active means every row this
-    machine writes says ``delivery_source override`` and measures nothing;
-    ignored means someone exported it and it is doing nothing, which is worth
-    a line before they wonder why.
-    """
-    if not ci_override.requested():
-        return None
-    if descriptor is None:
-        return _warn(
-            "ci delivery override",
-            f"{ci_override.ENV_VAR} is set, but there is no fetched descriptor to apply it to — "
-            "nothing is delivered",
-            "Fix the descriptor line first, or unset it",
-        )
-    ruling = ci_override.apply(descriptor)
-    if ruling.active:
-        return _warn(
-            "ci delivery override",
-            f"{ruling.detail}; every row records delivery_source override and measures nothing",
-            f"Unset {ci_override.ENV_VAR} once the server publishes real delivery modes",
-        )
-    return _warn("ci delivery override", ruling.detail, f"Fix or unset {ci_override.ENV_VAR}")
-
-
-def _display_url(url: str) -> str:
-    """A URL as ``doctor`` may print it: scheme, host and path, never ``user:secret@``.
-
-    ``doctor`` output is the most pasteable artefact there is, and a credential
-    in the URL would leak by being ordinary. The path stays, so a base URL with
-    one prints the route that was actually probed.
-    """
-    try:
-        parts = urlsplit(url if "://" in url else f"//{url}", scheme="")
-    except ValueError:
-        return re.sub(r"[^@/]*@", "", url)
-    host = parts.netloc.rsplit("@", 1)[-1]
-    path = parts.path.rstrip("/")
-    return f"{parts.scheme}://{host}{path}" if parts.scheme else f"{host}{path}"
 
 
 def last_injection() -> InjectionRecord | None:
@@ -3438,6 +3215,94 @@ def _fleet_labels(agents: list[FleetAgent], names: dict[str, str], *, limit: int
     if len(agents) > limit:
         shown.append(f"+{len(agents) - limit} more")
     return ", ".join(shown)
+
+
+REMOTE_CONTROL_HOST = "api.anthropic.com"
+
+
+def _window_environment(
+    environ: Mapping[str, str] | None, server: tmux_core.TmuxServer | None
+) -> tuple[Mapping[str, str], str]:
+    """The environment a fleet window inherits, and where it comes from.
+
+    A tmux server copies the environment of the client that started it, and every window
+    opened on it inherits that, before its own ``-e`` pairs (the role's binding). So it is
+    the running fleet server's global environment; with none running, what the fleet would
+    start one with: this shell's, less what ``core.spawn.tmux_client_env`` strips (a
+    tracing base URL among it). A server that will not answer is read as none.
+    """
+    try:
+        srv = server or _fleet_server(fleet_service.settings().tmux_socket)
+        if srv.available() and not srv.server_absent():
+            return _server_environment(srv), "on the fleet server"
+    except Exception:  # diagnostics must never crash
+        pass
+    return tmux_client_env(os.environ if environ is None else environ), "in this shell"
+
+
+def _check_remote_control(
+    environ: Mapping[str, str] | None = None, server: tmux_core.TmuxServer | None = None
+) -> DoctorCheck | None:
+    """``remote control``: the roles started with Claude Code's own Remote Control (#289),
+    and what in their launch would make Claude Code refuse it; ``None`` while no role asks.
+
+    A blocker is what ``launch`` steps aside for: a role bound to a binary that is not
+    Claude Code; an ``ANTHROPIC_BASE_URL`` naming another host than the Anthropic API, in
+    the role's binding or in what its window inherits (:func:`_window_environment`, not
+    this shell's: the agents never see it); explainability tracing, whose proxy is such a
+    base URL at every traced launch; a ``CLAUDE_CODE_OAUTH_TOKEN``, which can make model
+    requests only. ``launch`` says the same on each launch; this row says it before one.
+    """
+    name = "remote control"
+    try:
+        config = load_config()
+    except Exception:  # the config row has the verdict on a config that will not load
+        return None
+    roles = sorted(role for role, settings in config.fleet.roles.items() if settings.remote_control)
+    if not roles:
+        return None
+    inherited, source = _window_environment(environ, server)
+    blockers: list[str] = []
+    for role in roles:
+        profile = harness.resolve_profile(role)
+        binary = harness.resolve_binary(role).binary
+        if not harness.is_default_agent(binary):
+            blockers.append(f"{role} runs {os.path.basename(binary)!r}, not Claude Code")
+        env = {**inherited, **profile.env}
+        base_url = (env.get("ANTHROPIC_BASE_URL") or "").strip()
+        if base_url and urlsplit(base_url).hostname != REMOTE_CONTROL_HOST:
+            where = "in its binding" if "ANTHROPIC_BASE_URL" in profile.env else source
+            host = urlsplit(base_url).hostname or "another host"
+            blockers.append(f"{role}: ANTHROPIC_BASE_URL {where} points at {host}")
+        if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+            where = "in its binding" if "CLAUDE_CODE_OAUTH_TOKEN" in profile.env else source
+            blockers.append(f"{role}: CLAUDE_CODE_OAUTH_TOKEN is set {where}")
+    if config.explainability.enabled:
+        blockers.append("explainability tracing sends every traced launch through its proxy")
+    on = ", ".join(roles)
+    if not blockers:
+        return _ok(
+            name,
+            f"on for {on} — each session can be continued from claude.ai/code and the Claude "
+            "app, titled '<project> · <label>'",
+        )
+    fix = (
+        "Remote Control needs Claude Code on a Claude.ai login (Pro, Max, Team or "
+        "Enterprise) talking to the Anthropic API: unbind the base URL or the token from "
+        "these roles, or turn tracing off, which `aisquare explainability disable` does for "
+        "every launch on this machine, not for these roles alone"
+    )
+    if source == "on the fleet server" and any(source in blocker for blocker in blockers):
+        fix += (
+            "; a variable the fleet server holds reaches every agent it starts until the "
+            "server is restarted from a shell without it (with no agent running: tmux -L "
+            f"{fleet_service.settings().tmux_socket} kill-server)"
+        )
+    return _warn(
+        name,
+        f"on for {on}, but Claude Code will refuse it: {'; '.join(blockers)}",
+        f"{fix}; `aisquare launch` skips the flag and says why until then",
+    )
 
 
 def _check_fleet(

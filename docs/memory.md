@@ -43,6 +43,15 @@ aisquare why                       # explain the last injection
 aisquare log                       # your captured prompt history, per project
 ```
 
+`context search` finds the entries that hold any of the words you give it, each
+as a prefix (`lint` finds `linting`), in any script (`вход`, `ログイン`). Every
+word is a word: `AND`, `OR`, `NOT` and `NEAR` are searched for, never read as
+search operators, and punctuation only separates words. Words are split as the
+index splits them (SQLite FTS5's `unicode61`), which in scripts written with
+combining vowel signs, such as Devanagari, is at each sign: `हिन्दी` finds an
+entry holding it, along with any other entry holding a word that starts with
+one of its pieces.
+
 Prompts are recorded only in a project you added (`aisquare project onboard`,
 `init`, Welcome or `+` in `asq`, a fleet spawn): a hooked session anywhere else
 keeps nothing. `[projects] capture = true` records them in every directory, as
@@ -66,7 +75,7 @@ walking up to the nearest marker.
 Registrations accumulate — every directory a command once ran in is one, and
 the fleet UI loads state for all of them. `aisquare project forget` drops one
 (its context, prompt history and board rows stay in the store, hidden, until
-the root is registered again; `--purge` deletes them and its brain too), and
+the root is registered again; `--purge` deletes them and its data directory too), and
 `aisquare project prune` sweeps the stale ones: roots that no longer exist, and
 worktrees of a repository that is itself registered. It shows the plan and asks
 before dropping anything; off a terminal it is a dry run unless `--yes`. Both
@@ -77,9 +86,38 @@ it. A `prune` that drops the reading project too, its agents all stopped, drops
 the hub with it: every hold is decided before anything goes, so the plan and
 the sweep agree.
 
+Neither ever moves or writes the pin. When the pin from `project switch` named
+the project that went, it is cleared ("the pin on alpha was cleared"), and the
+active project follows your working directory again. With no pin, or a pin on
+another project, nothing changes, even when you forget the project you are
+standing in. Before #271 the pin moved to the most recently touched project,
+and with no pin at all one was written. Every terminal and every fleet that ran
+without `--project` then followed it.
+
 ```sh
 aisquare project forget ../old-checkout       # one registration; --purge deletes its history too
 aisquare project prune --missing --worktrees  # the stale ones, after a confirmation (or --yes)
+```
+
+A project you reuse piece of work after piece of work can **start fresh**
+instead: `aisquare project fresh` (alias `reset`) stops its fleet, removes the
+agents' worktrees, clears its board (tasks, notes, sessions, signals and its work
+briefs, with the evidence they keep under `~/.aisquare/briefs/<id>/`) and its
+fleet rows, deletes the manager's state (`~/.aisquare/projects/<id>/manager/`,
+its `state.md`), so task and brief numbers start at #1 again and the new manager
+starts blank, and starts that manager. It keeps the registration and its
+settings and the symbol index (`~/.aisquare/projects/<id>/code`). It does not
+delete the command reports (`~/.aisquare/reports/`), but with their briefs gone
+they are no longer pinned as evidence (unless another board's brief cites one
+too): retention takes them as it takes any other
+([command reports](command-reports.md)). Its context entries, prompt log and
+fleet branches stay unless `--memory`, `--prompts` or `--branches`. Work in a
+worktree or branch that no remote has refuses it unless `--discard-unpushed`.
+`--dry-run` shows the plan.
+
+```sh
+aisquare project fresh --dry-run              # what it would clear
+aisquare project fresh --memory --yes         # clear the context entries too, without asking
 ```
 
 `aisquare project onboard` adds a folder as a project on purpose and seeds its

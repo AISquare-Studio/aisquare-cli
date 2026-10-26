@@ -4,7 +4,9 @@ docs/plans/fleet-tui.md §4.1. One ``ProjectCard`` per registered project, each
 with a disclosure, its name (the nickname, else the basename — renamed in place),
 chips (agents alive · 🔔 count), a ⋯ menu, and — when two projects share a name —
 the path as a dim subtitle; under it one ``AgentRow`` per fleet agent (role icon,
-label, state chip, exit status) and a spawn-agent row. Below the separator, one
+label, state chip, exit status). Above the projects, one *actions* block under the Fleet
+header — *▶ Start captain* (the captain's own row while one is live) and *Spawn agent*, whose
+dialog asks which project — and under the separator, one
 row, *⚙ Settings* (the Settings hub: App settings, Accounts, Doctor), under it the
 ⬆ row while a newer aisquare is out (:func:`update_row_text`), and under that
 one dim status line (:func:`status_line_text`): the AISquare sign-in and the
@@ -35,7 +37,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from rich.cells import cell_len
 from rich.text import Text
@@ -64,6 +66,9 @@ from aisquare.models import FleetAgentStatus, HeadroomSummary, ProjectGroup, Pro
 from aisquare.services import fleet as fleet_service
 from aisquare.services.project import NICKNAME_MAX, display_name
 from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
+
+if TYPE_CHECKING:
+    from aisquare.cli.ui.attach import ReturnTo
 
 ROLE_ICON: dict[str, str] = {
     "manager": "🧭",
@@ -106,7 +111,8 @@ class AddProject(Message):
 
 
 class CaptainRequested(Message):
-    """The rank insignia beside Fleet: the captain's view, or a start when there is none (T4)."""
+    """*▶ Start captain* in the actions block: the captain's view, or a start when there is none
+    (T4)."""
 
 
 class ProjectSelected(Message):
@@ -123,7 +129,13 @@ class AgentSelected(Message):
 
 
 class SpawnAgent(Message):
-    def __init__(self, project_id: str) -> None:
+    """*Spawn agent*, or the receiver's ``open_spawn``: the Spawn dialog.
+
+    ``project_id`` is the project the dialog opens on — the sidebar's selection, which the
+    dialog's Project field can change — or ``None`` for the first project listed.
+    """
+
+    def __init__(self, project_id: str | None = None) -> None:
         self.project_id = project_id
         super().__init__()
 
@@ -149,7 +161,14 @@ class DoctorSelected(Message):
 
 
 class AccountsSelected(Message):
-    """The Accounts page: the AISquare sign-in and the Claude Code accounts."""
+    """The Accounts page: the AISquare sign-in and the Claude Code accounts.
+
+    ``return_to`` is where to go back once a sign-in started there lands: Welcome's
+    *Sign in* asks to come back to Welcome (#286). Every other way in carries none."""
+
+    def __init__(self, return_to: ReturnTo | None = None) -> None:
+        self.return_to = return_to
+        super().__init__()
 
 
 class SettingsSelected(Message):
@@ -433,14 +452,24 @@ def headroom_dot(
 
 
 def status_line_text(
-    aisquare: bool | None, headroom: HeadroomSummary | None, *, every_needs_login: bool = False
+    aisquare: bool | None,
+    headroom: HeadroomSummary | None,
+    *,
+    every_needs_login: bool = False,
+    width: int | None = None,
 ) -> Text:
-    """``● aisquare  ● 3x claude`` (the x a multiplication sign) — the line under *⚙ Settings*.
+    """``● aisquare  ● 3x claude 58%`` (the x a multiplication sign), under *⚙ Settings*.
 
     The AISquare dot is green signed in, red signed out, grey while unknown. The
-    Claude dot is :func:`headroom_dot`; the count is how many accounts are usable,
-    and a ``⚠`` follows when an account needs a login. ``headroom`` is ``None`` until
-    the first summary lands.
+    Claude dot is :func:`headroom_dot`; the count is how many accounts are usable;
+    the figure is the fleet's share LEFT (``HeadroomSummary.percent_left``, #287), in
+    the dot's colour, and absent until a reading; a ``⚠`` follows when an account
+    needs a login. ``headroom`` is ``None`` until the first summary lands.
+
+    ``width``, the cells the line has: the figure is left out where the line would not
+    fit it, so the ellipsis never cuts the ``⚠`` (something to do) nor a number in two.
+    In the 28 cells of the sidebar, ``2x claude 3% ⚠`` fits and ``2x claude 58% ⚠``
+    does not (review of #357).
     """
     text = Text(no_wrap=True, overflow="ellipsis")
     colour = "grey50" if aisquare is None else GREEN if aisquare else RED
@@ -452,8 +481,14 @@ def status_line_text(
     if headroom is not None:
         text.append(f"{headroom.usable}{TIMES} ", style="dim")
     text.append("claude", style="dim")
-    if headroom is not None and headroom.needs_login:
-        text.append(" ⚠", style="yellow")
+    warning = " ⚠" if headroom is not None and headroom.needs_login else ""
+    if headroom is not None and headroom.percent_left is not None:
+        # The figure the dot's band stands for (#287): percent LEFT, in the dot's colour.
+        figure = f" {round(headroom.percent_left)}%"
+        if width is None or text.cell_len + cell_len(figure + warning) <= width:
+            text.append(figure, style=colour)
+    if warning:
+        text.append(warning, style="yellow")
     return text
 
 
@@ -542,43 +577,6 @@ class AddButton(Activatable):
 
     def message(self) -> Message:
         return AddProject()
-
-
-class CaptainButton(Activatable):
-    """The ``★`` between Fleet and ``+``: the captain, one click away (T4).
-
-    A rank insignia, a single star (plan section 4, the owner's pick): lit in the
-    accent while the captain's row is live — a process that can answer, the
-    ``ALIVE_STATES`` the cards count by — and dim otherwise. The shell decides what a
-    click does from the same frame: the captain view, or the Spawn dialog preset to
-    the captain when there is none to show.
-    """
-
-    DEFAULT_CSS = """
-    CaptainButton { width: 3; color: $text-muted; }
-    CaptainButton.live { color: $accent; text-style: bold; }
-    """
-
-    def __init__(self) -> None:
-        super().__init__(Text(" ★ "), id="captain-button")
-        # No selection key: the keyboard cursor's walk (↑ ↓ from the header, pinned by the
-        # shell's tests) stays as it was, and the captain's own row in the Captain section
-        # is the keyboard's way to it — the star is the mouse's.
-        self.tooltip = CaptainButton.tip(live=False)
-
-    @staticmethod
-    def tip(*, live: bool) -> str:
-        if live:
-            return "The captain — open its view (aisquare captain)"
-        return "No captain running — start one (aisquare captain)"
-
-    def show(self, status: FleetAgentStatus | None) -> None:
-        live = status is not None and status.state in ALIVE_STATES
-        self.set_class(live, "live")
-        self.tooltip = CaptainButton.tip(live=live)
-
-    def message(self) -> Message:
-        return CaptainRequested()
 
 
 class Disclosure(Static):
@@ -840,7 +838,7 @@ class CardChips(Static):
 
 
 class CardMenuButton(Static):
-    """⋯ — the card's menu: Rename, Pin / Unpin, Open settings, Remove from fleet…"""
+    """⋯ — the card's menu: Rename, Pin / Unpin, Open settings, Start fresh…, Remove from fleet…"""
 
     DEFAULT_CSS = """
     CardMenuButton { width: 2; height: 1; content-align: right middle; color: $text-muted; }
@@ -906,23 +904,6 @@ class AgentRow(Activatable):
 
     def message(self) -> Message:
         return AgentSelected(self.status.agent.project_id, self.status.agent.id)
-
-
-class SpawnRow(Activatable):
-    """The spawn-agent row — opens the Spawn dialog for this project."""
-
-    DEFAULT_CSS = """
-    SpawnRow { padding-left: 3; color: $text-muted; }
-    """
-
-    def __init__(self, project_id: str) -> None:
-        # U+FF0B, the fullwidth plus of the plan's mockup (§4): visibly not the header's +.
-        super().__init__(Text("\uff0b spawn agent"), classes="spawn-row")
-        self.project_id = project_id
-        self.selection_key = f"spawn:{project_id}"
-
-    def message(self) -> Message:
-        return SpawnAgent(self.project_id)
 
 
 def group_header_text(
@@ -1009,7 +990,7 @@ class SectionLabel(Static):
 
 
 class ProjectCard(Vertical):
-    """One project: header row, optional path subtitle, agent rows, spawn row.
+    """One project: header row, optional path subtitle, agent rows.
 
     Everything the card shows is held on the instance and (re)painted from
     there, so ``show`` can be called before the card has composed (the data is
@@ -1082,7 +1063,6 @@ class ProjectCard(Vertical):
             for status in self.statuses:
                 yield AgentRow(status)
             yield Static(Text(self.notice or "", style="dim"), classes="card-notice")
-            yield SpawnRow(self.project.id)
 
     def on_mount(self) -> None:
         self._paint_decorations()
@@ -1283,41 +1263,82 @@ class UpdateRow(Activatable):
 
 
 CAPTAIN_READING = "reading the captain's board…"
-"""The Captain section's line from the moment Settings switches the captain on until a read
+"""The captain slot's line from the moment Settings switches the captain on until a read
 of the fleet that asked for it answers: until then nothing says there is no captain."""
 
+START_CAPTAIN_KEY = "start-captain"
+SPAWN_AGENT_KEY = "spawn-agent"
+"""The two actions' keys: reachable from the keyboard, never the highlighted selection (each
+opens a dialog or a view that has its own row)."""
 
-class StartCaptain(Activatable):
-    """*▶ Start captain*, in the Captain section while there is no captain: what the ``★`` does
-    then, the Spawn dialog with the captain chosen. It said "`aisquare captain` starts one",
-    a command to go and type, and the owner did not find how to start one (#33)."""
 
-    DEFAULT_CSS = """
-    StartCaptain { color: $accent; }
+ACTION_ICON_CELLS = 2
+"""The cells an action's icon column takes: the fullwidth plus and the captain row's emoji are two
+cells wide, so ``▶`` is padded to it and the three labels start in one column. The padding is
+measured (``cell_len``), not assumed: ``▶`` (U+25B6) is East-Asian-ambiguous."""
+
+
+def action_text(icon: str, label: str) -> Text:
+    """``▶  Start captain`` / ``+ Spawn agent`` (the fullwidth plus): the icon padded to
+    :data:`ACTION_ICON_CELLS`, a space, the label."""
+    text = Text(no_wrap=True, overflow="ellipsis")
+    text.append(icon + " " * (ACTION_ICON_CELLS - cell_len(icon)) + " " + label)
+    return text
+
+
+class ActionRow(Activatable):
+    """One action at the top of the sidebar: a full-width, one-line button in the accent.
+
+    The two actions share this look, so *Start captain* and *Spawn agent* read as a pair; the
+    captain's own row, which takes the first one's place while it is live, is an ordinary
+    :class:`AgentRow` on the same band (``ActionsSection``).
     """
 
+    DEFAULT_CSS = """
+    ActionRow { color: $accent; text-style: bold; background: $boost; }
+    """
+
+
+class StartCaptain(ActionRow):
+    """*▶ Start captain*, in the captain slot while there is no live captain: the Spawn dialog
+    with the captain chosen. It said "`aisquare captain` starts one", a command to go and
+    type, and the owner did not find how to start one (#33)."""
+
     def __init__(self) -> None:
-        super().__init__(Text("▶ Start captain"), id="captain-empty")
-        # No selection key, as the ★ has none: the keyboard cursor's walk (pinned by the
-        # shell's tests) stays as it was, and the line is the mouse's way to a start.
+        super().__init__(action_text("▶", "Start captain"), id="captain-empty")
+        self.selection_key = START_CAPTAIN_KEY
         self.tooltip = "No captain running — start one (aisquare captain)"
 
     def message(self) -> Message:
         return CaptainRequested()
 
 
+class SpawnButton(ActionRow):
+    """*Spawn agent*: the Spawn dialog, whose Project field says where the agent goes."""
+
+    def __init__(self) -> None:
+        # U+FF0B, the fullwidth plus of the plan's mockup (§4): visibly not the header's +.
+        super().__init__(action_text("\uff0b", "Spawn agent"), id="spawn-agent")
+        self.selection_key = SPAWN_AGENT_KEY
+        self.tooltip = "Spawn an agent — you choose the project in the dialog"
+
+    def message(self) -> Message:
+        sidebar = self._sidebar()
+        return SpawnAgent(sidebar.spawn_project_id() if sidebar is not None else None)
+
+
 class CaptainSection(Vertical):
-    """The home-level heading above the projects: the captain's row (one per home, T2).
+    """The captain's slot, first in the actions block: its row, or the line that starts one.
 
     The captain lives on the home board, which is never a project, so it never gets
     a :class:`ProjectCard`; its row is an ordinary :class:`AgentRow` — selecting it
-    opens the same agent view, with Stop and Restart — under this heading instead.
+    opens the same agent view, with Stop and Restart. While it is live the row takes the
+    place of *▶ Start captain*; an exited or lost one keeps its row with the start under it,
+    so it can be restarted from either.
     """
 
     DEFAULT_CSS = """
-    CaptainSection { height: auto; padding: 0 1; }
-    CaptainSection #captain-title { height: 1; }
-    CaptainSection #captain-empty { height: 1; color: $text-muted; }
+    CaptainSection { height: auto; }
     CaptainSection #captain-notice { height: auto; color: $text-muted; }
     """
 
@@ -1327,21 +1348,22 @@ class CaptainSection(Vertical):
         """The line it is built with, as :meth:`show` would say it with no row."""
 
     def compose(self) -> ComposeResult:
-        yield Static(Text("Captain", style="bold"), id="captain-title")
-        empty = StartCaptain()
-        empty.display = self._notice is None
-        yield empty
-        yield Static(Text(self._notice or "", style="dim"), id="captain-notice")
+        start = StartCaptain()
+        start.display = self._notice is None
+        yield start
+        notice = Static(Text(self._notice or "", style="dim"), id="captain-notice")
+        notice.display = bool(self._notice)
+        yield notice
 
     def show(self, status: FleetAgentStatus | None, *, notice: str | None = None) -> None:
-        """Show the captain's row, or the line saying how to start one.
+        """Show the captain's row and/or the line that starts one.
 
         ``notice`` says the read behind this frame failed; ``status`` is then the
         last frame's row, or ``None`` when there was none. It takes the place of
-        the "starts one" line, which is true only when the fleet ANSWERED none —
-        the project cards' rule (``Sidebar.show_projects``), for the captain.
+        the start line, which is true only when the fleet ANSWERED no live captain — the
+        project cards' rule (``Sidebar.show_projects``), for the captain.
         """
-        empty = self.query_one("#captain-empty", StartCaptain)
+        start = self.query_one("#captain-empty", StartCaptain)
         said = self.query_one("#captain-notice", Static)
         said.update(Text(notice or "", style="dim"))
         said.display = bool(notice)
@@ -1352,14 +1374,40 @@ class CaptainSection(Vertical):
         for row in rows:
             if row is not keep:
                 row.remove()
-        empty.display = status is None and not notice
+        live = status is not None and status.state in ALIVE_STATES
+        start.display = not live and not notice
         if status is None:
             return
         if keep is None:
-            # Under the heading, above the two lines that stand in for it.
-            self.mount(AgentRow(status), after=self.query_one("#captain-title"))
+            # First in the slot, above the start line it stands in for.
+            self.mount(AgentRow(status), before=0)
         else:
             keep.show(status)
+
+
+class ActionsSection(Vertical):
+    """The block under the Fleet header: the captain's slot (while the experimental captain is
+    on) and *Spawn agent*, stacked, full width, and a rule under them before the projects.
+
+    The spawn action used to be a row under every project card; one row up here says the same
+    and the dialog asks the project. The captain's heading and its ★ in the header are gone:
+    *Start captain* names itself, and beside *Spawn agent* a "Captain" heading would have read
+    as if that belonged to it.
+    """
+
+    DEFAULT_CSS = """
+    ActionsSection { height: auto; padding: 0 1; border-bottom: solid $primary; }
+    ActionsSection AgentRow { padding-left: 0; background: $boost; }
+    """
+
+    def __init__(self, *, captain: bool, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self._captain = captain
+
+    def compose(self) -> ComposeResult:
+        if self._captain:
+            yield CaptainSection(id="captain-section")
+        yield SpawnButton()
 
 
 class StatusLine(Static):
@@ -1377,6 +1425,33 @@ class StatusLine(Static):
 
     ALLOW_SELECT = False
 
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self.facts: tuple[bool | None, HeadroomSummary | None, bool] = (None, None, False)
+        """What the line says: the AISquare sign-in, the headroom, ``every_needs_login``."""
+
+    def show_facts(
+        self, aisquare: bool | None, headroom: HeadroomSummary | None, every_needs_login: bool
+    ) -> None:
+        self.facts = (aisquare, headroom, every_needs_login)
+        self.fit_line()
+
+    def on_resize(self) -> None:
+        self.fit_line()
+
+    def fit_line(self) -> None:
+        """The line for :attr:`facts`, fitted to the cells it has now (:func:`status_line_text`'s
+        ``width``); before the first layout, whole."""
+        aisquare, headroom, every_needs_login = self.facts
+        self.update(
+            status_line_text(
+                aisquare,
+                headroom,
+                every_needs_login=every_needs_login,
+                width=self.content_size.width or None,
+            )
+        )
+
     def on_click(self, event: events.Click) -> None:
         event.stop()
         self.post_message(AccountsSelected().set_sender(self))
@@ -1393,7 +1468,7 @@ class OthersSection(Vertical):
     def compose(self) -> ComposeResult:
         yield SettingsRow()
         yield UpdateRow()
-        yield StatusLine(status_line_text(None, None), id="status-line")
+        yield StatusLine(id="status-line")
 
 
 # --- the pane ---------------------------------------------------------------------
@@ -1462,7 +1537,7 @@ class Sidebar(Vertical):
     def __init__(self, *, id: str | None = None, captain: bool = True) -> None:
         super().__init__(id=id)
         self.captain = captain
-        """Whether the experimental captain is on: off, no insignia and no captain section."""
+        """Whether the experimental captain is on: off, the actions block has no captain slot."""
         self.selected_key: str | None = None
         """What is highlighted: ``project:<id>``, ``agent:<id>``, or ``settings`` while the hub
         or a page it opens (App settings, Accounts, Doctor) shows."""
@@ -1489,11 +1564,8 @@ class Sidebar(Vertical):
     def compose(self) -> ComposeResult:
         with Horizontal(id="fleet-header"):
             yield Static(Text("Fleet"), id="fleet-title")
-            if self.captain:
-                yield CaptainButton()
             yield AddButton()
-        if self.captain:
-            yield CaptainSection(id="captain-section")
+        yield ActionsSection(captain=self.captain, id="actions")
         yield Static("", id="projects-notice")
         # can_focus=False: the rows are Statics, so a mouse-down on one focuses
         # the nearest focusable ancestor. Left focusable, this scroll would take
@@ -1511,34 +1583,30 @@ class Sidebar(Vertical):
     # --- data in -----------------------------------------------------------------
 
     def show_captain(self, status: FleetAgentStatus | None, *, notice: str | None = None) -> None:
-        """The home's captain row, above the projects (``None``: there is none).
+        """The home's captain row, first in the actions block (``None``: there is none).
 
         ``notice``: why the read failed — the row is then the last frame's, kept.
-        The insignia in the header follows the same row (T4). With the captain off
-        there is neither, and nothing to show.
+        With the captain off there is no slot, and nothing to show.
         """
         if not self.captain:
             return
         self.query_one(CaptainSection).show(status, notice=notice)
-        self.query_one(CaptainButton).show(status)
 
     async def set_captain(self, on: bool) -> None:
-        """The captain switched on or off while asq runs (Settings, #33): the insignia and the
-        Captain section mounted, saying the captain is being read until a frame answers,
-        or removed. As at a start with the switch so (:meth:`compose`), never a restart."""
+        """The captain switched on or off while asq runs (Settings, #33): its slot mounted in the
+        actions block, saying the captain is being read until a frame answers, or removed. As at
+        a start with the switch so (:meth:`compose`), never a restart."""
         if on == self.captain:
             return
         self.captain = on
         if not on:
-            for widget in [*self.query(CaptainButton), *self.query(CaptainSection)]:
+            for widget in list(self.query(CaptainSection)):
                 await widget.remove()
             return
-        header = self.query_one("#fleet-header", Horizontal)
-        await header.mount(CaptainButton(), before=self.query_one(AddButton))
-        # Built saying so: shown after the mount, the section said *Start captain* for as
+        # Built saying so: shown after the mount, the slot said *Start captain* for as
         # long as the mount took, to a frame and to a read in that window (review of #274, m7).
         section = CaptainSection(notice=CAPTAIN_READING, id="captain-section")
-        await self.mount(section, before=self.query_one("#projects-notice"))
+        await self.query_one(ActionsSection).mount(section, before=0)
 
     def show_projects(
         self,
@@ -1710,11 +1778,9 @@ class Sidebar(Vertical):
             return ("project", ident)
         if kind == "group":
             return ("group", ident)
-        if kind in ("agent", "spawn"):
+        if kind == "agent":
             for card in self.query(ProjectCard):
-                if any(s.agent.id == ident for s in card.statuses) or (
-                    kind == "spawn" and card.project.id == ident
-                ):
+                if any(s.agent.id == ident for s in card.statuses):
                     return ("project", card.project.id)
         return None
 
@@ -1950,10 +2016,30 @@ class Sidebar(Vertical):
         self.query_one(UpdateRow).offer(version, runnable=runnable)
 
     def _paint_status(self) -> None:
-        line = status_line_text(
-            self.aisquare, self.headroom, every_needs_login=self.every_needs_login
-        )
-        self.query_one(StatusLine).update(line)
+        self.query_one(StatusLine).show_facts(self.aisquare, self.headroom, self.every_needs_login)
+
+    # --- what the Spawn dialog asks of the sidebar ------------------------------------
+
+    def ordered_projects(self) -> list[ProjectInfo]:
+        """Every listed project once, in the order the sidebar shows them (pinned, groups,
+        loose): the Spawn dialog's Project field offers them so. Empty before the first frame."""
+        return self.arrangement.ordered_projects() if self.arrangement is not None else []
+
+    def spawn_project_id(self) -> str | None:
+        """The project *Spawn agent* opens on: the selected card's, or the selected agent's
+        project; else ``None`` (the first one listed). The captain's row, whose board is no
+        listed project, and a group, Settings or nothing selected, name none."""
+        kind, _, ident = (self.selected_key or "").partition(":")
+        listed = {project.id for project in self.ordered_projects()}
+        if kind == "project":
+            return ident if ident in listed else None
+        if kind == "agent" and self.last_frame is not None:
+            _projects, agents = self.last_frame
+            for statuses in agents.values():
+                for status in statuses:
+                    if status.agent.id == ident and status.agent.project_id in listed:
+                        return status.agent.project_id
+        return None
 
     # --- selection ------------------------------------------------------------------
 

@@ -224,14 +224,19 @@ write it: a spawn of yours that names one (from asq's dialog or your own shell; 
 dialog field forgets it, unless the role's settings pin that flag, whose pin then runs and
 whose blank says so) and a `/model` inside any running fleet agent, the captain's
 included (the captain's spawns take no model), which its next turn end
-reads: the model off its transcript's last reply, the effort off the hook payload's
-`effort.level`, else its `CLAUDE_EFFORT`. A spawn an agent makes (`fleet spawn … --as
+reads: the model off its transcript's last reply, the effort off the Stop hook payload's
+`effort.level`, else its `CLAUDE_EFFORT` (a session start reports no effort, and a fleet
+window starts its agent without the `CLAUDE_EFFORT` it would inherit from whoever started
+the tmux server). A spawn an agent makes (`fleet spawn … --as
 <session>`, or from a fleet agent's own shell, such as a manager's) runs its flags for that
 one agent and leaves your pick alone, and an agent's `fleet tell` may not type a `/model`
 into another (it is refused, and pointed at `fleet restart <label> --model <model>`, which
-runs that agent alone on it and is no pick either). A reading
+runs that agent alone on it and is no pick either). A model reading
 is a `/model` when it names another id than the session's last one (its start's, or the
-previous turn's); an alias is only the id it resolved to, so `/model claude-opus-4-5` in
+previous turn's); an effort reading, when it differs from the previous turn's, or before
+any from the launch's own `--effort`. So with no `--effort` the first turn's end is the
+baseline: an effort changed inside the very first turn of such an agent is not
+remembered, and a later change is. An alias is only the id it resolved to, so `/model claude-opus-4-5` in
 an agent launched with `--model opus` (which runs `claude-opus-5-5`) is one. An agent
 launched on `opusplan` runs opus and sonnet by mode, so a reply of either says nothing of
 a pick, and one of another family does.

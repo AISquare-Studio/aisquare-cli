@@ -44,8 +44,10 @@ shows its pin instead, and an untouched field follows the role between the two; 
 the owner typed stays. Untouched, each is sent as ``None`` and the service decides as for
 ``fleet spawn``: the Extra agent args, the role's settings, then the pick. A changed one is
 this spawn's pick and the next one, and a cleared one (``""``) runs the account's default
-and forgets the pick, unless it showed the role's own pin (that clears the pin, for this
-spawn). The pick is the owner's: the dialog is asq's, run from the owner's shell.
+and forgets the pick. Over a role whose settings pin that flag (its ``extra_args``, or its
+binding's ``--arg``, which ``aisquare launch`` adds) a cleared field is no choice: the pin
+runs, the pick stays, and the blank says so (``(the reviewer's settings: haiku)``). The pick
+is the owner's: the dialog is asq's, run from the owner's shell.
 
 **Presets** — ``SpawnDialog(project, persona=, role=, binary=, account=)`` — are
 applied at compose, never by poking widgets after mount: the persona-first flow

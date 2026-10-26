@@ -119,8 +119,10 @@ def _effort_level(payload: dict[str, Any]) -> str | None:
 
 
 def _effort_now(payload: dict[str, Any]) -> str | None:
-    """The effort the session runs: the payload's ``effort.level``, else the
-    ``CLAUDE_EFFORT`` Claude Code gives its hooks (a payload may carry none, #16)."""
+    """The effort the session runs, at a turn's end: the payload's ``effort.level``, else
+    the ``CLAUDE_EFFORT`` Claude Code gives its Stop hook (#16). Never at a session start:
+    Claude Code 2.1.310's SessionStart carries no effort, and its hooks there see only the
+    process's inherited environment, a fleet window's being the tmux server's (seq 3513)."""
     return _effort_level(payload) or os.environ.get("CLAUDE_EFFORT", "").strip() or None
 
 
@@ -135,7 +137,7 @@ def session_start() -> None:
             source=_str(payload, "source"),
             transcript_path=_str(payload, "transcript_path"),
             model=_str(payload, "model"),
-            effort=_effort_now(payload),
+            effort=_effort_level(payload),
         )
         # Inside the try: the write itself can fail on what the context holds
         # (a character stdout cannot encode), and that must not become a

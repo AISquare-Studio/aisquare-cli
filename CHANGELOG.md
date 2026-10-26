@@ -100,23 +100,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   you chose them. Your last pick is one per home, for every role and persona, kept in the
   home's store, and only your choices write it: a spawn of yours that names one (asq's
   dialog or your shell; a cleared dialog field forgets it, and over a role's own pin runs
-  the pin; an empty `--model ""` is refused) and a `/model` inside any running fleet agent, which its Stop
-  hook reads from the transcript's last reply and the payload's `effort.level`, else
-  `CLAUDE_EFFORT` (one tail read, fail-open; the agent's own session only, never a `claude
-  -p` run from its shell). A spawn an agent makes (`--as`, or from its shell) runs its flags
-  for that agent alone, and an agent's `fleet tell` that starts with `/model` is refused in
-  favour of the new `fleet restart <label> --model … --effort …`, which runs that agent
-  alone on them. An alias is only the id it resolved to, as the session's start
+  the pin; an empty `--model ""` is refused) and a `/model` inside any running fleet agent,
+  which its Stop hook reads from the transcript's last reply and the payload's
+  `effort.level`, else `CLAUDE_EFFORT` (one tail read, fail-open; the agent's own session
+  only, never a `claude -p` run from its shell). An effort is read at a Stop alone: a fleet
+  window starts its agent without the `CLAUDE_EFFORT` the tmux server inherited, and with no
+  `--effort` the first turn's end is the baseline, so an effort changed inside an agent's
+  very first turn is not remembered. A spawn an agent makes (`--as`, or from its shell) runs
+  its flags for that agent alone, and an agent's `fleet tell` that starts with `/model` is
+  refused in favour of the new `fleet restart <label> --model … --effort …`, which runs that
+  agent alone on them. An alias is only the id it resolved to, as the session's start
   reports it, so a `/model` within its family counts; an `opusplan` agent's opus and sonnet
   replies never do. A role's settings win for that role and never write the pick. A
   restart, a switch, a hand-over and a fork as the same role keep what the agent was
   actually running, the account default included, on any account, over the recorded flag
   and a binding's pin (a fork as another role runs that role's settings, else the pick);
-  none changes the pick. A
-  spawn's own `--model` or `--effort` replaces the same flag in the role's `extra_args` and
-  binding instead of passing it twice, and `aisquare launch` drops a binding's flag that its
-  own line names. The `⚠ off-ladder` chip stands down for a session on a model you chose for
-  it (the pick, its spawn's args, its role's settings). Agents
+  none changes the pick. A spawn's own `--model` or `--effort` replaces the same flag in the
+  role's `extra_args` and binding instead of passing it twice, and `aisquare launch` drops a
+  binding's flag that its own line names. The `⚠ off-ladder` chip stands down for a session
+  on a model you chose for it (the pick, its spawn's args, its role's settings). Agents
   spawned by 0.9.0 keep the rung they recorded until they run another model.
 - **The Spawn dialog's Account field says what a spawn with no account runs on**
   (#12 on the board). With rank 1 the default (#406), the field still opened on

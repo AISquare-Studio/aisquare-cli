@@ -115,8 +115,9 @@ def session_start_context(
         else ""
     )
     if session_id:
-        # After the team hook, which binds a fleet row to this session where it may.
-        remember_the_start(session_id, model=model, effort=effort)
+        # After the team hook, which binds a fleet row to this session where it may. The
+        # model alone: no effort a session start can read is the session's (seq 3513).
+        remember_the_start(session_id, model=model)
     # Last, and only when the experiment is on: the standing instruction to
     # consult the recall tool, then any retrieved material — closest to what
     # the agent is about to do, and the part it should weigh least. Not in a
@@ -308,16 +309,16 @@ def remember_the_model(
         )
 
 
-def remember_the_start(session_id: str, *, model: str | None, effort: str | None) -> None:
-    """A fleet agent's session start: what its launch runs, as the payload reports it, which
-    a restart compares what it runs later with (``model_memory.started``). Nothing for a
-    session no fleet window runs. Fails open, said on stderr: stdout is the agent's context.
-    """
+def remember_the_start(session_id: str, *, model: str | None) -> None:
+    """A fleet agent's session start: the model its launch runs, as the payload reports it,
+    which a restart compares what it runs later with (``model_memory.started``). Nothing for
+    a session no fleet window runs. Fails open, said on stderr: stdout is the agent's
+    context."""
     agent_id = orchestrator.env_fleet_agent()
     if agent_id is None:
         return
     try:
-        model_memory.started(session_id, model=model, effort=effort, agent_id=agent_id)
+        model_memory.started(session_id, model=model, agent_id=agent_id)
     except Exception as exc:  # the session starts all the same; only the reading is lost
         sys.stderr.write(
             f"aisquare: the agent's launch model was not read ({type(exc).__name__}: {exc}) "

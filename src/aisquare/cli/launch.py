@@ -516,6 +516,11 @@ def launch(
         _check_persona(persona, persona_root)
 
     env = {**os.environ, "AISQUARE_ROLE": role}
+    if orchestrator.env_fleet_agent() is not None:
+        # A fleet window inherits the tmux server's environment, whoever started it: from a
+        # Claude Code session, its CLAUDE_EFFORT. The agent runs its own `--effort`, or the
+        # account's default, and its Stop hook reads the effort it runs (#16, seq 3513).
+        env.pop("CLAUDE_EFFORT", None)
     if persona is not None:
         # The name travels, never the body: argv is visible in `ps` and a body
         # can be thousands of characters. The session-start hook resolves it and

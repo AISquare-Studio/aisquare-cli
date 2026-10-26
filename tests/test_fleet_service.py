@@ -2207,11 +2207,12 @@ def _captured(
     model_memory.observe(agent.session_id, str(transcript), effort=effort, agent_id=agent.id)
 
 
-def _started(agent: FleetAgent, model: str, effort: str | None) -> None:
+def _started(agent: FleetAgent, model: str) -> None:
     """The agent's session start as its hook reports it: the model its launch resolved to
-    (``opus`` runs ``claude-opus-5-5``) and the effort (``CLAUDE_EFFORT``)."""
+    (``opus`` runs ``claude-opus-5-5``). No effort: Claude Code's SessionStart reports none
+    (seq 3513); its first Stop does."""
     assert agent.session_id is not None
-    model_memory.started(agent.session_id, model=model, effort=effort, agent_id=agent.id)
+    model_memory.started(agent.session_id, model=model, agent_id=agent.id)
 
 
 def test_a_restart_and_a_switch_start_what_the_agent_runs_now(
@@ -2287,7 +2288,7 @@ def test_a_model_command_within_the_aliases_family_is_the_pick_and_the_restarts_
     as the session's start reported it."""
     agent = _coder(project, agent_args=["--model", "opus", "--effort", "xhigh"])
     transcript = _on_disk(agent, tmp_path)
-    _started(agent, "claude-opus-5-5", "xhigh")
+    _started(agent, "claude-opus-5-5")
     _captured(monkeypatch, agent, transcript, "claude-opus-4-5", "xhigh")
     assert model_memory.remembered() == model_memory.Pick("claude-opus-4-5", "xhigh")
 
@@ -2322,7 +2323,7 @@ def test_a_restart_and_a_switch_keep_what_an_agent_with_no_pick_ran(
     _two_slots_with_usage(monkeypatch, work=10, personal=10)
     agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
     transcript = _on_disk(agent, tmp_path)
-    _started(agent, "claude-opus-5-5", "high")
+    _started(agent, "claude-opus-5-5")
     _captured(monkeypatch, agent, transcript, "claude-opus-5-5", "high")
     assert model_memory.remembered() == model_memory.Pick()
 
@@ -2346,7 +2347,7 @@ def test_a_mode_alias_is_kept_by_its_turns_and_its_restart(
     is. The sonnet reply became the pick, and the restart dropped opusplan for sonnet."""
     agent = _coder(project, agent_args=["--model", "opusplan"])
     transcript = _on_disk(agent, tmp_path)
-    _started(agent, "claude-opus-5-5", None)
+    _started(agent, "claude-opus-5-5")
     _captured(monkeypatch, agent, transcript, "claude-sonnet-5-5", "high")
     _captured(monkeypatch, agent, transcript, "claude-opus-5-5", "high")
     assert model_memory.remembered().model == "opusplan"
@@ -2524,7 +2525,7 @@ def test_a_fork_starts_what_its_source_runs_now(
     source runs now, and leaves the pick as it was."""
     source = _coder(project, agent_args=["--model", "opus", "--effort", "xhigh"])
     transcript = _on_disk(source, tmp_path)
-    _started(source, "claude-opus-5-5", "xhigh")
+    _started(source, "claude-opus-5-5")
     _captured(monkeypatch, source, transcript, "claude-fable-5-1", "max")
     picked = model_memory.remembered()
 
@@ -2548,7 +2549,7 @@ def test_a_hand_over_starts_what_the_agent_runs_now_and_leaves_the_pick(
         project, "coder", worktree=False, account="2", agent_args=["--model", "opus"]
     ).agent
     transcript = _on_disk(agent, tmp_path)
-    _started(agent, "claude-opus-5-5", "high")
+    _started(agent, "claude-opus-5-5")
     _captured(monkeypatch, agent, transcript, "claude-fable-5-1", "max")
     model_memory.remember(model="sonnet", effort="low")  # a later pick, on another spawn
 

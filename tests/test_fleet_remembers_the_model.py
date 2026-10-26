@@ -121,10 +121,14 @@ def _session(project: ProjectInfo) -> TeamSession:
 def test_a_model_command_in_any_fleet_agent_is_what_the_next_spawn_runs(
     work: ProjectInfo, monkeypatch: pytest.MonkeyPatch, role: str
 ) -> None:
-    """The agent started on fable at high; the owner's ``/model`` moved it to opus at xhigh.
-    Its next turn end reads that, keeps it on its session (a restart starts it) and as the
-    owner's pick, whatever the agent's role (``agent`` is the plain one)."""
-    _manager(work, role=role)
+    """The agent started on fable (its session start's model), and its first turn ended at
+    high (the first Stop's effort, the baseline: seq 3513); the owner's ``/model`` moved it
+    to opus at xhigh. Its next turn end reads that, keeps it on its session (a restart starts
+    it) and as the owner's pick, whatever the agent's role (``agent`` is the plain one)."""
+    _manager(work, role=role, effort=None)
+    _write(_transcript(work), _reply("claude-fable-5-1"))
+    _stop(work, monkeypatch, effort="high")
+    assert model_memory.remembered() == model_memory.Pick()
     _write(_transcript(work), _reply("claude-opus-5-5"))
     _stop(work, monkeypatch, effort="xhigh")
     assert model_memory.remembered() == model_memory.Pick("claude-opus-5-5", "xhigh")
@@ -136,7 +140,9 @@ def test_the_payloads_own_effort_is_read_before_the_environments(
     work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Claude Code reports ultracode as xhigh in ``CLAUDE_EFFORT``; its payload names it."""
-    _manager(work)
+    _manager(work, effort=None)
+    _write(_transcript(work), _reply("claude-fable-5-1"))
+    _stop(work, monkeypatch, effort="high")  # the first Stop: the baseline
     _write(_transcript(work), _reply("claude-fable-5-1"))
     monkeypatch.setenv(FLEET_AGENT_ENV_VAR, AGENT)
     monkeypatch.setenv("CLAUDE_EFFORT", "xhigh")
@@ -278,23 +284,58 @@ def test_a_model_command_within_the_launch_aliases_family_is_a_pick(
     assert model_memory.remembered() == model_memory.Pick("claude-opus-4-5", None)
 
 
-def test_an_effort_changed_in_the_first_turn_is_a_pick(
+@pytest.mark.parametrize(
+    ("role", "spawned_by"), [("tester", "ses_manager_1"), ("validator", "user")]
+)
+def test_an_inherited_claude_effort_is_never_the_owners_effort(
+    work: ProjectInfo, monkeypatch: pytest.MonkeyPatch, role: str, spawned_by: str
+) -> None:
+    """Seq 3513 (1): Claude Code 2.1.310's SessionStart carries the model and no effort, and
+    its hooks there see the process's inherited environment: a fleet window inherits the
+    tmux server's ``CLAUDE_EFFORT``, from whatever process started it. Read as the launch's
+    effort, the agent's first Stop at its own ``--effort low`` (a manager's ``--as`` spawn,
+    or a role pinned in its settings) looked like a ``/effort`` and became the pick."""
+    launched = LaunchSpec(binary="claude", extra_args=["--effort", "low"])
+    _manager(work, role=role, model=None, effort=None, spec=launched)
+    with store_session() as store:
+        row = store.get_fleet_agent(AGENT)
+        assert row is not None
+        store.upsert_fleet_agent(row.model_copy(update={"spawned_by": spawned_by}))
+    model_memory.remember(model="opus", effort="xhigh")
+    monkeypatch.setenv("AISQUARE_ROLE", role)
+    _hook(
+        "session-start",
+        work,
+        monkeypatch,
+        effort="xhigh",
+        source="startup",
+        model="claude-opus-5-5",
+    )
+    _write(_transcript(work), _reply("claude-opus-5-5"))
+    _hook("stop", work, monkeypatch, effort="low")
+    assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
+
+
+def test_with_no_effort_flag_the_first_stop_is_the_baseline_and_a_later_change_a_pick(
     work: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Seq 3424 (a): the session start reads ``CLAUDE_EFFORT`` too, so the effort it started
-    on is known before the first Stop, and a ``/model`` that changes it in that turn is a
-    pick. (The payload carries no ``effort`` here, as on a Claude Code that sends none.)"""
+    """Seq 3513 (ii): with no ``--effort``, what the agent runs is known at its first Stop
+    alone, so that reading is the baseline and only a later change is the owner's
+    ``/effort``. (A change inside the very first turn is not remembered: the gap the docs
+    name.)"""
     _manager(work, model=None, effort=None)
     monkeypatch.setenv("AISQUARE_ROLE", "manager")
     _hook(
         "session-start",
         work,
         monkeypatch,
-        effort="high",
+        effort="xhigh",
         source="startup",
         model="claude-fable-5-1",
     )
-    assert _session(work).effort == "high"
+    _write(_transcript(work), _reply("claude-fable-5-1"))
+    _hook("stop", work, monkeypatch, effort="high")
+    assert model_memory.remembered() == model_memory.Pick()
     _write(_transcript(work), _reply("claude-fable-5-1"))
     _hook("stop", work, monkeypatch, effort="max")
     assert model_memory.remembered() == model_memory.Pick(None, "max")

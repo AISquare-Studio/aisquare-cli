@@ -153,6 +153,7 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fleet.py", "_live_agent"): _FLEET_OP,
     ("services/fleet.py", "_replaced"): _FLEET_OP,
     ("services/fleet.py", "_in_hand_over"): _FLEET_OP,
+    ("services/fleet.py", "_refuse_an_agents_model_command"): _FLEET_OP,
     ("services/fleet.py", "spawn"): _FLEET_OP,
     ("services/fleet.py", "_refuse_by_group"): _FLEET_OP,
     ("services/fleet.py", "_in_place_of_recorded"): _FLEET_OP,

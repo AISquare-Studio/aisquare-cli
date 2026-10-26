@@ -97,61 +97,55 @@ class Running:
     launched: Pick
 
 
-def started(
-    session_id: str, *, model: str | None, effort: str | None, agent_id: str | None
-) -> None:
-    """At a fleet agent's session start: what its launch runs, as the session reports it
-    (``model``, the payload's; ``effort``, the payload's ``effort.level``, else
-    ``CLAUDE_EFFORT``). Kept for the row, once: the id an alias like ``opus`` resolved to,
-    and the account's own default for an agent launched with no pick, which a replay
-    compares what it runs later with (:func:`replay_from`). Only for the session the row is
-    bound to (:func:`_own_row`). Raises on a store that cannot be read: the caller fails
-    open."""
+@dataclasses.dataclass(frozen=True)
+class _Record:
+    """A fleet row's own readings: what its launch ran (``launched``: the model its session
+    start reported, the effort its first Stop did, or the launch's own ``--effort``), and
+    the effort its last Stop read (``last_effort``; ``stopped`` once one did)."""
+
+    launched: Pick = Pick()
+    stopped: bool = False
+    last_effort: str | None = None
+
+
+def started(session_id: str, *, model: str | None, agent_id: str | None) -> None:
+    """At a fleet agent's session start: the model its launch runs, as the payload reports it
+    (``model``). Kept for the row, once: the id an alias like ``opus`` resolved to, and the
+    account's own default for an agent launched with no pick, which a replay compares what
+    it runs later with (:func:`replay_from`). Never an effort: Claude Code 2.1.310's
+    SessionStart carries none, and its hooks there see only the process's inherited
+    ``CLAUDE_EFFORT``, a fleet window's being the tmux server's (seq 3513); the first Stop
+    reports it (:func:`observe`). Only for the session the row is bound to (:func:`_own_row`).
+    Raises on a store that cannot be read: the caller fails open."""
     with store_session() as store:
         agent = _own_row(store, session_id, agent_id)
-        if agent is None or _launched_record(agent, store) is not None:
+        if agent is None or _record(agent, store) is not None:
             return
-        _keep_launched(
-            store, agent, Pick(harness.clean_model_id(model), harness.clean_effort(effort))
-        )
+        _keep(store, agent, _Record(Pick(harness.clean_model_id(model), None)))
 
 
 def launched(agent: FleetAgent, *, store: ContextStore) -> Pick:
-    """What ``agent``'s launch ran, as its session first reported it; empty when nothing was
+    """What ``agent``'s launch ran, as its session reported it; empty when nothing was
     reported for this row (the label's record is another row's)."""
-    return _launched_record(agent, store) or Pick()
-
-
-def _launched_record(agent: FleetAgent, store: ContextStore) -> Pick | None:
-    """:func:`launched`, ``None`` when this row has no record yet: its first reading is to
-    come."""
-    raw = store.ui_state(_LAUNCHED_KEY.format(project=agent.project_id, label=agent.label))
-    try:
-        data = json.loads(raw) if raw else None
-    except ValueError:
-        return None
-    if not isinstance(data, dict) or data.get("agent") != agent.id:
-        return None
-    model, effort = data.get("model"), data.get("effort")
-    return Pick(
-        harness.clean_model_id(model) if isinstance(model, str) else None,
-        harness.clean_effort(effort) if isinstance(effort, str) else None,
-    )
+    record = _record(agent, store)
+    return record.launched if record is not None else Pick()
 
 
 def replay_from(agent: FleetAgent, session: TeamSession | None) -> Running | None:
     """What a replay of ``agent`` starts from (``fleet._model_choice``): the model and
-    effort its session runs now, its hooks' last reading, and what its launch ran.
-    ``None`` with no session; fail-open: a store that cannot be read says nothing was
-    launched, and the replay compares with the recorded flags."""
+    effort it runs now, its hooks' last reading (the effort a Stop's alone), and what its
+    launch ran. ``None`` with no session; fail-open: a store that cannot be read says nothing
+    was read, and the replay compares with the recorded flags."""
     if session is None:
         return None
     try:
         with store_session() as store:
-            first = launched(agent, store=store)
+            record = _record(agent, store)
     except Exception:  # a replay is never refused for this
-        first = Pick()
-    return Running(Pick(session.model, session.effort), first)
+        record = None
+    effort = record.last_effort if record is not None and record.stopped else None
+    first = record.launched if record is not None else Pick()
+    return Running(Pick(session.model, effort), first)
 
 
 def observe(
@@ -165,17 +159,22 @@ def observe(
     The model is the latest reply's in the transcript (one tail read,
     :func:`transcripts.latest_model`): ``transcript_path``, else the one the session
     recorded (a session resumed under another account keeps writing its first); the effort
-    the hook's (``effort``: the payload's ``effort.level``, else ``CLAUDE_EFFORT``). A
-    transcript with no reply that can be read says nothing of the turn, and nothing is
-    written.
+    the Stop hook's (``effort``: the payload's ``effort.level``, else ``CLAUDE_EFFORT``,
+    which Claude Code sets for its Stop). A transcript with no reply that can be read says
+    nothing of the turn, and nothing is written.
 
-    What it ran before is the session's last reading (its start's or a turn end's; else
+    The model it ran before is the session's last reading (its start's or a turn end's; else
     what its launch reported, :func:`started`): another id is a ``/model``, and only the
     very id is the same model (``harness.same_reading``). With no reading before, the
     launch's flag decides (``harness.ran_another``): nothing is a pick on the first reading
     of an agent launched with no pick, which can only be the account's default. An agent
     launched on a mode alias (``opusplan``) runs two models by mode: a reply of either
     (``harness.runs_under``) is no pick, one of another family is.
+
+    The effort it ran before is the last Stop's; before its first Stop, the launch's own
+    ``--effort``, and with none, nothing: the first Stop's effort is the baseline, and a
+    change made inside the very first turn of an agent launched with no ``--effort`` is not
+    remembered (no session start reports an effort, seq 3513); a later one is.
 
     Only the session the row is bound to speaks for it (:func:`_own_row`): a ``claude -p``
     run from the agent's shell inherits ``AISQUARE_FLEET_AGENT`` and is no ``/model`` of the
@@ -198,35 +197,36 @@ def observe(
         if live_model is None:
             return None
         flags = _launch_flags(agent)
-        recorded = _launched_record(agent, store)
-        first = recorded or Pick()
-        was = Pick(session.model or first.model, session.effort or first.effort)
+        record = _record(agent, store) or _Record()
+        was_model = session.model or record.launched.model
         if harness.runs_under(flags.model, live_model) and (
-            was.model is None or harness.runs_under(flags.model, was.model)
+            was_model is None or harness.runs_under(flags.model, was_model)
         ):
             new_model = False  # a reply of the mode alias it was launched on (opusplan)
-        elif was.model is not None:
-            new_model = not harness.same_reading(live_model, was.model)
+        elif was_model is not None:
+            new_model = not harness.same_reading(live_model, was_model)
         else:
             new_model = harness.ran_another(live_model, flags.model)
-        was_effort = was.effort or flags.effort
+        was_effort = record.last_effort if record.stopped else flags.effort
         new_effort = (
             live_effort is not None
             and was_effort is not None
             and not harness.same_effort(live_effort, was_effort)
         )
-        if recorded is None:
-            # This row's first reading: what its launch ran, unless this reading is already
-            # another model than the launch's (then that stays unknown, and a replay asks the
-            # launch's flag instead).
-            _keep_launched(
-                store,
-                agent,
-                Pick(
-                    was.model or (None if new_model else live_model),
-                    was.effort or (None if new_effort else live_effort),
-                ),
+        launch = record.launched
+        if not record.stopped:
+            # This row's first Stop: what its launch ran, unless this reading is already
+            # another model or effort than the launch's (then that stays unknown, and a
+            # replay asks the launch's flag instead).
+            launch = Pick(
+                launch.model or was_model or (None if new_model else live_model),
+                flags.effort or (None if new_effort else live_effort),
             )
+        _keep(
+            store,
+            agent,
+            _Record(launch, stopped=True, last_effort=live_effort or record.last_effort),
+        )
         if (live_model, live_effort or session.effort) != (session.model, session.effort):
             store.set_session_model(session.id, model=live_model, effort=live_effort)
         changed = Pick(live_model if new_model else None, live_effort if new_effort else None)
@@ -237,14 +237,44 @@ def observe(
 
 
 _LAUNCHED_KEY = "fleet-launched:{project}:{label}"
-"""What a fleet row's launch ran, per label (one row holds a label at a time, so the record
-is bounded by the labels), with the id of the row it is for."""
+"""A fleet row's own readings (:class:`_Record`), per label (one row holds a label at a time),
+with the id of the row it is for. Never deleted: a follow-up of #441."""
 
 
-def _keep_launched(store: ContextStore, agent: FleetAgent, pick: Pick) -> None:
+def _record(agent: FleetAgent, store: ContextStore) -> _Record | None:
+    """``agent``'s :class:`_Record`, ``None`` when this row has none yet (the label's record is
+    another row's, or nothing was read)."""
+    raw = store.ui_state(_LAUNCHED_KEY.format(project=agent.project_id, label=agent.label))
+    try:
+        data = json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("agent") != agent.id:
+        return None
+
+    def text(key: str) -> str | None:
+        value = data.get(key)
+        return value if isinstance(value, str) else None
+
+    return _Record(
+        Pick(harness.clean_model_id(text("model")), harness.clean_effort(text("effort"))),
+        stopped=data.get("stopped") is True,
+        last_effort=harness.clean_effort(text("last_effort")),
+    )
+
+
+def _keep(store: ContextStore, agent: FleetAgent, record: _Record) -> None:
     store.set_ui_state(
         _LAUNCHED_KEY.format(project=agent.project_id, label=agent.label),
-        json.dumps({"agent": agent.id, "model": pick.model, "effort": pick.effort}),
+        json.dumps(
+            {
+                "agent": agent.id,
+                "model": record.launched.model,
+                "effort": record.launched.effort,
+                "stopped": record.stopped,
+                "last_effort": record.last_effort,
+            }
+        ),
     )
 
 

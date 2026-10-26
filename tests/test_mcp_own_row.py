@@ -336,7 +336,15 @@ def test_a_serve_started_from_a_claude_code_shell_is_a_team(
     assert "<aisquare-team>" in _start(runner, OTHER, work_dir)
 
 
-@pytest.mark.parametrize("gateway", ["another interpreter", "the server's own interpreter"])
+@pytest.mark.parametrize(
+    "gateway",
+    [
+        "another interpreter",
+        "the server's own interpreter",
+        "our own process cannot be read",
+        "our own image is not known",
+    ],
+)
 def test_a_python_client_that_starts_the_server_is_a_team(
     runner: CliRunner,
     work_dir: Path,
@@ -350,7 +358,8 @@ def test_a_python_client_that_starts_the_server_is_a_team(
     server's parent: no proof, a teammate. Two ways to get it wrong: reading any ``python`` as
     a launcher, and reading the interpreter this server runs on as one (on Linux with a system
     python ``sys.executable`` IS the gateway's image, so the path alone cannot tell the
-    interpreter's own launcher from a client: only a launcher that is NOT our image is one)."""
+    interpreter's own launcher from a client: only a launcher that is NOT our image is one,
+    and when our own image cannot be told, nothing is)."""
     _team_on(runner)
     claude = _claude_session(runner, tree, monkeypatch, SOLO, work_dir)
     monkeypatch.delenv("__PYVENV_LAUNCHER__", raising=False)
@@ -359,7 +368,9 @@ def test_a_python_client_that_starts_the_server_is_a_team(
         monkeypatch.setattr(sys, "executable", "/work/.venv/bin/python")
     else:
         monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
-        tree.table[os.getpid()] = procs.ProcInfo(client, "t-me", "/usr/bin/python3")
+        if gateway != "our own process cannot be read":
+            image = "" if gateway == "our own image is not known" else "/usr/bin/python3"
+            tree.table[os.getpid()] = procs.ProcInfo(client, "t-me", image)
     _own_server_of(tree, monkeypatch, client, "relayed for a teammate")
 
     assert any(row.startswith("mcp:remote:") for row in _rows())

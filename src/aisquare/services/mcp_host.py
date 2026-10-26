@@ -241,7 +241,10 @@ def _is_launcher(info: procs.ProcInfo, own: str, me: Callable[[], procs.ProcInfo
     redirector, and the server reports its path as its ``sys.executable``).
 
     The interpreter's own launcher is told by its path, never by being a ``python``: a Python
-    program that starts a server is that server's client, and a client is not skipped."""
+    program that starts a server is that server's client, and a client is not skipped. On a
+    system python the launcher's path IS the client's, so a path that is also this process's
+    own image is a client; and when this process's own image cannot be read, nothing is
+    skipped: not proving is the safe side, and a skipped client is cached for the process."""
     name = procs.image_stem(info.image)
     if name in LAUNCHERS or (own != "" and name == own):
         return True
@@ -254,7 +257,8 @@ def _is_launcher(info: procs.ProcInfo, own: str, me: Callable[[], procs.ProcInfo
     if image == "" or image not in launchers:
         return False
     mine = me()
-    return mine is None or image != os.path.normcase(mine.image)
+    # our own image unknown: a client on this interpreter cannot be told from its launcher
+    return mine is not None and mine.image != "" and image != os.path.normcase(mine.image)
 
 
 def host_of(

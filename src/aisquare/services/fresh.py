@@ -138,14 +138,16 @@ def start_fresh(
     the spawn's.
     """
     planned = plan(project, memory=memory, prompts=prompts, branches=branches)
-    # Its places only, while agents run: a busy one's next commit is no refusal yet, and is
-    # judged by its tip once the stop has ended it.
-    if _uncovered(planned.unpushed, discard, tips=False):
+    # Tips and all, before anything is stopped: an agent that committed while the dialog was
+    # open is refused here with its fleet still running. Checked after the stop alone, the
+    # likeliest case left the project stopped, its session killed and its claims released
+    # (tester-fresh-ui at a14eafc1).
+    if _uncovered(planned.unpushed, discard):
         raise FreshRefused(unpushed_refusal(planned), code="unpushed_work", plan=planned)
     project = planned.project
     report = FreshReport(project=project, planned=planned.counts)
     if planned.live_agents or planned.sessions:
-        _stop(project, report, actor=actor)
+        _stop(project, report, actor=actor, planned=planned.sessions)
     try:
         found, trees, tips = _held_now(project, report, branches=branches)
         if _uncovered(found, discard):
@@ -199,7 +201,9 @@ def start_fresh(
     return report
 
 
-def _stop(project: ProjectInfo, report: FreshReport, *, actor: str) -> None:
+def _stop(
+    project: ProjectInfo, report: FreshReport, *, actor: str, planned: Sequence[str] = ()
+) -> None:
     """Stop the project's fleet as ``fleet shutdown`` does, onto ``report``, and raise
     :class:`FreshIncomplete` unless it is wholly down: a row left live, a session tmux would
     not kill, or a project the shutdown could not confirm down. Read on ``failed`` alone, a
@@ -219,7 +223,15 @@ def _stop(project: ProjectInfo, report: FreshReport, *, actor: str) -> None:
         raise FreshRefused(f"can't start fresh: {exc}", code="fleet_error") from exc
     report.stopped = _stopped(down)
     report.sessions_killed = list(down.sessions_killed)
-    report.sessions_gone = list(down.sessions_absent)
+    # Ended with its last window: a session the plan listed that the stop neither killed nor
+    # failed on is gone, whether or not the sweep was told to note it absent (it notes only
+    # one a row lived on). Read off ``sessions_killed`` alone, the common case said nothing.
+    failed = {entry.split(" (", 1)[0] for entry in down.sessions_failed}
+    report.sessions_gone = [
+        session
+        for session in dict.fromkeys([*down.sessions_absent, *planned])
+        if session not in report.sessions_killed and session not in failed
+    ]
     report.sessions_failed = list(down.sessions_failed)
     if not (down.failed or down.sessions_failed or project.id in down.incomplete_projects):
         return
@@ -263,14 +275,12 @@ def _held_now(
     return fleet_service.unpushed_work(project, trees, tips), trees, tips
 
 
-def _uncovered(
-    found: Sequence[FreshUnpushed], discard: Discard, *, tips: bool = True
-) -> list[FreshUnpushed]:
+def _uncovered(found: Sequence[FreshUnpushed], discard: Discard) -> list[FreshUnpushed]:
     """What of ``found`` ``discard`` does not let go: everything when it is empty, nothing
-    when it is ``"all"``, else each item it does not name at the same tree and branch (and,
-    with ``tips``, the same tip: no commit made since it was shown), and each with
-    uncommitted changes where the one it named had none. A blanket yes to a list someone saw
-    threw away work written after they saw it (review of #429, M1).
+    when it is ``"all"``, else each item it does not name at the same tree, branch and tip
+    (no commit made since it was shown), and each with uncommitted changes where the one it
+    named had none. A blanket yes to a list someone saw threw away work written after they
+    saw it (review of #429, M1). Asked before the stop and after it, alike.
 
     Uncommitted changes are confirmed as a yes or a no, not as their contents: a tree listed
     with uncommitted changes goes with them as they are when the reset runs, edits made
@@ -280,7 +290,7 @@ def _uncovered(
         return []
 
     def place(item: FreshUnpushed) -> tuple[Path | None, str | None, str | None]:
-        return item.path, item.branch, item.tip if tips else None
+        return item.path, item.branch, item.tip
 
     allowed = {place(item): item for item in discard}
     return [
@@ -320,6 +330,13 @@ def cleared_words(report: FreshReport) -> list[str]:
     return words
 
 
+def unpushed_brief(item: FreshUnpushed) -> str:
+    """``fleet/x/coder-1: 2 commits on no remote, uncommitted changes``: :func:`unpushed_line`
+    named by its branch, or its tree's folder when detached, without the path."""
+    name = item.branch or (item.path.name if item.path is not None else "?")
+    return f"{name}: {unpushed_line(item).split(': ', 1)[-1]}"
+
+
 def unpushed_line(item: FreshUnpushed) -> str:
     """``<tree> on <branch>: <n> commit(s) on no remote, uncommitted changes``, or
     ``branch <name>: …`` for a branch no tree has out."""
@@ -343,21 +360,39 @@ RUN_AGAIN = "run it again to see and confirm the new list"
 terminal: the flag they passed, named again, would only ask them about the same list."""
 
 
-def found_after_stop(planned: FreshPlan, *, way: str = DISCARD_FLAG) -> str:
+def found_after_stop(
+    planned: FreshPlan, *, way: str = DISCARD_FLAG, limit: int | None = None, brief: bool = False
+) -> str:
     """The refusal of work found once the fleet was stopped, which the confirmed discard does
-    not cover (:class:`FreshIncomplete` with ``plan``), with ``way`` as
-    :func:`unpushed_refusal` takes it."""
+    not cover (:class:`FreshIncomplete` with ``plan``): work committed during the stop
+    itself, the rest being refused before it. With ``way``, ``limit`` and ``brief`` as
+    :func:`unpushed_refusal` takes them, then that the fleet is stopped and how to start it
+    again: refused there, the project is left with nothing running."""
+    restart = project_service.fleet_command("restart", planned.project) + " <label>"
+    spawn = project_service.fleet_command("spawn", planned.project, "manager")
+    refusal = unpushed_refusal(planned, way=way, limit=limit, brief=brief)
     return (
-        f"{unpushed_refusal(planned, way=way)} — found once its fleet was stopped: nothing "
-        "was removed and the board was not cleared"
+        f"{refusal} — found once its fleet was "
+        "stopped: nothing was removed and the board was not cleared, but its agents are "
+        f"stopped. Start them again with {restart} (the manager first), or a new manager "
+        f"with {spawn}"
     )
 
 
-def unpushed_refusal(planned: FreshPlan, *, way: str = DISCARD_FLAG) -> str:
+def unpushed_refusal(
+    planned: FreshPlan, *, way: str = DISCARD_FLAG, limit: int | None = None, brief: bool = False
+) -> str:
     """The refusal of a plan whose trees or branches hold work found nowhere else, with
     ``way``, how the surface asking lets it go: the CLI's flag by default; the UI says to
-    open Start fresh… again and confirm the discard."""
-    lines = "; ".join(unpushed_line(item) for item in planned.unpushed)
+    open Start fresh… again and confirm the discard. ``limit`` names at most that many
+    places and counts the rest, and ``brief`` names each by its branch (or its tree's folder,
+    detached) without the tree's path, which the dialog lists: a toast at 80x24 listing
+    several long paths was taller than the screen, and its title and what to do scrolled off
+    (tester-fresh-ui)."""
+    items = planned.unpushed if limit is None else planned.unpushed[:limit]
+    lines = "; ".join((unpushed_brief if brief else unpushed_line)(item) for item in items)
+    if more := len(planned.unpushed) - len(items):
+        lines += f"; …and {more} more"
     return (
         f"can't start fresh: {project_service.display_name(planned.project)}'s fleet holds "
         f"work found nowhere else — push it, or {way}: {lines}"
@@ -403,10 +438,22 @@ def _sessions(project: ProjectInfo, *, live: bool) -> list[str]:
     the stop kills sessions on the server the caller runs in. With no live row and no usable
     tmux here, none: nothing could be killed, and nothing is said to run.
 
-    A session that could not be asked (``project_sessions`` says ``None``) is asked of the
-    plan, which lists it strictly or refuses: read as absent, the stop was skipped (review
-    of #429, round 2, n2)."""
-    if not live and fleet_service.project_sessions(project) == []:
+    A session that could not be asked (``project_sessions`` says ``None``) refuses the reset
+    with nothing touched. Read as absent, the stop was skipped (review of #429, round 2,
+    n2); handed to the plan instead, which asks a session no live row lived on only just in
+    case and passes over one it cannot ask, the stop was skipped all the same, and the tree
+    of a process still running in that session was removed (tester-fresh-fix at c85beaa4).
+    ``fleet shutdown``'s own plan stays as lenient as it is."""
+    standing = fleet_service.project_sessions(project)
+    if standing is None:
+        session = fleet_service.session_name(project.codename or "")
+        raise FreshRefused(
+            f"can't start fresh: tmux could not say whether {session} stands, so its "
+            f"agents could not be known stopped — nothing was touched; try again once tmux "
+            "answers",
+            code="fleet_error",
+        )
+    if not live and not standing:
         return []
     try:
         return fleet_service.shutdown_plan(project).sessions

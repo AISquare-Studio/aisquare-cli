@@ -23,7 +23,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--discard-unpushed`; a count git cannot give refuses it too, never reading as pushed.
   At a terminal the discard covers what the plan listed and you confirmed, at the tips
   it showed (uncommitted changes in a listed tree go as they are when the reset runs),
-  and work found since (asked again once the fleet is stopped) refuses it;
+  and work found since refuses it before anything is stopped (work committed during the
+  stop itself is refused after it, with how to start the fleet again);
   with `--yes`, the flag covers whatever the run finds. It prints the plan with its
   counts and asks at a terminal (a second time before discarding); `--dry-run` prints
   the plan and changes nothing, off a terminal it is a dry run unless `--yes`, and

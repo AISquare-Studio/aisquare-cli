@@ -2150,8 +2150,10 @@ def project_sessions(project: ProjectInfo) -> list[str] | None:
     ``None`` when a session could not be asked: only what tmux says is absent is absent
     (``has_session_or_raise``). Asked leniently, a session behind a socket that would not
     answer read as none, and with no live row the stop was skipped, leaving a dead pane or a
-    stray process beside the new manager (review of #429, round 2, n2); the caller asks
-    :func:`shutdown_plan`, which lists strictly or refuses."""
+    stray process beside the new manager (review of #429, round 2, n2). The caller refuses
+    on ``None``: :func:`shutdown_plan` asks a session no live row lived on only just in
+    case, and passes over one it cannot ask (tester-fresh-fix at c85beaa4). ``[]`` with no
+    usable tmux here, as :func:`shutdown_plan` reads it."""
     if not project.codename:
         return []
     config = settings()
@@ -2163,6 +2165,8 @@ def project_sessions(project: ProjectInfo) -> list[str] | None:
             try:
                 if srv.has_session_or_raise(name):
                     found.append(f"{socket}:{name}")
+            except TmuxUnavailable:
+                return []  # no usable tmux here: nothing could be stopped from here either
             except (TmuxError, OSError):
                 return None
     return found

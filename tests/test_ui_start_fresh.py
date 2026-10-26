@@ -24,6 +24,7 @@ import pytest
 from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widgets import Button, Checkbox, OptionList, Static
+from textual.widgets._toast import Toast
 from textual.worker import WorkerState
 
 from aisquare.cli.ui.app import FleetApp, _fresh_group
@@ -663,22 +664,47 @@ def test_a_second_start_never_cancels_a_reset_in_flight(
     assert str(seen["toasts"]).count("stood in for run") == 2, seen["toasts"]
 
 
-def test_the_toast_says_the_tmux_session_ended(
-    alpha: ProjectInfo, applied: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("noted", [True, False], ids=["sweep noted it", "sweep said nothing"])
+def test_the_toast_says_the_tmux_session_ended_with_its_last_window(
+    alpha: ProjectInfo,
+    applied: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    noted: bool,
 ) -> None:
-    """tester-fresh-fix: the success never said the session went, killed or gone with the
-    last window the stop closed (the common case, every pane a live agent)."""
-    monkeypatch.setattr(fleet_service, "project_sessions", lambda *_: ["asq:asq-amber-otter"])
+    """The common case: every pane a live agent, so stopping them closes the session's last
+    window and tmux ends it. ``kill-session`` never runs and ``sessions_killed`` stays empty,
+    so the toast said nothing of the session (tester-fresh-ui at a14eafc1). A session the
+    plan listed that the stop neither killed nor failed on has ended, noted absent by the
+    sweep or not."""
+    with store_session() as store:
+        live = store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_a_manager",
+                project_id="prj_a",
+                label="manager",
+                role="manager",
+                pane_id="%2",
+                tmux_socket=PRIVATE_SOCKET,
+                cwd=alpha.root,
+                created_at=NOW,
+            )
+        )
+    session = "asq:asq-amber-otter"
+    monkeypatch.setattr(fleet_service, "project_sessions", lambda *_: [session])
     monkeypatch.setattr(
         fleet_service,
         "shutdown_plan",
-        lambda *_, **__: fleet_service.ShutdownPlan(sessions=["asq:asq-amber-otter"]),
+        lambda *_, **__: fleet_service.ShutdownPlan(agents=[live], sessions=[session]),
     )
-    monkeypatch.setattr(
-        fleet_service,
-        "shutdown",
-        lambda *_, **__: fleet_service.ShutdownReport(sessions_absent=["asq:asq-amber-otter"]),
-    )
+
+    def shutdown(project: ProjectInfo, **_: Any) -> fleet_service.ShutdownReport:
+        with store_session() as store:  # its window closed, and the session with it
+            store.end_fleet_agent(live.id, exit_status=0, ended_by="stopped")
+        return fleet_service.ShutdownReport(
+            stopped=[live], sessions_absent=[session] if noted else []
+        )
+
+    monkeypatch.setattr(fleet_service, "shutdown", shutdown)
 
     async def go(pilot: Pilot[None]) -> str:
         app = fleet_app(pilot)
@@ -689,3 +715,42 @@ def test_the_toast_says_the_tmux_session_ended(
 
     toasts = drive(go, notifications=True)
     assert "; its tmux session ended; a new manager started (session sess-new)" in toasts, toasts
+
+
+def test_a_refusal_toast_names_three_places_and_counts_the_rest_at_80x24(
+    alpha: ProjectInfo,
+    applied: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """tester-fresh-ui: at 80x24 a refusal toast listing several long paths was taller than
+    the screen, and its title and what to do scrolled off. It names three places and counts
+    the rest, and fits."""
+    deep = tmp_path / ("a-rather-long-folder-name-" * 3)
+    later = fresh_service.plan(alpha).model_copy(
+        update={
+            "unpushed": [
+                FreshUnpushed(path=deep / f"coder-{n}", branch=f"fleet/x/coder-{n}", commits=1)
+                for n in range(1, 7)
+            ]
+        }
+    )
+
+    def refuse(project: ProjectInfo, **_: Any) -> Any:
+        raise fresh_service.FreshRefused("refused", code="unpushed_work", plan=later)
+
+    monkeypatch.setattr(fresh_service, "start_fresh", refuse)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[int]]:
+        app = fleet_app(pilot)
+        dialog = await _open_from_menu(pilot)
+        await settle(app)
+        dialog.query_one("#fresh-confirm", Button).press()
+        toasts = await _toasts(app)
+        heights = [toast.region.height for toast in app.query(Toast)]
+        return toasts, heights
+
+    toasts, heights = drive(go, notifications=True, size=(80, 24))
+    assert "confirm the discard in Start fresh…, open again on it" in toasts
+    assert "coder-3" in toasts and "coder-4" not in toasts and "…and 3 more" in toasts
+    assert heights and max(heights) < 24, heights

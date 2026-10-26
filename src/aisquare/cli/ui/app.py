@@ -189,6 +189,9 @@ PROJECT_REMOVE_WORKER = "project-remove"
 PROJECT_FRESH_WORKER = "project-fresh"
 """The thread worker *Start fresh…* clears a project's board and fleet on (``project fresh``),
 one a project at a time (:func:`_fresh_group`)."""
+TOAST_PLACES = 3
+"""The places a refusal's toast names before it counts the rest: at 80x24 a longer list
+pushed the toast's title and what to do off the screen."""
 UNPUSHED_IN_THE_UI = "confirm the discard in Start fresh…, open again on it"
 """How the UI lets work found nowhere else go, where the CLI's refusal names its flag: the
 dialog opens again on what the run found (``FleetApp._project_freshened``)."""
@@ -2293,9 +2296,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 # Work found since the dialog read its plan, which nobody agreed to discard:
                 # the CLI's flag means nothing here (tester-fresh-ui at 8b66e535), and the
                 # dialog opens again on it (review of #429, M1).
-                said = fresh_service.unpushed_refusal(found, way=UNPUSHED_IN_THE_UI)
                 if isinstance(error, fresh_service.FreshIncomplete):
-                    said += " — its fleet is stopped; nothing was removed or cleared"
+                    said = fresh_service.found_after_stop(
+                        found, way=UNPUSHED_IN_THE_UI, limit=TOAST_PLACES, brief=True
+                    )
+                else:
+                    said = fresh_service.unpushed_refusal(
+                        found, way=UNPUSHED_IN_THE_UI, limit=TOAST_PLACES, brief=True
+                    )
                 self._ask_again(found.project.id)
             elif isinstance(error, known):
                 said = str(error)

@@ -41,7 +41,7 @@ from aisquare.core.entries import new_entry
 from aisquare.core.ids import new_agent_id, new_event_id, new_task_id
 from aisquare.core.orchestrator import FLEET_AGENT_ENV_VAR, team_project
 from aisquare.core.store import SqliteStore, store_session
-from aisquare.core.tmux import TmuxError, TmuxServer
+from aisquare.core.tmux import TmuxError, TmuxServer, TmuxUnavailable
 from aisquare.models import (
     FleetAgent,
     FreshReport,
@@ -884,7 +884,13 @@ def test_m1_a_commit_made_before_the_stop_ended_its_agent_is_judged_after_it(
 
     assert stopped.value.plan is not None
     assert [item.commits for item in stopped.value.plan.unpushed] == [2]
-    assert "found once its fleet was stopped" in str(stopped.value)
+    said = str(stopped.value)
+    assert "found once its fleet was stopped" in said
+    # Refused there, the project is left with nothing running: the refusal says how back.
+    assert "its agents are stopped. Start them again with aisquare fleet restart --project " in said
+    assert (
+        "alpha-x <label> (the manager first), or a new manager with aisquare fleet spawn " in said
+    )
     assert (tree / "late.txt").exists() and _rows(alpha.id) == before and spawned == []
 
 
@@ -1087,30 +1093,58 @@ def test_n1_a_tree_spawned_after_the_stop_is_not_removed_under_its_agent(
     assert len(_rows(alpha.id)["team_task"]) == before and spawned == []
 
 
-def test_n2_a_session_tmux_cannot_be_asked_is_never_read_as_absent(
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("tmux") is None, reason="tmux is not installed"
+)
+def test_n2_a_session_tmux_cannot_be_asked_refuses_the_reset_with_nothing_touched(
     two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """n2: the read-only listing asked tmux leniently, so a session behind a socket that would
-    not answer read as none, and with no live row the stop was skipped. It says it could not
-    tell (``None``), and the plan asks ``fleet shutdown``'s, which lists strictly or refuses."""
-    alpha, _, _, _ = two
+    """n2, as tester-fresh-fix ran it at c85beaa4, against ``fleet shutdown``'s real plan: no
+    live row, the session standing, and only ``has-session`` failing (Permission denied)
+    while the socket answers the rest. The read-only listing said it could not tell
+    (``None``), and the plan it then asked, which asks a session no live row lived on only
+    just in case, passed over the failure and listed none: the stop was skipped, a tree
+    removed under its running process and the board cleared. It refuses, nothing touched."""
+    alpha, _, _, _ = two  # its manager's row ended: no live row
 
     def unasked(self: TmuxServer, name: str) -> bool:
-        raise TmuxError("error connecting to /tmp/asq (Permission denied)")
+        raise TmuxError("error connecting to /private/tmp/tmux-501/asq (Permission denied)")
 
     monkeypatch.setattr(TmuxServer, "has_session_or_raise", unasked)
     monkeypatch.setattr(TmuxServer, "has_session", lambda self, name: False)  # the lenient read
-    asked: list[str] = []
-
-    def shutdown_plan(project: ProjectInfo, **_: Any) -> fleet_service.ShutdownPlan:
-        asked.append(project.id)
-        return fleet_service.ShutdownPlan(sessions=["asq:asq-alpha-x"])
-
-    monkeypatch.setattr(fleet_service, "shutdown_plan", shutdown_plan)
+    monkeypatch.setattr(TmuxServer, "reachable", lambda self: True)  # the rest answers
+    stopped: list[str] = []
+    monkeypatch.setattr(fleet_service, "shutdown", lambda project, **_: stopped.append(project.id))
+    before = _rows(alpha.id)
 
     assert fleet_service.project_sessions(alpha) is None
-    assert fresh_service.plan(alpha).sessions == ["asq:asq-alpha-x"] and asked == [alpha.id]
+    with pytest.raises(fresh_service.FreshRefused) as refused:
+        fresh_service.plan(alpha)
+    assert refused.value.code == "fleet_error"
+    assert "tmux could not say whether asq-alpha-x stands" in str(refused.value)
+    with pytest.raises(fresh_service.FreshRefused):
+        fresh_service.start_fresh(alpha)
+    assert stopped == [] and _rows(alpha.id) == before and spawned == []
+
+
+def test_no_usable_tmux_and_no_live_row_is_no_session(
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no tmux to run here and no live row, there is no session to know of, as
+    ``fleet shutdown``'s plan reads it: the plan is not refused for it (a machine without
+    tmux, the Windows runner)."""
+    alpha, _, _, _ = two
+
+    def no_tmux(self: TmuxServer, name: str) -> bool:
+        raise TmuxUnavailable("tmux is not runnable: [Errno 2] No such file or directory")
+
+    monkeypatch.setattr(TmuxServer, "has_session_or_raise", no_tmux)
+
+    assert fleet_service.project_sessions(alpha) == []
+    assert fresh_service.plan(alpha).sessions == []
 
 
 def test_an_interrupted_stop_keeps_the_sessions_tmux_would_not_kill(
@@ -1250,3 +1284,31 @@ def test_json_refusals_carry_their_detail(
     said = json.loads(result.stdout)
     assert said["error"] == "fleet_error" and said["ref"] == alpha.id
     assert "tmux is not installed" in said["detail"]
+
+
+def test_a_commit_made_while_the_dialog_was_open_is_refused_with_nothing_stopped(
+    unpushed: tuple[ProjectInfo, Path, str],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    stops: Stops,
+) -> None:
+    """tester-fresh-ui at a14eafc1: tips were judged only after the stop, so the likeliest
+    case, a live agent committing while the dialog is open, was refused only once the whole
+    fleet was stopped, its session killed and its claims released. A tip that moved before
+    the stop is refused before it, with the fleet still running."""
+    alpha, tree, _ = unpushed
+    with store_session() as store:
+        store.upsert_fleet_agent(_agent(alpha, "coder-2"))  # still at work
+    stops.sessions = ["asq:asq-alpha-x"]
+    shown = fresh_service.plan(alpha)
+    (tree / "more.txt").write_text("committed while the dialog was open\n", encoding="utf-8")
+    _git("add", "more.txt", cwd=tree)
+    _git("commit", "-q", "-m", "more", cwd=tree)
+
+    with pytest.raises(fresh_service.FreshRefused) as refused:
+        fresh_service.start_fresh(alpha, discard=shown.unpushed)
+
+    assert refused.value.code == "unpushed_work" and "2 commits on no remote" in str(refused.value)
+    assert stops.asked == [], "nothing was stopped"
+    with store_session() as store:
+        assert [row.label for row in store.fleet_agents(alpha.id, live_only=True)] == ["coder-2"]
+    assert spawned == []

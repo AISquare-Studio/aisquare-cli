@@ -315,8 +315,8 @@ def test_a_truncated_answer_is_a_reason_on_the_row_not_a_traceback(
 
     real = urllib.request.urlopen
 
-    def urlopen(request: urllib.request.Request, timeout: float) -> Any:
-        response = real(request, timeout=timeout)
+    def urlopen(request: urllib.request.Request, timeout: float, **kwargs: Any) -> Any:
+        response = real(request, timeout=timeout, **kwargs)
         if request.full_url.endswith("/api/v2/credits/balance/"):
 
             def cut_short(*args: object) -> bytes:

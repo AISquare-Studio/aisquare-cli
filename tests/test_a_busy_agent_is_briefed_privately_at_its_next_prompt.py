@@ -20,6 +20,7 @@ read before, without a query when it sits in no fleet window.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import sqlite3
 from pathlib import Path
@@ -76,15 +77,21 @@ def _attached(name: str, *, replaces: str | None = None) -> str:
 
 
 def _delta(*updates: str) -> str:
-    """The per-prompt delta of the ``repo`` board carrying exactly ``updates``."""
+    """The per-prompt delta of the ``repo`` board carrying exactly ``updates``, each line's
+    ``#<seq>`` left out: compare a prompt's output through :func:`_unseq`."""
     return "\n".join(
         [
-            "<aisquare-team-delta>",
+            '<aisquare-team-delta board="repo">',
             f"{len(updates)} teammate update(s) since your last prompt:",
-            *(f"- [repo] {update}" for update in updates),
+            *(f"- {update}" for update in updates),
             "</aisquare-team-delta>",
         ]
     )
+
+
+def _unseq(output: str) -> str:
+    """``output`` with each delta line's ``#<seq> `` taken out (P1 WS-2, #279)."""
+    return re.sub(r"^- #\d+ ", "- ", output, flags=re.MULTILINE)
 
 
 def _briefing(name: str, project: ProjectInfo, *, replaces: str | None = None) -> str:
@@ -142,7 +149,7 @@ def test_a_busy_agents_next_prompt_carries_the_preface_and_the_block_once(
     first = _prompt(busy, tmux, monkeypatch)
     second = _prompt(busy, tmux, monkeypatch)
 
-    assert first == _briefing("skeptic", project) + _delta(_attached("skeptic"))
+    assert _unseq(first) == _briefing("skeptic", project) + _delta(_attached("skeptic"))
     assert second == "", "handed over once: a second prompt adds nothing"
 
 
@@ -171,7 +178,7 @@ def test_two_attaches_while_busy_deliver_the_latest_persona_once(
     first = _prompt(mentor, tmux, monkeypatch)
     second = _prompt(mentor, tmux, monkeypatch)
 
-    assert first == _briefing("careful", project, replaces="mentor") + _delta(
+    assert _unseq(first) == _briefing("careful", project, replaces="mentor") + _delta(
         _attached("skeptic", replaces="mentor"), _attached("careful", replaces="skeptic")
     )
     assert first.count("<aisquare-persona ") == 1 and second == ""
@@ -277,7 +284,7 @@ def test_a_persona_removed_before_the_prompt_costs_one_line_and_nothing_else(
     said, _, rest = first.partition("\n")
     assert said.startswith("persona \"pair\": no persona named 'pair' in "), said
     assert said.endswith(" — attached to you without its briefing"), said
-    assert rest == _delta(_attached("pair")), "the hook's other output is intact"
+    assert _unseq(rest) == _delta(_attached("pair")), "the hook's other output is intact"
     assert "think aloud" not in first and second == ""
 
 
@@ -304,7 +311,7 @@ def test_a_marker_that_cannot_be_read_costs_the_briefing_and_never_the_hooks_out
         unread = _prompt(busy, tmux, monkeypatch)
     later = _prompt(busy, tmux, monkeypatch)
 
-    assert unread == _delta(_attached("skeptic"))
+    assert _unseq(unread) == _delta(_attached("skeptic"))
     assert any("OperationalError" in record.getMessage() for record in caplog.records)
     assert later == _briefing("skeptic", project)
 
@@ -340,7 +347,7 @@ def test_another_session_reads_what_it_read_before_and_asks_the_store_nothing(
     briefing = team_service.hook_session_start(TESTER, project.root, "startup")
 
     assert handed.startswith(_briefing("skeptic", project)), "the agent it is for did get it"
-    assert before == _delta(_attached("skeptic")) and after == ""
+    assert _unseq(before) == _delta(_attached("skeptic")) and after == ""
     assert asked == [], "outside a fleet window the hook reads no marker at all"
     block = personas.briefing(personas.resolve("skeptic", project.root))
     for surface in (board.stdout, briefing):
@@ -373,5 +380,5 @@ def test_a_fleet_agent_that_is_owed_nothing_reads_what_it_read_before(
     is the delta, byte for byte; a prompt with no news is the empty string."""
     team_service.add_note("the cut is done", cwd=project.root)
 
-    assert _prompt(busy, tmux, monkeypatch) == _delta("cli note: the cut is done")
+    assert _unseq(_prompt(busy, tmux, monkeypatch)) == _delta("cli note: the cut is done")
     assert _prompt(busy, tmux, monkeypatch) == ""

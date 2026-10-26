@@ -63,6 +63,68 @@ LIVE_USAGE = {
     "limits": [{"kind": "session", "percent": 3, "severity": "normal"}],
 }
 
+#: Shaped like what the same endpoint answered on 2026-10-23 (Claude Code 2.1.309; "W0
+#: results" in docs/plans/handoff-p0-reliability.md): both windows with every field, the
+#: per-model ``seven_day_*`` keys (null on every account asked), and ``limits[]``, where the
+#: per-model window really is: a ``weekly_scoped`` entry whose ``scope`` names the model.
+#: The values are invented. The real answer also carried ``extra_usage``, ``spend``,
+#: ``seven_day_breakdown``, ``pace`` and seventeen opaque keys, all left out here.
+LIVE_USAGE_FULL = {
+    "five_hour": {
+        "utilization": 37.0,
+        "resets_at": "2026-10-23T20:00:00.412000+00:00",
+        "limit_dollars": None,
+        "used_dollars": None,
+        "remaining_dollars": None,
+        "locked_reason": None,
+    },
+    "seven_day": {
+        "utilization": 58.0,
+        "resets_at": "2026-10-27T03:00:00.412000+00:00",
+        "limit_dollars": None,
+        "used_dollars": None,
+        "remaining_dollars": None,
+        "locked_reason": None,
+    },
+    "seven_day_oauth_apps": None,
+    "seven_day_opus": None,
+    "seven_day_sonnet": None,
+    "seven_day_cowork": None,
+    "seven_day_omelette": None,
+    "limits": [
+        {
+            "kind": "session",
+            "group": "session",
+            "percent": 37,
+            "severity": "normal",
+            "resets_at": "2026-10-23T20:00:00.412000+00:00",
+            "scope": None,
+            "is_active": False,
+        },
+        {
+            "kind": "weekly_all",
+            "group": "weekly",
+            "percent": 58,
+            "severity": "normal",
+            "resets_at": "2026-10-27T03:00:00.412000+00:00",
+            "scope": None,
+            "is_active": True,
+        },
+        {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": 23,
+            "severity": "normal",
+            "resets_at": "2026-10-27T03:00:00.413000+00:00",
+            "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None},
+            "is_active": False,
+        },
+    ],
+    "weekly_scoped_shares": [
+        {"limit_index": 2, "used_percent_of_weekly": 9, "allowance_percent_of_weekly": 40}
+    ],
+}
+
 
 # --------------------------------------------------------------------------- fixtures
 
@@ -483,6 +545,55 @@ def test_usage_parses_the_live_payload_and_sends_the_token_only_to_the_usage_end
     assert headers["Authorization"] == "Bearer sk-ant-oat01-secret"
     assert headers["anthropic-beta"] == service.OAUTH_BETA
     assert timeout == service.USAGE_TIMEOUT_SECONDS
+
+
+def test_usage_reads_the_two_windows_out_of_the_w0_shape_and_ignores_the_rest(
+    fake_home: Path,
+) -> None:
+    # The W0 shape: both windows with every field, the per-model nulls, and a `limits[]`
+    # whose per-model entry carries a `scope` object. The parser still reads five_hour and
+    # seven_day and nothing else.
+    account = core.create_account()
+    _sign_in(account, "two@example.com")
+
+    usage = service.usage(account, now=NOW, fetch=_Fetch(body=LIVE_USAGE_FULL))
+
+    assert usage.available and usage.reason is None
+    assert usage.session_percent == 37.0 and usage.week_percent == 58.0
+    assert usage.session_resets_at == datetime(2026, 10, 23, 20, 0, 0, 412000, tzinfo=UTC)
+    assert usage.week_resets_at == datetime(2026, 10, 27, 3, 0, 0, 412000, tzinfo=UTC)
+
+
+def test_usage_reads_the_family_weeks_the_limits_and_a_lock_and_ignores_unknown_keys(
+    fake_home: Path,
+) -> None:
+    """P0-W3 (#277): only ``five_hour`` and ``seven_day`` were read. The per-family weeks
+    (``seven_day_opus``, ``seven_day_sonnet``), ``limits[]`` and a window's ``locked_reason``
+    were dropped, so an account whose Opus week was spent read as room for an Opus agent."""
+    account = core.create_account()
+    _sign_in(account, "two@example.com")
+    body = json.loads(json.dumps(LIVE_USAGE))
+    body["seven_day_opus"] = {"utilization": 100.0, "resets_at": "2026-09-12T00:00:00+00:00"}
+    body["seven_day_sonnet"] = {"utilization": 20.0, "resets_at": None, "locked_reason": "x"}
+    body["seven_day_oauth_apps"] = None  # a null window is no reading
+    body["limits"] = [
+        {"kind": "session", "percent": 3, "severity": "normal"},
+        {"kind": "weekly", "percent": 41, "severity": "warning"},
+        {"kind": "something_new", "percent": 99},
+        "not a limit",
+    ]
+    body["extra_usage"] = {"is_enabled": False}
+
+    usage = service.usage(account, now=NOW, fetch=_Fetch(body=body))
+
+    assert usage.available
+    assert usage.session_percent == 3.0
+    assert usage.week_percent == 41.0  # the fuller of the window and the limit
+    assert usage.family_week_percent == {"opus": 100.0, "sonnet": 100.0}  # sonnet: locked
+    assert usage.family_week_resets_at == {"opus": datetime(2026, 9, 12, tzinfo=UTC)}
+    # The recorded payload, whose Opus week is null, reads as it always has.
+    plain = service.usage(account, now=NOW, fetch=_Fetch())
+    assert (plain.session_percent, plain.week_percent, plain.family_week_percent) == (3.0, 7.0, {})
 
 
 @pytest.mark.parametrize(
@@ -1158,3 +1269,45 @@ def test_a_slot_this_user_cannot_enter_is_no_slot_and_raises_nothing(tmp_path: P
         (root / "4").chmod(0o700)
 
     assert found == [2]
+
+
+def test_accounts_usage_shows_each_family_week_beside_the_week() -> None:
+    """P0-W3 (#277): a family week binds that family alone, so the table names it."""
+    from aisquare.cli.accounts import _usage_cells
+    from aisquare.models import ClaudeUsage
+
+    reading = ClaudeUsage(
+        available=True,
+        session_percent=10.0,
+        week_percent=20.0,
+        week_resets_at=NOW + timedelta(days=2),
+        family_week_percent={"opus": 100.0},
+        family_week_resets_at={"opus": NOW + timedelta(days=1)},
+    )
+    _session, week = _usage_cells(reading, now=NOW)
+    assert week.startswith("20% · resets in 2d")
+    assert " · opus 100% resets in 1d" in week
+
+
+def test_a_family_week_whose_reset_has_passed_says_reset_not_resets_now() -> None:
+    """The tester's pass on #401, (b): a live reading whose Sonnet week reset an hour ago
+    printed 'sonnet 45% resets now'. It says the week reset, as a reset session or week
+    does (#408), and the figure for the window that is over goes."""
+    from aisquare.cli.accounts import _usage_cells
+    from aisquare.models import ClaudeUsage
+
+    reading = ClaudeUsage(
+        available=True,
+        session_percent=10.0,
+        week_percent=20.0,
+        week_resets_at=NOW + timedelta(days=2),
+        family_week_percent={"opus": 60.0, "sonnet": 45.0},
+        family_week_resets_at={
+            "opus": NOW + timedelta(days=1),
+            "sonnet": NOW - timedelta(hours=1),
+        },
+    )
+    _session, week = _usage_cells(reading, now=NOW)
+    assert " · sonnet reset 1h ago" in week, week
+    assert "45%" not in week and "resets now" not in week
+    assert " · opus 60% resets in 1d" in week, "a family week still running is as before"

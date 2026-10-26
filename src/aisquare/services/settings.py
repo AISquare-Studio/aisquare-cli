@@ -78,6 +78,18 @@ def set_value(key: str, value: str) -> str:
     return get_value(key)
 
 
+def what_it_changes(key: str, stored: str) -> str | None:
+    """One line on what a change does, for a key whose name says less than it means:
+    ``capture.enabled`` off stops storing prompts but not the board or the CI experiment
+    (#268). ``None`` for every other key."""
+    if key == "capture.enabled" and stored == "false":
+        return (
+            "Prompts are no longer stored or spooled; turn metrics (no text), teammate "
+            "updates and the CI experiment, if you turned it on, carry on."
+        )
+    return None
+
+
 def set_redaction(level: RedactionLevel) -> str:
     """Set the capture redaction level and return it."""
     config = load_config()
@@ -208,9 +220,9 @@ def _assign(data: dict[str, Any], key: str, value: str) -> None:
         node = node[part]
     if not isinstance(node, dict) or parts[-1] not in node:
         raise KeyError(key)
-    # A list-valued key takes its items comma-separated — the shape repomix's own
-    # `--ignore` uses, and the one `config get` prints for it — so a list can be
-    # set from a shell at all; pydantic would refuse the bare string.
+    # A list-valued key takes its items comma-separated — the shape `config get`
+    # prints for it — so a list can be set from a shell at all; pydantic would
+    # refuse the bare string.
     node[parts[-1]] = _split_list(value) if isinstance(node[parts[-1]], list) else value
 
 

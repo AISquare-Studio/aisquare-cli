@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import json
 import os
 import re
 import shutil
@@ -43,10 +44,11 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core
+from aisquare.core import claude_screen as screen_reader
 from aisquare.core import (
     claude_sharing,
     codenames,
@@ -57,9 +59,12 @@ from aisquare.core import (
     personas,
     selfcli,
 )
+from aisquare.core import memory as memory_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
+    LAST_ARGS_ONLY_DENY,
+    REVIEWER_ARGS,
     FleetRoleSettings,
     FleetSettings,
     load_config,
@@ -82,9 +87,7 @@ from aisquare.core.tmux import (
     PaneFacts,
     SocketAnswer,
     TmuxError,
-    TmuxPartlyTyped,
     TmuxServer,
-    TmuxTimedOut,
     TmuxUnavailable,
     WindowInfo,
 )
@@ -102,11 +105,29 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import auto_mode, explainability_ops
+from aisquare.services import (
+    auto_mode,
+    autostop,
+    delivery,
+    explainability_ops,
+    install_route,
+    pane_idle,
+)
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import project as project_service
-from aisquare.services.captain import screen as pane_screen
+
+# How a write into a pane ends lives with the one door every write goes through
+# (``services.delivery``, P0-W1a); its names stay importable from here, where every caller
+# and test reads them.
+from aisquare.services.delivery import PaneWrite as PaneWrite
+from aisquare.services.delivery import TellResult as TellResult
+from aisquare.services.delivery import Typed as Typed
+from aisquare.services.delivery import pane_write as pane_write
+from aisquare.services.delivery import pane_writes as pane_writes
+from aisquare.services.delivery import pasted_unsent as pasted_unsent
+from aisquare.services.delivery import prompt_typed_json as prompt_typed_json
+from aisquare.services.delivery import type_then_enter as type_then_enter
 
 FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator", "ui-tester")
 """The fleet's own roles (§3.3). Any harness or ``team bind`` role is accepted too."""
@@ -140,6 +161,15 @@ injection on ``UserPromptSubmit`` delivers the details — and never starts with
 NUDGE_DEBOUNCE = timedelta(seconds=5)
 """Two board writes inside this window wake the manager once."""
 
+NUDGE_DEFERRED = "nudge_deferred:"
+"""The ``team_meta`` prefix of a nudge a draft held back (P0-W2): ``nudge_deferred:<session>``
+→ when it was held back. :func:`retry_deferred_nudges` sends it once the box is clear."""
+
+_NUDGE_RE_PRESS: tuple[float, ...] = (2.0,)
+_NUDGE_LAST_WAIT = 2.0
+"""A nudge's Enter is pressed again once at most, and its wait is short: it runs inside
+another agent's board write. A nudge still in the box is sent by the next one."""
+
 PROMPT_TIMEOUT = 20.0
 """How long ``spawn --prompt`` waits for the agent to come up before typing anyway."""
 
@@ -156,11 +186,6 @@ _STATUS_WINDOW = 1.0
 _POLL_INTERVAL = 0.25
 _PROMPT_SETTLE = 2.0
 """After the agent process appears, its UI needs a moment before it reads input."""
-_SUBMIT_GRACE = 1.0
-"""How long a prompt may sit in Claude Code's input box after its Enter before the Enter is
-read as lost and pressed once more (:func:`_submitted`)."""
-_SUBMIT_TIMEOUT = 5.0
-"""How long :func:`_submitted` reads the pane back for the prompt to leave the input box."""
 _SECURITY_PRESSES = 3
 """How many Enters :func:`_at_input_box` gives Claude Code's first-run Security notes."""
 _SECURITY_REPRESS = 6.0
@@ -208,6 +233,19 @@ class NoSuchProject(FleetError):
 
 class NoSuchAgent(FleetError):
     """No live agent with that label in this project."""
+
+
+class CapacityRefused(FleetError):
+    """A spawn the machine has no room for (#283): ``code`` says which limit.
+
+    ``capacity_project`` (``max_agents_per_project``), ``capacity_fleet``
+    (``max_agents_total``, every project's live agents) or ``capacity_memory``
+    (``min_free_mb``, or the kernel's memory pressure at critical).
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class EndedMeanwhile(NoSuchAgent):
@@ -264,26 +302,6 @@ class ResumeSpec:
     source's, the one forked from."""
 
 
-Typed = Literal["yes", "no", "unsent", "maybe"]
-"""How a write into an agent's pane ended (:class:`PaneWrite`, :class:`TellResult`), and how a
-spawn's prompt or a replacement's first line reached it (:func:`_type_prompt`): the word an
-audit line says. ``yes``, all of it went through; ``no``, tmux refused it and typed
-nothing; ``unsent``, it is at the agent's prompt but its Enter did not go through, so an
-Enter sends it; ``maybe``, tmux did not answer in time, and it may still arrive. ``unsent``
-was ``no``, and a caller retrying on ``no`` pasted a second copy beside the first, both
-submitted by the next Enter (review of #259, round 12, 2/9). The receipts said it in a
-vocabulary of their own, ``True``/``False``/``unsent``/``maybe``, translated from this one
-by hand, which is how a tell had no word for ``unsent`` (9/9). Their JSON still says
-``true`` and ``false`` (:func:`prompt_typed_json`); a ``False``, "NOT typed … Tell it what
-to do", for the other two had the Tell go in beside the first copy (round 11, 2/13)."""
-
-
-def prompt_typed_json(typed: Typed | None) -> bool | str | None:
-    """A receipt's ``prompt_typed`` as the CLI's JSON and the remote's answer say it: ``true``,
-    typed and sent; ``false``, not typed; ``unsent`` and ``maybe`` as their words."""
-    return None if typed is None else {"yes": True, "no": False}.get(typed, typed)
-
-
 @dataclass(frozen=True)
 class SwitchReceipt:
     """What ``fleet switch`` did: the agent it stopped, the one it started, and how."""
@@ -307,7 +325,16 @@ class SwitchReceipt:
     """Whether the replacement's first line reached its pane: the line telling a resumed
     session to continue, or a fresh one's hand-off prompt. ``no`` leaves it idle at an
     empty prompt, ``unsent`` and ``maybe`` with the line at its prompt or on its way
-    (:data:`Typed`), and ``notes`` say why."""
+    (:data:`Typed`), and ``notes`` say why. On the command line it is ``yes``: handed over
+    with the launch (``prompt_delivery``)."""
+    prompt_delivery: delivery.Delivery | None = None
+    """How the first line reached it: ``argv`` (Claude Code's command line), ``typed``, or
+    ``None`` when there was none."""
+    prompt_acked: bool | None = None
+    """Whether the first line started a turn (its ``UserPromptSubmit``) within the wait the
+    caller gave (``[fleet] prompt_ack_seconds`` from the CLI): ``False`` is still pending,
+    which a listing reads ``attention`` once that wait is past at an idle input box;
+    ``None`` when there was none, or nothing could say."""
 
     @property
     def how(self) -> str:
@@ -328,8 +355,17 @@ class SpawnReceipt:
     join the board. NOT a permission-mode fallback — there is none: the mode is the
     flag, then the role's config, then ``auto``, and nothing here rewrites it."""
     prompt_typed: Typed | None = None
-    """Whether the ``prompt`` asked for reached the pane (:data:`Typed`): ``None`` when none
-    was asked for; otherwise the notes say why it is not ``yes``."""
+    """Whether the first message reached the agent (:data:`Typed`): ``None`` when there was
+    none; otherwise the notes say why it is not ``yes``. A message on the command line is
+    ``yes``: handed over with the launch (``prompt_delivery``)."""
+    prompt_delivery: delivery.Delivery | None = None
+    """How the first message reached it: ``argv`` (Claude Code's command line), ``typed``, or
+    ``None`` when there was none."""
+    prompt_acked: bool | None = None
+    """Whether the first message started a turn (its ``UserPromptSubmit``) within the wait the
+    caller gave (``[fleet] prompt_ack_seconds`` from the CLI): ``False`` is still pending,
+    which a listing reads ``attention`` once that wait is past at an idle input box;
+    ``None`` when there was none, or nothing could say."""
     failures: list[str] = field(default_factory=list)
     """The notes about what did NOT happen once the agent was up: the prompt not typed,
     the claims of a hand-over not moved, the previous session not marked ended. Each
@@ -339,167 +375,6 @@ class SpawnReceipt:
     its account (a folder's trust copied, its settings.json linked), or a key the launcher
     pressed so its prompt went in (#32: past the Security notes, a lost Enter pressed
     again). Each is in ``notes`` too."""
-
-
-@dataclass(frozen=True)
-class TellResult:
-    """How a message reached (or did not reach) an agent: ``typed`` as :class:`PaneWrite` says
-    it, ``yes`` once its text and its Enter went through; ``unsent``, its text is at the
-    agent's prompt and its Enter was refused; ``maybe``, tmux did not answer in time with one
-    of them, which may still arrive. One field for them all, as on
-    :class:`PaneWrite`: ``delivered`` and a ``maybe`` beside it could say "delivered, maybe"
-    (review of #259, round 11, 13/13)."""
-
-    typed: Typed
-    how: str
-
-    @property
-    def delivered(self) -> bool:
-        """Whether the message went in and was sent: ``typed`` is ``yes``."""
-        return self.typed == "yes"
-
-
-@dataclass(frozen=True)
-class PaneWrite:
-    """How one write into an agent's pane ended (:func:`pane_write`): ``yes``, tmux typed it;
-    ``no``, tmux refused it and typed nothing; ``unsent``, refused past the writes of its chain
-    that went in (``went``), or past a part of it (``TmuxPartlyTyped``); ``maybe``, tmux did
-    not answer in time (``TmuxTimedOut``), and a wedged server may still type it once it
-    recovers, or the rest of a part it typed.
-
-    Every write that types into an agent on someone's word asks it here: the remote's tell
-    in each of its modes, its Escapes, ``send-keys`` and quick answers, and ``fleet tell``.
-    A ``maybe`` is said by :meth:`late` and audited ``…=maybe``. It is never "nothing was
-    typed", nor advice to type it again: a second paste is submitted beside the first, and
-    a second Enter answers whatever prompt the first one's message brought up. Rounds 7 to
-    9 of #259's review taught that to one call site at a time, each in words of its own,
-    and the sites not reached yet took a timeout for a refusal (round 10, 8/9).
-    """
-
-    typed: Typed
-    what: str
-    error: TmuxError | None = None
-    went: tuple[str, ...] = ()
-    """The writes of a chain (:func:`pane_writes`) that went through before ``what``, which are
-    in the pane whatever came of it: refused past them, it is ``unsent``."""
-
-    def said(self, label: str, *, press: str, again: str = "send it again") -> str:
-        """The sentence for an ``unsent`` or ``maybe`` write into ``label``'s pane: past a write
-        that went in (``went``), what waits at its prompt, or its Enter on its way
-        (:func:`pasted_unsent`, ``press``); otherwise what tmux may still type (:meth:`late`,
-        ``again``). A ``no`` typed nothing, and its caller words it."""
-        if self.went:
-            return f"{label}: {pasted_unsent(self, label, press=press, put='typed').how}"
-        return self.late(label, again=again)
-
-    @property
-    def audited(self) -> str:
-        """The word its audit line ends on: ``failed`` for a ``no``, else ``delivered=…``."""
-        return "failed" if self.typed == "no" else f"delivered={self.typed}"
-
-    def late(self, label: str, *, then: str = "", again: str = "send it again") -> str:
-        """``maybe``'s sentence: ``what`` may still reach ``label``'s pane (and ``then``), or a
-        part of it did, and an ``unsent`` part's, so its live screen is read before anyone does
-        ``again``."""
-        error = self.error
-        read = f"read its live screen before you {again}"
-        if isinstance(error, TmuxPartlyTyped):
-            typed = f"tmux typed {error.typed} of the {error.size} bytes of {self.what} into"
-            if isinstance(error.cause, TmuxTimedOut):
-                return (
-                    f"{typed} {label}'s pane, then did not answer in time ({error.cause}): "
-                    f"more of it may still arrive{then} — {read}"
-                )
-            return f"{typed} {label}'s pane, then refused the rest ({error.cause}){then} — {read}"
-        return (
-            f"tmux did not answer in time with {self.what} for {label}'s pane ({error}): "
-            f"it may still arrive{then} — {read}"
-        )
-
-
-def pane_write(what: str, write: Callable[[], object]) -> PaneWrite:
-    """``write()``, which types ``what`` into an agent's pane, and how it ended
-    (:class:`PaneWrite`). ``TmuxError`` is every way a tmux call fails (``core.tmux._tmux``),
-    ``TmuxTimedOut`` the one way that may still happen, and ``TmuxPartlyTyped`` a write of
-    several calls that failed past its first: ``core.tmux`` says which of its calls timed out
-    (review of #259, round 11, 7/13). Past a refusal no more of it can arrive: ``unsent``, not
-    ``maybe``, which audited it ``delivered=maybe`` (round 12, 7/9)."""
-    try:
-        write()
-    except TmuxPartlyTyped as exc:
-        return PaneWrite("maybe" if isinstance(exc.cause, TmuxTimedOut) else "unsent", what, exc)
-    except TmuxTimedOut as exc:
-        return PaneWrite("maybe", what, exc)
-    except TmuxError as exc:
-        return PaneWrite("no", what, exc)
-    return PaneWrite("yes", what)
-
-
-def pane_writes(*writes: tuple[str, Callable[[], object]] | None) -> PaneWrite:
-    """``writes`` in turn, each ``(what, write)`` as :func:`pane_write` takes it (``None``: none
-    here), up to the first that did not go through: how that one ended, its ``what`` saying
-    which it was and ``went`` the ones before it, in the pane; the last one's when all did.
-    What comes after a write tmux refused or did not answer would land beside it, or ahead of
-    what may still arrive. ``send-keys`` and a quick answer chained it by hand, the first
-    beside a stand-in "nothing" write (review of #259, round 11, 12/13). And each worked out
-    by hand what was in the pane before the write that failed, a quick answer not at all
-    (round 12, 1/9 and 8/9): :meth:`PaneWrite.said` says it, :attr:`PaneWrite.audited`
-    audits it."""
-    wrote = PaneWrite("yes", "nothing")
-    went: tuple[str, ...] = ()
-    for what, write in filter(None, writes):
-        wrote = pane_write(what, write)
-        if wrote.typed != "yes":
-            typed: Typed = "unsent" if went and wrote.typed == "no" else wrote.typed
-            return replace(wrote, typed=typed, went=went)
-        went = (*went, what)
-    return wrote
-
-
-def type_then_enter(
-    server: TmuxServer,
-    pane_id: str,
-    text: str,
-    label: str,
-    *,
-    press: str,
-    done: str = "typed into its pane at its prompt",
-    what: str = "the text",
-) -> TellResult | PaneWrite:
-    """Paste ``text`` (``what``) at the prompt in ``label``'s pane, then press Enter: how every
-    message is typed into an agent, by :func:`tell`, a spawn's prompt (:func:`_type_prompt`)
-    and the remote's paste (``remote_actions.action_paste``).
-
-    A paste that did not go through is answered as its :class:`PaneWrite`, its caller's to
-    say: a tell files the text as a note, the remote refuses with a 409, a spawn notes it.
-    Past the paste the text is at the prompt, and the answer is how the Enter ended:
-    ``done``, or :func:`pasted_unsent` (``press``). The three wrote paste, Enter and
-    :func:`pasted_unsent` out each in words of its own (review of #259, round 11, 12/13).
-    """
-    wrote = pane_writes(
-        (what, lambda: server.paste(pane_id, text)),
-        ("Enter", lambda: server.send_keys(pane_id, "Enter")),
-    )
-    if wrote.typed == "yes":
-        return TellResult("yes", done)
-    return pasted_unsent(wrote, label, press=press) if wrote.went else wrote
-
-
-def pasted_unsent(entered: PaneWrite, label: str, *, press: str, put: str = "pasted") -> TellResult:
-    """A message ``put`` at ``label``'s prompt (pasted, or typed as ``send-keys`` types it)
-    whose Enter did not go through (``entered``): the text is there either way. Refused, it
-    waits there unsent, and ``press`` says where an Enter sends it. Not answered in time, the
-    Enter may still send it, so nothing invites a second one: that would answer whatever
-    prompt the message brings up, "1. Yes" to a permission nobody saw (review of #259, round
-    10, 3/9)."""
-    if entered.typed == "maybe":
-        how = entered.late(label, then=", and send it", again="press Enter")
-        return TellResult("maybe", f"{put} it at its prompt, but {how}")
-    return TellResult(
-        "unsent",
-        f"{put} it at its prompt, but tmux could not press Enter ({entered.error}) — {press} "
-        "to send it",
-    )
 
 
 @dataclass(frozen=True)
@@ -965,6 +840,26 @@ def resolve_project(ref: str | None = None, *, cwd: Path | None = None) -> Proje
         if ref is None:
             return active_project(store, cwd)
         return only_project(ref, store.find_projects(ref))
+
+
+def ui_scope(projects: Sequence[str] = (), groups: Sequence[str] = ()) -> frozenset[str] | None:
+    """The project ids ``aisquare ui --project … --group …`` shows, or ``None`` for every one.
+
+    Each ``--project`` is one project (:func:`resolve_project`'s refs), each ``--group`` its
+    members as they stand now, pinned ones included. For an operator with many projects
+    who works in a few (#83): the sidebar reads only those on every tick.
+    """
+    if not projects and not groups:
+        return None
+    scope = {resolve_project(ref).id for ref in projects}
+    with store_session() as store:
+        listed = store.list_projects(all=True)
+        for name in groups:
+            group = store.find_project_group(name)
+            if group is None:
+                raise NoSuchProject(f"no project group named {name!r}")
+            scope.update(p.id for p in listed if p.group_id == group.id)
+    return frozenset(scope)
 
 
 def only_project(ref: str, matches: list[ProjectInfo]) -> ProjectInfo:
@@ -2294,11 +2189,41 @@ def _on_another_server(
     return booted_at is None or agent.created_at >= booted_at
 
 
+class _Tick:
+    """One read's server-wide answer per server (:meth:`TmuxServer.every_window`), asked once.
+
+    For a reader of many projects (:func:`list_agents_many`, ``asq``'s tick, #83): each
+    project's :func:`_observe` asked its server for its session's windows and for every
+    pane's output time, two tmux processes per project per tick, the second the same
+    answer each time. A server that could not be asked raises for every project on it,
+    as it did when each asked on its own.
+    """
+
+    def __init__(self) -> None:
+        self._answers: dict[object, tuple[dict[str, list[WindowInfo]], dict[str, datetime]]] = {}
+        self._failed: dict[object, TmuxError] = {}
+
+    def every_window(
+        self, srv: TmuxServer
+    ) -> tuple[dict[str, list[WindowInfo]], dict[str, datetime]]:
+        key = (srv.socket, srv.path)
+        if key in self._failed:
+            raise self._failed[key]
+        if key not in self._answers:
+            try:
+                self._answers[key] = srv.every_window()
+            except TmuxError as exc:
+                self._failed[key] = exc
+                raise
+        return self._answers[key]
+
+
 def _observe(
     srv: TmuxServer,
     tmux_session: str | None,
     agents: Sequence[FleetAgent],
     reads: tmux_core.SocketReads | None = None,
+    tick: _Tick | None = None,
 ) -> _Observed | None:
     """Row id → the facts of that row's pane, or ``None`` when tmux cannot be asked at all.
 
@@ -2334,13 +2259,18 @@ def _observe(
     answers ``None`` for it, as for a server that could not be asked.
     """
     try:
-        windows = (
-            {window.pane_id: window for window in srv.list_windows(tmux_session)}
-            if tmux_session
-            else {}
-        )
         live = [agent for agent in agents if agent.ended_at is None]
-        output_at = _activity_times(srv) if live else {}
+        if tick is not None:  # the server's one answer for every project of this read
+            every, times = tick.every_window(srv)
+            windows = {w.pane_id: w for w in every.get(tmux_session, [])} if tmux_session else {}
+            output_at = times if live else {}
+        else:
+            windows = (
+                {window.pane_id: window for window in srv.list_windows(tmux_session)}
+                if tmux_session
+                else {}
+            )
+            output_at = _activity_times(srv) if live else {}
         said = [w.server_started for w in windows.values() if w.server_started is not None]
         seen: dict[str, _PaneView] = {}
         for agent in agents:
@@ -2392,6 +2322,7 @@ def _observe_sockets(
     config: FleetSettings | None = None,
     addresses: Mapping[str, _Address] | None = None,
     reads: tmux_core.SocketReads | None = None,
+    tick: _Tick | None = None,
 ) -> dict[_Address, _Observed | None]:
     """Server → what THAT server says about the live agents recorded on it.
 
@@ -2412,7 +2343,7 @@ def _observe_sockets(
     for agent in agents:
         groups.setdefault(_where(agent, config, addresses), []).append(agent)
     return {
-        address: _observe(_server_at(address, config), tmux_session, group, reads)
+        address: _observe(_server_at(address, config), tmux_session, group, reads, tick)
         for address, group in groups.items()
     }
 
@@ -2479,8 +2410,17 @@ def _derive(
     observed: bool,
     now: datetime,
     held: bool = False,
+    idle_box: Callable[[], bool] | None = None,
+    quiet: timedelta = timedelta(seconds=30),
 ) -> tuple[FleetAgentState, str | None]:
     """State from the board first, tmux second (§5.1) — with two honest exceptions.
+
+    And one check (#123): a fresh board ``working`` is trusted while the pane has
+    printed within ``quiet`` (``[fleet] busy_quiet_seconds``). Past that, ``idle_box``
+    (``services.pane_idle.box_idle_now``, one capture) is asked whether Claude Code sits
+    idle at its prompt — a turn ended with Esc fires no Stop — and an idle box reads
+    ``waiting``, "idle (the board said working)". Only rows in that state are captured;
+    without ``idle_box`` the row is trusted as before.
 
     A dead or vanished pane is a hard fact no board row can contradict: a
     process that has exited cannot be waiting, however recently its hooks
@@ -2548,6 +2488,15 @@ def _derive(
             if answered:
                 return "working", None
             return "attention", None
+        elif fresh and board_state == "working":
+            quiet_pane = (
+                observed
+                and pane is not None
+                and (pane.last_output is None or now - pane.last_output > quiet)
+            )
+            if quiet_pane and idle_box is not None and idle_box():
+                return "waiting", IDLE_SAID_WORKING
+            return "working", None
         elif fresh and board_state is not None:
             return board_state, None
     if not observed or pane is None:
@@ -2560,6 +2509,9 @@ def _derive(
     busy = pane.last_output is not None and now - pane.last_output <= ACTIVITY_WINDOW
     return ("working" if busy else "waiting"), hooks
 
+
+IDLE_SAID_WORKING = "idle (the board said working)"
+"""``_derive``'s detail for a ``working`` row whose quiet pane shows an idle prompt (#123)."""
 
 _LIMIT_GRACE = timedelta(minutes=10)
 """How long past its named reset a ``limited`` row is still believed (the reset
@@ -2635,10 +2587,122 @@ def _with_trust_prompts(
             elif claude_sharing.shows_security_notes(lines):
                 # Its only key is Enter, which a spawn presses (#32, L2): still there, it is
                 # one nobody typed into — a window the human opened first, or a refused key.
-                detail = f"{SECURITY_NOTES} — press Enter in its window"
+                detail = SECURITY_NOTES_DETAIL
                 status = status.model_copy(update={"state": "attention", "detail": detail})
         shown.append(status)
     return shown
+
+
+def _with_first_prompts(
+    statuses: list[FleetAgentStatus],
+    project: ProjectInfo,
+    config: FleetSettings,
+    addresses: Mapping[str, _Address] | None = None,
+) -> list[FleetAgentStatus]:
+    """``statuses``, every agent whose first message never started a turn read ``attention``
+    (P0-W1a, #122), with the detail that says what to do.
+
+    A row whose message is still ``pending`` past ``[fleet] prompt_ack_seconds`` is looked
+    at once: at an idle input box (``screen.box_idle``), or at Claude Code's first-run
+    Security notes (P0-FU1), nothing is going to take it, so it moves to ``unsent`` and its
+    board says so, once (:func:`_first_prompt_unsent`). A command-line first message waits
+    behind the notes, and its SessionStart has fired, so :func:`_with_trust_prompts`, which
+    asks only a row no hook has spoken for, never looked: it read ``waiting``, silent.
+
+    A row already ``unsent`` reads ``attention`` until a prompt takes the message
+    (``store.mark_prompted``, a human's Enter or a ``tell``), its detail the way on: at the
+    notes, their one key (a ``tell`` typed there is lost), else a ``tell`` or a restart
+    (:func:`unsent_detail`). Which of the two is read off its screen, one capture of a row
+    already stuck for the human, so a human's Enter past the notes turns it to the second.
+    Only a row whose session the board knows is asked: an agent with no hooks never
+    acknowledges anything, and its message would read not taken however its turn went. A
+    row the listing already reads ``attention`` (the trust question) or not live keeps what
+    it says.
+    """
+    now = _now()
+    shown: list[FleetAgentStatus] = []
+    for status in statuses:
+        agent = status.agent
+        live = (
+            agent.ended_at is None
+            and not status.held
+            and status.session is not None
+            and status.state in ("waiting", "working")
+        )
+        at_notes = False
+        if live and delivery.overdue(agent, now, config.prompt_ack_seconds):
+            agent, at_notes = _unsent_if_idle(agent, status.session, config, addresses)
+        elif live and agent.first_prompt == "unsent":
+            at_notes = claude_sharing.shows_security_notes(_screen(agent, config, addresses))
+        if live and agent.first_prompt == "unsent":
+            status = status.model_copy(
+                update={
+                    "agent": agent,
+                    "state": "attention",
+                    "detail": SECURITY_NOTES_DETAIL
+                    if at_notes
+                    else unsent_detail(project, agent.label),
+                }
+            )
+        shown.append(status)
+    return shown
+
+
+def unsent_detail(project: ProjectInfo, label: str) -> str:
+    """What a listing says of an agent whose first message never started a turn: the two ways
+    on, each naming ``project`` (``project_service.fleet_command``)."""
+    tell = project_service.fleet_command("tell", project, label)
+    restart = project_service.fleet_command("restart", project, label)
+    return f"first prompt not taken — `{tell} …` or `{restart}`"
+
+
+def _screen(
+    agent: FleetAgent, config: FleetSettings, addresses: Mapping[str, _Address] | None
+) -> list[str]:
+    """``agent``'s pane as tmux shows it now; nothing for a screen tmux will not show."""
+    try:
+        return _server_at(_where(agent, config, addresses), config).capture(agent.pane_id).lines
+    except TmuxError:
+        return []
+
+
+def _unsent_if_idle(
+    agent: FleetAgent,
+    session: TeamSession | None,
+    config: FleetSettings,
+    addresses: Mapping[str, _Address] | None,
+) -> tuple[FleetAgent, bool]:
+    """``agent`` as it stands once its overdue first message was looked at, and whether its
+    pane shows Claude Code's first-run Security notes: moved to ``unsent`` when the pane
+    shows Claude Code's idle input box or those notes (P0-FU1), and read again when another
+    reader moved it first (or a prompt took it meanwhile). A screen that cannot be read
+    says nothing, and the row stays ``pending``.
+
+    A prompt the session has had since the message was given (``prompted_at``) took it:
+    its ``UserPromptSubmit`` stamped the session and could not move the row (a store locked
+    for that write), and it is taken here instead of read as not taken (review of #330,
+    round 1). A ``Stop`` takes it too (``team.hook_stop``); a turn whose hooks both failed
+    leaves nothing to tell it by."""
+    prompted = session.prompted_at if session is not None else None
+    given = agent.first_prompt_at
+    if session is not None and prompted is not None and given is not None and prompted >= given:
+        with contextlib.suppress(Exception), store_session() as store:
+            store.take_first_prompt(prompted, session_id=session.id, agent_id=agent.id)
+            return store.get_fleet_agent(agent.id) or agent, False
+        return agent, False
+    lines = _screen(agent, config, addresses)
+    at_notes = claude_sharing.shows_security_notes(lines)
+    if at_notes:
+        why = "held at Claude Code's Security notes"
+    elif screen_reader.box_idle(lines):
+        why = f"no turn started on it within {config.prompt_ack_seconds:.0f} s"
+    else:
+        return agent, False
+    if _first_prompt_unsent(agent, why):
+        return agent.model_copy(update={"first_prompt": "unsent"}), at_notes
+    with contextlib.suppress(Exception), store_session() as store:
+        return store.get_fleet_agent(agent.id) or agent, at_notes
+    return agent, at_notes
 
 
 def _maybe_at_trust_prompt(status: FleetAgentStatus, session: TeamSession | None = None) -> bool:
@@ -2678,7 +2742,16 @@ def _status(
     held = _held_by_another(agent, observed)
     observed = _own_view(agent, observed)
     pane = _pane_in(agent, observed) if observed is not None else None
-    state, detail = _derive(agent, session, pane, observed=observed is not None, now=now, held=held)
+    state, detail = _derive(
+        agent,
+        session,
+        pane,
+        observed=observed is not None,
+        now=now,
+        held=held,
+        idle_box=lambda: pane_idle.box_idle_now(server_of(agent, config), agent.pane_id),
+        quiet=timedelta(seconds=config.busy_quiet_seconds),
+    )
     return FleetAgentStatus(
         agent=agent,
         state=state,
@@ -2795,6 +2868,11 @@ def _unaskable_root(project: ProjectInfo, exc: OSError) -> FleetError:
         f"the board of {_name(project)} cannot be worked out: its root {project.root} cannot "
         f"be looked at ({exc.strerror or exc})"
     )
+
+
+def board_of_row(agent: FleetAgent) -> str:
+    """The board ``agent``'s row reads, which its manager is woken on (:func:`_board_of_row`)."""
+    return _board_of_row(agent)
 
 
 def _board_of_row(agent: FleetAgent) -> str:
@@ -3049,9 +3127,31 @@ def spawn(
     start_point: str | None = None,
     fork: bool = False,
     hub: str | None = None,
+    admit: bool = True,
+    kickoff: bool = True,
+    ack_wait: float = 0.0,
+    board_context: str | None = None,
     replaces: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
+
+    THE FIRST MESSAGE (P0-W1a, #122) is ``prompt``, and with ``task_id`` and ``kickoff`` a
+    kickoff before it that names the task as the agent's ASSIGNED TO YOU block does
+    (``team.kickoff_prompt``): ``fleet spawn coder --task 12`` with no ``--prompt`` used to
+    type nothing, and the coder waited at an empty prompt. A Claude Code agent is given it
+    on its command line (``services.delivery``): written to a file only this user reads,
+    named to ``launch`` as ``--first-prompt-file``, read and deleted there, and passed to
+    Claude Code after ``--``. Nothing is typed, so no Enter can be dropped, and the row's
+    recorded launch holds the file's path at most, never the text, so a restart replays no
+    old message. Any other binary, and every agent under ``[fleet] first_prompt =
+    "type"``, has it typed (:func:`_type_prompt`). The row records it ``pending`` until the
+    agent's ``UserPromptSubmit`` takes it (``store.mark_prompted``); ``ack_wait`` is how long
+    this call waits for that (the CLI gives ``[fleet] prompt_ack_seconds``), said on the
+    receipt as ``prompt_acked``. A replacement (:func:`_respawn`) and a fork pass their own
+    first line and no kickoff.
+
+    ``board_context`` (``--board-context``) is what of the board it reads: the flag, else
+    the replayed spec's, else ``[fleet.roles.<role>] board_context`` (P1 WS-2, #279).
 
     ``spec`` REPLAYS a recorded launch (#144): the binary, permission mode,
     worktree choice and arguments come from what the agent was started with,
@@ -3207,6 +3307,12 @@ def spawn(
     _refuse_an_env_file_it_cannot_read(role)
     role_config = role_settings(role, config)
     chosen_persona = _chosen_persona(project, role, persona, role_config, notes)
+    reads = _board_context(role, board_context, spec, role_config)
+    if reads != role_config.board_context and role == MANAGER_LABEL and board_context is None:
+        notes.append(
+            f"fleet.roles.manager.board_context = {role_config.board_context!r} is ignored: "
+            "a manager reads the whole board"
+        )
     # A server that exited at the socket path left its rows live, and the server this spawn
     # starts there would hold them for good: they read lost from now on, in every project,
     # decided while the stale file still says so. And a socket path a running server lost
@@ -3254,11 +3360,20 @@ def spawn(
                 "`aisquare captain` attaches to it"
             )
     if len(live) >= config.max_agents_per_project:
-        raise FleetError(
+        raise CapacityRefused(
+            "capacity_project",
             f"{_name(project)} already runs {len(live)} agents "
             f"(max_agents_per_project = {config.max_agents_per_project}) — stop one, "
-            "or raise the limit in [fleet]"
+            "or raise the limit in [fleet]",
         )
+    _refuse_by_group(project, spawned_by, admit=admit)
+    # The machine's own limits (#283), after the project's: the fleet-wide budget and
+    # the memory floor. Before the store opens below and before any window.
+    # ``admit`` is False for a live 1:1 replacement (a restart of a running agent, a
+    # switch: `_respawn(takes_over=True)`): its own seat and memory are freed as it
+    # starts, and refused after the stop, the agent was lost (review of #323).
+    if admit and not experimental.captain_role(role):
+        notes.extend(_admit_or_make_room(config))
     # Before the store opens: with no hub, `_board_for` runs git (review of #259, round 29,
     # 5/8), and the refusals above need neither.
     board, hub = (
@@ -3268,6 +3383,7 @@ def spawn(
     with store_session() as store:
         task = _task_for(store, board, task_id)
         resolved_task_id = task.id if task is not None else None
+        statuses = store.task_statuses(board) if task is not None and kickoff else {}
         if fork:
             # Held by nothing, where a spawn's label is kept apart from the live agents
             # only: a fork is not the next agent under a label (review of #240, finding 3).
@@ -3309,7 +3425,9 @@ def spawn(
     # ladder names and the machine does not have refuses the spawn now, with
     # the rung named, rather than starting a window that dies on its first line.
     try:
-        choice = claude_accounts_service.choose(account, role=role, project=project)
+        # The family the agent will run, for the pick's per-family weeks (#277).
+        family = harness.launch_family(role, [*role_config.extra_args, *agent_args])
+        choice = claude_accounts_service.choose(account, role=role, project=project, family=family)
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc
 
@@ -3332,6 +3450,12 @@ def spawn(
     # adding today's would double them (or add ones the agent never had).
     role_args = [] if spec is not None else list(role_config.extra_args)
     extra = list(agent_args)
+    # The role's model and effort down its ladder (#129 b), as `team spawn` launches them:
+    # the fleet path never asked, so every agent ran on the account's default model.
+    # Recorded in the spec's own fields, not its arguments (the role's and the caller's),
+    # so a restart or switch starts the model it recorded.
+    ladder = _ladder(role, resolution.binary, [*role_args, *extra], spec)
+    model_flags = [] if ladder is None else ["--model", ladder[0], "--effort", ladder[1]]
     if replayed_args:
         # Filtered on the way OUT as well as on the way in: a spec written before
         # session choices were left out of it still holds them, and a board
@@ -3399,7 +3523,28 @@ def spawn(
         # A flag, not an env var: the window's environment is the tmux SERVER's.
         flags += ["--persona", chosen_persona]
     flags += ["--name", picked]
-    command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
+    first = _first_message(
+        prompt,
+        task if kickoff else None,
+        role=role,
+        label=picked,
+        session_id=identity.session_id,
+        statuses=statuses,
+    )
+    way = (
+        delivery.first_prompt_way(
+            resolution.binary, claude_code=claude_code, setting=config.first_prompt
+        )
+        if first is not None
+        else None
+    )
+    prompt_file: Path | None = None
+    if first is not None and way == "argv":
+        # Written before the window opens, so its launch finds it; named to the launch by
+        # path, so the command tmux carries and the row records never holds the text.
+        prompt_file = delivery.write_prompt_file(agent_id, first)
+        flags += [delivery.FIRST_PROMPT_FLAG, str(prompt_file)]
+    command = selfcli.argv_for(["launch", role, *flags, *role_args, *model_flags, *extra])
     env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
     if experimental.captain_role(role):
         # The launcher activates a board BEFORE it hands the agent its `-e` pairs,
@@ -3435,6 +3580,9 @@ def spawn(
     # that started the server gave every persona-less seat on it, and every replay of
     # one, its skeptic briefing (review of #201, F3).
     env[orchestrator.PERSONA_ENV_VAR] = chosen_persona or ""
+    # What of the board it reads, as this spawn resolved it: per window, like the persona,
+    # since the server's environment is whoever started it (P1 WS-2, #279).
+    env[orchestrator.BOARD_CONTEXT_ENV_VAR] = reads
     # The deployment override too, for the same reason: the tab resolves the
     # key's deployment, and shows the target, with THIS process's variable,
     # and the window's `launch` has to trace where the tab says. Blank for
@@ -3546,6 +3694,8 @@ def spawn(
                 notes=notes,
             )
         except TmuxError as exc:
+            if prompt_file is not None:
+                delivery.discard_prompt_file(prompt_file)
             raise FleetError(f"tmux could not start the window: {exc}") from exc
         if window.resize_refused is not None:
             # The agent runs either way; what it costs is #149 itself, so it is said
@@ -3597,6 +3747,9 @@ def spawn(
                 command=list(command),
                 recorded_by=__version__,
                 hub=hub,
+                model=ladder[0] if ladder is not None else None,
+                effort=ladder[1] if ladder is not None else None,
+                board_context=reads,
             ),
             socket_path=socket_path,
             boot_id=tmux_core.boot_id(),
@@ -3605,6 +3758,8 @@ def spawn(
             board=board,
             created_at=_now(),
             persona=chosen_persona,
+            first_prompt="pending" if first is not None else None,
+            first_prompt_at=_now() if first is not None else None,
         )
         stored = _record(
             agent,
@@ -3613,6 +3768,7 @@ def spawn(
             wanted=label,
             notes=notes,
             cap=config.max_agents_per_project,
+            total=0 if experimental.captain_role(role) else config.max_agents_total,
             onboard=onboard,
             codename=codename,
             replaces=replaces,
@@ -3634,30 +3790,42 @@ def spawn(
     if takes_over is not None and identity.session_id is not None:
         stored = _take_over(stored, takes_over, identity.session_id, moved)
     _supersede(rows, views, stored, config)
-    if prompt is None and task is not None and resume is None and takes_over is None:
-        prompt = task_prompt(task)
     typing: list[str] = []
     done: list[str] = []
-    typed = (
-        _type_prompt(
+    typed: Typed | None = None
+    acked: bool | None = None
+    if first is not None and way == "argv":
+        typed = "yes"  # handed over with the launch: nothing to type, no Enter to lose
+    elif first is not None:
+        typed, acked = _type_prompt(
             srv,
             stored.pane_id,
-            prompt,
+            first,
             typing,
             folder=cwd,
             to=(project, stored.label),
-            claude_code=claude_code or harness.is_default_agent(resolution.binary),
+            agent_id=stored.id,
+            reads_box=claude_code or harness.is_default_agent(resolution.binary),
+            guard=config.draft_quiet_seconds,
             done=done,
         )
-        if prompt
-        else None
-    )
+        if typed == "unsent":
+            _first_prompt_unsent(stored, "its first message is still in its input box")
+    if first is not None and typed not in ("no", "maybe") and acked is None:
+        acked = delivery.await_ack(stored.id, ack_wait, sleep=_sleep, monotonic=_monotonic)
+    if acked is False and typed == "yes" and way == "argv" and ack_wait > 0:
+        typing.append(
+            "no turn has started on its first message yet — `fleet ls` says `attention` if it "
+            f"is still waiting in {config.prompt_ack_seconds:.0f} s"
+        )
     return SpawnReceipt(
         agent=stored,
         asked_label=label,
         tmux_session=tmux_session,
         notes=[*notes, *moved, *done, *typing],
         prompt_typed=typed,
+        prompt_delivery=("argv" if way == "argv" else "typed") if first is not None else None,
+        prompt_acked=acked,
         failures=[*moved, *(typing if typed not in (None, "yes") else [])],
         shared=[*made, *done],
     )
@@ -3818,13 +3986,23 @@ def _replayed_args(role: str, spec: LaunchSpec, config: FleetSettings) -> list[s
     alone (review of #257). Where it leads the list, as it does before the caller's own
     arguments (round 19), and unless today's ``config`` leads with it too, which says it
     was chosen (round 20). A spec recorded since then (``recorded_by``) is replayed as it
-    is, so a ``--restricted`` chosen in today's config survives a restart.
+    is, so a ``--restricted`` chosen in today's config survives a restart; less, from
+    0.8.0 to 0.8.2, the reviewer's default deny it leads with, now the role's own.
     """
     args = list(spec.extra_args)
-    if spec.recorded_by is None and role == "reviewer":
+    if role != "reviewer":
+        return args
+    if spec.recorded_by is None:
         return replacing_the_former_reviewer_default_first(
             args, role_settings(role, config).extra_args
         )
+    if install_route.is_newer(spec.recorded_by, LAST_ARGS_ONLY_DENY) is False and args[
+        : len(REVIEWER_ARGS)
+    ] == list(REVIEWER_ARGS):
+        # 0.8.0 to 0.8.2 recorded the reviewer's default `extra_args`, its deny, first. It
+        # is the role's own now (`harness.tool_policy`): replayed as a typed deny, it was
+        # one `allow_tools` could never hand back (review of #311).
+        args = args[len(REVIEWER_ARGS) :]
     return args
 
 
@@ -3853,7 +4031,13 @@ def _without_session_choice(
     is called and joins the row to that session, so a restart resumes it with
     its own ``--resume`` — the ``claude2`` parallel install
     (``AISQUARE_BIN_CODER=claude2``) spawned on a session its caller chose.
+
+    ``launch``'s ``--first-prompt-file`` goes for every binary: a first message is per
+    launch, and the spec replayed it to a restart's launch, which would find its file read
+    and gone (P0-W1a). The spawn passes it among ``launch``'s own flags, never in ``args``;
+    this keeps a caller's from being recorded.
     """
+    args = _without_first_prompt_file(args)
     if harness.is_default_agent(binary) or claude_code:
         return explainability_service.without_session_choice(args)
     # An id the planner READ from the arguments, not one it minted — it mints
@@ -3862,6 +4046,21 @@ def _without_session_choice(
     if planned.session_id is not None and not planned.inject_args:
         return explainability_service.without_session_choice(args)
     return list(args)
+
+
+def _without_first_prompt_file(args: Sequence[str]) -> list[str]:
+    """``args`` less ``--first-prompt-file <path>`` (or ``=<path>``), wherever it is."""
+    flag = delivery.FIRST_PROMPT_FLAG
+    kept: list[str] = []
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg == flag:
+            skip = True
+        elif not arg.startswith(f"{flag}="):
+            kept.append(arg)
+    return kept
 
 
 def _supersede(
@@ -4279,6 +4478,7 @@ def _record(
     cap: int,
     onboard: bool,
     codename: str,
+    total: int = 0,
     replaces: str | None = None,
 ) -> FleetAgent:
     """Write the row; on a live-label collision re-pick the label and retry.
@@ -4310,6 +4510,7 @@ def _record(
             wanted=wanted,
             notes=notes,
             cap=cap,
+            total=total,
             onboard=onboard,
             codename=codename,
             replaces=replaces,
@@ -4340,6 +4541,7 @@ def _write_row(
     cap: int,
     onboard: bool,
     codename: str,
+    total: int = 0,
     replaces: str | None = None,
 ) -> FleetAgent:
     """The store half of :func:`_record`: onboard, insert, relabelling past a live collision.
@@ -4364,6 +4566,8 @@ def _write_row(
                 )
             stored = written
             _verify_cap(store, stored, cap)
+            _verify_budget(store, stored, total)
+            _verify_group_cap(store, stored)
             return stored
     raise FleetError(f"could not record {agent.label!r}: every label tried was taken")
 
@@ -4448,6 +4652,352 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
     )
 
 
+def is_paused(project: ProjectInfo) -> bool:
+    """Whether ``project``'s ``fleet-paused`` signal reads on, on any board it lives on
+    (:func:`_pause_where_on`). A store that cannot be read says not paused."""
+    if not orchestrator.team_enabled():
+        return False
+    try:
+        with store_session() as store:
+            states = _team().board_signals_in(store)
+    except Exception:
+        return False
+    return bool(_pause_where_on(project, states))
+
+
+def _under_a_parent(project: ProjectInfo) -> bool:
+    """Whether ``project`` is in a parent relation (a member under a parent, or a parent):
+    the subtree a group pause covers. A project in none behaves as before."""
+    from aisquare.services import parent as parent_service
+
+    with store_session() as store:
+        return parent_service.parent_of(store, project.id) is not None or bool(
+            parent_service.groups_parented_by(store, project.id)
+        )
+
+
+def _refuse_by_group(project: ProjectInfo, spawned_by: str, *, admit: bool) -> None:
+    """P2-W6 (#199): an agent's spawn (``--as``) on a paused board under a parent is
+    refused, so a parent manager cannot restart what ``fleet pause --group`` paused; and a
+    spawn past its group's ``max_agents`` is refused (``capacity_group``), as admission
+    refuses past the budget. A person's spawn on a paused board goes ahead, as before; a 1:1
+    replacement (``admit`` False) takes the seat it frees."""
+    from aisquare.services import parent as parent_service
+
+    if (
+        spawned_by not in ("user", "usage-limit")
+        and _under_a_parent(project)
+        and is_paused(project)
+    ):
+        raise FleetError(
+            f"{_name(project)} is paused — an agent may not spawn there; "
+            f"`{project_service.fleet_command('resume', project)}` first"
+        )
+    if not admit:
+        return
+    with store_session() as store:
+        why = parent_service.cap_refusal(store, project.id)
+    if why is not None:
+        raise CapacityRefused("capacity_group", why)
+
+
+def _verify_group_cap(store: ContextStore, stored: FleetAgent) -> None:
+    """Back the row out if it is past its group's ``max_agents`` (P2-W6, #199): settled as
+    :func:`_verify_cap` settles the project's, over the group's members and parent."""
+    from aisquare.services import parent as parent_service  # lazy: it reads the store only
+
+    why = parent_service.over_cap(store, stored)
+    if why is not None:
+        store.end_fleet_agent(stored.id, ended_by="stopped")  # backed out on purpose
+        raise CapacityRefused("capacity_group", why)
+
+
+def _verify_budget(store: ContextStore, stored: FleetAgent, total: int) -> None:
+    """Back the row out if it is past ``max_agents_total`` (#283); ``0`` is no budget.
+
+    :func:`_verify_cap`'s settlement, over every project's live rows: the same total
+    order (``created_at, id``), so N parallel spawns at the budget's last seat settle to
+    exactly the budget, whichever projects they are in. The captain is not counted.
+    """
+    if total <= 0:
+        return
+    live = sorted(
+        (agent for agent in store.live_fleet_agents() if agent.role != CAPTAIN_ROLE),
+        key=lambda agent: (agent.created_at, agent.id),
+    )
+    if len(live) <= total or all(agent.id != stored.id for agent in live[total:]):
+        return
+    store.end_fleet_agent(stored.id, ended_by="stopped")  # backed out on purpose
+    raise CapacityRefused(
+        "capacity_fleet",
+        f"that would be {len(live)} live agents across the fleet (max_agents_total = "
+        f"{total}) — another spawn took the last seat while this one was starting; stop "
+        "one, or raise the budget in [fleet]",
+    )
+
+
+# --- admission: the machine's own limits (#283) ------------------------------------
+
+_ADMISSION_LOG_MAX = 1024 * 1024
+"""``admission.jsonl`` is rotated to ``admission.jsonl.1`` past this size."""
+MEMORY_MARGIN_MB = 512
+"""What a memory refusal adds to ``min_free_mb`` for :data:`MEMORY_MARGIN_MINUTES`."""
+MEMORY_MARGIN_MINUTES = 5
+_MEMORY_REFUSED_META = "fleet:memory_refused_at"
+
+
+def _admit(config: FleetSettings) -> list[str]:
+    """The fleet-wide budget and the memory floor for one spawn: its notes, or a refusal.
+
+    Raises :class:`CapacityRefused` (``capacity_fleet`` naming each project's count;
+    ``capacity_memory`` naming the numbers and ``aisquare fleet capacity``). After a
+    memory refusal the floor is ``min_free_mb + 512`` for five minutes, so admission
+    does not flap on a box hovering at the line. Unknown headroom admits, with a note.
+    Each refusal, and each admission that fills the budget, is one line in
+    ``~/.aisquare/fleet/admission.jsonl``.
+    """
+    notes: list[str] = []
+    counts = _live_per_project() if config.max_agents_total > 0 else {}
+    live_total = sum(counts.values())
+    head = memory_core.headroom()
+    record: dict[str, object] = {
+        "live_total": live_total,
+        "max_agents_total": config.max_agents_total,
+        "available_mb": head.available_mb,
+        "pressure": head.pressure,
+        "min_free_mb": config.min_free_mb,
+    }
+    if config.max_agents_total > 0 and live_total >= config.max_agents_total:
+        each = ", ".join(f"{name} {count}" for name, count in sorted(counts.items()))
+        _log_admission("capacity_fleet", record)
+        raise CapacityRefused(
+            "capacity_fleet",
+            f"{live_total} live agents across the fleet (max_agents_total = "
+            f"{config.max_agents_total}): {each} — stop one (`aisquare fleet capacity` lists "
+            "them), or raise the budget in [fleet]",
+        )
+    floor = _memory_floor(config.min_free_mb)
+    if config.min_free_mb > 0 and head.pressure == "critical":
+        _memory_refused(record, f"memory pressure is critical ({_said(head)})")
+    if config.min_free_mb > 0 and head.available_mb is not None and head.available_mb < floor:
+        why = f"{head.available_mb} MB available, {floor} MB needed"
+        if floor != config.min_free_mb:
+            why += (
+                f" (min_free_mb = {config.min_free_mb}, plus {MEMORY_MARGIN_MB} for "
+                f"{MEMORY_MARGIN_MINUTES} min after a refusal)"
+            )
+        else:
+            why += " (min_free_mb)"
+        _memory_refused(record, why)
+    if head.pressure == "warn":
+        notes.append(f"memory pressure is warn ({_said(head)}) — admitted; heavy runs may swap")
+    if not head.known and config.min_free_mb > 0:
+        notes.append("could not read this machine's memory — admitted without the floor")
+    if config.max_agents_total > 0 and live_total + 1 >= config.max_agents_total:
+        _log_admission("admitted-at-budget", record)
+    return notes
+
+
+def _admit_or_make_room(config: FleetSettings) -> list[str]:
+    """:func:`_admit`; refused, and with ``[fleet] auto_stop_finished`` on, stop the workers
+    that have finished on every project and ask once more (P2-W1b, #283). A seat a finished
+    tester still held was a refusal the manager then had to stop it for. Whatever was stopped
+    is said in the notes; refused again, the second refusal is the answer."""
+    try:
+        return _admit(config)
+    except CapacityRefused:
+        if not config.auto_stop_finished:
+            raise
+        stopped = [
+            item.verdict
+            for item in autostop.reap_finished(autostop.every_project())
+            if item.stopped
+        ]
+        if not stopped:
+            raise
+    made = ", ".join(f"{v.agent.label} ({v.reason})" for v in stopped)
+    return [f"stopped finished workers to make room: {made}", *_admit(config)]
+
+
+def _said(head: memory_core.Headroom) -> str:
+    available = f"{head.available_mb} MB available" if head.available_mb is not None else ""
+    psi = f"PSI some avg10 {head.psi_some_avg10:g}" if head.psi_some_avg10 is not None else ""
+    return ", ".join(part for part in (available, psi) if part) or head.source
+
+
+def _memory_floor(min_free_mb: int) -> int:
+    """``min_free_mb``, or ``min_free_mb + 512`` within five minutes of a memory refusal."""
+    if min_free_mb <= 0:
+        return 0
+    try:
+        with store_session() as store:
+            said = store.get_meta(_MEMORY_REFUSED_META)
+        refused = datetime.fromisoformat(said) if said else None
+    except Exception:  # a meta that cannot be read is no recent refusal
+        refused = None
+    if refused is not None and _now() - refused < timedelta(minutes=MEMORY_MARGIN_MINUTES):
+        return min_free_mb + MEMORY_MARGIN_MB
+    return min_free_mb
+
+
+def _live_per_project() -> dict[str, int]:
+    """Live agents per project, the captain excluded: what the fleet-wide budget counts.
+
+    Counted by project id and named as lists name a project, with its root beside the
+    name where two share it: two checkouts of one repo, neither nicknamed, are two
+    projects, and one entry for both read as one project over its cap (review of #323).
+    """
+    counts: dict[str, int] = {}
+    rows: dict[str, ProjectInfo | None] = {}
+    with store_session() as store:
+        for agent in store.live_fleet_agents():
+            if agent.role == CAPTAIN_ROLE:
+                continue
+            if agent.project_id not in rows:
+                rows[agent.project_id] = store.get_project(agent.project_id, include_forgotten=True)
+            counts[agent.project_id] = counts.get(agent.project_id, 0) + 1
+    names = {pid: _name(row) if row is not None else pid[:12] for pid, row in rows.items()}
+    shared = {name for name in names.values() if list(names.values()).count(name) > 1}
+    labelled: dict[str, int] = {}
+    for pid, count in counts.items():
+        row = rows[pid]
+        label = names[pid]
+        if label in shared:
+            label = f"{label} ({row.root if row is not None else pid[:12]})"
+        labelled[label] = count
+    return dict(sorted(labelled.items()))
+
+
+def _memory_refused(record: Mapping[str, object], why: str) -> NoReturn:
+    with contextlib.suppress(Exception), store_session() as store:
+        store.set_meta(_MEMORY_REFUSED_META, _now().isoformat())
+    _log_admission("capacity_memory", record)
+    raise CapacityRefused(
+        "capacity_memory",
+        f"not enough memory to start another agent: {why} — see `aisquare fleet capacity`, "
+        "or lower min_free_mb in [fleet] (0 turns the floor off)",
+    )
+
+
+def _log_admission(outcome: str, record: Mapping[str, object]) -> None:
+    """One JSON line per refusal and per admission at the budget; never fails a spawn."""
+    with contextlib.suppress(OSError):
+        log = paths.aisquare_home() / "fleet" / "admission.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        if log.is_file() and log.stat().st_size > _ADMISSION_LOG_MAX:
+            log.replace(log.with_name(log.name + ".1"))
+        line = {"at": _now().isoformat(timespec="seconds"), "outcome": outcome, **record}
+        with log.open("a", encoding="utf-8") as out:
+            out.write(json.dumps(line) + "\n")
+
+
+@dataclass(frozen=True)
+class CapacityReport:
+    """``aisquare fleet capacity``: the machine's headroom against every admission limit."""
+
+    headroom: memory_core.Headroom
+    min_free_mb: int
+    """The floor a spawn needs now: ``min_free_mb``, or ``+512`` just after a refusal."""
+    max_agents_total: int
+    max_agents_per_project: int
+    live: dict[str, int]
+    """Live agents per project (by the name lists use), the captain excluded."""
+    admits: bool
+    reason: str
+
+    @property
+    def live_total(self) -> int:
+        return sum(self.live.values())
+
+    def as_json(self) -> dict[str, Any]:
+        head = self.headroom
+        return {
+            "available_mb": head.available_mb,
+            "total_mb": head.total_mb,
+            "pressure": head.pressure,
+            "psi_some_avg10": head.psi_some_avg10,
+            "source": head.source,
+            "min_free_mb": self.min_free_mb,
+            "max_agents_total": self.max_agents_total,
+            "max_agents_per_project": self.max_agents_per_project,
+            "live_total": self.live_total,
+            "live": self.live,
+            "admits": self.admits,
+            "reason": self.reason,
+        }
+
+
+def capacity() -> CapacityReport:
+    """What the next spawn would meet: the same reads :func:`_admit` makes, nothing written."""
+    config = settings()
+    live = _live_per_project()
+    head = memory_core.headroom()
+    floor = _memory_floor(config.min_free_mb)
+    total = sum(live.values())
+    admits, reason = True, "a spawn would be admitted"
+    if config.max_agents_total > 0 and total >= config.max_agents_total:
+        admits, reason = False, f"the fleet is at max_agents_total = {config.max_agents_total}"
+    elif config.min_free_mb > 0 and head.pressure == "critical":
+        admits, reason = False, "memory pressure is critical"
+    elif config.min_free_mb > 0 and head.available_mb is not None and head.available_mb < floor:
+        admits, reason = False, f"{head.available_mb} MB available, {floor} MB needed"
+    elif head.pressure == "warn":
+        reason = "a spawn would be admitted, with a warning: memory pressure is warn"
+    elif not head.known:
+        reason = "a spawn would be admitted: this machine's memory cannot be read"
+    return CapacityReport(
+        headroom=head,
+        min_free_mb=floor,
+        max_agents_total=config.max_agents_total,
+        max_agents_per_project=config.max_agents_per_project,
+        live=live,
+        admits=admits,
+        reason=reason,
+    )
+
+
+GATE_POLL_SECONDS = 5.0
+GATE_EXIT = 75
+"""``fleet gate``'s exit at the deadline: ``EX_TEMPFAIL``, "try again later"."""
+
+
+@dataclass(frozen=True)
+class GateResult:
+    """What ``fleet gate`` waited for and what it found."""
+
+    passed: bool
+    available_mb: int | None
+    needed_mb: int
+    waited_seconds: float
+    pressure: str
+
+
+def gate_floor(min_free_mb: int | None = None) -> int:
+    """``--min-free-mb``, else ``test_gate_mb``, else ``min_free_mb``."""
+    if min_free_mb is not None:
+        return min_free_mb
+    config = settings()
+    return config.test_gate_mb or config.min_free_mb
+
+
+def wait_for_memory(needed_mb: int, wait_seconds: float) -> GateResult:
+    """Poll the headroom every 5 s until ``needed_mb`` is available (and pressure is not
+    critical), or ``wait_seconds`` have passed. Unknown headroom passes: the gate cannot
+    hold a run on a number it cannot read."""
+    started = _monotonic()
+    while True:
+        head = memory_core.headroom()
+        enough = head.available_mb is None or head.available_mb >= needed_mb
+        if enough and head.pressure != "critical":
+            return GateResult(
+                True, head.available_mb, needed_mb, _monotonic() - started, head.pressure
+            )
+        waited = _monotonic() - started
+        if waited >= wait_seconds:
+            return GateResult(False, head.available_mb, needed_mb, waited, head.pressure)
+        _sleep(min(GATE_POLL_SECONDS, max(wait_seconds - waited, 0.0)))
+
+
 def _type_prompt(
     srv: TmuxServer,
     pane_id: str,
@@ -4456,16 +5006,32 @@ def _type_prompt(
     *,
     folder: Path | None = None,
     to: tuple[ProjectInfo, str],
-    claude_code: bool = False,
+    agent_id: str | None = None,
+    reads_box: bool = False,
+    guard: float | None = None,
     done: list[str] | None = None,
-) -> Typed:
-    """Wait (bounded) for the agent to come up, then paste the prompt and press Enter.
+) -> tuple[Typed, bool | None]:
+    """Wait (bounded) for the agent to come up, then type the prompt: the typed way of
+    :mod:`services.delivery`, for a binary whose command line does not take it.
 
-    Returns whether it was typed (:data:`Typed`); when it was not, a note says why.
+    Returns whether it was typed (:data:`Typed`), and whether a turn started on it
+    (``Delivered.acked``); when it was not typed, or no turn started, a note says why.
 
-    Ready means the pane's foreground process is no longer our launcher (or it
-    has produced scrollback). Past :data:`PROMPT_TIMEOUT` a SINGLE-LINE prompt
-    is typed anyway and the receipt says so — a slow start must not turn into a
+    ``reads_box``: the agent is Claude Code, whose input box :mod:`services.delivery` reads.
+    Ready is then that box drawn with no dialog over it (:func:`_at_input_box`), not a fixed
+    settle after the launcher leaves (P0-W0, and #32 L3: until its prompt is mounted, Claude
+    Code reads the keyboard with an early-input buffer that keeps the text and turns the
+    Enter into a newline, so the prompt sat in the box, unsent). The same wait presses Enter
+    past the first-run Security notes screen, which ate the prompt (#32, L2; the owner's D1
+    at board seq 671). Then the delivery checks the text is in the box, presses Enter, waits
+    for ``agent_id``'s ``UserPromptSubmit`` (``store.mark_prompted``), and presses again
+    only while the box provably still holds it (``delivery.deliver_typed``). A key pressed
+    so is said in ``done``, not ``notes``: it is what made the prompt go in, not why it did
+    not.
+
+    Otherwise ready means the pane's foreground process is no longer our launcher (or it
+    has produced scrollback), and one Enter is all there is. Past :data:`PROMPT_TIMEOUT` a
+    SINGLE-LINE prompt is typed anyway and the receipt says so — a slow start must not turn into a
     hang, and one line sits harmlessly in the pty's input buffer until the
     agent reads it.
 
@@ -4482,15 +5048,6 @@ def _type_prompt(
     :data:`PROMPT_TIMEOUT` was typed into, and the receipt said ``yes`` for an agent the
     Enter had ended (review of #259, round 13). A question drawn after that look still
     reads what was typed; no look can close that.
-
-    Claude Code (``claude_code``) is typed into once its input box is drawn
-    (:func:`_at_input_box`), not once its process runs, and read back after
-    (:func:`_submitted`) (#32, L3). Until its prompt is mounted, Claude Code reads the
-    keyboard with an early-input buffer that keeps the text and turns the Enter into a
-    newline, then trims it: a prompt typed then sat in the input box, unsent. The same wait
-    presses Enter past the first-run Security notes screen, which ate the prompt (#32,
-    L2; the owner's D1 at board seq 671). A key pressed so is said in ``done``, not
-    ``notes``: it is what made the prompt go in, not why it did not.
 
     Never raises: it runs after the row is recorded, and ``restart`` and
     ``switch`` read a raise out of ``spawn`` as "no replacement started" — they
@@ -4518,22 +5075,25 @@ def _type_prompt(
                 f"tmux could not be asked whether the agent is up ({exc}) — the prompt was "
                 f"NOT typed. Send it once the agent is up: {_send_it_later(*to)}"
             )
-            return "no"
+            return "no", None
         if facts is None or facts.dead:
             notes.append("the agent exited before the prompt could be typed")
-            return "no"
+            return "no", None
         if _agent_running(facts.current_command) or facts.history_size > 0:
             ready = True
             break
         if _monotonic() >= deadline:
             break
         _sleep(_POLL_INTERVAL)
-    if ready:
+    if ready and reads_box:
+        # Past the trust question and the Security notes first: each is drawn where the box
+        # would be, and the box comes only once it is answered.
+        if not _at_input_box(srv, pane_id, notes, done, folder=folder, to=to):
+            return "no", None
+    elif ready:
         _sleep(_PROMPT_SETTLE)
         if not _past_trust_prompt(srv, pane_id, notes, folder=folder, to=to):
-            return "no"
-        if claude_code and not _at_input_box(srv, pane_id, notes, done, folder=folder, to=to):
-            return "no"
+            return "no", None
     elif "\n" in prompt:
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s and the prompt has "
@@ -4541,30 +5101,111 @@ def _type_prompt(
             "asked for bracketed paste, and the launcher has not, so each line would arrive "
             f"as its own message. Send it once the agent is up: {_send_it_later(*to)}"
         )
-        return "no"
+        return "no", None
     else:
         if not _past_trust_prompt(srv, pane_id, notes, folder=folder, to=to, wait=False):
-            return "no"
-        if claude_code and not _at_input_box(
+            return "no", None
+        if reads_box and not _at_input_box(
             srv, pane_id, notes, done, folder=folder, to=to, wait=False
         ):
-            return "no"
+            return "no", None
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
         )
-    told = type_then_enter(
-        srv, pane_id, prompt, "the agent", press="press Enter in its pane", what="the prompt"
-    )
+    # One store connection for the whole acknowledgement wait (`delivery.acked_reader`).
+    with store_session() as store:
+        delivered = delivery.deliver_typed(
+            srv,
+            pane_id,
+            prompt,
+            "the agent",
+            press="press Enter in its pane",
+            acked=delivery.acked_reader(store, agent_id) if agent_id and reads_box else None,
+            reads_box=reads_box,
+            sleep=_sleep,
+            monotonic=_monotonic,
+            what="the prompt",
+            guard=guard,
+        )
+    if delivered.refused is not None and delivered.in_box:
+        notes.append(
+            f"the prompt was NOT sent: {delivered.refused}. Read its input box before you send it "
+            f"again: {_send_it_later(*to)}"
+        )
+        return "no", None
+    if delivered.refused is not None:
+        notes.append(
+            f"the prompt was NOT typed: {delivered.refused}, which nothing types over. Send it "
+            f"once the box is clear: {_send_it_later(*to)}"
+        )
+        return "no", None
+    told = delivered.told
     if isinstance(told, PaneWrite):
         if told.typed == "maybe":
             notes.append(told.late("the agent", then=" at its prompt, unsent"))
-            return "maybe"
+            return "maybe", None
         notes.append(f"could not type the prompt: {told.error}")
-        return "no"
-    if told.typed != "yes":
+        return "no", None
+    if told.typed != "yes" or delivered.acked is False:
         notes.append(f"the prompt: {told.how}")
-        return told.typed
-    return _submitted(srv, pane_id, prompt, notes, done, to=to) if claude_code else "yes"
+    if told.typed == "yes" and delivered.presses > 1 and done is not None:
+        done.append(
+            "the prompt sat in Claude Code's input box after its Enter — pressed Enter again"
+        )
+    return told.typed, delivered.acked
+
+
+def _first_message(
+    prompt: str | None,
+    task: TeamTask | None,
+    *,
+    role: str,
+    label: str,
+    session_id: str | None,
+    statuses: Mapping[str, str],
+) -> str | None:
+    """The first message a spawn gives its agent: the kickoff for ``task``, the task's own
+    ASSIGNED TO YOU lines (``team.kickoff_prompt``), then ``prompt``, a blank line apart.
+    ``None`` when there is neither."""
+    opening = (
+        _team().kickoff_prompt(
+            task, role=role, label=label, session_id=session_id, statuses=statuses
+        )
+        if task is not None
+        else None
+    )
+    parts = [part for part in (opening, prompt) if part]
+    return "\n\n".join(parts) if parts else None
+
+
+def _first_prompt_unsent(agent: FleetAgent, why: str) -> bool:
+    """Move ``agent``'s first message to ``unsent``, and say so on its board once: the
+    ``prompt_unsent`` event, which wakes its manager (``team.MANAGER_WAKE_KINDS``). The
+    store's compare-and-set decides who says it (``store.mark_first_prompt_unsent``): of a
+    spawn and two listings that all found it not taken, one writes the event. A manager's
+    own is not nudged: the nudge would type into the input box its message is stuck in.
+    Never raises: a listing calls it, and a board that cannot be written costs the line."""
+    try:
+        with store_session() as store:
+            if not store.mark_first_prompt_unsent(agent.id, _now()):
+                return False
+            _team()._emit(
+                store,
+                _board_of_row(agent),
+                "prompt_unsent",
+                f"{agent.label}: first prompt not taken — {why}",
+                session_id=agent.session_id,
+            )
+    except Exception:
+        return False
+    if agent.role != MANAGER_LABEL:
+        with contextlib.suppress(Exception):
+            nudge_manager(
+                agent.project_id,
+                reason=f"{agent.label} first prompt not taken",
+                board=_board_of_row(agent),
+            )
+    return True
 
 
 def _at_input_box(
@@ -4577,7 +5218,8 @@ def _at_input_box(
     to: tuple[ProjectInfo, str],
     wait: bool = True,
 ) -> bool:
-    """Whether Claude Code is at its input box, ready for the prompt: waited for (bounded).
+    """Whether Claude Code is at its input box, with no dialog over it, ready for the prompt:
+    waited for (bounded). The one wait for the box a typed prompt is given (P0-W0, #32 L3).
 
     On the way, Claude Code's first-run Security notes screen ("Press Enter to continue")
     is pressed past, up to :data:`_SECURITY_PRESSES` times: typed there, the prompt was
@@ -4586,7 +5228,7 @@ def _at_input_box(
     one brought; past it the first is read as swallowed and pressed again (on a box starved
     for longer than that, the accepted trade-off: the second may reach the trust question).
     The folder-trust question, which can follow it, is :func:`_past_trust_prompt`'s. A
-    screen still at the notes, or at another dialog (:func:`pane_screen.modal_showing`), is
+    screen still at the notes, or at another dialog (:func:`screen_reader.modal_showing`), is
     not typed into: its Enter would answer the dialog. Any other screen with no box drawn
     by the deadline is typed into as before, and the note says so. A screen tmux will not
     show is typed as before. Without ``wait``, one look.
@@ -4621,10 +5263,15 @@ def _at_input_box(
         if pressed and not notes_up:
             (notes if done is None else done).append(f"pressed Enter past {SECURITY_NOTES}")
             pressed, pressed_on = 0, None  # said once: the notes are not drawn again
-        if not notes_up and pane_screen.input_box_at(pane_screen.tail(lines)) is not None:
+        modal = None if notes_up else screen_reader.modal_showing(lines)
+        if (
+            not notes_up
+            and modal is None
+            and screen_reader.input_box_at(screen_reader.tail(lines)) is not None
+        ):
             return True
         if _monotonic() >= deadline:
-            dialog = SECURITY_NOTES if notes_up else pane_screen.modal_showing(lines)
+            dialog = SECURITY_NOTES if notes_up else modal
             if dialog is not None:
                 notes.append(
                     f"the agent is at {dialog} — the prompt was NOT typed (its Enter would "
@@ -4642,79 +5289,10 @@ def _at_input_box(
         _sleep(_POLL_INTERVAL)
 
 
-def _submitted(
-    srv: TmuxServer,
-    pane_id: str,
-    prompt: str,
-    notes: list[str],
-    done: list[str] | None = None,
-    *,
-    to: tuple[ProjectInfo, str],
-) -> Typed:
-    """How a prompt typed into Claude Code with its Enter ended, read back from the pane.
-
-    ``yes`` once it has left the input box (:func:`_in_input_box`). Still there after
-    :data:`_SUBMIT_GRACE`, its Enter was lost — read by an early-input buffer as a
-    newline (:func:`_type_prompt`) — and Enter is pressed once more: the box holds the
-    prompt, so that Enter sends it and answers nothing else. Still there at
-    :data:`_SUBMIT_TIMEOUT`, ``unsent``, and the note says where to press Enter. A screen
-    tmux will not show is ``yes``, as before this read (#32, L3).
-    """
-    start = _monotonic()
-    pressed = False
-    while True:
-        _sleep(_POLL_INTERVAL)
-        try:
-            lines = srv.capture(pane_id).lines
-        except TmuxError:
-            return "yes"
-        if not _in_input_box(lines, prompt):
-            return "yes"
-        waited = _monotonic() - start
-        if not pressed and waited >= _SUBMIT_GRACE:
-            enter = pane_write("Enter", lambda: srv.send_keys(pane_id, "Enter"))
-            if enter.typed != "yes":
-                notes.append(
-                    "the prompt: typed it at its prompt, but it sat there unsent and "
-                    + pasted_unsent(enter, "the agent", press="press Enter in its pane").how
-                )
-                return "maybe" if enter.typed == "maybe" else "unsent"
-            pressed = True
-            (notes if done is None else done).append(
-                "the prompt sat in Claude Code's input box after its Enter — pressed Enter again"
-            )
-            continue
-        if waited >= _SUBMIT_TIMEOUT:
-            notes.append(
-                "the prompt: typed it at its prompt, but it is still in the input box, unsent "
-                f"— press Enter in its window (`{project_service.fleet_command('attach', to[0])}`)"
-            )
-            return "unsent"
-
-
-def _in_input_box(lines: Sequence[str], prompt: str) -> bool:
-    """Whether Claude Code's input box, drawn at the foot of ``lines``, holds ``prompt``: its
-    first words, or the placeholder a long paste is shown as (``[Pasted text #1 …]``)."""
-    rows = pane_screen.tail(lines)
-    top = pane_screen.input_box_at(rows)
-    if top is None:
-        return False
-    body: list[str] = []
-    for row in rows[top + 1 :]:
-        if pane_screen.RULE.match(row):
-            break
-        body.append(row)
-    text = " ".join(" ".join(body).replace(pane_screen.PROMPT_MARK, " ").split())
-    words = " ".join(prompt.split())[:_PROMPT_HEAD]
-    return bool(text) and (text.startswith(words) or text.startswith("[Pasted text"))
-
-
-_PROMPT_HEAD = 24
-"""How much of a prompt :func:`_in_input_box` matches: enough to be the prompt, short enough
-to fit on the box's first row."""
-
 SECURITY_NOTES = "Claude Code's first-run Security notes screen"
 """How the Security notes screen is named in a note and an ``attention`` detail."""
+SECURITY_NOTES_DETAIL = f"{SECURITY_NOTES} — press Enter in its window"
+"""The ``attention`` detail of an agent at those notes: their one key, in its window."""
 
 
 def _tell(project: ProjectInfo, label: str) -> str:
@@ -4847,29 +5425,63 @@ def list_agents(
       ``fleet ls`` shows the same rows, so the two never disagree.
     """
     with store_session() as store:
-        current = store.get_project(project.id) or project
-        agents = store.fleet_agents(project.id, live_only=False)
-        sessions = {session.id: session for session in store.team_sessions(project.id)}
-        # A live row's session another board keeps (under AISQUARE_TEAM_HUB, every one):
-        # read by its id here, in this one store session, for the folder-trust question
-        # (`_with_trust_prompts`), and for a caller that derives those rows again with it.
-        by_id = {
-            agent.session_id: store.get_session(agent.session_id)
-            for agent in agents
-            if agent.ended_at is None and agent.session_id and agent.session_id not in sessions
-        }
+        listing = _listing(store, project)
     if looked_up is not None:
-        looked_up.update(by_id)
+        looked_up.update(listing.by_id)
+    return _statuses(listing, live_only=live_only)
+
+
+@dataclass(frozen=True)
+class _Listing:
+    """What a listing of one project read in the store (:func:`_listing`)."""
+
+    project: ProjectInfo
+    agents: list[FleetAgent]
+    sessions: dict[str, TeamSession]
+    by_id: dict[str, TeamSession | None]
+
+
+def _listing(store: ContextStore, project: ProjectInfo) -> _Listing:
+    """The project's rows and sessions, as :func:`list_agents` reads them, in ``store``."""
+    current = store.get_project(project.id) or project
+    agents = store.fleet_agents(project.id, live_only=False)
+    sessions = {session.id: session for session in store.team_sessions(project.id)}
+    # A live row's session another board keeps (under AISQUARE_TEAM_HUB, every one):
+    # read by its id here, in this one store session, for the folder-trust question
+    # (`_with_trust_prompts`), and for a caller that derives those rows again with it.
+    by_id = {
+        agent.session_id: store.get_session(agent.session_id)
+        for agent in agents
+        if agent.ended_at is None and agent.session_id and agent.session_id not in sessions
+    }
+    return _Listing(current, agents, sessions, by_id)
+
+
+def _statuses(
+    listing: _Listing,
+    *,
+    live_only: bool = True,
+    config: FleetSettings | None = None,
+    tick: _Tick | None = None,
+) -> list[FleetAgentStatus]:
+    """:func:`list_agents`'s answer for what :func:`_listing` read: tmux asked, dead rows
+    ended, each row's state derived. ``tick`` shares each server's answer across projects."""
+    current, agents, sessions, by_id = (
+        listing.project,
+        listing.agents,
+        listing.sessions,
+        listing.by_id,
+    )
     now = _now()
     if live_only:
         cutoff = now - RECENTLY_ENDED
         agents = [a for a in agents if a.ended_at is None or a.ended_at >= cutoff]
     tmux_session = session_name(current.codename) if current.codename else None
-    config = settings()
+    config = config or settings()
     # Each row's address once for this read (`_where`): asked about five times per row
     # otherwise, each resolving two paths, on asq's tick (follow-up of #257).
     addresses = {agent.id: _address(agent, config) for agent in agents}
-    views = _observe_sockets(agents, tmux_session, config, addresses)
+    views = _observe_sockets(agents, tmux_session, config, addresses, tick=tick)
     ended = {
         row.id: row
         for row in _end_dead_rows(
@@ -4892,7 +5504,67 @@ def list_agents(
         )
         for agent in agents
     ]
-    return _with_trust_prompts(statuses, config, by_id, addresses)
+    return _with_first_prompts(
+        _with_trust_prompts(statuses, config, by_id, addresses), current, config, addresses
+    )
+
+
+@dataclass(frozen=True)
+class Listings:
+    """What one read of many projects found in the store (:func:`read_listings`)."""
+
+    listings: dict[str, _Listing]
+    """Project id → its rows and sessions, for every project a listing can show a row of."""
+    live: dict[str, int]
+    """Project id → its live rows, for every project read or skipped that has any."""
+
+
+@dataclass(frozen=True)
+class ManyAgents:
+    """:func:`list_agents_many`'s answer: each project's agents, or why they are missing."""
+
+    agents: dict[str, list[FleetAgentStatus]]
+    errors: dict[str, Exception]
+
+
+def read_listings(
+    store: ContextStore, projects: Sequence[ProjectInfo], *, skip: Collection[str] = ()
+) -> Listings:
+    """The store half of :func:`list_agents_many`, in the caller's ``store`` session.
+
+    Only a project with a live row, or one that ended within :data:`RECENTLY_ENDED`, is
+    read: any other lists nothing (:func:`list_agents` keeps no older row), and with 305
+    listed projects every ``asq`` tick read each one's rows and sessions and asked its tmux
+    server, for no agent at all (#83). ``skip`` (a collapsed group's hidden members) is not
+    read either; :attr:`Listings.live` still counts its live rows.
+    """
+    live = store.fleet_live_counts(_now() - RECENTLY_ENDED)
+    listings = {
+        project.id: _listing(store, project)
+        for project in projects
+        if project.id in live and project.id not in skip
+    }
+    return Listings(listings, live)
+
+
+def list_agents_many(listings: Listings) -> ManyAgents:
+    """:func:`list_agents` for every project :func:`read_listings` read, with tmux asked once
+    per server for all of them (:class:`_Tick`) instead of twice per project.
+
+    The same statuses per project as :func:`list_agents` (``live_only``), dead rows ended the
+    same way. A project whose read failed is in ``errors`` and nowhere else, so one broken
+    project costs its own rows, not the listing.
+    """
+    config = settings()
+    tick = _Tick()
+    agents: dict[str, list[FleetAgentStatus]] = {}
+    errors: dict[str, Exception] = {}
+    for project_id, listing in listings.listings.items():
+        try:
+            agents[project_id] = _statuses(listing, config=config, tick=tick)
+        except Exception as exc:  # one project's failure is that project's: said, not raised
+            errors[project_id] = exc
+    return ManyAgents(agents, errors)
 
 
 def _end_dead_rows(
@@ -4979,9 +5651,9 @@ def _end_dead_rows(
                 # A listing has no report to carry a refused release; the claims then
                 # stay with the ended session until their lease lapses, as
                 # `_release_or_say` tells the callers that have one.
-                _release_or_say(store, row, why="agent exited")
-                _emit_exit(store, row)
-                mine.append(row)
+                released, _ = _release_or_say(store, row, why="agent exited")
+                if _emit_exit(store, row, released=len(released)):
+                    mine.append(row)  # only an exit that wakes is nudged (P1 WS-2, #279)
             else:  # another reader ended it first, and announced it
                 row = store.get_fleet_agent(agent.id)
             if row is not None:
@@ -5167,6 +5839,14 @@ def tell(
     was not typed is then the caller's to decide. :func:`attach_persona` asks so, because
     its message is a persona's body, which the board never carries (review of #240,
     finding 7). Not typed, ``how`` is the reason alone.
+
+    It types through the one door (``delivery.deliver_typed``, P0-W2, #276): never over a
+    draft in the agent's input box or while someone types in its pane (``draft_guard``) —
+    then it is filed as a note and says why ("a draft is in its input box"; one that
+    appears as the text is pasted stops it before its Enter, and says so) — and an
+    Enter the agent dropped is pressed again only while the text provably still waits
+    there, the agent's ``UserPromptSubmit`` its acknowledgement. A busy agent gets the note
+    at the end of its turn (``team.hook_stop``, ``[fleet] deliver_notes_at_turn_end``).
     """
 
     def noted(why: str) -> str:
@@ -5196,14 +5876,30 @@ def tell(
                     "launcher or a shell is in the foreground)"
                 )
             return TellResult("no", noted(why))
-        told = type_then_enter(
-            srv,
-            agent.pane_id,
-            text,
-            label,
-            press="press Enter in its pane",
-            done="typed into its pane (it was waiting)",
-        )
+        # One store connection for the acknowledgement wait (`delivery.prompted_since`).
+        with store_session() as store:
+            done = delivery.deliver_typed(
+                srv,
+                agent.pane_id,
+                text,
+                label,
+                press="press Enter in its pane",
+                acked=(
+                    delivery.prompted_since(store, agent.session_id, _now())
+                    if agent.session_id is not None
+                    else None
+                ),
+                reads_box=agent.session_id is not None or harness.is_default_agent(agent.binary),
+                sleep=_sleep,
+                monotonic=_monotonic,
+                done="typed into its pane (it was waiting)",
+                guard=settings().draft_quiet_seconds,
+            )
+        if done.refused is not None and done.in_box:
+            return TellResult("no", noted(done.refused))
+        if done.refused is not None:
+            return TellResult("no", noted(f"{done.refused}, which nothing types over"))
+        told = done.told
         if not isinstance(told, PaneWrite):
             return told
         if told.typed == "maybe":
@@ -5397,6 +6093,65 @@ def _note_board(store: ContextStore, project: ProjectInfo, label: str) -> str | 
     return None if agent is None else _board_of_row(agent)
 
 
+#: The agent flags that choose a model or an effort; one already in a spawn's arguments
+#: (the binding's, the role's ``extra_args``, the caller's) is the caller's choice.
+_MODEL_FLAGS = ("--model", "--effort")
+
+
+def _ladder(
+    role: str, binary: str, args: Sequence[str], spec: LaunchSpec | None
+) -> tuple[str, str] | None:
+    """``(model, effort)`` a spawn passes (#129 b), when the binary is the default agent
+    and no ``--model`` or ``--effort`` is in the binding's arguments, the role's
+    ``extra_args`` or the caller's: what ``spec`` recorded on a replay, else ``role``'s
+    ladder resolved with the cached probe only (``probe=False``: never the 150 s probe at
+    spawn). ``None`` otherwise, and for an untiered role.
+    """
+    if not harness.is_default_agent(binary):
+        return None
+    bound = harness.resolve_profile(role).args
+    if any(arg in _MODEL_FLAGS or arg.startswith(tuple(f"{f}=" for f in _MODEL_FLAGS))
+           for arg in [*bound, *args]):  # fmt: skip
+        return None
+    if spec is not None and spec.model is not None and spec.effort is not None:
+        return spec.model, spec.effort
+    resolved = harness.resolve_model(role, probe=False)
+    return None if resolved is None else (resolved.model, resolved.effort)
+
+
+def _board_context(
+    role: str, flag: str | None, spec: LaunchSpec | None, role_config: FleetRoleSettings
+) -> str:
+    """What of the board a spawn's agent reads: ``flag``, else what ``spec`` recorded (a
+    restart or switch keeps it), else the role's ``board_context``. A manager reads ``all``:
+    the board is its job, and a narrower one is refused (P1 WS-2, #279)."""
+    chosen = flag or (spec.board_context if spec is not None else None) or role_config.board_context
+    if chosen not in orchestrator.BOARD_CONTEXTS:
+        raise FleetError(
+            f"--board-context must be one of {', '.join(orchestrator.BOARD_CONTEXTS)}, "
+            f"not {chosen!r}"
+        )
+    if role == MANAGER_LABEL and chosen != "all":
+        if flag is not None:
+            raise FleetError("a manager reads the whole board: --board-context all, or none given")
+        return "all"  # a config value; `config` warns, and doctor says so
+    return chosen
+
+
+def acting_as(session_ref: str | None = None) -> str:
+    """Who a fleet command is acting for, as an event's ``actor`` (P1 WS-2, #279): the
+    session ``--as`` names (an id or a prefix of one), else the session of the caller's own
+    fleet row (``AISQUARE_FLEET_AGENT``: a manager's window), else ``user`` (asq, or a
+    shell with no session). An unknown ``--as`` is kept as given: the stop goes ahead."""
+    with store_session() as store:
+        if session_ref:
+            found = store.get_session(session_ref)
+            return found.id if found is not None else session_ref
+        own = orchestrator.env_fleet_agent()
+        row = store.get_fleet_agent(own) if own else None
+        return row.session_id if row is not None and row.session_id else "user"
+
+
 def stop(
     project: ProjectInfo,
     label: str,
@@ -5407,12 +6162,17 @@ def stop(
     agent_id: str | None = None,
     nudge: bool = True,
     live_only: bool = False,
+    actor: str | None = None,
+    reason: str | None = None,
     ended_by: EndedBy = "stopped",
 ) -> StopReceipt:
     """``/exit`` the agent named ``label``, wait ``grace`` seconds, then kill its window.
 
     Resolves the LIVE row by label and hands it to :func:`_stop_row`; the
-    documentation of what a stop is — and of ``handover`` — lives there.
+    documentation of what a stop is — and of ``handover`` — lives there. ``actor`` is who
+    asked (``fleet stop --as``; ``user`` for asq or a shell with no session). ``reason`` is
+    why, said on the ``agent_exited`` beside the actor and kept in its ``meta``: unlike a
+    ``why``, it wakes nobody (``auto-stop``'s, P2-W1b).
 
     With no live row, an ENDED agent's window may still be on the server
     (``remain-on-exit``), which is what the UI's 💤 row and its Stop button
@@ -5495,6 +6255,8 @@ def stop(
         handover=handover,
         nudge=nudge,
         ended_by=ended_by,
+        actor=actor,
+        reason=reason,
     )
 
 
@@ -5506,9 +6268,14 @@ def _stop_row(
     grace: float = 5.0,
     handover: bool = False,
     nudge: bool = True,
+    actor: str | None = None,
+    reason: str | None = None,
     ended_by: EndedBy = "stopped",
 ) -> StopReceipt:
     """``/exit`` the agent in ``agent``'s pane, wait ``grace`` seconds, then kill its window.
+
+    ``actor`` is who asked (:func:`stop`'s): it rides on the ``agent_exited``, and the
+    manager is nudged only for an exit that wakes it, never for its own stop.
 
     Takes the ROW, so a caller that already holds one — ``shutdown`` over its
     snapshot — stops that row and no other: resolving by label again let a
@@ -5738,14 +6505,26 @@ def _stop_row(
         # nothing: the replacement inherits, and ``switch`` says ``switched``.
         released: list[TeamTask] = []
         release_failed: str | None = None
+        wakes = False
         if not handover:
             released, release_failed = _release_or_say(store, ended, why="agent stopped")
-            _emit_exit(store, ended)
+            wakes = _emit_exit(
+                store, ended, actor=actor, force=force, released=len(released), reason=reason
+            ) and not _managers_own(store, ended, actor)
     # Outside the store session, as ``reap`` does: the nudge types into a pane
     # and must not hold the write lock the woken manager's own hooks will want.
-    if not handover and nudge:
+    if not handover and nudge and wakes:
         nudge_manager(ended.project_id, reason=f"{ended.label} exited", board=_board_of_row(ended))
     return StopReceipt(ended, released, release_failed, withheld=handover)
+
+
+def _managers_own(store: ContextStore, ended: FleetAgent, actor: str | None) -> bool:
+    """Whether ``actor`` is the session of the manager an exit of ``ended`` would nudge:
+    its own ``fleet stop`` is no news to it (``team.wake_class``'s ``own``)."""
+    if actor is None:
+        return False
+    manager = store.fleet_agent_by_label(ended.project_id, MANAGER_LABEL)
+    return manager is not None and manager.session_id == actor
 
 
 def _refuse_unless_gone(project: ProjectInfo, agent: FleetAgent, srv: TmuxServer) -> None:
@@ -6508,6 +7287,7 @@ def _shutdown_row(
     held: Mapping[str, tuple[SocketAnswer, str, str]] | None = None,
     forget: bool = False,
     config: FleetSettings | None = None,
+    actor: str | None = None,
 ) -> None:
     """Stop one row, leave it live or record it lost, as :func:`_shutdown_verdict` says, the
     verdict the plan showed: never ending one whose socket answers, as a server listens
@@ -6543,7 +7323,7 @@ def _shutdown_row(
         # later spawn reused. Whether it ended meanwhile is judged inside the
         # store session that ends it (`_stop_row` raises `NoSuchAgent` there),
         # not in a connection of its own a window ahead of it (round 5).
-        receipt = _stop_row(project, agent, force=force, grace=grace)
+        receipt = _stop_row(project, agent, force=force, grace=grace, actor=actor)
     except NoSuchAgent as exc:
         _row_that_went_away(agent, str(exc), report)
     except FleetError as exc:
@@ -7012,8 +7792,10 @@ def shutdown(
     force: bool = False,
     grace: float = 5.0,
     forget: bool = False,
+    actor: str | None = None,
 ) -> ShutdownReport:
-    """Stop this project's live agents (every project's with ``project=None``).
+    """Stop this project's live agents (every project's with ``project=None``). ``actor`` is
+    who asked, on each ``agent_exited`` (:func:`stop`'s).
 
     The one place a row may be ended without tmux confirming its pane died. Every
     other path — ``stop``, ``reap`` — refuses that: a server that cannot be reached
@@ -7115,6 +7897,7 @@ def shutdown(
                         held=held,
                         forget=forget,
                         config=config,
+                        actor=actor,
                     )
         except Exception:
             # The kill phase runs even if a row could not be recorded: "shutdown
@@ -7174,8 +7957,16 @@ def switch(
     automatic: bool = False,
     agent_id: str | None = None,
     before_stop: Callable[[], None] | None = None,
+    ack_wait: float = 0.0,
+    force: bool = False,
 ) -> SwitchReceipt:
     """Move a running agent to another Claude account — the hand-over of #146.
+
+    One switch per limit (#277): a row the automatic hand-over spawned less than
+    ``hooks.HANDOVER_COOLDOWN`` ago is refused without ``force`` — the hand-over has
+    just moved it, and a manager woken by the same limit moved the replacement again.
+    The pick knows the agent's model family (its session's model), so an account
+    whose week for that family is spent is no target.
 
     The target is ``to`` (a slot, alias or email) or, without it, HEADROOM
     FIRST among the enabled, signed-in accounts that are NOT the one the agent
@@ -7242,6 +8033,11 @@ def switch(
             # own row, and its take-back wrote a stale state over the second's mark
             # (review of #163, round 2).
             raise _in_hand_over(project, "switch", label)
+        if not (automatic or force):
+            from aisquare.services import hooks  # lazy, as `_team()`: kept off the import path
+
+            if (refusal := hooks.fresh_replacement_refusal(agent, now=_now())) is not None:
+                raise FleetError(refusal)  # one switch per limit (#277)
         # `spawn`'s refusal for the task (done, dropped, gone from the board), asked
         # before anything is stopped, as `restart` asks it. After the stop it left the
         # agent stopped and nothing started: a row spawned before rule 3 still names
@@ -7283,6 +8079,7 @@ def switch(
             project=project,
             exclude=() if current is None else (current,),
             automatic=automatic,
+            family=harness.model_family(session.model if session is not None else None),
         )
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc
@@ -7371,6 +8168,7 @@ def switch(
             # The hook's hand-over is nobody's add (#139): `spawn`'s `onboard`.
             onboard=not automatic,
             board_and_hub=board_and_hub,
+            ack_wait=ack_wait,
         )
     except Exception:
         if handed_over.withheld:
@@ -7409,6 +8207,8 @@ def switch(
         notes=notes,
         failures=failures,
         prompt_typed=typed,
+        prompt_delivery=receipt.prompt_delivery,
+        prompt_acked=receipt.prompt_acked,
     )
 
 
@@ -7431,6 +8231,7 @@ def _respawn(
     role: str | None = None,
     persona: str | None = None,
     board_and_hub: tuple[str, str],
+    ack_wait: float = 0.0,
     team_line: str | None = None,
     replaces: str | None = None,
 ) -> tuple[SpawnReceipt, bool, list[str]]:
@@ -7530,6 +8331,12 @@ def _respawn(
         own_worktree=agent.cwd if agent.worktree else None,
         own_branch=agent.branch,
         board_and_hub=board_and_hub,
+        # A hand-over replaces a running agent 1:1: admitted as the agent it replaces.
+        admit=not takes_over,
+        # Its own first line, never a kickoff: the resume line and the hand-off prompt
+        # both name the task already.
+        kickoff=False,
+        ack_wait=ack_wait,
         replaces=replaces,
     )
     if agent.launch_spec is not None and replay:
@@ -7767,6 +8574,14 @@ class RestartReceipt:
     notes: list[str] = field(default_factory=list)
     prompt_typed: Typed = "yes"
     """Whether the replacement's first line reached its pane, as on :class:`SwitchReceipt`."""
+    prompt_delivery: delivery.Delivery | None = None
+    """How the first line reached it: ``argv`` (Claude Code's command line), ``typed``, or
+    ``None`` when there was none."""
+    prompt_acked: bool | None = None
+    """Whether the first line started a turn (its ``UserPromptSubmit``) within the wait the
+    caller gave (``[fleet] prompt_ack_seconds`` from the CLI): ``False`` is still pending,
+    which a listing reads ``attention`` once that wait is past at an idle input box;
+    ``None`` when there was none, or nothing could say."""
     failures: list[str] = field(default_factory=list)
     """The notes that say what did NOT happen, as on :class:`SwitchReceipt`: the stop's
     claims not released, the hand-over mark not taken back, the replacement's first line
@@ -7792,6 +8607,7 @@ def restart(
     account: str | None = None,
     persona: str | None = None,
     before_stop: Callable[[], None] | None = None,
+    ack_wait: float = 0.0,
     team: Sequence[FleetAgentStatus] | None = None,
 ) -> RestartReceipt:
     """Start an agent again under its own label — the **Restart** of #138.
@@ -8033,6 +8849,7 @@ def restart(
             role=role,
             persona=persona,
             board_and_hub=board_and_hub,
+            ack_wait=ack_wait,
             # An agent that ended on its own: the owner's `fleet stop` of its 💤 row while
             # the replacement starts wins at the insert, as the guard above has it before
             # (last delta review, m3). Not a hand-over, whose own stop writes `stopped`, nor
@@ -8042,10 +8859,11 @@ def restart(
     except Exception:
         if handed_over is not None and handed_over.withheld:
             _abandon_handover(handed_over.agent)  # no replacement is coming for the parked claims
-        elif held_back:
+        elif held_back and bool(_team().exit_wakes({"status": agent.exit_status, "released": 0})):
             # The exit went out with its wake-up held back for a replacement that has
             # now failed to start: left unwoken, a waiting manager never hears of the
-            # agent it lost, as the hand-over's `_abandon_handover` wakes it for its own.
+            # agent it lost, as the hand-over's `_abandon_handover` wakes it for its own —
+            # for an exit that wakes (P1 WS-2, #279): a clean one is the restart's caller's.
             nudge_manager(project.id, reason=f"{label} exited", board=_board_of_row(agent))
         raise
     notes.extend(more)
@@ -8069,6 +8887,8 @@ def restart(
         tmux_session=receipt.tmux_session,
         notes=notes,
         prompt_typed=typed,
+        prompt_delivery=receipt.prompt_delivery,
+        prompt_acked=receipt.prompt_acked,
         failures=[*failures, *receipt.failures],
     )
 
@@ -8254,6 +9074,7 @@ def hand_off(
         claude_code=session is not None,
         start_point=_fork_point(project, agent, notes) if own else None,
         fork=True,
+        kickoff=False,  # its own first line names the source and the task
     )
     resumed = resume is not None
     how = "resumed its session as a fork" if resumed else "started fresh"
@@ -8571,26 +9392,6 @@ def _resume_prompt(agent: FleetAgent, reason: str | None) -> str:
 
 _HANDOFF_NOTES = 5
 _HANDOFF_DETAIL = 600
-
-
-def task_prompt(task: TeamTask) -> str:
-    """The first message of an agent spawned for ``task`` with no prompt of its own (#32, L1;
-    the owner's D2, board seq 671): read the task, and do what its briefing's ASSIGNED TO YOU
-    line says. Without it the agent sat idle at an empty prompt until someone typed this.
-
-    It names no claim. Whether to claim is the briefing's to say, per role and per state
-    (``team._assignment_lines``): a tester or reviewer is told a todo task is "not yours to
-    claim", a task waiting on its needs is not to be claimed yet, and one in review is to
-    be verified. "Claim it" here had a verifier take a coder's task, and fail on a review
-    one (delta review of #274, m1).
-    """
-    ref = str(task.number) if task.number is not None else task.id
-    named = f"#{ref}" if task.number is not None else ref
-    return (
-        f"Start on your assigned task {named}: {' '.join(task.title.split())}. Read its whole "
-        f"contract with `aisquare task show {ref}`, then do what the ASSIGNED TO YOU line of "
-        "your briefing says for it — claim it only if that line tells you to."
-    )
 
 
 def _handoff_prompt(
@@ -9166,7 +9967,7 @@ def _bulk_one(
         result: StopReceipt | RestartReceipt
         if action == "stop":
             _still_running(row)
-            result = stop(project, agent.label, agent_id=agent.id, live_only=True)
+            result = stop(project, agent.label, agent_id=agent.id, live_only=True, actor=spawned_by)
         else:
             result = restart(
                 project,
@@ -9266,6 +10067,19 @@ def _still_to_restart(row: BulkRow) -> None:
         raise NoSuchAgent(left)
 
 
+def restart_leaves(project: ProjectInfo, status: FleetAgentStatus) -> str | None:
+    """Why a restart leaves this agent with no process, read again now, or ``None`` to start
+    it again: :func:`bulk`'s rule for one row (:func:`_still_to_restart`), its death recorded
+    first. For the asq a one-click update reopened (``updates.reattach_agents``): an agent
+    stopped on purpose between the press and the reopen, or one that exited 0, is left, as
+    a Restart all leaves it."""
+    try:
+        _still_to_restart(BulkRow(project, status))
+    except NoSuchAgent as exc:
+        return str(exc)
+    return None
+
+
 def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> ReapReport:
     """Record dead panes as ended, mark vanished panes lost, remove finished worktrees.
 
@@ -9302,6 +10116,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
     """
     config = settings()
     report = ReapReport()
+    waking: list[FleetAgent] = []
     absent: dict[_Address, bool] = {}
     reads = tmux_core.SocketReads()  # one per server for the sweep, not per row
     now = _now()
@@ -9382,9 +10197,10 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                             released, failed = _release_or_say(store, ended, why="agent exited")
                             _count_release(report, ended, released, failed)
                             report.ended.append(ended)
-                            _emit_exit(store, ended)
+                            if _emit_exit(store, ended, released=len(released)):
+                                waking.append(ended)
             _remove_finished_worktrees(store, current, report)
-    for ended in report.ended:
+    for ended in waking:  # only an exit that wakes is nudged (P1 WS-2, #279)
         nudge_manager(ended.project_id, reason=f"{ended.label} exited", board=_board_of_row(ended))
     return report
 
@@ -9445,10 +10261,60 @@ def _hold_on_another_server(
         report.held.append(ShutdownRow(agent, f"{why} — left live: {way[0].lower() + way[1:]}"))
 
 
-def _emit_exit(store: ContextStore, agent: FleetAgent, *, why: str | None = None) -> None:
-    """The ``agent_exited`` board event the manager's Stop hook wakes on (§7.3), with
-    ``why`` after the status when the status does not say it all."""
+#: The actors that are no session (``TeamEvent.actor``): the human, a usage-limit hand-over,
+#: and P2's auto-stop.
+_NAMED_ACTORS = frozenset({"user", "usage-limit", "auto-stop"})
+
+
+def _actor_name(store: ContextStore, actor: str) -> str:
+    """How an exit's text names its ``actor``: a session by its label or role, else by the
+    label of the fleet row it runs in (a session not on the board yet), else as given."""
+    if actor in _NAMED_ACTORS:
+        return actor
+    session = store.get_session(actor)
+    if session is not None and (session.label or session.role):
+        return session.label or session.role
+    row = store.fleet_agent_for_session(actor)
+    return row.label if row is not None else actor
+
+
+def _emit_exit(
+    store: ContextStore,
+    agent: FleetAgent,
+    *,
+    why: str | None = None,
+    actor: str | None = None,
+    force: bool = False,
+    released: int = 0,
+    reason: str | None = None,
+) -> bool:
+    """The ``agent_exited`` board event (§7.3), with ``why`` after the status when the
+    status does not say it all; whether it wakes the manager (``team.exit_wakes``).
+    ``reason`` is why its stopper stopped it (``auto-stop``'s finished verdict, P2-W1b):
+    said after the actor and kept as ``meta.reason``, it is not a ``why`` and wakes nobody.
+
+    P1 WS-2 (#279): ``actor`` is who stopped it (a session id, ``user``, ``usage-limit``;
+    ``None`` for its own exit or a death found), named in the text — ``coder-auth exited
+    (0) — stopped by manager`` — and with ``force``, ``released`` (the claims its end let
+    go) and ``why`` in ``meta``. A clean exit that left nothing open is news, not a wake.
+    """
     status = "?" if agent.exit_status is None else str(agent.exit_status)
+    meta: dict[str, object] = {
+        "status": agent.exit_status,
+        "force": force,
+        "released": released,
+        "why": why,
+    }
+    if reason is not None:
+        meta["reason"] = reason
+    by = f" — stopped by {_actor_name(store, actor)}" if actor is not None else ""
+    by += f" ({reason})" if reason else ""
+    text = (
+        f"{agent.label} exited ({status})"
+        + (f": {why}" if why else "")
+        + by
+        + (" (--force)" if force else "")
+    )
     # The row is already ended; the event is the courtesy, not the record. On the board the
     # row recorded (`_board_of_row`), which its manager reads: under a hub not the row's
     # project's, and never the board of whichever process ends the row, a session or none
@@ -9458,9 +10324,12 @@ def _emit_exit(store: ContextStore, agent: FleetAgent, *, why: str | None = None
             store,
             _board_of_row(agent),
             "agent_exited",
-            f"{agent.label} exited ({status})" + (f": {why}" if why else ""),
+            text,
             session_id=agent.session_id,
+            actor=actor,
+            meta=meta,
         )
+    return bool(_team().exit_wakes(meta))
 
 
 def rename(project: ProjectInfo, codename: str, *, notes: list[str] | None = None) -> ProjectInfo:
@@ -9730,6 +10599,13 @@ def nudge_manager(project_id: str, *, reason: str, board: str | None = None) -> 
     that comes with the pane's facts (``PaneFacts.last_output``, ``#{window_activity}``),
     in the one ``display-message``. A ``list-panes -a`` over every pane on the server for it
     was one more tmux process per nudge (review of #259, round 5).
+
+    It types through the one door (``delivery.deliver_typed``, P0-W2, #276), and never over a
+    human (``draft_guard``): a draft in the manager's input box, or someone typing in its
+    pane in ``asq``, and the nudge waits — recorded (:data:`NUDGE_DEFERRED`), and sent by the
+    next board write or by ``asq``'s refresh once the box is clear
+    (:func:`retry_deferred_nudges`). Nothing is lost meanwhile: the human's own submit runs
+    ``UserPromptSubmit``, which hands the manager the same delta.
     """
     try:
         with store_session() as store:
@@ -9756,12 +10632,140 @@ def nudge_manager(project_id: str, *, reason: str, board: str | None = None) -> 
             state, _ = _derive(manager, session, pane, observed=True, now=now)
             if state != "waiting":
                 return False
+            done = delivery.deliver_typed(
+                srv,
+                manager.pane_id,
+                NUDGE_TEXT,
+                MANAGER_LABEL,
+                press="press Enter in its pane",
+                acked=delivery.prompted_since(store, session.id, now),
+                reads_box=True,
+                sleep=_sleep,
+                monotonic=_monotonic,
+                what="the nudge",
+                guard=settings().draft_quiet_seconds,
+                re_press=_NUDGE_RE_PRESS,
+                last_wait=_NUDGE_LAST_WAIT,
+            )
+            deferred = f"{NUDGE_DEFERRED}{session.id}"
+            if done.refused is not None:
+                if not store.get_meta(deferred):
+                    store.set_meta(deferred, now.isoformat())
+                return False
             store.set_meta(key, now.isoformat())
-            srv.send_literal(manager.pane_id, NUDGE_TEXT)
-            srv.send_keys(manager.pane_id, "Enter")
-            return True
+            if store.get_meta(deferred):
+                store.set_meta(deferred, "")  # sent: nothing is held back any more
+            return done.told.typed == "yes"
     except Exception:
         return False
+
+
+def retry_deferred_nudges() -> int:
+    """Send each manager nudge a draft held back (:data:`NUDGE_DEFERRED`), now that its input
+    box may be clear: ``asq``'s refresh asks every frame. How many were sent.
+
+    One indexed read when nothing is held back. A nudge whose manager has prompted since it
+    was held back is dropped unsent: that prompt's ``UserPromptSubmit`` handed it the delta
+    the nudge was for. One whose manager row has ended is dropped too. A draft still there
+    keeps it held back (``nudge_manager`` asks the guard again). Never raises.
+
+    Read and sent in two steps (:func:`deferred_nudge_targets`, :func:`send_deferred_nudges`)
+    so ``asq``'s frame reads in its own store session and sends after it: one store session
+    per read (P2-W3, #83)."""
+    try:
+        with store_session() as store:
+            targets = deferred_nudge_targets(store)
+    except Exception:
+        return 0
+    return send_deferred_nudges(targets)
+
+
+def deferred_nudge_targets(store: ContextStore) -> list[FleetAgent]:
+    """The managers whose held-back nudge is still owed, read in ``store``; one owed no
+    more (its manager prompted since, or its row ended) is dropped there. One indexed read
+    when nothing is held back."""
+    held = {
+        key.removeprefix(NUDGE_DEFERRED): since
+        for key, since in store.list_meta(NUDGE_DEFERRED).items()
+        if since
+    }
+    targets: list[FleetAgent] = []
+    for session_id, since in held.items():
+        row = store.fleet_agent_for_session(session_id)
+        session = store.get_session(session_id)
+        prompted = session.prompted_at if session is not None else None
+        gone = row is None or row.ended_at is not None or row.label != MANAGER_LABEL
+        if gone or (prompted is not None and prompted >= datetime.fromisoformat(since)):
+            store.set_meta(f"{NUDGE_DEFERRED}{session_id}", "")
+            continue
+        assert row is not None
+        targets.append(row)
+    return targets
+
+
+def send_deferred_nudges(targets: Sequence[FleetAgent]) -> int:
+    """Send each of :func:`deferred_nudge_targets`' nudges; how many were sent."""
+    return sum(
+        nudge_manager(
+            row.project_id,
+            reason="deferred: a draft was in its input box",
+            board=_board_of_row(row),
+        )
+        for row in targets
+    )
+
+
+def quiet_prompt_refusal(agent: FleetAgent) -> str | None:
+    """Why typing into ``agent``'s pane now could land somewhere but an empty, idle input
+    box, or ``None`` (P1 WS-4's quiet compaction, #281).
+
+    Its own agent in the foreground (:func:`_its_agent`, what every write into a row's
+    pane asks), no dialog, Claude Code's input box drawn and idle (no spinner), and nothing
+    in it: a human's half-typed draft is the one thing a ``/compact`` must never be typed
+    into. Then P0-W2's own guard (:func:`delivery.draft_guard`), which adds someone typing
+    into the pane in ``asq`` within ``[fleet] draft_quiet_seconds``. Never raises: tmux that
+    cannot answer is a refusal too.
+    """
+    try:
+        srv = server_of(agent)
+        facts = srv.pane_facts(agent.pane_id)
+        if not _its_agent(agent, facts):
+            return "its pane does not run it"
+        lines = srv.capture(agent.pane_id).lines
+    except (TmuxError, OSError) as exc:
+        return f"tmux would not show its pane ({exc})"
+    dialog = screen_reader.modal_showing(lines)
+    if dialog is not None:
+        return f"{dialog} is showing"
+    if not screen_reader.box_idle(lines):
+        return "it is not idle at its prompt"
+    if screen_reader.composer_text(lines):
+        return "a draft is in its input box"
+    try:
+        return delivery.draft_guard(srv, agent.pane_id, quiet=settings().draft_quiet_seconds)
+    except (TmuxError, OSError) as exc:
+        return f"tmux would not show its pane ({exc})"
+
+
+def type_line(agent: FleetAgent, text: str, *, acked: Callable[[], bool]) -> delivery.Delivered:
+    """Type one line into ``agent``'s pane and press Enter, through the first message's own
+    verified delivery (:func:`delivery.deliver_typed`): pasted, seen in the box, Enter pressed
+    again only while the box provably still holds it. The caller asked
+    :func:`quiet_prompt_refusal` first, and P0-W2's guard (``guard=``) asks again right before
+    the paste, and refuses the Enter when a human's text appeared beside it."""
+    return delivery.deliver_typed(
+        server_of(agent),
+        agent.pane_id,
+        text,
+        agent.label,
+        press="press Enter in its pane",
+        acked=acked,
+        reads_box=True,
+        sleep=_sleep,
+        monotonic=_monotonic,
+        what="the line",
+        guard=settings().draft_quiet_seconds,
+    )
 
 
 def attach_argv(project: ProjectInfo) -> list[str]:

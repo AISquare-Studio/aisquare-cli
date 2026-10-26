@@ -82,7 +82,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, TypeVar
 
-from aisquare.services import remote_needs, remote_server
+from aisquare.services import delivery, remote_needs, remote_server
 from aisquare.services.remote_server import RequestError
 
 if TYPE_CHECKING:
@@ -1122,6 +1122,18 @@ def action_paste(
     server = fleet_service.server_of(agent)
     first = "interrupted it with Escape, then " if interrupted else ""
     sent, escape = ("Escape was sent, but ", " escape=sent") if interrupted else ("", "")
+    # Never over a human's draft (P0-W2, #276): a draft in its input box, or someone typing
+    # in its pane in asq, and nothing is pasted (`delivery.draft_guard`).
+    held = delivery.draft_guard(
+        server, agent.pane_id, quiet=fleet_service.settings().draft_quiet_seconds
+    )
+    if held is not None:
+        raise RequestError(
+            409,
+            "fleet_error",
+            f"{sent}{label}: {held}, which nothing types over — nothing was typed",
+            audit=trail(f"delivered=no{escape} failed=draft"),
+        )
     told = fleet_service.type_then_enter(
         server, agent.pane_id, text, label, press="press Enter on the pad"
     )
@@ -1355,7 +1367,9 @@ def action_stop(body: dict[str, Any]) -> tuple[dict[str, object], str]:
                 target,
                 label,
                 agent_id,
-                lambda: fleet_service.stop(target, label, force=force, agent_id=agent_id),
+                lambda: fleet_service.stop(
+                    target, label, force=force, agent_id=agent_id, actor="user"
+                ),
             )
     released = [task.id for task in receipt.released]
     result: dict[str, object] = {
@@ -1430,6 +1444,8 @@ def action_restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         "started": receipt.started.model_dump(mode="json"),
         "resumed": receipt.resumed,
         "prompt_typed": fleet_service.prompt_typed_json(receipt.prompt_typed),
+        "prompt_delivery": receipt.prompt_delivery,
+        "prompt_acked": receipt.prompt_acked,
         "how": receipt.how,
         "failures": list(receipt.failures),
         "was_running": receipt.was_running,
@@ -1516,6 +1532,8 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         "to_slot": receipt.to_slot,
         "resumed": receipt.resumed,
         "prompt_typed": fleet_service.prompt_typed_json(receipt.prompt_typed),
+        "prompt_delivery": receipt.prompt_delivery,
+        "prompt_acked": receipt.prompt_acked,
         "how": receipt.how,
         "failures": list(receipt.failures),
         "tmux_session": receipt.tmux_session,

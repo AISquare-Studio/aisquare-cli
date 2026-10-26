@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +11,6 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.models import Snapshot
 
 
 @pytest.fixture(autouse=True)
@@ -23,6 +20,14 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     workdir.mkdir()
     monkeypatch.chdir(workdir)
     return workdir
+
+
+def _said(output: str) -> str:
+    """What ``project onboard`` said of the project's facts: its output without the symbol
+    index's own line (#285, from main's P2), which comes first on every onboard."""
+    return "".join(
+        line for line in output.splitlines(keepends=True) if not line.startswith("code index: ")
+    )
 
 
 def _json(output: str) -> Any:
@@ -148,101 +153,181 @@ def test_workspace_alias_works(runner: CliRunner, work_dir: Path) -> None:
     assert _json(result.stdout)["root"] == str(work_dir.resolve())
 
 
-_TWO_FILE_SKELETON = (
-    '<files>\n<file path="a.py">\nx ⋮\n</file>\n<file path="b.py">\ny ⋮\n</file>\n</files>\n'
-)
-
-
-def test_onboard_over_budget_keeps_a_skeleton_and_the_knob_is_what_it_measures_against(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+def test_onboard_and_refresh_seed_facts_and_start_nothing_but_git(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#82: over budget even compressed, the line says what was kept and skipped, with numbers.
-
-    Then the loop closes: raise the knob it names, re-pack with the flag it
-    names, and the compressed pack is kept whole. Rendered output, not the
-    string passed in — bracketed text that Rich would eat with markup on.
-    """
-    from aisquare.core import snapshot
-
-    seen: dict[str, list[str]] = {}
-
-    def _fake(_root: Path, *, compress: bool, ignore: Sequence[str] = ()) -> tuple[str, str]:
-        seen["ignore"] = list(ignore)
-        if compress:
-            return _TWO_FILE_SKELETON, "Total Tokens: 203,991"
-        return "<files>\n</files>\n", "Total Tokens: 412,318"
-
-    monkeypatch.setattr(snapshot, "_run_repomix", _fake)
-    # Read repomix's own count, whether or not this machine has tiktoken.
-    monkeypatch.setattr(snapshot, "_tiktoken_count", lambda _text: None)
-
-    result = runner.invoke(app, ["project", "onboard"])
-    assert result.exit_code == 0, result.output
-    assert (
-        "snapshot: skeleton only: 203991 tokens, 2 files indexed; "
-        "full pack skipped over budget 150000 (412318 tokens)"
-    ) in result.stdout
-
-    assert runner.invoke(app, ["config", "set", "snapshot.max_tokens", "250000"]).exit_code == 0
-    assert (
-        runner.invoke(
-            app, ["config", "set", "snapshot.ignore", "docs/generated/**,**/fixtures/**"]
-        ).exit_code
-        == 0
-    )
-    again = runner.invoke(app, ["--json", "project", "onboard", "--refresh"])
-    # The operator's patterns reach repomix AFTER the built-ins, never instead of them.
-    assert seen["ignore"][: len(snapshot.DEFAULT_IGNORE)] == list(snapshot.DEFAULT_IGNORE)
-    assert seen["ignore"][-2:] == ["docs/generated/**", "**/fixtures/**"]
-    assert again.exit_code == 0, again.output
-    snap = _json(again.stdout)["snapshot"]
-    assert (snap["status"], snap["compressed"]) == ("ready", True)
-    assert (snap["full_token_count"], snap["token_count"], snap["max_tokens"]) == (
-        412318,
-        203991,
-        250000,
-    )
-
-
-def test_onboard_reports_a_legacy_too_large_verdict_with_its_numbers(
-    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A snapshot.json written before ``skeleton_only`` existed: a plain `onboard` reloads it.
-
-    The line names all three numbers and both knobs — ``[snapshot]`` is bracketed
-    text Rich would eat with markup on, so this reads the RENDERED output — and
-    ends with the ``--refresh`` that turns the verdict into a skeleton. On a machine
-    that can pack: where nothing can, it reads off (test_snapshot_optional_without_node.py).
-    """
-    from aisquare.core import snapshot
+    """``project onboard`` seeds one fact per marker; a plain second run seeds nothing; and
+    ``--refresh`` reads the markers again and adds only a fact that is new. No run starts a
+    process but the ``git rev-parse`` that finds the root, and none packs the codebase: the
+    report has no snapshot, and the project's data directory no ``snapshot/``."""
+    from aisquare.core import paths
     from aisquare.core.workspace import project_id_for
 
-    monkeypatch.setattr(snapshot, "can_pack", lambda: True)
-    project_id = project_id_for(work_dir.resolve())
-    snapshot.snapshot_dir(project_id).mkdir(parents=True, exist_ok=True)
-    verdict = Snapshot(
-        project_id=project_id,
-        generated_at=datetime.now(tz=UTC),
-        pack_path=snapshot.pack_path(project_id),
-        skeleton_path=snapshot.skeleton_path(project_id),
-        index_path=snapshot.index_path(project_id),
-        token_count=203_991,
-        compressed=True,
-        status="too_large",
-        full_token_count=412_318,
-        max_tokens=150_000,
-    )
-    snapshot.meta_path(project_id).write_text(verdict.model_dump_json(), encoding="utf-8")
+    proj = tmp_path / "app"
+    proj.mkdir()
+    (proj / "pyproject.toml").touch()
+    monkeypatch.chdir(proj)
+    started: list[str] = []
 
-    result = runner.invoke(app, ["project", "onboard"])
-    assert result.exit_code == 0, result.output
+    class Recorded(subprocess.Popen):  # type: ignore[type-arg]
+        def __init__(self, args: Any, *rest: Any, **kwargs: Any) -> None:
+            first = args[0] if isinstance(args, (list, tuple)) else str(args).split()[0]
+            started.append(Path(str(first)).name)
+            super().__init__(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", Recorded)
+
+    first = runner.invoke(app, ["project", "onboard"])
+    (proj / "Makefile").touch()
+    plain = runner.invoke(app, ["project", "onboard"])
+    refreshed = runner.invoke(app, ["--json", "project", "onboard", "--refresh"])
+    again = runner.invoke(app, ["project", "onboard", "--refresh"])
+
+    assert first.exit_code == 0, first.output
+    assert "seeded 1 project fact(s):\n  - Python project (pyproject.toml).\n" in first.stdout
+    assert first.stdout.startswith("code index: building in the background"), first.stdout
+    # The Makefile is new, and a plain run does not read the markers: it says so rather
+    # than "no new facts" (review of #399, m2).
+    assert _said(plain.stdout) == "✓ already onboarded; --refresh reads the markers again\n", (
+        plain.output
+    )
+    report = _json(refreshed.stdout)
+    # code_index: the symbol index's line (#285, main's P2), None with [code] enabled off.
+    assert set(report) == {"seeded", "markers_read", "restored", "warning", "code_index"}
+    assert report["markers_read"] is True
+    assert [entry["text"] for entry in report["seeded"]] == [
+        "Has a Makefile — check its targets for build/test commands."
+    ]
+    assert _said(again.stdout) == "✓ onboarded — no new project facts to seed\n", (
+        "a refresh never duplicates a fact, and says it read them"
+    )
+    assert set(started) <= {"git"}, started
+    assert not (paths.project_data_dir(project_id_for(proj.resolve())) / "snapshot").exists()
+
+
+def test_onboarding_a_forgotten_project_again_says_its_facts_are_back(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Forget keeps a project's facts, hidden, so onboarding it again finds them. That is
+    no re-run: "already onboarded" would say nothing happened while the project came back
+    to the list. It says so, reads the markers as a first run does, and seeds only a
+    fact that is new; a plain run after it is a re-run again (review of #399, m12)."""
+    proj = tmp_path / "app"
+    proj.mkdir()
+    (proj / "package.json").touch()
+    monkeypatch.chdir(proj)
+
+    first = runner.invoke(app, ["project", "onboard"])
+    forgotten = runner.invoke(app, ["project", "forget", str(proj)])
+    gone = runner.invoke(app, ["--json", "project", "list"])
+    back = runner.invoke(app, ["project", "onboard"])
+    listed = runner.invoke(app, ["--json", "project", "list"])
+    plain = runner.invoke(app, ["project", "onboard"])
+    runner.invoke(app, ["project", "forget", str(proj)])
+    (proj / "Makefile").touch()
+    report = _json(runner.invoke(app, ["--json", "project", "onboard"]).stdout)
+    newer = runner.invoke(app, ["project", "forget", str(proj)])
+    (proj / "go.mod").touch()
+    seeded = runner.invoke(app, ["project", "onboard"])
+
     assert (
-        "snapshot: codebase too large: full 412318 tokens, compressed 203991 tokens, "
-        "budget 150000. Raise [snapshot] max_tokens (aisquare config set "
-        "snapshot.max_tokens <n>), or exclude generated or vendored trees with [snapshot] "
-        "ignore (aisquare config set snapshot.ignore '<glob>,<glob>') or a .repomixignore at "
-        "the repo root. Re-pack: aisquare project onboard --refresh"
-    ) in result.stdout
+        _said(first.stdout) == "seeded 1 project fact(s):\n  - Node.js project (package.json).\n"
+    ), "control: a project never seen before is no comeback"
+    assert forgotten.exit_code == 0, forgotten.output
+    assert _json(gone.stdout) == [], "control: the project really was forgotten"
+    assert back.exit_code == 0, back.output
+    assert _said(back.stdout) == "✓ onboarded again; its earlier facts are back\n", back.output
+    assert [project["root"] for project in _json(listed.stdout)] == [str(proj.resolve())]
+    assert _said(plain.stdout) == "✓ already onboarded; --refresh reads the markers again\n"
+    assert report["restored"] is True
+    assert report["markers_read"] is True
+    assert [entry["text"] for entry in report["seeded"]] == [
+        "Has a Makefile — check its targets for build/test commands."
+    ], "it read the markers, and seeded only the new one"
+    assert newer.exit_code == 0, newer.output
+    assert _said(seeded.stdout) == (
+        "✓ onboarded again; its earlier facts are back\n"
+        "seeded 1 project fact(s):\n"
+        "  - Go module (go.mod).\n"
+    ), seeded.output
+
+
+def test_a_forgotten_project_a_capture_brought_back_is_onboarded_again(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Forget clears ``onboarded_at``, and a capture (a prompt there, with ``[projects]
+    capture`` on) revives the row live but unlisted. Onboarding it then lists it again,
+    so it is no re-run either: it says its facts are back and reads the markers. A
+    captured row never onboarded has nothing back, though it holds a fact of another
+    kind (review of #399, m13)."""
+    from aisquare.core.entries import new_entry
+    from aisquare.core.store import store_session
+    from aisquare.core.workspace import project_id_for
+    from aisquare.models import ProjectInfo
+
+    def captured(root: Path, note: str | None = None) -> None:
+        project = ProjectInfo(id=project_id_for(root.resolve()), root=root.resolve())
+        with store_session() as store:
+            store.ensure_project(project)
+            if note is not None:
+                store.add(new_entry(note, "project", project.id, [], "cli"))
+
+    proj = tmp_path / "app"
+    proj.mkdir()
+    (proj / "package.json").touch()
+    monkeypatch.chdir(proj)
+    runner.invoke(app, ["project", "onboard"])
+    forgotten = runner.invoke(app, ["project", "forget", str(proj)])
+    (proj / "Makefile").touch()
+    captured(proj)
+    gone = runner.invoke(app, ["--json", "project", "list"])
+    back = runner.invoke(app, ["project", "onboard"])
+    listed = runner.invoke(app, ["--json", "project", "list"])
+
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    (fresh / "Cargo.toml").touch()
+    captured(fresh, note="Deploys from the release branch.")
+    monkeypatch.chdir(fresh)
+    first = runner.invoke(app, ["project", "onboard"])
+
+    assert forgotten.exit_code == 0, forgotten.output
+    assert _json(gone.stdout) == [], "control: the capture revived it unlisted"
+    assert _said(back.stdout) == (
+        "✓ onboarded again; its earlier facts are back\n"
+        "seeded 1 project fact(s):\n"
+        "  - Has a Makefile — check its targets for build/test commands.\n"
+    ), back.output
+    assert [project["root"] for project in _json(listed.stdout)] == [str(proj.resolve())]
+    assert _said(first.stdout) == "seeded 1 project fact(s):\n  - Rust project (Cargo.toml).\n", (
+        "a captured row never onboarded is a first run, not a comeback"
+    )
+
+
+def test_a_forgotten_project_whose_facts_are_its_own_notes_is_onboarded_again(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A project with no marker at its root gets nothing from onboard, but forget keeps
+    the notes added to it as it keeps any fact. Onboarding it again brings them back and
+    says so: a forgotten row reads as gone, so whatever it kept is back, an onboard's fact
+    or not. Only a captured row needs an earlier onboard's fact to be back (the test
+    above). Review of #399, cycle 6, n15."""
+    proj = tmp_path / "notes-only"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    first = runner.invoke(app, ["project", "onboard"])
+    noted = runner.invoke(app, ["context", "add", "Deploys from the release branch.", "--project"])
+    forgotten = runner.invoke(app, ["project", "forget", str(proj)])
+    gone = runner.invoke(app, ["--json", "project", "list"])
+    report = _json(runner.invoke(app, ["--json", "project", "onboard"]).stdout)
+    notes = _json(runner.invoke(app, ["--json", "context", "list"]).stdout)
+
+    assert first.exit_code == 0 and noted.exit_code == 0, first.output + noted.output
+    assert forgotten.exit_code == 0, forgotten.output
+    assert _json(gone.stdout) == [], "control: the project really was forgotten"
+    assert report["restored"] is True, report
+    assert report["seeded"] == [], report
+    assert "Deploys from the release branch." in {entry["text"] for entry in notes}
 
 
 def test_switch_says_so_when_the_state_file_is_not_a_json_object(

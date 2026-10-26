@@ -268,8 +268,9 @@ def test_off_a_session_started_as_a_declared_captain_gets_the_ordinary_briefing(
     assert "attention()" not in text, "not the captain's cycle"
     with store_session() as store:
         session = store.get_session("declared-captain-1")
-    # Waiting at its prompt as every session start leaves one (#32, L1), the captain's or
-    # not: what tells them apart is the briefing above.
+    # Since #123 (and #32, L1) every role's start reads `waiting` until its first prompt, so
+    # the state no longer tells the captain's path from the ordinary one; the briefing
+    # asserts above do.
     assert session is not None and session.state == "waiting"
 
 

@@ -146,6 +146,10 @@ class FakeServer:
         """The server at ``path`` (``tmux -S``, 0.8.0): this fake is the only one there is."""
         return self
 
+    socket = "asq"
+    """Its name, as a real server's: with :meth:`socket_path`, the key of a pane's typing
+    lease (P0-W2), which the captain's typed writes ask through ``delivery.draft_guard``."""
+
     def socket_path(self) -> Path:
         return self._socket if self._socket is not None else Path("/nonexistent/tmux-0/asq")
 
@@ -1312,7 +1316,9 @@ def test_stop_refuses_without_confirm_and_never_reaches_the_fleet(
     result = ok(
         actions.stop("alpha", "coder-1", force=True, confirm=True, utterance="force-stop coder-1")
     )
-    assert fleet_rec.calls == [("stop", {"project": alpha.id, "label": "coder-1", "force": True})]
+    assert fleet_rec.calls == [
+        ("stop", {"project": alpha.id, "label": "coder-1", "force": True, "actor": "user"})
+    ]
     assert result["label"] == "coder-1"
     assert result["released"] == []
 

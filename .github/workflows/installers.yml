@@ -1,0 +1,95 @@
+name: Release installers
+
+# Attaches install.sh and install.ps1 to a GitHub Release, stamped to install
+# exactly that release, so these work from 0.9.0 on:
+#
+#   versioned  https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.0/install.sh
+#   latest     https://github.com/AISquare-Studio/aisquare-cli/releases/latest/download/install.sh
+#
+# (and the same two for install.ps1). The copies on `main` stay unstamped and
+# keep installing the latest release.
+#
+# publish.yml calls this after the PyPI publish job succeeds, with upload: true.
+# Every check of the stamped files already ran before that publish, in
+# installers-check.yml (publish.yml's `precheck`), on this same tag's checkout;
+# this re-stamps (which re-checks the tag), waits for PyPI, and uploads. Run by
+# hand it is a DRY RUN unless `upload` is ticked.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag, e.g. v0.9.0.
+        required: true
+        type: string
+      upload:
+        description: Attach the stamped files to the release.
+        required: false
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag, e.g. v0.9.0 (must be pyproject.toml's version on this ref).
+        required: true
+        type: string
+      upload:
+        description: Attach to the release. Leave off for a dry run.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  installers:
+    name: Attach install.sh and install.ps1
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release upload
+    env:
+      # Inputs reach the shell through the environment, never through ${{ }}
+      # inside a script, so a tag cannot inject a command.
+      TAG: ${{ inputs.tag }}
+      OUT: dist-installers
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Stamp
+        run: python scripts/stamp_installers.py --tag "$TAG" --out "$OUT"
+
+      - name: Wait until PyPI serves the version
+        # So nobody fetches an installer pinned to a version pip cannot get yet.
+        # `pip download` reads the same simple index uv installs from, which can
+        # trail the JSON API by a little. Ten minutes, then red.
+        run: |
+          version=${TAG#v}
+          for attempt in $(seq 1 30); do
+            if python -m pip download --quiet --no-deps --dest /tmp/pypi-check \
+              "aisquare-cli==$version"; then
+              echo "PyPI serves aisquare-cli $version (attempt $attempt)"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::PyPI does not serve aisquare-cli $version after 10 minutes"
+          exit 1
+
+      - name: Upload to the release
+        if: ${{ inputs.upload }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # --clobber so a rerun of a failed job replaces what it attached.
+        run: |
+          gh release upload "$TAG" "$OUT/install.sh" "$OUT/install.ps1" \
+            --clobber --repo "$GITHUB_REPOSITORY"
+          {
+            echo "## Attached to $TAG"
+            echo "- https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/install.sh"
+            echo "- https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/install.ps1"
+          } >>"$GITHUB_STEP_SUMMARY"

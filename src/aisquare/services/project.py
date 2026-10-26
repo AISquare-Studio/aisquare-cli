@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import shutil
 import stat
-import subprocess
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -13,8 +12,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from aisquare.core import paths
-from aisquare.core import snapshot as snapshot_core
-from aisquare.core.config import ProjectsSettings, SnapshotSettings, load_config
+from aisquare.core.config import ProjectsSettings, load_config
 from aisquare.core.entries import new_entry
 from aisquare.core.names import name_flaw
 from aisquare.core.state_file import StateUnwritableError
@@ -37,7 +35,6 @@ from aisquare.models import (
     ProjectInfo,
     ProjectPruneReport,
     PruneCandidate,
-    Snapshot,
 )
 from aisquare.services import install_route
 
@@ -71,7 +68,10 @@ def capture_on() -> bool:
     """``[projects] capture``: whether a directory a hooked session merely runs in gets a
     row of its own, captured and unlisted (#139). Off by default since 0.8.1; an unreadable
     config costs the setting, never the hook, as every section's does, and is read again on
-    the next ask (review of #259, round 18).
+    the next ask (review of #259, round 18). The default it falls back to is off, so an
+    unreadable config captures nothing more: the same direction as ``capture.enabled``,
+    which fails closed on purpose (``hooks.capture_prompt``, #268): both record less, never
+    more.
 
     Asked twice a SessionStart, once a prompt, and on asq's UI thread every refresh tick:
     :func:`~aisquare.core.config.load_config` parses the file again only when it changed."""
@@ -438,7 +438,7 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
     context entries, prompt history, board rows and ended fleet-agent rows stay
     in the store, hidden — reachable again only by registering the root again.
     With ``purge`` they are deleted, and so is ``~/.aisquare/projects/<id>/``
-    (the snapshot and brain), and a key the CLI minted for it is revoked — or,
+    (its brain), and a key the CLI minted for it is revoked — or,
     when it cannot be yet, kept owed and named in the report
     (:func:`_revoke_owed`).
 
@@ -940,7 +940,13 @@ def _repin(store: ContextStore) -> tuple[ProjectInfo | None, str | None]:
 
 
 def _remove_data_dir(project_id: str) -> bool:
-    """Delete ``~/.aisquare/projects/<id>/`` (snapshot, brain); False if there was none."""
+    """Delete ``~/.aisquare/projects/<id>/`` (its brain, key and symbol index, ``code/``);
+    False if there was none.
+
+    The project's kept brief artifacts (``~/.aisquare/briefs/<id>/``) go too: the purge
+    has deleted the briefs that cite them.
+    """
+    shutil.rmtree(paths.aisquare_home() / "briefs" / project_id, ignore_errors=True)
     directory = paths.project_data_dir(project_id)
     if not directory.is_dir():
         return False
@@ -1009,28 +1015,36 @@ def onboard_on_purpose(store: ContextStore, project: ProjectInfo) -> tuple[Proje
     return added, HOME_WARNING if became else None
 
 
-def onboard(path: Path | None, *, refresh: bool, pack: bool = True) -> OnboardReport:
-    """Pack the codebase into a snapshot and seed facts from ecosystem markers.
+def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
+    """Add the project on purpose and seed facts from ecosystem markers.
 
-    Generates the Repomix snapshot (full pack + skeleton + index) on first run,
-    or when ``refresh`` is set, and seeds one fact per detected marker. Existing
-    facts are never duplicated; the snapshot is reused unless ``refresh``. ``path`` is
-    the user's, refused unless it is a folder (:func:`typed_root`).
-
-    ``pack=False`` (``init``) packs nothing and reports the pack already there, if
-    any: no agent is pointed at a pack any more, so it is ``project onboard``'s, on
-    demand, and not a minute of every ``init``. The aisquare home is the same either
-    way: never packed, a pack left from before deleted, and ``snapshot_note`` says why.
+    The first run seeds one fact per marker found at the root. Later runs seed
+    nothing unless ``refresh`` is set; then the markers are read again and any fact
+    not already in the pool is added, so none is ever duplicated. A forgotten project
+    added again is a first run: forget kept its facts, hidden, and they are back.
+    ``path`` is the user's, refused unless it is a folder (:func:`typed_root`). Nothing
+    is packed: the codebase snapshot it once made is gone (#399). The symbol index (#285)
+    is started in a detached process when ``[code] enabled``, and never fails the onboard.
     """
     root = typed_root(path)
     project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
     facts = [fact for marker, fact in _ECOSYSTEM_MARKERS if (root / marker).exists()]
     seeded: list[ContextEntry] = []
     with store_session() as store:
+        before = store.get_project(project.id)  # a forgotten row reads as None
+        # Listed, not merely live: forget clears onboarded_at, and a capture revives the
+        # row unlisted (review of #399, m13).
+        listed = before is not None and before.onboarded_at is not None
         _, warning = onboard_on_purpose(store, project)  # the deliberate add (#139)
         project_entries = store.entries("project", project_id=project.id)
-        already_onboarded = any(entry.source == "onboard" for entry in project_entries)
-        if not (already_onboarded and not refresh):
+        earlier = any(entry.source == "onboard" for entry in project_entries)
+        # A re-run only while the project is listed: a forgotten one has its facts kept,
+        # and "already onboarded" would say nothing happened (review of #399, m12). A
+        # captured row is back only with an earlier onboard's facts, else it never left.
+        already_onboarded = listed and earlier
+        restored = not listed and bool(project_entries) and (before is None or earlier)
+        markers_read = refresh or not already_onboarded
+        if markers_read:
             existing = {entry.text for entry in project_entries}
             for fact in facts:
                 if fact in existing:
@@ -1038,61 +1052,27 @@ def onboard(path: Path | None, *, refresh: bool, pack: bool = True) -> OnboardRe
                 seeded.append(
                     store.add(new_entry(fact, "project", project.id, ["onboarding"], "onboard"))
                 )
-    if not pack and not snapshot_core.is_the_homes(project.id):
-        return OnboardReport(
-            seeded=seeded, snapshot=snapshot_core.load(project.id), warning=warning
-        )
-    # The home takes this path asked or not: _ensure_snapshot packs nothing there, deletes
-    # a pack left from before, and says why, where `init`'s opt-in line would point at a
-    # `project onboard` that never packs it (D5, #42).
-    snapshot, note = _ensure_snapshot(project, refresh=refresh)
-    return OnboardReport(seeded=seeded, snapshot=snapshot, snapshot_note=note, warning=warning)
+    return OnboardReport(
+        seeded=seeded,
+        markers_read=markers_read,
+        restored=restored,
+        warning=warning,
+        code_index=_ensure_code_index(project, refresh=refresh),
+    )
 
 
-def snapshot_settings() -> SnapshotSettings:
-    """The ``[snapshot]`` section; the defaults when the config is unreadable (fail-open)."""
+def _ensure_code_index(project: ProjectInfo, *, refresh: bool) -> str | None:
+    """Start building or refreshing the symbol index (#285) detached, as one line for the
+    report; ``None`` when ``[code] enabled`` is off. Never inline: a first index of a large
+    checkout takes minutes, and the onboard (and ``init``) returns at once. Incremental
+    unless ``refresh``; never fails the onboard."""
+    from aisquare.services import code as code_service  # lazy: onboard imports this module
+    from aisquare.services import hooks as hooks_service  # lazy: hooks imports this module
+
+    if not code_service.settings().enabled:
+        return None
     try:
-        return load_config().snapshot
-    except Exception:  # a broken config costs the knobs, never the onboarding
-        return SnapshotSettings()
-
-
-def _ensure_snapshot(project: ProjectInfo, *, refresh: bool) -> tuple[Snapshot | None, str | None]:
-    """Generate (or reuse) the codebase snapshot: ``(snapshot, why nothing was packed)``.
-
-    The second half is ``None`` when a pack was made or reused. Otherwise it is the
-    sentence :mod:`snapshot_core` words: the optional feature being off (no Node, or
-    a Node with no packer) is not a pack that failed, and a pack that failed says
-    why in the packer's own words. A failed ``--refresh`` rewrites nothing, so a
-    last pack is returned, with a sentence that says so.
-    """
-    if snapshot_core.is_the_homes(project.id):
-        # Never packed, refresh or not, and a pack left from before is deleted: its
-        # login data must not sit in a file agents are pointed at (owner, 2026-10-23).
-        shutil.rmtree(snapshot_core.snapshot_dir(project.id), ignore_errors=True)
-        return None, snapshot_core.HOME_SKIPPED
-    if snapshot_core.exists(project.id) and not refresh:
-        return snapshot_core.load(project.id), None
-    settings = snapshot_settings()
-    failure: str | None = None
-    try:
-        packed = snapshot_core.generate(
-            project.id,
-            project.root,
-            head=snapshot_core.head_sha(project.root),
-            max_tokens=settings.max_tokens,
-            ignore=settings.ignore,
-        )
-    except snapshot_core.RepomixUnavailableError:
-        pass
-    except (subprocess.SubprocessError, OSError) as exc:
-        failure = snapshot_core.failure_reason(exc)
-    else:
-        return packed, None
-    try:
-        kept = snapshot_core.load(project.id)
-    except (OSError, ValueError):  # an unreadable snapshot.json serves no agent either
-        kept = None
-    if kept is not None and kept.status in ("ready", "skeleton_only"):
-        return kept, snapshot_core.not_refreshed_detail(kept, failure)
-    return None, snapshot_core.skipped_detail(failure)
+        hooks_service.start_code_index(project, full=refresh)
+    except Exception as exc:  # an index is optional; the onboard is not
+        return f"not started ({exc}) — build it with `aisquare code index`"
+    return "building in the background — `aisquare code index --status` says when it is ready"

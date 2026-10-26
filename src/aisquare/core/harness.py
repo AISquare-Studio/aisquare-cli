@@ -64,7 +64,7 @@ from aisquare.core import experimental, spawn
 from aisquare.core.paths import aisquare_home, expand_user
 
 if TYPE_CHECKING:  # runtime import stays lazy: config imports harness back
-    from aisquare.core.config import TeamSettings
+    from aisquare.core.config import FleetSettings, TeamSettings
 
 _OFF_VALUES = {"0", "false", "no", "off"}
 PROBE_TIMEOUT_SECONDS = 150
@@ -80,6 +80,31 @@ MODEL_FAMILIES: dict[str, str] = {
     "sonnet": "sonnet",
     "haiku": "haiku",
 }
+
+
+def model_family(model: str | None) -> str | None:
+    """The family a model id or alias belongs to (``claude-opus-5-5`` → ``opus``), or ``None``.
+
+    What a usage pick keys a per-family weekly window on (``services.claude_accounts``):
+    such a limit applies only to requests to that family (#277).
+    """
+    if not model:
+        return None
+    lowered = model.lower()
+    return next((family for family in MODEL_FAMILIES.values() if family in lowered), None)
+
+
+def launch_family(role: str, args: Sequence[str] = ()) -> str | None:
+    """The family a launch of ``role`` will run: its ``--model`` when ``args`` name one, else
+    the role's ladder as resolved WITHOUT probing (a cached verdict, or the first rung) —
+    a pick must not wait 150 s on a probe, and a wrong guess only costs the family window."""
+    for index, arg in enumerate(args):
+        if arg == "--model" and index + 1 < len(args):
+            return model_family(args[index + 1])
+        if arg.startswith("--model="):
+            return model_family(arg.partition("=")[2])
+    resolution = resolve_model(role, probe=False)
+    return model_family(resolution.model) if resolution is not None else None
 
 
 #: The effort scale, weakest first — the levels ``claude --effort`` accepts.
@@ -114,6 +139,10 @@ class RoleProfile(BaseModel):
     :func:`role_defaults`). A role's tooling is the role's business: the
     ui-tester needs Claude in Chrome, and asking every operator to remember
     ``--chrome`` is how the role silently degrades on the second machine."""
+    denied_tools: list[str] = []
+    """Claude Code tools the role never launches with, wherever it starts: its safety
+    list, which :func:`tool_policy` merges with the operator's denies. Only ``[fleet.roles.
+    <role>] allow_tools`` hands one back; an ``extra_args`` no longer replaces it (#280)."""
 
 
 PLAIN_ROLE = "agent"
@@ -164,6 +193,9 @@ ROLE_PROFILES: dict[str, RoleProfile] = {
         role="reviewer",
         ladder=["sonnet", "opus"],
         mission="reads the PR as the stranger who will maintain it — read-only findings",
+        # Subagents inherit their session's tools and its permission rules, so a
+        # reviewer's subagents cannot edit either (code.claude.com/docs/en/sub-agents).
+        denied_tools=["Edit", "Write", "NotebookEdit"],
     ),
     "ui-tester": RoleProfile(
         role="ui-tester",
@@ -245,6 +277,113 @@ def role_defaults(role: str, *, binary: str, args: Sequence[str]) -> RoleDefault
             if not _flag_present(args, flag) and not _flag_present(args, _opt_out_of(flag))
         ]
     )
+
+
+#: What ``skill_listing = "names"`` passes Claude Code: every skill description cut to one
+#: character, every name kept. ``skillListingBudgetFraction`` at its smallest (it takes any
+#: fraction above 0) cut the first request by 41 tokens on Claude Code 2.1.309; this, 2,121.
+SKILL_NAMES_SETTINGS = '{"skillListingMaxDescChars": 1}'
+
+
+class ToolPolicy(RoleDefaults):
+    """The tool and skill flags a launch gets (:func:`tool_policy`): :attr:`args` go where
+    the role's own flags go, and every ``--disallowedTools`` already given comes out
+    (:meth:`strip`), so the agent gets ONE, holding :attr:`denied`."""
+
+    denied: list[str] = []
+    """Every tool the launch denies, sorted; empty when the policy was withheld."""
+    skill_listing: str = "full"
+    """The skill listing the launch gets: ``full``, ``names`` or ``off``."""
+    applied: bool = False
+
+    def strip(self, args: Sequence[str]) -> list[str]:
+        """``args`` without the ``--disallowedTools`` :attr:`args` now carries; untouched
+        when the policy was withheld (another agent's flags are its own)."""
+        from aisquare.core.config import split_denied_tools
+
+        return split_denied_tools(args)[1] if self.applied else list(args)
+
+
+def tool_policy(
+    role: str,
+    *,
+    binary: str,
+    args: Sequence[str],
+    fleet: FleetSettings,
+    effort: str | None = None,
+) -> ToolPolicy:
+    """The tools ``role`` launches without and the skill listing it gets, wherever it starts.
+
+    The deny set is the role's safety list (:attr:`RoleProfile.denied_tools`), ``[fleet]
+    deny_tools`` and ``[fleet.roles.<role>] deny_tools``, minus that table's
+    ``allow_tools``, plus every ``--disallowedTools`` already in ``args``: what the
+    operator typed (or a fleet ``extra_args``) is never handed back. ``skill_listing``
+    ``off`` adds ``Skill``; ``names`` passes :data:`SKILL_NAMES_SETTINGS` unless ``args``
+    already carry ``--settings``, which is never merged blindly. A launch at
+    :data:`ULTRACODE` effort (``effort``, as ``team spawn`` resolves it, or ``--effort`` in
+    ``args``) keeps ``Workflow``: ultracode IS xhigh plus workflow orchestration, which
+    the default deny would have turned off without a word (review of #311).
+
+    The reviewer's deny lived in its ``extra_args`` alone, so ``launch reviewer`` and
+    ``team spawn reviewer`` had none, and any ``extra_args`` an operator set replaced it
+    whole: the reviewer launched with ``Edit`` and ``Write`` (#280, #129 f). As
+    :func:`role_defaults`, only for Claude Code (:func:`is_default_agent`), with a note
+    when withheld.
+    """
+    from aisquare.core.config import FleetRoleSettings, split_denied_tools
+
+    seat = base_role(role)
+    profile = ROLE_PROFILES.get(seat)
+    settings = fleet.roles.get(seat) or FleetRoleSettings()
+    asked, _rest = split_denied_tools(args)
+    denied = {*(profile.denied_tools if profile else ()), *fleet.deny_tools, *settings.deny_tools}
+    denied -= set(settings.allow_tools)
+    if settings.skill_listing == "off":
+        denied.add("Skill")
+    notes: list[str] = []
+    if "Workflow" in denied and ULTRACODE in (
+        _normal(effort),
+        _normal(_flag_value(args, "--effort")),
+    ):
+        denied.discard("Workflow")
+        notes.append("Workflow kept: effort ultracode orchestrates workflows")
+    names = settings.skill_listing == "names"
+    if not is_default_agent(binary):
+        withheld = [f"--disallowedTools={' '.join(sorted(denied))}"] if denied else []
+        withheld += ["skill_listing names"] if names else []
+        why = f"{os.path.basename(binary)!r} is not {DEFAULT_AGENT_BINARY}"
+        return ToolPolicy(
+            notes=[f"{', '.join(withheld)} withheld: {why}"] if withheld else [],
+            skill_listing=settings.skill_listing,
+        )
+    denied |= asked
+    flags = [f"--disallowedTools={' '.join(sorted(denied))}"] if denied else []
+    if names and _flag_present(args, "--settings"):
+        notes.append("skill_listing withheld: --settings already given")
+    elif names:
+        flags += ["--settings", SKILL_NAMES_SETTINGS]
+    return ToolPolicy(
+        args=flags,
+        notes=notes,
+        denied=sorted(denied),
+        skill_listing=settings.skill_listing,
+        applied=True,
+    )
+
+
+def _flag_value(args: Sequence[str], flag: str) -> str | None:
+    """The value ``args`` give ``flag`` (``--flag value`` or ``--flag=value``), the last one."""
+    found: str | None = None
+    for index, arg in enumerate(args):
+        if arg.startswith(f"{flag}="):
+            found = arg.partition("=")[2]
+        elif arg == flag and index + 1 < len(args):
+            found = args[index + 1]
+    return found
+
+
+def _normal(value: str | None) -> str | None:
+    return value.strip().lower() if value is not None else None
 
 
 #: A numbered SEAT: a first-class role with a crew index glued on (``coder1``).
@@ -936,9 +1075,22 @@ def pause_signal(project_id: str, board: str) -> str:
 
 
 def role_cycle(
-    role: str, session_short_id: str, *, fleet: FleetCommand, paused: str = PAUSE_SIGNAL
+    role: str,
+    session_short_id: str,
+    *,
+    fleet: FleetCommand,
+    paused: str = PAUSE_SIGNAL,
+    task: str | None = None,
+    state_file: str | None = None,
+    escalate_to_parent: bool = False,
 ) -> list[str]:
     """The standing work cycle injected for ``role`` (empty for unknown roles).
+
+    ``task`` is the task the agent was spawned for (``12`` or its id, never ``#12``, which a
+    shell reads as a comment), when it was: a
+    tester or ui-tester then verifies that one task and stops after its verdict (#129 a).
+    ``state_file`` is where a manager keeps its state (P1 WS-4, #281). ``escalate_to_parent``:
+    the project's group has a parent manager, whom a manager asks before the human (P2-W6).
 
     Keyed on :func:`base_role`, so a numbered seat (``coder1``) is briefed as
     the role it is a seat of — the number is an identity, not a new role. Every
@@ -948,17 +1100,132 @@ def role_cycle(
     (:func:`pause_signal`), which a manager obeys.
     """
     role = base_role(role)
-    core = _role_cycle_core(role, session_short_id, fleet=fleet, paused=paused)
+    core = _role_cycle_core(
+        role,
+        session_short_id,
+        fleet=fleet,
+        paused=paused,
+        task=task,
+        state_file=state_file,
+        escalate_to_parent=escalate_to_parent,
+    )
     if not core:
         return []
+    if role in ("runner", "tester", "validator") and _test_gate_on():
+        core = [*core, *_GATE_LINE]
     if role in _CLEANS_UP:
         core = [*core, *(line.format(reap=fleet("reap")) for line in _CLEANUP)]
     merge_said = any("merge" in line.lower() for line in core)
     return [*core, *_lane_rule(role, session_short_id, merge_said=merge_said, fleet=fleet)]
 
 
+_GATE_LINE = (
+    "Run a heavy check (the full test suite, a build) through the memory gate:",
+    "`aisquare fleet gate -- <command>` waits for headroom, and exit 75 means it never",
+    "came: say so on the board rather than run it anyway.",
+)
+
+
+def _auto_stop_line() -> list[str]:
+    """The manager's line on auto-stop (P2-W1b, #283): the fleet stops these itself. None
+    while ``auto_stop_finished`` is off."""
+    roles = _auto_stop_roles()
+    if not roles:
+        return []
+    return [
+        f"Finished workers of these roles stop by themselves ({', '.join(roles)}; the exit "
+        "says auto-stop): stop the others, coders included, yourself."
+    ]
+
+
+def _auto_stop_roles() -> list[str]:
+    """``[fleet] auto_stop_roles`` while ``auto_stop_finished`` is on, else none (#283). An
+    unreadable config names none."""
+    try:
+        from aisquare.core.config import load_config
+
+        fleet = load_config().fleet
+    except Exception:
+        return []
+    return list(fleet.auto_stop_roles) if fleet.auto_stop_finished else []
+
+
+def _test_gate_on() -> bool:
+    """Whether ``[fleet] test_gate_mb`` is set (#283): only then do the checking roles'
+    cycles name ``fleet gate``. An unreadable config names nothing."""
+    try:
+        from aisquare.core.config import load_config
+
+        return load_config().fleet.test_gate_mb > 0
+    except Exception:
+        return False
+
+
+STATE_FILE_MAX = 4_000
+"""How long a manager's state file may be (P1 WS-4, #281): its start pack quotes it."""
+
+
+def _state_rule(state_file: str | None) -> list[str]:
+    """The manager's two sentences on keeping its state outside its context (P1 WS-4, #281):
+    a compaction or a restart starts from the file, and text pasted inline rides every later
+    request."""
+    where = state_file or "your state file"
+    return [
+        f"Keep your state in {where}; rewrite it (≤ {STATE_FILE_MAX:,} chars: goal ·",
+        "decisions · open items · next step) when a plan step completes and before you stop.",
+        "Reusable scripts and rule text live in files; run and cite them by path, never",
+        "paste them inline.",
+    ]
+
+
+def _verify_start(role: str, sid: str, task: str | None) -> list[str]:
+    """A tester's first step: the review pool, or the one task it was spawned for (#129 a)."""
+    if task is None:
+        return [
+            f"Your standing cycle ({role}): `aisquare task next --status review --as {sid}`;",
+            "if nothing,",
+        ]
+    return [
+        f"Your standing cycle ({role}): `aisquare task next --status review --task {task} "
+        f"--as {sid}` — the one task you were spawned for; if nothing,",
+    ]
+
+
+def _ui_start(sid: str, task: str | None) -> list[str]:
+    """The ui-tester's first step: its ``UI: …`` tasks from the review pool, or the one task
+    it was spawned for (#129 a)."""
+    if task is not None:
+        return [
+            f"Your standing cycle (ui-tester): `aisquare task next --status review --task {task}",
+            f"--as {sid}` — the one task you were spawned for; if nothing, tell the user and",
+            "stop. Verify in a REAL browser with whatever this window has, in this",
+        ]
+    return [
+        f"Your standing cycle (ui-tester): `aisquare task next --status review --as {sid}`;",
+        'take tasks titled "UI: …" (leave the rest to the runner). That returns only the',
+        "HEAD of the review pool, so if it hands you a non-UI task, find your `UI:` tasks",
+        "on the board (`aisquare board`) and act on them by id; if there are none, tell the",
+        "user and stop. Verify in a REAL browser with whatever this window has, in this",
+    ]
+
+
+def _verify_end(task: str | None) -> str:
+    """How a tester's cycle ends: it repeats over the pool, or, spawned for one task, it
+    stops after that task's verdict and takes no other (#129 a)."""
+    if task is None:
+        return "Repeat."
+    return "After that one verdict, tell the user and stop: take no other task."
+
+
 def _role_cycle_core(
-    role: str, session_short_id: str, *, fleet: FleetCommand, paused: str = PAUSE_SIGNAL
+    role: str,
+    session_short_id: str,
+    *,
+    fleet: FleetCommand,
+    paused: str = PAUSE_SIGNAL,
+    task: str | None = None,
+    state_file: str | None = None,
+    escalate_to_parent: bool = False,
 ) -> list[str]:
     """The role-specific half of the cycle for an already-normalised ``role``;
     see :func:`role_cycle`."""
@@ -992,7 +1259,8 @@ def _role_cycle_core(
         return [
             f"Your standing cycle (coder): `aisquare task next --role coder --claim --as {sid}`;",
             "if nothing is available, tell the user and stop. Read the task's contract and",
-            "any reopen feedback first — if the contract is missing or ambiguous, don't",
+            "any reopen feedback first — the claim prints both; `aisquare task show <id>` is",
+            "the whole task. If the contract is missing or ambiguous, don't",
             f'guess: `aisquare task block <id> --reason "needs spec: …" --as {sid}` and note',
             "it to the planner. Otherwise do the work, self-check against the acceptance",
             "criteria, then `aisquare task review <id> "
@@ -1006,8 +1274,7 @@ def _role_cycle_core(
         # session it can join to its fleet row; without it two testers spawned
         # for two review tasks were both handed the older one (review of #135).
         return [
-            f"Your standing cycle ({role}): `aisquare task next --status review --as {sid}`;",
-            "if nothing,",
+            *_verify_start(role, sid, task),
             "tell the user and stop. You are the adversarial verifier: run the FULL check the",
             "acceptance criteria name — not a smoke test — and try to make the change fail",
             "(edge inputs, a counterexample) before you trust it. Verdicts cite evidence you",
@@ -1019,7 +1286,7 @@ def _role_cycle_core(
             "NOT marked (stale) — a stale row is a crashed or hung tester, not an available one;",
             "otherwise run its non-browser checks and reopen it —",
             f'`aisquare task reopen <id> --reason "UI not browser-verified" --as {sid}` —',
-            "never done. Repeat.",
+            f"never done. {_verify_end(task)}",
         ]
     if role == "validator":
         return [
@@ -1042,36 +1309,54 @@ def _role_cycle_core(
             "Your standing cycle (manager): you run this project's fleet; you never do its",
             "work. Intake: ask until the acceptance criteria are executable. Contracts:",
             '`aisquare task add "<title>" --role coder --detail "<objective · why · known ·',
-            'acceptance · boundaries>"`, `--needs` for ordering. Help comes only from',
+            "acceptance · boundaries>\"`, `--needs` for ordering; the coder's claim prints the",
+            "contract, so put it in `--detail`, not the prompt. Help comes only from",
             f"`{spawn} coder --label coder-<purpose> --task <id> --as {sid}` —",
-            f"one per parallelisable task, within the agent cap; `{spawn} tester` once work",
-            f'reaches review — `{spawn} ui-tester --prompt "<branch or worktree to check +',
-            'the URL to open>"` for tasks titled "UI: …", which it verifies in a real browser',
-            "and cannot otherwise place, since nothing moves it into the coder's tree —",
-            f"`{spawn} reviewer` once a PR exists, `{spawn} validator`",
-            "once every task is done. Board updates reach you every turn: reopen with reasons,",
+            "`--task` delivers the task; add `--prompt` only for extra instructions —",
+            "one per parallelisable task, within the agent cap. Spawn one tester per task at",
+            f"its task_review: `{spawn} tester --task <id> --as {sid}`, which verifies that",
+            f'task and stops — `{spawn} ui-tester --task <id> --prompt "<branch or worktree to',
+            'check + the URL to open>"` for tasks titled "UI: …", which it verifies in a real',
+            "browser and cannot otherwise place, since nothing moves it into the coder's tree —",
+            f"`{spawn} reviewer` once a PR exists; the validator stays the single final gate:",
+            f"`{spawn} validator` once every task is done.",
+            "Board updates reach you every turn: reopen with reasons,",
             f'`{fleet("tell")} <label> "…"` to steer, re-spec or split what bounces. Spawn',
             f"nothing while the `{paused}` signal is set. An agent that hits its Claude usage",
-            f"limit shows `limited` on the board and wakes you: `{fleet('switch')} <label>",
-            f"--as {sid}` moves it to the account with the most headroom and resumes its session;",
-            "if nothing has headroom, leave it — it continues by itself at the reset the event",
-            "names. Usage figures are the share USED (40% used = 60% left); headroom is what",
-            "is left. An agent whose task is done, with no queued task that fits it:",
-            f"`{fleet('stop')} <label>`, then `{fleet('reap')}` — it records the exit",
+            'limit shows `limited` on the board. With `on_limit = "switch"` (the default) the',
+            "fleet moves a limited agent itself; act on `handover_failed`, not on `limited`:",
+            f"`{fleet('switch')} <label> --as {sid}` moves it to the account with the most",
+            "headroom and resumes its session; if nothing has headroom, leave it — it continues",
+            "by itself at the reset the event names. Usage figures are the share USED",
+            "(40% used = 60% left); headroom is what is left. An agent whose task is done,",
+            "with no queued task that fits it:",
+            f"`{fleet('stop')} <label> --as {sid}`, then `{fleet('reap')}` — it records the exit",
             "and removes the agent's worktree once its work is pushed. When the validator's",
             f"gate is PASS: `{fleet('reap')}` again, then",
             f'`aisquare note "READY: <PRs + evidence>" --kind result --as {sid}` and stop.',
-            "Never write code. Never merge. Blocked twice on one task? Ask the human:",
-            f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and descriptive',
+            *_auto_stop_line(),
+            *_state_rule(state_file),
+            "Never watch panes, CI or pull requests with Monitor or sleep loops: `aisquare",
+            "watch --detach` runs one watcher for the fleet, and its `watch:` lines wake you.",
+            *(
+                [
+                    "Never write code. Never merge. Blocked twice on one task? Ask your parent",
+                    f'manager: `aisquare note "…" --kind question --to parent --as {sid}`. Labels',
+                    "are unique and descriptive",
+                ]
+                if escalate_to_parent
+                else [
+                    "Never write code. Never merge. Blocked twice on one task? Ask the human:",
+                    f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and '
+                    "descriptive",
+                ]
+            ),
             "(coder-auth, not coder-2).",
         ]
     if role == "ui-tester":
+        start = _ui_start(sid, task)
         return [
-            f"Your standing cycle (ui-tester): `aisquare task next --status review --as {sid}`;",
-            'take tasks titled "UI: …" (leave the rest to the runner). That returns only the',
-            "HEAD of the review pool, so if it hands you a non-UI task, find your `UI:` tasks",
-            "on the board (`aisquare board`) and act on them by id; if there are none, tell the",
-            "user and stop. Verify in a REAL browser with whatever this window has, in this",
+            *start,
             "order: Claude in Chrome (present when the window was started with `--chrome` and",
             "the extension is connected), the Chrome DevTools MCP, Playwright MCP. Check which",
             "of them answer BEFORE you start. Do the acceptance steps as written — URL, login,",
@@ -1085,13 +1370,14 @@ def _role_cycle_core(
             f"<screenshot path>\" --as {sid}`. No browser tool answers? Run the task's",
             'non-browser checks, then reopen it with "UI not browser-verified in this window" —',
             "never done. You are ASKED to be read-only and nothing here enforces it (no",
-            "allowed-tools list is written or passed): never edit, never push. Repeat.",
+            "allowed-tools list is written or passed): never edit, never push.",
+            _verify_end(task),
         ]
     if role == "reviewer":
         # §3.3 — reads the PR as the stranger who will maintain it; findings on the
         # PR through `gh pr review`. `--restricted` would remove the Bash every step
-        # below needs, so the fleet launches it denied Edit, Write and NotebookEdit
-        # instead (`config.REVIEWER_ARGS`); never push and never merge are this
+        # below needs, so it launches denied Edit, Write and NotebookEdit instead,
+        # wherever it starts (`RoleProfile.denied_tools`); never push and never merge are this
         # briefing's, and the credentials its shell runs with
         # (`config._default_fleet_roles` says why no allowlist holds it).
         return [

@@ -43,9 +43,10 @@ while it is still running, so a later import of anything in that environment
 would load the new version's module into the old process, or fail outright. The
 one exception is the PyPI lookup's network modules, imported inside it to keep
 them off the path every command pays to start (``tests/test_iam_single_reader.py``,
-the hooks included). That is safe twice over: the lookup runs before any
-installer, and those are standard-library modules, which live with the
-interpreter rather than in the tool environment uv replaces.
+the hooks included). That is safe because the lookup runs before any installer:
+``core.tls`` and what it loads (``truststore``, ``certifi``, #403) live in the tool
+environment uv replaces, unlike the standard-library ones, so they must be, and
+are, imported before it is replaced.
 """
 
 from __future__ import annotations
@@ -525,7 +526,7 @@ def _instant(text: object) -> datetime | None:
 def open_url(request: Any, *, timeout: float) -> Any:
     """``urllib.request.urlopen``: the one network call in this module, behind a name a
     test can replace. Imported inside for the reason the module docstring gives."""
-    from urllib.request import urlopen
+    from aisquare.core.tls import urlopen
 
     return urlopen(request, timeout=timeout)
 

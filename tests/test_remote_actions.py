@@ -708,8 +708,17 @@ class FakePane:
         """Asked where the row's spawn recorded its server (``TmuxServer.at``): this one."""
         return self
 
+    socket = "asq"
+    """Its name, as a real server's."""
+
+    def socket_path(self) -> Path:
+        """Where its socket is, as a real server's: the key of the pane's typing lease (P0-W2)."""
+        return Path("/run/fake/tmux-1000/asq")
+
     def __init__(self, log: list[str]) -> None:
         self.log = log
+        self.screens: dict[str, list[str]] = {}
+        """What each pane shows (``capture``): nothing, unless a test draws a screen."""
         self.sent: list[tuple[str, str, str]] = []
         """``(pane id, "key" or "paste", the key or the text)``."""
         self.sockets: list[str] = []
@@ -760,6 +769,10 @@ class FakePane:
         return SimpleNamespace(
             dead=False, current_command="claude", server_started=self.started_at()
         )
+
+    def capture(self, pane_id: str, **_kwargs: object) -> SimpleNamespace:
+        """The pane's screen, as the delivery door reads it before it types (P0-W2)."""
+        return SimpleNamespace(lines=list(self.screens.get(pane_id, [])))
 
     def started_at(self) -> datetime:
         """The server started before every row here was written: no pane outlived its row."""
@@ -1056,7 +1069,7 @@ def test_stop_stops_the_pinned_row_and_audits_what_it_did(
         "stop",
         project.id,
         (LABEL,),
-        {"force": False, "agent_id": "agt_one"},
+        {"force": False, "agent_id": "agt_one", "actor": "user"},
     )
     assert response.json() == {
         "agent": receipts.stop.agent.model_dump(mode="json"),
@@ -1593,7 +1606,7 @@ def test_a_force_stop_types_nothing_so_it_skips_the_guard(
     needs.dialog = True
     response = phone.post("agent/stop", **PINNED, force=True)
     assert response.status_code == 200, response.text
-    assert fleet.calls[0][2] == {"force": True, "agent_id": "agt_one"}
+    assert fleet.calls[0][2] == {"force": True, "agent_id": "agt_one", "actor": "user"}
     assert needs.reads == 0 and pane.sent == []
     assert "force=yes dismissed=no" in phone.audit()[0][1]
 

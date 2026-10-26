@@ -208,9 +208,13 @@ def test_a_failure_that_says_nothing_of_the_token_never_hides_a_good_reading(
         assert served[work.slot].last_failed_at == failed_at, "and the failed try with it"
     assert fetch.calls == ["tok-work"]
 
-    # Past the good reading's window, the failure is the newest word until its own ends.
+    # Past the good reading's window the failure is the newest word until its own ends —
+    # said beside the figure, which stays on the row with its age (F1 of #400), never `—`.
     gone = service.cached_usage([work], now=NOW + timedelta(minutes=5, seconds=1), fetch=fetch)
-    assert not gone[work.slot].available and fetch.calls == ["tok-work"]
+    assert fetch.calls == ["tok-work"]
+    assert gone[work.slot].session_percent == 40 and gone[work.slot].fetched_at == NOW
+    assert gone[work.slot].last_failed_at == failed_at
+    assert gone[work.slot].last_failed_reason
     back = service.cached_usage([work], now=NOW + timedelta(minutes=6, seconds=1), fetch=fetch)
     assert back[work.slot].session_percent == 40 and len(fetch.calls) == 2
     assert back[work.slot].last_failed_at is None, "the latest try read it"
@@ -500,7 +504,10 @@ def test_a_refresh_that_fails_keeps_the_figure_and_the_cli_says_the_try_failed(
     monkeypatch.setattr(service, "_now", lambda: NOW + timedelta(minutes=1))
     refreshed = runner.invoke(app, ["accounts", "usage", "--refresh"])
     assert refreshed.exit_code == 0, refreshed.output
-    assert "40%" in refreshed.stdout and "503" not in refreshed.stdout, refreshed.stdout
+    assert "40%" in refreshed.stdout, refreshed.stdout  # the figure stays; the row says why
+    assert "account 2: HTTP 503 from the usage endpoint; showing the reading from 1m ago" in (
+        refreshed.stdout
+    )
     assert "usage as of 1m ago · last try failed just now (percent USED" in refreshed.stdout
 
     monkeypatch.setattr(service, "_now", lambda: NOW + timedelta(minutes=2))

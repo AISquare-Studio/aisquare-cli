@@ -52,7 +52,13 @@ def test_the_base_install_gains_no_dependencies() -> None:
     ``segno`` (pure python, typed, one module) is the Remote modal's QR. It is
     imported lazily by the QR renderer alone (``cli/ui/views/remote.py``), so the
     hook path never loads it; when it is absent the modal says the QR is unavailable, and the
-    command that puts segno back in the install that runs, instead of failing."""
+    command that puts segno back in the install that runs, instead of failing.
+
+    ``truststore`` and ``certifi`` (both pure python) are what every HTTPS call
+    verifies against (``core/tls.py``): a python.org Python on macOS ships no CA
+    bundle, so without them every usage read failed certificate verification.
+    Imported inside ``tls.ssl_context`` only: the hook path loads them only when a hook
+    sends a request over https (the CI experiment, ``AISQUARE_CI`` on), never at import."""
     import re
     import tomllib
 
@@ -64,6 +70,7 @@ def test_the_base_install_gains_no_dependencies() -> None:
     assert required == {
         "typer", "rich", "pydantic", "tomli-w", "textual", "pyyaml", "tzdata", "segno",
         "starlette", "uvicorn", "websockets", "cryptography", "ngrok",
+        "truststore", "certifi",
     }  # fmt: skip
 
 
@@ -195,3 +202,23 @@ def test_the_rich_floor_provides_split_graphemes() -> None:
     from rich.cells import split_graphemes  # the symbol the floor exists for
 
     assert callable(split_graphemes)
+
+
+def test_ci_installs_the_tls_trust_at_the_locks_versions() -> None:
+    """Review of #403, n8: CI installed with pip, which resolved truststore 0.10.5 against
+    the lock's 0.10.4. CI's installs read ``ci/constraints.txt``, not ``uv.lock`` (ci.yml's
+    with uv, installers-check.yml's with pip), so it pins both to what ``uv.lock`` holds."""
+    import tomllib
+
+    root = Path(__file__).resolve().parent.parent
+    locked = {
+        package["name"]: package["version"]
+        for package in tomllib.loads((root / "uv.lock").read_text(encoding="utf-8"))["package"]
+    }
+    pinned = dict(
+        line.split("==", 1)
+        for line in (root / "ci" / "constraints.txt").read_text(encoding="utf-8").splitlines()
+        if "==" in line and not line.startswith("#")
+    )
+    for name in ("truststore", "certifi"):
+        assert pinned.get(name) == locked[name], (name, pinned.get(name), locked[name])

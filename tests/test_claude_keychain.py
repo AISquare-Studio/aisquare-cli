@@ -422,7 +422,8 @@ def test_a_keychain_that_would_not_say_is_said_and_offers_no_log_in(
     assert not reading.available and reading.reason == reason and not reading.needs_login
     assert fetch.calls == []
     assert not needs_login(status, reading)  # a log-in would not unlock the Keychain
-    assert str(account_cells(status, reading)["status"]) == f"usage: {reason}"
+    # Said where the usage would be: there is no status column (#8 on the board).
+    assert str(account_cells(status, reading)["session"]) == reason
 
 
 @POSIX_ONLY

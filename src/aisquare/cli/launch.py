@@ -20,15 +20,21 @@ byte-identical to what it always was.
 The environment has one more decision in it since #145: WHICH CLAUDE ACCOUNT.
 ``--account`` names one for this launch; without it the role's binding, the
 project's default and the machine's default are consulted in that order
-(``aisquare accounts default``), and with none of those set the environment is
-exactly what it always was. One resolver, ``services.claude_accounts.choose``,
-answers for ``launch`` and ``fleet spawn`` alike.
+(``aisquare accounts default``). The machine's default is the preferred account,
+the first enabled, signed-in one in the priority order (#406), so with an account
+signed in a launch runs on one. The exception is a role whose binding sets Claude
+Code's directory itself (``team bind --env``/``--env-file``): it keeps that directory
+unless a flag, an account binding, a project default or a headroom pick names an
+account. With no account signed in, the environment is exactly what it always was.
+One resolver, ``services.claude_accounts.choose``, answers for ``launch`` and
+``fleet spawn`` alike.
 """
 
 from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -44,12 +50,12 @@ from rich.text import Text
 from aisquare.cli.common import fail
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import experimental, harness, orchestrator, paths, personas
-from aisquare.core.config import load_config
+from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
 from aisquare.services import claude_accounts as claude_accounts_service
+from aisquare.services import delivery, explainability_ops
 from aisquare.services import explainability as explainability_service
-from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
@@ -158,6 +164,40 @@ never sits in argv, which ``ps`` shows (the name travels as ``AISQUARE_PERSONA``
 _SYSTEM_PROMPT_FLAGS = (SYSTEM_PROMPT_FLAG, "--append-system-prompt")
 
 
+def _with_shared_memory(
+    binary: str, role_args: Sequence[str], operator_args: Sequence[str]
+) -> list[str]:
+    """``role_args`` with ``[accounts] share = ["memory"]``'s shared auto-memory directory for
+    this folder in their ``--settings`` (P2-W7, #198). Claude Code only.
+
+    ONE ``--settings`` for every key aisquare sets: the role's skill listing (P1 WS-1,
+    ``harness.tool_policy``) and the memory directory merge into one JSON. Two flags are not
+    two settings: Claude Code reads one, and the memory stood down on the role's own flag,
+    so a coder or a tester shared no memory at all (sync #367). An ``--settings`` the
+    operator's line carries (``operator_args``: a binding's ``--arg``, a fleet
+    ``extra_args``, what was typed) still wins, as each feature says; the memory's
+    stand-down is said in one dim line.
+    """
+    out = list(role_args)
+    wanted = claude_accounts_service.memory_settings_args(Path.cwd())
+    if not wanted:
+        return out
+    if any(arg == "--settings" or arg.startswith("--settings=") for arg in operator_args):
+        stderr_console().print(
+            "accounts: memory is not shared into this launch — its own --settings wins",
+            style="dim",
+        )
+        return out
+    if not harness.is_default_agent(binary):
+        return out
+    memory = json.loads(wanted[1])
+    for index, arg in enumerate(out[:-1]):
+        if arg == "--settings":
+            out[index + 1] = json.dumps({**json.loads(out[index + 1]), **memory})
+            return out
+    return [*out, *wanted]
+
+
 def _persona_system_prompt(
     name: str, root: Path | None, binary: str, args: Sequence[str]
 ) -> list[str]:
@@ -235,6 +275,18 @@ def _persona_system_prompt(
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
     """Replace this process with the agent (indirection so tests can intercept)."""
     os.execve(binary, argv, env)
+
+
+def _fleet() -> FleetSettings:
+    """The ``[fleet]`` settings the role's tool policy reads; the built-in ones, said, when the
+    config cannot be read. A role's safety list is code, so it holds either way."""
+    try:
+        return load_config().fleet
+    except Exception as exc:  # the same fail-open bar as tracing's config read
+        stderr_console().print(
+            f"tool policy: config unreadable ({exc}) — the built-in deny list", style="dim"
+        )
+        return FleetSettings()
 
 
 def _await_fleet_row(*, say: bool = True) -> None:
@@ -384,6 +436,16 @@ def launch(
             metavar="NAME",
         ),
     ] = None,
+    first_prompt_file: Annotated[
+        Path | None,
+        typer.Option(
+            delivery.FIRST_PROMPT_FLAG,
+            help="A file holding the agent's first message: read, deleted, and passed to the "
+            "agent as its prompt, after `--` (what `fleet spawn` gives a Claude Code agent).",
+            metavar="PATH",
+            hidden=True,
+        ),
+    ] = None,
 ) -> None:
     """Launch an agent session already attached to this project's team board.
 
@@ -488,8 +550,11 @@ def launch(
     # the role's standing shape. For slot 1 that means RESTORING this shell's
     # own two variables (or their absence) over whatever the binding set — a
     # launch announced as `[plain claude]` must not run on the binding's other
-    # login. When NOTHING chose (no flag, no binding, no default — every
-    # machine before #145), the environment is left exactly as it was.
+    # login. The machine's default is the first enabled, signed-in account
+    # (#406), so something chooses whenever one is signed in. Nothing chooses
+    # when none is, or when the role's binding sets Claude Code's directory
+    # itself and no flag, account binding, project default or headroom pick
+    # names an account: then the environment is left as the binding made it.
     try:
         choice = claude_accounts_service.choose(account, role=role, project=project)
     except claude_accounts_service.NoSuchAccount as exc:
@@ -533,8 +598,16 @@ def launch(
     defaults = harness.role_defaults(
         role, binary=resolution.binary, args=[*profile.args, *ctx.args]
     )
-    role_args = defaults.args
-    for note in defaults.notes:
+    # The role's tools and skill listing (`harness.tool_policy`), here as in `team spawn`
+    # and every fleet window (whose `extra_args` arrive in `ctx.args`): its safety list
+    # holds whatever the config says, and every `--disallowedTools` the binding or this
+    # line carries is merged into ONE token beside the role's own flags.
+    policy = harness.tool_policy(
+        role, binary=resolution.binary, args=[*profile.args, *ctx.args], fleet=_fleet()
+    )
+    role_args = [*defaults.args, *policy.args]
+    binding_args, agent_args = policy.strip(profile.args), policy.strip(ctx.args)
+    for note in [*defaults.notes, *policy.notes]:
         # A withheld flag is otherwise invisible: the launch succeeds and the
         # role degrades silently (a ui-tester with no browser reopens every UI
         # task). Same surface and style as the tracing notes below.
@@ -567,7 +640,7 @@ def launch(
             )
         # The EFFECTIVE argument list, not just what this invocation typed.
         # `argv` below is
-        # `[binary, *profile.args, *role_args, *ctx.args, *pinned_id]`, so a
+        # `[binary, *binding_args, *role_args, *agent_args, *pinned_id]`, so a
         # role bound with `--session-id`, `--resume` or `--continue` via
         # `team bind --arg` — or handed one by its own `RoleProfile.default_args`
         # — carries it here without appearing in `ctx.args`.
@@ -579,7 +652,7 @@ def launch(
         # board row and one Run. `team spawn` already passes its profile args
         # (cli/team.py), so this path was the asymmetric one.
         identity = explainability_service.plan_session_identity(
-            resolution.binary, [*profile.args, *role_args, *ctx.args]
+            resolution.binary, [*binding_args, *role_args, *agent_args]
         )
         # The ACTIVE target's overrides folded onto the settings the wiring
         # reads. `explainability enable --target prod --proxy-url …` writes
@@ -637,12 +710,35 @@ def launch(
     # resolve inside cannot fail here.
     persona_args = (
         _persona_system_prompt(
-            persona, persona_root, resolution.binary, [*profile.args, *role_args, *ctx.args]
+            persona, persona_root, resolution.binary, [*binding_args, *role_args, *agent_args]
         )
         if persona is not None
         else []
     )
-    argv = [resolution.binary, *profile.args, *role_args, *persona_args, *ctx.args, *pinned_id]
+    role_args = _with_shared_memory(resolution.binary, role_args, [*binding_args, *agent_args])
+    argv = [resolution.binary, *binding_args, *role_args, *persona_args, *agent_args, *pinned_id]
+    # The first message (P0-W1a, #122), last: Claude Code's positional prompt, after `--`.
+    # Read from a file and the file deleted, so the window's command, which tmux carries and
+    # the row records, never holds the text, and a replay of that command finds no file and
+    # starts without one: a restart is given a line of its own.
+    if first_prompt_file is not None:
+        try:
+            first = delivery.take_prompt_file(first_prompt_file)
+        except delivery.NotAPromptFile as exc:
+            stderr_console().print(
+                f"first prompt: {exc} — not read, not deleted; starting without one",
+                style="dim",
+                markup=False,
+            )
+            first = ""
+        if first is None:
+            stderr_console().print(
+                f"first prompt: {first_prompt_file} is not there (read by an earlier launch) "
+                "— starting without one",
+                style="dim",
+            )
+        elif first:
+            argv += delivery.argv_tail(first)
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling

@@ -30,7 +30,7 @@ from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core import claude_accounts as core
 from aisquare.core import paths
-from aisquare.core.config import load_config
+from aisquare.core.config import AccountsSettings, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import SqliteStore, store_session
 from aisquare.models import ProjectInfo
@@ -78,10 +78,24 @@ def _positions(accounts: list[Any]) -> list[int | None]:
     return [account.position for account in accounts]
 
 
+def _by_order() -> None:
+    """``[accounts] pick = "default"``: no headroom rung, so the order alone decides."""
+    config = load_config()
+    config.accounts = AccountsSettings(pick="default")
+    save_config(config)
+
+
+def _signed_in(slot: int) -> Any:
+    """Sign slot ``slot`` in (slot 1 is the plain claude's directory) and return it."""
+    account = next(a for a in core.list_accounts() if a.slot == slot)
+    _sign_in(account, f"slot{slot}@example.com")
+    return account
+
+
 # --------------------------------------------------------------------------- the registry
 
 
-def test_a_fresh_machine_arranges_its_slots_in_slot_order_and_marks_nothing_default(
+def test_a_fresh_machine_arranges_its_slots_in_slot_order_and_prefers_the_first_signed_in(
     fake_home: Path,
 ) -> None:
     """The migration is the first read: every existing machine is the no-rows case."""
@@ -92,19 +106,22 @@ def test_a_fresh_machine_arranges_its_slots_in_slot_order_and_marks_nothing_defa
 
     assert _slots(arranged) == [1, 2, 3]  # exactly the order `accounts list` always had
     assert _positions(arranged) == [1, 2, 3]  # dense, 1 first
-    assert not any(a.is_default for a in arranged)  # nobody chose, so nothing is chosen
     assert all(a.alias is None and not a.disabled for a in arranged)
     with store_session() as store:
         assert [record.slot for record in store.claude_accounts()] == [1, 2, 3]
-    assert service.machine_default() is None
+    assert service.machine_default() is None  # nobody is signed in, so nobody runs a launch
+
+    _signed_in(3)
+    preferred = service.machine_default()
+    assert preferred is not None and preferred.slot == 3  # the first that can launch
 
 
 def test_a_vanished_directory_drops_its_row_and_closes_the_gap(fake_home: Path) -> None:
     """The directories are the record; a row whose directory is gone is not trusted."""
     second = core.create_account()
     core.create_account()
-    service.set_default("2")
-    assert service.machine_default() is not None
+    _signed_in(2)
+    assert service.machine_default() == service.resolve("2")
 
     shutil.rmtree(second.config_dir)  # moved by hand, not through `remove`
 
@@ -143,16 +160,21 @@ def test_pruning_several_vanished_slots_renumbers_the_order_once(
         assert [record.slot for record in store.claude_accounts()] == [1, 5]
 
 
-def test_set_default_marks_exactly_one_slot_and_clear_unmarks_it(fake_home: Path) -> None:
+def test_set_default_moves_the_slot_to_rank_1_and_the_machine_default_cannot_be_cleared(
+    fake_home: Path,
+) -> None:
+    """``accounts default <ref>`` at machine level is ``move <ref> top`` (#8 on the board):
+    rank 1 IS the default, so there is no second thing to pick and nothing to clear."""
     core.create_account()
     core.create_account()
 
     assert service.set_default("2") is not None
-    assert [a.slot for a in service.list_accounts() if a.is_default] == [2]
+    assert _slots(service.list_accounts()) == [2, 1, 3]
     service.set_default("3")
-    assert [a.slot for a in service.list_accounts() if a.is_default] == [3]  # moved, not added
-    assert service.set_default(None) is None
-    assert not any(a.is_default for a in service.list_accounts())
+    assert _slots(service.list_accounts()) == [3, 2, 1]  # moved to the top, the rest kept
+    with pytest.raises(service.AccountsError, match="cannot be cleared"):
+        service.set_default(None)
+    assert _slots(service.list_accounts()) == [3, 2, 1]
     with pytest.raises(service.NoSuchAccount, match="slot 9"):
         service.set_default("9")
 
@@ -273,15 +295,16 @@ def test_order_and_move_rewrite_positions_densely(fake_home: Path) -> None:
 def test_disable_keeps_a_slot_out_of_automatic_choice_but_not_out_of_reach(
     fake_home: Path,
 ) -> None:
+    _by_order()
     core.create_account()
-    service.set_default("2")
+    _signed_in(2)
+    service.move("2", "top")
 
     disabled = service.set_disabled("2", True)
-    assert disabled.disabled and disabled.is_default  # still the default on paper…
+    assert disabled.disabled and disabled.position == 1  # still rank 1 on paper…
 
     choice = service.choose(role="coder", project=None)
-    assert choice.account is None  # …but never picked
-    assert any("disabled" in note for note in choice.notes), choice.notes
+    assert choice.account is None  # …but never picked, and slot 1 has no login
     assert service.choose("2").account is not None  # the flag is the operator insisting
     assert service.set_disabled("2", False).disabled is False
     assert service.choose(role="coder", project=None).account is not None
@@ -290,18 +313,51 @@ def test_disable_keeps_a_slot_out_of_automatic_choice_but_not_out_of_reach(
 # --------------------------------------------------------------------------- the resolver
 
 
+def test_choose_with_nothing_more_specific_picks_rank_1(fake_home: Path) -> None:
+    """The machine default is the first enabled, signed-in account in priority order (#8)."""
+    _by_order()
+    core.create_account()
+    core.create_account()
+    for slot in (1, 2, 3):
+        _signed_in(slot)
+
+    first = service.choose()
+    assert first.account is not None and first.account.slot == 1
+    assert first.source == "preferred"
+    assert first.describe() == "plain claude · preferred (rank 1)"
+
+    service.move("3", "top")  # moving a slot to the top changes the pick
+    moved = service.choose()
+    assert moved.account is not None and moved.account.slot == 3
+
+    service.set_disabled("3", True)  # a disabled rank 1 hands the place to the next
+    skipped = service.choose()
+    assert skipped.account is not None and skipped.account.slot == 1
+    assert skipped.describe() == "plain claude · preferred (rank 2)"
+
+
+def test_choose_passes_over_a_rank_1_with_no_login(fake_home: Path) -> None:
+    _by_order()
+    core.create_account()
+    _signed_in(2)  # slot 1, rank 1, has no login: it cannot run a launch
+
+    choice = service.choose()
+    assert choice.account is not None and choice.account.slot == 2 and choice.notes == []
+
+
 def test_choose_walks_the_ladder_and_the_top_rung_wins(fake_home: Path, work: ProjectInfo) -> None:
+    _by_order()
     core.create_account()
     core.create_account()
 
-    # Nothing arranged: no choice, and no source — the launch leaves its environment alone.
+    # Nothing signed in: no choice, and no source — the launch leaves its environment alone.
     nothing = service.choose(role="coder", project=work)
     assert nothing.account is None and nothing.source is None and nothing.notes == []
 
-    service.set_default("2")
+    _signed_in(2)
     machine = service.choose(role="coder", project=work)
     assert machine.account is not None and machine.account.slot == 2
-    assert machine.source == "machine default"
+    assert machine.source == "preferred"
 
     service.set_default("3", project=work)
     per_project = service.choose(role="coder", project=work)
@@ -309,7 +365,7 @@ def test_choose_walks_the_ladder_and_the_top_rung_wins(fake_home: Path, work: Pr
     assert per_project.source == "project default"
     # Another project is untouched by this one's default.
     elsewhere = ProjectInfo(id="prj_other", root=Path("/elsewhere"))
-    assert service.choose(role="coder", project=elsewhere).source == "machine default"
+    assert service.choose(role="coder", project=elsewhere).source == "preferred"
 
     settings_service.bind_role("coder", account="1")
     bound = service.choose(role="coder", project=work)
@@ -344,16 +400,17 @@ def test_choose_refuses_a_rung_that_names_a_missing_account_and_says_which(
 def test_a_disabled_binding_or_default_is_skipped_with_a_note(
     fake_home: Path, work: ProjectInfo
 ) -> None:
+    _by_order()
     core.create_account()
     core.create_account()
+    _signed_in(3)
     settings_service.bind_role("coder", account="2")
-    service.set_default("3")
     service.set_disabled("2", True)
 
     choice = service.choose(role="coder", project=work)
 
-    assert choice.account is not None and choice.account.slot == 3  # fell through to the default
-    assert choice.source == "machine default"
+    assert choice.account is not None and choice.account.slot == 3  # fell through to rank 1
+    assert choice.source == "preferred"
     assert choice.notes == ["account 2 (bound to coder) is disabled — skipped"]
 
 
@@ -395,9 +452,7 @@ def test_the_agent_header_and_fleet_ls_name_the_account_as_the_rest_of_the_cli_d
     assert "  account 2  " in fleet_cli._agent_line(status(2), {})
 
 
-def test_a_disabled_account_cannot_be_made_the_default_and_disabling_the_default_is_said(
-    fake_home: Path, runner: CliRunner
-) -> None:
+def test_a_disabled_account_cannot_be_made_the_default(fake_home: Path, runner: CliRunner) -> None:
     """Accepted silently, the default was a rung every launch skipped (third round)."""
     core.create_account()
     core.create_account()
@@ -406,13 +461,7 @@ def test_a_disabled_account_cannot_be_made_the_default_and_disabling_the_default
         service.set_default("2")
     refused = runner.invoke(app, ["accounts", "default", "2"])
     assert refused.exit_code == 1 and "enable it first" in refused.output
-    assert service.machine_default() is None
-
-    service.set_default("3")
-    said = runner.invoke(app, ["accounts", "disable", "3"])
-    assert said.exit_code == 0, said.output
-    assert "it is the machine default: launches fall through" in said.stdout
-    assert service.machine_default() is not None  # the choice is kept (a temporary disable)
+    assert _slots(service.list_accounts()) == [1, 2, 3]  # nothing moved
 
 
 def test_a_slot_removed_between_the_reconcile_and_the_write_is_a_sentence(
@@ -428,7 +477,7 @@ def test_a_slot_removed_between_the_reconcile_and_the_write_is_a_sentence(
 
     monkeypatch.setattr(SqliteStore, "set_claude_account_alias", vanished)
     monkeypatch.setattr(SqliteStore, "set_claude_account_disabled", vanished)
-    monkeypatch.setattr(SqliteStore, "set_claude_account_default", vanished)
+    monkeypatch.setattr(SqliteStore, "order_claude_accounts", vanished)
     calls: list[Callable[[], object]] = [
         lambda: service.set_alias("2", "work"),
         lambda: service.set_disabled("2", True),
@@ -439,27 +488,51 @@ def test_a_slot_removed_between_the_reconcile_and_the_write_is_a_sentence(
             call()
 
 
+def test_a_machine_default_on_a_slot_removed_after_it_was_resolved_is_refused(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """The real store, not a mocked ``KeyError``: ``order_claude_accounts`` ignores an unknown
+    slot, so a slot removed between ``resolve()`` and the write printed ``✓ … moved to rank
+    1`` over an order it had not changed (review of #406 in #401, n4). The retired
+    ``set_claude_account_default`` raised there."""
+    core.create_account()
+    gone = core.create_account()
+    resolve = service.resolve
+
+    def removed_meanwhile(ref: str) -> Any:
+        account = resolve(ref)
+        shutil.rmtree(gone.config_dir)  # by another process, after the lookup
+        return account
+
+    monkeypatch.setattr(service, "resolve", removed_meanwhile)
+    with pytest.raises(service.NoSuchAccount, match="slot 3 any more"):
+        service.set_default("3")
+    monkeypatch.setattr(service, "resolve", resolve)
+    assert _slots(service.list_accounts()) == [1, 2]  # nothing moved, the slot dropped
+
+
 # --------------------------------------------------------------------------- launch and spawn
 
 
 def test_launch_runs_on_the_machine_default_and_stays_byte_identical_without_one(
     fake_home: Path, work: ProjectInfo, handover: dict[str, Any], runner: CliRunner
 ) -> None:
+    _by_order()
     second = core.create_account()
 
-    # The control first: nothing arranged, nothing touched — the pre-#145 launch.
+    # The control first: nothing signed in, nothing touched — the pre-#145 launch.
     plain = runner.invoke(app, ["launch", "coder"])
     assert plain.exit_code == 0, plain.output
     assert core.CONFIG_DIR_VAR not in handover["env"]
     assert "[" not in plain.stderr.split("Launching", 1)[1].split(" as ")[0]
 
-    service.set_default("2")
+    _sign_in(second, "two@example.com")
     handover.clear()
     result = runner.invoke(app, ["launch", "coder"])
     assert result.exit_code == 0, result.output
     assert handover["env"][core.CONFIG_DIR_VAR] == str(second.config_dir)
     assert handover["env"][core.TMPDIR_VAR] == str(second.tmp_dir)
-    assert "[account 2 · machine default]" in result.stderr
+    assert "[account 2 · preferred (rank 2)]" in result.stderr
 
     # A binding's env loses to the default, as it loses to the flag.
     handover.clear()
@@ -484,16 +557,80 @@ def test_launch_runs_on_the_machine_default_and_stays_byte_identical_without_one
     assert "[Work laptop]" in spaced.stderr
 
 
+@pytest.mark.parametrize("bound", ["env", "env_files"])
+@pytest.mark.parametrize("pick", ["default", "headroom"], ids=["pick-default", "unreadable-usage"])
+def test_rank_1_never_overrides_a_hand_written_config_dir_binding(
+    fake_home: Path,
+    work: ProjectInfo,
+    handover: dict[str, Any],
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    pick: str,
+    bound: str,
+) -> None:
+    """``team bind coder --env CLAUDE_CONFIG_DIR=/hand/written`` launched there before rank 1
+    was the default, and must still: the preferred rung is a silent default, and applying
+    slot 1 RESTORES this shell's variables over the binding's (review of #406, M1). With
+    ``pick = "default"``, and with headroom on but no usage readable, which falls to it. The
+    directory bound as a value (``--env``) or read from a file (``--env-file``) alike."""
+    config = load_config()
+    config.accounts = AccountsSettings(pick=pick)
+    save_config(config)
+    monkeypatch.setattr(service, "_http_get", lambda url, headers, timeout: (503, b""))
+    core.create_account()
+    _signed_in(1)
+    _signed_in(2)
+    if bound == "env":
+        settings_service.bind_role("coder", env={core.CONFIG_DIR_VAR: "/hand/written"})
+    else:
+        secret = fake_home / "config-dir.txt"
+        secret.write_text("/hand/written\n", encoding="utf-8")
+        settings_service.bind_role("coder", env_files={core.CONFIG_DIR_VAR: str(secret)})
+
+    choice = service.choose(role="coder", project=work)
+    assert choice.account is None and choice.source is None  # nothing chose: left as written
+    launched = runner.invoke(app, ["launch", "coder"])
+    assert launched.exit_code == 0, launched.output
+    assert handover["env"][core.CONFIG_DIR_VAR] == "/hand/written"
+
+    # The control: a role with no such binding gets rank 1, and an account binding or the
+    # flag still win over the hand-written directory, as they always did.
+    assert service.choose(role="tester", project=work).source == "preferred"
+    assert service.choose("2", role="coder", project=work).source == "flag"
+    settings_service.bind_role("coder", account="2")
+    assert service.choose(role="coder", project=work).source == "role binding"
+
+
+def test_a_default_set_by_an_older_build_is_rank_1_on_the_next_read(fake_home: Path) -> None:
+    """The retired ``is_default`` flag is folded into the order by the registry's read, keyed
+    on the flag and not on a schema version (review of #406, C1)."""
+    core.create_account()
+    core.create_account()
+    service.list_accounts()  # the rows exist, in slot order
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        raw.execute("UPDATE claude_account SET is_default = 1 WHERE slot = 3")  # an old build
+        raw.commit()
+    finally:
+        raw.close()
+
+    assert _slots(service.list_accounts()) == [3, 1, 2]
+    service.move("1", "top")  # cleared once promoted: a later reorder stands
+    assert _slots(service.list_accounts()) == [1, 3, 2]
+
+
 def test_launch_says_why_a_rung_was_skipped_and_refuses_a_dangling_one(
     fake_home: Path, work: ProjectInfo, handover: dict[str, Any], runner: CliRunner
 ) -> None:
+    _by_order()
     core.create_account()
-    service.set_default("2")
+    _signed_in(2)
+    settings_service.bind_role("coder", account="2")
     service.set_disabled("2", True)
 
     skipped = runner.invoke(app, ["launch", "coder"])
     assert skipped.exit_code == 0, skipped.output
-    assert "accounts: account 2 (machine default) is disabled — skipped" in skipped.stderr
+    assert "accounts: account 2 (bound to coder) is disabled — skipped" in skipped.stderr
     assert core.CONFIG_DIR_VAR not in handover["env"]  # fell through to "touch nothing"
 
     settings_service.bind_role("coder", account="9")
@@ -514,7 +651,6 @@ def test_remove_forgets_the_default_the_alias_and_every_project_default_that_nam
     fake_home: Path, work: ProjectInfo
 ) -> None:
     second = core.create_account()
-    service.set_default("2")
     service.set_default("2", project=work)
     service.set_alias("2", "work")
     core.create_account()  # slot 3, so the order has something left to renumber
@@ -525,6 +661,7 @@ def test_remove_forgets_the_default_the_alias_and_every_project_default_that_nam
     settings_service.bind_role("coder", account="3")  # another slot: untouched
     notes: list[str] = []
 
+    assert service.machine_default() == service.resolve("2")
     service.remove(second, notes=notes)
 
     assert service.machine_default() is None
@@ -546,7 +683,7 @@ def test_remove_forgets_the_default_the_alias_and_every_project_default_that_nam
     again = core.create_account()
     assert again.slot == 2
     fresh = service.resolve("2")
-    assert fresh.alias is None and not fresh.is_default and not fresh.disabled
+    assert fresh.alias is None and fresh.position == 3 and not fresh.disabled  # queued last
     with pytest.raises(service.NoSuchAccount):
         service.resolve("work")
     with pytest.raises(service.NoSuchAccount, match=r"reviewer.*two@example\.com"):
@@ -585,14 +722,14 @@ def test_a_damaged_store_costs_the_arrangement_never_the_listing_or_the_launch(
 ) -> None:
     _installed(monkeypatch)
     core.create_account()
-    service.set_default("2")  # a real arrangement, about to become unreadable
+    service.set_alias("2", "kept")  # a real arrangement, about to become unreadable
     paths.db_path().write_bytes(CORRUPT)
 
     listing = runner.invoke(app, ["--json", "accounts", "list"])
     assert listing.exit_code == 0, listing.output
     rows = json.loads(listing.stdout)["accounts"]
     assert [row["account"]["slot"] for row in rows] == [1, 2]  # the directories still list
-    assert not any(row["account"]["is_default"] for row in rows)  # the arrangement is what is lost
+    assert not any(row["account"]["alias"] for row in rows)  # the arrangement is what is lost
 
     launched = runner.invoke(app, ["launch", "coder"])
     assert launched.exit_code == 0, launched.output
@@ -641,9 +778,13 @@ def test_accounts_default_sets_shows_and_clears_at_all_three_levels(
     assert "machine default: none" in shown.stdout
     assert "no default of its own" in shown.stdout  # the cwd's project is reported
 
+    _signed_in(2)
+    _signed_in(3)
     machine = runner.invoke(app, ["accounts", "default", "2"])
     assert machine.exit_code == 0, machine.output
-    assert "✓ machine default: slot 2" in machine.stdout
+    assert "✓ machine default: slot 2" in machine.stdout and "moved to rank 1" in machine.stdout
+    assert "not signed in" not in machine.stdout  # signed in: nothing to warn about
+    assert _slots(service.list_accounts()) == [2, 1, 3]  # an alias of `move 2 top`
 
     per_project = runner.invoke(app, ["accounts", "default", "3", "--project", "."])
     assert per_project.exit_code == 0, per_project.output
@@ -662,8 +803,13 @@ def test_accounts_default_sets_shows_and_clears_at_all_three_levels(
 
     listed = runner.invoke(app, ["accounts", "list"])
     assert listed.exit_code == 0, listed.output
-    starred = [line for line in listed.stdout.splitlines() if line.lstrip().startswith("*")]
-    assert len(starred) == 1 and " 2 " in starred[0]  # exactly one star, on slot 2
+    rows = [line.split() for line in listed.stdout.splitlines()]
+    assert [row[0] for row in rows if row and row[0].isdigit()] == ["2", "1", "3"]  # by rank
+    assert "*" not in listed.stdout and "no default account" not in listed.stdout  # no star
+    ordered = runner.invoke(app, ["accounts", "order", "2"])
+    assert ordered.exit_code == 0, ordered.output
+    assert ordered.stdout.splitlines()[0].startswith("1. slot 2")  # rank 1 first, unmarked
+    assert "*" not in ordered.stdout and "★" not in ordered.stdout
 
     bindings = runner.invoke(app, ["team", "bind"])
     assert "coder" in bindings.stdout and "account=1" in bindings.stdout
@@ -671,7 +817,6 @@ def test_accounts_default_sets_shows_and_clears_at_all_three_levels(
     for args in (
         ["accounts", "default", "--clear", "--role", "coder"],
         ["accounts", "default", "--clear", "--project", "."],
-        ["accounts", "default", "--clear"],
     ):
         cleared = runner.invoke(app, args)
         assert cleared.exit_code == 0, cleared.output
@@ -679,7 +824,11 @@ def test_accounts_default_sets_shows_and_clears_at_all_three_levels(
         "coder" not in load_config().team.profiles
         or not load_config().team.profiles["coder"].account
     )
-    assert service.machine_default() is None and service.project_default(work) is None
+    assert service.project_default(work) is None
+    # The machine's is rank 1 of the order: there is always a first, so no clearing it.
+    kept = runner.invoke(app, ["accounts", "default", "--clear"])
+    assert kept.exit_code == 1 and "cannot be cleared" in kept.output
+    assert service.machine_default() == service.resolve("2")
 
     both = runner.invoke(
         app, ["--json", "accounts", "default", "2", "--project", ".", "--role", "x"]
@@ -691,6 +840,20 @@ def test_accounts_default_sets_shows_and_clears_at_all_three_levels(
     assert unknown_role.exit_code == 1
     assert json.loads(unknown_role.stdout)["error"] == "unknown_account"
     assert "coder" not in load_config().team.profiles  # a refused reference binds nothing
+
+
+def test_making_a_signed_out_account_the_default_says_launches_skip_it(
+    fake_home: Path, runner: CliRunner
+) -> None:
+    """Rank 1 is the default only for an account that can launch (review of #406, m1)."""
+    core.create_account()
+    moved = runner.invoke(app, ["accounts", "default", "2"])
+    assert moved.exit_code == 0, moved.output
+    assert "moved to rank 1" in moved.stdout
+    assert "not signed in, so launches skip it until it is: aisquare accounts run 2" in (
+        moved.stdout
+    )
+    assert _slots(service.list_accounts()) == [2, 1]
 
 
 def test_a_project_default_lists_the_project_it_is_set_for(
@@ -827,7 +990,7 @@ def test_team_bind_account_resolves_the_reference_before_writing_it(
 # --------------------------------------------------------------------------- doctor
 
 
-def test_doctor_warns_when_the_default_cannot_launch_and_is_silent_when_nothing_is_arranged(
+def test_doctor_names_the_machine_default_under_a_binding_and_is_silent_when_nothing_is_arranged(
     fake_home: Path, work: ProjectInfo
 ) -> None:
     core.create_account()  # slot 2, signed in below
@@ -837,24 +1000,17 @@ def test_doctor_warns_when_the_default_cannot_launch_and_is_silent_when_nothing_
     names = {check.name for check in diagnostics._claude_accounts_checks()}
     assert names == {"claude-accounts"}  # the store exists, nothing is arranged: no new lines
 
-    service.set_default("3")
+    service.set_default("3", project=work)  # something arranged: the rung under it is said
     checks = {check.name: check for check in diagnostics._claude_accounts_checks()}
     default = checks["claude-account-default"]
-    assert default.status.value == "warn" and "not signed in" in default.detail
-    assert default.fix is not None and "aisquare accounts run 3" in default.fix
-
-    service.set_default("2")
-    checks = {check.name: check for check in diagnostics._claude_accounts_checks()}
-    assert checks["claude-account-default"].status.value == "ok"
-    assert "slot 2" in checks["claude-account-default"].detail
+    assert default.status.value == "ok" and "slot 2" in default.detail  # rank 1 has no login
 
     service.set_disabled("2", True)
     checks = {check.name: check for check in diagnostics._claude_accounts_checks()}
     assert checks["claude-account-default"].status.value == "warn"
-    assert "disabled" in checks["claude-account-default"].detail
+    assert "no enabled account is signed in" in checks["claude-account-default"].detail
 
     settings_service.bind_role("coder", account="9")  # straight to config: `team bind` would refuse
-    service.set_default("3", project=work)
     shutil.rmtree(third.config_dir)
     checks = {check.name: check for check in diagnostics._claude_accounts_checks()}
     dangling = checks["claude-account-bindings"]
@@ -911,8 +1067,7 @@ def test_doctor_flags_a_project_default_that_outlives_the_last_added_account(
     "a project default is a registry row ``forget_arrangement`` drops with its slot". It is
     a project setting — ``forget_arrangement`` drops it best effort, and a slot directory
     deleted by hand drops none — so every launch in that project was refused while doctor
-    said nothing. A disabled machine default on slot 1 went unsaid the same way (review of
-    the #205 fold, round 3)."""
+    said nothing (review of the #205 fold, round 3)."""
     only = core.create_account()  # slot 2, the only added account
     _sign_in(only, "two@example.com")
     service.set_default("2", project=work)
@@ -928,12 +1083,6 @@ def test_doctor_flags_a_project_default_that_outlives_the_last_added_account(
 
     service.set_default(None, project=work)
     assert diagnostics._claude_accounts_checks() == []  # nothing arranged is left to report
-
-    service.set_default("1")
-    service.set_disabled("1", True)
-    checks = {check.name: check for check in diagnostics._claude_accounts_checks()}
-    default = checks["claude-account-default"]
-    assert default.status.value == "warn" and "disabled" in default.detail
 
 
 def test_doctor_checks_every_binding_against_one_registry_read(

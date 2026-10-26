@@ -565,8 +565,8 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
     _record_turn("trc_alpha", alpha)
     _record_turn("trc_beta", beta)
     data_dir = paths.project_data_dir(alpha)
-    (data_dir / "snapshot").mkdir(parents=True)
-    (data_dir / "snapshot" / "pack.xml").write_text("<pack/>", encoding="utf-8")
+    (data_dir / "brain").mkdir(parents=True)
+    (data_dir / "brain" / "page.md").write_text("a page", encoding="utf-8")
 
     result = runner.invoke(app, ["--json", "project", "forget", "alpha", "--purge"])
 
@@ -583,6 +583,7 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
         "metric": 1,
         "usage_turn": 1,
         "usage_session": 1,
+        "brief": 0,
         "project_setting": 0,
         "project_explainability": 0,
         "project_destination": 0,
@@ -607,6 +608,38 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
     assert _raw("SELECT COUNT(*) FROM usage_session WHERE project_id = ?", (beta,)) == [(1,)]
     assert _raw("SELECT value FROM team_meta WHERE key = ?", (f"distill_seq:{beta}",)) == [("7",)]
     assert _raw("SELECT COUNT(*) FROM metric WHERE project_id = ?", (beta,)) == [(1,)]
+
+
+def test_forget_purge_deletes_brief_rows(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``project forget --purge`` deletes the project's work briefs, counted, and leaves a
+    bystander's. The table carries no foreign key, so the purge has to name it."""
+    from aisquare.services import briefs, team
+
+    alpha = _register(runner, monkeypatch, work_dir / "alpha")
+    beta = _register(runner, monkeypatch, work_dir / "beta")
+    for directory in ("alpha", "alpha", "beta"):
+        monkeypatch.chdir(work_dir / directory)
+        assert runner.invoke(app, ["team", "on"]).exit_code == 0
+        created = briefs.create(f"{directory} brief", ["a requirement"])
+        task, _ = team.add_task(f"{directory} task")
+        (work_dir / directory / "shot.png").write_bytes(b"a screenshot")
+        briefs.finding(created.id, "R1", task_ref=task.id, summary="broken",
+                       artifact=work_dir / directory / "shot.png")  # fmt: skip
+    monkeypatch.chdir(work_dir)
+    kept = paths.aisquare_home() / "briefs"
+    assert len(list((kept / alpha).iterdir())) == 2 and (kept / beta).is_dir()
+    assert _raw("SELECT COUNT(*) FROM brief WHERE project_id = ?", (alpha,)) == [(2,)]
+
+    result = runner.invoke(app, ["--json", "project", "forget", "alpha", "--purge"])
+
+    assert result.exit_code == 0, result.output
+    assert _json(result.stdout)["removed"]["brief"] == 2
+    assert _raw("SELECT COUNT(*) FROM brief WHERE project_id = ?", (alpha,)) == [(0,)]
+    assert _raw("SELECT COUNT(*) FROM brief WHERE project_id = ?", (beta,)) == [(1,)]
+    assert not (kept / alpha).exists(), "the purged project's kept artifacts went with it"
+    assert len(list((kept / beta).iterdir())) == 1
 
 
 def test_purge_copes_with_hundreds_of_recorded_sessions(
@@ -1517,7 +1550,7 @@ def test_forget_purge_completes_and_reports_a_pin_it_could_not_move(
     alpha = _register(runner, monkeypatch, work_dir / "alpha")
     beta = _register(runner, monkeypatch, work_dir / "beta")  # cwd is beta: active, unpinned
     data_dir = paths.project_data_dir(beta)
-    (data_dir / "snapshot").mkdir(parents=True)
+    (data_dir / "brain").mkdir(parents=True)
     body = _corrupt_state()
 
     result = runner.invoke(app, ["--json", "project", "forget", "beta", "--purge"])
@@ -1558,7 +1591,7 @@ def test_forget_purge_of_the_last_project_reports_a_state_file_it_can_no_longer_
     the data directory was never removed. The refusal names the file, as a write's does."""
     alpha = _register(runner, monkeypatch, work_dir / "alpha")  # the cwd's: active, unpinned
     data_dir = paths.project_data_dir(alpha)
-    (data_dir / "snapshot").mkdir(parents=True)
+    (data_dir / "brain").mkdir(parents=True)
     real_purge = SqliteStore.purge_project
     unreadable = False
 

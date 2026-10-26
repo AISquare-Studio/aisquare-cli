@@ -161,7 +161,11 @@ adapter.**
     through `hook codex`.
 - **One priority order over every agent's accounts, and a launch's agent from it**
   (the owner's call on r17 item 7). The Accounts page is one table, each row naming its
-  agent, and ↑/↓ (`accounts order`, `accounts move`) move an account past any other's.
+  agent in two letters before its name (`Cl`, `Co`; the full name is the tooltip), and ↑/↓
+  (`accounts order`, `accounts move`) move an account past any other's. The table is
+  163 cells wide, what a 200-column screen shows beside the sidebar, so *Disable* and
+  *Remove* are on screen (0.9.0's was four cells over, and a column of its own for the
+  agent made it sixteen); the *signed in as* column gave up four cells for it.
   A launch that nothing pins runs the agent of the first usable account in that order
   with room, by the headroom rule and `switch_at` (`[accounts] pick`), and on that
   account, from the same usage reading; with nothing measured, or `pick = "default"`,

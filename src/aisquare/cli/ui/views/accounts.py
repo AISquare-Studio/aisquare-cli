@@ -11,9 +11,9 @@ docs/plans/claude-accounts.md. Two halves, one page:
 - **Coding agent accounts** — ONE table (:data:`LAYOUT`) of every agent's slots, in the
   one priority order a launch that names no agent picks its agent from (owner, PR #113):
   one aligned row per slot that ``services.claude_accounts`` knows, in priority order:
-  *↑*/*↓*, the slot, its agent, its name, who is signed in, the five-hour and seven-day
-  windows (a bar and the percent USED, or why there is no reading) with *Log in* beside
-  them, when each window resets, then the plan.
+  *↑*/*↓*, the slot, its name behind its agent's two-letter mark, who is signed in, the
+  five-hour and seven-day windows (a bar and the percent USED, or why there is no reading)
+  with *Log in* beside them, when each window resets, then the plan.
   *Add* makes a fresh slot and opens Claude Code's own login in a tmux window
   rendered right here (a ``TerminalPane``); the view polls the slot's
   directory and, the moment Claude Code has written a login into it, records
@@ -340,9 +340,9 @@ class Column(NamedTuple):
 
 COLUMNS: tuple[Column, ...] = (
     Column("slot", "#", 2),
-    Column("agent", "agent", 11),
-    Column("name", "name", 16),
-    Column("email", "signed in as", 24),
+    Column("agent", "agent", 2),
+    Column("name", "agent name", 16),
+    Column("email", "signed in as", 20),
     Column("session", "session used", 16),
     Column("week", "week used", 10),
     Column("session-resets", "session resets", 21),
@@ -350,6 +350,12 @@ COLUMNS: tuple[Column, ...] = (
     Column("plan", "plan", 7),
 )
 """The table's data columns, left to right; the header and every row are cut from them.
+
+The ``agent`` cell is not a column of its own: it is the first word of the name's column
+(:func:`agent_marks`, two letters), whose 16 cells it shares with the name. As a column of
+11 it took the table to 179 cells, past the 163 a 200-column screen shows, and the buttons
+at the end of a line were cut (the ui-tester at 200x50, r23 of #113). The ``email`` column
+gave up four cells to fit.
 
 Fixed widths, so a column starts at the same x on every row whatever its values:
 a value too long for its cell ends in ``…`` and never wraps (the whole text is the
@@ -374,11 +380,7 @@ the same flow as a secondary action on a row that reads fine (:func:`offers_logi
 
 LAYOUT: tuple[Column, ...] = (
     *MOVE_COLUMNS,
-    *(
-        column
-        for column in COLUMNS
-        if column.key in ("slot", "agent", "name", "email", "session", "week")
-    ),
+    *(column for column in COLUMNS if column.key in ("slot", "name", "email", "session", "week")),
     LOGIN_COLUMN,
     *(column for column in COLUMNS if column.key.endswith("-resets")),
     *(column for column in COLUMNS if column.key == "plan"),
@@ -387,6 +389,21 @@ LAYOUT: tuple[Column, ...] = (
 the usage that says why it is there — what needs doing reads, and can be done, without
 scrolling sideways at 160 columns — and the plan last; then the arranging buttons
 (:data:`_ACTIONS`)."""
+
+
+def agent_marks() -> dict[str, str]:
+    """Each agent with account slots by the shortest start of its label, two characters at
+    least, that no other agent's label starts with (``Cl`` for Claude Code, ``Co`` for Codex):
+    the first word of the name's column. The full label is the mark's tooltip."""
+    labels = {agent: core.agent_label(agent) for agent in core.account_agents()}
+    marks: dict[str, str] = {}
+    for agent, label in labels.items():
+        others = [other.lower() for each, other in labels.items() if each != agent]
+        size = 2
+        while size < len(label) and any(other.startswith(label[:size].lower()) for other in others):
+            size += 1
+        marks[agent] = label[:size]
+    return marks
 
 
 def offers_login_again(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> bool:
@@ -500,7 +517,7 @@ def account_cells(
     tokened = core.kind(account.agent).network_usage
     cells = {column.key: Text() for column in COLUMNS}
     cells["slot"] = Text(str(account.slot), style="bold", justify="right")
-    cells["agent"] = Text(core.agent_label(account.agent), style="dim")
+    cells["agent"] = Text(agent_marks().get(account.agent, account.agent[:2]), style="dim")
     cells["name"] = Text(status.label, style="dim cyan" if account.disabled else "cyan")
     if status.identity is not None:
         cells["email"] = Text(status.identity.email)
@@ -723,7 +740,7 @@ _ACTIONS: tuple[tuple[str, str, int], ...] = (
 
 class AccountsTable(Vertical):
     """The accounts table, every agent's in the one priority order: a header line, then
-    one :class:`AccountRow` per slot, its agent in a column of its own.
+    one :class:`AccountRow` per slot, its agent the first word of its name's column.
 
     The whole table scrolls sideways as one when the page is narrower than it, so the
     header stays over its columns and the action buttons stay reachable at any width
@@ -824,6 +841,7 @@ class AccountRow(Vertical, can_focus=True):
     AccountRow:focus-within { background: $boost; }
     AccountRow .col-name { layout: horizontal; }
     AccountRow NameCell { width: 1fr; height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
+    AccountRow .account-agent { width: auto; height: 1; margin: 0 1 0 0; text-wrap: nowrap; }
     AccountRow AliasInput { width: 1fr; height: 1; }
     AccountRow Button { height: 1; min-width: 1; margin: 0 1 0 0; }
     """
@@ -894,6 +912,7 @@ class AccountRow(Vertical, can_focus=True):
                 yield Static(classes=classes, id=f"account-cell-{column.key}-{self.slot}")
                 continue
             with Horizontal(classes=classes):
+                yield Static(classes="account-agent", id=f"account-cell-agent-{self.slot}")
                 name = NameCell(id=f"account-name-{self.slot}")
                 name.tooltip = "double-click (or Enter / F2) to rename"
                 yield name
@@ -943,6 +962,7 @@ class AccountRow(Vertical, can_focus=True):
                 )
             self.prefill = field.value
             self.query_one(NameCell).display = False
+            self.cell("agent").display = False  # the field covers the whole name column
             field.display = True
         field.focus()
 
@@ -963,6 +983,7 @@ class AccountRow(Vertical, can_focus=True):
         field.display = False
         field.value = ""
         self.query_one(NameCell).display = True
+        self.cell("agent").display = True
         if had_focus:
             self.focus()
 
@@ -1030,6 +1051,8 @@ class AccountRow(Vertical, can_focus=True):
             if column.key in ("name", "email", "session", "week"):
                 # The whole value, for the cell that cut it short with an ellipsis.
                 cell.tooltip = self._cell_tooltip(column.key, cells[column.key])
+            elif column.key == "agent":
+                cell.tooltip = core.agent_label(account.agent)
         windows = windows_text(self.status, self.usage)
         line = self.query_one(f"#account-windows-{self.slot}", Static)
         line.update(windows or "")

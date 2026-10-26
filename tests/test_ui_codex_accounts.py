@@ -320,7 +320,7 @@ def test_a_codex_slot_renders_in_the_one_table_with_offline_usage_bars(
     assert seen["section"] and seen["title"].startswith("Codex 0.162.1") and seen["header"]
     assert seen["in_table"], "every agent's rows are in the one table"
     assert f"{slot}  account {slot}" in seen["line"]
-    assert seen["cells"]["agent"] == "Codex"
+    assert seen["cells"]["agent"] == "Co"  # the first word of the name's column
     assert "codex@example.com  ▮▮▯▯▯ 42% · 3h" in seen["line"] and seen["line"].endswith("plus")
     shown_cells = seen["cells"]
     # The reading's age is said beside its bar, as a kept reading's is: a rollout's is as
@@ -526,5 +526,5 @@ def test_a_codex_account_moves_above_a_claude_one_in_the_one_order_at_80x24(
     assert before == [plain, claude.slot, codex.slot]
     assert after == [plain, codex.slot, claude.slot]
     assert [a.slot for a in accounts_service.list_accounts()] == after
-    assert agent == "Codex"
+    assert agent == "Co"
     assert order_note.startswith("In priority order, every agent's")

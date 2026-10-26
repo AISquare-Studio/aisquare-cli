@@ -3332,9 +3332,10 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
     starts = [x for x, _ in closed["header"]]
     assert starts == sorted(starts) and len(set(starts)) == len(starts)  # left to right
     assert out["heights"] == [1, 1, 1, 1]  # never wrapped onto a second line
-    assert out["header"][:4] == ["↑", "↓", "#", "agent"]  # the arrows first (#8 on the board)
-    assert out["header"][6:9] == ["session used", "week used", ""]  # USED; Log in
-    assert out["header"][9:] == ["session resets", "week resets", "plan"]  # the plan last
+    # The arrows first (#8 on the board); the agent is the first word of the name's column.
+    assert out["header"][:4] == ["↑", "↓", "#", "agent name"]
+    assert out["header"][5:8] == ["session used", "week used", ""]  # USED; Log in
+    assert out["header"][8:] == ["session resets", "week resets", "plan"]  # the plan last
     assert out["name 2"].rstrip().endswith("…") and out["email 2"].rstrip().endswith("…")
     assert out["open"] == closed  # the open field moved no column on any row…
     field_region, name_box = out["field"]
@@ -3390,6 +3391,62 @@ def test_an_expired_rows_reason_and_log_in_are_on_screen_at_160_columns_unscroll
     offered_here, login_seen, on_screen, gap = out["login"]
     assert offered_here and login_seen and on_screen
     assert gap == 1  # right beside the usage cells: one cell apart
+
+
+def _mixed_frame() -> AccountsOverview:
+    """:func:`_table_frame` with its last slot a Codex one: both agents in the one table."""
+    frame = _table_frame()
+    last = frame.accounts[-1]
+    codex = last.account.model_copy(update={"agent": "codex"})
+    accounts = [*frame.accounts[:-1], last.model_copy(update={"account": codex})]
+    return frame.model_copy(update={"accounts": accounts})
+
+
+def test_every_button_of_a_row_is_on_screen_at_200_columns_unscrolled(
+    no_network: dict[str, Any],
+) -> None:
+    """The ui-tester at 200x50 (board seq 3673): the agent column made the table 179 cells wide,
+    the page scrolled 16 sideways and *Disable* read "Di" (main's was 4 over). The agent is the
+    first word of the name's column now, and the columns are measured, not looked at: with
+    the sidebar at its default width the table is no wider than the 163 cells the page
+    shows, nothing scrolls, and every button of every row, *Remove* last, ends at or before
+    the screen's last column."""
+    no_network["usage"] = _table_usage
+
+    async def run() -> dict[str, Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_mixed_frame)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 4))
+            table = view.query_one("#accounts-table")
+            buttons = [b for each in view.rows() for b in each.query(Button) if b.visible]
+            seen = table.scrollable_content_region
+            return {
+                "screen": app.size.width,
+                "sidebar": app.sidebar.outer_size.width,
+                "scrolls": table.max_scroll_x,
+                "width": (table.virtual_size.width, seen.width),
+                "right": max(b.region.right for b in buttons),
+                "whole": all(seen.contains_region(b.region) for b in buttons),
+                "labels": {str(b.label) for b in buttons},
+                "marks": {slot: shown(row(view, slot).cell("agent")) for slot in (1, 4)},
+                "tip": str(row(view, 4).cell("agent").tooltip),
+            }
+
+    out = asyncio.run(run())
+    assert out["sidebar"] == 30 and out["screen"] == 200
+    assert {"Disable", "Enable", "Remove"} <= out["labels"]
+    assert out["right"] <= out["screen"]
+    table_width, shown_width = out["width"]
+    assert out["scrolls"] == 0 and table_width <= shown_width and out["whole"]
+    assert out["marks"] == {1: "Cl", 4: "Co"} and out["tip"] == "Codex"
+
+
+def test_an_agents_mark_is_the_shortest_start_of_its_label_no_other_agent_shares() -> None:
+    """The first word of the name's column: two letters, more only for agents that share
+    them, and never a name taken from the agent's id."""
+    assert accounts_view.agent_marks() == {"claude-code": "Cl", "codex": "Co"}
 
 
 def test_log_in_again_reads_whole_on_screen_at_160_columns_unscrolled(

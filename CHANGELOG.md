@@ -29,11 +29,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on its account by name (`--account`, a role's account binding, a binding that sets
   `CLAUDE_CONFIG_DIR`), in a paused fleet, for a finished worker auto-stop is about to stop
   (its task closed or its result posted: moved, it would run a whole turn on the new account
-  first), or within ten minutes of the agent's start or the last look at it. No polling, and no usage request from a hook: the turn end decides from
-  the usage cache whether to look, and a detached worker (`aisquare hook before-limit`) does
-  the reads, through the cache and honouring a back-off; a kept reading moves nobody. The
-  spawn records whether its account was named (`account_pinned` in the row's launch spec),
-  which a restart, a switch and a fork keep; rows spawned before this read as not pinned.
+  first), or within ten minutes of the agent's start or the last look at it. No polling, and
+  no usage request from a hook: the turn end decides from the usage cache whether to look,
+  and a detached worker (`aisquare hook before-limit`) does the reads, through the cache and
+  honouring a back-off; a kept reading moves nobody. The spawn records whether its account
+  was named (`account_pinned` in the row's launch spec), which a restart, a switch and a fork
+  keep; rows spawned before this read as not pinned.
 
 ### Changed
 

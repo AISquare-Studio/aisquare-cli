@@ -986,6 +986,7 @@ def test_a_task_closed_while_the_move_settles_leaves_its_tester_to_auto_stop(
     _work(runner)
 
     assert exited == [] and nudged == []
+    assert _state() == "waiting"  # a `working` stamp would keep it from auto-stop for good
 
 
 # --------------------------------------------------------------------------- when it waits

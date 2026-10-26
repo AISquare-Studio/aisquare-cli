@@ -1,9 +1,9 @@
 """A project card's menu — ⋯ on the card, ``.`` or a right-click — and what its Remove asks.
 
 The menu answers what was chosen and does nothing itself: the shell (``FleetApp``)
-renames, pins, opens the Settings tab or removes, as it does for every gesture the
-sidebar posts. Every name in it is a ``rich.text.Text``: a nickname is free text,
-and ``[wip]`` is not markup.
+renames, pins, opens the Settings tab, starts the project fresh (``ui.fresh``) or removes,
+as it does for every gesture the sidebar posts. Every name in it is a ``rich.text.Text``:
+a nickname is free text, and ``[wip]`` is not markup.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from aisquare.services.project import display_name, onboard_command
 RENAME = "rename"
 PIN = "pin"
 SETTINGS = "settings"
+FRESH = "fresh"
 REMOVE = "remove"
 
 MENU_WIDTH = 26
@@ -34,10 +35,11 @@ source of it: the box is sized from it on mount, as it is placed."""
 
 
 class ProjectMenu(ModalScreen[str | None]):
-    """Rename, Pin / Unpin, Open settings, Remove from fleet… — under the card it is about.
+    """Rename, Pin / Unpin, Open settings, Start fresh…, Remove from fleet… — under the card
+    it is about.
 
-    Answers :data:`RENAME`, :data:`PIN`, :data:`SETTINGS` or :data:`REMOVE`; Esc, or a
-    click anywhere off the menu, answers ``None``.
+    Answers :data:`RENAME`, :data:`PIN`, :data:`SETTINGS`, :data:`FRESH` or :data:`REMOVE`;
+    Esc, or a click anywhere off the menu, answers ``None``.
     """
 
     CSS = """
@@ -64,6 +66,7 @@ class ProjectMenu(ModalScreen[str | None]):
                 Option("✎ Rename", id=RENAME),
                 Option(f"📌 {pin}", id=PIN),
                 Option(f"{SETTINGS_ICON} Open settings", id=SETTINGS),
+                Option("↺ Start fresh…", id=FRESH),
                 Option("✗ Remove from fleet…", id=REMOVE),
                 id="project-menu-options",
             )

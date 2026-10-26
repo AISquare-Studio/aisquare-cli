@@ -595,10 +595,9 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
         )
         ended = store.upsert_fleet_agent(_agent(alpha))
         store.end_fleet_agent(ended.id, exit_status=0, ended_by="stopped")
-        store.set_meta(f"distill_seq:{alpha}", "3")
         store.set_meta(f"signal/{alpha}/phase", "{}")
         store.set_meta(f"nudge:{session.id}", now.isoformat())
-        store.set_meta(f"distill_seq:{beta}", "7")
+        store.set_meta(f"signal/{beta}/phase", "7")
         for project in (alpha, beta):
             usage = SessionUsage(
                 session_id=f"use-{project}",
@@ -643,7 +642,7 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
         "project_setting": 0,
         "project_explainability": 0,
         "project_destination": 0,
-        "team_meta": 3,
+        "team_meta": 2,
         "project": 1,
     }
     for table in (
@@ -662,7 +661,7 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
     assert _listed(runner) == {beta}
     assert _raw("SELECT COUNT(*) FROM entry WHERE project_id = ?", (beta,)) == [(1,)]
     assert _raw("SELECT COUNT(*) FROM usage_session WHERE project_id = ?", (beta,)) == [(1,)]
-    assert _raw("SELECT value FROM team_meta WHERE key = ?", (f"distill_seq:{beta}",)) == [("7",)]
+    assert _raw("SELECT value FROM team_meta WHERE key = ?", (f"signal/{beta}/phase",)) == [("7",)]
     assert _raw("SELECT COUNT(*) FROM metric WHERE project_id = ?", (beta,)) == [(1,)]
 
 

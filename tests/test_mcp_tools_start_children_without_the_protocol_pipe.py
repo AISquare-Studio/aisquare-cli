@@ -22,8 +22,8 @@ Two layers, each tested:
 - **Each spawn a tool reaches names its stdin** (belts, and what the spies see): the spies are on
   ``Popen``, so they see every spawn a tool makes, on every platform, and fail a spawn that
   leaves ``stdin`` unset or points it at the process's own. They run the tools by condition, not
-  only by name: an empty board, a task a work brief gates and a passing report backs, and a
-  ready brain with ``gbrain`` on PATH, since each of those reaches spawns the others do not.
+  only by name: an empty board, and a task a work brief gates and a passing report backs, since
+  each of those reaches spawns the other does not.
 """
 
 from __future__ import annotations
@@ -46,7 +46,6 @@ from aisquare.cli.app import app
 from aisquare.services import briefs, mcp_server, team
 from aisquare.services import command_reports as reports
 from aisquare.services import fleet as fleet_service
-from tests import fakebin
 from tests.projects import add_project
 
 pytestmark = pytest.mark.usefixtures("project_capture")
@@ -329,59 +328,4 @@ def test_finishing_a_task_a_brief_gates_starts_no_child_on_the_servers_stdin(
     mcp_server.task_update(task.id, "done")
 
     assert team.show_task(task.id).status == "done", "the call did not reach the gate it is for"
-    _none_inherits(spawns)
-
-
-_FAKE_GBRAIN = textwrap.dedent(
-    """
-    import os, sys
-    from pathlib import Path
-
-    command = sys.argv[1] if len(sys.argv) > 1 else ""
-    home = Path(os.environ.get("GBRAIN_HOME", "."))
-    if command == "--version":
-        print("gbrain 0.42.1.0")
-    elif command == "init":
-        (home / ".gbrain" / "brain.pglite").mkdir(parents=True, exist_ok=True)
-        (home / ".gbrain" / "brain.pglite" / "PG_VERSION").write_text("16\\n")
-        (home / ".gbrain" / "config.json").write_text('{"embedding_disabled": true}')
-    elif command == "put":
-        sys.stdin.buffer.read()
-    elif command in ("search", "query"):
-        print("results for: " + sys.argv[2])
-    """
-)
-
-
-def test_recalling_from_a_ready_brain_starts_no_child_on_the_servers_stdin(
-    work: Path,
-    runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    spawns: list[tuple[list[str], object]],
-) -> None:
-    """``recall`` drains the undistilled backlog first (``gbrain --version``, ``init``, ``put``)
-    and then searches: the optional brain's whole command line, with a fake on PATH."""
-    bin_dir = tmp_path / "fakebin"
-    bin_dir.mkdir()
-    impl = bin_dir / "fake_gbrain.py"
-    impl.write_text(_FAKE_GBRAIN, encoding="utf-8")
-    fakebin.executable_fake(
-        bin_dir,
-        "gbrain",
-        posix=f'exec "{sys.executable}" "{impl}" "$@"',
-        windows=f'"{sys.executable}" "{impl}" %*',
-        exit_code=None,
-    )
-    fakebin.prepend_to_path(bin_dir, monkeypatch)
-    monkeypatch.setenv("AISQUARE_BRAIN", "1")
-    assert runner.invoke(app, ["team", "on"]).exit_code == 0
-    mcp_server.note_add("we will use JWT", kind="decision")  # a backlog for the drain
-    spawns.clear()
-
-    answer = mcp_server.recall("jwt")
-
-    assert "results for: jwt" in answer, "the call did not reach the brain it is for"
-    commands = {argv[1] for argv, _ in spawns if len(argv) > 1 and "gbrain" in argv[0]}
-    assert {"--version", "init", "put", "search"} <= commands, commands
     _none_inherits(spawns)

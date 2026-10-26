@@ -439,7 +439,7 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
     context entries, prompt history, board rows and ended fleet-agent rows stay
     in the store, hidden — reachable again only by registering the root again.
     With ``purge`` they are deleted, and so is ``~/.aisquare/projects/<id>/``
-    (its brain), and a key the CLI minted for it is revoked — or,
+    (its key and symbol index), and a key the CLI minted for it is revoked — or,
     when it cannot be yet, kept owed and named in the report
     (:func:`_revoke_owed`).
 
@@ -588,6 +588,13 @@ def reading_rows(store: ContextStore) -> dict[str, list[FleetAgent]]:
     for row in store.fleet_label_heads():
         by_board.setdefault(fleet_service.restart_board(store, row, checkouts), []).append(row)
     return by_board
+
+
+def board_readers(store: ContextStore, project: ProjectInfo) -> list[BoardReader]:
+    """Every other project whose fleet agents read ``project``'s board, as a hub's, live or a
+    restart away (:func:`_board_readers`): what ``project fresh`` refuses over, as ``forget``
+    does, each named with what frees it in a :class:`ProjectBusyError`."""
+    return _board_readers(store, project)
 
 
 def _board_readers(
@@ -943,7 +950,7 @@ def _clear_pin() -> str | None:
 
 
 def _remove_data_dir(project_id: str) -> bool:
-    """Delete ``~/.aisquare/projects/<id>/`` (its brain, key and symbol index, ``code/``);
+    """Delete ``~/.aisquare/projects/<id>/`` (its key and symbol index, ``code/``);
     False if there was none.
 
     The project's kept brief artifacts (``~/.aisquare/briefs/<id>/``) go too: the purge

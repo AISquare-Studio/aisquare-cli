@@ -256,14 +256,15 @@ def next_step(projects: Sequence[ProjectInfo], managed: Collection[str]) -> Next
 
     ``projects`` are the listed ones, in the sidebar's order; ``managed`` the ids of those
     with a live manager. No project: add one. None of them managed: start the first one's
-    manager, which Welcome walks through. Otherwise the fleet is up: spawn under a project.
+    manager, which Welcome walks through. Otherwise the fleet is up: spawn an agent, with the
+    sidebar's one *Spawn agent* (at the top, under Fleet: the dialog asks the project).
     """
     if not projects:
         return NextStep("Next: add a project (+ beside Fleet)")
     if not any(project.id in managed for project in projects):
         name = project_service.display_name(projects[0])
         return NextStep(f"Next: open {name} and press Start manager", welcome=True)
-    return NextStep("Next: \uff0b spawn agent under a project")  # the sidebar's own row
+    return NextStep("Next: \uff0b Spawn agent")  # the sidebar's own action, as it reads
 
 
 # --- pure helpers (unit-testable without a running app) ----------------------------------

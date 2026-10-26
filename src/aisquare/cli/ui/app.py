@@ -63,6 +63,7 @@ from aisquare.cli.ui.attach import NewAccountRequested, ReturnTo
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.board import BoardPanel, board_help
 from aisquare.cli.ui.divider import Divider, floor_of
+from aisquare.cli.ui.fresh import ConfirmFresh, FreshChoice, StartFresh
 from aisquare.cli.ui.groups import (
     DropGroup,
     DropProject,
@@ -73,7 +74,15 @@ from aisquare.cli.ui.groups import (
     TogglePin,
     UndoLayout,
 )
-from aisquare.cli.ui.project_menu import PIN, REMOVE, RENAME, SETTINGS, ConfirmRemove, ProjectMenu
+from aisquare.cli.ui.project_menu import (
+    FRESH,
+    PIN,
+    REMOVE,
+    RENAME,
+    SETTINGS,
+    ConfirmRemove,
+    ProjectMenu,
+)
 from aisquare.cli.ui.receiver import listen_for_ui, stop_listening_for_ui
 from aisquare.cli.ui.remote_control import SWITCHES, RemoteController, ngrok_ends_with
 from aisquare.cli.ui.sidebar import (
@@ -151,6 +160,8 @@ from aisquare.models import (
     DoctorCheck,
     FleetAgent,
     FleetAgentStatus,
+    FreshPlan,
+    FreshReport,
     HeadroomSummary,
     ProjectForgetReport,
     ProjectGroup,
@@ -159,6 +170,7 @@ from aisquare.models import (
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import diagnostics, install_route, project_groups
 from aisquare.services import fleet as fleet_service
+from aisquare.services import fresh as fresh_service
 from aisquare.services import lifecycle as lifecycle_service
 from aisquare.services import project as project_service
 from aisquare.services import settings as settings_service
@@ -216,6 +228,22 @@ HEADROOM_SECONDS = 60.0
 goes to the network only for an account whose cached usage is over five minutes old."""
 PROJECT_REMOVE_WORKER = "project-remove"
 """The thread worker a card's *Remove from fleet…* forgets its project on (``project forget``)."""
+PROJECT_FRESH_WORKER = "project-fresh"
+"""The thread worker *Start fresh…* clears a project's board and fleet on (``project fresh``),
+one a project at a time (:func:`_fresh_group`)."""
+TOAST_PLACES = 3
+"""The places a refusal's toast names before it counts the rest: at 80x24 a longer list
+pushed the toast's title and what to do off the screen."""
+UNPUSHED_IN_THE_UI = "confirm the discard in Start fresh…, open again on it"
+"""How the UI lets work found nowhere else go, where the CLI's refusal names its flag: the
+dialog opens again on what the run found (``FleetApp._project_freshened``)."""
+
+
+def _fresh_group(project_id: str) -> str:
+    """The worker group of a project's Start fresh: one run of it at a time."""
+    return f"{PROJECT_FRESH_WORKER}:{project_id}"
+
+
 _QUIT_POLL = 0.1
 """Seconds between the looks a hand-over takes at the reads it waits out (``_exit_when_read``)."""
 _HAND_OFF_PATIENCE = 10.0
@@ -536,7 +564,10 @@ class HelpScreen(ModalScreen[None]):
             ("shift+g", "group the marked cards; Esc clears the marks"),
             ("drag title", "move a card or a group header to a new place"),
             ("F2 dblclick", "rename the card in place: Enter or a click away saves, Esc cancels"),
-            (". ⋯ r-click", "the card's menu: rename, pin, settings, remove from the fleet"),
+            (
+                ". ⋯ r-click",
+                "the card's menu: rename, pin, settings, start fresh, remove from the fleet",
+            ),
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
             ("drag", "select text in a pane (double-click: a word) — copied on release"),
@@ -1048,8 +1079,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         are never listed, whatever ``show_captured`` says, and ``a`` is no key."""
         self._undo: list[project_groups.UndoEntry] = []
         """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
+        self._fresh_choices: dict[str, FreshChoice] = {}
+        """Each project's last confirmed Start fresh, by id: what a reopened dialog ticks."""
+        self._fresh_asked: dict[str, FreshChoice] = {}
+        """The Start fresh dialogs to open with a run's extras ticked, by project id, once."""
         self.captain_on = experimental.captain_enabled()
-        """The experimental captain, read at the start: off, there is no insignia, captain
+        """The experimental captain, read at the start: off, there is no Start captain, captain
         row or captain view, and no ui receiver is started (:meth:`on_mount`). Settings'
         *Captain* box switches it while asq runs (:meth:`on_captain_switched`)."""
 
@@ -1115,7 +1150,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     async def on_captain_switched(self, event: CaptainSwitched) -> None:
         """Settings' *Captain* box (#33): all that :attr:`captain_on` gates, at once, with no
-        restart: the insignia and the Captain section, the captain's part of the fleet read
+        restart: Start captain and the captain's row, the captain's part of the fleet read
         (read as each read runs) and the ui receiver."""
         if event.on == self.captain_on:
             return
@@ -1828,6 +1863,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.worker.name == PROJECT_REMOVE_WORKER:
             self._project_removal(event)
             return
+        if event.worker.name == PROJECT_FRESH_WORKER:
+            self._project_freshened(event)
+            return
         if event.worker.name == FLEET_WORKER:
             self._fleet_read(event)
             return
@@ -2002,14 +2040,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         return AgentView(status, usage=self.session_usage, id=view_id)
 
     def on_captain_requested(self, event: CaptainRequested) -> None:
-        """The insignia: the captain's view when it is live, else the Spawn dialog preset to it.
+        """*▶ Start captain*: the captain's view when live, else the Spawn dialog preset to it.
 
-        Decided from the frame the insignia was painted from, so the click does what
-        the star showed: lit is a live row (``ALIVE_STATES``), dim is none — or one
-        that is gone, which a start replaces (``brain.find`` reaps it first).
+        Decided from the frame the row was painted from, so the click does what the sidebar
+        showed: a live row (``ALIVE_STATES``) opens its view, none — or one that is gone, which
+        a start replaces (``brain.find`` reaps it first) — starts one.
         """
         if not self.captain_on:
-            return  # the insignia is not there to click; nothing else may start one
+            return  # the row is not there to click; nothing else may start one
         # Imported here, not at the top: the shell starts without the captain's modules.
         from aisquare.services.captain import brain
         from aisquare.services.captain import state as captain_state
@@ -2290,10 +2328,143 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 self.on_toggle_pin(TogglePin("project", project_id))
             elif choice == SETTINGS:
                 self.call_later(self._open_settings, project_id)
+            elif choice == FRESH:
+                self.post_message(StartFresh(project_id))
             elif choice == REMOVE:
                 self.push_screen(ConfirmRemove(project), confirmed)
 
         self.push_screen(ProjectMenu(project, event.anchor), chosen)
+
+    def on_start_fresh(self, event: StartFresh) -> None:
+        """*Start fresh…*, from a card's menu or a Settings tab: ask (:class:`ConfirmFresh`,
+        which reads the plan), then :meth:`_start_fresh` with what was chosen."""
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        if self._fresh_running(project):
+            return
+
+        def chosen(choice: FreshChoice | None) -> None:
+            if choice is not None:
+                self._start_fresh(choice)
+
+        self.push_screen(ConfirmFresh(project, self._fresh_asked.pop(project.id, None)), chosen)
+
+    def _start_fresh(self, choice: FreshChoice) -> None:
+        """*Start fresh…*, confirmed: ``services.fresh.start_fresh``, off the UI thread. It
+        plans again before it acts, so a refusal found since (a hub's reader started, work
+        nobody agreed to discard) is a toast, with nothing cleared."""
+        project = self.snapshot.project(choice.project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        if self._fresh_running(project):
+            return
+        target = project
+        self._fresh_choices[target.id] = choice
+        self.run_worker(
+            lambda: fresh_service.start_fresh(
+                target,
+                memory=choice.memory,
+                prompts=choice.prompts,
+                branches=choice.branches,
+                discard=choice.discard,
+            ),
+            name=PROJECT_FRESH_WORKER,
+            group=_fresh_group(target.id),
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _fresh_running(self, project: ProjectInfo) -> bool:
+        """Whether a Start fresh of ``project`` is still running, said when it is: a second
+        run beside it would stop what the first just spawned, and both would start a manager.
+        Refused here, at the menu, the Settings button and the confirmation alike: this is
+        the guard. The worker is not ``exclusive``, which guards nothing: it cancels the run
+        in flight, whose thread goes on regardless, and drops its report (review of #429,
+        round 2)."""
+        group = _fresh_group(project.id)
+        if not any(worker.group == group and not worker.is_finished for worker in self.workers):
+            return False
+        self.notify(
+            f"{project_service.display_name(project)} is starting fresh already — wait for it "
+            "to finish",
+            severity="warning",
+            timeout=6,
+            markup=False,
+        )
+        return True
+
+    def _project_freshened(self, event: Worker.StateChanged) -> None:
+        """What a Start fresh did: a toast of what was cleared and the new manager, a warning
+        for what was kept or refused; then the sidebar, and the project's board, read again."""
+        result = event.worker.result
+        if event.state is WorkerState.SUCCESS and isinstance(result, FreshReport):
+            name = project_service.display_name(result.project)
+            cleared = ", ".join(fresh_service.cleared_words(result))
+            session = (result.manager.session_id or "")[:8] if result.manager else ""
+            manager = f"; a new manager started (session {session})" if result.manager else ""
+            if result.sessions_killed or result.sessions_gone:
+                manager = f"; its tmux session ended{manager}"
+            self.notify(
+                f"✓ {name} started fresh — cleared {cleared}{manager}", timeout=10, markup=False
+            )
+            for kept in result.kept:
+                where = str(kept.path) if kept.path is not None else f"branch {kept.branch}"
+                self.notify(
+                    f"kept {where}: {kept.reason}", severity="warning", timeout=10, markup=False
+                )
+            if result.manager_error is not None:
+                spawn = project_service.fleet_command("spawn", result.project, "manager")
+                self.notify(
+                    f"no manager started: {result.manager_error} — start one: {spawn}",
+                    severity="error",
+                    timeout=12,
+                    markup=False,
+                )
+            self._read_boards(result.project.id)
+            self.refresh_data()
+        elif event.state is WorkerState.ERROR:
+            error = event.worker.error
+            known = (fresh_service.FreshRefused, fresh_service.FreshIncomplete)
+            found = getattr(error, "plan", None) if isinstance(error, known) else None
+            if isinstance(found, FreshPlan):
+                # Work found since the dialog read its plan, which nobody agreed to discard:
+                # the CLI's flag means nothing here (tester-fresh-ui at 8b66e535), and the
+                # dialog opens again on it (review of #429, M1).
+                if isinstance(error, fresh_service.FreshIncomplete):
+                    said = fresh_service.found_after_stop(
+                        found, way=UNPUSHED_IN_THE_UI, limit=TOAST_PLACES, brief=True
+                    )
+                else:
+                    said = fresh_service.unpushed_refusal(
+                        found, way=UNPUSHED_IN_THE_UI, limit=TOAST_PLACES, brief=True
+                    )
+                self._ask_again(found.project.id)
+            elif isinstance(error, known):
+                said = str(error)
+            else:
+                said = f"could not start it fresh: {type(error).__name__}: {error}"
+            self.notify(said, title="not started fresh", severity="error", timeout=12, markup=False)
+            if isinstance(error, fresh_service.FreshIncomplete):
+                self.refresh_data()  # its agents were stopped: the sidebar says so
+
+    def _ask_again(self, project_id: str) -> None:
+        """Open Start fresh… again for ``project_id``, its extras ticked as the run's were,
+        once the run that found work nobody agreed to discard has ended."""
+        choice = self._fresh_choices.get(project_id)
+        if choice is not None:
+            self._fresh_asked[project_id] = choice
+        self.call_after_refresh(self.post_message, StartFresh(project_id))
+
+    def _read_boards(self, project_id: str) -> None:
+        """Every open board of the project, hidden ones too, starts over
+        (``BoardPanel.start_over``): its feed forgets the events the reset deleted and reads
+        the board from its start. Read again only past its cursor, it kept listing them."""
+        for panel in self.query(BoardPanel):
+            if panel.project is not None and panel.project.id == project_id:
+                panel.start_over()
 
     async def _open_settings(self, project_id: str) -> None:
         """The menu's *Open settings*: the project's page, on its Settings tab."""
@@ -2412,13 +2583,23 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         pane.paste_text(event.text)
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
-        """The sidebar's spawn-agent row: the Spawn dialog for THAT row's project."""
-        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        """*Spawn agent*: the Spawn dialog, on the project asked for — else the first listed —
+        with every listed project in its Project field, in the sidebar's order."""
+        snapshot = self.snapshot
+        listed = self.sidebar.ordered_projects() or (snapshot.projects if snapshot else [])
+        if event.project_id is None:
+            if not listed:
+                self.notify("No projects yet — press + to onboard one", timeout=4)
+                return
+            project: ProjectInfo | None = listed[0]
+        else:
+            project = snapshot.project(event.project_id) if snapshot else None
         if project is None:
             self.notify("that project is no longer listed", severity="warning", timeout=4)
             return
         self.push_screen(
-            SpawnDialog(project, accounts=self._accounts), callback=self.spawn_finished
+            SpawnDialog(project, projects=listed, accounts=self._accounts),
+            callback=self.spawn_finished,
         )
 
     def spawn_finished(self, receipt: fleet_service.SpawnReceipt | None) -> None:
@@ -3271,9 +3452,10 @@ def _writing_workers() -> dict[str, str]:
 
     One rule on the app's worker manager, where views kept a flag each (a bool, a set, a
     property) and the next writer was missed: the Project tab's Start manager, an agent's
-    Stop and Restart, and Explainability's writes all quit under an Update (round 16 of
-    #257). The views' own name constants, imported here so the import block stays as it
-    is. The AISquare sign-in is left out (:func:`_cut_off_workers`).
+    Stop and Restart all quit under an Update (round 16 of #257; Explainability's writes
+    were on the list until its view went dormant). The views' own name constants, imported
+    here so the import block stays as it is. The AISquare sign-in is left out
+    (:func:`_cut_off_workers`).
 
     Every other thread worker is waited out rather than refused
     (``FleetApp._holding_the_quit``), so a writer missing here is still never cut off;
@@ -3285,7 +3467,6 @@ def _writing_workers() -> dict[str, str]:
         agent,
         captain,
         doctor,
-        explainability,
         fleet_bulk,
         onboard,
         personas_tab,
@@ -3313,10 +3494,6 @@ def _writing_workers() -> dict[str, str]:
         settings_remote.TOKEN_WORKER: "Settings ▸ Remote's save of the ngrok token",
         agent.RESTART_WORKER: "an agent's restart",
         fleet_bulk.BULK_WORKER: "Settings ▸ Fleet's restart or stop of every agent",
-        explainability.SAVE_WORKER: "Explainability's setup",
-        explainability.REGISTER_WORKER: "Explainability's registration",
-        explainability.SHIP_WORKER: "Explainability's ship",
-        explainability.RESET_WORKER: "Explainability's routing reset",
         accounts.SIGN_OUT_WORKER: "an AISquare sign-out",
         accounts.COMPLETE_WORKER: "a Claude sign-in",
         accounts.ABANDON_WORKER: "a Claude sign-in's discard",
@@ -3325,6 +3502,7 @@ def _writing_workers() -> dict[str, str]:
         accounts.RENAME_WORKER: "an account's rename",
         accounts.ADOPT_WORKER: "a conversation's adoption",
         PROJECT_REMOVE_WORKER: "a project's removal",
+        PROJECT_FRESH_WORKER: "a project's fresh start",
         REATTACH_WORKER: "the update's restart of the agents it kept",
         PRESS_WORKER: "the update's record of the running agents",
     }
@@ -3338,14 +3516,13 @@ def _waited_reads() -> dict[str, str]:
     ``shell-accounts``, ``welcome-validate`` (round 24 of #257). tests/test_ui_writing_workers.py
     checks that every read the UI starts is here.
     """
-    from aisquare.cli.ui import attach, board, persona_dialogs, spawn, terminal
+    from aisquare.cli.ui import attach, board, fresh, persona_dialogs, spawn, terminal
     from aisquare.cli.ui.views import (
         accounts,
         agent,
         app_settings,
         captain,
         doctor,
-        explainability,
         fleet_bulk,
         settings_remote,
         welcome,
@@ -3368,8 +3545,6 @@ def _waited_reads() -> dict[str, str]:
         accounts.LOGIN_POLL_WORKER: "a Claude sign-in's check",
         agent.LABELS_WORKER: "an agent's account names",
         board.LABELS_WORKER: "a board's account names",
-        explainability.STATUS_WORKER: "Explainability's status",
-        explainability.LEFTOVERS_WORKER: "Explainability's check for leftover routing",
         fleet_bulk.PLAN_WORKER: "Settings ▸ Fleet's read of the running agents",
         app_settings.ACCOUNTS_WORKER: "App settings' accounts",
         welcome.worker_name("look"): "Welcome's checks",
@@ -3383,6 +3558,7 @@ def _waited_reads() -> dict[str, str]:
         captain.MIC_WORKER: "the captain's microphone check",
         settings_remote.CHECK_WORKER: "what Remote needs",
         terminal.WSLPATH_WORKER: "a pasted Windows path's conversion",
+        fresh.PLAN_WORKER: "Start fresh's read of the project",
     }
 
 

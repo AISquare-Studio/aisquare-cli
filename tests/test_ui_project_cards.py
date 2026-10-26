@@ -468,7 +468,7 @@ def test_the_menu_opens_from_its_button_the_dot_key_and_a_right_click(
             width = screen.query_one("#project-menu").outer_size.width
         await pilot.press("escape")
         app.sidebar.focus()
-        await pilot.press("down", "down")  # past alpha's spawn row, onto beta's name
+        await pilot.press("down")  # from alpha's name onto beta's
         await pilot.press("full_stop")
         await settle(app)
         if isinstance(app.screen, ProjectMenu):
@@ -498,6 +498,7 @@ def test_the_menu_opens_from_its_button_the_dot_key_and_a_right_click(
         "✎ Rename",
         "📌 Pin",
         f"{SETTINGS_ICON} Open settings",  # the sidebar's monotone gear, not the emoji
+        "↺ Start fresh…",
         "✗ Remove from fleet…",
     ]
     assert seen["width"] == MENU_WIDTH
@@ -707,4 +708,5 @@ def test_the_help_screen_names_the_rename_and_the_menu(tmp_path: Path, script: S
 
     keys = drive(go)
     assert "F2 dblclick" in keys and "rename the card in place" in keys
-    assert ". ⋯ r-click" in keys and "remove from the fleet" in keys
+    assert ". ⋯ r-click" in keys
+    assert "settings, start fresh, remove from the fleet" in keys

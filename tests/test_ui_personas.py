@@ -281,9 +281,18 @@ async def wait_for(pilot: Pilot[Any], kind: type[Screen[Any]], seconds: float = 
     """Until ``kind`` is the active screen — a modal a worker thread opens arrives later."""
     for _ in range(int(seconds / 0.05)):
         if isinstance(pilot.app.screen, kind):
+            # Its widgets are mounted by messages it has yet to handle: a test reading the
+            # question or the list the moment the screen was the active one found none
+            # ("No nodes match '#attach-question'": 2 runs in 60 under load). Settled for the
+            # messages alone, so that a test holding a worker on purpose is not waited on.
+            await settle_page(pilot.app, group=_NO_WORKER)
             return pilot.app.screen
         await pilot.pause(0.05)
     raise AssertionError(f"{kind.__name__} never opened; the screen is {pilot.app.screen!r}")
+
+
+_NO_WORKER = "no worker"
+"""A group no worker is in: a settle passed it waits for the messages alone."""
 
 
 async def press(pilot: Pilot[Any], selector: str) -> None:
@@ -1423,11 +1432,14 @@ def test_choosing_a_bind_or_an_account_opens_the_spawn_dialog_preset_with_the_pe
             dialog.query_one("#spawn-account", Select).value,
             dialog.query_one("#spawn-persona", Select).value,
         ]
+        # Opened on the project the Personas tab belongs to, which it fixes: no Project field.
+        where = [dialog.project.id, bool(dialog.query("#spawn-project"))]
         await press(pilot, "#spawn-submit")
         await settle(pilot)
-        return [shown_values, host.spawned]
+        return [shown_values, host.spawned, where]
 
-    shown_values, spawned = drive(scenario, project=project)
+    shown_values, spawned, where = drive(scenario, project=project)
+    assert where == [project.id, False]
     ((role, kwargs),) = spawns
     if pick == "bind:coder2":
         assert shown_values == ["coder2", "claude2", "", "pair"]

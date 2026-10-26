@@ -908,6 +908,31 @@ class BoardPanel(Vertical):
         if self.autoscroll:
             feed.scroll_end(animate=False)
 
+    def start_over(self) -> None:
+        """The board was cleared under the panel (Start fresh): forget what the panel read
+        of it — the feed's lines and the events behind them, the cursor, the close
+        attributions, the detail shown — and read it again from its start.
+
+        :meth:`refresh_data` reads only past the cursor and the feed only grows, so after a
+        reset the cleared notes, signals and the stop's own ``agent_exited`` stayed listed,
+        and selectable through ``_events_by_id``, until asq restarted: on a panel open
+        through the reset, on a hidden one shown later and after ``r`` alike
+        (tester-fresh-ui at 8b66e535). A frozen select-mode copy is left first, so it shows
+        nothing that went."""
+        if self._select_mode:
+            self._select_mode = False
+            self.query_one("#feed", OptionList).remove_class("hidden")
+            self.query_one("#feedtext", VerticalScroll).remove_class("active")
+        self.query_one("#feed", OptionList).clear_options()
+        self._events_by_id.clear()
+        self._feed_order.clear()
+        self._last_seq = 0
+        self._terminal_by_task = {}
+        self._terminal_fetched = False
+        self.detail_moment = None
+        self._show_detail(Text(""))
+        self.refresh_data()
+
     def _evict_oldest(self, feed: OptionList, count: int) -> None:
         """Drop the oldest ``count`` feed lines from the list AND the caches.
 

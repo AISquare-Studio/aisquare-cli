@@ -702,8 +702,7 @@ def claude_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     shebanged script on POSIX, a ``.cmd`` on Windows, which is the shape pip and
     npm use and what makes PATHEXT match. `fleet.spawn` gates on exactly that
     call, so an extensionless file left every test using this fixture failing
-    with "'claude' is not on your PATH" — the same PATHEXT bug as the gbrain
-    fake in test_brain.py, in code written after that one was fixed.
+    with "'claude' is not on your PATH" — the PATHEXT bug `tests/fakebin.py` exists for.
     """
     bin_dir = tmp_path / "bin"
     script = fakebin.executable_fake(
@@ -7018,28 +7017,18 @@ def test_under_a_hub_each_read_and_write_goes_where_the_rule_says(
     assert case(hubbed) == expected
 
 
-def test_a_note_on_a_forgotten_hub_is_drained_there_and_named_by_it(hubbed: _Hubbed) -> None:
+def test_a_note_on_a_forgotten_hub_is_named_by_it(hubbed: _Hubbed) -> None:
     """Review of #259, round 32, 7/9: ``add_note(board_id=...)`` named its board through a
     lookup that read a forgotten project as none. A note ``fleet tell`` filed on a hub
     forgotten since, where its agents still read, went there, but its receipt named the hub
-    by its id, and its drain ran in the caller's directory (``spawn_drain(root=None)``),
-    distilling the caller's board, not the hub's. Both are the hub's own."""
-    from aisquare.services import distill as distill_service
-
+    by its id. The name is the hub's own."""
     w = hubbed
-    drained: list[tuple[Path | None, str | None]] = []
-    w.monkeypatch.setattr(
-        distill_service,
-        "spawn_drain",
-        lambda cwd=None, *, root=None, board=None: drained.append((root, board)),
-    )
     with store_session() as store:
         store.forget_project(w.hub.id)  # as 0.8.1 before round 32 allowed, to tidy the list
         assert store.get_project(w.hub.id) is None
 
     team_service.add_note("ship it", to_role="coder-1", board_id=w.hub.id)
 
-    assert drained == [(w.hub.root, w.hub.id)]
     receipt = team_service.last_delivery()
     assert receipt is not None and (receipt.board_id, receipt.board_name) == (w.hub.id, "hub")
     with store_session() as store:

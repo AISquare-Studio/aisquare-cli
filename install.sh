@@ -106,27 +106,32 @@ DEVTOOLS_MCP_PACKAGE="chrome-devtools-mcp@latest"
 #: `extra_<name>_current` (true when there is nothing to do) and `install_<name>`.
 OPTIONAL_EXTRAS="chrome-devtools"
 
-# `brain` is always expected to be amber when this finishes — gbrain is out of
-# scope (§0.4). `expected_amber` adds to it what the flags asked for.
-EXPECTED_AMBER="brain"
+# Nothing is amber on every run: `expected_amber` is what the flags asked for, and
+# the installed release's own rows (RELEASE_ERA_AMBER).
 # Amber for a passing reason that says nothing about the install: an account whose
 # usage reads wait out a rate limit (HTTP 429, or 503 with Retry-After) resume by
 # themselves. Counted as unexpected, a transient limit at install time exited 2 on a
 # good install. Expected in every run, but not part of `expected_amber`'s set.
 TRANSIENT_AMBER="claude-account-backoff"
 
-# The installed RELEASE's rows for the codebase snapshot this tree removed
-# (#399): `repomix`, `snapshot` and `tiktoken`. This script installs the latest
-# release, and every release up to 0.8.2 has them. `repomix` goes amber with a
+# The installed RELEASE's rows for what this tree removed: the codebase snapshot
+# (#399), `repomix`, `snapshot` and `tiktoken`, and the project brain, `brain`,
+# whose CLI no longer exists. This script installs the latest release, and every
+# release up to 0.8.2 has the snapshot rows and every release up to 0.9.0 the
+# `brain` one. `repomix` goes amber with a
 # Node below 22 or no npm, which this script no longer upgrades unless the
 # Chrome DevTools extra is chosen; `snapshot` in 0.8.2 with no project or no Node
 # to pack with. Neither is a state this run caused or could fix. Measured by the
 # review of #399: `--yes` on Debian 12's own Node 18 exited 2 on `repomix`. The
-# same reasoning keeps `--with tiktoken` above install_cli. Neither goes by date:
+# same reasoning keeps `--with tiktoken` above install_cli. None goes by date:
 # with 0.9.0 the latest on PyPI, `--version 0.8.2` still installs a release with
-# these rows through THIS script (0.8.2 has no installer to hand off to). To
-# drop them, gate both on the version being installed: below 0.9.0 only.
-RELEASE_ERA_AMBER="repomix snapshot tiktoken"
+# the snapshot rows through THIS script (0.8.2 has no installer to hand off to),
+# and 0.9.0 itself, which is what a run installs until the release without
+# `brain` is the latest, answers `brain` amber on a machine with no brain CLI. To
+# drop them, gate each on the version being installed: below 0.9.0 for the
+# snapshot rows, below 0.9.1 for `brain`.
+# `brain` can go once 0.9.1 is the oldest release this script or CI installs (follow-up of #435).
+RELEASE_ERA_AMBER="brain repomix snapshot tiktoken"
 
 # --- options (§3.5) ---------------------------------------------------------
 
@@ -1138,24 +1143,20 @@ short_circuit() {
     else
         note "$(aisquare_home_shown) configured (--no-agent: no agent hooks)"
     fi
-    # Gated per line, the way `summary` is. The unconditional version named
-    # gbrain as the reason on a machine that HAS gbrain — reachable, since
-    # `brain` reports ok when gbrain is installed and also when AISQUARE_BRAIN=0
-    # — so `--no-project` on such a machine read "everything ok except snapshot
-    # (gbrain is out of scope)", blaming a check that was fine.
+    # Gated per line, the way `summary` is: a reason named for a check that is
+    # green would blame a check that was fine.
     _why=""
-    listed "$_amber" brain && _why="gbrain is out of scope"
     if listed "$_amber" claude-code; then
-        [ -n "$_why" ] && _why="$_why; "
-        _why="${_why}Claude Code left alone (--no-agent)"
+        _why="Claude Code left alone (--no-agent)"
     fi
     if listed "$_amber" tmux || listed "$_amber" gh; then
         [ -n "$_why" ] && _why="$_why; "
         _why="${_why}system deps skipped"
     fi
-    if listed "$_amber" repomix || listed "$_amber" snapshot || listed "$_amber" tiktoken; then
+    if listed "$_amber" brain || listed "$_amber" repomix || listed "$_amber" snapshot ||
+        listed "$_amber" tiktoken; then
         [ -n "$_why" ] && _why="$_why; "
-        _why="${_why}this release's codebase-snapshot rows, gone in the next"
+        _why="${_why}this release's rows for what the next one removes"
     fi
     [ -n "$_why" ] || _why="all expected"
     if [ -n "$_amber" ]; then
@@ -2206,13 +2207,13 @@ DOCTOR_AMBER=""
 
 # The checks that SHOULD be amber when this run finishes, sorted.
 #
-# `brain` always, and the release's codebase-snapshot rows (RELEASE_ERA_AMBER)
-# while a release that has them is what this installs. The others only for what
-# the flags asked for. A row expected and not amber is good news: the caller asks
+# The release's rows for what the next one removes (RELEASE_ERA_AMBER) while a
+# release that has them is what this installs. The others only for what the
+# flags asked for. A row expected and not amber is good news: the caller asks
 # "nothing amber that we did not expect", never for an equal set.
 expected_amber() {
-    # Alphabetical, to read the same way as doctor_amber's sorted output.
-    _exp="$EXPECTED_AMBER"
+    # In no order: callers ask membership (`is_expected_amber`), never the sequence.
+    _exp=""
     if [ "$WANT_AGENT" = 0 ]; then
         # `--no-agent` asked for Claude Code to be left alone, and the run touches
         # none of it, so no claude-code state is one this run caused or could
@@ -2281,7 +2282,7 @@ listed_words() {
 # where no repository's plugin loads. Asked here, a run from such a repository
 # printed "claude-code hooks installed", wired nothing and exited 0, and a run
 # whose hooks could not be written listed nothing (review of #257). The other
-# rows stay this folder's: brain and harness are about its project.
+# rows stay this folder's: harness is about its project.
 # Under --no-agent the script wires nothing, so claude-code stays this folder's
 # too: the row `aisquare doctor` shows here.
 #
@@ -2360,8 +2361,8 @@ _folder_may_load_a_repo_plugin() {
 # GNU sed has it, BusyBox sed has it, and **BSD sed — which is macOS's sed —
 # does not**. There it matches the literal text `warn|fail`, so the amber list
 # came back EMPTY on every Mac. Measured in CI the first time this ran on
-# macos-latest: `doctor: 17 checks, 0 not ok` (the count was 17 then; it is
-# 18 since #72 added the CI-test-bed line) on a machine whose gbrain is absent.
+# macos-latest: `doctor: 17 checks, 0 not ok` (the count was 17 then) on a
+# machine whose release answered `brain` amber.
 # That is the worst failure this function has — an installer that calls
 # every Mac perfectly healthy, never short-circuits, and can never surface an
 # unexpected check, which is exactly what §3.8 exists to prevent. Every
@@ -2548,8 +2549,8 @@ _actionable_fix() {
             # present and logged out, and wrong advice for one whose install
             # failed (warn-only, §3.2, so that is a reachable state). Telling
             # someone to log into a binary they do not have is the same class of
-            # mistake as blaming gbrain for a green check: advice that does not
-            # match the state.
+            # mistake as blaming a check for a state it is not in: advice that
+            # does not match the state.
             if [ -n "$GH_VERSION" ]; then
                 printf 'gh auth login'
             else
@@ -2615,14 +2616,8 @@ summary() {
     if [ -n "$_expected" ]; then
         say ""
         note "expected: $(listed_words "$_expected")"
-        # Each line explained only if it is actually there. `brain` was printed
-        # unconditionally, which is wrong on a machine that HAS gbrain: the
-        # macOS runner reported brain green with another row amber, and the
-        # summary would have explained a check that was fine.
-        if listed "$_expected" brain; then
-            note "  brain    — gbrain is out of scope for this installer; team"
-            note "             decisions are simply not distilled without it."
-        fi
+        # Each line explained only if it is actually there: a line printed
+        # unconditionally would explain a check that was fine.
         if listed "$_expected" claude-account-backoff; then
             note "  claude-account-backoff — an account's usage reads wait out a rate"
             note "             limit; they resume by themselves (aisquare doctor says until when)."
@@ -2656,8 +2651,8 @@ summary() {
             listed "$_expected" "$_check" && _sm_era="${_sm_era:+$_sm_era/}$_check"
         done
         if [ -n "$_sm_era" ]; then
-            note "  $_sm_era — this release's rows for the codebase snapshot,"
-            note "             which the next release removes. Nothing to do."
+            note "  $_sm_era — this release's rows for what the next release"
+            note "             removes (the codebase snapshot, the project brain). Nothing to do."
         fi
     fi
 
@@ -2848,7 +2843,7 @@ Exit codes
      or an optional extra you chose did not install: Node or npx for
      --with chrome-devtools. Its Claude Code registration only warns.
 
-Not installed, on purpose: gbrain (out of scope), explainability tracing (off
+Not installed, on purpose: explainability tracing (off
 unless asked for), and any credential — `claude` and `gh auth login` do their
 own. Full design and measurements: docs/plans/one-line-install.md
 USAGE

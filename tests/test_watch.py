@@ -240,6 +240,7 @@ def test_done_archive_view_shows_who_and_when(
     from textual.widgets import DataTable
 
     from aisquare.cli import watch as watch_mod
+    from aisquare.cli.ui import board as board_mod
 
     monkeypatch.setenv("AISQUARE_ROLE", "runner")
     runner.invoke(
@@ -259,12 +260,13 @@ def test_done_archive_view_shows_who_and_when(
     task_id = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)[0]["id"]
     runner.invoke(app, ["task", "done", task_id, "--as", "ffff9999"])
 
-    async def drive() -> tuple[int, int, str]:
+    async def drive() -> tuple[list[Any], int, str]:
         app_cls = watch_mod._build_app_class(interval=60.0)
         async with app_cls().run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             table = pilot.app.query_one("#tasks", DataTable)
-            open_rows = table.row_count
+            # No open task: the one row is the empty state, keyed as no task is (#286).
+            open_rows = [key.value for key in table.rows]
             await pilot.press("d")  # flip to the done archive
             await pilot.pause()
             table.focus()
@@ -273,7 +275,7 @@ def test_done_archive_view_shows_who_and_when(
             return open_rows, table.row_count, pilot.app.board.detail_text
 
     open_rows, done_rows, detail = asyncio.run(drive())
-    assert open_rows == 0 and done_rows == 1
+    assert open_rows == [board_mod.EMPTY_ROW] and done_rows == 1
     assert "finished thing" in detail
     assert "done by ffff9999" in detail  # who + when from the task_done event
 
@@ -797,7 +799,9 @@ def test_the_board_lines_keep_the_feed_and_the_tasks_on_screen_whatever_the_size
 
             seen: dict[str, object] = {}
             team = app.query_one("#team-divider").region
-            await _drag(pilot, (10, team.y), (10, 20))  # the team block to 20 rows
+            # The team block to 20 rows: below the "needs you" line over the board (#286).
+            strip = app.query_one("#needs-you").outer_size.height
+            await _drag(pilot, (10, team.y), (10, 20 + strip))
             seen["team"] = app.query_one("#sessions").outer_size.height
             side = app.query_one("#side-divider").region
             await _drag(pilot, (side.x, 10), (119, 10))  # the column all the way right
@@ -836,10 +840,10 @@ def test_the_board_lines_keep_the_feed_and_the_tasks_on_screen_whatever_the_size
     seen = asyncio.run(push())
     assert seen["team"] == 20, "the premise: the team block grew past its undragged ten rows"
     # 120 columns: 87 + the line + 32 for the feed. 39 rows: 8 above, the line, 30 below.
-    assert seen["pushed"] == (87, 32, 30, 8, 4)
+    assert seen["pushed"] == (87, 32, 29, 8, 4), "the detail pane less the needs-you line"
     assert seen["team_squeezed"] == 3, "8 rows of board: the line and 4 rows of tasks left 3"
     # 100 x 30: 67 + 1 + 32 columns; 29 rows are 8 + 1 + 20.
-    assert seen["shrunk"] == (67, 32, 20, 8, 4)
+    assert seen["shrunk"] == (67, 32, 19, 8, 4)
     assert seen["narrow"] == (False, False), "the column and the line that resizes it hide"
     assert seen["widened"], "the premise: 120 columns show the column again"
     assert seen["toggled"] == (False, False)

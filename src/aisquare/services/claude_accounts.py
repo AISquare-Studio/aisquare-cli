@@ -48,6 +48,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing as sharing
 from aisquare.core import paths, tls
@@ -69,13 +70,17 @@ from aisquare.models import (
     HeadroomLevel,
     HeadroomSummary,
     ProjectInfo,
+    StatuslineSession,
+    StatuslineSite,
     UsageCause,
     UsageSample,
     UsageTrend,
+    WeekReset,
 )
 from aisquare.services import agents as agents_service
 from aisquare.services import install_route
 from aisquare.services import settings as settings_service
+from aisquare.statusline import FLEET_FILE as STATUSLINE_FLEET_FILE
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 """What Claude Code's ``/usage`` reads; ``anthropic-beta: oauth-2025-04-20`` is required."""
@@ -2029,6 +2034,9 @@ def cached_usage(
     if force:
         core.forget_keychain_reads()
     moment = now or _now()
+    if not force:
+        # What a session's own status line saw (#287, 2c), before anything is fetched.
+        ingest_statusline(accounts, max_age=max_age, now=moment)
     since = moment - timedelta(seconds=max_age)
     tokens = {
         account.slot: token
@@ -2307,7 +2315,12 @@ def fleet_headroom(
       USED, as read — what the agent rows show beside an agent's account;
     - the **level**: ``good`` over 50 % left, ``fair`` 25-50 %, ``low`` 5-25 %,
       ``critical`` under 5 % (but above 0), ``empty`` at 0 % or with no usable
-      account, ``unknown`` while no enabled account has been read yet.
+      account, ``unknown`` while no enabled account has been read yet;
+    - the **week** (#287), over the usable accounts whose weekly window was read:
+      ``week left by slot`` is ``100 - week % used``; ``week percent left`` their mean;
+      ``weeks left`` the sum of ``(100 - week % used) / 100``, account-weeks (two
+      accounts at 90 % and 20 % used have 0.9 of 2 left); ``week resets soonest`` the
+      account whose week resets first, and when.
 
     ``accounts`` are the accounts to summarise (disabled ones are skipped);
     ``readings`` is slot → reading, and an account without one has not been
@@ -2325,6 +2338,8 @@ def fleet_headroom(
         return HeadroomSummary(level="unknown")
     left_by_slot: dict[int, float] = {}
     session_by_slot: dict[int, float] = {}
+    week_left: dict[int, float] = {}
+    resets: list[tuple[datetime, int]] = []
     taken: list[datetime] = []
     oldest = (now or _now()) - timedelta(seconds=USAGE_MAX_AGE_SECONDS)
     for account in enabled:
@@ -2336,11 +2351,16 @@ def fleet_headroom(
             continue
         left_by_slot[account.slot] = left
         session_by_slot[account.slot] = reading.session_percent
+        if reading.week_percent is not None:
+            week_left[account.slot] = max(0.0, 100.0 - reading.week_percent)
+            if reading.week_resets_at is not None:
+                resets.append((reading.week_resets_at, account.slot))
         if reading.fetched_at is not None:
             taken.append(reading.fetched_at)
     if not left_by_slot:
         return HeadroomSummary(level="empty", needs_login=needs_login)
     mean = sum(left_by_slot.values()) / len(left_by_slot)
+    soonest = min(resets, default=None)
     return HeadroomSummary(
         level=headroom_level(mean),
         percent_left=mean,
@@ -2349,7 +2369,41 @@ def fleet_headroom(
         left_by_slot=left_by_slot,
         session_by_slot=session_by_slot,
         fetched_at=min(taken, default=None),
+        week_left_by_slot=week_left,
+        week_percent_left=sum(week_left.values()) / len(week_left) if week_left else None,
+        weeks_left=sum(week_left.values()) / 100 if week_left else None,
+        week_resets_soonest=(
+            WeekReset(slot=soonest[1], resets_at=soonest[0]) if soonest is not None else None
+        ),
     )
+
+
+def summary_sentence(
+    summary: HeadroomSummary, labels: Mapping[int, str], *, now: datetime | None = None
+) -> str | None:
+    """The fleet in one line (#287): ``Fleet: 58% left now · week: 1.8 of 3 accounts left ·
+    next weekly reset in 2d 4h (Thu 14:00) (account 3)``; ``None`` with no reading.
+
+    The Accounts page's header and ``accounts usage``'s last line. "Now" is the fuller
+    window's share left (:attr:`HeadroomSummary.percent_left`), the week part is
+    account-weeks over the accounts whose week was read, the reset is the soonest
+    (:func:`core.format_reset`, the one reset formatter). ``labels`` is slot → alias;
+    ``now`` is this module's clock unless given.
+    """
+    if summary.percent_left is None:
+        return None
+    now = now or _now()
+    parts = [f"Fleet: {round(summary.percent_left)}% left now"]
+    if summary.weeks_left is not None:
+        parts.append(
+            f"week: {summary.weeks_left:.1f} of {len(summary.week_left_by_slot)} accounts left"
+        )
+    if summary.week_resets_soonest is not None:
+        soonest = summary.week_resets_soonest
+        name = labels.get(soonest.slot) or core.default_label(soonest.slot)
+        reset = core.format_reset(soonest.resets_at, now=now)
+        parts.append(f"next weekly reset {reset} ({name})")
+    return " · ".join(parts)
 
 
 def read_fleet_headroom(
@@ -2371,7 +2425,283 @@ def read_fleet_headroom(
         if not account.disabled and core.signed_in(account)
     ]
     readings = cached_usage(candidates, max_age=max_age, force=force, now=now, fetch=fetch)
-    return fleet_headroom(candidates, readings, now=now)
+    summary = fleet_headroom(candidates, readings, now=now)
+    write_statusline_fleet(summary, candidates, now=now)
+    return summary
+
+
+# --- the Claude Code status line and the sessions it reports (#287, 2c) -----------------------
+#
+# `asq-statusline` (aisquare.statusline, stdlib only) keeps one record per session under
+# cache/statusline/. Read here they are three things: the sessions on this machine
+# (`statusline_sessions`, `accounts sessions`), readings the usage endpoint need not be
+# asked for (`ingest_statusline`, which `cached_usage` runs first), and, the other way,
+# `fleet.json`, the fleet's figure the status line prints (`write_statusline_fleet`).
+
+STATUSLINE_KEEP = timedelta(hours=24)
+"""A record older than this is deleted when the records are read."""
+
+
+def statusline_dir() -> Path:
+    """Where ``asq-statusline`` keeps its records (``aisquare.statusline.record_dir``)."""
+    return paths.cache_dir() / "statusline"
+
+
+def _statusline_slot(config_dir: str | None) -> int | None:
+    """The account a record's ``CLAUDE_CONFIG_DIR`` names: slot 1 for none or the plain
+    claude's own directory, a managed slot's number, else ``None`` (not ours)."""
+    if not config_dir:
+        return core.DEFAULT_SLOT
+    if (slot := core.managed_slot(config_dir)) is not None:
+        return slot
+    with contextlib.suppress(OSError, RuntimeError):
+        if Path(config_dir).resolve() == core.default_config_dir().resolve():
+            return core.DEFAULT_SLOT
+    return None
+
+
+def _at(epoch: Any) -> datetime | None:
+    if isinstance(epoch, bool) or not isinstance(epoch, int | float):
+        return None
+    try:
+        return datetime.fromtimestamp(epoch, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _statusline_session(data: Any) -> StatuslineSession | None:
+    """One record as a :class:`StatuslineSession`; ``None`` for one that is not a record."""
+    if not isinstance(data, dict) or not isinstance(data.get("session_id"), str):
+        return None
+    updated = _at(data.get("updated_at"))
+    if updated is None:
+        return None
+
+    def window(name: str) -> tuple[float | None, datetime | None]:
+        value = data.get(name)
+        if not isinstance(value, dict):
+            return None, None
+        used = value.get("used_percentage")
+        percent = float(used) if isinstance(used, int | float) else None
+        return percent, _at(value.get("resets_at"))
+
+    def text(key: str) -> str | None:
+        value = data.get(key)
+        return value if isinstance(value, str) and value else None
+
+    def number(key: str) -> float | None:
+        value = data.get(key)
+        return float(value) if isinstance(value, int | float) else None
+
+    session_percent, session_resets = window("five_hour")
+    week_percent, week_resets = window("seven_day")
+    return StatuslineSession(
+        session_id=data["session_id"],
+        updated_at=updated,
+        cwd=text("cwd"),
+        model=text("model"),
+        config_dir=text("config_dir"),
+        slot=_statusline_slot(text("config_dir")),
+        fleet_agent=text("fleet_agent"),
+        session_percent=session_percent,
+        session_resets_at=session_resets,
+        week_percent=week_percent,
+        week_resets_at=week_resets,
+        context_percent=number("context_percent"),
+        cost_usd=number("cost_usd"),
+    )
+
+
+def _read_statusline_records(now: datetime) -> list[StatuslineSession]:
+    """Every record in :func:`statusline_dir`, newest first; one older than
+    :data:`STATUSLINE_KEEP` is deleted, and a file that is not a record skipped."""
+    found: list[StatuslineSession] = []
+    try:
+        files = list(statusline_dir().glob("*.json"))
+    except OSError:
+        return []
+    for file in files:
+        if file.name == STATUSLINE_FLEET_FILE:
+            continue
+        try:
+            session = _statusline_session(json.loads(file.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+        if session is None:
+            continue
+        if now - session.updated_at > STATUSLINE_KEEP:
+            with contextlib.suppress(OSError):
+                file.unlink()
+            continue
+        found.append(session)
+    return sorted(found, key=lambda session: session.updated_at, reverse=True)
+
+
+def statusline_sessions(
+    *, since: timedelta | None = None, now: datetime | None = None
+) -> list[StatuslineSession]:
+    """The Claude Code sessions that reported in the last ``since`` (all kept ones with
+    ``None``), newest first, each named with its account and, for a fleet agent, its label.
+
+    Every session carrying ``asq-statusline`` reports: hand-launched ones, and ones in a
+    directory no project holds, under any config directory. Read-only but for deleting
+    records older than a day.
+    """
+    moment = now or _now()
+    sessions = [
+        session
+        for session in _read_statusline_records(moment)
+        if since is None or moment - session.updated_at <= since
+    ]
+    names = {account.slot: core.label(account) for account in list_accounts()}
+    agents = {session.fleet_agent for session in sessions if session.fleet_agent}
+    labels: dict[str, str] = {}
+    if agents:
+        with contextlib.suppress(sqlite3.Error), store_session() as store:
+            for agent_id in agents:
+                if (row := store.get_fleet_agent(agent_id)) is not None:
+                    labels[agent_id] = row.label
+    return [
+        session.model_copy(
+            update={
+                "account": names.get(session.slot) if session.slot is not None else None,
+                "fleet_label": labels.get(session.fleet_agent or ""),
+            }
+        )
+        for session in sessions
+    ]
+
+
+def ingest_statusline(
+    accounts: Sequence[ClaudeAccount],
+    *,
+    max_age: float = USAGE_MAX_AGE_SECONDS,
+    now: datetime | None = None,
+) -> int:
+    """Record, as a ``claude_usage`` sample, each account's newest status-line reading that
+    is younger than ``max_age`` and newer than every sample the store holds for it; returns
+    how many it recorded.
+
+    A reading Claude Code took itself, on that account's own token, so
+    :func:`cached_usage` serves it like one of its own fetches and the usage endpoint is
+    asked less often. Sampled under the token the account holds NOW (``_token_fingerprint``),
+    as a fetch would be: an account signed out has no sample to add. Best effort: an
+    unreadable record or store records nothing.
+    """
+    moment = now or _now()
+    newest: dict[int, StatuslineSession] = {}
+    for session in _read_statusline_records(moment):
+        # Both windows, or none: a sample stands for a whole reading, and one without its
+        # week (a payload that left `seven_day` out) would be served as an account with
+        # its week to spare, over the endpoint's reading of it spent (review of #362).
+        if session.slot is None or session.session_percent is None or session.week_percent is None:
+            continue
+        if (moment - session.updated_at).total_seconds() > max_age:
+            continue
+        if session.slot not in newest:  # newest first
+            newest[session.slot] = session
+    recorded = 0
+    if not newest:
+        return recorded
+    with contextlib.suppress(sqlite3.Error), store_session() as store:
+        for account in accounts:
+            reading = newest.get(account.slot)
+            if reading is None:
+                continue
+            token = _token_fingerprint(account, moment)
+            if token is None or store.usage_samples(account.slot, since=reading.updated_at):
+                continue
+            store.add_usage_sample(
+                UsageSample(
+                    slot=account.slot,
+                    fetched_at=reading.updated_at,
+                    session_percent=reading.session_percent,
+                    session_resets_at=reading.session_resets_at,
+                    week_percent=reading.week_percent,
+                    week_resets_at=reading.week_resets_at,
+                    token_fingerprint=token,
+                )
+            )
+            recorded += 1
+    return recorded
+
+
+def statusline_sites(
+    slots: Sequence[int] | None = None,
+    *,
+    action: Literal["status", "install", "uninstall"] = "status",
+    wrap: bool = False,
+) -> list[StatuslineSite]:
+    """Each account's ``statusLine`` (every account, or those in ``slots``), after ``action``.
+
+    ``install`` sets ``asq-statusline`` where none is set, and with ``wrap`` around a
+    command the user set; a status line it did not write is otherwise left alone and
+    reported ``foreign``. ``uninstall`` takes out only what it wrote, putting a wrapped
+    command back as it was. A settings file two accounts share (``[accounts] share``
+    links it) is acted on once. One account's failure is its row's ``error``; the rest go on.
+    """
+    chosen = [account for account in list_accounts() if slots is None or account.slot in slots]
+    sites: list[StatuslineSite] = []
+    seen: dict[str, int] = {}
+    for account in chosen:
+        path = account.config_dir / "settings.json"
+        key = os.path.realpath(path)
+        base = {"slot": account.slot, "account": core.label(account), "settings_path": str(path)}
+        if key in seen:
+            sites.append(StatuslineSite(**base, state="shared", theirs=f"slot {seen[key]}"))
+            continue
+        seen[key] = account.slot
+        before = agent_core.statusline_entry(account.config_dir)
+        try:
+            if action == "install":
+                after = agent_core.install_statusline(account.config_dir, wrap=wrap)
+                statusline_dir().mkdir(parents=True, exist_ok=True)
+            elif action == "uninstall":
+                agent_core.remove_statusline(account.config_dir)
+                after = agent_core.statusline_entry(account.config_dir)
+            else:
+                after = before
+        except Exception as exc:  # one account's file; the rest still go
+            sites.append(
+                StatuslineSite(**base, state=before.kind, theirs=before.theirs, error=str(exc))
+            )
+            continue
+        sites.append(
+            StatuslineSite(
+                **base,
+                state=after.kind,
+                theirs=after.theirs,
+                changed=(after.kind, after.theirs) != (before.kind, before.theirs),
+                note=after.note,
+            )
+        )
+    return sites
+
+
+def write_statusline_fleet(
+    summary: HeadroomSummary, accounts: Sequence[ClaudeAccount], *, now: datetime | None = None
+) -> None:
+    """``fleet.json`` for ``asq-statusline``: the fleet's share left, how many accounts, and
+    each account's name by its directory. Only where the status line has run or been
+    installed (its directory exists), and best effort: the line goes without it."""
+    directory = statusline_dir()
+    if not directory.is_dir():
+        return
+    labels = {os.path.realpath(account.config_dir): core.label(account) for account in accounts}
+    plain = next((a for a in accounts if a.slot == core.DEFAULT_SLOT), None)
+    if plain is not None:
+        labels[""] = core.label(plain)
+    data = {
+        "percent_left": summary.percent_left,
+        "week_percent_left": summary.week_percent_left,
+        "accounts": summary.usable,
+        "labels": labels,
+        "updated_at": (now or _now()).timestamp(),
+    }
+    with contextlib.suppress(OSError):
+        temporary = directory / f".{STATUSLINE_FLEET_FILE}.{os.getpid()}.tmp"
+        temporary.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(temporary, directory / STATUSLINE_FLEET_FILE)
 
 
 # --- the refusal memory (#277) -------------------------------------------------------------------

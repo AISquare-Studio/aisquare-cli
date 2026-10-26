@@ -71,6 +71,7 @@ dev = [
     { name = "jsonschema" },
     { name = "mcp" },
     { name = "mypy" },
+    { name = "pyotp" },
     { name = "pytest" },
     { name = "pytest-split" },
     { name = "pytest-xdist" },
@@ -84,6 +85,9 @@ dev = [
 ]
 explainability = [
     { name = "aisquare", extra = ["explainability"] },
+]
+gate = [
+    { name = "pyotp" },
 ]
 llm = [
     { name = "anthropic" },
@@ -118,6 +122,8 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "ngrok", marker = "(python_full_version >= '3.12' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'armv7l' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'ARM64' and sys_platform == 'win32') or sys_platform == 'darwin'", specifier = ">=1.4" },
     { name = "pydantic", specifier = ">=2.13.4" },
+    { name = "pyotp", marker = "extra == 'dev'", specifier = ">=2.9" },
+    { name = "pyotp", marker = "extra == 'gate'", specifier = ">=2.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
     { name = "pytest-split", marker = "extra == 'dev'", specifier = ">=0.11" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.6" },
@@ -148,7 +154,7 @@ requires-dist = [
     { name = "websockets", specifier = ">=12" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=12" },
 ]
-provides-extras = ["serve", "llm", "explainability", "voice", "remote", "code", "tui", "experiment", "dev"]
+provides-extras = ["serve", "llm", "explainability", "voice", "gate", "remote", "code", "tui", "experiment", "dev"]
 
 [[package]]
 name = "annotated-doc"
@@ -1700,6 +1706,15 @@ wheels = [
 [package.optional-dependencies]
 crypto = [
     { name = "cryptography" },
+]
+
+[[package]]
+name = "pyotp"
+version = "2.10.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2d/c6/c5d96a86fd0bf6fa1bbb5c5c341ff3208638b692727a683c8289068d9a11/pyotp-2.10.0.tar.gz", hash = "sha256:d01e9703443616b03c57c700b5cbffd56a1f929c1b0f8f03131bc78c1fca9d3f", size = 18625, upload-time = "2026-06-14T03:48:49.221Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/65/33/7b83bde70eddaaaaef487751a9c3a5cc0c0be54620ded0e120ebdc401ff9/pyotp-2.10.0-py3-none-any.whl", hash = "sha256:1df2f6a1bcc3bb0716172a5215ddc2f8c7c7fd26a13df9927d52e1746934836c", size = 13768, upload-time = "2026-06-14T03:48:47.831Z" },
 ]
 
 [[package]]

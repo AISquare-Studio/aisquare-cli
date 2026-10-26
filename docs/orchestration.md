@@ -129,6 +129,11 @@ event. What of the board an agent reads is its board context
 (its own tasks, what is addressed to its role or label, and decisions) or `none` (the
 reviewer's default: no recent updates at start and no deltas). A manager reads `all`.
 
+Your own `CLAUDE.md` files reach every agent too, beside its role cycle, and
+nothing ranks the two. When they disagree (*use subagents* against *spawn
+coders*), [Which instructions an agent follows](instructions.md) says where each
+comes from and how to remove the conflict.
+
 A note addressed to a session does not wait for its next prompt. When the
 session's turn ends, its `Stop` hook hands it the notes addressed to its role
 or its fleet label (`aisquare note --to`, `fleet tell` to a busy agent), the
@@ -158,6 +163,15 @@ aisquare task review 1 --note "how to verify" --as <id>
 aisquare task reopen '#1' --reason "fails on py3.11" --as <id>
 aisquare note "JWT it is" --kind decision --as <id>
 ```
+
+A task is **idempotent on its key**: `task add` with a key the board already holds
+answers "already tracked (idempotent)" with that task, instead of adding a second.
+`--key` sets the key; without it, the key is the title's letters, digits and marks
+in any script, NFKC-normalised and casefolded, with every other run as one `-`, clipped
+to 64 characters: `Wire the auth flow!` → `wire-the-auth-flow`, `Исправить вход` →
+`исправить-вход`, `修复登录` → `修复登录`. A title of emoji alone is keyed by a hash
+of it (`t-…`). A title with words outside ASCII added before #270 was keyed by its
+ASCII letters only (`Fix вход` → `fix`), and re-adding exactly that title still finds it.
 
 Every task has a **number on its board** — `#1`, `#2`, … in the order tasks
 were added to that project — shown beside its id on the board, in `task list`,
@@ -270,6 +284,26 @@ Every line between the board's parts drags to resize — the one beside the task
 column, the one above the detail, the one between the sessions and the tasks — and
 a double-click puts it back. The sizes are kept in `~/.aisquare/state.json`, one
 for every project's board, and come back at the next launch.
+
+#### What a human does here
+
+The board's top line says what needs you, for example `needs you: 🔔 1 waiting · ❓ 2
+questions · 👀 1 in review · ⛔ 1 blocked`, or "nothing needs you — the manager is
+working; talk to it on the Manager tab". Each count is a button to the first thing it
+counts: the card in the table, or, for 🔔 and ❓, the agent's row in `asq`, whose pane
+is where you answer. The counts are the captain's attention queue's own rules
+(`services.captain.queue.observe`), read from what the board's tick already read: no
+tmux call, no extra store read, nothing written to `captain/queue.json`, and the
+captain need not be on. A question counts while it is still its asker's last word on
+the board; stale agents are left to the captain.
+
+- 🔔 and ❓ need you: click the agent and answer in its pane.
+- 👀 waits for a reviewer agent, or for you on the PR.
+- Nothing here is typed into: you talk to the manager, and it writes the tasks. With no
+  open task the table says so: "No open tasks. The manager writes them when you give it
+  a goal on the Manager tab."
+
+`?` lists these three lines under "what to do here", between the keys and the icons.
 
 ### Remote agents over MCP (`aisquare serve`)
 

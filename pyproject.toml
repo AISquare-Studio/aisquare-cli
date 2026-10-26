@@ -164,6 +164,16 @@ voice = [
   "faster-whisper>=1.0",
   "segno>=1.6",
 ]
+gate = [
+  # The captain's owner gate (#216, services/captain/gate.py): RFC 6238 TOTP codes from the
+  # owner's authenticator open a 15-minute act-as-owner window. An extra, never core: the
+  # captain is experimental and off by default, and the gate imports pyotp only where it
+  # verifies or enrols. Without it the gate fails closed and names this extra. 2.9 is the
+  # release whose TOTP takes the interval and digits used here and whose provisioning_uri
+  # takes issuer_name. segno, a core dependency since #34 (the Remote QR), draws the QR
+  # `gate enroll` prints for the authenticator to scan.
+  "pyotp>=2.9",
+]
 remote = [
   # Kept as a no-op alias for one release, as `tui` is: Remote's dependencies
   # are core since #34, and `pipx install 'aisquare-cli[remote]'` was the
@@ -243,6 +253,9 @@ dev = [
   # against the real `messages.parse` signature (the `mcp`/`serve` precedent).
   # Tests never call it: they install a fake `anthropic` module.
   "anthropic>=1",
+  # The gate extra's TOTP, so tests/test_captain_gate.py verifies real codes and mypy
+  # --strict checks the verifier against pyotp's own hints.
+  "pyotp>=2.9",
   # starlette's TestClient, which the remote server tests drive; mcp 2.x no
   # longer brings it. (Remote's own dependencies are core since #34.)
   "httpx>=0.27",
@@ -256,6 +269,7 @@ dev = [
 [project.scripts]
 aisquare = "aisquare.cli.app:main"
 asq = "aisquare.cli.app:main"
+asq-statusline = "aisquare.statusline:main"
 
 [project.urls]
 Homepage = "https://aisquare.studio"

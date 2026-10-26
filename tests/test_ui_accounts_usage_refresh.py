@@ -588,3 +588,141 @@ def test_a_refresh_that_fails_inside_the_window_keeps_the_figure_and_says_the_tr
     said, row, calls = seen["aged"]
     assert said == "last refreshed 5m ago · last try failed 4m ago"
     assert "40%" in row and "reading from 5m ago · HTTP 503" in row and calls == 2, row
+
+
+def test_the_page_says_the_fleets_share_left_now_and_of_the_week(
+    no_network: dict[str, Any], clock: Clock, tmp_path: Path
+) -> None:
+    """#287 slice 2a: under the usage bar, the fleet in one line, from the readings shown."""
+
+    def usage(account: ClaudeAccount) -> ClaudeUsage:
+        return ClaudeUsage(
+            available=True,
+            session_percent=30.0,
+            week_percent=20.0,
+            week_resets_at=NOW + timedelta(days=2),
+            fetched_at=clock(),
+        )
+
+    no_network["usage"] = usage
+    frame = _signed_in(2, tmp_path, "tok-two")
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 1)
+        await settle(app)
+        return shown(view.query_one("#fleet-summary", Static))
+
+    after = drive(go, overview=frame)
+    reset = core.format_reset(NOW + timedelta(days=2), now=NOW)
+    assert after == (
+        "Fleet: 70% left now · week: 0.8 of 1 accounts left · "
+        f"next weekly reset {reset} (account 2)"
+    ), after
+
+
+def test_the_page_lists_the_sessions_on_this_machine(
+    no_network: dict[str, Any], clock: Clock, tmp_path: Path
+) -> None:
+    """#287 slice 2c: under the accounts, every session whose status line reported in the
+    last 15 minutes, a hand-launched one too; one older is not listed."""
+    from aisquare import statusline
+
+    no_network["usage"] = lambda account: ClaudeUsage(available=True, fetched_at=clock())
+    frame = _signed_in(2, tmp_path, "tok-two")
+    for session, cwd, age in (("handmade-1", "/scratch", 120), ("old-one-1", "/gone", 3600)):
+        statusline.write_record(
+            statusline.record_dir(),
+            {
+                "session_id": session,
+                "cwd": cwd,
+                "model": "claude-opus-5-5",
+                "config_dir": None,
+                "five_hour": {"used_percentage": 42.0, "resets_at": None},
+                "context_percent": 34.0,
+                "updated_at": clock().timestamp() - age,
+            },
+        )
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(
+            app, lambda: "handmade" in shown(view.query_one("#machine-sessions", Static))
+        )
+        return shown(view.query_one("#machine-sessions", Static))
+
+    listed = drive(go, overview=frame)
+    assert listed.splitlines() == [
+        "Sessions on this machine",
+        "plain claude · handmade · /scratch · claude-opus-5-5 · ctx 34% · 5h 42% · 2m ago",
+    ], listed
+
+
+def test_adopt_a_conversation_picks_from_the_list_and_adopts_the_one_chosen(
+    no_network: dict[str, Any], clock: Clock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#290's asq half: *Adopt a conversation…* under Sessions on this machine lists
+    ``fleet adopt --list`` (read off the UI thread); one a claude still holds cannot be
+    picked, and Enter on another adopts it in a worker, the page saying as what."""
+    from textual.widgets import OptionList
+
+    from aisquare.cli.ui.adopt_picker import AdoptPicker
+    from aisquare.models import AdoptableConversation, FleetAgent
+    from aisquare.services import adopt as adopt_service
+    from aisquare.services import fleet as fleet_service
+
+    def conversation(session: str, *, held: int | None = None) -> AdoptableConversation:
+        return AdoptableConversation(
+            session_id=session,
+            transcript_path=f"/c/projects/-w/{session}.jsonl",
+            slot=2,
+            account="work",
+            cwd="/w",
+            project_id="prj_w",
+            last_activity=clock() - timedelta(hours=2),
+            first_prompt="fix the login bug",
+            held_by=held,
+        )
+
+    listed = [conversation("aaaaaaaa-1", held=4242), conversation("bbbbbbbb-2")]
+    adopted: list[str] = []
+
+    def adopt(ref: str, **_: Any) -> fleet_service.SpawnReceipt:
+        adopted.append(ref)
+        agent = FleetAgent(
+            id="agt_1",
+            project_id="prj_w",
+            label="coder-1",
+            role="coder",
+            pane_id="%1",
+            cwd=Path("/w"),
+            created_at=clock(),
+            session_id=ref,
+        )
+        return fleet_service.SpawnReceipt(agent=agent, asked_label=None, tmux_session="asq-w")
+
+    monkeypatch.setattr(adopt_service, "recent", lambda limit=10: listed)
+    monkeypatch.setattr(adopt_service, "adopt", adopt)
+    no_network["usage"] = lambda account: ClaudeUsage(available=True, fetched_at=clock())
+    frame = _signed_in(2, tmp_path, "tok-two")
+
+    async def go(pilot: Pilot[None]) -> tuple[list[bool], str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        view.query_one("#sessions-adopt", Button).press()
+        await settle_until(app, lambda: isinstance(app.screen, AdoptPicker))
+        options = app.screen.query_one("#adoptlist", OptionList)
+        disabled = [options.get_option_at_index(i).disabled for i in range(options.option_count)]
+        options.highlighted = 1
+        await pilot.press("enter")
+        await settle_until(
+            app, lambda: "adopted" in shown(view.query_one("#accounts-notice", Static))
+        )
+        return disabled, shown(view.query_one("#accounts-notice", Static))
+
+    disabled, notice = drive(go, overview=frame)
+    assert disabled == [True, False], "the held one cannot be picked"
+    assert adopted == ["bbbbbbbb-2"]
+    assert notice.startswith("✓ adopted bbbbbbbb as coder-1"), notice

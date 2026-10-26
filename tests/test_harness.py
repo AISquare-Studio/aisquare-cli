@@ -285,8 +285,11 @@ def test_the_boards_cycles_name_their_project_in_every_fleet_command() -> None:
         "`aisquare fleet reap --project calm-otter`"
     ) in manager
     verbs = re.findall(r"aisquare fleet (\S+)( --project calm-otter)?", manager)
-    assert {verb for verb, _named in verbs} == {"spawn", "tell", "switch", "stop", "reap"}
-    assert all(named for _verb, named in verbs), verbs
+    # `fleet adopt` (#290) takes no --project: the conversation's own directory names it.
+    scoped = [(verb, named) for verb, named in verbs if verb != "adopt"]
+    assert {verb for verb, _named in scoped} == {"spawn", "tell", "switch", "stop", "reap"}
+    assert all(named for _verb, named in scoped), verbs
+    assert "`aisquare fleet adopt --list`" in manager
     assert "`aisquare fleet spawn --project calm-otter tester --task <id> --as abcd1234`" in manager
     assert "`fleet spawn " not in manager, "the short forms name it too"
     coder = cycle("coder")
@@ -309,6 +312,15 @@ def test_the_lane_rules_substitute_commands_run_as_written() -> None:
     assert '--detail "<contract>" --as abcd1234' in planner
     manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
     assert "aisquare fleet spawn coder --task <id> --as abcd1234" in manager
+
+
+def test_the_manager_cycle_names_the_label_limit() -> None:
+    """#291: the manager adds a task, then spawns for it, so a label it learns is too long
+    only from the spawn's refusal leaves that task without an agent. The cycle says so first."""
+    manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
+    assert (
+        "Labels are unique, descriptive and at most 24 characters (coder-auth, not coder-2)."
+    ) in manager
 
 
 def test_no_role_reads_never_merge_twice() -> None:

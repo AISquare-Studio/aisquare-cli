@@ -11,7 +11,10 @@ the one it goes back to:
 2. **Claude Code** — the binary the fleet launches. When it is missing the card
    names this platform's install command, and the page looks again on every
    refresh tick while it is shown, and on *Check again*. *Sign in* opens the
-   Accounts page; *Connect* is the doctor's own one-click fix, and "connected"
+   Accounts page, and the shell comes back here once a sign-in started there lands
+   (#286): the page looks again and the keyboard goes to the next step, which is
+   step 3's button when the sign-in was all it waited on (:meth:`WelcomeView.back_from_sign_in`).
+   *Connect* is the doctor's own one-click fix, and "connected"
    is the one shared answer (``services.agents.claude_code_connected``), asked
    where the manager starts and where the coders do.
 3. **Fleet** — *Start manager*, then *Start the coders* (coder-1 and coder-2),
@@ -24,7 +27,8 @@ the one it goes back to:
    is restarted under its own label, as its own page's Restart does it.
 
 **The page never takes the keyboard on its own.** The sidebar has it at mount,
-and the app's keys depend on that. A finished card's buttons leave the Tab
+and the app's keys depend on that; the one exception is the return from a sign-in
+the user started here, which the user asked for. A finished card's buttons leave the Tab
 order (they stay clickable), so Tab from the sidebar lands on the next thing to
 do; and when the button the keyboard was on goes away, focus moves to the next
 step's button rather than to nowhere.
@@ -52,6 +56,7 @@ from textual.widget import Widget
 from textual.widgets import Button, Input, Static
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.attach import ReturnTo
 from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, short_path
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.views.onboard import render_verdict
@@ -431,6 +436,10 @@ class WelcomeView(VerticalScroll):
         """The shell frame's project ids when step 1 was last listed."""
         self._keyboard = False
         """Whether the keyboard was on this page at the last paint (see :meth:`paint`)."""
+        self._back_owed = False
+        """A sign-in started from step 2 landed: the next full look hands the keyboard on."""
+        self._hand_to_next = False
+        """That look landed: the next paint gives the keyboard to the next step."""
 
     # ------------------------------------------------------------------ layout
 
@@ -622,8 +631,22 @@ class WelcomeView(VerticalScroll):
         if self._full_owed:
             self._full_owed = False
             self.look(full=True)
-        elif isinstance(result, tuple):
+            return
+        if self._back_owed:
+            self._back_owed = False
+            self._hand_to_next = True
+        if isinstance(result, tuple):
             self._follow_project()
+
+    def back_from_sign_in(self) -> None:
+        """A sign-in step 2's *Sign in* started has landed (the shell's return-to, #286).
+
+        The login is read again, with everything else, and once that look lands the
+        keyboard goes to the next thing to do: step 3's button when the sign-in was what
+        it waited on. Asked by the shell after it has shown this page again.
+        """
+        self._back_owed = True
+        self.look(full=True)
 
     def _follow_project(self) -> None:
         """Ask step 2 again when its answer was for another folder than the chosen project's.
@@ -857,7 +880,8 @@ class WelcomeView(VerticalScroll):
         elif button.id == "claude-check":
             self.look(full=True)
         elif button.id == "claude-sign-in":
-            self.post_message(AccountsSelected())
+            project_id = self.project.id if self.project is not None else None
+            self.post_message(AccountsSelected(return_to=ReturnTo("welcome", project_id)))
         elif button.id == "claude-connect":
             self._start_work("connect", self.seams.connect)
         elif button.id == "fleet-manager":
@@ -1013,7 +1037,13 @@ class WelcomeView(VerticalScroll):
         project_done = self._paint_project()
         claude_done = self._paint_claude(waiting=not project_done)
         self._paint_fleet(waiting=not (project_done and claude_done))
-        if self._keyboard:
+        if self._hand_to_next:
+            self._hand_to_next = False
+            target = self.next_button()
+            if target is not None:
+                target.focus()
+                self._keyboard = True
+        elif self._keyboard:
             self._hand_on()
 
     def _hand_on(self) -> None:
@@ -1026,14 +1056,22 @@ class WelcomeView(VerticalScroll):
         chain = self.screen.focus_chain
         if focused is not None and focused in chain:
             return
-        target = next((widget for widget in chain if self in widget.ancestors), None)
+        target = self.next_button()
         if target is not None:
             target.focus()
 
     def next_button(self) -> Widget | None:
-        """The first widget Tab reaches on this page: the next thing to do."""
+        """The first widget Tab reaches on this page: the next thing to do.
+
+        Step 2's *Sign in* on a done card is a stop Tab keeps, never the next thing to do:
+        while step 3 waits (its look at the chosen folder in flight), it was the only
+        widget left and took the keyboard, and Enter opened Accounts (#349's walk). With
+        nothing else, there is no next button yet, and the next paint hands on.
+        """
+        claude = self.claude
+        aside = claude is not None and claude.ready
         for widget in self.screen.focus_chain:
-            if self in widget.ancestors:
+            if self in widget.ancestors and not (aside and widget.id == "claude-sign-in"):
                 return widget
         return None
 
@@ -1104,11 +1142,11 @@ class WelcomeView(VerticalScroll):
             and claude.hooks_off is None
             and claude.refused is None
         )
-        self.query_one("#claude-sign-in", Button).display = (
-            found and claude is not None and claude.signed_in is False
-        )
+        sign_in = found and claude is not None and claude.signed_in is False
+        self.query_one("#claude-sign-in", Button).display = sign_in
         self.query_one("#claude-check", Button).display = claude is not None and not claude.found
-        self._card("step-claude", done=done, waiting=waiting)
+        # Step 3 does not wait on a sign-in, so a done card can still offer one: Tab keeps it.
+        self._card("step-claude", done=done, waiting=waiting, keep_keys=sign_in)
         return done
 
     def _paint_fleet(self, *, waiting: bool) -> None:

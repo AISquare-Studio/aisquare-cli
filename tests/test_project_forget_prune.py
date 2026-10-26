@@ -462,55 +462,111 @@ def test_forgets_help_and_docs_say_a_stopped_reader_holds_a_hub_too() -> None:
         assert "project's live agents read" not in text, where
 
 
-def test_forget_the_active_project_moves_the_pin_to_the_most_recently_touched(
+def _state_keys() -> set[str] | None:
+    """The keys of `state.json`, or ``None`` when there is no such file."""
+    state = paths.state_path()
+    return set(json.loads(state.read_text(encoding="utf-8"))) if state.exists() else None
+
+
+def test_forget_from_inside_the_project_with_no_pin_writes_no_pin(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    alpha = _register(runner, monkeypatch, work_dir / "alpha")
+    """#271: with no pin, the working directory's project counted as the active one, and
+    forgetting it from inside pinned the most recently touched project left: a
+    machine-wide pin, in a `state.json` written for it, that every other terminal and
+    every fleet's `fleet ls` then followed. Nothing was pinned, so nothing is now."""
+    _register(runner, monkeypatch, work_dir / "alpha")
+    _register(runner, monkeypatch, work_dir / "beta")  # cwd is beta, nothing pinned
+    assert pinned_project_id() is None and _state_keys() is None
+
+    result = runner.invoke(app, ["--json", "project", "forget", "beta"])
+
+    assert result.exit_code == 0, result.output
+    assert _state_keys() is None, "no state.json was written"
+    report = _json(result.stdout)
+    assert (report["active_changed"], report["unpinned"], report["active"]) == (False, None, None)
+    said = runner.invoke(app, ["project", "forget", "alpha"]).stdout
+    assert "pin" not in said and _state_keys() is None
+
+
+def test_forget_the_pinned_project_clears_the_pin_rather_than_moving_it(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#271: the pin moved to the most recently touched project, one nobody chose. It is
+    cleared, and the active project follows the working directory again."""
+    _register(runner, monkeypatch, work_dir / "alpha")
     _register(runner, monkeypatch, work_dir / "beta")
     gamma = _register(runner, monkeypatch, work_dir / "gamma")
-    # alpha was registered first but is touched LAST, so it is the one to land on.
-    monkeypatch.chdir(work_dir / "alpha")
-    runner.invoke(app, ["context", "add", "a later note", "--project"])
     assert runner.invoke(app, ["project", "switch", "gamma"]).exit_code == 0
     assert pinned_project_id() == gamma
 
     result = runner.invoke(app, ["project", "forget", "gamma"])
 
     assert result.exit_code == 0, result.output
-    assert "active project is now alpha" in result.stdout
-    assert pinned_project_id() == alpha
-    info = runner.invoke(app, ["--json", "project", "info"])
-    assert _json(info.stdout)["id"] == alpha
+    assert "the pin on gamma was cleared" in result.stdout
+    assert "the active project follows your working directory" in result.stdout
+    assert pinned_project_id() is None
+    assert "active_project_id" not in (_state_keys() or set()), "the key is removed"
 
 
-def test_forget_the_cwd_project_is_forgetting_the_active_one(
+def test_forget_another_project_leaves_the_pin_where_it_is(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Active means pinned OR cwd-derived; with no pin, the cwd project is active."""
     alpha = _register(runner, monkeypatch, work_dir / "alpha")
-    _register(runner, monkeypatch, work_dir / "beta")  # cwd is now beta, nothing pinned
-    assert pinned_project_id() is None
+    _register(runner, monkeypatch, work_dir / "beta")  # forgotten from inside itself
+    assert runner.invoke(app, ["project", "switch", "alpha"]).exit_code == 0
 
     result = runner.invoke(app, ["--json", "project", "forget", "beta"])
 
-    report = _json(result.stdout)
-    assert report["active_changed"] is True
-    assert report["active"]["id"] == alpha
     assert pinned_project_id() == alpha
+    report = _json(result.stdout)
+    assert (report["active_changed"], report["unpinned"]) == (False, None)
 
 
-def test_forget_the_only_project_clears_the_pin(
+@pytest.mark.parametrize("pin", ["none", "the dropped one", "another"])
+def test_prune_clears_only_a_pin_that_named_what_it_dropped(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, pin: str
+) -> None:
+    """#271: `prune` repinned the same way, through the same `_repin`."""
+    alpha = _register(runner, monkeypatch, work_dir / "alpha")
+    gone = _register(runner, monkeypatch, work_dir / "gone")
+    if pin != "none":
+        target = "gone" if pin == "the dropped one" else "alpha"
+        assert runner.invoke(app, ["project", "switch", target]).exit_code == 0
+    monkeypatch.chdir(work_dir / "alpha")
+    shutil.rmtree(work_dir / "gone")
+    before = _state_keys()
+
+    result = runner.invoke(app, ["--json", "project", "prune", "--missing", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    report = _json(result.stdout)
+    assert report["dropped"] == [gone]
+    if pin == "none":
+        assert _state_keys() == before is None, "no state.json was written"
+        assert (report["active_changed"], report["unpinned"]) == (False, None)
+    elif pin == "the dropped one":
+        assert pinned_project_id() is None
+        assert report["active_changed"] is True and report["unpinned"]["id"] == gone
+    else:
+        assert pinned_project_id() == alpha
+        assert (report["active_changed"], report["unpinned"]) == (False, None)
+
+
+def test_prune_says_which_pin_it_cleared(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _register(runner, monkeypatch, work_dir / "alpha")
-    assert runner.invoke(app, ["project", "switch", "alpha"]).exit_code == 0
+    _register(runner, monkeypatch, work_dir / "gone")
+    assert runner.invoke(app, ["project", "switch", "gone"]).exit_code == 0
+    monkeypatch.chdir(work_dir)
+    shutil.rmtree(work_dir / "gone")
 
-    result = runner.invoke(app, ["project", "forget", "alpha"])
+    result = runner.invoke(app, ["project", "prune", "--missing", "--yes"])
 
     assert result.exit_code == 0, result.output
-    assert "follows your working directory" in result.stdout
+    assert "the pin on gone was cleared" in result.stdout
     assert pinned_project_id() is None
-    assert "No projects registered yet" in runner.invoke(app, ["project", "list"]).stdout
 
 
 def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
@@ -1485,23 +1541,6 @@ def test_a_prune_of_a_hub_and_its_reader_decides_every_hold_before_either_goes(
     assert _listed(runner) == ({hub, beta, gamma} if held else {gamma})
 
 
-def test_prune_moves_the_pin_when_it_drops_the_active_project(
-    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    alpha = _register(runner, monkeypatch, work_dir / "alpha")
-    gone = _register(runner, monkeypatch, work_dir / "gone")
-    assert runner.invoke(app, ["project", "switch", "gone"]).exit_code == 0
-    monkeypatch.chdir(work_dir)
-    shutil.rmtree(work_dir / "gone")
-    assert pinned_project_id() == gone
-
-    result = runner.invoke(app, ["project", "prune", "--missing", "--yes"])
-
-    assert result.exit_code == 0, result.output
-    assert "active project is now alpha" in result.stdout
-    assert pinned_project_id() == alpha
-
-
 def test_prune_purge_deletes_history_too(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1540,17 +1579,25 @@ def _corrupt_state() -> str:
     return body
 
 
-def test_forget_purge_completes_and_reports_a_pin_it_could_not_move(
+def test_forget_purge_completes_and_reports_a_pin_it_could_not_clear(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`_repin` ran inside the transaction: a `state.json` that refused the pin reported the
     command FAILED after the purge had committed and before the data directory was removed —
-    orphaned for good, its registration gone — and a re-run said "no project matches"."""
+    orphaned for good, its registration gone — and a re-run said "no project matches".
+    Clearing the pin (#271) is reported the same way: the writer refuses (its lock held by
+    another process, say) while the file still names the project."""
     alpha = _register(runner, monkeypatch, work_dir / "alpha")
-    beta = _register(runner, monkeypatch, work_dir / "beta")  # cwd is beta: active, unpinned
+    beta = _register(runner, monkeypatch, work_dir / "beta")
+    assert runner.invoke(app, ["project", "switch", "beta"]).exit_code == 0
     data_dir = paths.project_data_dir(beta)
     (data_dir / "brain").mkdir(parents=True)
-    body = _corrupt_state()
+    body = paths.state_path().read_text()
+
+    def refuse(key: str, value: object) -> None:
+        raise StateUnwritableError(f"{paths.state_path()}.lock is held by another process")
+
+    monkeypatch.setattr("aisquare.core.workspace.update_state", refuse)
 
     result = runner.invoke(app, ["--json", "project", "forget", "beta", "--purge"])
 
@@ -1558,8 +1605,8 @@ def test_forget_purge_completes_and_reports_a_pin_it_could_not_move(
     report = _json(result.stdout)
     assert report["purged"] is True and report["data_dir_removed"] is True
     assert not data_dir.exists()
-    assert report["active_changed"] is True and report["active"] is None
-    assert "state.json" in report["pin_error"]
+    assert report["active_changed"] is True and report["unpinned"]["id"] == beta
+    assert report["active"] is None and "state.json" in report["pin_error"]
     assert paths.state_path().read_text() == body  # the user's file, untouched
     assert _listed(runner) == {alpha}
 
@@ -1575,7 +1622,7 @@ def test_forget_the_last_project_on_a_corrupt_state_file_is_complete(
     result = runner.invoke(app, ["project", "forget", "alpha"])
 
     assert result.exit_code == 0, result.output
-    assert "follows your working directory" in result.stdout and "⚠" not in result.stdout
+    assert "pin" not in result.stdout and "⚠" not in result.stdout, "nothing was pinned"
     assert paths.state_path().read_text() == body
     assert "No projects registered yet" in runner.invoke(app, ["project", "list"]).stdout
 
@@ -1583,12 +1630,13 @@ def test_forget_the_last_project_on_a_corrupt_state_file_is_complete(
 def test_forget_purge_of_the_last_project_reports_a_state_file_it_can_no_longer_read(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review of the #167 fold, F6. With no project left, `_repin` unpins, and the unpin asks
-    `pinned_project_id` first — a strict read, whose `PermissionError` is not the
-    `StateUnwritableError` `_repin` catches. A `state.json` that became unreadable after
+    """Review of the #167 fold, F6. With the pin on the project, the forget unpins, and the
+    unpin asks `pinned_project_id` first — a strict read, whose `PermissionError` is not the
+    `StateUnwritableError` `_clear_pin` catches. A `state.json` that became unreadable after
     `forget` had resolved the active project escaped the committed purge as a traceback, and
     the data directory was never removed. The refusal names the file, as a write's does."""
-    alpha = _register(runner, monkeypatch, work_dir / "alpha")  # the cwd's: active, unpinned
+    alpha = _register(runner, monkeypatch, work_dir / "alpha")
+    assert runner.invoke(app, ["project", "switch", "alpha"]).exit_code == 0  # the unpin asks
     data_dir = paths.project_data_dir(alpha)
     (data_dir / "brain").mkdir(parents=True)
     real_purge = SqliteStore.purge_project
@@ -1614,12 +1662,12 @@ def test_forget_purge_of_the_last_project_reports_a_state_file_it_can_no_longer_
     report = _json(result.stdout)
     assert report["purged"] is True and report["data_dir_removed"] is True
     assert not data_dir.exists()
-    assert report["active_changed"] is True and report["active"] is None
+    assert report["active_changed"] is True and report["unpinned"]["id"] == alpha
     assert "state.json could not be read" in report["pin_error"], report["pin_error"]
     assert "Permission denied" in report["pin_error"]
 
 
-def test_prune_reports_a_pin_it_could_not_move_instead_of_a_traceback(
+def test_prune_reports_a_pin_it_could_not_clear_instead_of_a_traceback(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, repo_and_worktree: tuple[Path, Path]
 ) -> None:
     """`prune` reached the same `pin_project` with no handler: a raw traceback, and under
@@ -1645,7 +1693,7 @@ def test_prune_reports_a_pin_it_could_not_move_instead_of_a_traceback(
 
     assert result.exit_code == 0, result.output
     assert "✓ forgot 1 registration" in result.stdout
-    assert "⚠ the pin could not be moved" in result.stdout and "state.json" in result.stdout
+    assert "could not be cleared" in result.stdout and "state.json" in result.stdout
     assert _listed(runner) == {principal}
     assert paths.state_path().read_text() == body, "left as it was — still naming the worktree"
 
@@ -1705,6 +1753,27 @@ def test_forget_sticks_against_the_next_prompt(
     monkeypatch.chdir(tmp_path / "gone")
     assert runner.invoke(app, ["context", "add", "back", "--project"]).exit_code == 0
     assert project_id in _listed(runner)
+
+
+def test_prune_from_inside_a_captured_directory_with_no_pin_writes_no_pin(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, project_capture: None
+) -> None:
+    """#271, as `prune` did it: run from inside a scratch directory it drops, with nothing
+    pinned, it pinned the most recently touched project left, machine-wide."""
+    _register(runner, monkeypatch, tmp_path / "alpha")
+    scratch = _capture(runner, monkeypatch, tmp_path / "scratch")
+    monkeypatch.chdir(tmp_path / "scratch")
+    assert pinned_project_id() is None and _state_keys() is None
+
+    pruned = runner.invoke(
+        app, ["--json", "project", "prune", "--captured-only", "--older-than", "0", "--yes"]
+    )
+
+    assert pruned.exit_code == 0, pruned.output
+    assert _state_keys() is None, "no state.json was written"
+    report = _json(pruned.stdout)
+    assert report["dropped"] == [scratch]
+    assert (report["active_changed"], report["unpinned"]) == (False, None)
 
 
 def test_a_pruned_capture_is_captured_again_by_the_next_prompt(
@@ -1929,6 +1998,7 @@ def test_the_changelog_names_each_key_a_prunes_json_gained_since_080(
         "purged",
         "active",
         "active_changed",
+        "unpinned",
         "pin_error",
         "keys_still_live",
         *since_080,
@@ -1937,6 +2007,8 @@ def test_the_changelog_names_each_key_a_prunes_json_gained_since_080(
     notes = " ".join(changelog.split("## [0.8.1]")[1].split("## [0.8.0]")[0].split())
     assert "`project prune` reads why each candidate is one again" in notes
     assert all(f"`{key}`" in notes for key in since_080), notes
+    unreleased = " ".join(changelog.split("## [Unreleased]")[1].split("## [0.9.0]")[0].split())
+    assert "`unpinned`" in unreleased, "#271's key is named in the notes it ships in"
 
 
 @pytest.mark.parametrize(("candidate", "lists"), [("missing", 0), ("worktree", 1)])

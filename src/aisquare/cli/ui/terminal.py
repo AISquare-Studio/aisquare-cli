@@ -164,6 +164,9 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import os
+import re
+import subprocess
 import time
 import weakref
 from bisect import bisect_left
@@ -191,6 +194,7 @@ from textual.timer import Timer
 from textual.widget import Widget
 
 from aisquare.cli.ui.clipboard import ClipboardApp, characters, copy_and_tell
+from aisquare.core.clipboard import in_wsl
 from aisquare.core.keys import (
     EXTENDED_MINIMUM,
     Drop,
@@ -1036,6 +1040,65 @@ def _printable_name(key: str) -> str:
     reader's screen.
     """
     return "".join(char if char.isprintable() else f"U+{ord(char):04X}" for char in key)
+
+
+_WINDOWS_PATH = re.compile(r"""^(["']?)([A-Za-z]:\\[^"'\r\n]*)\1$""")
+"""A paste that is one Windows path, ``C:\\…``, bare or in one pair of quotes."""
+WSLPATH_TIMEOUT = 2.0
+WSLPATH_WORKER = "terminal-wslpath"
+"""The worker a pasted Windows path is converted in: ``wslpath`` may take its whole
+timeout, which the UI thread must not wait out."""
+
+
+def wsl_path(text: str, *, under_wsl: bool | None = None) -> str:
+    """``text`` with a lone Windows path turned into its Linux path, under WSL (#288).
+
+    Windows Terminal hands a file dropped on WSL to the program as ``C:\\…``, a path the
+    Linux side cannot open. A paste that is exactly one such path, of a file that exists,
+    becomes ``wslpath -u``'s answer, in the quotes it came in. Anything else, and anything
+    off WSL, reaches the agent as the terminal sent it: Claude Code reads its own
+    terminal's drops.
+    """
+    match = _WINDOWS_PATH.match(text.strip())
+    if match is None:
+        return text
+    if not (in_wsl(os.environ) if under_wsl is None else under_wsl):
+        return text
+    quote, windows = match.groups()
+    try:
+        done = subprocess.run(
+            ["wslpath", "-u", windows],
+            capture_output=True,
+            text=True,
+            timeout=WSLPATH_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return text
+    linux = done.stdout.strip()
+    if done.returncode != 0 or not linux or not Path(linux).exists():
+        return text
+    return f"{quote}{linux}{quote}"
+
+
+PASTE_LOG_ENV = "AISQUARE_PASTE_LOG"
+
+
+def log_paste(text: str, focused: Widget | None) -> None:
+    """One line per paste in the file ``AISQUARE_PASTE_LOG`` names, when it names one: its
+    length, its first 80 characters and the widget that had the keyboard — the record
+    #288's reproduction matrix is filled from. Asked where a paste lands: a pane that
+    takes it, and the shell's router for one no focused widget took. Off by default:
+    a paste may be a secret."""
+    target = os.environ.get(PASTE_LOG_ENV)
+    if not target:
+        return
+    where = type(focused).__name__ if focused is not None else "nothing"
+    if focused is not None and focused.id:
+        where += f"#{focused.id}"
+    line = f"{time.strftime('%H:%M:%S')} focused={where} len={len(text)} head={text[:80]!r}\n"
+    with contextlib.suppress(OSError), open(target, "a", encoding="utf-8") as log:
+        log.write(line)
 
 
 class TerminalPane(Widget, can_focus=True):
@@ -2864,10 +2927,41 @@ class TerminalPane(Widget, can_focus=True):
         if self.pane_id is None or self.server is None:
             return
         event.stop()
+        log_paste(event.text, self)
+        self.paste_text(event.text)
+
+    def paste_text(self, text: str) -> bool:
+        """``text`` into the agent as one bracketed paste: this pane's own paste, and the
+        shell's for a paste no focused widget took (#288). A lone Windows path under WSL
+        becomes its Linux path first (:func:`wsl_path`), in a worker, and is pasted when
+        ``wslpath`` answers (#340's review). False when there is no pane."""
+        if self.pane_id is None or self.server is None:
+            return False
+        if _WINDOWS_PATH.match(text.strip()) is not None and in_wsl(os.environ):
+            self.run_worker(
+                partial(self._paste_converted, text),
+                name=WSLPATH_WORKER,
+                group=WSLPATH_WORKER,
+                thread=True,
+                exit_on_error=False,
+            )
+            return True
+        self._paste_now(text)
+        return True
+
+    def _paste_converted(self, text: str) -> None:
+        """In :data:`WSLPATH_WORKER`: ``text`` through ``wslpath``, then pasted on the UI
+        thread."""
+        converted = wsl_path(text, under_wsl=True)
+        self.app.call_from_thread(self._paste_now, converted)
+
+    def _paste_now(self, text: str) -> None:
+        if self.pane_id is None or self.server is None:
+            return  # the pane let go of its agent while wslpath ran
         self.scrollback = 0
         if self.text_selection is not None:
             self._clear_own_selection()  # input into the agent: the highlight is stale (rule 3)
-        self._forward("paste", event.text)
+        self._forward("paste", text)
         self._input_arrived()
 
     async def _on_click(self, event: events.Click) -> None:

@@ -55,6 +55,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "actions",
         )
     ),
+    *(("captain", "gate", verb) for verb in ("enroll", "unlock", "lock", "status")),
     ("login",),
     ("logout",),
     ("whoami",),
@@ -79,6 +80,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "switch",
             "capacity",
             "gate",
+            "adopt",
         )
     ),
     ("code", "find"),
@@ -210,6 +212,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "enable",
             "trust",
             "settings",
+            "statusline",
+            "sessions",
         )
     ),
     *(("metrics", command) for command in ("show", "list", "tokens", "ledger")),

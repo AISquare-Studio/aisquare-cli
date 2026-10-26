@@ -158,6 +158,7 @@ def test_an_entry_the_user_added_to_a_mapping_is_written_with_only_what_it_sets(
         "permission_mode": "auto",
         "worktree": False,
         "extra_args": [],
+        "remote_control": False,
         "deny_tools": [],
         "allow_tools": [],
         "skill_listing": "names",
@@ -274,8 +275,9 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
         # own, not its extra_args), the first message's two (P0-W1a, #122), the idle check's
         # quiet window (P0-W1b, #123), the delivery guards (P0-W2, #276), whether a pane's
         # program may set the clipboard (P2-W3, #101), what of the board each role reads (P1
-        # WS-2, #279): the reviewer judges cold; the manager's quiet-point compaction, off, and
-        # the task contract's blocks (P1 WS-4, #281).
+        # WS-2, #279): the reviewer judges cold; Claude Code's own Remote Control, per role,
+        # off (#289); the manager's quiet-point compaction, off, and the task contract's
+        # blocks (P1 WS-4, #281).
         "fleet": {
             "max_agents_total": 0,
             "min_free_mb": 2048,
@@ -303,6 +305,7 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
                     "allow_tools": [],
                     "skill_listing": "full" if role == "manager" else "names",
                     "board_context": "none" if role == "reviewer" else "all",
+                    "remote_control": False,
                     **({"extra_args": []} if role == "reviewer" else {}),
                 }
                 for role in _V1_DEFAULTS["fleet"]["roles"]
@@ -314,6 +317,7 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
                     "permission_mode": "auto",
                     "worktree": False,
                     "extra_args": [],
+                    "remote_control": False,
                     "deny_tools": [],
                     "allow_tools": [],
                     "skill_listing": "names",

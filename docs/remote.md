@@ -28,6 +28,71 @@ phone loads ships inside aisquare-cli.
 
 ---
 
+## Claude Code's own Remote Control
+
+Claude Code has a remote of its own: `claude --remote-control "<title>"` starts an
+interactive session that can also be continued from claude.ai/code or the Claude app
+([Claude Code docs](https://code.claude.com/docs/en/remote-control)). A fleet role can
+start its agents that way:
+
+```sh
+aisquare config set fleet.roles.coder.remote_control true    # every coder from now on
+aisquare fleet spawn reviewer --remote-control               # this one reviewer
+aisquare fleet spawn coder --no-remote-control               # this coder without it
+```
+
+Each session is titled `<project> · <label>` (`alpha · coder-auth`), so you can
+tell the agents apart in the Claude app. The Spawn dialog has a *Claude Remote
+Control* switch under *Advanced*, at the role's default (not *Remote control*, which is
+this page's phone remote in *⚙ Settings*). The choice is recorded on the agent's row, so
+`fleet restart` and `fleet switch` keep it, and `fleet ls --json` reports it as
+`remote_control`.
+
+**Who can drive it, and as what.** A remote-controlled agent is the same Claude
+Code process with the same permission mode: its role's
+`fleet.roles.<role>.permission_mode` (`auto` unless you changed it), or the
+`--permission-mode` it was spawned with. A prompt sent from claude.ai/code is acted
+on exactly as one typed in its pane, and what the agent may do there without asking,
+it may do then. Anyone signed in to the Claude account the agent runs on can open
+the session, from any device, send it prompts and answer its permission questions.
+A login several people share gives each of them the agent. Turn Remote Control on
+only for roles whose permission mode you would hand to everyone with that login.
+
+`aisquare launch` adds the flag only where Claude Code takes it, and otherwise
+prints one dim line saying why:
+- the binary must be Claude Code (codex, aider and wrappers have no such flag);
+- the launch line must not already carry `--remote-control` or `--rc` (your own
+  flag wins);
+- `ANTHROPIC_BASE_URL` must name no host other than the Anthropic API;
+- `CLAUDE_CODE_OAUTH_TOKEN` must not be set.
+
+Claude Code refuses Remote Control in the last two cases. **Explainability
+tracing sends Claude Code through its proxy, which is such a base URL**, so a
+traced launch runs without Remote Control. While any role has it on, `aisquare
+doctor` shows a `remote control` row naming those roles and anything in their
+launch that Claude Code would refuse. It reads what the agents get: each role's
+binding, and the environment the fleet server hands every window it opens, which
+the server copied from whatever started it. With no server running, it reads the
+environment the fleet would start one with: your shell's, without a tracing base URL,
+which the fleet never passes on.
+
+Remote Control needs a Claude.ai login on Pro, Max, Team or Enterprise (on Team
+and Enterprise an Owner must enable it); API keys are not supported. To turn it
+on for every session on an account, hand-launched ones included, set
+`"remoteControlAtStartup": true` in that account's `settings.json`. aisquare does
+not set it, and a slot that links its settings (`core/claude_sharing.py`) shares
+it with every slot linked to the same file.
+
+| | `aisquare remote` | Claude Code's Remote Control |
+| --- | --- | --- |
+| **What it shows** | the whole fleet: what needs you across every project, each agent's screen and conversation, the board; with `allow-write`, tell, keys, stop, restart, switch | one Claude Code session, as the Claude app shows a conversation: continue it, answer its prompts |
+| **Auth** | a secret URL, then a four-word passphrase; read-only until `allow-write on` | your claude.ai login (Pro, Max, Team or Enterprise); no API keys |
+| **Where traffic goes** | your phone → your own ngrok tunnel → `aisquare remote` on `127.0.0.1:8750` → tmux and the board; nothing is hosted elsewhere | Claude Code → Anthropic (outbound HTTPS only, no inbound port) → claude.ai/code or the Claude app |
+| **Per** | machine, every project | session: one remote session per Claude Code process |
+| **Acts as** | you at the desk: what you send is typed into an agent's pane, and the agent acts on it with its role's permission mode; only with `allow-write on` | the agent itself, with its role's permission mode, for anyone signed in to the Claude account it runs on |
+
+---
+
 ## Install
 
 Nothing to install: Remote comes with aisquare-cli. The web server (starlette,

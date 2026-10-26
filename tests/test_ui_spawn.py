@@ -32,13 +32,16 @@ from typing import Any, TypeVar
 
 import pytest
 from textual.app import App
+from textual.geometry import Size
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
+from textual.widget import Widget
 from textual.widgets import (
     Button,
     Checkbox,
     Collapsible,
     Input,
+    Label,
     OptionList,
     RadioButton,
     Select,
@@ -94,7 +97,7 @@ from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.captain import state as captain_state
 from tests.fleet_fakes import list_agents_as
-from tests.ui_workers import released, settle_page, settle_workers
+from tests.ui_workers import released, settle_page, settle_until, settle_workers
 
 T = TypeVar("T")
 SIZE = (120, 50)
@@ -236,6 +239,7 @@ UNTOUCHED: Kwargs = {
     "agent_args": [],
     "account": None,
     "persona": None,
+    "remote_control": None,
 }
 """What a Spawn press sends for a form nobody changed: the role's default everywhere."""
 
@@ -384,6 +388,21 @@ async def unfolded(pilot: Pilot[Any]) -> None:
     await settle(pilot)
     await pilot.wait_for_scheduled_animations()
     await pilot.pause()
+
+
+async def resized(pilot: Pilot[Any], width: int, height: int) -> None:
+    """Resize the terminal and wait until the screen is laid out at that size.
+
+    ``Pilot.resize_terminal`` returns once the app looks idle, and the app hands a resize on
+    to its screen from a timer (``App._on_resize``), so the screen could still be laid out at
+    the old size. A click then aimed where *Advanced*'s title was in the 120x50 dialog: at
+    80x24 off the screen (``OutOfBounds``), at 80x45 on nothing, and the section stayed
+    folded (#298's full matrix, windows-latest, push run 40222702828). The screen's own size
+    is set in the same reflow that places the dialog, so that is what is waited for."""
+    size = Size(width, height)
+    await pilot.resize_terminal(width, height)
+    await settle_until(pilot.app, lambda: pilot.app.screen.outer_size == size)
+    assert pilot.app.screen.outer_size == size, "the screen was never laid out at the new size"
 
 
 # --- the row opens it -----------------------------------------------------------------
@@ -756,6 +775,7 @@ def test_spawn_sends_exactly_the_chosen_values_with_the_agent_args_shlex_split(
                 "agent_args": ["--model", "opus", "--append-system-prompt", "be brief"],
                 "account": "2",
                 "persona": None,
+                "remote_control": None,
             },
         )
     ]
@@ -808,6 +828,156 @@ def test_untouched_defaults_follow_the_role_and_touched_ones_stay(
     assert seen[1] == ("plan", False)  # both untouched: they followed coder → tester
     assert seen[2] == ("acceptEdits", True)  # the touched mode stayed; the switch followed
     assert seen[3] == "acceptEdits"  # and differs from the reviewer's default: it is sent
+
+
+def test_the_remote_control_switch_follows_the_role_until_touched_and_is_sent_then(
+    git_project: ProjectInfo,
+) -> None:
+    """#289: *Claude Remote Control* opens at the role's ``remote_control``, follows a role
+    change while untouched, and is sent only when it differs from the role's default."""
+    config = load_config()
+    config.fleet.roles["reviewer"] = FleetRoleSettings.model_validate({"remote_control": True})
+    save_config(config)
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        remote = dialog.query_one("#spawn-remote", Switch)
+        seen: list[Any] = [remote.value, dialog.spawn_kwargs()["remote_control"]]
+        select(dialog, "role").value = "reviewer"
+        await pilot.pause()
+        seen += [remote.value, dialog.spawn_kwargs()["remote_control"]]
+        remote.value = False  # touched: off for this one reviewer
+        await pilot.pause()
+        seen.append(dialog.spawn_kwargs()["remote_control"])
+        select(dialog, "role").value = "coder"
+        await pilot.pause()
+        seen += [remote.value, dialog.spawn_kwargs()["remote_control"]]
+        return seen
+
+    seen = drive(git_project, scenario)
+    assert seen[:2] == [False, None], "a coder: off, the role's default, sent as None"
+    assert seen[2:4] == [True, None], "untouched, it followed the reviewer's default"
+    assert seen[4] is False, "touched off over the reviewer's default: sent"
+    assert seen[5:] == [False, None], "back to coder: off is coder's default again"
+
+
+def test_a_resize_the_app_hands_on_late_is_waited_for(
+    git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``resized`` waits for the layout, not for the app to look idle. With the app's hand-on
+    of a resize held 150 ms, as a loaded runner's timer can hold it, a click on *Advanced*'s
+    title at 80x24 still lands and unfolds it; after ``Pilot.resize_terminal`` alone it was
+    aimed at the 120x50 dialog's title, off the screen."""
+    hand_on = App._check_resize
+    held: list[bool] = []
+
+    def late(app: App[Any]) -> None:
+        if app._resize_timer is not None and not held:
+            held.append(True)
+            app._resize_timer.stop()
+            app._resize_timer = app.set_timer(0.15, lambda: late(app))
+            return
+        hand_on(app)
+
+    monkeypatch.setattr(Host, "_check_resize", late)
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[object]:
+        await resized(pilot, 80, 24)
+        await open_advanced(pilot)
+        return [held, advanced(dialog).collapsed]
+
+    assert drive(git_project, scenario) == [[True], False]
+
+
+def test_the_remote_control_note_wraps_at_80_columns(git_project: ProjectInfo) -> None:
+    """At 80 columns the note beside the switch was laid out on one line wider than its row
+    and painted cut, '…or the Cl' (#335's walk). It wraps in its row now. The label is
+    *Claude Remote Control*, never main's *Remote control*, the phone remote's name in
+    Settings (owner call W4-8, revised at the main sync), and it is painted whole."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        await resized(pilot, 80, 45)
+        await open_advanced(pilot)  # the row is in Advanced
+        note = dialog.query_one("#spawn-remote-note", Static)
+        note.scroll_visible(animate=False)
+        await settle(pilot)
+        row = note.parent
+        assert row is not None
+        label = row.query_one(Label)
+        # What the screen paints there, not the layout: a line wider than its row is laid
+        # out whole and painted cut (test_ui_remote.painted_in).
+        update = host.screen._compositor.render_full_update()
+        rows = ["".join(chop.text for chop in strip) for strip in update.strips]
+
+        def painted(widget: Widget) -> str:
+            x, y, width, height = widget.region
+            return " ".join(" ".join(row[x : x + width] for row in rows[y : y + height]).split())
+
+        return [painted(label), painted(note)]
+
+    label, note = drive(git_project, scenario)
+    assert label == "Claude Remote Control"
+    assert note == "continue it from claude.ai/code or the Claude app"
+
+
+@pytest.mark.parametrize("size", [(80, 24), (200, 50)], ids=["80x24", "200x50"])
+def test_the_claude_remote_control_label_reads_on_one_line(
+    git_project: ProjectInfo, size: tuple[int, int]
+) -> None:
+    """Owner call W4-8 (revised) named the switch *Claude Remote Control*, 21 characters,
+    and the 18-column label column wrapped it, 'Claude Remote' over 'Control', at every
+    width (#411's review). It is painted on one line, at 80 columns and wide."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        await resized(pilot, *size)
+        await open_advanced(pilot)
+        switch = dialog.query_one("#spawn-remote", Switch)
+        switch.scroll_visible(animate=False)
+        await settle(pilot)
+        row = switch.parent
+        assert row is not None
+        x, y, width, height = row.query_one(Label).content_region
+        update = host.screen._compositor.render_full_update()
+        rows = ["".join(chop.text for chop in strip) for strip in update.strips]
+        return [line[x : x + width].strip() for line in rows[y : y + height]]
+
+    assert drive(git_project, scenario) == ["Claude Remote Control"]
+
+
+def test_every_row_of_the_open_dialog_fits_80x24_and_each_label_one_line(
+    git_project: ProjectInfo, teammates: list[FleetAgentStatus]
+) -> None:
+    """The label column is as wide as its longest label: at 80x24, with *Advanced* open and
+    a teammate picked (so the *How* row shows), every row's widgets fit inside it, and no
+    label wraps. A note with no width of its own took the whole row and ran past its edge:
+    *Pick…*'s was painted cut, '…fills Role, Binary'."""
+    teammates.append(teammate(git_project, role="tester", label="tester-1"))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        await resized(pilot, 80, 24)
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        assert dialog.query_one("#spawn-how-row").display
+        advanced(dialog).collapsed = False  # its title is below the fold at 24 rows
+        await unfolded(pilot)
+        problems: list[str] = []
+        for row in dialog.query(".spawn-row"):
+            if not row.display:
+                continue
+            shown = [child for child in row.children if child.display]
+            widths = {
+                child.id or type(child).__name__: child.outer_size.width
+                + child.styles.margin.left
+                + child.styles.margin.right
+                for child in shown
+            }
+            if sum(widths.values()) > row.size.width:
+                problems.append(f"{widths} > {row.size.width}")
+            for label in row.query(Label):
+                if label.content_size.height != 1:
+                    problems.append(f"{label.content!s} wraps")
+        return problems
+
+    assert drive(git_project, scenario) == []
 
 
 def test_the_manager_role_locks_the_label_and_a_live_manager_greys_it_out(

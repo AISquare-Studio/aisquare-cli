@@ -199,12 +199,21 @@ async def open_panel(pilot: Pilot[None]) -> RemotePanel:
     return panel(pilot)
 
 
+_NO_WORKER = "no worker"
+"""A group no worker is in: a settle passed it waits for the messages alone (a test of this
+module may hold a writer's thread on purpose)."""
+
+
 async def written(pilot: Pilot[None]) -> None:
     """Let the writes of ``remote.json`` the panel asked for land on the controller's writer
     thread, what they hand back to Textual's thread run, and the panel paint them."""
     app = pilot.app
     assert isinstance(app, FleetApp)
-    await pilot.pause()  # the press's handler asks for its writes as it runs
+    # The press's handler asks for its writes as it runs, so it is waited for until it has run:
+    # one pause could return before a toggled switch's message was handled, with the write it
+    # asks for not yet asked, and the previous write's future the last one, long done
+    # ("allow_write" still False in remote.json, windows-latest, CI run 40274296658).
+    await settle_page(app, group=_NO_WORKER)
     for _ in range(500):
         if app.remote.writes_done(0):
             break

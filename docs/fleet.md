@@ -1082,12 +1082,21 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   `--slot N`), in each one's `settings.json`, only where none is set. Inside
   every session it prints one line, `acct 3 · 5h 42% · wk 61% · fleet 58% left
   (3×) · ctx 34%`: the account's five-hour and weekly use, the fleet's share left
-  and the session's context, shortened from the end to fit. A status line you
-  set yourself is never replaced: `--install --wrap` keeps it and prints its line
-  first, and `--uninstall` (or `aisquare uninstall`) takes out only what aisquare
-  wrote, putting yours back as it was. `aisquare accounts statusline` alone says
+  and the session's context, shortened from the end to fit. The fleet's share is
+  shown only while its file (`fleet.json`, which `asq` rewrites every minute and
+  `aisquare accounts usage` on each run) is at most five minutes old, the usage
+  cache's own age; after that the part is left out, and the account's name stays.
+  A status line you set yourself is never replaced: `--install --wrap` keeps it
+  and prints its line first, and `--uninstall` (or `aisquare uninstall`) takes out
+  only what aisquare wrote, putting yours back as it was, byte for byte, from the
+  copy of `settings.json` made at install. A command that cannot be read back
+  from inside ours exactly as you wrote it is not wrapped: on Windows that is one
+  with a `"` in it, a quoted path under `Program Files`; `--install --wrap` leaves
+  it as it is, says so, and exits 0. `aisquare accounts statusline` alone says
   what each account has. The status line runs on every message, so it imports
-  the standard library only. The windows show for a Pro or Max login after the
+  the standard library only, and it reads the session's JSON and prints its line
+  in UTF-8 whatever the code page of a Windows pipe (it would otherwise raise on
+  the `·`). The windows show for a Pro or Max login after the
   session's first answer; an API-key session shows the rest.
 - **Sessions on this machine.** Each session carrying the status line keeps a
   record under `~/.aisquare/cache/statusline/`: its id, cwd, model, account and

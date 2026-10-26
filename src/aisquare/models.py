@@ -533,6 +533,8 @@ class StatuslineSite(BaseModel):
     changed: bool = False
     """Whether this run wrote the file."""
     error: str | None = None
+    note: str | None = None
+    """Why ``--install --wrap`` left a ``foreign`` command as it is, when it did not wrap it."""
 
 
 class AdoptableConversation(BaseModel):

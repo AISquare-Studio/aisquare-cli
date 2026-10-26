@@ -2672,6 +2672,7 @@ def statusline_sites(
                 state=after.kind,
                 theirs=after.theirs,
                 changed=(after.kind, after.theirs) != (before.kind, before.theirs),
+                note=after.note,
             )
         )
     return sites

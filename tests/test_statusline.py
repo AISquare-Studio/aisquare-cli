@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from aisquare import statusline
 from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as core
+from aisquare.core import paths
 from aisquare.core.store import store_session
 from aisquare.services import claude_accounts as service
 from aisquare.services import lifecycle
@@ -145,7 +147,9 @@ def test_the_line_names_the_fleet_and_gives_way_from_its_end_to_fit_columns(
     directory = statusline.record_dir()
     directory.mkdir(parents=True)
     (directory / statusline.FLEET_FILE).write_text(
-        json.dumps({"percent_left": 58.4, "accounts": 3, "labels": {"": "home"}})
+        json.dumps(
+            {"percent_left": 58.4, "accounts": 3, "labels": {"": "home"}, "updated_at": time.time()}
+        )
     )
     _code, wide = _run(SAMPLE, monkeypatch, env={"COLUMNS": "120"})
     assert wide == "home · 5h 42% · wk 61% · fleet 58% left (3\N{MULTIPLICATION SIGN}) · ctx 34%\n"
@@ -164,6 +168,155 @@ def test_wrap_prints_the_users_own_line_first(monkeypatch: pytest.MonkeyPatch) -
     own = f"{sys.executable} -c \"import sys,json; print('mine', json.load(sys.stdin)['cwd'])\""
     assert statusline.main([statusline.WRAP_FLAG, own]) == 0
     assert out.getvalue().splitlines() == ["mine /work/api", "claude · 5h 42% · wk 61% · ctx 34%"]
+
+
+def _fleet(updated_at: Any = ..., **fields: Any) -> dict[str, Any]:
+    """A ``fleet.json`` as ``write_statusline_fleet`` writes it; ``updated_at`` left out
+    when not given."""
+    data: dict[str, Any] = {"percent_left": 3.4, "accounts": 3, "labels": {"": "home"}, **fields}
+    if updated_at is not ...:
+        data["updated_at"] = updated_at
+    return data
+
+
+def test_the_fleet_figure_is_as_old_as_the_usage_cache_serves_and_no_older() -> None:
+    """Review of #298 (ui half, 2): fleet.json of any age was printed as the fleet's share
+    left now. Its bound is the usage cache's own age, which this lean module cannot import."""
+    assert statusline.FLEET_MAX_AGE_SECONDS == service.USAGE_MAX_AGE_SECONDS
+
+
+@pytest.mark.parametrize(
+    ("age", "shown"),
+    [
+        (0.0, True),
+        (299.0, True),
+        (301.0, False),
+        (3 * 86400.0, False),  # the review's case: three days old, still 'fleet 3% left'
+        (-60.0, True),  # written a moment after this record's moment: another process's clock
+        (-3600.0, False),  # from the future: a clock set back
+    ],
+)
+def test_a_fleet_figure_older_than_the_usage_cache_is_left_out_and_the_account_stays(
+    age: float, shown: bool
+) -> None:
+    record = {"session_id": "s", "config_dir": None, "updated_at": 1_000_000.0}
+    fleet = _fleet(updated_at=1_000_000.0 - age)
+    said = statusline.line(record, fleet, 120)
+    assert ("fleet 3% left" in said) is shown
+    assert said.startswith("home")  # the account's name does not age
+
+
+@pytest.mark.parametrize("updated_at", [None, "yesterday", True, float("nan")])
+def test_a_fleet_file_with_no_readable_date_prints_no_figure(updated_at: Any) -> None:
+    record = {"session_id": "s", "config_dir": None, "updated_at": 1_000_000.0}
+    assert "fleet" not in statusline.line(record, _fleet(updated_at=updated_at), 120)
+    assert "fleet" not in statusline.line(record, _fleet(), 120)  # no key at all
+
+
+def test_a_stale_fleet_file_prints_the_line_without_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    directory = statusline.record_dir()
+    directory.mkdir(parents=True)
+    (directory / statusline.FLEET_FILE).write_text(
+        json.dumps(_fleet(updated_at=time.time() - 3 * 86400))
+    )
+    _code, out = _run(SAMPLE, monkeypatch, env={"COLUMNS": "120"})
+    assert out == "home · 5h 42% · wk 61% · ctx 34%\n"
+
+
+def _script(
+    tmp_path: Path, payload: bytes, *args: str, env: dict[str, str]
+) -> subprocess.CompletedProcess[bytes]:
+    """``python -m aisquare.statusline`` over real pipes, as Claude Code runs it: its bytes
+    in, its bytes out, in the code page ``env`` gives Python (``io.StringIO`` has none)."""
+    clean = {k: v for k, v in os.environ.items() if k not in {"PYTHONUTF8", "PYTHONIOENCODING"}}
+    clean.update({"COLUMNS": "120", **env})
+    return subprocess.run(
+        [sys.executable, "-m", "aisquare.statusline", *args],
+        input=payload,
+        capture_output=True,
+        env=clean,
+        cwd=tmp_path,
+        timeout=60,
+        check=False,
+    )
+
+
+def _utf8(done: subprocess.CompletedProcess[bytes]) -> str:
+    assert done.returncode == 0, done.stderr.decode("utf-8", errors="replace")
+    return done.stdout.decode("utf-8").replace("\r\n", "\n")
+
+
+@pytest.mark.parametrize("code_page", ["cp932", "cp874", "cp1251", "cp1252"])
+def test_the_status_line_speaks_utf_8_whatever_the_code_page_of_its_pipes(
+    tmp_path: Path, code_page: str
+) -> None:
+    """Review of #298 (ui half, 1): a Windows ANSI code page cannot encode the separator
+    (cp932, cp874) or the fleet's count sign (cp1251, cp874), so it raised on every message,
+    against 'never fails, always exits 0'; and on cp1252 it wrote 0xB7 for the separator."""
+    directory = statusline.record_dir()
+    directory.mkdir(parents=True)
+    (directory / statusline.FLEET_FILE).write_text(
+        json.dumps(_fleet(updated_at=time.time(), percent_left=58.4))
+    )
+    done = _script(
+        tmp_path,
+        json.dumps(SAMPLE).encode("utf-8"),
+        env={"PYTHONIOENCODING": code_page},
+    )
+    assert _utf8(done) == (
+        "home \N{MIDDLE DOT} 5h 42% \N{MIDDLE DOT} wk 61% \N{MIDDLE DOT} "
+        "fleet 58% left (3\N{MULTIPLICATION SIGN}) \N{MIDDLE DOT} ctx 34%\n"
+    )
+    assert b"\xc2\xb7" in done.stdout  # the separator as UTF-8, never the code page's 0xB7
+
+
+@pytest.mark.parametrize("code_page", ["cp1252", "cp932"])
+def test_a_non_ascii_cwd_and_label_go_through_whatever_the_code_page(
+    tmp_path: Path, code_page: str
+) -> None:
+    """Review of #298 (ui half, 1): a cwd with a character outside the code page died in
+    the decode (UnicodeDecodeError on cp1252), and a label outside it in the encode, which
+    also stopped the record and so the usage ingest."""
+    directory = statusline.record_dir()
+    directory.mkdir(parents=True)
+    (directory / statusline.FLEET_FILE).write_text(
+        json.dumps(_fleet(updated_at=time.time(), labels={"": "\u5de5\u4f5c"}), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    payload = dict(SAMPLE, cwd="C:\\Users\\\u601d\\p", workspace={})
+    done = _script(
+        tmp_path,
+        json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        env={"PYTHONIOENCODING": code_page},
+    )
+    assert _utf8(done).startswith("\u5de5\u4f5c \N{MIDDLE DOT} 5h 42%")
+    [file] = directory.glob("abc123-session.json")
+    assert json.loads(file.read_text(encoding="utf-8"))["cwd"] == "C:\\Users\\\u601d\\p"
+
+
+def test_wrap_reads_the_users_line_as_utf_8_whatever_the_locale(tmp_path: Path) -> None:
+    """Review of #298 (ui half, 1): the wrapped command's output was decoded with the
+    locale's encoding (text=True), so a status line printing a bullet died in
+    UnicodeDecodeError under a non-UTF-8 locale, and ours with it."""
+    emit = tmp_path / "emit.py"
+    emit.write_text(
+        "import sys\n"
+        "sys.stdin.buffer.read()\n"
+        "sys.stdout.buffer.write('\u25cf mine\\n'.encode('utf-8'))\n",
+        encoding="utf-8",
+    )
+    own = f"{sys.executable} {agent_core._quote(str(emit))}"
+    done = _script(
+        tmp_path,
+        json.dumps(SAMPLE).encode("utf-8"),
+        statusline.WRAP_FLAG,
+        own,
+        env={"LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0"},
+    )
+    assert _utf8(done).splitlines() == [
+        "\u25cf mine",
+        "claude \N{MIDDLE DOT} 5h 42% \N{MIDDLE DOT} wk 61% \N{MIDDLE DOT} ctx 34%",
+    ]
 
 
 # --------------------------------------------------------------------------- install
@@ -265,6 +418,195 @@ def test_a_file_changed_since_the_install_keeps_its_change(tmp_path: Path) -> No
     (tmp_path / "settings.json").write_text(json.dumps(settings))
     agent_core.remove_statusline(tmp_path)
     assert _settings(tmp_path) == {"model": "opus", "theme": "dark"}
+
+
+class _Platform:
+    """``core.agents``' own view of ``sys`` on another platform: only that module sees it, so
+    the rest of the process (pytest, pathlib, the temp dir) stays what it is."""
+
+    def __init__(self, platform: str) -> None:
+        self.platform = platform
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(sys, name)
+
+
+def _on(platform: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run ``core.agents`` as ``platform`` (the reviewer's repro of #298: ``agents.sys`` and the
+    DACL probe stubbed, there being no Windows host to run on)."""
+    monkeypatch.setattr(agent_core, "sys", _Platform(platform))
+    monkeypatch.setattr(paths, "dacl_sddl", lambda path: "D:P(A;;FA;;;OW)")
+
+
+#: The shape of a Windows user's command: a quoted path under Program Files.
+QUOTED = '"C:\\Program Files\\nodejs\\node.exe" C:\\Users\\me\\sl.js'
+
+
+def _own(config_dir: Path, command: str, **keys: Any) -> bytes:
+    """A settings.json holding the user's own status line ``command``; its bytes."""
+    config_dir.mkdir(parents=True, exist_ok=True)
+    body = json.dumps({"statusLine": {"type": "command", "command": command, **keys}}, indent=1)
+    (config_dir / "settings.json").write_text(body, encoding="utf-8")
+    return (config_dir / "settings.json").read_bytes()
+
+
+def test_on_windows_a_quoted_command_is_not_wrapped_and_nothing_is_touched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #298 (core half): --wrap put the quoted path inside double quotes it could not
+    nest (``asq-statusline --wrap ""C:\\Program Files\\…" sl.js"``), read it back as '' and
+    --uninstall wrote that over the user's line and deleted the copy. A command that cannot be
+    read back exactly is left as it is, and the answer says why."""
+    _on("win32", monkeypatch)
+    original = _own(tmp_path, QUOTED, padding=2)
+
+    entry = agent_core.install_statusline(tmp_path, wrap=True)
+
+    assert (entry.kind, entry.theirs) == ("foreign", QUOTED)
+    assert entry.note is not None and "double quote" in entry.note
+    assert (tmp_path / "settings.json").read_bytes() == original
+    assert not (tmp_path / ("settings.json" + agent_core.STATUSLINE_KEPT)).exists()
+    assert agent_core.statusline_entry(tmp_path).kind == "foreign"
+    assert agent_core.remove_statusline(tmp_path) is False
+    assert (tmp_path / "settings.json").read_bytes() == original
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "my-line",
+        "~/bin/my-line --short",
+        "C:\\tools\\sl.cmd",
+        "C:\\Program Files\\x\\sl.cmd",  # spaces, no quote: wrapped in ours as one argument
+        "node 'a b.js' --x",
+        "echo $HOME && date",
+        "sl.cmd \\",  # ends in a backslash
+        "sl.cmd\t--tabbed",
+        "\u5de5\u4f5c.cmd \u601d",
+        QUOTED,
+        'node -e "console.log(1)"',
+        "it's",
+        "",
+    ],
+)
+def test_a_command_is_wrapped_only_when_it_goes_back_byte_for_byte(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, command: str
+) -> None:
+    """Whatever the command: either it is wrapped and read back as exactly itself and the
+    uninstall gives the file back byte for byte, or it is left alone with a reason."""
+    _on(platform, monkeypatch)
+    original = _own(tmp_path, command, padding=2)
+
+    entry = agent_core.install_statusline(tmp_path, wrap=True)
+
+    if entry.kind == "wrapped":
+        assert entry.note is None
+        assert agent_core.statusline_entry(tmp_path).theirs == command
+        assert agent_core.remove_statusline(tmp_path) is True
+    else:
+        assert (entry.kind, entry.theirs) == ("foreign", command)
+        assert entry.note
+        assert agent_core.remove_statusline(tmp_path) is False
+    assert (tmp_path / "settings.json").read_bytes() == original
+    assert not (tmp_path / ("settings.json" + agent_core.STATUSLINE_KEPT)).exists()
+
+
+@pytest.mark.parametrize(("platform", "wraps"), [("linux", True), ("win32", False)])
+def test_a_command_with_a_double_quote_is_wrapped_where_posix_quoting_inverts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, wraps: bool
+) -> None:
+    """Pins which side of the line the quoted command is on: POSIX quoting inverts (the
+    review found it byte-identical), Windows' cannot nest a ``"``."""
+    _on(platform, monkeypatch)
+    _own(tmp_path, QUOTED)
+    assert (agent_core.install_statusline(tmp_path, wrap=True).kind == "wrapped") is wraps
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_uninstall_gives_the_users_line_back_from_the_copy_whatever_the_parsing_made_of_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    """What an older build wrote (and what a hand edit can write): a wrapped command whose
+    quoting reads back as something else, over a copy that holds the user's own. The copy's
+    command is the one that goes back, and the file is the copy's bytes."""
+    _on(platform, monkeypatch)
+    original = _own(tmp_path, QUOTED, padding=2)
+    kept = tmp_path / ("settings.json" + agent_core.STATUSLINE_KEPT)
+    kept.write_bytes(original)
+    garbled = f'asq-statusline --wrap "{QUOTED}"'  # the old build's: an unescaped quote inside
+    body = json.loads(original)
+    body["statusLine"]["command"] = garbled
+    (tmp_path / "settings.json").write_text(json.dumps(body), encoding="utf-8")
+    assert agent_core.statusline_entry(tmp_path).theirs != QUOTED, "the premise: it is misread"
+
+    assert agent_core.remove_statusline(tmp_path) is True
+
+    assert (tmp_path / "settings.json").read_bytes() == original
+    assert not kept.exists()
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_uninstall_after_a_change_keeps_the_change_and_still_gives_the_command_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    _on(platform, monkeypatch)
+    original = _own(tmp_path, QUOTED, padding=2)
+    (tmp_path / ("settings.json" + agent_core.STATUSLINE_KEPT)).write_bytes(original)
+    body = json.loads(original)
+    body["statusLine"]["command"] = f'asq-statusline --wrap "{QUOTED}"'
+    body["theme"] = "dark"  # the user's edit, after ours went in
+    (tmp_path / "settings.json").write_text(json.dumps(body), encoding="utf-8")
+
+    assert agent_core.remove_statusline(tmp_path) is True
+
+    assert _settings(tmp_path) == {
+        "statusLine": {"type": "command", "command": QUOTED, "padding": 2},
+        "theme": "dark",
+    }
+
+
+@pytest.mark.parametrize("copy", [None, b"{not json", b"[]", b'{"model": "opus"}'])
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_without_a_usable_copy_the_uninstall_gives_back_what_the_wrapped_string_says(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, copy: bytes | None
+) -> None:
+    """The old path stays where the copy is missing, unparseable, not an object, or holds no
+    status line of the user's: the command read out of ours, the other keys as they are."""
+    _on(platform, monkeypatch)
+    _own(tmp_path, "my-line --short", padding=2)
+    assert agent_core.install_statusline(tmp_path, wrap=True).kind == "wrapped"
+    kept = tmp_path / ("settings.json" + agent_core.STATUSLINE_KEPT)
+    kept.unlink()
+    if copy is not None:
+        kept.write_bytes(copy)
+
+    assert agent_core.remove_statusline(tmp_path) is True
+
+    assert _settings(tmp_path)["statusLine"] == {
+        "type": "command",
+        "command": "my-line --short",
+        "padding": 2,
+    }
+
+
+def test_the_accounts_command_says_why_a_quoted_command_was_not_wrapped(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _on("win32", monkeypatch)
+    original = _own(core.default_config_dir(), QUOTED)
+
+    result = runner.invoke(app, ["--json", "accounts", "statusline", "--install", "--wrap"])
+
+    assert result.exit_code == 0, result.output
+    [site] = [s for s in json.loads(result.stdout) if s["slot"] == core.DEFAULT_SLOT]
+    assert (site["state"], site["changed"], site["theirs"]) == ("foreign", False, QUOTED)
+    assert "double quote" in site["note"]
+    assert (core.default_config_dir() / "settings.json").read_bytes() == original
+
+    shown = runner.invoke(app, ["accounts", "statusline", "--install", "--wrap"])
+    assert "not wrapped" in shown.stdout and "left as it is" in shown.stdout
+    assert "--install --wrap keeps it" not in shown.stdout, "it was asked, and refused"
 
 
 def test_accounts_statusline_installs_on_each_account_and_says_so(runner: CliRunner) -> None:

@@ -12,7 +12,8 @@ prints one line no wider than ``COLUMNS``::
 (the x a multiplication sign, as on asq's sidebar).
 
 The fleet's figure is ``fleet.json`` beside the records, which asq's headroom read and
-``aisquare accounts usage`` write. The records feed ``aisquare accounts sessions`` and,
+``aisquare accounts usage`` write; it is printed only while that file is current
+(:data:`FLEET_MAX_AGE_SECONDS`). The records feed ``aisquare accounts sessions`` and,
 as ``claude_usage`` samples, the usage cache (``services.claude_accounts.ingest_statusline``):
 a reading Claude Code already had, so the usage endpoint is asked less often.
 
@@ -46,6 +47,12 @@ WRAP_FLAG = "--wrap"
 """Runs the user's own status line command first (its output, then ours)."""
 WRAP_TIMEOUT = 5.0
 """How long a wrapped command may take, in seconds, before its output is dropped."""
+FLEET_MAX_AGE_SECONDS = 300.0
+"""How old ``fleet.json`` may be and still be printed as the fleet's share left now: the
+usage cache's own age (``services.claude_accounts.USAGE_MAX_AGE_SECONDS``, five minutes, which
+this lean module cannot import and ``tests/test_statusline.py`` pins it to). ``asq`` rewrites
+the file every minute while it runs, so a file older than a reading the cache would still
+serve means nothing has read the fleet since: the figure is left out, not shown as current."""
 SEPARATOR = " · "
 TIMES = "\N{MULTIPLICATION SIGN}"
 
@@ -162,15 +169,29 @@ def _account(record: dict[str, Any], fleet: dict[str, Any]) -> str:
     return "claude"
 
 
+def _fleet_is_current(record: dict[str, Any], fleet: dict[str, Any]) -> bool:
+    """Whether ``fleet.json`` was written within :data:`FLEET_MAX_AGE_SECONDS` of this
+    record (which is stamped with the moment it prints). No ``updated_at`` is not current,
+    and nor is one from the future by more than that: a clock set back."""
+    written = _number(fleet.get("updated_at"))
+    now = _number(record.get("updated_at"))
+    if written is None:
+        return False
+    age = (time.time() if now is None else now) - written
+    return abs(age) <= FLEET_MAX_AGE_SECONDS
+
+
 def line(record: dict[str, Any], fleet: dict[str, Any], columns: int) -> str:
     """The status line: account · 5h · wk · fleet · ctx, each part only when known,
-    dropped from the end until it fits ``columns``, the account cut last."""
+    dropped from the end until it fits ``columns``, the account cut last. The fleet's
+    share is left out when ``fleet.json`` is not current (:func:`_fleet_is_current`); the
+    account's name does not age and stays."""
     parts = [_account(record, fleet)]
     for name, key in (("5h", "five_hour"), ("wk", "seven_day")):
         window = record.get(key)
         if isinstance(window, dict) and window.get("used_percentage") is not None:
             parts.append(f"{name} {round(window['used_percentage'])}%")
-    left = _number(fleet.get("percent_left"))
+    left = _number(fleet.get("percent_left")) if _fleet_is_current(record, fleet) else None
     count = fleet.get("accounts")
     if left is not None:
         many = f" ({count}{TIMES})" if isinstance(count, int) and count > 1 else ""
@@ -190,7 +211,8 @@ def _columns(env: dict[str, str] | os._Environ[str]) -> int:
 
 
 def _wrapped(command: str, stdin: str) -> str:
-    """The user's own status line, run as Claude Code would run it; nothing if it fails."""
+    """The user's own status line, run as Claude Code would run it; nothing if it fails.
+    Both ways in UTF-8, as Claude Code speaks it, not the locale's code page."""
     import subprocess  # only under --wrap
 
     try:
@@ -199,7 +221,8 @@ def _wrapped(command: str, stdin: str) -> str:
             shell=True,
             input=stdin,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=WRAP_TIMEOUT,
             check=False,
         )
@@ -208,9 +231,23 @@ def _wrapped(command: str, stdin: str) -> str:
     return done.stdout.rstrip("\n")
 
 
+def _utf8_pipes() -> None:
+    """Claude Code writes the payload and reads the line in UTF-8; a piped stdin and stdout
+    open in the locale's code page instead (Windows' ANSI one: cp932, cp1252, cp874 …),
+    where the separator ``·`` or the fleet's count sign cannot be encoded and a non-ASCII
+    cwd or label cannot be decoded. So both are UTF-8, and a byte that is not one is
+    replaced, never raised."""
+    for stream in (sys.stdin, sys.stdout):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(OSError, ValueError):
+                reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Read the payload, keep its record, print the line. Always exits 0."""
     args = sys.argv[1:] if argv is None else argv
+    _utf8_pipes()
     raw = sys.stdin.read()
     out: list[str] = []
     if len(args) >= 2 and args[0] == WRAP_FLAG and (own := _wrapped(args[1], raw)):

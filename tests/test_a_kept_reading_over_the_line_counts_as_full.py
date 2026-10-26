@@ -250,6 +250,149 @@ def test_every_account_full_by_a_floor_leaves_no_answer_for_a_hand_over_that_wan
     assert sum("counts as full" in n for n in decision.notes) == 2, decision.notes
 
 
+def test_the_note_names_the_week_that_holds_the_floor_when_the_five_hours_have_reset(
+    fake_home: Path,
+) -> None:
+    """tester-23's observation ii: "no window has reset since" was said when the five hours
+    had. The week holds the floor, and the note says so; with no window reset the words are
+    the same as before (the first test above)."""
+    work = _slot("work@example.com", "tok-work")
+    spare = _slot("spare@example.com", "tok-spare")
+    payload = _payload(30.0, week=95.0)
+    payload["seven_day"]["resets_at"] = (NOW + timedelta(days=3)).isoformat()
+    endpoint = _Endpoint({"tok-work": payload, "tok-spare": _payload(40.0)})
+    service.cached_usage([work, spare], now=NOW, fetch=endpoint)
+    endpoint.by_token["tok-work"] = 500
+
+    decision = _decide(
+        work, spare, endpoint, when=NOW + timedelta(hours=5), max_age=service.PICK_MAX_AGE_SECONDS
+    )
+
+    said = " | ".join(decision.notes)
+    assert (
+        "its reading from 5h ago is over the 85%-used line in its week, which has not reset "
+        "since, so it counts as full"
+    ) in said, decision.notes
+    assert "no window has reset since" not in said
+
+
+def test_the_note_names_the_family_week_when_that_week_holds_the_floor(fake_home: Path) -> None:
+    """An Opus agent's pick: the account's Opus week reads 95 % and has not reset; its five
+    hours and its all-models week read low, and the five hours have."""
+    work = _slot("work@example.com", "tok-work")
+    spare = _slot("spare@example.com", "tok-spare")
+    payload = _payload(30.0, week=40.0)
+    payload["seven_day_opus"] = {
+        "utilization": 95.0,
+        "resets_at": (NOW + timedelta(days=3)).isoformat(),
+    }
+    endpoint = _Endpoint({"tok-work": payload, "tok-spare": _payload(40.0)})
+    service.cached_usage([work, spare], now=NOW, fetch=endpoint)
+    endpoint.by_token["tok-work"] = 500
+
+    decision = _decide(
+        work,
+        spare,
+        endpoint,
+        when=NOW + timedelta(hours=5),
+        max_age=service.PICK_MAX_AGE_SECONDS,
+        family="opus",
+    )
+
+    assert decision.account is not None and decision.account.slot == spare.slot, decision.notes
+    assert "in its opus week, which has not reset since, so it counts as full" in " | ".join(
+        decision.notes
+    ), decision.notes
+
+
+def test_a_codex_note_names_the_week_that_holds_the_floor_when_the_five_hours_have_reset(
+    fake_home: Path, both_installed: None
+) -> None:
+    claude = _slot("work@example.com", "tok-work")
+    codex = core.create_account("codex")
+    _sign_in(codex.config_dir, "x@example.com")
+    _rollout(
+        codex.config_dir,
+        [
+            _token_count(
+                NOW,
+                _window(10.0, 300, NOW + timedelta(hours=1)),
+                _window(95.0, 10080, NOW + timedelta(days=3)),
+            )
+        ],
+    )
+    service.move(str(codex.slot), "top")
+    endpoint = _Endpoint({"tok-work": _payload(20.0, resets_at=NOW + timedelta(hours=9))})
+
+    decision = service.headroom_decision(
+        [codex, claude],
+        switch_at=LINE,
+        now=NOW + timedelta(hours=3),
+        fetch=endpoint,
+        max_age=service.PICK_MAX_AGE_SECONDS,
+        unread_keeps_place=True,
+    )
+
+    said = " | ".join(decision.notes)
+    assert decision.account is not None and decision.account.slot == claude.slot, decision.notes
+    assert "in its week, which has not reset since, so it counts as full" in said, decision.notes
+    assert "no window has reset since" not in said
+
+
+@pytest.mark.parametrize(
+    "max_age", [service.PICK_MAX_AGE_SECONDS, None], ids=["launch", "handover"]
+)
+def test_a_floor_does_not_beat_a_live_reading_when_every_account_is_over_the_line(
+    fake_home: Path, max_age: float | None
+) -> None:
+    """tester-23's observation i: an 86 % floor from two hours ago won the "every account is
+    over the line" answer against a live 90 %, and the note said "14% left". A floor is at
+    least 86 % used, perhaps 100: the live reading wins, as it did before a floor counted."""
+    work = _slot("work@example.com", "tok-work")
+    spare = _slot("spare@example.com", "tok-spare")
+    endpoint = _Endpoint({"tok-work": _full_a_while_ago(percent=86.0), "tok-spare": _payload(90.0)})
+    service.cached_usage([work, spare], now=NOW, fetch=endpoint)
+    endpoint.by_token["tok-work"] = 500
+
+    decision = _decide(work, spare, endpoint, when=NOW + timedelta(hours=2), max_age=max_age)
+
+    said = " | ".join(decision.notes)
+    assert decision.account is not None and decision.account.slot == spare.slot, decision.notes
+    assert f"{core.label(spare)} has the most room (10% left)" in said, decision.notes
+    assert "has the most room (14% left)" not in said and "has the most room by" not in said
+    # The control: two live readings compare as they always did, and the lower one wins.
+    endpoint.by_token["tok-work"] = _full_a_while_ago(percent=86.0)
+    live = _decide(work, spare, endpoint, when=NOW + timedelta(hours=2), max_age=None)
+    assert live.account is not None and live.account.slot == work.slot, live.notes
+    assert f"{core.label(work)} has the most room (14% left)" in " | ".join(live.notes)
+
+
+def test_floors_compete_among_themselves_when_no_account_has_a_live_reading(
+    fake_home: Path,
+) -> None:
+    """With nothing live to prefer, the least-full floor is the answer, and the note says it is
+    a floor: its age, and "at most" what is left."""
+    work = _slot("work@example.com", "tok-work")
+    spare = _slot("spare@example.com", "tok-spare")
+    endpoint = _Endpoint(
+        {
+            "tok-work": _full_a_while_ago(percent=96.0),
+            "tok-spare": _payload(86.0, resets_at=NOW + timedelta(hours=3)),
+        }
+    )
+    service.cached_usage([work, spare], now=NOW, fetch=endpoint)
+    endpoint.by_token["tok-work"] = 500
+    endpoint.by_token["tok-spare"] = 500
+
+    decision = _decide(work, spare, endpoint, when=NOW + timedelta(hours=2), max_age=None)
+
+    assert decision.account is not None and decision.account.slot == spare.slot, decision.notes
+    assert (
+        f"{core.label(spare)} has the most room by its reading from 2h ago (14% left at most)"
+        in " | ".join(decision.notes)
+    ), decision.notes
+
+
 # --- an agent that reads its usage offline: Codex's rollout --------------------------------
 
 
@@ -302,6 +445,28 @@ def test_a_codex_reading_over_the_line_from_hours_ago_is_full_and_says_how_old_i
         "its reading from 3h ago is over the 85%-used line and no window has reset since" in n
         for n in decision.notes
     ), decision.notes
+
+
+def test_a_codex_floor_does_not_beat_a_live_claude_reading_when_every_account_is_over_the_line(
+    fake_home: Path, both_installed: None
+) -> None:
+    """The offline floor is a floor too (tester-23's observation i): Codex's 86 % record from
+    three hours ago, past the window, ranks behind Claude Code's live 90 %."""
+    claude = _slot("work@example.com", "tok-work")
+    codex = _codex_account(86.0, recorded_ago=timedelta(hours=3), resets_in=timedelta(hours=4))
+    service.move(str(codex.slot), "top")
+    endpoint = _Endpoint({"tok-work": _payload(90.0, resets_at=NOW + timedelta(hours=9))})
+
+    decision = service.headroom_decision(
+        [codex, claude],
+        switch_at=LINE,
+        now=NOW + timedelta(hours=3),
+        fetch=endpoint,
+        max_age=service.PICK_MAX_AGE_SECONDS,
+    )
+
+    assert decision.account is not None and decision.account.slot == claude.slot, decision.notes
+    assert f"{core.label(claude)} has the most room (10% left)" in " | ".join(decision.notes)
 
 
 def test_a_codex_reading_whose_window_has_reset_reads_empty_and_is_not_full(

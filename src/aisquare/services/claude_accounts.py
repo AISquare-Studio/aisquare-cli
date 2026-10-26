@@ -71,6 +71,7 @@ from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import TmuxServer, WindowInfo
 from aisquare.models import (
     SESSION_WINDOW,
+    WEEK_WINDOW,
     AccountsOverview,
     ClaudeAccount,
     ClaudeAccountRecord,
@@ -2073,6 +2074,35 @@ def _floor(reading: ClaudeUsage, now: datetime) -> ClaudeUsage | None:
     )
 
 
+def _floor_words(reading: ClaudeUsage | None, family: str | None, now: datetime) -> str:
+    """Why ``reading`` still proves a floor at ``now``, in a note's words: ``and no window has
+    reset since`` while every window it names still stands, else the window that holds the
+    floor, the one that limits among those left (a ``family`` week included): ``in its week,
+    which has not reset since`` when the five hours did (review r23 of #113, tester-23's
+    observation ii). A window that reset reads 0 % with no reset time in an offline reading
+    (Codex's), so it is told by being missing from the floor, not by a reset in the past."""
+    held = _floor(reading, now) if reading is not None else None
+    if reading is None or held is None:
+        return "and no window has reset since"
+    if len(held.windows) == len(reading.windows) and len(held.family_week_resets_at) == len(
+        reading.family_week_resets_at
+    ):
+        return "and no window has reset since"
+    limiting = held.limiting
+    own = held.family_week_percent.get(family) if family is not None else None
+    if own is not None and (limiting is None or own >= (limiting.used_percent or 0.0)):
+        name = f"{family} week"
+    elif limiting is None:
+        return "and no window has reset since"
+    elif limiting.name == SESSION_WINDOW:
+        name = "five-hour window"
+    elif limiting.name == WEEK_WINDOW:
+        name = "week"
+    else:
+        name = f"{limiting.name} window"
+    return f"in its {name}, which has not reset since"
+
+
 def _without_reset_windows(reading: ClaudeUsage, now: datetime) -> ClaudeUsage:
     """A kept reading with each window that has reset since emptied: its percentage
     describes a window that is over, so it is shown as reset (``reset 1h ago``, the reset
@@ -2646,6 +2676,10 @@ def headroom_decision(
     readings = dict(readings)
     window = timedelta(seconds=max_age if max_age is not None else USAGE_MAX_AGE_SECONDS)
     full_by_age: set[int] = set()
+    # The accounts counted as full by a reading too old to be the figure now (a kept reading's
+    # floor, an offline reading past the window, `full_by_age` the first kind): at least that
+    # used, not exactly, which the every-account-is-over-the-line answer must not forget.
+    floors: set[int] = set()
     # A kept reading — the last good figure a failed read shows (F1 of #400), or a slot the
     # endpoint asked to wait — is never taken for a live one: the pick decides by it only
     # while it is inside the pick's own window and neither window has reset since, and
@@ -2702,7 +2736,7 @@ def headroom_decision(
                 notes.append(
                     f"headroom: {core.label(account)} {why} — its reading from "
                     f"{describe_age(taken, now=moment)} is over the {switch_at}%-used line "
-                    "and no window has reset since, so it counts as full"
+                    f"{_floor_words(last, family, moment)}, so it counts as full"
                 )
                 continue
             if taken is None and not is_kept(reading):
@@ -2746,10 +2780,11 @@ def headroom_decision(
                 # An agent that reads its usage offline (Codex: its rollout's newest record)
                 # has no live figure to wait for: a window that has not reset since is a
                 # floor under the account now, whatever the age the reading says.
+                floors.add(account.slot)
                 notes.append(
                     f"headroom: {core.label(account)} — its reading from "
                     f"{describe_age(recorded, now=moment)} is over the {switch_at}%-used line "
-                    "and no window has reset since, so it counts as full"
+                    f"{_floor_words(reading, family, moment)}, so it counts as full"
                 )
         elif unread_keeps_place:
             measured.append((account, None))
@@ -2802,10 +2837,24 @@ def headroom_decision(
             "nothing to switch to"
         )
         return HeadroomDecision(None, notes)
-    least, pct = min(((a, p) for a, p in measured if p is not None), key=lambda pair: pair[1])
+    # A floor is a lower bound of use, not a figure: a live reading beats it however the two
+    # compare (before a floor counted, it was unread and the live one won), and the floors
+    # compete among themselves only when no account has a live reading (review r23 of #113,
+    # tester-23's observation i).
+    floors |= full_by_age
+    over = [(a, p) for a, p in measured if p is not None]
+    live = [(a, p) for a, p in over if a.slot not in floors]
+    least, pct = min(live or over, key=lambda pair: pair[1])
+    left = max(0, 100 - pct)
+    taken_at = readings[least.slot].fetched_at
+    if least.slot in floors and taken_at is not None:
+        age = describe_age(taken_at, now=moment)
+        room = f"has the most room by its reading from {age} ({left:.0f}% left at most)"
+    else:
+        room = f"has the most room ({left:.0f}% left)"
     notes.append(
         f"headroom: {summary} — every account is over the {switch_at}%-used line; "
-        f"{core.label(least)} has the most room ({max(0, 100 - pct):.0f}% left)"
+        f"{core.label(least)} {room}"
     )
     return HeadroomDecision(least, notes)
 

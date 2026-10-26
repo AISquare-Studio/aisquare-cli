@@ -537,7 +537,12 @@ only rises until the reset, so when the read fails and the last good figure is o
 figure is a floor, not nothing: a reading **over** the `switch_at` line, in a window
 that has not reset since, makes the account measured-full, however old it is (its
 five-hour window may have reset while its week, over the line, has not, and the week
-counts), and the pick's note gives its age. A reading **under** the line that is older
+counts), and the pick's note gives its age and names the window that holds the floor
+(`in its week, which has not reset since`; `and no window has reset since` while none
+has). A floor is a lower bound, not a figure: when every account is over the line and a
+switch by hand takes the one with the most room, an account with a live reading goes
+before any floor, and floors are compared with each other only when none is live (`14% left
+at most`). A reading **under** the line that is older
 than the pick's window says nothing of now: the account stays unread and keeps its
 place, as above. One from before a reset is no figure at all. Codex's readings, taken
 offline off its rollouts, follow the same rule by the age of the record they were read

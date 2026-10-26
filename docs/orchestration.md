@@ -518,22 +518,63 @@ Code's, Codex's and any agent added later (`aisquare accounts order`, `move`, an
 pins runs the **agent of the best account in it**: the first enabled, signed-in
 account whose agent is installed and that has room by `[accounts] pick` and
 `switch_at` (the same rule a headroom pick uses), else the first such account
-when no usage can be read or `pick = "default"`. Put a Codex account on top and
-an unpinned spawn runs Codex; a Claude one, Claude Code. The account that rule
-picked is also the launch's account, from the same usage reading.
+when nothing is measured or `pick = "default"`. Put a Codex account on top and
+an unpinned spawn runs Codex; a Claude one, Claude Code.
+
+**An account whose usage cannot be read keeps its place.** An expired token (the
+normal state of a Claude Code account idle for a few hours: a session on it
+refreshes the token), an endpoint that cannot be reached or one that asked to
+wait: such an account is *unmeasured*, not *full*. A lower agent's account takes
+the launch only from an account that is measured over the `switch_at` line, one at
+a limit it named (a limit mark, or a spent week for the launch's model family), or
+one that is not usable at all (disabled, signed out, its agent not installed).
+So with Claude Code's account on top and its token expired, an unpinned spawn runs
+Claude Code, whatever Codex reads; the rule is the one #406 states from the other
+side, rank 1 is the machine default even when its reading is missing. What this
+decides is the **agent**: the account within it is then picked by the ordinary
+ladder (below), where a measured account of the same agent may still go before an
+unread one, and otherwise the agent's first usable account is taken, which is rank
+1 when its agent is first. `prefer = "reset-soonest"` compares the readings there
+are: an unread account ahead of them is neither passed over nor preferred. A
+hand-over (`fleet switch`, the automatic switch on a limit) is the opposite case
+and stays strict: it leaves a limited account and moves only to one it measured.
+
+The account the rule picked by a reading is also the launch's account, from the same
+usage reading; when no reading decided it (nothing measured, `pick = "default"`,
+one agent's accounts alone, an unread account kept in its place), only the agent
+follows the order here and the launch's account is the ladder's: `--account`, the
+role's binding, the project's default, then the agent's first account in the order.
+
+Reading usage takes up to ten seconds with a cold cache, so only a *launch* does it. A
+display of the agent (the Spawn dialog's `(role's: …)`, `doctor`, `team harness`,
+the line `accounts add` prints) never reads on the UI thread or in a command that only
+reports: the dialog asks in a worker and shows `picking…` until it answers, and the
+others ask the order alone, which can differ from what a launch then picks when
+headroom puts a later account's agent first.
 
 What pins the agent, first wins: `--agent`; the role's agent (`team bind ROLE
 --agent`, *App settings ▸ Agent*); a binary (`--bin`, a binding's); the project's
 coding agent; the account the launch names (`--account`, else the role's bound
-account), whose agent it is. Below the order, when no account is usable (no one
+account, unless that one is disabled: `choose` skips a disabled binding and so does
+the agent), whose agent it is. Below the order, when no account is usable (no one
 signed in, an API key, the accounts unreadable): the inherited launch family,
 `AISQUARE_CODING_AGENT`, the **fallback coding agent** under *App settings ▸ Agent
-settings ▸ Advanced* (`[agents] default`), then Claude Code. A restart, a Fork, a
-switch and a hand-over keep the agent their launch record names.
+settings ▸ Advanced* (`[agents] default`), then Claude Code. A restart and a Fork
+keep the agent their launch record names. So does a switch or a hand-over, unless it
+crosses to another agent (`fleet switch --agent`, `--to` another agent's account, *Hand
+off from* with another *Agent*, or the automatic hand-over once every account of its own
+agent is full, `[accounts] cross_agent_handover`): the replacement then starts fresh on the
+other agent, from a brief (see `docs/coding-agents.md`, *A hand-off across agents*).
 
-A store from before this order (schema v40 or older) is ordered on its first
-read with the fallback coding agent's accounts first, each agent's in the order it
-had, so the upgrade changes no launch's agent.
+A store from before this order (schema v44 or older) is ordered on its first read
+with the fallback coding agent's accounts first, each agent's in the order it had.
+That is every launch's agent on the upgrade **in the common case**, not a promise: the
+order now sits above the settings that named an agent before it, so an unpinned launch
+follows it where one of those said otherwise. `[agents] default = "codex"` on a machine
+whose Codex has no login (an API key) but whose Claude Code account is signed in now runs
+Claude Code, as does `AISQUARE_CODING_AGENT=codex` (or a Codex-launched parent's
+inherited family) with a signed-in Claude Code account first. Name the agent where it
+must not follow the order: `--agent`, `team bind ROLE --agent`, or the project's agent.
 
 **Spending several accounts.** With more than one login the interesting
 questions are *where is there room* and *what happens when one runs out*. Both

@@ -280,7 +280,7 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
     slots and dropped for vanished ones, so the table can never describe an
     account that is not there. Each agent's rows keep its own ranking
     (``claude_account``, ``agent_account``), and :func:`_ranked` lays all of them
-    in one order across agents (store v43): ``position`` is the place in it.
+    in one order across agents (store v45): ``position`` is the place in it.
     """
     promoted = _promote_retired_defaults(store)
     listed = core.list_accounts()
@@ -331,12 +331,14 @@ def _ranked(
 
     The ranked slots by their rank, then any slot with none (added by a build before
     store v45, or just now) after them, each agent's in its own order. A store that has
-    ranked nothing yet (one coming from v42 or older) is seeded with the user's coding
+    ranked nothing yet (one coming from v44 or older) is seeded with the user's coding
     agent's accounts first and every other agent's after, as they were listed, so the
-    upgrade changes no launch's agent (owner, PR #113). ``promoted`` are the slots a retired
-    default flag just moved to the top of their own agent's order
-    (:func:`_promote_retired_defaults`); each goes ahead of that agent's first account in the
-    order, so the account a launch of that agent took before is the one it takes after.
+    order starts where the user's agent already led (owner, PR #113): an unpinned launch that
+    order alone decided keeps its agent, one a setting below it decided (``[agents] default``,
+    ``AISQUARE_CODING_AGENT``) may not. ``promoted`` are the slots a retired default flag
+    just moved to the top of their own agent's order (:func:`_promote_retired_defaults`);
+    each goes ahead of that agent's first account in the order, so the account a launch of
+    that agent took before is the one it takes after.
     Written only when it changed.
     """
     ranks = store.account_ranks()

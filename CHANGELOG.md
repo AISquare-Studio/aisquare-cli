@@ -116,9 +116,16 @@ adapter.**
   with room, by the headroom rule and `switch_at` (`[accounts] pick`), and on that
   account, from the same usage reading; with nothing measured, or `pick = "default"`,
   the first usable account's agent. A Codex account on top makes an unpinned spawn run
-  Codex; a future agent's account the same. `--agent`, a role's agent, a binary, the
-  project's agent and the account a launch names (`--account`, or the role's bound one)
-  still pin it; a restart, Fork, switch and hand-over keep their record's agent.
+  Codex; a future agent's account the same. **An account whose usage cannot be read
+  keeps its place** (an expired token, an unreachable endpoint: unmeasured is not full):
+  a lower agent takes the launch only from an account measured over the line or at a
+  limit it named, so Claude Code's account with an expired token on top still runs
+  Claude Code. `--agent`, a role's agent, a binary, the project's agent and the account a
+  launch names (`--account`, or the role's bound one, unless it is disabled) still pin it;
+  a restart and Fork keep their record's agent, and so do a switch and a hand-over unless
+  they cross to another agent. The Spawn dialog asks which agent the role launches in a
+  worker (`(role's: picking…)` until it answers), and `doctor`, `team harness` and
+  `accounts` ask the order alone: only a launch reads usage.
   *App settings ▸ Advanced*'s *user coding agent* is now the **fallback coding agent**:
   the agent when no account is usable (no one signed in, an API key, the accounts
   unreadable). `claude_accounts.choose_any` is the cross-agent pick a hand-over can ask.
@@ -159,9 +166,12 @@ adapter.**
   one what it read (a reading recorded before reads NULL there, its session and week as
   they were); v45 adds `account_rank`, the one priority order over every agent's accounts,
   seeded on the first read with the fallback coding agent's accounts first and each
-  agent's in the order it had, so no launch changes agent on the upgrade (a build before
-  v45 sharing the store keeps each agent's own order, and an account it adds is ranked
-  last). Machine defaults are folded into that order too (0.9.0's #406): a Claude Code
+  agent's in the order it had (a build before v45 sharing the store keeps each agent's own
+  order, and an account it adds is ranked last). That keeps the agent of every launch the
+  order alone decided; it is not a promise for the settings the order now sits above:
+  `[agents] default = "codex"` with no usable Codex account but a signed-in Claude Code one,
+  `AISQUARE_CODING_AGENT` and a Codex-launched parent's family now give way to the order
+  (`--agent`, `team bind --agent` and the project's agent still pin). Machine defaults are folded into that order too (0.9.0's #406): a Claude Code
   account or a Codex one an older build flagged the default moves to the top of its
   agent's accounts in the one order, once, and the flag is cleared. A store a build of this
   branch took to v43 before 0.9.0 was merged (these six steps as v38-v43) lacks 0.9.0's

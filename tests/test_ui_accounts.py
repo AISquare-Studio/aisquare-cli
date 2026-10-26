@@ -2539,6 +2539,18 @@ def drive_held(reads: HeldReads, fn: Callable[[Pilot[None]], Awaitable[T]]) -> T
     return asyncio.run(run())
 
 
+async def _retype_as_late(pilot: Pilot[None], view: AccountsView) -> None:
+    """Slot 3's open field, which says "work", made to say "late": the old name taken out
+    first, and ``late`` typed once it is. ``pilot.press("end", backspace…, *"late")`` sent them
+    in one go, and on a loaded box the letters reached the field ahead of the keys that are
+    bindings (``end``, ``backspace``): "workl" less four was ``wate`` (13 runs in 60 here)."""
+    app = fleet_app(pilot)
+    await pilot.press("end", *["backspace"] * 4)
+    await settle_until(app, lambda: field(view, 3).value == "", group=_NO_WORKER)
+    await pilot.press(*"late")
+    await settle_until(app, lambda: field(view, 3).value == "late", group=_NO_WORKER)
+
+
 def field(view: AccountsView, slot: int) -> accounts_view.AliasInput:
     return row(view, slot).query_one(f"#account-alias-{slot}", accounts_view.AliasInput)
 
@@ -2915,7 +2927,7 @@ def test_rename_reopened_after_its_write_landed_but_before_the_next_frame_says_t
         view = await open_accounts(pilot)
         said = heard(view, monkeypatch)
         await rename(pilot, 3)  # "work"
-        await pilot.press("end", *["backspace"] * 4, *"late")
+        await _retype_as_late(pilot, view)
         reads.holding = True  # the re-read the write asks for waits, as on a busy store
         await pilot.press("enter")
         await settle_until(
@@ -2961,7 +2973,8 @@ def test_a_frame_read_before_the_write_and_painted_after_it_does_not_bring_the_o
         app.refresh_accounts()  # a tick: its read takes the registry now ("work")…
         stale = await reads.next_held()  # …and waits
         await rename(pilot, 3)
-        await pilot.press("end", *["backspace"] * 4, *"late", "enter")
+        await _retype_as_late(pilot, view)
+        await pilot.press("enter")
         await settle_until(
             app, lambda: not row(view, 3).renaming, group=accounts_view.RENAME_WORKER
         )

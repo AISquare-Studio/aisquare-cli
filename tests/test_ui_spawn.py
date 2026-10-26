@@ -2077,6 +2077,23 @@ def test_a_picked_agent_needs_no_wait_for_the_roles_own(
     assert seen == ["claude-code", False]
 
 
+def test_a_failed_ask_never_leaves_the_form_waiting_for_an_agent(
+    git_project: ProjectInfo, spawns: SpawnRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_resolve_role_agent`` answers for everything it can catch; a worker that fails anyway
+    still ends the wait, on Claude Code, rather than leave *Spawn* disabled for good."""
+
+    def broken(self: SpawnDialog, role: str, binary: str, settle: float = 0.0) -> None:
+        raise RuntimeError("the worker fell over")
+
+    monkeypatch.setattr(SpawnDialog, "_ask_role_agent", broken)
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        return [str(select(dialog, "agent")._options[0][0]), submit(dialog).disabled]
+
+    assert drive(git_project, scenario) == ["(role's: Claude Code)", False]
+
+
 def test_a_preset_agent_is_honoured_and_a_preset_account_brings_its_agent(
     git_project: ProjectInfo, spawns: SpawnRecorder
 ) -> None:

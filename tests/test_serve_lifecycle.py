@@ -19,7 +19,13 @@ import pytest
 
 pytest.importorskip("mcp", reason="the [serve] extra is not installed")
 
-_WAIT = 15  # generous CI margin for "exits by its 1s deadline"
+#: How long to wait for a daemon to exit before calling it hung. What it tells apart is a
+#: daemon that exits at the deadline or on EOF from one that does neither: no deadline
+#: here is under 300 s (the default one) or ends in ``--close-after 0``'s never, so the
+#: bound is under both, and over a Windows runner's interpreter start and import under
+#: load (12.9 s for one, and a timeout at the 15 s this was: CI runs 40230136547 and
+#: 40267952906, both windows-latest).
+_WAIT = 120
 
 
 @pytest.fixture

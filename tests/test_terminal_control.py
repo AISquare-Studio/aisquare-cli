@@ -722,13 +722,18 @@ def test_real_tmux_the_followed_project_ending_does_not_cost_the_other_panes_the
         host = Host(live, gone)
         async with host.run_test(size=(80, 24)) as pilot:
             pane = host.pane
-            await wait_until(pilot, lambda: _serving(pane), timeout=5.0)
+            # A client that has answered, as the other pins of its end wait for: one that ended
+            # before its first answer is a server that "never answered", offered another a
+            # minute on (CONTROL_RETRY), and that was this test's 1 failure in 50 under load.
+            await wait_until(pilot, lambda: _serving(pane) and _client(pane).answered, timeout=10.0)
             live.run("kill-window", "-t", gone)  # its session's last window
             ended = time.monotonic()
             pane.attach(stays)
-            # A failure is a pane that never comes: this wait is how long to look, not what
-            # is asserted, and a pane served after the poll would be 600 s away.
-            await wait_until(pilot, lambda: _serving(pane), timeout=30.0)
+            # Served again, by a client that has answered (the same one where tmux lets it stay,
+            # another where it detaches). A failure is a pane that never comes: this wait is how
+            # long to look, not what is asserted, and a pane served after the poll would be
+            # 600 s away.
+            await wait_until(pilot, lambda: _serving(pane) and _client(pane).answered, timeout=30.0)
             return time.monotonic() - ended, list(host.notices)
 
     took, notices = run(drive())

@@ -3310,7 +3310,10 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
             table = view.query_one("#claude-table")
             out["scrolls"] = table.max_scroll_x
             table.scroll_to(x=table.max_scroll_x, animate=False, immediate=True)
-            await pilot.pause()
+            # Settled until the table stands at its far edge, not paused for once: the
+            # columns were read before the scroll had been laid out (1 run in a full suite
+            # under load, at 140 columns).
+            await settle_until(app, lambda: table.scroll_x == table.max_scroll_x)
             out["scrolled"] = _columns_at(view)
             return out
 

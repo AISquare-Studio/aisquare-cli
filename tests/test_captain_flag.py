@@ -45,6 +45,10 @@ from tests.test_ui_shell import Script, drive, fleet_app, refreshed, seed, statu
 no_real_tmux = ui_suite.no_real_tmux
 script = ui_suite.script
 ui_path = receiver_suite.ui_path
+# Its landing budget too (the receiver suite's autouse fixture): these pins ask what lands, not how
+# soon, and on a loaded machine the 1.25 s the receiver ships with ran out ("asq had not finished
+# it within 1.25s", 1 run in a full suite under load).
+patient_landing = receiver_suite.patient_landing
 git_project = spawn_suite.git_project
 spawns = spawn_suite.spawns
 

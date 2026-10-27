@@ -1141,6 +1141,38 @@ def test_the_fake_agent_runs_through_the_fleet_like_any_other(
     assert (receipt.agent.pane_id, "literal", "/quit") in tmux.typed
 
 
+def test_a_third_agent_takes_the_spawns_own_options_over_the_roles_by_its_own_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_agent: FakeAgentAdapter,
+) -> None:
+    """Which options an agent takes once is its own (``AgentAdapter.merged_args``), and the
+    fleet asks it: the spawn's own ``--model`` replaces its role's, never passed beside it,
+    and the role's other options stay (seq 4204 (1), Codex's ``--model``)."""
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(
+        worktree=False, agent_args={"fake-agent": ["--model", "role-m", "--effort", "low"]}
+    )
+    save_config(config)
+    bin_dir = tmp_path / "bin"
+    fakebin.executable_fake(
+        bin_dir, "fakeagent", windows="echo fake agent\nset /p line=", posix="read line"
+    )
+    fakebin.prepend_to_path(bin_dir, monkeypatch)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+
+    fleet_service.spawn(
+        team_project(tmp_path), "coder", agent="fake-agent", agent_args=["--model", "own-m"]
+    )
+    command = tmux.spawned[-1]["command"]
+    assert isinstance(command, list)
+    native = command[command.index("--") + 1 :]
+    assert native.count("--model") == 1 and "role-m" not in native, native
+    assert native[native.index("--model") + 1] == "own-m", native
+    assert native[native.index("--effort") + 1] == "low", native
+
+
 def test_the_hand_over_dismisses_a_dialog_with_the_fake_agents_own_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_agent: FakeAgentAdapter
 ) -> None:

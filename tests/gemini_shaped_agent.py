@@ -88,6 +88,7 @@ from aisquare.core.agent_adapters.types import (
     payload_cwd,
     payload_text,
     stepped_down,
+    without_options_named,
 )
 from aisquare.core.agent_adapters.usage_tally import Tally, cut_turns, is_lookup_command
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice
@@ -903,6 +904,9 @@ class GeminiShapedAdapter:
     def model_args(self, model: str | None, effort: str | None) -> list[str]:
         self.validate(model, effort)
         return ["-m", model] if model else []
+
+    def merged_args(self, under: Sequence[str], over: Sequence[str]) -> list[str]:
+        return without_options_named(under, over, once=(("--model", "-m"),))
 
     def permission_args(
         self, intent: PermissionIntent, role: str, native: Sequence[str] = ()

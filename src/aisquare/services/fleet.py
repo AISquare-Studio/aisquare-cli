@@ -4900,6 +4900,9 @@ def spawn(
         adapter=selected.adapter,
     )
     role_args, extra = models.role_args, models.extra
+    # The spawn's own arguments over the role's, each option once (`AgentAdapter.merged_args`):
+    # Codex given the role's `--model` and the spawn's did not start (seq 4204 (1)).
+    role_args = selected.adapter.merged_args(role_args, extra)
     # What the spec records: the agent's own arguments, BEFORE this launch's
     # `--resume` is prepended — a resume is per launch, and a restart of the
     # restarted agent must not carry an old transcript path into the new one.
@@ -4928,7 +4931,8 @@ def spawn(
             role, binary=resolution.binary, args=[*selected.profile.args, *role_args, *extra]
         )
         # The binding's own flags, less the ones this spawn's model choice adds beside them: a
-        # flag this spawn chose (or a replay moved) replaces the binding's, never doubled.
+        # flag this spawn chose (or a replay moved) replaces the binding's, never doubled; and
+        # less each option the role's arguments or the spawn's name (`merged_args`).
         bound = list(selected.profile.args)
         for flag, added in (
             (harness.MODEL_FLAG, models.added.model),
@@ -4936,6 +4940,7 @@ def spawn(
         ):
             if added:
                 bound = harness.without_flag(bound, flag)
+        bound = selected.adapter.merged_args(bound, [*role_args, *extra])
         arguments = agent_launch.prepare_arguments(
             selected, [*defaults.args, *bound, *role_args], extra
         )

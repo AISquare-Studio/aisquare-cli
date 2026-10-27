@@ -77,6 +77,7 @@ from aisquare.core.agent_adapters.types import (
     payload_text,
     store_dir,
     store_read_only,
+    without_options_named,
 )
 from aisquare.core.agent_adapters.usage_tally import Tally, carries_context, cut_turns, trace
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice
@@ -781,6 +782,9 @@ class FakeAgentAdapter:
     def model_args(self, model: str | None, effort: str | None) -> list[str]:
         self.validate(model, effort)
         return (["--model", model] if model else []) + (["--effort", effort] if effort else [])
+
+    def merged_args(self, under: Sequence[str], over: Sequence[str]) -> list[str]:
+        return without_options_named(under, over, once=(("--model",), ("--effort",)))
 
     def permission_args(
         self, intent: PermissionIntent, role: str, native: Sequence[str] = ()

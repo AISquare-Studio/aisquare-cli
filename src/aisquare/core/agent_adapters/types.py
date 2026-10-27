@@ -1454,6 +1454,13 @@ class AgentAdapter(Protocol):
         ...
 
     def model_args(self, model: str | None, effort: str | None) -> list[str]: ...
+    def merged_args(self, under: Sequence[str], over: Sequence[str]) -> list[str]:
+        """``under`` (a role's arguments, or its binding's) less each option the agent takes
+        once that ``over`` (the spawn's own, after them on the line) names: ``over`` wins, and
+        no such option is passed twice, which an agent that refuses one given twice would not
+        start on (Codex's ``--model``; :func:`without_options_named`)."""
+        ...
+
     def role_defaults(self, role: str, *, binary: str, args: Sequence[str]) -> harness.RoleDefaults:
         """The flags ``role`` needs on this agent wherever it starts (the ui-tester's
         browser), less what ``args`` already says, with a note for each it withholds."""
@@ -1816,6 +1823,57 @@ def option_occurrences(args: Sequence[str], *options: str) -> Iterator[OptionVal
 
 def option_values(args: Sequence[str], *options: str) -> list[str]:
     return [item.value for item in option_occurrences(args, *options)]
+
+
+def without_options_named(
+    under: Sequence[str],
+    over: Sequence[str],
+    *,
+    once: Sequence[Sequence[str]] = (),
+    switches: Sequence[Sequence[str]] = (),
+    keyed: Sequence[str] = (),
+    same: Mapping[str, Sequence[str]] | None = None,
+) -> list[str]:
+    """``under`` less each option ``over`` names (:meth:`AgentAdapter.merged_args`): one of
+    ``once`` by any of its spellings (``("--model", "-m")``), with its value; one of
+    ``switches``, which takes none, by any of its spellings; and an assignment through an
+    option of ``keyed`` (``-c key=value``) to a key ``over`` assigns through one, each key on
+    its own. A key of ``same`` is one choice with the option it maps to (Codex's ``model``
+    and ``--model``, which ``once`` holds too): ``over`` naming the one takes ``under``'s
+    other as well. Both are read up to the native ``--`` (:func:`option_occurrences`); the
+    rest of ``under`` is kept, in its order."""
+    dropped: set[int] = set()
+
+    def drop(names: Sequence[str]) -> None:
+        for item in option_occurrences(under, *names):
+            dropped.update(range(item.index, item.value_index + 1))
+
+    for names in once:
+        if next(option_occurrences(over, *names), None) is not None:
+            drop(names)
+    given, held = _before_separator(over), _before_separator(under)
+    for names in switches:
+        if any(arg in names for arg in given):
+            dropped.update(index for index, arg in enumerate(held) if arg in names)
+    keys = {
+        parsed[0]
+        for item in option_occurrences(over, *keyed)
+        if (parsed := config_assignment(item.value)) is not None
+    }
+    for key, names in (same or {}).items():
+        if key in keys:
+            drop(names)
+        if next(option_occurrences(over, *names), None) is not None:
+            keys.add(key)
+    for item in option_occurrences(under, *keyed):
+        parsed = config_assignment(item.value)
+        if parsed is not None and parsed[0] in keys:
+            dropped.update(range(item.index, item.value_index + 1))
+    return [arg for index, arg in enumerate(under) if index not in dropped]
+
+
+def _before_separator(args: Sequence[str]) -> list[str]:
+    return list(args[: args.index("--")] if "--" in args else args)
 
 
 def rewrite_option_values(

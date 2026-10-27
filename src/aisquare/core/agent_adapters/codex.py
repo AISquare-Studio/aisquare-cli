@@ -57,6 +57,7 @@ from aisquare.core.agent_adapters.types import (
     rewrite_option_values,
     store_dir,
     store_read_only,
+    without_options_named,
 )
 from aisquare.core.codex_accounts import CodexAccounts, _records_from_end, approvals_reviewer
 from aisquare.core.config import FleetSettings
@@ -77,6 +78,33 @@ APPROVAL_POLICIES = ("on-request", "never")
 #: be combined with (Codex refuses the launch).
 _APPROVAL_SWITCHES = frozenset(
     {"--approve-for-me", "--dangerously-bypass-approvals-and-sandbox", "--yolo"}
+)
+#: The options with a value Codex refuses given twice, each with its spellings: 0.164.0 does
+#: not start on ``-m a --model b`` ("error: the argument '--model <MODEL>' cannot be used
+#: multiple times"), nor on any of these doubled (measured). ``-c``, ``--enable``,
+#: ``--disable``, ``--add-dir`` and ``--image`` repeat.
+TAKEN_ONCE = (
+    ("--model", "-m"),
+    ("--profile", "-p"),
+    ("--sandbox", "-s"),
+    ("--ask-for-approval", "-a"),
+    ("--cd", "-C"),
+    ("--local-provider",),
+    ("--remote",),
+    ("--remote-auth-token-env",),
+)
+#: The switches Codex refuses given twice (0.164.0, measured: ``--search --search``), each
+#: with its spellings.
+SWITCHED_ONCE = (
+    ("--oss",),
+    ("--strict-config",),
+    ("--approve-for-me",),
+    ("--dangerously-bypass-approvals-and-sandbox", "--yolo"),
+    ("--dangerously-bypass-hook-trust",),
+    ("--worktree",),
+    ("--search",),
+    ("--no-alt-screen",),
+    ("--no-daemon",),
 )
 #: The features whose tools :meth:`CodexAdapter.tools_only_args` switches off (with
 #: ``web_search="disabled"``), by their names in ``codex features list``. Measured on 0.162.1:
@@ -1089,6 +1117,22 @@ class CodexAdapter:
         effort = self.reasoning_effort(effort)
         return (["--model", model] if model else []) + (
             ["-c", f'model_reasoning_effort="{effort}"'] if effort else []
+        )
+
+    def merged_args(self, under: Sequence[str], over: Sequence[str]) -> list[str]:
+        """``under`` less each option of :data:`TAKEN_ONCE` and :data:`SWITCHED_ONCE` that
+        ``over`` names, which Codex would not start on given twice, and each ``-c`` key
+        ``over`` sets (``model_reasoning_effort`` among them), whose last Codex runs: one
+        option once, ``over``'s. A model ``over`` names either way (``--model``, ``-c
+        model=…``) takes both of ``under``'s: :meth:`native_choice` reads the two as one
+        choice, the flag over the key."""
+        return without_options_named(
+            under,
+            over,
+            once=TAKEN_ONCE,
+            switches=SWITCHED_ONCE,
+            keyed=("-c", "--config"),
+            same={"model": ("--model", "-m")},
         )
 
     @staticmethod

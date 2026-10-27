@@ -614,6 +614,12 @@ class ClaudeCodeAdapter:
         self.validate(model, effort)
         return (["--model", model] if model else []) + (["--effort", effort] if effort else [])
 
+    def merged_args(self, under: Sequence[str], over: Sequence[str]) -> list[str]:
+        """``under`` as it is: the spawn's ``--model`` and ``--effort`` replace the role's in
+        its model choice (``services.fleet``, #441) and the binding's beside it, and its argv
+        is otherwise as it always was."""
+        return list(under)
+
     def permission_args(
         self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
     ) -> PermissionArgs:

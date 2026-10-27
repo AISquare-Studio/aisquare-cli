@@ -2811,6 +2811,141 @@ def test_a_claude_code_pick_replaces_its_roles_flags_and_nothing_is_said(
     assert not any("not passed" in note for note in receipt.notes), receipt.notes
 
 
+def test_a_codex_spawn_passes_each_option_once_its_own_over_its_roles_and_its_bindings(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """seq 4204 (1): a Codex role whose ``agent_args`` named ``--model X``, spawned with its
+    own ``--model Y`` (the Spawn dialog's Extra agent args, ``fleet spawn``'s), launched
+    ``codex --model X … --model Y``, and Codex 0.164.0 does not start on that ("error: the
+    argument '--model <MODEL>' cannot be used multiple times"). The spawn's own arguments win
+    over the role's and the role's over its binding's (``AgentAdapter.merged_args``), each
+    option once, a ``-c`` key included; the record holds them so, and a restart passes them
+    once again."""
+    config = load_config()
+    role = ["--model", "gpt-role", "-c", 'model_reasoning_effort="medium"', "-c", "a.b=1"]
+    config.fleet.roles["coder"] = FleetRoleSettings(worktree=False, agent_args={"codex": role})
+    config.team.profiles["coder"] = RoleLaunchProfile(
+        agent="codex", args=["-m", "gpt-bound", "--search", "-c", "a.c=1"]
+    )
+    save_config(config)
+    own = ["--model", "gpt-own", "--config", "model_reasoning_effort=low", "--search"]
+    receipt = fleet_service.spawn(project, "coder", agent="codex", agent_args=own)
+    spec = receipt.agent.launch_spec
+    assert spec is not None
+    for native in (_spawn_native(tmux), spec.extra_args):
+        assert [arg for arg in native if arg in {"--model", "-m"}] == ["--model"], native
+        assert _pair(native, "--model") == "gpt-own", native
+        assert [arg for arg in native if "model_reasoning_effort" in arg] == [
+            "model_reasoning_effort=low"
+        ], native
+        assert "gpt-role" not in native and "gpt-bound" not in native, native
+    native = _spawn_native(tmux)
+    assert native.count("--search") == 1 and {"a.b=1", "a.c=1"} <= set(native), native
+    assert not any("not passed" in note for note in receipt.notes), receipt.notes
+
+    fleet_service.restart(project, receipt.agent.label)
+    replayed = _spawn_native(tmux)
+    assert [arg for arg in replayed if arg in {"--model", "-m"}] == ["--model"], replayed
+    assert _pair(replayed, "--model") == "gpt-own" and replayed.count("--search") == 1, replayed
+
+
+@pytest.mark.parametrize(
+    ("under", "over", "kept"),
+    [
+        pytest.param(
+            ["--model", "gpt-r", "--search"], ["--model", "gpt-o"], ["--search"], id="--model"
+        ),
+        pytest.param(["-m", "gpt-r", "--search"], ["--model=gpt-o"], ["--search"], id="-m"),
+        pytest.param(["-mgpt-r"], ["-m", "gpt-o"], [], id="-mJOINED"),
+        pytest.param(
+            ["-c", 'model_reasoning_effort="medium"', "-c", "a.b=1"],
+            ["-c", 'model_reasoning_effort="low"'],
+            ["-c", "a.b=1"],
+            id="-c-k=v",
+        ),
+        pytest.param(
+            ["--config", 'model_reasoning_effort="medium"'],
+            ["--config", "model_reasoning_effort=low"],
+            [],
+            id="--config-k=v",
+        ),
+        pytest.param(
+            ['-cmodel_reasoning_effort="medium"'],
+            ['--config=model_reasoning_effort="low"'],
+            [],
+            id="-cJOINED",
+        ),
+        pytest.param(
+            ["--model", "gpt-r", "-c", 'model="gpt-r"'],
+            ["-c", 'model="gpt-o"'],
+            [],
+            id="one-model-two-spellings",
+        ),
+        pytest.param(["-c", 'model="gpt-r"'], ["-m", "gpt-o"], [], id="the-flag-takes-the-key"),
+        pytest.param(
+            ["-s", "read-only", "--search", "-a", "never", "--yolo"],
+            [
+                "--sandbox",
+                "workspace-write",
+                "--search",
+                "--dangerously-bypass-approvals-and-sandbox",
+            ],
+            ["-a", "never"],
+            id="the-rest-codex-takes-once",
+        ),
+        pytest.param(
+            ["--enable", "x", "-c", "a.b=1", "-c", "a.c=1"],
+            ["--enable", "x", "-c", "a.c=2"],
+            ["--enable", "x", "-c", "a.b=1"],
+            id="what-repeats-and-another-key",
+        ),
+        pytest.param(
+            ["--model", "gpt-r"], ["--", "--model", "gpt-o"], ["--model", "gpt-r"], id="a-prompt"
+        ),
+    ],
+)
+def test_codex_takes_the_spawns_own_options_over_the_roles_each_once(
+    under: list[str], over: list[str], kept: list[str]
+) -> None:
+    """seq 4204 (1): every spelling of an option Codex refuses given twice (measured on
+    0.164.0), and each ``-c`` key, whose last it runs: ``over``'s, once. ``--model`` and ``-c
+    model=…`` are one choice (``native_choice``). What repeats (``--enable``), another key, and
+    a prompt after the native ``--`` are kept."""
+    assert CODEX.merged_args(under, over) == kept
+
+
+def test_claude_codes_argv_keeps_what_its_role_and_its_spawn_both_name(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """Claude Code's argv is as it was (``merged_args`` leaves its role's arguments alone): the
+    role's and the spawn's both, but for the ``--model`` its model choice replaces (#441)."""
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(
+        worktree=False, extra_args=["--add-dir", "role-dir", "--model", "sonnet"]
+    )
+    save_config(config)
+    fleet_service.spawn(
+        project,
+        "coder",
+        agent="claude-code",
+        agent_args=["--add-dir", "own-dir", "--model", "opus"],
+    )
+    native = _spawn_native(tmux)
+    assert [arg for arg in native if arg in {"--add-dir", "role-dir", "own-dir"}] == [
+        "--add-dir",
+        "role-dir",
+        "--add-dir",
+        "own-dir",
+    ], native
+    assert native.count("--model") == 1 and _pair(native, "--model") == "opus", native
+
+
 def test_a_hand_launch_keeps_claude_codes_argv_and_gives_codex_its_pins(
     runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,

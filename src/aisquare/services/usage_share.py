@@ -417,15 +417,17 @@ def ensure_identity() -> tuple[str, str]:
     return state.install_id, state.salt
 
 
-def reset_identity() -> tuple[str, str]:
+def reset_identity(*, now: datetime | None = None) -> tuple[str, str]:
     """A new install id and salt: what was sent before is no longer this installation's."""
+
+    moment = now or datetime.now(UTC)
 
     def fresh(state: SharingState) -> None:
         state.install_id = str(uuid.uuid4())
         state.salt = os.urandom(32).hex()
         state.acked = {}
         state.settled_through = None
-        state.since = datetime.now().astimezone().date().isoformat()  # not what went before
+        state.since = moment.astimezone().date().isoformat()  # not what went before
         state.linked = None
         state.last_sent_at = None
         state.withheld = []

@@ -8,7 +8,9 @@ for every test (``AISQUARE_NO_TELEMETRY``); these take that off with ``sharing_a
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+import os
+import time
+from collections.abc import Callable, Iterator
 from datetime import UTC, timedelta
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,29 @@ from tests.usage_share_support import Server, check_contract, ok, status, unreac
 from tests.usage_stats_support import IST, NOW, Machine, pin_clock, prompt, request, tokens
 
 pytestmark = pytest.mark.usefixtures("sharing_allowed")
+
+
+@pytest.fixture(autouse=True)
+def machine_clock_is_ist() -> Iterator[None]:
+    """The machine's own time zone is the one the data is cut in (``IST``, as the stats tests'):
+    the sharing path takes the first day shared from the machine's local date, and a test that
+    mixed that with IST days passed only where the two dates agree (it failed on a UTC runner
+    once the real date had moved on from the pinned ``NOW``, and at UTC-11)."""
+    if not hasattr(time, "tzset"):  # Windows: the zone of the runner stays
+        yield
+        return
+    before = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Kolkata"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if before is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = before
+        time.tzset()
+
 
 SECRET_REMOTE = "git@github.com:Acme-Secret/hush-project.git"
 SECRET_NAME = "hush-project"
@@ -196,7 +221,7 @@ def test_the_install_id_is_minted_at_the_first_opt_in_and_kept_across_off_and_on
     usage_share.disable(now=NOW)
     usage_share.enable(now=NOW)
     again = usage_share.status().install_id
-    changed = usage_share.reset_identity()[0]
+    changed = usage_share.reset_identity(now=NOW)[0]
 
     assert first is not None and again == first
     assert changed != first and usage_share.status().install_id == changed
@@ -209,7 +234,7 @@ def test_a_repository_hash_is_stable_for_an_install_and_different_for_another(
     _on()
     one = _build().days[-1]["repos"][0]["repo_hash"]
     again = _build().days[-1]["repos"][0]["repo_hash"]
-    usage_share.reset_identity()  # another installation: its own salt
+    usage_share.reset_identity(now=NOW - timedelta(days=10))  # another installation: its own salt
     other = _build().days[-1]["repos"][0]["repo_hash"]
 
     assert one == again and one != other

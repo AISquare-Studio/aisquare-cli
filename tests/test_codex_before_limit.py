@@ -513,7 +513,8 @@ def test_a_record_begun_before_the_turn_end_is_not_a_turn_begun_since(tmp_path: 
     turn that ended): that line began before it and is no turn begun since, though the rest
     of it, read from there, names a ``response_item``; a turn opened after it is one."""
     file = tmp_path / "rollout.jsonl"
-    file.write_text("".join(line + "\n" for line in LINES[:STOPPED]), encoding="utf-8")
+    # Its lines end as Codex ends them, ``\n`` alone, on Windows too: the lengths are bytes.
+    file.write_text("".join(line + "\n" for line in LINES[:STOPPED]), encoding="utf-8", newline="")
     last_response = max(i for i, line in enumerate(LINES[:STOPPED]) if '"response_item"' in line)
     begun = len("".join(line + "\n" for line in LINES[:last_response]).encode())
     inside = begun + 2  # in its first bytes: what follows still names it a response_item
@@ -521,5 +522,7 @@ def test_a_record_begun_before_the_turn_end_is_not_a_turn_begun_since(tmp_path: 
     reader = CodexTranscript()
     assert not reader.activity_since(file, inside)
     assert reader.activity_since(file, begun)
-    file.write_text("".join(line + "\n" for line in LINES[:NEXT_TURN]), encoding="utf-8")
+    file.write_text(
+        "".join(line + "\n" for line in LINES[:NEXT_TURN]), encoding="utf-8", newline=""
+    )
     assert reader.activity_since(file, inside)

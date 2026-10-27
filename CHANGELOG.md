@@ -6,7 +6,69 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-27
+
+**Usage & stats: what every Claude Code session on this machine spent, by day,
+repository, account and model, with anonymous sharing that is opt-in and off by default.
+Start fresh clears a project's board and fleet for a blank manager. A fleet agent can
+move to another account before its own runs out (opt-in: `[accounts] before_limit`), and
+a spawn runs the model and effort you last chose. Claude Code's own Remote Control per role, its status line, `fleet adopt`,
+and the captain's owner gate. The project brain (gbrain) and `docs/` are gone, and CI
+runs in shards.**
+
 **Upgrading:**
+- From 0.9.0, run `aisquare upgrade`, or take the update `asq` offers.
+- **The store migrates from v39 (0.9.0's) to v40 on first open, automatically, in one
+  step.** It adds two tables (`repo_profile`, `feature_use`), an index on
+  `usage_turn.recorded_at`, and four nullable columns for Usage & stats
+  (`usage_session.account_slot`, `account_type` and `repo_id`, and `usage_turn.source`).
+  Nothing is rewritten or dropped.
+- **Moving back to 0.9.0 is safe.** Its migrator treats a store at or past its own version
+  as current: it leaves `user_version` at 40 and the new tables and columns alone, and the
+  commands it was tried with all worked on a v40 store (tasks, notes, context, the board,
+  `metrics`, `doctor`, and a usage write). A session 0.9.0 records there has no account or
+  repository; 0.9.1 reads it as it is when you move forward again.
+- **New settings, with their defaults:** `[accounts] before_limit = "off"` (`warn` or
+  `switch`), `[sharing] enabled = false`, `[fleet.roles.<role>] remote_control = false`,
+  and `[captain] gate`, on unless it is `false`. A new extra, `gate`
+  (`pip install 'aisquare-cli[gate]'`, for the captain's gate), and a new command,
+  `asq-statusline`, which Claude Code runs only once `aisquare accounts statusline
+  --install` has set it. No extra is removed.
+- **The captain's owner gate is on by default, which matters only with the experimental
+  captain on.** Its acting tools (`press`, `paste`, `stop`, `spawn`, `restart`, `wololo`,
+  `attach_persona`, `act`) refuse until you install the `gate` extra and run `aisquare
+  captain gate enroll`, or add `gate = false` under `[captain]` in `~/.aisquare/config.toml`
+  by hand (`aisquare config set` does not take it). Reads, `tell`, notes and tasks
+  never need a code.
+- **A spawn runs the model and effort you last chose** (#441), not the ladder's top rung
+  0.9.0 passed to every spawn: a manager no longer starts on `--model fable --effort
+  high` over the default you saved with `/model`. With no choice made, no flag is passed
+  and Claude Code runs the account's own default. Agents spawned by 0.9.0 keep the rung
+  they recorded until a `/model` moves them.
+- **A headroom pick no longer overrides a hand-written `CLAUDE_CONFIG_DIR` binding**
+  (`team bind <role> --env CLAUDE_CONFIG_DIR=…`): such a role launches on its own
+  directory, where 0.9.0's note said a headroom pick still moved it. A hand-over still
+  does.
+- **`asq` now reads every Claude Code session's transcript on this machine** (under
+  `~/.claude` and every registered account), whether or not aisquare launched it and
+  whether or not its repository is added: when Settings ▸ Usage & stats opens, from the
+  TUI every ten minutes, and as `aisquare metrics backfill`. The figures stay on this
+  machine. Nothing is sent anywhere unless you turn sharing on
+  (`docs/usage-telemetry.md`); `DO_NOT_TRACK=1`, `AISQUARE_NO_TELEMETRY=1` and any `CI`
+  run force it off. The server that receives the shipments is not deployed yet: a
+  shipment that fails is silent and retried, so turning sharing on today sends counts
+  nowhere that answers.
+- **Removed:** `aisquare recall` and `aisquare team distill`, the `recall` tool of
+  `aisquare serve` (eight tools now), the `brain` row of `aisquare doctor`, and
+  `AISQUARE_BRAIN`, `AISQUARE_BRAIN_EMBED` and `AISQUARE_BRAIN_EMBED_MODEL`; an existing
+  `~/.aisquare/projects/<id>/brain` stays on disk. `aisquare doctor` no longer has the
+  `explainability…` and `ci …` rows, and takes no `--target` or `--project`;
+  `aisquare explainability doctor` runs the explainability checks. New doctor rows:
+  `remote control` (only while a role has it on), `role bindings` (only with a bound
+  role) and `fleet model pick` (only after a `/model` or `/effort` answer it could not
+  read).
+- **`docs/` is removed, except `docs/usage-telemetry.md`.** `aisquare --help` and each
+  command's `--help` are the reference now.
 - **A task title with words outside ASCII now has a different key** (#270):
   `Fix вход` was keyed `fix` and is now `fix-вход`. No store migration is
   needed. Re-adding a title exactly as a task already on the board has it still
@@ -48,7 +110,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   was named (`account_pinned` in the row's launch spec), which a restart, a switch and a fork
   keep; rows spawned before this read as not pinned.
 - **Settings ▸ Usage & stats, and `aisquare metrics stats`: what every Claude Code session on
-  this machine spent, by day, repository, account and model.** A new page under Settings
+  this machine spent, by day, repository, account and model** (#444). A new page under Settings
   (Today / 7 days / 30 days / Lifetime, keys `1`-`4`) with tiles for tokens, input + output,
   cost at list prices, sessions, turns, active days and repositories; a bar per day (per hour
   for Today); the weekdays and hours you work; your ten biggest repositories; your accounts
@@ -96,7 +158,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   days still waiting; `preview --json` says whether it is a sample. A day on which sharing was forced off is never
   sent later; a batch the server refuses for good does not hold the newer ones back. The server end is a separate
   change.
-- **Start fresh: `aisquare project fresh`** (alias `project reset`) clears an onboarded
+- **Start fresh: `aisquare project fresh`** (alias `project reset`, #429) clears an onboarded
   project's board and fleet and starts a blank manager, without onboarding it again.
   Every live agent is stopped as `fleet shutdown` stops it, and the project's tmux
   session is killed whenever it stands, a live row or none, so a dead pane or a process
@@ -145,20 +207,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refused plan says why and cannot be confirmed; one run a project at a time, off the
   UI thread, ending in a toast of what was cleared, with the project's open boards read
   again from their start.
-- **A fleet across two machines, the interim way.** A multi-machine fleet is postponed
-  (#293). Until it ships, a manager on one box drives another box's fleet over SSH:
-  setting up box B, an `~/.ssh/config` that shares one connection and drops a dead
-  link in about 45 seconds, the four commands to brief the manager with, watching B's
-  `asq` in tmux, and the trust model. B trusts A's key completely, so the advice is a
-  dedicated user and a key whose forced command runs `aisquare` and nothing else.
-  (#293)
-- **Which instructions an agent follows.** Your `CLAUDE.md` files, the role cycle, the
-  persona and aisquare's memory all reach a fleet agent, and nothing ranks them.
-  Here is where each lands, that a conflict is removed rather than ranked
-  (with a `CLAUDE.md` snippet that keeps *use subagents* out of fleet agents), what
-  a subagent does and does not see, how to clear a stale `CLAUDE.md` section out of
-  aisquare's memory, and the 10,000-character cap on a hook's output. (#292)
-
 - **`aisquare persona import` takes several sources, or `--from-dir DIR`** (#294).
   Each goes through the same import in turn, and one refusal does not stop the
   rest. The receipt is one table (SOURCE · NAME · ENGINE · OUTCOME), `--json` a
@@ -189,7 +237,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - pyotp comes with the new `gate` extra (`pip install 'aisquare-cli[gate]'`),
     never core. Without it, or before enrolment, the gate stays shut and says how
     to fix it.
-  - `[captain] gate = false` turns the gate off. A spoken code can be overheard.
+  - `gate = false` under `[captain]` in `~/.aisquare/config.toml` turns the gate off; it is
+    a hand edit, since `aisquare config set` does not take the key. A spoken code can be
+    overheard.
 - **A fleet role can start its agents with Claude Code's own Remote Control** (#289).
   `[fleet.roles.<role>] remote_control = true`, or `fleet spawn --remote-control` /
   `--no-remote-control` for one agent, starts Claude Code with `--remote-control
@@ -271,7 +321,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `aisquare accounts sessions [--since 15m] [--json]` and the Accounts page list
   every session that reported, hand-launched ones too, and the usage cache takes
   their readings (both windows, never one alone), so the usage endpoint is asked
-  less often.
+  less often. **`capture.enabled = false` does not stop these records:** it stops
+  prompt capture only, and `asq-statusline` reads no setting, so it writes a record
+  for every session it runs in while it is installed. A record older than a day is
+  deleted the next time it is read. To stop them, run `aisquare accounts statusline
+  --uninstall`; the files are `~/.aisquare/cache/statusline/<session id>.json`.
 - **A conversation started by hand can join the fleet** (#290). `aisquare fleet
   adopt <session-id|transcript>` resumes it as a fleet agent on the account its
   transcript lives in and in the directory it ran in, keeping its session id, so
@@ -311,7 +365,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **The sidebar has one *Start captain* and one *Spawn agent*, not a spawn row under every
-  project.** Under the Fleet header, two full-width one-line actions: *▶ Start captain*
+  project** (#442). Under the Fleet header, two full-width one-line actions: *▶ Start captain*
   (with the experimental captain on; its own row takes that place while it is live, and an
   exited one keeps its row with the start under it) and *＋ Spawn agent*. The "Captain"
   heading and the ★ beside Fleet are gone. *Spawn agent* opens the Spawn dialog with a new
@@ -322,8 +376,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prompt. With no project yet it says so in a toast and opens nothing. The captain's dialog
   and the Personas tab's flow open on their own project, with no Project field.
 
+- **Explainability and the CI test bed are dormant: out of `aisquare doctor` and out of
+  every UI, still there through their own commands.** Both are unmaintained and unused,
+  and a row or a tab each was noise. `aisquare doctor` has no `explainability…` row (nor
+  `explainability auto-mode`) and no `ci …` row, takes no `--target` or `--project`, and
+  its `--fix` only creates the home; `--yes` is still accepted. The section moved to
+  `aisquare explainability doctor [--live] [--target T] [--project P] [--fix] [--yes]`,
+  which runs the same checks and repairs and exits 1 on a failed row, and every hint that
+  said `doctor --live` for tracing names it. The test bed's rows are parked in
+  `services/ci_doctor.py`, which nothing imports; its `ci_*` modules, the `AISQUARE_CI`
+  gate, the hooks and the `ci_recall` tool are untouched. In the fleet UI a project has
+  the tabs Manager, Board, Settings and Personas (no AISquare tab), the Doctor page has no
+  "explainability enable" button, and nothing starts an explainability worker; the view
+  stays in `cli/ui/views/explainability.py`, unmounted, with how to mount it again. The
+  Remote page's agent view has Live and Transcript (no Card tab), and
+  `GET api/explainability/<agent>` still answers. `init` and its `--no-explainability`,
+  and the shipping line of `aisquare status`, are as they were.
+
 - **CI runs each leg's suite in shards: a sub-PR's CI takes about 8 minutes, the full
-  matrix about 10-13, down from 22 and 64.** The suite is ~13k tests and its time is a
+  matrix about 10-13, down from 22 and 64** (#427). The suite is ~13k tests and its time is a
   long tail, so it is split across standard runners rather than sped up: pytest-split
   (now in the `dev` extra) splits each leg by the per-test times in `.test_durations`,
   measured on CI itself, into 4 jobs per Linux leg and 10 on Windows, each on every core.
@@ -331,9 +402,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leg's shards ran every collected test exactly once (`tests/shards.py`). The two
   ambient jobs, which ran the suite serially for over an hour, are now the py3.11
   (proxy-down) and py3.13 (proxy-up) legs, sharded and parallel, with every premise
-  check in every shard; the suite runs 5 times per full run, not 7. ruff, the format
-  check, mypy (now also as `--platform win32`, which the Windows leg used to cover) and
-  `uv lock --check` run once, in `lint`. Installs use uv. Every job has a timeout. A
+  check in every shard; the suite runs 5 times per full run, not 7. ruff (0.17.2, #380),
+  the format check, mypy (now also as `--platform win32`, which the Windows leg used to
+  cover) and `uv lock --check` run once, in `lint`. Installs use uv. Every job has a timeout. A
   new `ci-ok` job passes only when every other job did: one check name for branch
   protection, whatever the shards. The suite now resets `insights`' once-per-process
   config for every test, as it already did `ci_client`'s, so no test passes or fails by
@@ -343,7 +414,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it beside a heavier test. Ten tests of the usage-limit hand-over no longer fail from
   23:45 to midnight every Sunday in Toronto: they fired `resets Mon 12:00am`, which then
   lifts inside `wait_if_reset_within_minutes`, so the hook waited instead of switching;
-  they fire a weekly limit that lifts three days out, whatever the clock says.
+  they fire a weekly limit that lifts three days out, whatever the clock says. The
+  timing tests no longer race the clock (#436, and the Windows stop-toast and client-clock
+  tests before it): each holds or steps the clock it measures, or looks on the loop's own,
+  and two tests pin the CI's shape (standard runners; every guard step runs). The one
+  change outside the tests is a seam: `asq exec`'s output drain reads its clock through a
+  name a test can replace.
 - **An account with no usage to show reads `!` on the Accounts page, and says
   why on hover** (#13 on the board). With no reading and none kept, the row read
   `⚠ token missing` cut to its 16-wide cell and `—`, which looked like no usage
@@ -372,7 +448,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **A fleet spawn runs the model and effort you last chose, not the ladder's top rung.**
+- **A fleet spawn runs the model and effort you last chose, not the ladder's top rung** (#441).
   0.9.0 made `fleet spawn` pass the role ladder's head (#338, #129), so every manager
   started on `--model fable --effort high` (high because asq runs with no `CLAUDE_EFFORT`)
   over the default you saved with `/model`, and a restart or a usage-limit switch replayed
@@ -449,16 +525,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when it runs. A headroom pick is shown from the shared five-minute usage
   cache, so the label sends no request the status line would not.
 - **A headroom pick no longer overrides a hand-written `CLAUDE_CONFIG_DIR`
-  binding.** With `[accounts] pick = "headroom"` (the default) and usage
+  binding** (#432). With `[accounts] pick = "headroom"` (the default) and usage
   readable, a role bound with `team bind <role> --env CLAUDE_CONFIG_DIR=…` (or
   `--env-file`) launched on the picked account instead of its own directory;
   the rank-1 default already left it alone. Both silent defaults now do. The
   flag, an account binding, a project default and a hand-over still win over it.
-  **Upgrade note:** this completes 0.9.0's note on the rank-1 default, which
+  **Upgrade note** (see Upgrading): this completes 0.9.0's note on the rank-1 default, which
   said a headroom pick still overrides such a binding: after this upgrade it
   does not, so a role bound by hand launches on its own directory whatever
   headroom would pick. A hand-over still moves it.
-- **A solo session's own board tools no longer make it read as a team.** Fixes the known
+- **A solo session's own board tools no longer make it read as a team** (#397). Fixes the known
   limitation the 0.9.0 notes named ("Less per-request context from aisquare"): a solo session
   that called one of aisquare's board tools over MCP wrote its server's row, every live row
   counted as a teammate, and for 30 minutes it got the board on its next prompt and the full
@@ -491,22 +567,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no process a tool starts, `git` or a tmux nudge, can hold or read the pipe; the `git`
   calls a tool reaches also name no stdin of their own.
 
-- **Explainability and the CI test bed are dormant: out of `aisquare doctor` and out of
-  every UI, still there through their own commands.** Both are unmaintained and unused,
-  and a row or a tab each was noise. `aisquare doctor` has no `explainability…` row (nor
-  `explainability auto-mode`) and no `ci …` row, takes no `--target` or `--project`, and
-  its `--fix` only creates the home; `--yes` is still accepted. The section moved to
-  `aisquare explainability doctor [--live] [--target T] [--project P] [--fix] [--yes]`,
-  which runs the same checks and repairs and exits 1 on a failed row, and every hint that
-  said `doctor --live` for tracing names it. The test bed's rows are parked in
-  `services/ci_doctor.py`, which nothing imports; its `ci_*` modules, the `AISQUARE_CI`
-  gate, the hooks and the `ci_recall` tool are untouched. In the fleet UI a project has
-  the tabs Manager, Board, Settings and Personas (no AISquare tab), the Doctor page has no
-  "explainability enable" button, and nothing starts an explainability worker; the view
-  stays in `cli/ui/views/explainability.py`, unmounted, with how to mount it again. The
-  Remote page's agent view has Live and Transcript (no Card tab), and
-  `GET api/explainability/<agent>` still answers. `init` and its `--no-explainability`,
-  and the shipping line of `aisquare status`, are as they were.
 - **Two tasks whose titles have no ASCII letters are two tasks** (#270). A
   task's key, which makes `task add` idempotent, kept only `[a-z0-9]` from the
   title, so `Исправить вход` and `Добавить тесты` both keyed `task`, and the
@@ -572,6 +632,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Binary"), and *Claude Remote Control* wrapped onto two lines at every width. The
   label column now fits its longest label, and a note beside a field wraps in what
   the row leaves.
+- **A Windows drive-letter git remote is a local path, not a host** (#451). `C:/git/x.git`
+  and `D:\repos\x` were read as the scp form with a host `C` or `D` (`c/git/x`), so
+  Usage & stats counted a repository whose remote is such a path under a remote that
+  does not exist, with its host trait `other`, and every checkout of the same path
+  together. `core/repo_profile.normalise_remote` now reads a drive path as a local path
+  on every OS, as it already read `/srv/x.git`: the repository is identified by its
+  root and its host trait is `none`. `x:org/repo`, a one-letter scp host with a
+  relative path, is still a host.
 
 ### Removed
 
@@ -581,14 +649,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   eight tools), as are the detached drain every board write started, the `brain` row of
   `aisquare doctor` and `AISQUARE_BRAIN`, `AISQUARE_BRAIN_EMBED` and
   `AISQUARE_BRAIN_EMBED_MODEL`. Nothing on disk is deleted: an existing
-  `~/.aisquare/projects/<id>/brain` stays where it is, and the store's schema is
-  untouched. `install.sh` still expects the `brain` row from a release that has it
+  `~/.aisquare/projects/<id>/brain` stays where it is, and the removal changes nothing in the
+  store (the v40 step is Usage & stats'). `install.sh` still expects the `brain` row from a release that has it
   (`--version 0.9.0` and older), alongside the codebase-snapshot rows.
-- **The `docs/` directory** (the owner's decision of 2026-10-26). The guides, plans,
-  runbooks and deck are gone, with the demo GIF and tape, `make demo` and the demo
-  workflow. The README no longer links them, the tests that read them are gone too,
-  and nothing a command prints or `--help` shows names one of those pages. Run
-  `aisquare --help` for the commands.
+- **The `docs/` directory, except `docs/usage-telemetry.md`** (the owner's decision of
+  2026-10-26). The guides, plans, runbooks and deck are gone, with the demo GIF and tape,
+  `make demo` and the demo workflow; `usage-telemetry.md` stays as the statement of what
+  opt-in usage sharing sends. The README links that one page and no other, the tests that
+  read the rest are gone too, and nothing a command prints or `--help` shows names a page
+  that is gone. Run `aisquare --help` for the commands. The READMEs of 0.9.0 and older, as
+  PyPI shows them, link pages on `main` that are no longer there.
 
 ## [0.9.0] - 2026-10-25
 
@@ -5745,7 +5815,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.0...v0.8.1

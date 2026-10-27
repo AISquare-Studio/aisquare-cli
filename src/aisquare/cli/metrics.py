@@ -35,7 +35,9 @@ from aisquare.services import metrics as metrics_service
 from aisquare.services import token_ledger, usage_share, usage_stats
 
 app = typer.Typer(
-    help="Inspect per-turn metrics recorded by the CI test bed.", no_args_is_help=True
+    help="Usage & stats: what Claude Code sessions on this machine spent, anonymous usage "
+    "sharing, and per-turn metrics.",
+    no_args_is_help=True,
 )
 
 share_app = typer.Typer(

@@ -45,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/i
 ```
 
 That installs the latest release. To pin one, every release from 0.9.0 on
-carries its own copy: `curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.0/install.sh | sh`.
+carries its own copy: `curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.1/install.sh | sh`.
 
 macOS, Linux and WSL2. It installs uv, a Python 3.13 for the CLI alone,
 `aisquare-cli`, tmux, gh, git and Claude Code, offers Node for browser tools,
@@ -91,7 +91,10 @@ talk to it, typed or spoken. `aisquare captain` starts it (or attaches to it),
 and `aisquare captain say "what is up"` asks it what needs you, across every
 board. Every effect is one of its 26 tools, each leaving one audit event with
 your words; `stop`, `spawn` and `restart` happen only when your words name what
-they act on, and a refusal is said, never faked.
+they act on, and a refusal is said, never faked. The owner gate is on by default
+while the captain is: its acting tools refuse until you run `aisquare captain gate
+enroll` (it needs the `gate` extra), or you add `gate = false` under `[captain]` in
+`~/.aisquare/config.toml` by hand (`config set` does not take it).
 
 It ships **off**. Turn it on in `asq` under *⚙ Settings ▸ Captain*, at once and
 with no restart, or once from a shell, or for one shell with

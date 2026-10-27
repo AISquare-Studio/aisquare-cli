@@ -95,7 +95,8 @@ adapter.**
     `codex resume <id>`, the picker naming each row's agent. A solo Codex session's own MCP
     server writes as the session: its process is the one of the hook's ancestors that holds
     its rollout open (measured on 0.164.0), its hooks being handed no pid. `project fresh`
-    removes the worktrees the launch records name, never a `cwd` rewritten in the store.
+    and `fleet reap` remove the worktrees the launch records name, never a `cwd` rewritten in
+    the store.
     `[accounts] before_limit` moves a Codex agent too: whether its turn end is a safe point
     is read off its rollout by its own reader (`AgentTranscript.background_work`: an exec
     answered `Process running with session ID <n>` runs until its `CommandExecution`

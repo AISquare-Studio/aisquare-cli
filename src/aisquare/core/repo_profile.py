@@ -69,7 +69,8 @@ _MANIFESTS = frozenset(
 _VENDORED = frozenset({"node_modules", "vendor", "third_party", "third-party", "examples", "docs"})
 
 _REMOTE_SCP = re.compile(r"^(?:[^@/\s]+@)?(?P<host>[^:/\s]+):(?P<path>(?!//).+)$")
-#: A Windows path (``C:\git\x``, ``D:/x``): read as scp it is host ``C``, path ``\git\x``.
+#: A Windows path (``C:\git\x``, ``D:/x``): read as scp it is host ``C``, path ``\git\x``. So a
+#: one-letter scp host with an absolute path (``x:/org/repo``) is read as a path on every OS.
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 
 

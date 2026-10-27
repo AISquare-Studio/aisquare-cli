@@ -85,6 +85,81 @@ def test_task_add_is_idempotent_on_key(work_dir: Path) -> None:
     assert again.id == first.id
 
 
+# --- a dropped or done task does not block re-adding its title (#2) -----------
+
+
+def test_re_adding_a_dropped_tasks_title_creates_a_new_task() -> None:
+    first, made_first = team_service.add_task("QA probe task")
+    assert first.number is not None
+    team_service.drop_task(first.id)
+
+    again, made_again = team_service.add_task("QA probe task")
+
+    assert made_first and made_again
+    assert again.id != first.id and again.number == first.number + 1
+    supersedes = team_service.last_supersedes()
+    assert supersedes is not None
+    assert supersedes.id == first.id and supersedes.status == "dropped"
+
+
+def test_re_adding_a_done_tasks_title_creates_a_new_task() -> None:
+    first, made_first = team_service.add_task("ship the release")
+    assert first.number is not None
+    team_service.finish_task(first.id)
+
+    again, made_again = team_service.add_task("ship the release")
+
+    assert made_first and made_again
+    assert again.id != first.id and again.number == first.number + 1
+    assert again.key != first.key, "the unique (project_id, key) row must not collide"
+    supersedes = team_service.last_supersedes()
+    assert supersedes is not None
+    assert supersedes.id == first.id and supersedes.status == "done"
+
+
+@pytest.mark.parametrize("make_status", ["todo", "doing", "review", "blocked"])
+def test_re_adding_a_title_still_open_stays_idempotent(make_status: str) -> None:
+    first, made_first = team_service.add_task("recurring checklist item")
+    if make_status == "doing":
+        team_service.claim_task(first.id)
+    elif make_status == "review":
+        team_service.review_task(first.id)
+    elif make_status == "blocked":
+        team_service.block_task(first.id, reason="waiting on X")
+
+    again, made_again = team_service.add_task("recurring checklist item")
+
+    assert made_first and not made_again
+    assert again.id == first.id
+    assert team_service.last_supersedes() is None
+
+
+def test_a_superseding_add_is_reported_in_cli_json(runner: CliRunner) -> None:
+    runner.invoke(app, ["task", "add", "QA probe task"])
+    runner.invoke(app, ["task", "drop", "1"])
+
+    result = runner.invoke(app, ["--json", "task", "add", "QA probe task"])
+    payload = json.loads(result.stdout)
+    assert payload["supersedes"] == {
+        "number": 1,
+        "id": payload["supersedes"]["id"],
+        "status": "dropped",
+    }
+    assert payload["number"] == 2
+
+    # A plain idempotent duplicate still carries the field, null.
+    again = json.loads(runner.invoke(app, ["--json", "task", "add", "QA probe task"]).stdout)
+    assert again["supersedes"] is None
+
+
+def test_a_superseding_add_names_the_old_task_on_the_human_line(runner: CliRunner) -> None:
+    runner.invoke(app, ["task", "add", "QA probe task"])
+    runner.invoke(app, ["task", "drop", "1"])
+
+    added = runner.invoke(app, ["task", "add", "QA probe task"])
+    assert "#2" in _flat(added.output) and "supersedes dropped #1" in _flat(added.output)
+
+
 # --- task keys in any script (#270) --------------------------------------------
 
 

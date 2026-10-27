@@ -429,6 +429,20 @@ def last_delivery() -> Delivery | None:
     return _DELIVERY.get()
 
 
+_SUPERSEDES: ContextVar[TeamTask | None] = ContextVar("aisquare_task_supersedes", default=None)
+
+
+def last_supersedes() -> TeamTask | None:
+    """The terminal-status (``done``/``dropped``) task that the most recent ``add_task``
+    bumped off its key, or ``None``.
+
+    Out-of-band like :func:`last_delivery`, and for the same reason: ``add_task``'s
+    return type is unpacked in a dozen call sites, so this rides a context var instead
+    of growing a tuple everywhere. ``add_task`` resets it before doing anything.
+    """
+    return _SUPERSEDES.get()
+
+
 def short_id(value: str) -> str:
     """The display form of a session id (leading characters, git-style)."""
     return value[:_SHORT_ID]
@@ -1656,6 +1670,7 @@ def add_task(
     """
     _require_enabled()
     _DELIVERY.set(None)
+    _SUPERSEDES.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
         board = _board(store, session, cwd, write=True)
@@ -1689,20 +1704,37 @@ def add_task(
             if any(task.key == legacy and task.title == title for task in stored):
                 derived = legacy
         now = _now()
-        task, created = store.upsert_task(
-            TeamTask(
-                id=new_task_id(),
-                project_id=board.id,
-                key=derived,
-                title=title,
-                detail=detail,
-                role=role,
-                needs=resolved_needs,
-                created_by=session.id if session else None,
-                created_at=now,
-                updated_at=now,
+        candidate = derived
+        supersedes: TeamTask | None = None
+        suffix = 1
+        while True:
+            task, created = store.upsert_task(
+                TeamTask(
+                    id=new_task_id(),
+                    project_id=board.id,
+                    key=candidate,
+                    title=title,
+                    detail=detail,
+                    role=role,
+                    needs=resolved_needs,
+                    created_by=session.id if session else None,
+                    created_at=now,
+                    updated_at=now,
+                )
             )
-        )
+            if created or task.status not in CLOSED_STATUSES:
+                break
+            # The key's holder is dropped or done: re-adding this title must not stay
+            # stuck behind a closed task forever (#2), so it gets a new key and a fresh
+            # number, naming what it supersedes instead of silently shadowing it.
+            supersedes = task
+            suffix += 1
+            candidate = f"{derived}-{suffix}"
+        if created and supersedes is not None:
+            # A chain of terminal keys can end in a genuine open duplicate (an earlier
+            # superseded candidate, then a later one still in play) — that is the
+            # idempotent-duplicate case, not a supersede, so nothing is reported.
+            _SUPERSEDES.set(supersedes)
         event = None
         if created:
             if origin_task is not None:

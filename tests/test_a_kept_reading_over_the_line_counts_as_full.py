@@ -276,6 +276,35 @@ def test_the_note_names_the_week_that_holds_the_floor_when_the_five_hours_have_r
     assert "no window has reset since" not in said
 
 
+def test_the_note_names_the_five_hour_window_when_it_holds_the_floor_and_the_week_has_reset(
+    fake_home: Path,
+) -> None:
+    """The other window of tester-23's observation ii (the ui-tester at 874aeff6: only the week
+    and a family week were pinned, so naming the five hours "week" went unseen). The five hours
+    read 95 % and reset in 6 h; the week reset an hour after the reading, so at +2 h the five
+    hours hold the floor, and the note says so."""
+    work = _slot("work@example.com", "tok-work")
+    spare = _slot("spare@example.com", "tok-spare")
+    payload = _payload(95.0, resets_at=NOW + timedelta(hours=6), week=30.0)
+    payload["seven_day"]["resets_at"] = (NOW + timedelta(hours=1)).isoformat()
+    endpoint = _Endpoint({"tok-work": payload, "tok-spare": _payload(40.0)})
+    service.cached_usage([work, spare], now=NOW, fetch=endpoint)
+    endpoint.by_token["tok-work"] = 500
+
+    decision = _decide(
+        work, spare, endpoint, when=NOW + timedelta(hours=2), max_age=service.PICK_MAX_AGE_SECONDS
+    )
+
+    said = " | ".join(decision.notes)
+    assert decision.account is not None and decision.account.slot == spare.slot, decision.notes
+    assert (
+        "its reading from 2h ago is over the 85%-used line in its five-hour window, which has "
+        "not reset since, so it counts as full"
+    ) in said, decision.notes
+    assert "no window has reset since" not in said
+    assert "in its week" not in said
+
+
 def test_the_note_names_the_family_week_when_that_week_holds_the_floor(fake_home: Path) -> None:
     """An Opus agent's pick: the account's Opus week reads 95 % and has not reset; its five
     hours and its all-models week read low, and the five hours have."""

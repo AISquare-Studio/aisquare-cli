@@ -233,6 +233,20 @@ def test_a_draft_is_named_before_someone_typing_when_a_pane_shows_both(
     assert autostop.pane_refusal(reviewer) == "someone is typing in its pane"
 
 
+def test_the_pane_is_captured_once_for_the_last_check_before_a_stop(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, later: None
+) -> None:
+    """r24 12: the box was read from the lines the check had, and then again by the guard that
+    adds the typing lease: two captures of one pane for one answer."""
+    reviewer = _worker(project, tmux)
+    _result(reviewer)
+    tmux.captured.clear()
+
+    assert autostop.pane_refusal(reviewer) is None
+
+    assert tmux.captured.count(reviewer.pane_id) == 1, tmux.captured
+
+
 def test_a_manager_or_a_coder_is_never_a_candidate(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, later: None
 ) -> None:

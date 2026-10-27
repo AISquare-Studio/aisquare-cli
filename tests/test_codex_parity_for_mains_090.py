@@ -105,7 +105,7 @@ def test_a_codex_worker_is_stopped_only_at_an_idle_empty_prompt(
     composer is idle (Claude Code's idle input box is), a draft in it is a human's."""
     server = SimpleNamespace(capture=lambda pane_id: SimpleNamespace(lines=list(screen)))
     monkeypatch.setattr(fleet_service, "server_of", lambda agent: server)
-    monkeypatch.setattr(delivery, "draft_guard", lambda *args, **kwargs: None)
+    monkeypatch.setattr(delivery, "human_typing", lambda *args, **kwargs: False)
     agent = FleetAgent(
         id="agt_codex1",
         project_id="prj_x",

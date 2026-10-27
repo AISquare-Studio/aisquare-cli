@@ -177,6 +177,9 @@ def redact(text: str, level: RedactionLevel) -> str:
     enter and their prompt being recorded, so the worst case must be "shipped
     unscrubbed" only if that is what the level says — a scrubber that throws
     would cost the record itself.
+
+    One string at a time: a credential split across two (``Bearer`` ending one content block
+    and its token starting the next) is whole in neither, and neither is scrubbed (r24 12).
     """
     if level is RedactionLevel.off:
         return text

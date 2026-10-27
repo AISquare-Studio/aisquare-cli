@@ -162,9 +162,9 @@ def _queued(store: ContextStore, project_id: str, role: str) -> bool:
 def pane_refusal(agent: FleetAgent) -> str | None:
     """Why ``agent``'s pane is not an idle prompt with an empty input box, or ``None``: the
     last check before a stop, so a human's half-typed draft is never killed with it. Then
-    P0-W2's own guard (:func:`delivery.draft_guard`), which adds someone typing into the pane
-    in ``asq`` within ``[fleet] draft_quiet_seconds`` (the typing lease): a draft the box
-    reader cannot see, or a key between two reads (W1b's owner call 6)."""
+    P0-W2's typing lease (:func:`delivery.human_typing`, the guard's other half), which adds
+    someone typing into the pane in ``asq`` within ``[fleet] draft_quiet_seconds``: a draft
+    the box reader cannot see, or a key between two reads (W1b's owner call 6)."""
     from aisquare.services import delivery, fleet  # lazy: fleet imports this module
 
     try:
@@ -180,10 +180,14 @@ def pane_refusal(agent: FleetAgent) -> str | None:
     # first: a pane that shows both is a draft, as 0.9.0 said (review r23 of #113, nit).
     if claude_screen.composer_text(lines):
         return "a draft is in its input box"
+    # The box is read from the lines above; what only the lease shows is asked of it alone,
+    # so the pane is captured once, not again by the guard for the same box (r24 12).
     try:
-        return delivery.draft_guard(srv, agent.pane_id, quiet=fleet.settings().draft_quiet_seconds)
+        if delivery.human_typing(srv, agent.pane_id, quiet=fleet.settings().draft_quiet_seconds):
+            return "someone is typing in its pane"
     except (TmuxError, OSError) as exc:
         return f"tmux would not show its pane ({exc})"
+    return None
 
 
 def _pane_idle_since(agent: FleetAgent) -> datetime | None:

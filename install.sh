@@ -1993,10 +1993,32 @@ devtools_mcp_add_shown() {
 # another name, by the same reading as devtools_mcp_registered's. Read from the file, as
 # `codex mcp add` writes it; and the survey is not optional here: measured with Codex 0.164.0,
 # `codex mcp add` of a name it has REPLACES that table without a word, so an operator's own
-# entry (its env, its cwd) would be overwritten. A commented line is not a server.
+# entry (its env, its cwd) would be overwritten. A commented line is not a server, and only
+# what is in an [mcp_servers...] table (or a dotted mcp_servers.NAME.key line) is read, as the
+# adapter reads `mcp_servers` alone: Codex's config also holds [projects."/path"] trust
+# tables, and a checkout of the package's own repository is not a registered server (r24 5).
 devtools_mcp_codex_registered() {
-    grep -v '^ *#' "$(codex_config_toml)" 2>/dev/null |
-        grep -q -E -e "^\[mcp_servers\.\"?$DEVTOOLS_MCP_NAME\"?[].]" -e '[/"]chrome-devtools-mcp[@"/]'
+    _dc_file=$(codex_config_toml)
+    [ -r "$_dc_file" ] || return 1
+    _dc_in=0
+    while IFS= read -r _dc_line || [ -n "$_dc_line" ]; do
+        _dc_text=${_dc_line#"${_dc_line%%[![:space:]]*}"}
+        _dc_here=$_dc_in
+        case $_dc_text in
+            '#'*) continue ;;
+            '[mcp_servers]'* | '[mcp_servers.'* | '[[mcp_servers'*) _dc_in=1 _dc_here=1 ;;
+            '['*) _dc_in=0 _dc_here=0 ;;
+            mcp_servers.* | mcp_servers[\ =]*) _dc_here=1 ;;
+        esac
+        [ "$_dc_here" = 1 ] || continue
+        case $_dc_text in
+            "[mcp_servers.$DEVTOOLS_MCP_NAME]"* | "[mcp_servers.$DEVTOOLS_MCP_NAME."*) return 0 ;;
+            "[mcp_servers.\"$DEVTOOLS_MCP_NAME\"]"* | "[mcp_servers.\"$DEVTOOLS_MCP_NAME\"."*) return 0 ;;
+            "mcp_servers.$DEVTOOLS_MCP_NAME."* | "mcp_servers.\"$DEVTOOLS_MCP_NAME\"."*) return 0 ;;
+            *[/\"]chrome-devtools-mcp[@\"/]*) return 0 ;;
+        esac
+    done <"$_dc_file"
+    return 1
 }
 
 devtools_mcp_codex_add_shown() {

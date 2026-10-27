@@ -2501,6 +2501,34 @@ model = "gpt-6"
 _CODEX_ANOTHER_SERVER = """[mcp_servers.github]
 url = "https://example.invalid/mcp"
 """
+#: Codex's trust tables name paths: a checkout of the package's own repository is not a server
+#: (r24 5), nor is the package named anywhere else but in an [mcp_servers] table.
+_CODEX_TRUSTED_CHECKOUT = """[projects."/Users/dev/src/chrome-devtools-mcp"]
+trust_level = "trusted"
+"""
+_CODEX_NAMED_ELSEWHERE = """notify = ["/opt/chrome-devtools-mcp/hook.sh"]
+
+[projects."/Users/dev/src/chrome-devtools-mcp/build"]
+trust_level = "trusted"
+
+[mcp_servers.github]
+url = "https://example.invalid/mcp"
+"""
+#: Registered, read the way TOML allows: an args array over several lines, dotted keys.
+_CODEX_MULTILINE_ARGS = """[projects."/Users/dev/src/other"]
+trust_level = "trusted"
+
+[mcp_servers.devtools]
+command = "npx"
+args = [
+  "-y",
+  "chrome-devtools-mcp@latest",
+]
+"""
+_CODEX_DOTTED = """model = "gpt-6"
+mcp_servers.devtools.command = "npx"
+mcp_servers.devtools.args = ["chrome-devtools-mcp@latest"]
+"""
 
 #: The layouts both the survey (shell) and the adapter (Python) read as registered, and as not.
 CODEX_REGISTERED = {
@@ -2511,11 +2539,15 @@ CODEX_REGISTERED = {
     "named-otherwise": _CODEX_NAMED_OTHERWISE,
     "scoped-fork": _CODEX_SCOPED_FORK,
     "by-path": _CODEX_BY_PATH,
+    "multiline-args": _CODEX_MULTILINE_ARGS,
+    "dotted-keys": _CODEX_DOTTED,
 }
 CODEX_NOT_REGISTERED = {
     "lookalike-package": _CODEX_LOOKALIKE,
     "commented-out": _CODEX_COMMENTED,
     "another-server": _CODEX_ANOTHER_SERVER,
+    "trusted-checkout": _CODEX_TRUSTED_CHECKOUT,
+    "named-elsewhere": _CODEX_NAMED_ELSEWHERE,
 }
 
 

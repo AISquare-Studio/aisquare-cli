@@ -56,11 +56,47 @@ MARKER = "[redacted]"
 #: word characters), leaving the whole key in the text it was written to remove it from.
 _START = r"(?<![A-Za-z0-9_])"
 
+#: Where a secret's name may start: where a token may, and at a letter, digit or underscore. The
+#: name's own first character is never a ``.`` or a ``-`` (the keyword it holds starts with a
+#: letter, and a ``--`` or a ``.`` before it stays in the output either way), and a start at
+#: every character of a long run of them cost each one the whole 48-character look ahead for a
+#: keyword: 65 times what prose costs, per character, in a 500 KB run of ``-``.
+_NAME_START = _START + "(?=[A-Za-z0-9_])"
+
 #: What names a secret in an assignment: a keyword, with the rest of the name (up to 48 characters
 #: before it and 24 after) kept in the output.
 _SECRET_NAME = (
     r"[A-Z0-9_.-]{0,48}?(?:api[_-]?key|secret|token|password|passwd|pwd"
     r"|credential|private[_-]?key|access[_-]?key)[A-Z0-9_.-]{0,24}"
+)
+
+#: Where a quoted value may end: before a separator, a closing bracket or the end of the text. A
+#: value is taken to the quote that closes it, across the escaped quotes inside it, only when
+#: that quote is followed by one of these. Otherwise (a value that ends in a backslash, as
+#: ``"C:\x\" k="v"`` does) it is taken to the first quote, as it was, and the text after it
+#: goes to its own rules instead of being read into this value.
+_VALUE_END = r"(?=[\s,;}\])]|\Z)"
+
+#: A quoted value, to the quote that closes it. ``"ab\"cd"`` is one value that holds a quote (in
+#: JSON, in Python, in a shell), and the first quote is not its end: a pattern that stopped there
+#: shipped the rest of the value (``cd1234"}``), or all of it when fewer than four characters came
+#: before the quote. Each form reads the escapes first and the first quote after, which is what
+#: the rule did, for what is not well formed. Where the text is JSON inside a string its quotes
+#: are escaped (``\"…\"``) and the quote of a value that holds one is escaped again (three
+#: backslashes and a quote): that form closes at a quote with ONE backslash before it, and reads
+#: the runs of backslashes before a quote as an escaped quote (three), an escaped backslash
+#: (four) or a pair and a letter (``\\n``). The body of every form stops at the first quote it
+#: does not know as an escape, so no value reads the text of the next one: the cost stays linear.
+_QUOTED_VALUE = (
+    r'\\"(?:[^"\\\n]|\\\\\\"|\\\\\\\\|\\\\[^"\\\n]){4,}+\\"'
+    + _VALUE_END
+    + r'|\\++"[^"\n]{4,}+"'
+    + r'|"(?:[^"\\\n]|\\[^\n]){4,}+"'
+    + _VALUE_END
+    + r'|"[^"\n]{4,}+"'
+    + r"|'(?:[^'\\\n]|\\[^\n]){4,}+'"
+    + _VALUE_END
+    + r"|'[^'\n]{4,}+'"
 )
 
 #: Credential shapes, matched on shape rather than on context. Order matters
@@ -81,14 +117,14 @@ _SECRET_NAME = (
 _CREDENTIAL_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     # NAME=value / NAME: value where the name says "secret". The name is kept —
     # "EXPLAINABILITY_API_KEY=[redacted]" still tells a reader a key was in play,
-    # which a bare marker does not. A value in quotes is removed to the quote that closes it,
-    # and where the text is JSON inside a string (a tool call's arguments are one) the quotes
-    # are escaped: ``PASSWORD=\"…\"``.
+    # which a bare marker does not. A value in quotes is removed to the quote that closes it
+    # (an escaped quote inside it does not: :data:`_QUOTED_VALUE`), and where the text is JSON
+    # inside a string (a tool call's arguments are one) the quotes are escaped: ``PASSWORD=\"…\"``.
     (
         re.compile(
-            r"(?i)" + _START + "(" + _SECRET_NAME + ")"
+            r"(?i)" + _NAME_START + "(" + _SECRET_NAME + ")"
             r"(\s*[:=]\s*)"
-            r"""(\\++"[^"\n]{4,}+"|"[^"\n]{4,}+"|'[^'\n]{4,}+'|[^\s"'\n]{4,}+)"""
+            "(" + _QUOTED_VALUE + r"""|[^\s"'\n]{4,}+)"""
         ),
         r"\1\2" + MARKER,
     ),
@@ -99,9 +135,9 @@ _CREDENTIAL_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     # is the next line after ``== "token":`` in code.
     (
         re.compile(
-            r"(?i)" + _START + "(" + _SECRET_NAME + ")"
+            r"(?i)" + _NAME_START + "(" + _SECRET_NAME + ")"
             r"""(\\*+["'][ \t]*[:=][ \t]*)"""
-            r"""(\\++"[^"\n]{4,}+"|"[^"\n]{4,}+"|'[^'\n]{4,}+')"""
+            "(" + _QUOTED_VALUE + ")"
         ),
         r"\1\2" + MARKER,
     ),

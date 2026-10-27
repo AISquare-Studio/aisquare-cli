@@ -7537,8 +7537,10 @@ def _at_input_box(
         if pressed and not notes_up:
             (notes if done is None else done).append(f"pressed Enter past {SECURITY_NOTES}")
             pressed, pressed_on = 0, None  # said once: the notes are not drawn again
-        modal = None if notes_up else screen.modal(lines)
-        if not notes_up and modal is None and screen.ready(lines):
+        # The agent's screen reads rows as `capture-pane -p` gives them, escapes stripped.
+        plain = pane_screen.strip_escapes(lines)
+        modal = None if notes_up else screen.modal(plain)
+        if not notes_up and modal is None and screen.ready(plain):
             return True
         if _monotonic() >= deadline:
             dialog = SECURITY_NOTES if notes_up else modal

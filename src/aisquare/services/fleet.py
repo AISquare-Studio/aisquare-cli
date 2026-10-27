@@ -2649,6 +2649,12 @@ def _remove_finished_worktrees(
     is on the report with why. A tree a live agent still sits in (a respawn reused it)
     is never touched.
 
+    Each row's tree is the one its launch record names (``cwd``, ``worktree``:
+    :func:`_in_its_recorded_tree`), as stop asks git about it and :func:`fleet_trees` names
+    it, never a path the row was rewritten to name in the store (``core.launch_seal``): a
+    row no record places (:class:`Unplaced`) names no tree to remove. A tree a live row's
+    store columns name is kept all the same (:func:`_reap_tree`): keeping is the safe side.
+
     A tree, or a project root, that cannot be looked at (a folder above it this user may not
     search, a mount that answered ``EIO``) is kept and said so, and the sweep goes on. Asked
     with ``Path.exists``, which raised ``PermissionError`` for one up to 3.13, one such root
@@ -2685,12 +2691,18 @@ def _remove_finished_worktrees(
         common = _git_common_dir(root)  # once: the branch lock is taken for each tree
     except FleetError:
         return  # no git here: nothing can be removed safely, so nothing is
+    # Each row at the tree its launch record names; one no record places is at none.
+    config = settings()
+    placed = [resolve_place(row, config=config) for row in rows]
     # The row whose tree a path is now: the NEWEST there, the one a restart of its label
     # acts on (`fleet_agent_by_label`). A label reused — a restart, a switch, a respawn
     # for its task — leaves older rows at the same path, each with the branch it recorded
     # when it ended; the tree's branch written to the oldest was a restart's of the newest
     # rebuilding on the branch before it (review of #259, round 16).
-    trees = [(_tree_at(agent.cwd), agent) for agent in rows]
+    trees = [
+        (_tree_at(agent.cwd), agent)
+        for agent in (_in_its_recorded_tree(p) for p in placed if isinstance(p, Placed))
+    ]
     owners = {here: agent for here, agent in trees if here is not None and agent.worktree}
     in_use = {here for here, agent in trees if here is not None and agent.ended_at is None}
     in_use.add(root.resolve())

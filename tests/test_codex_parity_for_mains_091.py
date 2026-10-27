@@ -27,6 +27,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import claude_accounts as accounts_core
+from aisquare.core import launch_seal
 from aisquare.core.store import SqliteStore, store_session
 from aisquare.models import ProjectInfo, TeamSession
 from aisquare.services import agent_events, usage_stats
@@ -214,6 +215,74 @@ def test_a_codex_rows_tree_is_the_one_its_launch_record_names_not_its_rewritten_
 
     assert [tree.resolve() for tree in trees] == [agent.cwd.resolve()]
     assert owners.resolve() not in {tree.resolve() for tree in trees}
+
+
+def _rewrite_cwd(agent_id: str, cwd: Path) -> None:
+    """``cwd`` in the store for the row ``agent_id``, as a sandbox could write it."""
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        store._conn.execute("UPDATE fleet_agent SET cwd = ? WHERE id = ?", (str(cwd), agent_id))
+        store._conn.commit()
+        row = store.get_fleet_agent(agent_id)
+    assert row is not None and row.cwd == cwd, "the store names the rewritten tree now"
+
+
+def test_reap_removes_the_tree_a_codex_rows_launch_record_names_not_its_rewritten_cwd(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """Item 6's sibling (seq 4187 a): reap, as ``fleet_trees``, takes an ended row's tree from
+    its launch record. A Codex row whose ``cwd`` was rewritten in the store to the owner's
+    own worktree, clean and on the default branch as a reaped tree is, is not reaped there:
+    the owner's tree stays, and the row's own, which its record names, goes."""
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=True).agent
+    owners = tmp_path / "owners-tree"
+    git = ["git", "-C", str(project.root)]
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "owners", str(owners)], check=True)
+    fleet_service.stop(project, agent.label, force=True)
+    _rewrite_cwd(agent.id, owners)
+
+    report = fleet_service.reap(project)
+
+    assert owners.is_dir(), "the owner's tree is no row's to reap"
+    assert [tree.resolve() for tree in report.worktrees_removed] == [agent.cwd.resolve()]
+    assert not agent.cwd.exists()
+
+
+def test_reap_removes_no_tree_for_a_row_no_launch_record_places(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """A row whose launch record is gone (``Unplaced``) names no tree, as ``fleet_trees``
+    lists none for it: its store columns are all it has, and reap removes nothing there."""
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=True).agent
+    fleet_service.stop(project, agent.label, force=True)
+    launch_seal._path(agent.id).unlink()
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [] and agent.cwd.is_dir()
+
+
+def test_reap_keeps_a_tree_a_live_rows_store_names_whatever_the_records_say(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """Keeping a tree is the safe side: one a live row's store columns name stays, though no
+    launch record puts that row there (``_reap_tree`` asks the store's rows under the branch
+    lock), so reading the records never takes a tree from under a live agent."""
+    ended = fleet_service.spawn(project, "coder", agent="codex", worktree=True).agent
+    fleet_service.stop(project, ended.label, force=True)
+    live = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+    _rewrite_cwd(live.id, ended.cwd)
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [] and ended.cwd.is_dir()
 
 
 # --- the label cap --------------------------------------------------------------------------

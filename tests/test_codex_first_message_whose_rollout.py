@@ -11,7 +11,10 @@ the pane's own (``core.process_table``; measured on 0.164.0), so:
 
 - a rollout the row's pane holds is the row's own, and nothing else is;
 - where the process table cannot be read (``PromptRecord.own`` false) the message's own words
-  still take the row, and no other prompt does unless this is the only live row in its folder.
+  still take the row and no other prompt does, not even when it is the only live row in its
+  folder: "alone" is a fact about the moment of the listing, and the prompt may be that of an
+  agent that ran its task in the folder and ended since (tester-24b); the row's detail says
+  so.
 
 Both are here with a made-up process table (``tests.test_codex_first_message_never_taken.
 Processes``); ``tests/test_process_table.py`` reads real processes and
@@ -29,7 +32,7 @@ import pytest
 
 from aisquare.core.agent_adapters import codex_prompts
 from aisquare.core.process_table import PaneProcesses
-from aisquare.core.store import SqliteStore, store_session
+from aisquare.core.store import store_session
 from aisquare.models import ProjectInfo
 from aisquare.services import fleet as fleet_service
 from tests import test_codex_first_message_never_taken as first
@@ -196,17 +199,57 @@ def test_the_record_says_whose_it_is_when_the_table_is_read_and_when_it_is_not(
 # --- where the process table cannot be read
 
 
-def test_with_the_table_unreadable_a_row_alone_in_its_folder_is_still_taken_by_a_later_prompt(
+def _named(spawned: Spawned) -> ProjectInfo:
+    """The project as a listing reads it (its codename), for the detail it writes."""
+    with store_session() as store:
+        return store.get_project(spawned.project.id) or spawned.project
+
+
+def test_with_the_table_unreadable_a_row_alone_in_its_folder_is_not_taken_by_a_later_prompt(
     spawned: Spawned, processes: Processes
 ) -> None:
-    """No attribution to be had: the row is the only one in its folder, so a prompt there is the
-    row's (what #17 did, and what the docs say a session outside the fleet can still defeat)."""
+    """No attribution to be had, and the row is the only one in its folder: still no. "Alone" is
+    asked at the listing, about the moment, and says nothing of whose the prompt was (the next
+    test is the way that goes wrong); a session outside the fleet there could run it too."""
     processes.readable = False
     _unsent(spawned)
     spawned.rollout(["a fleet tell of other words"], began=_soon(), held=False)
 
-    assert spawned.listed().state != "attention"
-    assert spawned.row().first_prompt == "acked"
+    for _ in range(3):
+        assert spawned.listed().state == "attention"
+    assert spawned.row().first_prompt == "unsent"
+
+
+def test_with_the_table_unreadable_a_row_that_ran_a_task_and_ended_does_not_take_the_unsent_row(
+    spawned: Spawned,
+    tmux: FakeTmux,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    processes: Processes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """tester-24b's repro 1 (unit): A and B in one folder, A's message lost, B runs its own task.
+    While B lives A stays unsent; B is stopped, so A is "alone", and B's old prompt, which is in
+    the record and not among those A saw when it read unsent, must not take A: its agent ran
+    nothing, idles at its prompt, and its manager is still waiting."""
+    processes.readable = False
+    other = _second(spawned, tmux, project, processes, monkeypatch)
+    _unsent(spawned)
+    other.rollout([OTHERS_TASK], began=_soon(), held=False)
+    for _ in range(3):
+        assert spawned.listed().state == "attention"
+    assert spawned.row().first_prompt == "unsent"
+
+    with store_session() as store:
+        store.end_fleet_agent(other.agent.id, ended_by="stopped")
+        ended = store.get_fleet_agent(other.agent.id)
+        assert ended is not None and ended.ended_at is not None
+
+    for _ in range(3):
+        status = spawned.listed()
+        assert status.state == "attention", "B's old prompt took a row whose agent ran nothing"
+    assert spawned.row().first_prompt == "unsent"
+    with store_session() as store:
+        assert store.get_meta(f"{fleet_service.FIRST_PROMPT_META}{spawned.agent.id}") is not None
 
 
 def test_with_the_table_unreadable_another_live_row_in_the_folder_leaves_an_unsent_row_unsent(
@@ -233,60 +276,64 @@ def test_with_the_table_unreadable_another_live_row_in_the_folder_leaves_an_unse
     assert spawned.row().first_prompt == "acked"
 
 
-def test_with_the_table_unreadable_an_ended_row_in_the_folder_is_no_other(
-    spawned: Spawned,
-    tmux: FakeTmux,  # noqa: F811
-    project: ProjectInfo,  # noqa: F811
-    processes: Processes,
-    monkeypatch: pytest.MonkeyPatch,
+def test_with_the_table_unreadable_the_message_itself_takes_a_row_alone_in_its_folder(
+    spawned: Spawned, processes: Processes
 ) -> None:
-    processes.readable = False
-    stopped = _second(spawned, tmux, project, processes, monkeypatch)
-    with store_session() as store:
-        store.end_fleet_agent(stopped.agent.id, ended_by="stopped")
-        ended = store.get_fleet_agent(stopped.agent.id)
-        assert ended is not None and ended.ended_at is not None
-    _unsent(spawned)
-    spawned.rollout(["a fleet tell of other words"], began=_soon(), held=False)
-
-    assert spawned.listed().state != "attention", "an ended row is not running there"
-
-
-def test_with_the_table_unreadable_a_store_that_will_not_say_leaves_the_row_unsent(
-    spawned: Spawned, processes: Processes, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Whether the row is alone is a question put to the store, and a store that fails to answer
-    says no: the manager keeps being told."""
+    """What the row asked for ran, whoever's pane held it: its digest is the one rule that needs
+    no attribution, and the one #17 had."""
     processes.readable = False
     _unsent(spawned)
-    spawned.rollout(["a fleet tell of other words"], began=_soon(), held=False)
+    spawned.rollout(["something else a human typed"], began=_soon(), held=False)
+    assert spawned.listed().state == "attention"
 
-    def refuse(self: Any) -> Any:
-        raise RuntimeError("database is locked")
-
-    row = spawned.row()
-    with monkeypatch.context() as refusing:
-        refusing.setattr(SqliteStore, "live_fleet_agents", refuse)
-        assert fleet_service._alone_in_its_folder(row) is False
-    assert fleet_service._alone_in_its_folder(row) is True
-
-
-def test_a_live_row_of_another_folder_does_not_count_either(
-    spawned: Spawned, processes: Processes, tmp_path: Path
-) -> None:
-    processes.readable = False
-    other = tmp_path / "another-checkout"
-    other.mkdir()
-    with store_session() as store:
-        row = store.get_fleet_agent(spawned.agent.id)
-        assert row is not None
-        store.upsert_fleet_agent(
-            row.model_copy(update={"id": "agt_other", "label": "coder-9", "cwd": other})
-        )
-    _unsent(spawned)
-    spawned.rollout(["a fleet tell of other words"], began=_soon(), held=False)
+    spawned.rollout(["  " + MESSAGE.replace(" ", "  ") + "\n"], began=_soon(), held=False)
 
     assert spawned.listed().state != "attention"
+    assert spawned.row().first_prompt == "acked"
+
+
+def test_an_unsent_row_says_where_only_the_message_itself_clears_it(
+    spawned: Spawned, processes: Processes
+) -> None:
+    """The detail is the same two ways on, and, where the record could not be told from other
+    sessions' (a prompt there, the table unreadable), the reason a ``tell`` of other words does
+    not clear it: the manager is not left to find that out. Where it can be read, no such word."""
+    named = _named(spawned)
+    plain = fleet_service.unsent_detail(named, spawned.agent.label)
+    blind = fleet_service.unsent_detail(named, spawned.agent.label, blind=True)
+    assert blind == plain + fleet_service.BLIND_DETAIL
+    assert "only the message itself clears this" in blind and "no lsof" in blind
+    assert fleet_service.BLIND_DETAIL not in plain
+
+    _unsent(spawned)
+    assert spawned.listed().detail == plain, "no prompt of the folder to attribute: nothing blind"
+
+    spawned.rollout([OTHERS_TASK], began=_soon(), held=False)
+    assert spawned.listed().detail == plain, "the table read: another agent's, and said so plain"
+
+    processes.readable = False
+    status = spawned.listed()
+    assert status.state == "attention" and status.detail == blind
+
+
+def test_a_tell_of_other_words_with_the_table_unreadable_leaves_the_detail_saying_why(
+    spawned: Spawned, processes: Processes
+) -> None:
+    """The case the detail is for: the row's own agent runs the human's ``fleet tell``, nothing
+    can tell it from another session's, and the row stays unsent. The same message told again
+    is the way out, and takes it."""
+    processes.readable = False
+    _unsent(spawned)
+    named = _named(spawned)
+    spawned.rollout(["do something else instead"], began=_soon(), held=False)
+
+    status = spawned.listed()
+    assert status.state == "attention"
+    assert status.detail == fleet_service.unsent_detail(named, spawned.agent.label, blind=True)
+
+    spawned.rollout([MESSAGE], began=_soon(), held=False)
+    assert spawned.listed().state != "attention"
+    assert spawned.row().first_prompt == "acked"
 
 
 def test_a_pane_tmux_will_not_give_a_pid_for_is_read_like_a_table_that_cannot_be(

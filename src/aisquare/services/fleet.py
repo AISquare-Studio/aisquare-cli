@@ -3641,10 +3641,11 @@ def _with_first_prompts(
         live = running and status.session is not None
         pane = panes.get(agent.id)
         at_notes = False
+        blind = False
         if running and status.session is None and pane is not None:
             # No session yet: an agent whose start comes with its first prompt (Codex's)
             # has none until a prompt runs, so its own record of the prompts it ran decides.
-            agent = _first_prompt_off_its_transcript(agent, pane, config, now)
+            agent, blind = _first_prompt_off_its_transcript(agent, pane, config, now)
             live = agent.first_prompt == "unsent"
         elif live and pane is not None and delivery.overdue(agent, now, config.prompt_ack_seconds):
             agent, at_notes = _unsent_if_idle(agent, status.session, config, pane)
@@ -3657,7 +3658,7 @@ def _with_first_prompts(
                     "state": "attention",
                     "detail": SECURITY_NOTES_DETAIL
                     if at_notes
-                    else unsent_detail(project, agent.label),
+                    else unsent_detail(project, agent.label, blind=blind),
                 }
             )
         shown.append(status)
@@ -3668,6 +3669,13 @@ FIRST_PROMPT_META = "first-prompt:"
 """``team_meta`` key prefix, before an agent id, of what a spawn's first message was given as:
 ``{"digest", "home", "cwd", "at"}``, for :func:`_first_prompt_off_its_transcript`; and, once a
 row reads ``unsent``, ``"seen"``: the digests of the prompts its agent's record held then."""
+BLIND_DETAIL = (
+    "; aisquare cannot tell which process holds a rollout here (no lsof, a hidden /proc),"
+    " so only the message itself clears this"
+)
+"""What an ``unsent`` row's detail adds where its agent's record of the prompts it ran could not
+be told from another session's: any other prompt there may be another agent's, so a ``tell`` of
+other words does not clear the row (#24, tester-24b)."""
 FIRST_PROMPT_LEAD = timedelta(seconds=10)
 """How long before the spawn's own clock a session may have begun and still be this row's."""
 
@@ -3694,7 +3702,7 @@ def _note_first_prompt(
 
 def _first_prompt_off_its_transcript(
     agent: FleetAgent, pane: PlacedPane, config: FleetSettings, now: datetime
-) -> FleetAgent:
+) -> tuple[FleetAgent, bool]:
     """``agent``, its pending first message settled by its agent's own record of the prompts
     it ran (``AgentAdapter.first_prompts_since``: Codex's rollouts), for a row no session has
     spoken for: Codex fires its first hook only with its first prompt, and with its hooks not
@@ -3709,50 +3717,56 @@ def _first_prompt_off_its_transcript(
     Whose prompt it is matters (#24, tester-24): the record holds every session of the folder
     on that account home, and another agent's prompt there is not this row's. The adapter
     tells them apart by the pane's processes (``PromptRecord.own``); where it cannot, the
-    message's own words still take the row, and no other prompt does unless this is the only
-    live row in its folder (:func:`_alone_in_its_folder`)."""
+    message's own words still take the row and no other prompt does. Not even when the row
+    looks alone in its folder: that is a fact about the moment of the listing, and the prompt
+    may be an agent's that ran its task and ended since the row read ``unsent`` (tester-24b).
+
+    The second of the pair is whether the record could not tell whose its prompts are, which
+    is what an ``unsent`` row says of itself (:func:`unsent_detail`)."""
     if agent.first_prompt not in ("pending", "unsent"):
-        return agent
+        return agent, False
     adapter = recorded_adapter(agent.agent)
     try:
         with store_session() as store:
             raw = store.get_meta(f"{FIRST_PROMPT_META}{agent.id}")
         given = json.loads(raw) if raw else None
         if adapter is None or not isinstance(given, dict):
-            return agent
+            return agent, False
         # The spawn's own clock, never the row's `first_prompt_at`, which `unsent` rewrites.
         since = datetime.fromisoformat(given["at"]) - FIRST_PROMPT_LEAD
         record = adapter.first_prompts_since(
             Path(given["home"]), Path(given["cwd"]), since, PaneProcesses(lambda: pane.pid())
         )
     except Exception:
-        return agent
+        return agent, False
     if record is None:
-        return agent
+        return agent, False
     digests = {_first_prompt_digest(text) for text in record.prompts}
     seen = given.get("seen")
     later = (
         agent.first_prompt == "unsent"
         and isinstance(seen, list)
         and bool(digests - set(seen))
-        and (record.own or _alone_in_its_folder(agent))
+        and record.own
     )
     if given["digest"] in digests or later:
         # The message ran; or, with the agent's hooks not trusted (none ever fires, so nothing
         # else takes the row), a prompt its own session ran after the row read ``unsent``:
         # someone told it something, which is what the row asked for, as a hook's own prompt
-        # takes it. Another session's prompt in the folder is neither.
+        # takes it. Another session's prompt in the folder is neither, and where the record
+        # cannot tell whose a prompt is, none but the message's own is taken.
         with contextlib.suppress(Exception), store_session() as store:
             store.take_first_prompt(now, session_id="", agent_id=agent.id)
             store.delete_meta(f"{FIRST_PROMPT_META}{agent.id}")
-            return store.get_fleet_agent(agent.id) or agent
-        return agent
+            return store.get_fleet_agent(agent.id) or agent, False
+        return agent, False
+    blind = not record.own
     if agent.first_prompt != "pending" or not delivery.overdue(
         agent, now, config.prompt_ack_seconds
     ):
-        return agent
+        return agent, blind
     if not pane_screen.ready(agent, _first_prompt_screen(pane)):
-        return agent
+        return agent, blind
     why = (
         f"no turn started on it within {config.prompt_ack_seconds:.0f} s, and its "
         f"{adapter.label} sessions hold no such prompt"
@@ -3764,33 +3778,23 @@ def _first_prompt_off_its_transcript(
             store.set_meta(
                 f"{FIRST_PROMPT_META}{agent.id}", json.dumps({**given, "seen": sorted(digests)})
             )
-        return agent.model_copy(update={"first_prompt": "unsent"})
+        return agent.model_copy(update={"first_prompt": "unsent"}), blind
     with contextlib.suppress(Exception), store_session() as store:
-        return store.get_fleet_agent(agent.id) or agent
-    return agent
+        return store.get_fleet_agent(agent.id) or agent, blind
+    return agent, blind
 
 
-def _alone_in_its_folder(agent: FleetAgent) -> bool:
-    """Whether no other live fleet row, of any agent or project, runs in ``agent``'s folder:
-    what lets a prompt a record cannot attribute (``PromptRecord.own`` false) stand for the
-    row's own. Another row there may have run it; a session outside the fleet in the same
-    folder on the same home still can, and is said so (docs/coding-agents.md). A store that
-    will not answer says no."""
-    here = os.path.realpath(agent.cwd)
-    with contextlib.suppress(Exception), store_session() as store:
-        return not any(
-            other.id != agent.id and os.path.realpath(other.cwd) == here
-            for other in store.live_fleet_agents()
-        )
-    return False
-
-
-def unsent_detail(project: ProjectInfo, label: str) -> str:
+def unsent_detail(project: ProjectInfo, label: str, *, blind: bool = False) -> str:
     """What a listing says of an agent whose first message never started a turn: the two ways
-    on, each naming ``project`` (``project_service.fleet_command``)."""
+    on, each naming ``project`` (``project_service.fleet_command``). ``blind``: its record of
+    the prompts it ran could not be told from another session's, so only the message itself
+    clears the row (:func:`_first_prompt_off_its_transcript`), and the detail says so (#24)."""
     tell = project_service.fleet_command("tell", project, label)
     restart = project_service.fleet_command("restart", project, label)
-    return f"first prompt not taken — `{tell} …` or `{restart}`"
+    detail = f"first prompt not taken — `{tell} …` or `{restart}`"
+    if blind:
+        detail += BLIND_DETAIL
+    return detail
 
 
 def _first_prompt_screen(pane: PlacedPane) -> list[str]:

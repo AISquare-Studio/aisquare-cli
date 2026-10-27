@@ -501,7 +501,7 @@ def test_an_agent_that_keeps_no_record_of_its_prompts_leaves_the_row_as_it_was(
     )
     moved = datetime.now(tz=UTC) + timedelta(seconds=46)
 
-    row = fleet_service._first_prompt_off_its_transcript(
+    row, blind = fleet_service._first_prompt_off_its_transcript(
         stored,
         _Pane(),  # type: ignore[arg-type]
         FleetSettings(),
@@ -509,6 +509,7 @@ def test_an_agent_that_keeps_no_record_of_its_prompts_leaves_the_row_as_it_was(
     )
 
     assert row.first_prompt == "pending"
+    assert not blind
 
 
 class _Pane:

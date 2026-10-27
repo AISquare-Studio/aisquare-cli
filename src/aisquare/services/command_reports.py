@@ -607,6 +607,10 @@ _DRAIN_AFTER_EXIT = 2.0
 #: line every second (a server's heartbeat, a watcher) would hold ``asq exec`` forever.
 _DRAIN_MAX = 10.0
 
+#: The clock the drain's two windows are read on. ``time.monotonic``; only a test that
+#: moves a clock of its own replaces it, to hold the windows still and step them.
+_now: Callable[[], float] = time.monotonic
+
 
 class _Reader:
     """Copies one pipe into its file, keeping the first ``limit`` bytes.
@@ -630,7 +634,7 @@ class _Reader:
         self._stopped = False
         self.observed = 0
         self.kept = 0
-        self.last_data = time.monotonic()
+        self.last_data = _now()
         self.error: OSError | None = None
 
     def start(self) -> None:
@@ -649,7 +653,7 @@ class _Reader:
                 with self._lock:
                     if self._stopped:
                         continue
-                    self.last_data = time.monotonic()
+                    self.last_data = _now()
                     self.observed += len(data)
                     retained = data[: max(0, self._limit - self.kept)]
                     if retained:
@@ -697,9 +701,9 @@ def _capture(
                 break
             except subprocess.TimeoutExpired:
                 continue
-        exited = time.monotonic()
+        exited = _now()
         while any(reader.is_alive() for reader in readers.values()):
-            now = time.monotonic()
+            now = _now()
             last = max(exited, *(reader.last_data for reader in readers.values()))
             remaining = min(_DRAIN_AFTER_EXIT - (now - last), _DRAIN_MAX - (now - exited))
             if remaining <= 0:

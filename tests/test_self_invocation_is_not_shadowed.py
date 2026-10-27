@@ -6,16 +6,15 @@ SDK's own repo ships one, and any customer repo may — the interpreter finds th
 package, not ours, and dies: "No module named aisquare.__main__; 'aisquare' is a
 package and cannot be directly executed". Every self-invocation the CLI makes
 went through that door: ``init``/``doctor``/``project onboard`` from the fleet
-UI, every fleet window, the detached distiller, and the hook fallback command.
+UI, every fleet window, and the hook fallback command.
 
 The fix is ONE builder — :func:`aisquare.core.selfcli.argv_for` — that passes
 the interpreter ``-P`` (the flag form of ``PYTHONSAFEPATH``, Python 3.11+, which
 this CLI requires). A flag and not a variable, because the fleet's ``launch``
 ``execve``s the agent with the window's whole environment and a coder's own
 ``python -m pytest`` must not inherit a changed ``sys.path``. This file pins the
-builder, the one caller a fake tmux cannot reach (the distiller), the hook
-string's round trip through its own matcher, the doctor row — and, through a
-real subprocess, that the shadow is REAL and the flag defeats it.
+builder, the hook string's round trip through its own matcher, the doctor row — and,
+through a real subprocess, that the shadow is REAL and the flag defeats it.
 
 Measured while writing this: the two shadow shapes fail DIFFERENTLY. A package
 (``aisquare/__init__.py``) dies with the error above, exit 1. A sibling MODULE
@@ -31,7 +30,6 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -39,12 +37,6 @@ from aisquare.core import agents, selfcli
 from aisquare.core.version import __version__
 from aisquare.models import CheckStatus
 from aisquare.services import diagnostics
-from aisquare.services import distill as _distill
-
-#: The REAL ``spawn_drain``, bound at import: conftest's autouse
-#: ``no_detached_distill`` swaps the module attribute for a no-op before every
-#: test, and this file exists to inspect what the real one would launch.
-_REAL_SPAWN_DRAIN = _distill.spawn_drain
 
 #: The two shapes that shadow a ``-m`` import from the cwd. A bare ``aisquare/``
 #: directory is NOT one of them — it is a PEP 420 namespace portion, and a real
@@ -111,27 +103,6 @@ def test_a_project_with_its_own_aisquare_cannot_shadow_the_self_invocation(
 
     assert result.ok, result.stderr
     assert result.stdout.strip() == f"aisquare {__version__}"
-
-
-def test_the_detached_distiller_is_built_by_the_same_helper(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The distiller runs with ``cwd=<project root>`` — exactly where the shadow lives."""
-    seen: dict[str, Any] = {}
-
-    def fake_popen(argv: list[str], **kwargs: Any) -> Any:
-        seen.update(argv=argv, cwd=kwargs.get("cwd"))
-        return None
-
-    monkeypatch.setattr("aisquare.core.brain.brain_enabled", lambda: True)
-    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/gbrain")
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
-
-    _REAL_SPAWN_DRAIN(root=tmp_path)
-
-    assert seen["cwd"] == str(tmp_path)
-    assert seen["argv"] == selfcli.argv_for(["--quiet", "team", "distill"])
-    assert seen["argv"][:4] == [sys.executable, "-P", "-m", "aisquare"]
 
 
 def test_the_hook_fallback_carries_the_flag_and_still_round_trips(

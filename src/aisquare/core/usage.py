@@ -45,7 +45,7 @@ from __future__ import annotations
 import contextlib
 import json
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -91,6 +91,12 @@ _LOOKUP_COMMAND = re.compile(
 #: every line of any session under a path naming it — every fleet agent's worktree — and
 #: the pre-filter skipped nothing for them (#45, n2). Hook lines match ``"hook_``.
 _USAGE_MARKERS = (b'"assistant"', b'"tool_result"', b'"hook_', b"<aisquare-", b"_delta")
+#: :data:`_USAGE_MARKERS` and the human prompts :func:`scan_turns` cuts at: a ``user`` line
+#: that is not a tool result carries neither of the others.
+_TURN_MARKERS = (*_USAGE_MARKERS, b'"user"')
+#: What a ``user`` entry opens with when Claude Code wrote it rather than a person: a
+#: slash command's captured output and the caveat before it.
+_NOT_TYPED = ("<local-command-stdout>", "<local-command-caveat>", "<system-reminder>")
 
 
 def is_aisquare_hook(command: str) -> bool:
@@ -361,6 +367,108 @@ def scan(transcript: Path, state: ScanState | None = None) -> tuple[Usage, ScanS
     updated in place and returned. A fresh state reads every file from the start.
     """
     state = state if state is not None else ScanState()
+    usage = Usage()
+    for _, _, _, entry in _gather(transcript, state, _USAGE_MARKERS):
+        _account(entry, usage, state)
+    _trim(state)
+    return usage, state
+
+
+@dataclass
+class TurnChunk:
+    """One stretch of a transcript a sweep reads as a turn: the work between two human
+    prompts, cut where the local day changes. ``ended_at`` is the timestamp of the last
+    request in it (ISO-8601 UTC, as the transcript writes it)."""
+
+    ended_at: str
+    usage: Usage
+
+
+@dataclass
+class TurnScan:
+    """What :func:`scan_turns` found: the turns, and any usage with no request to carry it."""
+
+    chunks: list[TurnChunk] = field(default_factory=list)
+    rest: Usage = field(default_factory=Usage)
+    """Tool results and the like that no turn of this scan holds: the transcript ended in
+    them and no request came before. Folded into the last chunk whenever there is one."""
+
+    def total(self) -> Usage:
+        """The whole scan summed: what :func:`scan` returns for the same bytes."""
+        out = Usage()
+        for chunk in self.chunks:
+            out.add(chunk.usage)
+        out.add(self.rest)
+        return out
+
+
+def scan_turns(
+    transcript: Path,
+    state: ScanState | None = None,
+    *,
+    day_of: Callable[[str], str] | None = None,
+) -> tuple[TurnScan, ScanState]:
+    """:func:`scan`, but cut into the turns it holds, for a reader that was not there at
+    each Stop (the sweep over transcripts nobody's hook watched).
+
+    A turn is what lies between two human prompts in the transcript itself (a ``user``
+    entry of the main file that is a typed message, not a tool result, a hook's context or a
+    summary); it is cut as well wherever ``day_of(timestamp)`` changes, so that a turn
+    running over midnight is two rows and each day is charged what was spent in it. The
+    chunks sum to exactly what :func:`scan` returns for the same bytes: the same entries
+    in the same order go through the same accounting; only where the totals are cut differs.
+    A chunk with no request in it is not a turn and carries over into the next one.
+    """
+    state = state if state is not None else ScanState()
+    scanned = TurnScan()
+    usage = Usage()
+    ended = ""
+    day: str | None = None
+    for stamp, order, _, entry in _gather(transcript, state, _TURN_MARKERS):
+        here = day_of(stamp) if day_of is not None and stamp else day
+        cut = usage.requests > 0 and (
+            (order == 0 and _is_prompt(entry)) or (day is not None and here != day)
+        )
+        if cut:
+            scanned.chunks.append(TurnChunk(ended, usage))
+            usage, ended = Usage(), ""
+        day = here if here is not None else day
+        before = usage.requests
+        _account(entry, usage, state)
+        if usage.requests > before and stamp:
+            ended = max(ended, stamp)
+    if usage.requests > 0:
+        scanned.chunks.append(TurnChunk(ended, usage))
+    elif scanned.chunks:
+        scanned.chunks[-1].usage.add(usage)
+    else:
+        scanned.rest = usage
+    _trim(state)
+    return scanned, state
+
+
+def _is_prompt(entry: dict[str, Any]) -> bool:
+    """Whether a ``user`` entry is a message a human typed: it opens a turn."""
+    if entry.get("type") != "user" or entry.get("isSidechain") or entry.get("isMeta"):
+        return False
+    if entry.get("isCompactSummary") or entry.get("toolUseResult") is not None:
+        return False
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        text = content.lstrip()
+        return bool(text) and not text.startswith(_NOT_TYPED)
+    if not isinstance(content, list):
+        return False
+    kinds = {block.get("type") for block in content if isinstance(block, dict)}
+    return "text" in kinds and "tool_result" not in kinds
+
+
+def _gather(
+    transcript: Path, state: ScanState, markers: tuple[bytes, ...]
+) -> list[tuple[str, int, int, dict[str, Any]]]:
+    """The entries the files added since ``state``, oldest first, as
+    ``(timestamp, file order, line, entry)``; ``state``'s offsets and marks move past them."""
     stamped: list[tuple[str, int, int, dict[str, Any]]] = []
     for order, path in enumerate(transcript_files(transcript)):
         key = str(path)
@@ -369,7 +477,7 @@ def scan(transcript: Path, state: ScanState | None = None) -> tuple[Usage, ScanS
         if consumed:
             state.offsets[key] = (0 if restarted else start) + consumed
         newest = state.newest.get(key, state.newest.get("", ""))
-        for line_no, entry in enumerate(_entries(raw)):
+        for line_no, entry in enumerate(_entries(raw, markers)):
             stamp = entry.get("timestamp")
             stamp = stamp if isinstance(stamp, str) else ""
             if restarted and stamp <= newest:
@@ -381,11 +489,7 @@ def scan(transcript: Path, state: ScanState | None = None) -> tuple[Usage, ScanS
     # Timestamps are ISO-8601 UTC from one clock, so they sort as strings. An entry
     # without one sorts first within its file, where it was found.
     stamped.sort(key=lambda item: (item[0], item[1], item[2]))
-    usage = Usage()
-    for _, _, _, entry in stamped:
-        _account(entry, usage, state)
-    _trim(state)
-    return usage, state
+    return stamped
 
 
 def _read_from(path: Path, start: int) -> tuple[list[bytes], int, bool]:
@@ -415,13 +519,13 @@ def _read_from(path: Path, start: int) -> tuple[list[bytes], int, bool]:
     return complete.split(b"\n"), len(complete), restarted
 
 
-def _entries(lines: Iterable[bytes]) -> Iterator[dict[str, Any]]:
+def _entries(lines: Iterable[bytes], markers: tuple[bytes, ...]) -> Iterator[dict[str, Any]]:
     for line in lines:
         # The bytes test first: most lines (api-request blobs, titles, modes) carry
         # nothing this reader counts, and json.loads is where the time goes.
         if not line or line.startswith(b'{"type":"api-request'):
             continue
-        if not any(marker in line for marker in _USAGE_MARKERS):
+        if not any(marker in line for marker in markers):
             continue
         try:
             entry = json.loads(line)

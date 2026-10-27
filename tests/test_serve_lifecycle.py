@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -18,7 +19,20 @@ import pytest
 
 pytest.importorskip("mcp", reason="the [serve] extra is not installed")
 
-_WAIT = 15  # generous CI margin for "exits by its 1s deadline"
+#: How long to wait for a daemon to exit before calling it hung, for the tests whose subject is
+#: not a deadline: EOF ends it, and ``--close-after 0`` never does. What it tells apart is a
+#: daemon that exits on EOF from one that does not (the default deadline is 300 s, and
+#: ``--close-after 0``'s is never), so the bound is under both, and over a Windows runner's
+#: interpreter start and import under load (12.9 s for one, and a timeout at the 15 s this
+#: was: CI runs 40230136547 and 40267952906, both windows-latest).
+_HANG_GUARD = 120
+
+#: How long a daemon that is serving may take to leave by a 1 s idle deadline: the tests
+#: whose subject IS that deadline wait for the daemon to answer first (so its start-up is not
+#: in the bound), and then for this. Twenty times the deadline, so that a runner's stall of a
+#: few seconds does not turn it red, and under thirty times it, so that a deadline kept
+#: thirty times too long (a watchdog that waits ``close_after * 30``) does.
+_DEADLINE_WAIT = 20.0
 
 
 @pytest.fixture
@@ -51,6 +65,33 @@ def _stderr_of(daemon: subprocess.Popen[bytes]) -> bytes:
     return data
 
 
+def _first_line_of(daemon: subprocess.Popen[bytes], *, seconds: float = 120) -> bytes:
+    """The first line the daemon prints on stdout, once it is serving; a daemon that never
+    answers is killed and fails the test, rather than hanging it, and one that ends without
+    answering says what it said."""
+    assert daemon.stdout is not None
+    stdout = daemon.stdout
+    line: list[bytes] = []
+    reader = threading.Thread(target=lambda: line.append(stdout.readline()), daemon=True)
+    reader.start()
+    reader.join(seconds)
+    if reader.is_alive():
+        daemon.kill()
+        pytest.fail(f"the daemon answered nothing in {seconds:g} s: {_stderr_of(daemon)!r}")
+    if not line[0]:
+        pytest.fail(f"the daemon ended without an answer: {_stderr_of(daemon)!r}")
+    return line[0]
+
+
+def _serving(daemon: subprocess.Popen[bytes]) -> None:
+    """Ask the daemon one thing and wait for the answer: it is up, and its idle clock has
+    started, so what is waited for next is its own, not the interpreter's start-up."""
+    assert daemon.stdin is not None
+    daemon.stdin.write(b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n')
+    daemon.stdin.flush()
+    assert _first_line_of(daemon).startswith(b'{"jsonrpc":"2.0","id":1,"result"')
+
+
 def test_abandoned_daemons_exit_at_the_idle_deadline(project: Path) -> None:
     # The #19 trap, looped: each client dies mid-handshake (a partial line,
     # no newline) and its pipe write end stays open — EOF never arrives.
@@ -58,11 +99,12 @@ def test_abandoned_daemons_exit_at_the_idle_deadline(project: Path) -> None:
     for _ in range(2):
         daemon = _spawn(project, env_extra={"AISQUARE_SERVE_CLOSE_AFTER": "1"})
         assert daemon.stdin is not None
-        daemon.stdin.write(b'{"jsonrpc":"2.0","id":1,"method":"initi')
+        _serving(daemon)
+        daemon.stdin.write(b'{"jsonrpc":"2.0","id":2,"method":"initi')
         daemon.stdin.flush()
         daemons.append(daemon)  # keeping the handle open IS the no-EOF trap
     for daemon in daemons:
-        assert daemon.wait(timeout=_WAIT) == 0  # exits itself — nobody reaps it
+        assert daemon.wait(timeout=_DEADLINE_WAIT) == 0  # exits itself — nobody reaps it
     # Zero daemons remain (every wait() above returned), and the exit says why.
     assert b"idle deadline" in _stderr_of(daemons[0])
 
@@ -85,7 +127,7 @@ def test_an_active_client_outlives_many_idle_windows(project: Path) -> None:
     except BrokenPipeError:  # pragma: no cover - diagnostic path
         pytest.fail(f"daemon died mid-conversation: {_stderr_of(daemon).decode()!r}")
     daemon.stdin.close()
-    assert daemon.wait(timeout=_WAIT) == 0  # EOF still ends it promptly
+    assert daemon.wait(timeout=_HANG_GUARD) == 0  # EOF still ends it promptly
 
 
 def test_close_after_zero_runs_forever(project: Path) -> None:
@@ -94,7 +136,7 @@ def test_close_after_zero_runs_forever(project: Path) -> None:
     time.sleep(3)  # total silence, well past the 1s windows the other tests use
     assert daemon.poll() is None  # the persistent-client opt-out holds
     daemon.stdin.close()
-    assert daemon.wait(timeout=_WAIT) == 0
+    assert daemon.wait(timeout=_HANG_GUARD) == 0
 
 
 def test_close_after_flag_beats_env(project: Path) -> None:
@@ -103,13 +145,19 @@ def test_close_after_flag_beats_env(project: Path) -> None:
         env_extra={"AISQUARE_SERVE_CLOSE_AFTER": "0"},
         args=["--close-after", "1"],
     )
-    assert daemon.wait(timeout=_WAIT) == 0  # the flag's 1s deadline fired despite env=0
+    _serving(daemon)
+    assert daemon.wait(timeout=_DEADLINE_WAIT) == 0  # the flag's 1s deadline fired despite env=0
 
 
 def test_eof_still_exits_immediately(project: Path) -> None:
     daemon = _spawn(project, env_extra={})  # default 300s deadline
     assert daemon.stdin is not None
+    # The daemon is up, and answering, before the clock starts: what is timed is the exit
+    # on EOF, not the interpreter's start-up and its imports, which took 12.9 s on a
+    # loaded windows-latest runner (CI run 40230136547) against a 10 s bound.
+    _serving(daemon)
     daemon.stdin.close()
     start = time.monotonic()
-    assert daemon.wait(timeout=_WAIT) == 0
+    assert daemon.wait(timeout=_HANG_GUARD) == 0
     assert time.monotonic() - start < 10  # EOF path, nowhere near the deadline
+    assert b"idle deadline" not in _stderr_of(daemon), "it left by its deadline, not on EOF"

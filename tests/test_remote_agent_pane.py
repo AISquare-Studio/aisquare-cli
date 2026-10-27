@@ -545,6 +545,11 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
     late, and a bound on the client's clock went red with a whole wave of keys reaching
     the server 0.85 s after the last tap (ubuntu py3.13, #401 at 294b68d1)."""
     tmux = _serving(monkeypatch, Tmux(OLDER))
+    # A wait of four times the usual 2 s: the read below is made while every key still waits
+    # because the test sees them waiting, not because it was quick. On a loaded box the read
+    # itself took more than 2 s, and the keys' waits had run out by the time it was
+    # answered ("32 answered first": 2 runs in 50 here, windows-latest in run 40138367251).
+    monkeypatch.setattr(remote_server, "SEND_KEYS_LOCK_WAIT_SECONDS", 8.0)
     # Each time a key reckons what is left of its wait, before its row is read and again
     # before the lock: the thread, when, what was left (None: refused), and when the server
     # stamped its request as arrived. Not the lock's own waits: under load the first wave's
@@ -593,7 +598,12 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
             tappers = [threading.Thread(target=tap) for _ in range(taps)]
             for tapper in tappers:
                 tapper.start()
-            time.sleep(0.3)  # every tap is in, and waiting
+            # Every write thread holds a key, waiting: the pool is full, which is when a
+            # read on the pool's threads would stall behind them.
+            until = time.monotonic() + 30
+            while len(took) < remote_server.WRITE_WORKERS and time.monotonic() < until:
+                time.sleep(0.01)
+            assert len(took) >= remote_server.WRITE_WORKERS, "the keys never filled the pool"
             read = client.get(f"{base(runtime)}/api/fleet")
             answered_before_the_read = len(answers)
             for tapper in tappers:
@@ -719,7 +729,13 @@ def test_keys_queued_behind_actions_holding_every_write_thread_are_not_typed_as_
     run_write = app.kit.kit_run_write
 
     async def watched(handler: Any, body: dict[str, Any], arrived: float, *rest: Any) -> Any:
-        if handler is not restart:
+        # The tap's arrival, by what it carries. Every handler reaches the pool wrapped
+        # (``tracked_write``), so ``handler is not restart`` was true of the restart too, and
+        # its arrival, a moment before the tap's, was the one the wait below was counted
+        # from: a tap that started 0.1 s after the restart (a loaded windows-latest runner)
+        # was let go of by the restart before its own 0.3 s was up, and was typed (CI run
+        # 40364537727). Started 0.2 s late here, it fails the same way.
+        if "keys" in body:
             queued.append(arrived)
         return await run_write(handler, body, arrived, *rest)
 

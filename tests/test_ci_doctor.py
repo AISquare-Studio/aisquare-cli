@@ -1,4 +1,6 @@
-"""``doctor`` on the CI test bed: every question a developer would ask, one line each.
+"""The CI test bed's doctor rows (``services.ci_doctor``): every question a developer would
+ask, one line each. Dormant: ``aisquare doctor`` no longer shows them
+(tests/test_doctor_leaves_out_retired_rows.py), so these call the parked ``checks()``.
 
 Off is ``ok`` and touches nothing. On, the checks are asked in the order the
 hooks would hit them, each probe is bounded by the transport's own deadline,
@@ -17,8 +19,7 @@ import pytest
 
 from aisquare.core import paths
 from aisquare.models import CheckStatus, DoctorCheck
-from aisquare.services import ci_client, diagnostics
-from aisquare.services.diagnostics import doctor
+from aisquare.services import ci_client, ci_doctor, diagnostics
 from tests.ci_support import RUN, wire
 from tests.stub_ci_server import StubCI, error_v1, live_descriptor, serve
 
@@ -29,7 +30,7 @@ def stub() -> Iterator[StubCI]:
 
 
 def _ci_checks() -> dict[str, DoctorCheck]:
-    return {c.name: c for c in doctor() if c.name.startswith("ci ")}
+    return {c.name: c for c in ci_doctor.checks()}
 
 
 def test_off_is_ok_and_asks_the_network_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,7 +90,7 @@ def test_a_multi_line_token_is_named_not_echoed(
     check = _ci_checks()["ci test bed"]
     assert check.status is CheckStatus.warn and "more than one line" in check.detail
     assert check.fix and "one line" in check.fix
-    for line in doctor():
+    for line in [*ci_doctor.checks(), *diagnostics.doctor()]:
         assert "SUPERSECRET" not in line.detail and "SUPERSECRET" not in (line.fix or "")
 
 
@@ -114,7 +115,7 @@ def test_doctor_does_not_cache_the_descriptor_it_fetched(
     stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
 ) -> None:
     wire(monkeypatch, stub)
-    doctor()
+    ci_doctor.checks()
     assert not paths.ci_descriptor_path(RUN).exists()
     assert not paths.ci_cache_dir().exists()
 
@@ -222,12 +223,12 @@ def test_credentials_in_the_url_never_reach_the_output(monkeypatch: pytest.Monke
     monkeypatch.setenv(ci_client.URL_ENV_VAR, "http://user:s3cr3t@127.0.0.1:1")
     monkeypatch.setenv(ci_client.KEY_ENV_VAR, "k")
     monkeypatch.setenv(ci_client.RUN_ENV_VAR, RUN)
-    for check in doctor():
+    for check in [*ci_doctor.checks(), *diagnostics.doctor()]:
         assert "s3cr3t" not in check.detail
         assert "s3cr3t" not in (check.fix or "")
 
 
-def test_a_black_hole_endpoint_cannot_hang_doctor(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_black_hole_endpoint_cannot_hang_the_checks(monkeypatch: pytest.MonkeyPatch) -> None:
     """Deterministic: a fake transport that sleeps well past the probe bound,
     recording the timeout it was handed. The bound is the transport's wall
     clock, so the sleep never matters and the timeout kwarg is what we asked."""
@@ -235,24 +236,24 @@ def test_a_black_hole_endpoint_cannot_hang_doctor(monkeypatch: pytest.MonkeyPatc
 
     def black_hole(request: Any, timeout: float) -> Any:
         seen.append(timeout)
-        time.sleep(3.0)
+        time.sleep(60.0)  # a minute, not three seconds: the deadline fires first, however slow
         raise AssertionError("unreachable: the deadline fires first")
 
     monkeypatch.setattr(ci_client, "urlopen", black_hole)
-    monkeypatch.setattr(diagnostics, "_CI_PROBE_MS", 200)
+    monkeypatch.setattr(ci_doctor, "_CI_PROBE_MS", 200)
     monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, "1")
     monkeypatch.setenv(ci_client.URL_ENV_VAR, "http://blackhole.invalid")
     monkeypatch.setenv(ci_client.KEY_ENV_VAR, "k")
     monkeypatch.setenv(ci_client.RUN_ENV_VAR, RUN)
     started = time.monotonic()
     checks = _ci_checks()
-    assert time.monotonic() - started < 2.0
+    assert time.monotonic() - started < 30.0  # half the black hole's minute
     assert checks["ci endpoint"].status is CheckStatus.warn
     assert checks["ci descriptor"].status is CheckStatus.warn
     assert seen and all(abs(t - 0.2) < 0.01 for t in seen)
 
 
-def test_doctor_still_answers_every_other_check_when_the_url_is_garbage(
+def test_the_checks_still_answer_when_the_url_is_garbage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A typo'd URL used to raise out of the port parser and lose the whole report."""
@@ -261,19 +262,20 @@ def test_doctor_still_answers_every_other_check_when_the_url_is_garbage(
     monkeypatch.setenv(ci_client.RUN_ENV_VAR, RUN)
     for url in ("http://localhost:99999", "http://host:notaport", "http://a..example.com"):
         monkeypatch.setenv(ci_client.URL_ENV_VAR, url)
-        checks = doctor()
-        assert any(c.name == "python" for c in checks)
-        assert any(c.name == "ci endpoint" and c.status is CheckStatus.warn for c in checks), url
+        assert any(
+            c.name == "ci endpoint" and c.status is CheckStatus.warn for c in ci_doctor.checks()
+        ), url
+        assert any(c.name == "python" for c in diagnostics.doctor()), "the rest of doctor answers"
 
 
 def test_the_display_url_keeps_scheme_host_and_path_and_drops_credentials() -> None:
     assert (
-        diagnostics._display_url("https://user:pw@ci.example:9443/base")
+        ci_doctor._display_url("https://user:pw@ci.example:9443/base")
         == "https://ci.example:9443/base"
     ), "the route actually probed is /base/ready, so /base must show"
-    assert diagnostics._display_url("https://ci.example/") == "https://ci.example"
-    assert diagnostics._display_url("example.com") == "example.com"
-    assert "pw" not in diagnostics._display_url("user:pw@example.com")
+    assert ci_doctor._display_url("https://ci.example/") == "https://ci.example"
+    assert ci_doctor._display_url("example.com") == "example.com"
+    assert "pw" not in ci_doctor._display_url("user:pw@example.com")
 
 
 def test_a_transport_failure_that_mentions_expiry_does_not_get_the_fresh_run_fix(

@@ -144,9 +144,9 @@ def window_team_hub() -> str:
 
     A window inherits the tmux SERVER's environment, which was frozen when the
     private server first started, and ``launch`` inside the window joins
-    ``team_project`` from there. The fleet UI's Explainability tab resolves the
-    same question in THIS process (``key_project``). With the hub exported in
-    one and not the other, the tab showed and attached one project's key while
+    ``team_project`` from there. The fleet UI's Explainability view (parked now, but
+    mountable again) resolves the same question in THIS process (``key_project``).
+    With the hub exported in one and not the other, it showed and attached one project's key while
     the window's launches took another's: a 409 ``agent_not_registered`` on
     every span, or traces in the other project's workspace (review of #170,
     D1b round 2, B1). Set on the window, the window resolves as its spawner
@@ -165,7 +165,7 @@ def team_hub() -> Path | None:
 
     :func:`team_project`'s rule without its warning: a relative value is
     ignored. For a surface that has to say it is under a hub, such as the fleet
-    UI's Explainability tab, whose key then belongs to the hub project.
+    UI's Explainability view (parked), whose key then belongs to the hub project.
     """
     hub = os.environ.get(TEAM_HUB_ENV_VAR, "").strip()
     if not hub or not Path(hub).expanduser().is_absolute():

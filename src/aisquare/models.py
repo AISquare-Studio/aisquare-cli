@@ -286,6 +286,36 @@ def _left(used: float | None) -> float | None:
     return None if used is None else min(100.0, max(0.0, 100.0 - used))
 
 
+class UsageCause(StrEnum):
+    """Why an account has no usage to show (:attr:`ClaudeUsage.cause`), as a kind.
+
+    Set where the reading is made (``services.claude_accounts``), so the Accounts page and
+    ``accounts usage`` act on the kind and never on :attr:`ClaudeUsage.reason`'s words. What
+    to do about each is ``services.claude_accounts.USAGE_FIXES``, the one table of fixes.
+    """
+
+    # no login to read with
+    not_signed_in = "not_signed_in"
+    token_missing = "token_missing"
+    token_expired = "token_expired"
+    token_rejected = "token_rejected"
+
+    # the macOS Keychain would not say
+    keychain_locked = "keychain_locked"
+    keychain_refused = "keychain_refused"
+    keychain_timeout = "keychain_timeout"
+    keychain_failed = "keychain_failed"
+
+    # the usage endpoint
+    rate_limited = "rate_limited"
+    unreachable = "unreachable"
+    tls_bundle = "tls_bundle"
+    tls_cert = "tls_cert"
+    http_error = "http_error"
+    bad_answer = "bad_answer"
+    read_failed = "read_failed"
+
+
 class ClaudeUsage(BaseModel):
     """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them.
 
@@ -299,7 +329,12 @@ class ClaudeUsage(BaseModel):
 
     available: bool
     reason: str | None = None
-    """Why nothing could be read, when ``available`` is False."""
+    """Why nothing could be read, when ``available`` is False: what is wrong, in words."""
+    cause: UsageCause | None = None
+    """The kind of :attr:`reason`, when ``available`` is False."""
+    fix: str | None = None
+    """What to do about :attr:`cause` (``press Log in …``), or ``None`` when nothing done on
+    this machine helps: from ``services.claude_accounts.usage_fix``, with the cause."""
     needs_login: bool = False
     """Signed in, but the stored token has expired or was rejected: a session on the
     account refreshes it. False for every other reason nothing could be read."""
@@ -328,6 +363,10 @@ class ClaudeUsage(BaseModel):
     last_failed_reason: str | None = None
     """Why the try at :attr:`last_failed_at` read nothing ("rate-limited until 14:32",
     "could not reach the usage endpoint …"), shown beside the older figure it kept."""
+    last_failed_cause: UsageCause | None = None
+    """The :attr:`cause` of that try, so the older figure shows its fix too
+    (``services.claude_accounts.kept_fix_line``): a TLS failure on an account with a
+    reading on record shows the figure, and the fix is the only word of what to do."""
     rate_limited: bool = False
     """The usage endpoint answered HTTP 429 (or 503 with ``Retry-After``) for this account,
     now or on a try still being waited out: logging in again does not clear it."""
@@ -408,6 +447,13 @@ HeadroomLevel = Literal["good", "fair", "low", "critical", "empty", "unknown"]
 """How much room the fleet's accounts have left, in one word (see ``HeadroomSummary``)."""
 
 
+class WeekReset(BaseModel):
+    """The account whose weekly window resets first, and when (#287)."""
+
+    slot: int
+    resets_at: datetime
+
+
 class HeadroomSummary(BaseModel):
     """What is LEFT across the fleet's accounts, in one figure and one word.
 
@@ -429,6 +475,87 @@ class HeadroomSummary(BaseModel):
     the sidebar's agent rows and the agent info line show beside an agent's account."""
     fetched_at: datetime | None = None
     """The OLDEST reading behind the figure: the summary is no staler than this."""
+    week_left_by_slot: dict[int, float] = Field(default_factory=dict)
+    """Each usable account's WEEKLY window LEFT, ``100 - week used`` (#287)."""
+    week_percent_left: float | None = None
+    """The mean of :attr:`week_left_by_slot` (0-100); ``None`` with no week read."""
+    weeks_left: float | None = None
+    """The sum of ``(100 - week used) / 100``: account-weeks left, read as "1.8 of 3"."""
+    week_resets_soonest: WeekReset | None = None
+    """The usable account whose weekly window resets first, and when."""
+
+
+class StatuslineSession(BaseModel):
+    """One Claude Code session as its status line last reported it (#287, 2c).
+
+    Read from ``<aisquare home>/cache/statusline/<session_id>.json``, which
+    ``asq-statusline`` writes on each assistant message of any session carrying it —
+    hand-launched and non-project sessions too. Never a prompt: the ids, the cwd, the
+    model and the figures Claude Code shows.
+    """
+
+    session_id: str
+    updated_at: datetime
+    cwd: str | None = None
+    model: str | None = None
+    config_dir: str | None = None
+    """``CLAUDE_CONFIG_DIR`` in the session's environment; ``None`` for the plain claude."""
+    slot: int | None = None
+    """The account it runs on, from :attr:`config_dir`; ``None`` for a directory not ours."""
+    account: str | None = None
+    """That account's name (its alias, ``account N`` or ``plain claude``)."""
+    fleet_agent: str | None = None
+    """``AISQUARE_FLEET_AGENT``: the fleet row it runs in, when a fleet spawn started it."""
+    fleet_label: str | None = None
+    """That row's label, when the store still has it."""
+    session_percent: float | None = None
+    """The five-hour window, percent USED; ``None`` without ``rate_limits`` (an API key)."""
+    session_resets_at: datetime | None = None
+    week_percent: float | None = None
+    week_resets_at: datetime | None = None
+    context_percent: float | None = None
+    cost_usd: float | None = None
+
+
+class StatuslineSite(BaseModel):
+    """One account's Claude Code ``statusLine``, as ``accounts statusline`` found or left it."""
+
+    slot: int
+    account: str
+    settings_path: str
+    state: Literal["none", "ours", "wrapped", "foreign", "unreadable", "shared"]
+    """``none``; ``ours`` (``asq-statusline``); ``wrapped`` (ours, running the user's own
+    command first); ``foreign`` (the user's own, left alone); ``unreadable`` (a settings
+    file that is not a JSON object, left alone); ``shared`` (the same file as an account
+    listed before it, through ``[accounts] share``)."""
+    theirs: str | None = None
+    """The user's own command: the one left alone, or the one ours wraps."""
+    changed: bool = False
+    """Whether this run wrote the file."""
+    error: str | None = None
+    note: str | None = None
+    """Why ``--install --wrap`` left a ``foreign`` command as it is, when it did not wrap it."""
+
+
+class AdoptableConversation(BaseModel):
+    """A Claude Code conversation on one of the CLI's accounts that no fleet row owns (#290):
+    what ``fleet adopt --list`` shows and ``fleet adopt`` takes."""
+
+    session_id: str
+    transcript_path: str
+    slot: int
+    """The account whose config dir holds the transcript: the one it resumes on."""
+    account: str
+    cwd: str | None = None
+    """The directory the conversation ran in, as its transcript records it."""
+    project_id: str | None = None
+    """The onboarded project that holds :attr:`cwd`; ``None`` when none does."""
+    last_activity: datetime
+    """When the transcript was last written."""
+    first_prompt: str | None = None
+    """The first thing the user typed, cut to a line."""
+    held_by: int | None = None
+    """The pid of a live ``claude`` still holding the session; ``None`` when none does."""
 
 
 class ClaudeAccountStatus(BaseModel):
@@ -694,6 +821,16 @@ class SessionUsage(BaseModel):
     started_at: datetime
     updated_at: datetime
     ended_at: datetime | None = None
+    account_slot: int | None = None
+    """The Claude Code account the session ran under (``claude_account`` slot; 1 is the
+    machine's plain ``claude``); ``None`` for a directory no slot names, or before it was read."""
+    account_type: str | None = None
+    """That account's subscription type (``pro``, ``max``, ``team``, ``api`` …) when the
+    session was recorded or first attributed; ``None`` until it could be read."""
+    repo_id: str | None = None
+    """The repository the session ran in, by working directory (``core.workspace.project_id_for``
+    of its root) — whatever ``project_id`` is, which a pinned project overrides. ``None`` for
+    a row from before it was recorded: ``project_id`` then stands for it."""
 
 
 class TurnUsage(BaseModel):
@@ -713,6 +850,9 @@ class TurnUsage(BaseModel):
     cost_usd: float = 0.0
     scan_ms: float | None = None
     """How long reading the transcript took on the hook's path."""
+    source: Literal["hook", "sweep"] | None = None
+    """Who read it: a Stop hook (``None`` for a row from before this was recorded), or the
+    transcript sweep over sessions no hook watched (``services.usage_stats``)."""
 
 
 class TokenSummary(BaseModel):
@@ -745,6 +885,239 @@ class TokenSummary(BaseModel):
     median_tool_calls_before_edit: int | None = None
     prices_as_of: str = ""
     prices_source: str = ""
+
+
+# --- local usage stats: Settings ▸ Usage & stats, ``aisquare metrics stats`` ------------
+
+UsageRange = Literal["today", "7d", "30d", "lifetime"]
+"""The windows the dashboard shows: today, the last 7 or 30 local days (today included), or
+everything recorded."""
+
+USAGE_RANGES: tuple[UsageRange, ...] = ("today", "7d", "30d", "lifetime")
+
+
+class UsageTurnRow(BaseModel):
+    """A recorded turn with the account and repository its session ran under: what the
+    dashboard sums (``store.usage_turn_rows``)."""
+
+    session_id: str
+    repo_id: str
+    recorded_at: datetime
+    usage: dict[str, Any] = Field(default_factory=dict)
+    account_slot: int | None = None
+    account_type: str | None = None
+
+
+class TokenCounts(BaseModel):
+    """Tokens in the four kinds the API bills."""
+
+    input: int = 0
+    cache_write: int = 0
+    cache_read: int = 0
+    output: int = 0
+
+    def sum(self) -> int:
+        return self.input + self.cache_write + self.cache_read + self.output
+
+
+class DayTokens(TokenCounts):
+    """The telemetry contract's ``tokens``: the four kinds and their ``total``."""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def total(self) -> int:
+        return self.sum()
+
+
+class UsageTokens(DayTokens):
+    """Tokens summed; ``total`` is the four kinds added — the figure ``aisquare metrics
+    tokens`` calls ``total_tokens`` — and ``input_output`` the typed-in and written-back
+    part of it, caches left out."""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def input_output(self) -> int:
+        return self.input + self.output
+
+
+class RepoTraits(BaseModel):
+    """What a repository looks like from outside, coarsely: no name, path or remote."""
+
+    host: Literal["github", "gitlab", "bitbucket", "other", "none"] = "none"
+    language: str | None = None
+    """The extension most files have (``python``, ``typescript`` …), ``None`` when unknown."""
+    size_bucket: Literal["xs", "s", "m", "l", "xl"] = "xs"
+    monorepo: bool = False
+
+
+class RepoProfile(BaseModel):
+    """What the CLI knows about one repository, cached and refreshed at most daily."""
+
+    repo_id: str
+    name: str
+    root: str
+    remote: str | None = None
+    """The git remote, normalised (``github.com/org/repo``): no scheme, credentials or ``.git``."""
+    traits: RepoTraits = Field(default_factory=RepoTraits)
+    files: int = 0
+    refreshed_at: datetime
+
+
+class UsageAccountRow(BaseModel):
+    """One Claude Code account's share of a range."""
+
+    slot: int | None
+    """``None`` for sessions no registered account's directory holds."""
+    label: str
+    subscription: str = "unknown"
+    tokens: UsageTokens = Field(default_factory=UsageTokens)
+    cost_usd: float = 0.0
+    sessions: int = 0
+    turns: int = 0
+    share: float = 0.0
+    """Its tokens over the range's."""
+
+
+class UsageRepoRow(BaseModel):
+    """One repository's share of a range."""
+
+    repo_id: str
+    name: str
+    tokens: UsageTokens = Field(default_factory=UsageTokens)
+    cost_usd: float = 0.0
+    sessions: int = 0
+    turns: int = 0
+    last_active: str | None = None
+    """The local date it was last worked in, within the range."""
+
+
+class UsageModelRow(BaseModel):
+    model: str
+    tokens: UsageTokens = Field(default_factory=UsageTokens)
+    cost_usd: float = 0.0
+    priced: bool = True
+    share: float = 0.0
+
+
+class UsageFeatureRow(BaseModel):
+    name: str
+    count: int
+
+
+class UsageDay(BaseModel):
+    """One LOCAL calendar day."""
+
+    date: str
+    """``YYYY-MM-DD``."""
+    tokens: UsageTokens = Field(default_factory=UsageTokens)
+    cost_usd: float = 0.0
+    sessions: int = 0
+    turns: int = 0
+
+
+class UsageAccounts(BaseModel):
+    registered: int = 0
+    """The Claude Code accounts this machine has (the plain ``claude`` and every slot)."""
+    active: int = 0
+    """How many of them ran a turn in the range."""
+    by_type: dict[str, int] = Field(default_factory=dict)
+    """The active ones, by subscription type."""
+    top: UsageAccountRow | None = None
+    rows: list[UsageAccountRow] = Field(default_factory=list)
+
+
+class UsageRepos(BaseModel):
+    active: int = 0
+    top: UsageRepoRow | None = None
+    rows: list[UsageRepoRow] = Field(default_factory=list)
+    """The ten with the most tokens."""
+
+
+class UsageStats(BaseModel):
+    """``aisquare metrics stats``, and the Usage & stats page: what this machine's Claude
+    Code sessions spent in a range, summed on read from what the hooks and the sweep recorded.
+    Days are LOCAL days (``tz_offset_minutes`` is today's offset)."""
+
+    range: UsageRange
+    since: str | None = None
+    """The first local date counted: the range's start, or the first recorded day for
+    ``lifetime``; ``None`` when nothing is recorded."""
+    until: str
+    """The last local date counted: today, or for ``lifetime`` the date of a later turn there is
+    (a clock that was ahead): everything recorded is in it."""
+    recorded_turns: int = 0
+    """Turns recorded in all, whatever the range: it tells a range with nothing in it from a
+    machine with nothing recorded."""
+    tz_offset_minutes: int = 0
+    tokens: UsageTokens = Field(default_factory=UsageTokens)
+    cost_usd: float = 0.0
+    """List price over the priced models only (``core.pricing``)."""
+    unpriced_models: list[str] = Field(default_factory=list)
+    sessions: int = 0
+    """Distinct sessions that ran a turn in the range."""
+    turns: int = 0
+    active_days: int = 0
+    days: list[UsageDay] = Field(default_factory=list)
+    """Every local day of the range, oldest first, quiet ones with zeros; for ``lifetime``,
+    from the first recorded day."""
+    busiest_days: list[UsageDay] = Field(default_factory=list)
+    """The five days with the most tokens."""
+    by_weekday: list[int] = Field(default_factory=lambda: [0] * 7)
+    """Turns by weekday, Monday first."""
+    by_hour: list[int] = Field(default_factory=lambda: [0] * 24)
+    """Turns by hour of the local day."""
+    accounts: UsageAccounts = Field(default_factory=UsageAccounts)
+    repos: UsageRepos = Field(default_factory=UsageRepos)
+    models: list[UsageModelRow] = Field(default_factory=list)
+    features: list[UsageFeatureRow] = Field(default_factory=list)
+    """The features used most, by command path or TUI view; never arguments."""
+    prices_as_of: str = ""
+
+
+class DayRepo(BaseModel):
+    repo_id: str
+    """The local id; the sharing path replaces it with a salted hash and drops the rest."""
+    key: str
+    """What that hash is taken of: the normalised git remote, else the repo root path."""
+    tokens_total: int = 0
+    sessions: int = 0
+    turns: int = 0
+    traits: RepoTraits = Field(default_factory=RepoTraits)
+
+
+class DayAccounts(BaseModel):
+    active: int = 0
+    registered: int = 0
+    by_type: dict[str, int] = Field(default_factory=dict)
+    top_account_share: float = 0.0
+
+
+class FleetDay(BaseModel):
+    """What the fleet did on one local day, by role: counts only."""
+
+    agents_spawned: dict[str, int] = Field(default_factory=dict)
+    """Agents started that day by role; a role that is not one of the built-in ones is ``other``."""
+    tasks_done: int = 0
+
+
+class DailyRollup(BaseModel):
+    """One local day, shaped as the telemetry contract's ``days[]`` entry (docs/usage-telemetry.md)
+    before hashing: the sharing task builds its batches from these."""
+
+    date: str
+    tz_offset_minutes: int
+    active: bool = True
+    tokens: DayTokens = Field(default_factory=DayTokens)
+    cost_usd_list: float = 0.0
+    sessions: int = 0
+    turns: int = 0
+    models: dict[str, TokenCounts] = Field(default_factory=dict)
+    accounts: DayAccounts = Field(default_factory=DayAccounts)
+    repos_active: int = 0
+    repos: list[DayRepo] = Field(default_factory=list)
+    """The 25 with the most tokens that day."""
+    features: dict[str, int] = Field(default_factory=dict)
+    fleet: FleetDay = Field(default_factory=FleetDay)
 
 
 TaskStatus = Literal["todo", "doing", "review", "blocked", "done", "dropped"]
@@ -1078,12 +1451,16 @@ class ProjectForgetReport(BaseModel):
     removed: dict[str, int] = Field(default_factory=dict)
     data_dir_removed: bool = False
     active: ProjectInfo | None = None
-    """The active project AFTER the forget — ``None`` when nothing is pinned any
-    more and the active project again follows the working directory."""
+    """The project pinned AFTER the forget. Always ``None`` since #271: a forget clears a
+    pin that named the project and never moves one, so the active project follows the
+    working directory, or the pin it left alone. Kept for ``--json`` readers."""
     active_changed: bool = False
-    """Whether the forgotten project WAS the active one, so the pin moved."""
+    """Whether the pin named the forgotten project, so it was cleared (:attr:`unpinned`)."""
+    unpinned: ProjectInfo | None = None
+    """The project whose pin the forget cleared, else ``None``: there was no pin, or it
+    named another project, and nothing was written (#271)."""
     pin_error: str | None = None
-    """Why the pin could not be moved after the forget, when it could not — the
+    """Why the pin could not be cleared after the forget, when it could not — the
     forget itself is complete; the active project follows the working directory
     until ``project switch`` succeeds."""
     keys_still_live: list[PendingRevocation] = Field(default_factory=list)
@@ -1147,9 +1524,13 @@ class ProjectPruneReport(BaseModel):
     dry_run: bool = True
     purged: bool = False
     active: ProjectInfo | None = None
+    """As for ``ProjectForgetReport``: always ``None`` since #271."""
     active_changed: bool = False
+    """Whether the pin named a project the sweep dropped, so it was cleared."""
+    unpinned: ProjectInfo | None = None
+    """The dropped project whose pin the sweep cleared, else ``None`` (#271)."""
     pin_error: str | None = None
-    """Why the pin could not be moved after the sweep, when it could not — the
+    """Why the pin could not be cleared after the sweep, when it could not — the
     registrations are dropped (and purged) regardless."""
     keys_still_live: list[PendingRevocation] = Field(default_factory=list)
     """As for ``ProjectForgetReport``: minted keys of purged projects still live."""
@@ -1315,6 +1696,10 @@ class LaunchSpec(BaseModel):
     less the ones that chose a session (``--session-id``, ``--resume``, ``--continue``):
     those are per launch, like a restart's own ``--resume``."""
     account_slot: int | None = None
+    account_pinned: bool = False
+    """The account was NAMED for the agent — ``--account``, or the Spawn dialog's choice — not
+    picked: ``[accounts] before_limit`` leaves it there (F2 of #400). A replay keeps it, a
+    switch included; ``False`` on a spec recorded before it."""
     worktree: bool = False
     command: list[str] = Field(default_factory=list)
     recorded_by: str | None = None
@@ -1326,11 +1711,19 @@ class LaunchSpec(BaseModel):
     (``core.orchestrator.window_team_hub``). A restart or switch gives the replacement's
     window the same, whoever runs it (``services.fleet._board_and_hub``). ``None`` on a spec
     recorded before 0.8.1 kept it."""
+    remote_control: bool = False
+    """Whether it was spawned with Claude Code's Remote Control asked for (#289): the
+    spawn's ``--remote-control``/``--no-remote-control``, else the role's
+    ``[fleet.roles.<role>] remote_control``. A restart and a switch replay it; ``False`` on a
+    spec recorded before it existed."""
     model: str | None = None
-    """The ``--model`` the spawn resolved down the role's ladder (#129 b), ``None`` when it
-    passed none: another binary, a model already in the arguments, or an untiered role."""
+    """The ``--model`` the spawn added beside the arguments: the owner's last pick
+    (``services.model_memory``), the Spawn dialog's field, or on a replay what the agent ran
+    by then. ``None`` when it added none: nothing chosen (the account's default), a model
+    already in the arguments, another binary. A spec recorded by 0.9.0 holds the role
+    ladder's rung (#129 b), which a replay still starts unless the agent ran another."""
     effort: str | None = None
-    """The ``--effort`` passed beside ``model``."""
+    """The ``--effort`` added beside the arguments, as ``model``; each is decided on its own."""
     board_context: str | None = None
     """What of the board the agent reads (``all``, ``relevant``, ``none``; P1 WS-2, #279),
     as its spawn resolved it, so a restart or switch keeps it. ``None`` on a spec recorded
@@ -1433,3 +1826,174 @@ class FleetAgentStatus(BaseModel):
     run on where no client reaches it. Its state is ``unknown`` whatever its board says, and
     its pane id is no pane of its own there: that server numbers its panes from ``%0``
     again."""
+
+
+# --- opt-in anonymous usage sharing ------------------------------------------------------------
+
+
+class SharingStatus(BaseModel):
+    """``aisquare metrics share status``, and the line under the page's sharing switch."""
+
+    enabled: bool
+    """Whether usage is being shared: the switch is on AND nothing forces it off."""
+    switch: bool
+    """The switch as the user left it (``[sharing] enabled``)."""
+    forced_off: str | None = None
+    """Why nothing is shared whatever the switch says (``DO_NOT_TRACK``, ``AISQUARE_NO_TELEMETRY``,
+    ``CI``); ``None`` when nothing forces it."""
+    consent_asked: bool = False
+    consent_answer: Literal["share", "declined"] | None = None
+    install_id: str | None = None
+    """The random id of this installation; ``None`` until sharing was first turned on."""
+    signed_in: bool = False
+    """Whether the next shipment carries the AISquare sign-in, so that the server links it."""
+    linked: bool | None = None
+    """Whether the server linked the last shipment to an AISquare account; ``None`` before any."""
+    last_sent_at: datetime | None = None
+    """When a shipment last SUCCEEDED. A failed one is not reported anywhere a person reads
+    (see ``debug``): sharing fails silently, whatever the server's state."""
+    days_acknowledged: int = 0
+    debug: dict[str, Any] = Field(default_factory=dict)
+    """For ``--json`` only, never shown: when the next shipment is due, the failures in a row and
+    the last error, the first day shared, the endpoint."""
+
+
+class ShipReport(BaseModel):
+    """What one shipment did."""
+
+    sent: bool = False
+    days: int = 0
+    """Days in the batch the server accepted."""
+    linked: bool | None = None
+    skipped: str | None = None
+    """Why nothing was sent: sharing off or forced off, not due, nothing to send, or a ship
+    already running."""
+    error: str | None = None
+    """Why the send failed (it is tried again after a backoff)."""
+    retried_anonymously: bool = False
+    """The server refused the sign-in (401), and the batch was sent again without it."""
+    rejected_days: int = 0
+    """Days in batches the server refused for good (a 4xx that is not a throttle): not
+    acknowledged, asked again next time; the newer batches went on."""
+    opt_out: bool = False
+
+
+class FreshUnpushed(BaseModel):
+    """Work a ``project fresh`` would throw away: a fleet agent's worktree, or a fleet branch
+    ``--branches`` would delete, holding what no remote and no default branch has."""
+
+    path: Path | None = None
+    """The worktree; ``None`` for a branch no tree has out."""
+    branch: str | None = None
+    """The branch the tree is on (``None`` on a detached HEAD), or the branch itself."""
+    tip: str | None = None
+    """The commit it was judged at: the tree's HEAD, or the branch's tip. A discard someone
+    confirmed covers this tip, and no commit made after it."""
+    commits: int = 0
+    """Commits on no remote-tracking branch and not on the default branch."""
+    uncommitted: bool = False
+    """The tree has changes not committed: modified, staged or untracked (not ignored)."""
+
+
+class FreshKept(BaseModel):
+    """What a ``project fresh`` meant to remove and could not, with why: an agent's worktree,
+    a fleet branch, the briefs' evidence folder, or the manager's state folder."""
+
+    path: Path | None = None
+    branch: str | None = None
+    reason: str
+
+
+class FreshCounts(BaseModel):
+    """What a ``project fresh`` clears (its plan) or cleared (its report). An extra not asked
+    for is ``None``: kept, not counted."""
+
+    tasks: int = 0
+    events: int = 0
+    """Board events: notes, decisions, claims, reviews, exits."""
+    sessions: int = 0
+    meta: int = 0
+    """``team_meta`` rows: the board's signals and the gone sessions' marks, with the
+    project's before-limit ``ui_state`` rows."""
+    agents: int = 0
+    """Fleet agent rows, live and ended."""
+    worktrees: int = 0
+    briefs: int = 0
+    """Work briefs, with their numbered requirements: the board's, as its tasks are."""
+    evidence: int = 0
+    """Files of the briefs' kept evidence, under ``~/.aisquare/briefs/<id>/``."""
+    manager_state: int = 0
+    """Files of the manager's own state (``~/.aisquare/projects/<id>/manager/``: its
+    ``state.md``, goal, decisions, open items, next step), which a blank manager must not
+    read back."""
+    entries: int | None = None
+    """``--memory``: the project's context entries."""
+    prompts: int | None = None
+    """``--prompts``: the prompt log."""
+    metrics: int | None = None
+    """``--prompts``: the turn metrics."""
+    branches: int | None = None
+    """``--branches``: local fleet branches."""
+
+
+class FreshPlan(BaseModel):
+    """What ``project fresh`` would do, read-only (``services.fresh.plan``): the counts it
+    clears, the agents it stops first, the trees and branches it removes, and the work in
+    them found nowhere else, which it refuses to discard unless told to."""
+
+    project: ProjectInfo
+    memory: bool = False
+    prompts: bool = False
+    branches: bool = False
+    counts: FreshCounts = Field(default_factory=FreshCounts)
+    live_agents: list[str] = Field(default_factory=list)
+    """Labels of the live agents it stops first, the manager first."""
+    sessions: list[str] = Field(default_factory=list)
+    """``<socket>:<session>`` for each of its tmux sessions the stop kills, live rows or none:
+    what a dead pane or a stray process outlives its row in."""
+    worktrees: list[Path] = Field(default_factory=list)
+    fleet_branches: dict[str, str] = Field(default_factory=dict)
+    """``--branches``: the local fleet branches it deletes, once no tree has them out, each
+    with the tip it was judged at (and is deleted at)."""
+    unpushed: list[FreshUnpushed] = Field(default_factory=list)
+
+
+class FreshReport(BaseModel):
+    """What ``project fresh`` did (``services.fresh.start_fresh``)."""
+
+    project: ProjectInfo
+    planned: FreshCounts = Field(default_factory=FreshCounts)
+    """What the run's own plan counted, before anything was stopped."""
+    cleared: FreshCounts = Field(default_factory=FreshCounts)
+    """What it deleted: past :attr:`planned` by what was written after the plan was read,
+    during the reset: the stop's own ``agent_exited`` and released claims, and anything an
+    agent posted before it was stopped, which go with the board too (:meth:`stop_events`)."""
+    stopped: list[str] = Field(default_factory=list)
+    """Labels of the agents it stopped (or recorded gone) before clearing."""
+    sessions_killed: list[str] = Field(default_factory=list)
+    """``<socket>:<session>`` for each of the project's tmux sessions the stop killed."""
+    sessions_gone: list[str] = Field(default_factory=list)
+    """The project's sessions that ended with the last window the stop closed, gone before
+    the kill (``ShutdownReport.sessions_absent``): the common case, every pane a live agent.
+    Ended all the same, and said so with :attr:`sessions_killed`."""
+    sessions_failed: list[str] = Field(default_factory=list)
+    """The sessions tmux would not kill, with why: a reset with any is incomplete."""
+    worktrees_removed: list[Path] = Field(default_factory=list)
+    branches_deleted: list[str] = Field(default_factory=list)
+    kept: list[FreshKept] = Field(default_factory=list)
+    """What it could not remove (:class:`FreshKept`): trees, branches, the evidence folder,
+    the manager's state folder. The rows went all the same; a manager's state
+    left in place withholds the new manager (:attr:`manager_error`)."""
+    discarded: list[FreshUnpushed] = Field(default_factory=list)
+    """The unpushed work it threw away, as asked: only what went (a tree removed, a branch
+    deleted), never what it was let discard and then kept."""
+    manager: FleetAgent | None = None
+    """The fresh manager it started; ``None`` when the spawn was refused."""
+    manager_error: str | None = None
+    """Why the fresh manager did not start: the board is clear all the same."""
+
+    def stop_events(self) -> int:
+        """The board events cleared that the plan did not count: written during the reset,
+        after the plan was read (the stop's ``agent_exited`` and released claims, and what
+        an agent posted before it was stopped)."""
+        return max(0, self.cleared.events - self.planned.events)

@@ -25,7 +25,9 @@ publishes a recognised skill; the LLM path's last question was always ``confirm`
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
+import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any, Literal, TypeVar
@@ -43,6 +45,7 @@ from aisquare.models import ProjectInfo
 from aisquare.services import persona_import
 from aisquare.services import personas as personas_service
 from tests import test_ui_personas as personas_suite
+from tests.test_persona_import import _REAL_MANAGER, _gone, _stand_in_claude, _started
 from tests.test_ui_personas import (
     Host,
     drive,
@@ -319,6 +322,49 @@ def test_backing_out_while_an_engine_drafts_saves_no_persona_as_before(
     [outcome] = held.outcome
     assert isinstance(outcome, personas_service.DraftKept) and outcome.code == "not_confirmed"
     assert outcome.draft_path.is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the stand-in is a POSIX shell script")
+def test_cancel_ends_the_engines_claude_within_two_seconds_and_publishes_nothing(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#211: Cancel closed the dialog, but the manager engine's ``claude -p`` ran on to its
+    180-second timeout. The real engine here, its ``claude -p`` a stand-in bound through
+    the registered seam that never answers and starts a ``sleep 60`` of its own: both are
+    gone within two seconds of the Cancel, and no persona is written."""
+    script, pids = _stand_in_claude(tmp_path)
+    monkeypatch.setenv("AISQUARE_BIN_MANAGER", str(script))
+    monkeypatch.setattr(persona_import, "draft_with_manager", _REAL_MANAGER)
+    notes = tmp_path / "notes.txt"
+    notes.write_text("Be kind in reviews. Name risks before style.\n", encoding="utf-8")
+    held = Held(monkeypatch, "published")  # never reached: the import ends cancelled
+    before = layers(repo)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, float]:
+        the_dialog(host).query_one("#import-source", Input).value = str(notes)
+        await pilot.pause()
+        await press(pilot, "#import-submit")
+
+        def running() -> bool:
+            deadline = time.monotonic() + WAIT
+            while len(_started(pids)) < 2 and time.monotonic() < deadline:
+                time.sleep(0.02)
+            return len(_started(pids)) == 2
+
+        assert await asyncio.to_thread(running), "the stand-in claude never started"
+        cancelled_at = time.monotonic()
+        await back_out(pilot, "cancel")
+        assert await asyncio.to_thread(held.ended.wait, WAIT), "the import never ended"
+        return type(host.screen).__name__, time.monotonic() - cancelled_at
+
+    screen, took = drive_held(held, scenario, dialog=ImportPersonaScreen(repo))
+
+    assert screen == "Screen", "the dialog closed on Cancel"
+    assert took <= 2.0, f"Cancel to the import's end: {took:.2f} s"
+    assert all(_gone(pid) for pid in _started(pids)), "the stand-in or its child ran on"
+    [outcome] = held.outcome
+    assert isinstance(outcome, PersonaError) and outcome.code == "cancelled"
+    assert layers(repo) == before, "nothing written, not even a kept draft"
 
 
 # --- nobody backs out: the import publishes as before -----------------------------------

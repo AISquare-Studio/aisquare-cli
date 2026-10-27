@@ -62,6 +62,7 @@ def _git(root: Path, *args: str, timeout: float = 30) -> subprocess.CompletedPro
     try:
         return subprocess.run(
             ["git", "-C", str(root), *args],
+            stdin=subprocess.DEVNULL,  # a tool's git must not hold an MCP server's protocol pipe
             capture_output=True,
             timeout=timeout,
             check=False,

@@ -7,7 +7,7 @@
 # The acceptance criterion of the whole feature is one line, and it is asserted
 # here rather than described:
 #
-#     aisquare --json doctor  ->  every check ok EXCEPT brain
+#     aisquare --json doctor  ->  every check ok
 #
 # THREE RUNS, and the sequence is the test rather than an accident:
 #
@@ -137,8 +137,8 @@ amber_checks() {
         sed 's/  */ /g; s/^ //; s/ $//'
 }
 
-# Total checks in the payload, so "all ok except brain" cannot be satisfied by a
-# doctor that answered with two checks.
+# Total checks in the payload, so "all ok" cannot be satisfied by a doctor that
+# answered with two checks.
 total_checks() {
     aisquare --json doctor 2>/dev/null | tr '{' '\n' | grep -c '"name": *"' || true
 }
@@ -171,7 +171,7 @@ head1 "installed: $(aisquare --version)"
 aisquare --version >/dev/null || fail "aisquare --version does not run"
 
 # Node, which run 1 chose with --with chrome-devtools. It is optional, so no
-# doctor row goes amber without it and run 2's "exactly [brain]" gate could not
+# doctor row goes amber without it and run 2's "nothing amber" gate could not
 # see a failed install. Checked by name.
 command -v node >/dev/null 2>&1 ||
     fail "node absent after run 1 — the installer's Chrome DevTools extra failed (no doctor row names Node)"
@@ -236,18 +236,18 @@ amber=$(amber_checks)
 head1 "doctor: $total checks, not-ok = [$amber]"
 
 # A doctor that answered with a handful of checks must not be able to satisfy
-# "all ok except brain".
+# "all ok".
 [ "$total" -ge 15 ] || fail "doctor reported only $total checks — expected the full set (17+)"
 
 # THE ACCEPTANCE CRITERION OF THE WHOLE FEATURE (§0.3, §0.4, §8.3).
-if [ "$amber" != "brain" ]; then
+if [ -n "$amber" ]; then
     printf '\n--- full doctor, for the log ---\n'
     aisquare doctor || true
-    fail "expected exactly [brain] amber, got [$amber]"
+    fail "expected nothing amber, got [$amber]"
 fi
-head1 "ACCEPTANCE: 	 every check ok except brain"
+head1 "ACCEPTANCE: 	 every check ok"
 
-[ "$run2" = 0 ] || fail "with only brain amber the installer must exit 0, got $run2"
+[ "$run2" = 0 ] || fail "with nothing amber the installer must exit 0, got $run2"
 
 # ---------------------------------------------------------------------------
 # RUN 3 — idempotence, with the package managers stubbed (§3.9.4, §8.4)
@@ -337,7 +337,7 @@ if [ -f "$SETTINGS" ]; then
 fi
 
 amber_again=$(amber_checks)
-[ "$amber_again" = "brain" ] || fail "after the re-run, not-ok = [$amber_again], expected [brain]"
+[ -z "$amber_again" ] || fail "after the re-run, not-ok = [$amber_again], expected none"
 
 # ---------------------------------------------------------------------------
 # RUN 4 — the upgrade path (§3.9.1, §8.4)

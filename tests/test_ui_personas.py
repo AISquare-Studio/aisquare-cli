@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import threading
 from collections.abc import Callable, Coroutine, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +29,7 @@ from typing import Any, TypeVar
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.containers import Vertical
 from textual.geometry import Region
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
@@ -113,6 +115,13 @@ def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, ..
     monkeypatch.setattr(tmux_core, "_tmux", record)
     yield ran
     assert ran == [], f"the persona UI ran tmux: {ran[:2]}"
+
+
+@pytest.fixture(autouse=True)
+def text_box_editor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Edit opens the text box editor in this file, which runs no tmux: the ``$EDITOR``
+    pane (#212) is tests/test_ui_persona_editor_pane.py's."""
+    monkeypatch.setattr(dialogs, "editor_unavailable", lambda: "this file runs no tmux")
 
 
 @pytest.fixture
@@ -246,10 +255,11 @@ def drive(
     *,
     project: ProjectInfo | None = None,
     dialog: Screen[Any] | None = None,
+    size: tuple[int, int] = SIZE,
 ) -> T:
     async def run() -> T:
         host = Host(project, dialog)
-        async with host.run_test(size=SIZE) as pilot:
+        async with host.run_test(size=size) as pilot:
             await settle(pilot)
             return await scenario(pilot, host)
 
@@ -271,9 +281,18 @@ async def wait_for(pilot: Pilot[Any], kind: type[Screen[Any]], seconds: float = 
     """Until ``kind`` is the active screen — a modal a worker thread opens arrives later."""
     for _ in range(int(seconds / 0.05)):
         if isinstance(pilot.app.screen, kind):
+            # Its widgets are mounted by messages it has yet to handle: a test reading the
+            # question or the list the moment the screen was the active one found none
+            # ("No nodes match '#attach-question'": 2 runs in 60 under load). Settled for the
+            # messages alone, so that a test holding a worker on purpose is not waited on.
+            await settle_page(pilot.app, group=_NO_WORKER)
             return pilot.app.screen
         await pilot.pause(0.05)
     raise AssertionError(f"{kind.__name__} never opened; the screen is {pilot.app.screen!r}")
+
+
+_NO_WORKER = "no worker"
+"""A group no worker is in: a settle passed it waits for the messages alone."""
 
 
 async def press(pilot: Pilot[Any], selector: str) -> None:
@@ -814,6 +833,7 @@ def test_the_import_recorder_receives_exactly_the_chosen_options(
     for call in (first, second):
         assert callable(call.pop("confirm")) and callable(call.pop("progress"))
         assert callable(call.pop("cancelled"))  # the import's last question (review of #240)
+        assert isinstance(call.pop("cancel"), threading.Event)  # stops a running engine (#211)
     assert first == {
         "args": [],
         "source": "./skills/x",
@@ -946,6 +966,51 @@ def test_a_bundled_persona_opens_read_only_and_saves_as_a_copy_into_a_layer(
         {"args": ["skeptic"], "root": repo, "to": user_layer(), "skill": None, "force": False}
     ]
     assert screen == "Screen"
+
+
+@pytest.mark.parametrize("layer", ["bundled", "user"])
+def test_the_editor_keeps_its_rows_and_buttons_inside_an_80_by_30_terminal(
+    layer: Layer, repo: Path
+) -> None:
+    """The editor's text box was 20 rows whatever the terminal, and the dialog is capped at
+    94% of the screen, so at 80x30 Save (Save as…, and its 'into' row) and Cancel were laid
+    out below the dialog's edge and never drawn (#342's walk). The text box takes the
+    room that is left now."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
+        dialog = host.screen
+        box = dialog.query_one(Vertical).region
+        rows = [*dialog.query(Button), *dialog.query(".dialog-row")]
+        assert dialog.query_one("#edit-text", TextArea).region.height >= 3, "still a text box"
+        return [
+            f"#{w.id}" if w.id else ".dialog-row" for w in rows if not box.contains_region(w.region)
+        ]
+
+    clipped = drive(
+        scenario,
+        dialog=EditPersonaScreen("skeptic", layer, core.BUNDLED_DIR / "skeptic", repo),
+        size=(80, 30),
+    )
+    assert clipped == []
+
+
+def test_import_and_new_are_on_screen_at_the_width_asq_gives_the_tab_at_80_columns(
+    project: ProjectInfo,
+) -> None:
+    """In an 80-column terminal the Personas tab is 49 columns wide, beside the 30-column
+    sidebar. The search box, three layer filters, + Import… and + New in one row need
+    about 86, so + Import… and + New were off the edge (#342's walk), and + New has no
+    key. The filters have a row of their own now."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[str], int]:
+        view = tab(host).region
+        widgets = [*host.query("#persona-search, #persona-import, #persona-new, Checkbox")]
+        off = [str(w.id) for w in widgets if not view.contains_region(w.region)]
+        return off, host.query_one("#persona-search", Input).region.width
+
+    off, search_width = drive(scenario, project=project, size=(49, 30))
+    assert off == []
+    assert search_width >= 12, "room to type a query"
 
 
 # --- export -----------------------------------------------------------------------------
@@ -1367,11 +1432,14 @@ def test_choosing_a_bind_or_an_account_opens_the_spawn_dialog_preset_with_the_pe
             dialog.query_one("#spawn-account", Select).value,
             dialog.query_one("#spawn-persona", Select).value,
         ]
+        # Opened on the project the Personas tab belongs to, which it fixes: no Project field.
+        where = [dialog.project.id, bool(dialog.query("#spawn-project"))]
         await press(pilot, "#spawn-submit")
         await settle(pilot)
-        return [shown_values, host.spawned]
+        return [shown_values, host.spawned, where]
 
-    shown_values, spawned = drive(scenario, project=project)
+    shown_values, spawned, where = drive(scenario, project=project)
+    assert where == [project.id, False]
     ((role, kwargs),) = spawns
     if pick == "bind:coder2":
         assert shown_values == ["coder2", "claude2", "", "pair"]

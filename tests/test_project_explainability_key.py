@@ -633,13 +633,14 @@ def test_a_project_that_is_not_there_is_a_usage_error_and_not_a_red_lane(
     home: Path, runner: CliRunner
 ) -> None:
     """``status --project <typo>`` exited 1, ``status``'s code for tracing on and the proxy
-    lane red, and ``doctor --project <typo>`` 1, its code for a failed check. A cutover
-    script gating on ``$?`` read the typo as either (review of #170's follow-ups, round 1,
-    F6). Both exit 2, a usage error, and the JSON error is still ``not_found``."""
+    lane red, and ``explainability doctor --project <typo>`` 1, its code for a failed
+    check. A cutover script gating on ``$?`` read the typo as either (review of #170's
+    follow-ups, round 1, F6). Both exit 2, a usage error, and the JSON error is still
+    ``not_found``."""
     _settings()
     for argv in (
         ["explainability", "status", "--project", "nope"],
-        ["doctor", "--project", "nope"],
+        ["explainability", "doctor", "--project", "nope"],
     ):
         result = runner.invoke(app, argv)
         assert result.exit_code == 2, (argv, result.output)

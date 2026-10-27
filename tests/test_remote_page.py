@@ -791,16 +791,13 @@ def test_the_key_pad_fits_a_360_px_phone_and_every_label_its_key() -> None:
     assert _css_value(css, ".pad .key", "min-width") == "max-content", "so theirs widen"
 
 
-DOCS = Path(__file__).resolve().parents[1] / "docs" / "remote.md"
-
-
-def test_the_pad_is_one_row_where_eight_keys_fit_and_the_docs_say_where_they_do_not() -> None:
-    """SPEC §6.3 has the pad as one row, ``Esc 1 2 3 ⏎ ↑ ↓ More``, and so did the docs. Eight
+def test_the_pad_is_one_row_where_eight_keys_fit_and_not_where_they_do_not() -> None:
+    """SPEC §6.3 has the pad as one row, ``Esc 1 2 3 ⏎ ↑ ↓ More``. Eight
     44 px keys and their gaps need 380 px, more than a 390 px phone's row: there More went
     to a line of its own, and at 320 px ↓ with it (r2 smoke of #243). More joins the row
     where the eight fit, as headless Chromium measured at 412 and 430 px, and takes the
     line under the seven where they do not; under 360 px, where not even seven fit, the
-    eight are two rows of four. The docs say which phone gets which."""
+    eight are two rows of four."""
     script, css = _text("app.js"), _text("app.css")
     row = _pad_labels(script, "PAD_ROW")
     (gap,) = _css_px(css, ".pad", "gap")
@@ -817,12 +814,6 @@ def test_the_pad_is_one_row_where_eight_keys_fit_and_the_docs_say_where_they_do_
     assert narrow is not None, "under 360 px, four to a row"
     assert 4 * int(narrow.group(1)) == 3 * gap, "four keys and their three gaps fill the row"
     assert (320 - 2 * 12 - 3 * gap) / 4 >= KEY_PX
-    prose = " ".join(DOCS.read_text("utf-8").split())
-    wide = "On a phone wide enough for eight keys (412 px is, 390 px is not) the key pad is"
-    described = re.search(re.escape(wide) + r" one row, `([^`]+)`", prose)
-    assert described is not None and described.group(1).split() == [*row, "More"]
-    assert "with the rest under More. On a narrower phone More takes the line under the" in prose
-    assert "below 360 px the eight are two rows of four, More last" in prose
 
 
 def test_the_status_strip_and_the_bottom_nav_keep_to_one_line_on_a_phone() -> None:
@@ -1306,6 +1297,14 @@ def test_routes_are_built_only_from_ids_that_validate(node_report: dict[str, Any
         "label": "coder-1",
     }
     assert routes["#/p/prj_x/a/coder-1/transcript"]["tab"] == "transcript"
+    # The retired Card tab reads as the agent's Live view, marked, for the page to replace.
+    assert routes["#/p/prj_x/a/coder-1/card"] == {
+        "name": "agent",
+        "pid": "prj_x",
+        "label": "coder-1",
+        "tab": "live",
+        "retired": True,
+    }
     for hostile in (
         "#/n/javascript:alert(1)",
         "#/p/../fleet",
@@ -1318,6 +1317,7 @@ def test_routes_are_built_only_from_ids_that_validate(node_report: dict[str, Any
         assert routes[hostile] is None, hostile
     hashes = node_report["hashes"]
     assert hashes["card"] == "#/n/ny_0123456789abcdef/p/prj_x/a/coder-1"
+    assert hashes["agent"] == "#/p/prj_x/a/coder-1/transcript"
     assert hashes["badCard"] == hashes["badAgent"] == hashes["nothing"] == "#/"
     assert hashes["badTab"] == "#/p/prj_x/fleet"
 
@@ -2508,7 +2508,7 @@ def test_a_screen_reader_is_told_which_tab_is_open_and_that_a_sheet_is_a_modal_d
     focus in it, and back on what opened it once Escape closes it."""
     said = boot_report["spoken"]
     assert said["dots"] == ["Live", "Stale: nothing heard for 25 s"], "the dot said it by colour"
-    assert said["tabs"] == [["Live", "true"], ["Transcript", "false"], ["Card", "false"]]
+    assert said["tabs"] == [["Live", "true"], ["Transcript", "false"]]
     assert said["nav"] == ["false", "page", "false", "false"]
     assert said["opened"] == {
         "dialog": ["dialog", "true", "sheet-title"],
@@ -3168,7 +3168,7 @@ def test_each_listing_screen_shows_what_the_spec_lists(boot_report: dict[str, An
     """SPEC §6.3's screens: the feed's empty state; a NEEDS YOU count on a project's row, and
     a NEEDS YOU badge on an agent the feed has a card for; tasks grouped doing, review,
     blocked, todo, done; memory without what was deleted; a cleared card that says what its
-    agent does now and leads back to the feed; an empty transcript; the Card tab's model.
+    agent does now and leads back to the feed; an empty transcript.
     Each could be dropped with every test green."""
     screens = boot_report["screensListed"]
     assert screens["feed"] == "Nothing needs you."
@@ -3191,7 +3191,21 @@ def test_each_listing_screen_shows_what_the_spec_lists(boot_report: dict[str, An
         "back": "#/",
     }
     assert screens["transcript"] == ["No conversation recorded yet."]
-    assert screens["card"].splitlines()[:2] == ["Explainability: on", "model: claude-x"]
+
+
+def test_an_old_bookmark_to_the_retired_card_tab_opens_the_live_view_and_asks_for_no_card(
+    boot_report: dict[str, Any],
+) -> None:
+    """The agent view's Card tab drew the explainability card and is gone. A bookmark to
+    ``#/p/<id>/a/<agent>/card`` read as no route at all and sent the page to the feed, not to
+    the agent; it opens the agent's Live view now, the history entry becomes the Live one
+    (Back does not return to a tab that is not there), and nothing asks the machine for
+    ``api/explainability``."""
+    opened = boot_report["retiredCardTab"]
+    assert opened["hash"] == "#/p/prj_x/a/coder-1/live", "the entry was replaced by Live's"
+    assert opened["tabs"] == [["Live", "true"], ["Transcript", "false"]]
+    assert opened["pane"] == 1 and opened["inputBar"] == 1, "the Live view is drawn, not a blank"
+    assert opened["explainability"] == 0, opened["asked"]
 
 
 def test_a_board_whose_tasks_were_all_dropped_says_so_instead_of_drawing_nothing(

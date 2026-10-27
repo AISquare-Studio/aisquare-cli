@@ -7,7 +7,7 @@ that is process-wide and a race with every worker — so it runs them here, as
 call (~350 ms); the gain is crash isolation and a cwd that is exactly right.
 
 This is a registered spawn seam (``core.spawn.SEAMS``), ruled EXCLUDED and not
-stripped: it starts no model process, and ``doctor --live`` needs the
+stripped: it starts no model process, and ``explainability doctor --live`` needs the
 ``EXPLAINABILITY_*`` environment to diagnose the machine it is on.
 """
 
@@ -57,8 +57,8 @@ def argv_for(args: Sequence[str]) -> list[str]:
     window inherits regardless of what the spawner had set.
 
     Every self-invocation in the package builds its argv here — ``run`` below,
-    the fleet's window command, the detached distiller and the hook fallback —
-    so the flag has exactly one home.
+    the fleet's window command and the hook fallback — so the flag has
+    exactly one home.
     """
     return [sys.executable, "-P", "-m", "aisquare", *args]
 

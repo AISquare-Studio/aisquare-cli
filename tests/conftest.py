@@ -26,14 +26,15 @@ from typer.testing import CliRunner
 
 import aisquare
 from aisquare.core import agents as agent_core
-from aisquare.core import experimental
+from aisquare.core import experimental, insights
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
 from aisquare.models import ProjectInfo
 from aisquare.services import ci_client
 from aisquare.services import hooks as hooks_service
 from aisquare.services import project as project_service
-from tests import private_fleets
+from tests import private_fleets, shards
+from tests.usage_stats_support import Machine, pin_hook_clock
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -207,10 +208,15 @@ AMBIENT_ENV_VARS = (
     # (`core.claude_accounts.keychain_service`), which it hands to the teammates it
     # spawns: a suite run from one of those would name every account's item after it.
     "CLAUDE_SECURESTORAGE_CONFIG_DIR",
-    # Claude Code hands it to the MCP servers it starts, and to every shell a session runs:
-    # a suite run from inside Claude Code would name every virtual MCP row after that
-    # session (`mcp_server.client_session_id`, #48).
+    # Claude Code hands it to the MCP servers it starts, and to every shell a session runs.
+    # Nothing reads it any more (#48's naming went with option A), but a suite run from
+    # inside Claude Code should still see the same environment as one run from a terminal.
     "CLAUDE_CODE_SESSION_ID",
+    # Claude Code's own pid, given to its hooks and to every shell a session runs: the pid
+    # `mcp_host.register` records at SessionStart. A suite run from inside Claude Code would
+    # register the real Claude Code process as the host of every test session, and the
+    # tests that hand `register` a pid of their own would not be the only ones to.
+    "CLAUDE_PID",
     "AISQUARE_TEAM",
     "AISQUARE_ROLE",
     # Exported by `launch --persona`; a fleet agent running the suite has one.
@@ -245,9 +251,6 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_TEAM_DELTA",
     "AISQUARE_TEAM_LEASE_MIN",
     "AISQUARE_DB_BUSY_MS",
-    "AISQUARE_BRAIN",
-    "AISQUARE_BRAIN_EMBED",
-    "AISQUARE_BRAIN_EMBED_MODEL",
     "AISQUARE_HARNESS_PROBE",
     "AISQUARE_EFFORT",
     "AISQUARE_EFFORT_PLANNER",
@@ -442,8 +445,8 @@ def home_outside_a_test(tmp_path_factory: pytest.TempPathFactory) -> Path:
     none of them, for module-scoped fixtures and for what outlives a test. Left set at
     the end on purpose: the panel's writer thread is joined at the interpreter's exit,
     and what it still had to write lands here, not in the developer's home. A home the
-    shell named is kept: the CI ``ambient`` job names a configured one, and a fixture
-    reading it outside a test is the leak that job exists to catch.
+    shell named is kept: CI's two ambient legs (py3.11 and py3.13) name a configured one,
+    and a fixture reading it outside a test is the leak those legs exist to catch.
     """
     if SHELL_HOME is not None:
         return Path(SHELL_HOME)
@@ -502,9 +505,9 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
     home = tmp_path / "aisquare-home"
     monkeypatch.setenv(HOME_ENV_VAR, str(home))
-    # Read from the ambient env; cleared so the suite is hermetic (an embedding
-    # user's AISQUARE_BRAIN_EMBED=1 must not change what tests build/assert),
-    # each test opting in explicitly instead.
+    # Read from the ambient env; cleared so the suite is hermetic (a developer's own
+    # settings must not change what tests build/assert), each test opting in
+    # explicitly instead.
     for knob in AMBIENT_ENV_VARS:
         monkeypatch.delenv(knob, raising=False)
     for knob in [name for name in os.environ if name.startswith(AMBIENT_ENV_PREFIXES)]:
@@ -515,10 +518,18 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # exits through its `unreachable` message and never leaves the machine. Tests
     # that exercise sign-in point --api-url at their own stub server.
     monkeypatch.setenv("AISQUARE_API_URL", "http://127.0.0.1:9")
+    # Usage sharing is forced off for the whole suite: nothing a test does may send a body to
+    # the real server (or ask the TUI's consent question in tests that never meant to). The
+    # tests of sharing take it off with the ``sharing_allowed`` fixture and give it a fake
+    # transport; DO_NOT_TRACK and CI are cleared there too, as GitHub's runners set CI.
+    monkeypatch.setenv("AISQUARE_NO_TELEMETRY", "1")
     # The experiment settings are read once per process (ci_client._settings is
     # lru_cached, like core.insights._config), so a cached read from the previous
-    # test's HOME would outlive the home it came from.
+    # test's HOME would outlive the home it came from. So is the insights config,
+    # and a test that never turned shipping on passed only after one that had, in the
+    # same process: green in a whole run, red alone or in a CI shard without it.
     ci_client.reset_cache()
+    insights.reset_cache()
     # Cached once per process (core.agents.current_install), and tests change what it
     # reads: the interpreter (sys.executable) and the distribution's RECORD on sys.path.
     agent_core.current_install.cache_clear()
@@ -821,7 +832,7 @@ def isolated_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     ``~/.claude/settings.json`` — and since #84 it also globs ``~/.claude*`` for
     sibling installs and grades the binary each one's hooks name. A doctor row
     that depends on how the author's own machine is hooked is the ambient leak
-    ``.github/workflows/ci.yml``'s ``ambient`` job exists to catch; green there
+    ``.github/workflows/ci.yml``'s two ambient legs exist to catch; green there
     and red on a hooked laptop, or the reverse. Tests that want Claude Code
     detected build the tree under their own fixture (``fake_home`` in
     test_agents.py) and re-point ``_home`` at it, which overrides this.
@@ -849,6 +860,42 @@ CLAUDE_ACCOUNTS_NOW = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
 Tests that write credentials against it import it (``NOW`` in
 test_claude_accounts.py), so a token they mint and the clock that grades it agree.
 """
+
+
+@pytest.fixture(autouse=True)
+def no_background_shipper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test starts the REAL detached ``aisquare metrics ship``.
+
+    Any command a test runs through the CLI starts one when sharing is on and a shipment is due
+    (``core.sharing.start_background_ship`` from the root callback); a real one is a process that
+    outlives the test, minds the test's home and, under load, mints an identity mid-test (a test
+    of "no identity yet" failed once in the full run, never alone). A test of the spawn itself
+    replaces ``_spawn`` with its own recorder."""
+    from aisquare.core import sharing
+
+    monkeypatch.setattr(sharing, "_spawn", lambda: None)
+
+
+@pytest.fixture
+def sharing_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Usage sharing may be turned on: none of the three things that force it off is set
+    (``core.sharing.forced_off_reason``). The suite forces it off for every test otherwise."""
+    for name in ("AISQUARE_NO_TELEMETRY", "DO_NOT_TRACK", "CI"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def machine(tmp_path: Path, fake_home: Path, monkeypatch: pytest.MonkeyPatch) -> Machine:
+    """A machine with Claude Code accounts, repositories and transcripts to build
+    (``tests/usage_stats_support.py``). Its repositories are repositories: the scratch
+    directories the usage stats count as one "temporary directories" are none here, the
+    suite's own living in a temporary directory. The Stop hook's clock is pinned to the stats
+    tests' ``NOW``: stamped by the wall clock, its turns fell out of the range they read."""
+    from aisquare.services import usage_stats
+
+    monkeypatch.setattr(usage_stats, "_ephemeral_roots", lambda: ())
+    pin_hook_clock(monkeypatch)  # a hook's turn is stamped NOW, not whenever the suite runs
+    return Machine(root=tmp_path, home=fake_home)
 
 
 @pytest.fixture
@@ -1087,19 +1134,6 @@ def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def no_detached_distill(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep tests from launching detached distiller processes.
-
-    Team commands fire-and-forget `aisquare team distill` after durable events;
-    in tests that would race the temp home and outlive the test. Distiller
-    behaviour is tested by calling ``distill.drain`` directly (test_brain.py).
-    """
-    from aisquare.services import distill
-
-    monkeypatch.setattr(distill, "spawn_drain", lambda cwd=None, *, root=None, board=None: None)
-
-
-@pytest.fixture(autouse=True)
 def no_real_llm_import(monkeypatch: pytest.MonkeyPatch) -> None:
     """No test may run a model.
 
@@ -1108,7 +1142,7 @@ def no_real_llm_import(monkeypatch: pytest.MonkeyPatch) -> None:
     binding, or a paid API call. Both are replaced with an engine that is
     unavailable, so such an import in any test ends in ``no_import_engine``.
     ``tests/test_persona_import.py`` tests the engines themselves by capturing the
-    real functions at import time, as ``test_spawn_seams.py`` does for the distiller.
+    real functions at import time, as ``test_spawn_seams.py`` does for its seams.
     """
     from aisquare.services import persona_import
 
@@ -1150,6 +1184,15 @@ carry it: a test that fails with the captain off and is not about the captain is
 of the off path, to be fixed in the code (review of #240)."""
 
 
+CAPTAIN_GATE = "captain_gate"
+"""The marker of a test of the captain's owner gate (#216): it runs with ``[captain] gate``
+as the config says. Every other test runs with the gate off, as Phase 1 had none."""
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    shards.add_option(parser)
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
@@ -1158,9 +1201,19 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
+        f"{CAPTAIN_GATE}: the owner gate applies as the config says; every other test runs "
+        "with it off",
+    )
+    config.addinivalue_line(
+        "markers",
         "e2e: drives a real, signed-in Claude Code (and spends tokens); skipped unless the "
         "test's own variables name what to drive",
     )
+    # A CI shard notes what it collected and ran, for the `shards` job's check that a
+    # leg's shards ran its suite exactly once (tests/shards.py).
+    manifest = config.getoption(shards.OPTION)
+    if manifest:
+        config.pluginmanager.register(shards.plugin(Path(manifest), config), "shard-manifest")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -1190,6 +1243,24 @@ def captain_on(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(experimental.CAPTAIN_ENV, raising=False)
         return
     monkeypatch.setenv(experimental.CAPTAIN_ENV, "1")
+
+
+@pytest.fixture(autouse=True)
+def captain_gate_off(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The captain's owner gate (#216) off, unless the test is marked :data:`CAPTAIN_GATE`.
+
+    The gate is on by default while the captain is, and the suite runs with the captain on
+    (:func:`captain_on`), so every Phase 1 pin of a privileged tool would meet a locked
+    gate. Phase 1 had no gate: those pins run as they were. The gate's own pins
+    (``tests/test_captain_gate.py``) read ``[captain] gate`` from the config like a user.
+    Patched here, never through the environment: the product has no variable that
+    switches the gate off.
+    """
+    if request.node.get_closest_marker(CAPTAIN_GATE) is not None:
+        return
+    from aisquare.services.captain import gate
+
+    monkeypatch.setattr(gate, "configured", lambda: False)
 
 
 @pytest.fixture

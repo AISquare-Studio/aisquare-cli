@@ -21,8 +21,10 @@ Two footer actions make a target without leaving the flow. **+ New bind** is
 writer ``aisquare team bind`` uses — after which the list is read again with the
 new bind selected. **+ New account** dismisses with a ``new-account`` target; its
 owner posts :class:`NewAccountRequested` and the app opens the Accounts page's
-own add-account flow. That is a navigation: the page does not hand the flow back
-to the picker when the sign-in lands (v1, recorded in the plan's §10).
+own add-account flow, carrying a :class:`ReturnTo` that brings the flow back once the
+sign-in lands: the picker again, its persona, intent and filter as they were, and the
+new slot highlighted (#215). The shell holds at most one; a sign-in that does not land,
+or the user going elsewhere first, drops it.
 
 The rows are read in a thread worker — ``list_agents`` asks tmux and the accounts
 read opens every slot's files — so the screen opens at once. Every read is
@@ -47,7 +49,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, OptionList, Select, Static, TextArea
+from textual.widgets import Button, Input, Label, OptionList, Select, Static, Switch, TextArea
 from textual.widgets.option_list import Option
 from textual.worker import Worker, WorkerState
 
@@ -59,6 +61,7 @@ from aisquare.services import settings as settings_service
 
 Intent = Literal["existing", "new"]
 TargetKind = Literal["agent", "bind", "account", "new-account"]
+ReturnKind = Literal["welcome", "picker", "spawn"]
 Section = Literal["agents", "binds", "accounts"]
 
 SECTION_ORDER: dict[Intent, tuple[Section, ...]] = {
@@ -79,10 +82,34 @@ SEAT_RULE = (
 )
 ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_BINARY = "claude"
+MASKED = "••••"
+"""What an Edit shows for each env value until *Show values*. App settings names a bound
+variable and never shows its value, which may be a token, and the form does the same
+(review of #334). A value left masked is saved as the one stored."""
+
+
+@dataclass(frozen=True)
+class ReturnTo:
+    """Where a sign-in started from goes back to once it lands (#215, #286).
+
+    ``welcome`` is Welcome's step 2; ``picker`` the target picker, ``form`` holding its
+    ``persona``, ``intent`` and ``filter``; ``spawn`` the Spawn dialog, ``form`` holding
+    what ``SpawnDialog.form_state`` read. ``project_id`` is the project the picker or the
+    dialog was for.
+    """
+
+    kind: ReturnKind
+    project_id: str | None = None
+    form: dict[str, Any] = field(default_factory=dict)
 
 
 class NewAccountRequested(Message):
-    """Open the Accounts page's add-account flow — the picker's *+ New account*."""
+    """Open the Accounts page's add-account flow — the picker's *+ New account* — and come
+    back to ``return_to`` once the sign-in lands."""
+
+    def __init__(self, return_to: ReturnTo | None = None) -> None:
+        self.return_to = return_to
+        super().__init__()
 
 
 @dataclass(frozen=True)
@@ -91,7 +118,8 @@ class Target:
 
     kind: TargetKind
     key: str = ""
-    """The agent's label, the bind's seat, or the account's slot."""
+    """The agent's label, the bind's seat, or the account's slot; for ``new-account``, what
+    the filter held, so the picker that comes back after the sign-in shows it again."""
     role: str | None = None
     binary: str | None = None
     account: str | None = None
@@ -209,6 +237,8 @@ class AttachTargetScreen(ModalScreen[Target | None]):
         persona: str | None,
         intent: Intent,
         accounts: Callable[[], AccountsOverview] | None,
+        select: str | None = None,
+        filter_text: str = "",
     ) -> None:
         super().__init__()
         self.project = project
@@ -216,8 +246,10 @@ class AttachTargetScreen(ModalScreen[Target | None]):
         self.attach_intent: Intent = intent
         self._accounts = accounts
         self.targets = Targets()
-        self._wanted: str | None = None
-        """The option id to highlight after the next read (a bind just created)."""
+        self._wanted: str | None = select
+        """The option id to highlight after the next read: a bind just created, or the
+        account a sign-in started from here just added (``select``)."""
+        self._filter_text = filter_text
 
     def _header(self) -> Text:
         text = Text()
@@ -235,7 +267,11 @@ class AttachTargetScreen(ModalScreen[Target | None]):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static(self._header(), classes="picker-header")
-            yield Input(placeholder="filter agents, binds and accounts", id="picker-filter")
+            yield Input(
+                value=self._filter_text,
+                placeholder="filter agents, binds and accounts",
+                id="picker-filter",
+            )
             yield OptionList(id="picker-list")
             yield Static(id="picker-status", classes="picker-note")
             with Horizontal(classes="picker-buttons"):
@@ -245,7 +281,7 @@ class AttachTargetScreen(ModalScreen[Target | None]):
 
     def on_mount(self) -> None:
         self._say("reading agents, binds and accounts …", "dim")
-        self.read()
+        self.read(select=self._wanted)
         self.query_one("#picker-list", OptionList).focus()
 
     def read(self, *, select: str | None = None) -> None:
@@ -354,7 +390,7 @@ class AttachTargetScreen(ModalScreen[Target | None]):
 
     @on(Button.Pressed, "#picker-new-account")
     def _new_account(self) -> None:
-        self.dismiss(Target("new-account"))
+        self.dismiss(Target("new-account", self.query_one("#picker-filter", Input).value))
 
     @on(Button.Pressed, "#picker-cancel")
     def action_cancel(self) -> None:
@@ -362,28 +398,42 @@ class AttachTargetScreen(ModalScreen[Target | None]):
 
 
 class NewBindScreen(ModalScreen[str | None]):
-    """``aisquare team bind`` as a form; dismisses with the seat it saved, or ``None``."""
+    """``aisquare team bind`` as a form; dismisses with the seat it saved, or ``None``.
+
+    ``editing`` opens it on an existing seat's binding (App settings' *Edit*, #98): the
+    seat is fixed, the fields hold what the binding holds, and Save writes them whole
+    through ``services.settings.replace_role_binding``, not merged as a new bind is.
+    """
 
     DEFAULT_CSS = _BOX_CSS.format(name="NewBindScreen") + "NewBindScreen #bind-env { height: 4; }"
     BINDINGS: ClassVar = [Binding("escape", "cancel", "cancel")]
 
-    def __init__(self, accounts: list[ClaudeAccountStatus]) -> None:
+    def __init__(
+        self,
+        accounts: list[ClaudeAccountStatus],
+        *,
+        editing: tuple[str, RoleLaunchProfile] | None = None,
+    ) -> None:
         super().__init__()
         self._statuses = accounts
+        self._editing = editing
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            header = Text("New bind", style="bold")
+            seat, bound = self._editing or ("", RoleLaunchProfile())
+            header = Text("Edit bind" if self._editing else "New bind", style="bold")
             header.append(
                 " — a seat `aisquare team bind` pins: binary, environment, args", style="dim"
             )
             yield Static(header, classes="picker-header")
             with Horizontal(classes="picker-row"):
                 yield Label("Seat")
-                yield Input(placeholder="coder2", id="bind-seat")
+                yield Input(
+                    seat, placeholder="coder2", id="bind-seat", disabled=self._editing is not None
+                )
             with Horizontal(classes="picker-row"):
                 yield Label("Binary")
-                yield Input(value=DEFAULT_BINARY, id="bind-binary")
+                yield Input(value=bound.bin or DEFAULT_BINARY, id="bind-binary")
             with Horizontal(classes="picker-row"):
                 yield Label("Account")
                 yield Select(
@@ -395,10 +445,19 @@ class NewBindScreen(ModalScreen[str | None]):
                 )
             with Horizontal(classes="picker-row"):
                 yield Label("Env (KEY=VALUE)")
-                yield TextArea(id="bind-env")
+                yield TextArea(self._env_text(reveal=False), id="bind-env")
+            if any(bound.env.values()):
+                with Horizontal(classes="picker-row"):
+                    yield Label("Show values")
+                    yield Switch(False, id="bind-env-reveal")
+            if bound.env_files:
+                # Their values are secrets read at launch: named, never shown, kept as bound.
+                kept = Text("kept, bound to a file: ", style="dim")
+                kept.append(", ".join(sorted(bound.env_files)))
+                yield Static(kept, id="bind-env-files", classes="picker-note")
             with Horizontal(classes="picker-row"):
                 yield Label("Extra args")
-                yield Input(placeholder="--model opus", id="bind-args")
+                yield Input(shlex.join(bound.args), placeholder="--model opus", id="bind-args")
             yield Static(id="bind-rule", classes="picker-note")
             yield Static(id="bind-status", classes="picker-note")
             with Horizontal(classes="picker-buttons"):
@@ -409,6 +468,34 @@ class NewBindScreen(ModalScreen[str | None]):
         self.query_one("#bind-status", Static).display = False
         self._validate()
         self.query_one("#bind-seat", Input).focus()
+
+    def _stored_env(self) -> dict[str, str]:
+        """The env the edited binding holds (none for a new bind)."""
+        return self._editing[1].env if self._editing is not None else {}
+
+    def _env_text(self, *, reveal: bool) -> str:
+        return "\n".join(
+            f"{key}={value if reveal or not value else MASKED}"
+            for key, value in self._stored_env().items()
+        )
+
+    @on(Switch.Changed, "#bind-env-reveal")
+    def _reveal(self, event: Switch.Changed) -> None:
+        """Show the stored values, or mask them again: only on the lines that still hold one,
+        so a value typed meanwhile stays as typed."""
+        stored = self._stored_env()
+        area = self.query_one("#bind-env", TextArea)
+        lines: list[str] = []
+        for line in area.text.splitlines():
+            key, separator, value = line.partition("=")
+            was = stored.get(key.strip())
+            if separator and was:
+                if event.value and value.strip() == MASKED:
+                    line = f"{key}={was}"
+                elif not event.value and value.strip() == was:
+                    line = f"{key}={MASKED}"
+            lines.append(line)
+        area.load_text("\n".join(lines))
 
     def problems(self) -> list[str]:
         """Every rule the form breaks right now, in field order."""
@@ -455,10 +542,12 @@ class NewBindScreen(ModalScreen[str | None]):
         if status is not None:
             # What `launch --account <slot>` sets — none for the default slot.
             env.update(accounts_core.launch_env(status.account))
+        stored = self._stored_env()
         for line in self.query_one("#bind-env", TextArea).text.splitlines():
             key, separator, value = line.partition("=")
             if separator and key.strip():
-                env[key.strip()] = value.strip()
+                name, value = key.strip(), value.strip()
+                env[name] = stored[name] if value == MASKED and name in stored else value
         return self.query_one("#bind-seat", Input).value.strip(), {
             "agent_bin": self.query_one("#bind-binary", Input).value.strip() or DEFAULT_BINARY,
             "env": env,
@@ -471,7 +560,18 @@ class NewBindScreen(ModalScreen[str | None]):
             return
         seat, kwargs = self.bind_kwargs()
         try:
-            settings_service.bind_role(seat, **kwargs)
+            if self._editing is None:
+                settings_service.bind_role(seat, **kwargs)
+            else:
+                binary = kwargs["agent_bin"]
+                was = self._editing[1].bin
+                settings_service.replace_role_binding(
+                    seat,
+                    # A binding that named no binary still names none at the default.
+                    agent_bin=None if was is None and binary == DEFAULT_BINARY else binary,
+                    env=kwargs["env"],
+                    args=kwargs["args"],
+                )
         except Exception as exc:  # the config could not be written: say so, stay open
             status = self.query_one("#bind-status", Static)
             status.update(Text(f"{type(exc).__name__}: {exc}", style="bold red"))

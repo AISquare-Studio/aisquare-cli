@@ -152,7 +152,7 @@ def test_remote_task_lifecycle_and_guards(work_dir: Path) -> None:
     assert "team.task_claimed" in kinds and "team.task_review" in kinds
 
 
-def test_server_exposes_exactly_the_nine_tools() -> None:
+def test_server_exposes_exactly_the_eight_tools() -> None:
     server = mcp_server.build_server()
 
     tools = anyio.run(server.list_tools)
@@ -165,7 +165,6 @@ def test_server_exposes_exactly_the_nine_tools() -> None:
         "team_log",
         "verify",
         "signal",
-        "recall",
     }
 
 
@@ -297,7 +296,6 @@ def test_remote_calls_respect_master_switch(
         ("task_update", {"ref": "tsk_x", "action": "done"}),
         ("note_add", {"text": "x"}),
         ("team_log", {}),
-        ("recall", {"query": "x"}),
     ]
     for tool, arguments in calls:
         result = call_remote(tool, arguments)

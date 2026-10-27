@@ -7,6 +7,7 @@ failure is swallowed and the command exits 0, never disrupting the agent.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -117,6 +118,14 @@ def _effort_level(payload: dict[str, Any]) -> str | None:
     return level if isinstance(level, str) and level else None
 
 
+def _effort_now(payload: dict[str, Any]) -> str | None:
+    """The effort the session runs, at a turn's end: the payload's ``effort.level``, else
+    the ``CLAUDE_EFFORT`` Claude Code gives its Stop hook (#16). Never at a session start:
+    Claude Code 2.1.310's SessionStart carries no effort, and its hooks there see only the
+    process's inherited environment, a fleet window's being the tmux server's (seq 3513)."""
+    return _effort_level(payload) or os.environ.get("CLAUDE_EFFORT", "").strip() or None
+
+
 @app.command("session-start")
 def session_start() -> None:
     """Emit aisquare context for a starting session (stdout becomes context)."""
@@ -183,7 +192,7 @@ def stop() -> None:
 
     stdout is JSON or nothing. It is nothing for every role but ``manager``, and
     for a manager it is the Stop decision that keeps the turn going when
-    teammates put decisions on the board (docs/plans/fleet-tui.md §7.3):
+    teammates put decisions on the board:
     ``{"decision": "block", "reason": "<the delta>"}``. ``stop_hook_active`` is
     Claude Code saying it is already continuing on a stop hook; it is honoured
     as the loop guard the reference asks for.
@@ -197,6 +206,7 @@ def stop() -> None:
             last_message=_str(payload, "last_assistant_message"),
             permission_mode=_str(payload, "permission_mode"),
             transcript_path=_str(payload, "transcript_path"),
+            effort=_effort_now(payload),
         )
     except ManagerWakeupError as exc:  # the row is right; only the wake-up was lost
         _cost_of_failing_open("stop", exc.cause, cost=_COST["manager-wakeup"])
@@ -258,6 +268,24 @@ def hand_over(
         hooks_service.hand_over(session_id, reason=reason)
     except Exception as exc:  # the board carries the refusal; nothing else to disrupt
         _cost_of_failing_open("hand-over", exc, cost="the limited agent was not moved")
+
+
+@app.command("before-limit", hidden=True)
+def before_limit(
+    session_id: Annotated[str, typer.Argument(help="The session whose turn ended.")],
+) -> None:
+    """The detached half of ``accounts.before_limit`` (no output; started by ``stop`` and
+    ``notification``: F2 of #400).
+
+    Not a Claude Code hook: the turn end's hook decides from what is on record whether the
+    agent's account is worth a look, and this worker does the reads that may reach the usage
+    endpoint, then warns or hands the agent over, so no request is made from a hook. Silent
+    like every hook; the board carries what it did.
+    """
+    try:
+        hooks_service.before_limit_worker(session_id)
+    except Exception as exc:  # the board carries a refusal; nothing else to disrupt
+        _cost_of_failing_open("before-limit", exc, cost="the agent was not moved before its limit")
         return
 
 
@@ -319,6 +347,7 @@ def notification() -> None:
             session_id=_str(payload, "session_id"),
             message=_str(payload, "message"),
             notification_type=_str(payload, "notification_type"),
+            transcript_path=_str(payload, "transcript_path"),
         )
     except Exception as exc:  # never disrupt the agent
         _cost_of_failing_open("notification", exc)

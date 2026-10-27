@@ -186,7 +186,7 @@ class ExperimentalSettings(BaseModel):
     """``[experimental]`` — features that ship OFF until the owner turns them on.
 
     ``captain``: the home-level agent (``docs/captain.md``). Off, ``aisquare captain``
-    refuses, the fleet UI shows no insignia or captain view, the bundled ``captain``
+    refuses, the fleet UI shows no Start captain or captain view, the bundled ``captain``
     persona is absent and the voice page does not serve. ``AISQUARE_EXPERIMENTAL_CAPTAIN``
     wins over this field either way; ``core.experimental.captain_enabled`` is the one
     reader of both.
@@ -316,6 +316,12 @@ class FleetRoleSettings(BaseModel):
     """The persona every spawn of this role gets unless ``--persona`` names another
     (docs/plans/spawn-personas.md §3.8). Checked at spawn, not at load: a name the
     project does not have refuses the spawn with this key in the message."""
+    remote_control: bool = False
+    """Start this role's Claude Code sessions with Claude Code's own Remote Control
+    (``--remote-control "<project> · <label>"``), so claude.ai/code and the Claude app can
+    continue them (#289). Off for every role by default; ``fleet spawn --remote-control``
+    / ``--no-remote-control`` overrides it for one spawn, and a restart replays the choice.
+    ``launch`` steps aside, saying why, where Claude Code refuses it."""
     deny_tools: list[str] = Field(default_factory=list)
     """Tools this role launches without, on top of ``[fleet] deny_tools`` and the role's
     own safety list (``harness.RoleProfile.denied_tools``)."""
@@ -940,6 +946,18 @@ class AccountsSettings(BaseModel):
     Both defaults were ``default`` and ``wait`` through 0.8.0; a file those builds
     saved keeps either only where it differs from them (``_V1_DEFAULTS``).
 
+    ``before_limit`` (F2 of #400, off by default) acts BEFORE a limit, where ``on_limit``
+    acts after one: when a fleet agent's account reads over ``switch_at`` (not the manager's
+    or the captain's), at its next turn end or idle notice — never mid-turn, nor with
+    background work its turn left running or a message queued for its next turn —
+    ``switch`` hands it over the way ``on_limit`` does, to an account under the line, and
+    ``warn`` only says so on the board, once per crossing of the line. The line is
+    ``switch_at`` itself, not a second threshold: it is where every pick counts an account
+    full, so a lower one would move agents onto accounts barely emptier, and a higher one
+    would leave them on accounts no pick would choose. Windows over it that reset within
+    ``wait_if_reset_within_minutes`` are waited for, as after a limit, in both modes
+    (``services.hooks.check_before_limit``).
+
     ``prefer`` orders the accounts under ``switch_at`` (#277): ``priority``, the default,
     takes the first in the operator's order, rank 1 (the machine default, #406) first;
     ``reset-soonest`` takes the one whose weekly window resets first, priority breaking
@@ -969,6 +987,7 @@ class AccountsSettings(BaseModel):
     pick: Literal["default", "headroom"] = "headroom"
     switch_at: int = Field(default=85, ge=1, le=100)
     on_limit: Literal["wait", "switch"] = "switch"
+    before_limit: Literal["off", "warn", "switch"] = "off"
     wait_if_reset_within_minutes: int = Field(default=15, ge=0)
     prefer: Literal["priority", "reset-soonest"] = "priority"
     share_trust: bool = True
@@ -1005,6 +1024,22 @@ class UiSettings(BaseModel):
     always_show_project_path: bool = False
 
 
+class SharingSettings(BaseModel):
+    """``[sharing]`` — opt-in anonymous usage sharing (docs/usage-telemetry.md).
+
+    ``enabled`` is the switch, **off by default**: nothing leaves this machine until it is
+    turned on (Settings ▸ Usage & stats, or ``aisquare metrics share on``). Turned on, daily
+    counts of usage (tokens, sessions, which commands) are sent to AISquare, never names, paths,
+    remotes, prompts or arguments. ``DO_NOT_TRACK=1``, ``AISQUARE_NO_TELEMETRY=1`` and ``CI``
+    force it off whatever this says (``core.sharing.forced_off_reason``).
+
+    The installation's random id, its salt for the repository hashes and what has been sent
+    are kept beside the other runtime state (``state.json``), not here.
+    """
+
+    enabled: bool = False
+
+
 class AppConfig(BaseModel):
     """Root configuration object persisted at ``~/.aisquare/config.toml``."""
 
@@ -1025,6 +1060,7 @@ class AppConfig(BaseModel):
     watch: WatchSettings = Field(default_factory=WatchSettings)
     code: CodeSettings = Field(default_factory=CodeSettings)
     ui: UiSettings = Field(default_factory=UiSettings)
+    sharing: SharingSettings = Field(default_factory=SharingSettings)
 
 
 #: Sections an older build read and this one does not, each with why. An unknown section

@@ -531,6 +531,54 @@ def test_sign_in_opens_the_accounts_page() -> None:
     assert hosted(Machine(claude=[READY]), go) == (False, [])
 
 
+def test_sign_in_is_on_the_keyboard_when_step_two_is_done_but_signed_out(tmp_path: Path) -> None:
+    """Step 2 is ✓ once Claude Code is connected, signed in or not, and a finished card
+    left the Tab order with its *Sign in* still showing: no key reached it (#324's walk).
+    It is a Shift+Tab back from step 3 now, and step 3 keeps the keyboard's first stop."""
+    signed_out = dataclasses.replace(READY, signed_in=False)
+    machine, _ = _ready_machine(tmp_path, claude=[signed_out])
+
+    async def go(
+        pilot: Pilot[None], page: WelcomeView, host: Host
+    ) -> tuple[bool, bool, str | None, str | None, list[str]]:
+        done = "✓" in card(page, "claude-title")
+        sign_in = page.query_one("#claude-sign-in", Button)
+        reachable = visible(page, "claude-sign-in") and sign_in in host.screen.focus_chain
+        first = page.next_button()
+        page.query_one("#fleet-manager", Button).focus()
+        await pilot.press("shift+tab")
+        back = host.focused.id if host.focused is not None else None
+        await pilot.press("enter")
+        await settle_page(host)
+        received = [type(message).__name__ for message in host.received]
+        return done, reachable, first.id if first is not None else None, back, received
+
+    done, reachable, first, back, received = hosted(machine, go)
+    assert done, "the premise: step 2 is done, signed out"
+    assert reachable, "Sign in shows on a done card: Tab reaches it"
+    assert first == "fleet-manager", "the next thing to do is still step 3"
+    assert back == "claude-sign-in"
+    assert "AccountsSelected" in received
+
+
+def test_with_the_fleet_up_and_signed_out_the_keyboard_still_goes_to_the_manager(
+    tmp_path: Path,
+) -> None:
+    """Step 3 done keeps its own buttons on the keyboard; the sign-in Tab now reaches is
+    still not what the keyboard is handed to."""
+    machine, _ = _ready_machine(tmp_path, claude=[dataclasses.replace(READY, signed_in=False)])
+
+    async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> tuple[str, str | None]:
+        for button in ("fleet-manager", "fleet-open", "fleet-coders"):
+            await press(pilot, page, button)
+        first = page.next_button()
+        return card(page, "fleet-title"), first.id if first is not None else None
+
+    title, first = hosted(machine, go)
+    assert "✓" in title, "the premise: the fleet is up"
+    assert first == "fleet-open"
+
+
 # --------------------------------------------------------------------------- step 1
 
 
@@ -1333,6 +1381,35 @@ def test_the_keyboard_alone_gets_from_a_new_folder_to_a_fleet(
     ]
     assert FLEET_UP in (status or "")
     assert focus == ["claude-connect", "fleet-manager", "fleet-open", "fleet-open"]
+
+
+def test_signed_out_choosing_the_folder_hands_the_keyboard_to_start_manager_not_sign_in(
+    captain: str | None,
+    fleet_rows: dict[str, list[FleetAgentStatus]],
+    scripted: Callable[[Machine], None],
+    tmp_path: Path,
+) -> None:
+    """#349's walk: with step 2 ✓ and signed out, *Sign in* is in the Tab order, and when
+    step 1's button went away Textual moved the keyboard onto it, the next widget, so
+    Enter opened Accounts instead of starting the manager. Step 3 is the next thing to do."""
+    folder = tmp_path / "demo-app"
+    folder.mkdir()
+    signed_out = dataclasses.replace(READY, signed_in=False)
+    machine = Machine(claude=[signed_out], found=Candidates(items=(here(folder),)))
+    scripted(machine)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[str | None]:
+        focus: list[str | None] = []
+        for keys in (("tab", "enter"), ("enter",)):
+            await pilot.press(*keys)
+            await settle_page(app)
+            focus.append(app.focused.id if app.focused is not None else None)
+        return focus
+
+    focus = in_shell(machine, go)
+    assert machine.onboarded == [folder]
+    assert focus == ["fleet-manager", "fleet-open"], "Enter started the manager"
+    assert machine.starts == [(project_id_for(folder), True, 0)]
 
 
 def test_a_typed_folder_hands_the_keyboard_to_the_next_step(

@@ -28,7 +28,6 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("log",),
     ("note",),
     ("board",),
-    ("recall",),
     ("launch",),
     ("exec",),
     ("reports", "list"),
@@ -56,6 +55,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "actions",
         )
     ),
+    *(("captain", "gate", verb) for verb in ("enroll", "unlock", "lock", "status")),
     ("login",),
     ("logout",),
     ("whoami",),
@@ -80,6 +80,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "switch",
             "capacity",
             "gate",
+            "adopt",
         )
     ),
     ("code", "find"),
@@ -88,6 +89,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("code", "index"),
     ("accounts", "share"),
     ("explainability", "status"),
+    ("explainability", "doctor"),
     ("explainability", "env"),
     ("explainability", "enable"),
     ("explainability", "disable"),
@@ -110,6 +112,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("watch",),
     ("watch", "show"),
     ("hook", "compact-check"),
+    ("hook", "before-limit"),
     ("hook", "session-end"),
     ("hook", "stop"),
     ("hook", "notification"),
@@ -121,7 +124,6 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "focus",
             "role",
             "log",
-            "distill",
             "prune",
             "verify",
             "show",
@@ -181,6 +183,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "onboard",
             "forget",
             "prune",
+            "fresh",
+            "reset",
             "pin",
             "unpin",
             "move",
@@ -208,9 +212,15 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "enable",
             "trust",
             "settings",
+            "statusline",
+            "sessions",
         )
     ),
-    *(("metrics", command) for command in ("show", "list", "tokens", "ledger")),
+    *(
+        ("metrics", command)
+        for command in ("show", "list", "tokens", "ledger", "stats", "backfill", "ship")
+    ),
+    *(("metrics", "share", command) for command in ("on", "off", "status", "preview", "reset-id")),
     *(
         ("persona", command)
         for command in (

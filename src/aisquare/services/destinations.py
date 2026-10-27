@@ -98,7 +98,7 @@ class Environment:
     ``proxy_url`` is the hosted ``claude_code`` proxy as the cutover runbook
     records it (the public ``:9443`` listener in front of the proxy's 9090);
     ``None`` where none is recorded, in which case the target keeps whatever
-    proxy it has and ``doctor --live`` says so.
+    proxy it has and ``explainability doctor --live`` says so.
     """
 
     name: str

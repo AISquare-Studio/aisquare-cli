@@ -39,7 +39,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import claude_accounts as core
-from aisquare.models import ClaudeAccount, ClaudeAccountStatus
+from aisquare.models import ClaudeAccount, ClaudeAccountStatus, UsageCause
 from aisquare.services import claude_accounts as service
 from tests.test_claude_accounts import NOW, _installed, _sign_in
 from tests.test_usage_aware_accounts import _payload, _Usage
@@ -390,40 +390,69 @@ LOCKED = core.KEYCHAIN_LOCKED
 REFUSED = core.KEYCHAIN_REFUSED
 
 
+_OTHER = "could not read the Keychain (security exited 25)"
+
+
 @POSIX_ONLY
 @pytest.mark.parametrize(
-    ("exit", "stderr", "reason"),
+    ("exit", "stderr", "said", "cause", "reason"),
     [
-        (36, "security: SecKeychainSearchCopyNext: User interaction is not allowed.\n", LOCKED),
-        (1, "security: the keychain is locked\n", LOCKED),
+        (
+            36,
+            "security: SecKeychainSearchCopyNext: User interaction is not allowed.\n",
+            LOCKED,
+            UsageCause.keychain_locked,
+            core.KEYCHAIN_LOCKED_REASON,
+        ),
+        (
+            1,
+            "security: the keychain is locked\n",
+            LOCKED,
+            UsageCause.keychain_locked,
+            core.KEYCHAIN_LOCKED_REASON,
+        ),
         (
             51,
             "security: SecKeychainSearchCopyNext: The user name or passphrase you entered is "
             "not correct.\n",
             REFUSED,
+            UsageCause.keychain_refused,
+            core.KEYCHAIN_REFUSED_REASON,
         ),
-        (128, "security: User canceled the operation.\n", LOCKED),
-        (25, "security: something else\n", "could not read the Keychain (security exited 25)"),
+        (
+            128,
+            "security: User canceled the operation.\n",
+            LOCKED,
+            UsageCause.keychain_locked,
+            core.KEYCHAIN_LOCKED_REASON,
+        ),
+        (25, "security: something else\n", _OTHER, UsageCause.keychain_failed, _OTHER),
     ],
     ids=["interaction-not-allowed", "locked", "denied", "canceled", "other"],
 )
 def test_a_keychain_that_would_not_say_is_said_and_offers_no_log_in(
-    keychain: FakeKeychain, exit: int, stderr: str, reason: str
+    keychain: FakeKeychain, exit: int, stderr: str, said: str, cause: UsageCause, reason: str
 ) -> None:
-    from aisquare.cli.ui.views.accounts import account_cells, needs_login
+    """The core says it in the row's words (``unreadable``, what a Log in that cannot open
+    says too) and its kind; the reading takes its cause from the kind, its reason without
+    the fix, which the '!' says on hover beside it (#13)."""
+    from aisquare.cli.ui.views.accounts import account_cells, needs_login, problem_tooltip
 
     two = core.create_account()
     _sign_in(two, "two@example.com")  # a file beside it is not the answer: the Keychain is
     keychain.put(core.keychain_service(two), exit=exit, stderr=stderr)
     status = service.describe(two)
     assert status.signed_in and status.token_state == "unreadable"
+    assert core.stored_login(two).unreadable == said
     fetch = _Usage({})
     reading = service.usage(two, now=NOW, fetch=fetch)
     assert not reading.available and reading.reason == reason and not reading.needs_login
+    assert reading.cause is cause and reading.fix == service.usage_fix(cause, slot=two.slot)
     assert fetch.calls == []
     assert not needs_login(status, reading)  # a log-in would not unlock the Keychain
-    # Said where the usage would be: there is no status column (#8 on the board).
-    assert str(account_cells(status, reading)["session"]) == reason
+    # One '!' where the usage would be (#13), why and the fix on hover.
+    assert str(account_cells(status, reading)["session"]) == "!"
+    assert problem_tooltip(status, reading) == f"{reason}\nfix: {reading.fix}"
 
 
 @POSIX_ONLY
@@ -437,6 +466,7 @@ def test_a_keychain_that_does_not_answer_in_time_is_said(
     login = core.stored_login(two)
     assert login.credentials is None
     assert login.unreadable == "could not read the Keychain (no answer in 0.5 s)"
+    assert login.problem == "timeout"  # its kind: the reading's cause is read from it (#13)
     assert core.signed_in(two)
 
 
@@ -447,8 +477,9 @@ def test_a_security_that_cannot_run_is_said(
     monkeypatch.setattr(core, "KEYCHAIN_TOOL", str(tmp_path / "no-such-security"))
     two = core.create_account()
     _identity(two, "two@example.com")
-    unreadable = core.stored_login(two).unreadable
-    assert unreadable is not None
+    login = core.stored_login(two)
+    unreadable = login.unreadable
+    assert unreadable is not None and login.problem == "failed"
     assert unreadable.startswith(f"could not read the Keychain ({tmp_path / 'no-such-security'}: ")
 
 
@@ -616,10 +647,13 @@ def test_refresh_usage_asks_a_locked_keychain_again_once_it_is_unlocked(
     keychain.put(core.keychain_service(two), exit=36, stderr="User interaction is not allowed.")
     fetch = _Usage({"sk-ant-oat01-2": _payload(20.0)})
     [locked] = service.cached_usage([two], now=NOW, fetch=fetch).values()
-    assert locked.reason == LOCKED
+    assert locked.cause is UsageCause.keychain_locked
+    assert locked.fix is not None and "then ↻ Refresh usage (or --refresh)" in locked.fix
     keychain.login(two, "sk-ant-oat01-2")  # unlocked
     [still] = service.cached_usage([two], now=NOW, fetch=fetch).values()
-    assert still.reason == LOCKED, "a refusal stands until someone asks: not on every tick"
+    assert still.cause is UsageCause.keychain_locked, (
+        "a refusal stands until someone asks: not on every tick"
+    )
     [read] = service.cached_usage([two], now=NOW, force=True, fetch=fetch).values()
     assert read.available and read.session_percent == 20
 

@@ -2,7 +2,7 @@
 
 Everything the view reaches for outside the store is monkeypatched at the
 module the view imports — ``services.fleet`` for the manager, the two
-explainability services for the tracing tab — so no test starts tmux, dials a
+explainability services for the dormant tracing view — so no test starts tmux, dials a
 gateway or depends on ``claude``.
 What each test asserts is the artefact the claim is about: the spawn call the
 button made, the bytes ``config.toml`` holds after Save, the rows the board
@@ -57,7 +57,7 @@ from textual.widgets import (
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.cli.ui.board import COLUMN_WIDTH_KEY, DETAIL_HEIGHT_KEY, BoardPanel
+from aisquare.cli.ui.board import COLUMN_WIDTH_KEY, DETAIL_HEIGHT_KEY, EMPTY_ROW, BoardPanel
 from aisquare.cli.ui.divider import Divider
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import personas_tab
@@ -129,11 +129,35 @@ def drive(
     scenario: Callable[[Pilot[None], Host], Coroutine[Any, Any, T]],
     *,
     refresh_seconds: float = 60.0,
+    size: tuple[int, int] = (120, 50),
 ) -> T:
     """Run ``scenario`` against a mounted Project view and return what it observed."""
 
     async def run() -> T:
         host = Host(project, refresh_seconds=refresh_seconds)
+        async with host.run_test(size=size) as pilot:
+            await pilot.pause()
+            return await scenario(pilot, host)
+
+    return asyncio.run(run())
+
+
+class ExplainabilityHost(Host):
+    """The same bare app around the dormant ``ExplainabilityView`` alone: no tab mounts it, so
+    its tests mount it directly, with the project a tab would have handed it."""
+
+    def compose(self) -> ComposeResult:
+        yield ExplainabilityView(self._project, id="project-explainability")
+
+
+def drive_explainability(
+    project: ProjectInfo,
+    scenario: Callable[[Pilot[None], Host], Coroutine[Any, Any, T]],
+) -> T:
+    """Run ``scenario`` against a mounted ``ExplainabilityView`` and return what it observed."""
+
+    async def run() -> T:
+        host = ExplainabilityHost(project, refresh_seconds=60.0)
         async with host.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             return await scenario(pilot, host)
@@ -366,52 +390,63 @@ def _config_toml() -> dict[str, Any]:
 # --- the tabs -----------------------------------------------------------------------------
 
 
-def test_project_view_has_the_five_tabs_with_their_widgets(project: ProjectInfo) -> None:
-    """Manager, Board, AISquare, Settings, Personas: no Doctor tab — the doctor is the app's
-    page."""
+def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo) -> None:
+    """Manager, Board, Settings, Personas: no Doctor tab — the doctor is the app's page — and
+    no AISquare tab: the explainability view is dormant, mounted by nothing."""
 
     async def scenario(
         pilot: Pilot[None], host: Host
-    ) -> tuple[int, list[str], str, list[str], str, int, str]:
+    ) -> tuple[int, list[str], str, list[str], int, int]:
         view = host.query_one(ProjectView)
         for pane_id, widget_type in (
             ("#tab-manager", ManagerTab),
             ("#tab-board", BoardPanel),
-            ("#tab-explainability", ExplainabilityView),
             ("#tab-settings", SettingsView),
         ):
             assert view.query_one(pane_id).query_one(widget_type)
         view.active = "tab-personas"  # built when first opened
-        await pilot.pause()
+        await settle_page(pilot.app)
         assert view.query_one("#tab-personas").query_one(PersonasTab)
         view.active = "tab-manager"
         await pilot.pause()
         ids = [pane.id or "" for pane in view.query("TabPane")]
         labels = [view.get_tab(pane_id).label_text for pane_id in ids]
-        first = view.query_one(ExplainabilityView).children[0]
+        return (
+            view.tab_count,
+            ids,
+            view.active,
+            labels,
+            len(view.query(DoctorView)),
+            len(view.query(ExplainabilityView)),
+        )
+
+    count, ids, active, labels, doctors, explainability = drive(project, scenario)
+    assert count == 4
+    assert ids == list(ProjectView.TAB_IDS)
+    assert active == "tab-manager"  # the manager first: that is where the goal goes
+    assert labels == ["Manager", "Board", "Settings", "Personas"]
+    assert doctors == 0
+    assert explainability == 0
+
+
+def test_the_dormant_explainability_view_opens_on_an_explainability_heading(
+    project: ProjectInfo,
+) -> None:
+    """Mounted on its own, as a re-mount would (the note at the top of
+    ``views/explainability.py``), the view opens on a bold "Explainability" heading, above
+    the status block."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, str]:
+        first = host.query_one(ExplainabilityView).children[0]
         heading = first.render()
         assert isinstance(heading, Content)
         bold = any(
             span.end - span.start == len(heading.plain) and "bold" in str(span.style)
             for span in heading.spans
         )
-        return (
-            view.tab_count,
-            ids,
-            view.active,
-            labels,
-            f"{first.id}:{'bold' if bold else 'plain'}",
-            len(view.query(DoctorView)),
-            heading.plain,
-        )
+        return f"{first.id}:{'bold' if bold else 'plain'}", heading.plain
 
-    count, ids, active, labels, first_id, doctors, heading = drive(project, scenario)
-    assert count == 5
-    assert ids == list(ProjectView.TAB_IDS)
-    assert active == "tab-manager"  # the manager first: that is where the goal goes
-    assert labels == ["Manager", "Board", "AISquare", "Settings", "Personas"]
-    assert doctors == 0
-    # The AISquare tab opens on an "Explainability" heading, above the status block as before.
+    first_id, heading = drive_explainability(project, scenario)
     assert first_id == "explainability-heading:bold" and heading == "Explainability"
 
 
@@ -420,7 +455,15 @@ def test_the_personas_tab_reads_nothing_until_it_is_opened(
 ) -> None:
     """Built with the view, the Personas tab read the whole catalogue as every project view
     mounted, on the UI thread, for a tab that may never be opened (review of #201, R1-F10).
-    It is built when first opened, reads then, and re-reads at each later opening."""
+    It is built when first opened, reads then, and re-reads at each later opening.
+
+    Each count is taken once the page has gone quiet, so a read that comes late is still
+    counted. The first opening's read is in ``PersonasTab.on_mount``, after a mount
+    ``open_personas`` does not await, and one pause after ``active`` did not wait for it: P3's
+    layers row made that mount longer, and every windows-latest job counted the tab before
+    its read (run 40238412702). An opening waits for its read, bounded. The board's opening
+    has nothing to wait for, since no read is the claim, so the page is settled before the
+    count, and a read it started would land in time to fail it."""
     reads: list[Path | None] = []
     read_entries = personas_tab.read_entries
 
@@ -430,20 +473,22 @@ def test_the_personas_tab_reads_nothing_until_it_is_opened(
 
     monkeypatch.setattr(personas_tab, "read_entries", counted)
 
+    async def read_since(pilot: Pilot[None], before: int) -> None:
+        await settle_until_held(
+            pilot.app, lambda: len(reads) > before, what="a read on opening tab-personas"
+        )
+
     async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[int, int]]:
         view = host.query_one(ProjectView)
+        await settle_page(pilot.app)
         seen = [(len(view.query(PersonasTab)), len(reads))]
-
-        # Each opening is waited for by the read it makes, not one pause: on a loaded
-        # windows-latest runner the tab had mounted and its on_mount had not yet read.
-        async def open_tab(tab: str, read: int) -> None:
+        for tab in ("tab-personas", "tab-board", "tab-personas"):
+            before = len(reads)
             view.active = tab
-            await settle_until_held(pilot.app, lambda: len(reads) >= read, what=f"read {read}")
-            await pilot.pause()
+            if tab == "tab-personas":
+                await read_since(pilot, before)
+            await settle_page(pilot.app)
             seen.append((len(view.query(PersonasTab)), len(reads)))
-
-        for tab, read in (("tab-personas", 1), ("tab-board", 1), ("tab-personas", 2)):
-            await open_tab(tab, read)
         return seen
 
     seen = drive(project, scenario)
@@ -842,6 +887,114 @@ def test_refresh_status_pushes_the_managers_state(project: ProjectInfo) -> None:
     assert "no live tmux session" in attach_after  # the coder has no session to attach to
 
 
+def _member(project: ProjectInfo, label: str, role: str, *, ended: bool = False) -> FleetAgent:
+    """A team member of ``role`` in the frame, with an id and pane of its own."""
+    return fake_agent(project, pane_id=f"%{len(label)}", label=label).model_copy(
+        update={
+            "id": f"agt_01test{label.replace('-', '')}",
+            "role": role,
+            "ended_at": datetime.now(tz=UTC) if ended else None,
+        }
+    )
+
+
+def test_the_team_strip_counts_each_role_by_state_and_hides_with_only_the_manager(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P3-W2b (#287): under the manager's info line, the team per role and state, from the
+    shell's frame alone: 2 coders working, 1 tester waiting, 1 reviewer in attention."""
+    manager = fake_agent(project, pane_id="%11")
+    frame = [
+        FleetAgentStatus(agent=manager, state="working"),
+        FleetAgentStatus(agent=_member(project, "coder-a", "coder"), state="working"),
+        FleetAgentStatus(agent=_member(project, "coder-b", "coder"), state="working"),
+        FleetAgentStatus(agent=_member(project, "tester-1", "tester"), state="waiting"),
+        FleetAgentStatus(agent=_member(project, "reviewer-1", "reviewer"), state="attention"),
+        # An ended row the listing keeps while its window stands (#138) is not the team.
+        FleetAgentStatus(agent=_member(project, "coder-old", "coder", ended=True), state="exited"),
+    ]
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, bool, bool]:
+        def no_read(*args: object, **kwargs: object) -> None:
+            raise AssertionError("the strip reads the frame it was handed, nothing else")
+
+        monkeypatch.setattr(fleet_service, "list_agents", no_read)
+        view = host.query_one(ProjectView)
+        view.refresh_status(frame)
+        await pilot.pause()
+        strip = host.query_one("#team-strip", Static)
+        team = (shown(strip), strip.display)
+        view.refresh_status(frame[:1])  # the manager alone
+        await pilot.pause()
+        return (*team, strip.display)
+
+    text, displayed, alone = drive(project, scenario)
+    assert text == "🔨 2▶  🧪 1⏸  👀 1🔔  · board for detail"
+    assert displayed is True
+    assert alone is False
+
+
+def test_the_team_strip_shows_each_state_of_a_role_and_a_role_it_has_no_icon_for(
+    project: ProjectInfo,
+) -> None:
+    frame = [
+        FleetAgentStatus(agent=_member(project, "coder-a", "coder"), state="working"),
+        FleetAgentStatus(agent=_member(project, "coder-b", "coder"), state="limited"),
+        FleetAgentStatus(agent=_member(project, "coder-c", "coder"), state="waiting"),
+        FleetAgentStatus(agent=_member(project, "docs-1", "docs-writer"), state="waiting"),
+    ]
+    text = project_view_module.team_strip_text(frame)
+    assert text is not None
+    assert text.plain == "🔨 1▶ 1⏸ 1⏳  🤖 docs-writer 1⏸  · board for detail"
+    assert project_view_module.team_strip_text(frame[:0]) is None
+
+
+def test_a_narrow_team_strip_is_cut_at_its_end_with_an_ellipsis(project: ProjectInfo) -> None:
+    """Review of #359's walk: under 62 columns the strip word-wrapped and its one row hid
+    the rest, a whole word at a time and unmarked, so a role's counts vanished. One row,
+    cut at its end with an ellipsis."""
+    roles = ("coder", "tester", "reviewer", "validator", "docs-writer")
+    frame = [
+        FleetAgentStatus(agent=_member(project, f"{role}-1", role), state="working")
+        for role in roles
+    ]
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
+        host.query_one(ProjectView).refresh_status(frame)
+        await pilot.pause()
+        strip = host.query_one("#team-strip", Static)
+        # The whole row, padding included: the strip's content starts one cell in.
+        rows = strip.render_lines(Region(0, 0, strip.region.width, strip.region.height))
+        return ["".join(segment.text for segment in row).rstrip() for row in rows]
+
+    [row] = drive(project, scenario, size=(50, 30))
+    assert row.lstrip().startswith("🔨 1▶  🧪 1▶"), row
+    assert row.endswith("…"), row
+
+
+def test_a_click_on_the_team_strip_opens_the_board_tab(project: ProjectInfo) -> None:
+    manager = fake_agent(project, pane_id="%11")
+    coder = _member(project, "coder-a", "coder")
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, str]:
+        view = host.query_one(ProjectView)
+        view.refresh_status(
+            [
+                FleetAgentStatus(agent=manager, state="working"),
+                FleetAgentStatus(agent=coder, state="working"),
+            ]
+        )
+        await pilot.pause()
+        before = view.active
+        await pilot.click("#team-strip")
+        await pilot.pause()
+        return before, view.active
+
+    before, after = drive(project, scenario)
+    assert before == "tab-manager"
+    assert after == "tab-board"
+
+
 def test_a_resize_after_the_manager_leaves_keeps_the_no_manager_text(
     project: ProjectInfo,
 ) -> None:
@@ -986,7 +1139,8 @@ def test_board_tab_shows_this_projects_tasks_and_not_anothers(
     assert other.id != project.id
 
     async def rows(pilot: Pilot[None], host: Host) -> int:
-        return host.query_one("#tasks", DataTable).row_count
+        """The task rows: with none open, the table's one row is the empty state (#286)."""
+        return sum(key.value != EMPTY_ROW for key in host.query_one("#tasks", DataTable).rows)
 
     assert drive(project, rows) == 2
     assert drive(other, rows) == 0  # the panel reads the project it was given, not the cwd
@@ -1380,7 +1534,7 @@ def test_a_nickname_the_store_refuses_is_said_and_nothing_is_written(
         assert store.get_project(project.id).nickname is None  # type: ignore[union-attr]
 
 
-# --- the Explainability tab -----------------------------------------------------------------
+# --- the dormant Explainability view (no tab mounts it; drive_explainability does) ------------
 
 
 def test_explainability_enable_writes_the_switch_and_disable_clears_it(
@@ -1389,7 +1543,6 @@ def test_explainability_enable_writes_the_switch_and_disable_clears_it(
     async def scenario(
         pilot: Pilot[None], host: Host
     ) -> tuple[bool, str, bool, list[tuple[str, str]]]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         view = host.query_one(ExplainabilityView)
         await pilot.click("#explainability-enable")
@@ -1406,7 +1559,7 @@ def test_explainability_enable_writes_the_switch_and_disable_clears_it(
             host.notices,
         )
 
-    enabled, status, disabled, notices = drive(project, scenario)
+    enabled, status, disabled, notices = drive_explainability(project, scenario)
     assert enabled is True  # the artefact: config.toml on disk
     assert "enabled:   on" in status  # …and the tab re-read it through the services
     assert disabled is False
@@ -1435,7 +1588,6 @@ def test_disable_offers_reset_for_a_leftover_proxy_and_reset_removes_it(
     )
 
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[bool, bool, list[Any]]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         reset = host.query_one("#explainability-reset", Button)
         hidden_before = not reset.display
@@ -1446,7 +1598,7 @@ def test_disable_offers_reset_for_a_leftover_proxy_and_reset_removes_it(
         await settle(pilot)
         return hidden_before and not reset.display, offered, list(host.notices)
 
-    hidden, offered, notices = drive(project, scenario)
+    hidden, offered, notices = drive_explainability(project, scenario)
     assert offered, notices
     assert hidden, "hidden until Disable finds something, and again once Reset ran"
     assert any(str(settings) in m and s == "warning" for m, s in notices), notices
@@ -1475,7 +1627,6 @@ def test_explainability_ship_drains_through_the_service_and_register_refuses_unc
     monkeypatch.setattr(ops, "register_roster", never)
 
     async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         await pilot.click("#explainability-ship")
         await settle(pilot)
@@ -1483,7 +1634,7 @@ def test_explainability_ship_drains_through_the_service_and_register_refuses_unc
         await settle(pilot)
         return host.notices
 
-    notices = drive(project, scenario)
+    notices = drive_explainability(project, scenario)
     assert drains == [500]  # one press, one drain, the CLI's default limit
     assert ("shipped 3 records\nruns: run-1", "information") in notices
     assert rosters == []  # no gateway configured → refused before any request
@@ -1609,7 +1760,6 @@ def test_the_explainability_tab_attaches_a_key_to_the_active_project_without_ech
     async def scenario(
         pilot: Pilot[None], host: Host
     ) -> tuple[str, list[tuple[str, str]], str, str]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         view = host.query_one(ExplainabilityView)
         before = view.status_text
@@ -1618,7 +1768,7 @@ def test_the_explainability_tab_attaches_a_key_to_the_active_project_without_ech
         field = host.query_one("#explainability-key", Input)
         return before, list(host.notices), field.value, view.status_text
 
-    before, notices, field_after, status = drive(project, scenario)
+    before, notices, field_after, status = drive_explainability(project, scenario)
     assert "project:" in before and "no key of its own" in before
     attached = [m for m, _ in notices if m.startswith("✓ key attached to")]
     assert len(attached) == 1, notices
@@ -1658,13 +1808,12 @@ def test_save_setup_asks_git_and_writes_the_key_off_the_ui_thread(
     monkeypatch.setattr(ops, "attach_project_key", attach)
 
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[tuple[str, str]], str]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         _attach_in_setup(host, "pk-worker-0123456789")
         await settle(pilot)
         return list(host.notices), host.query_one("#explainability-key", Input).value
 
-    notices, field = drive(project, scenario)
+    notices, field = drive_explainability(project, scenario)
     # The status worker asks `key_project` too, off the UI thread; none of the asks is on it.
     assert on_ui_thread["git"] and not any(on_ui_thread["git"]), on_ui_thread
     assert on_ui_thread["write"] == [False]
@@ -1702,7 +1851,6 @@ def test_a_config_write_made_while_save_setup_runs_is_not_saved_over(
     async def scenario(
         pilot: Pilot[None], host: Host
     ) -> tuple[list[bool], list[bool], list[tuple[str, str]]]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         armed.set()
         _attach_in_setup(host, "pk-race-0123456789")
@@ -1724,7 +1872,7 @@ def test_a_config_write_made_while_save_setup_runs_is_not_saved_over(
         after = [host.query_one(switch, Button).disabled for switch in switches]
         return during, after, list(host.notices)
 
-    during, after, notices = drive(project, scenario)
+    during, after, notices = drive_explainability(project, scenario)
     assert during == [True, True], "the switches are off while the save runs"
     assert after == [False, False], "and on again once it answered"
     assert not any("tracing disabled" in m for m, _ in notices), notices
@@ -1755,13 +1903,12 @@ def test_a_key_the_attach_could_not_put_back_is_named_on_the_form(
     monkeypatch.setattr(ops, "store_project_api_key", full_disk_for_the_put_back)
 
     async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         _attach_in_setup(host, "pk-refused-0123456789")
         await settle(pilot)
         return list(host.notices)
 
-    notices = drive(project, scenario)
+    notices = drive_explainability(project, scenario)
     [failed] = [m for m, s in notices if s == "error" and "could not be attached" in m]
     assert "database is locked" in failed
     assert "could not be put back as it was" in failed and "it was removed" in failed
@@ -1775,7 +1922,6 @@ def test_the_explainability_tab_has_one_key_field_and_the_box_says_whose_key(
     now: unticked it is the machine key, as the Setup form always wrote it."""
 
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[str | None], bool]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         view = host.query_one(ExplainabilityView)
         secret_fields = [field.id for field in view.query(Input) if field.password]
@@ -1785,7 +1931,7 @@ def test_the_explainability_tab_has_one_key_field_and_the_box_says_whose_key(
         await settle(pilot)
         return secret_fields, box.disabled
 
-    secret_fields, disabled = drive(project, scenario)
+    secret_fields, disabled = drive_explainability(project, scenario)
     assert secret_fields == ["explainability-key"]
     assert disabled is False, "a page has a project to own a key"
     assert explainability_service.stored_api_key() == "AIS_machine_0123456789"
@@ -1807,13 +1953,12 @@ def test_a_project_key_is_taken_beside_a_target_that_names_its_own_variable(
     monkeypatch.delenv("MY_KEY", raising=False)
 
     async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         _attach_in_setup(host, "pk-own-var-0123456789")
         await settle(pilot)
         return list(host.notices)
 
-    notices = drive(project, scenario)
+    notices = drive_explainability(project, scenario)
     assert not any("reads its key from $MY_KEY" in m for m, _ in notices), notices
     resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
     assert (resolved.api_key, resolved.key_source) == ("pk-own-var-0123456789", "project")
@@ -1828,7 +1973,6 @@ def test_a_project_key_for_a_deployment_nothing_answers_to_is_refused(
     save and the key is bound to it, not to the machine's active one."""
 
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[tuple[str, str]], str]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         _attach_in_setup(host, "pk-typo-0123456789", target="prdo")
         await settle(pilot)
@@ -1838,7 +1982,7 @@ def test_a_project_key_for_a_deployment_nothing_answers_to_is_refused(
         await settle(pilot)
         return refused, kept
 
-    refused, kept = drive(project, scenario)
+    refused, kept = drive_explainability(project, scenario)
     assert any(m.startswith("no target 'prdo' on this machine") for m, _ in refused), refused
     assert kept == "pk-typo-0123456789", "refused before a write began: the field keeps it"
     assert "prdo" not in load_config().explainability.targets
@@ -1860,7 +2004,6 @@ def test_make_active_does_not_make_a_typo_a_known_deployment_for_the_key(
     names is the same question (G2)."""
 
     async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         host.query_one("#explainability-switch", Checkbox).value = True
         _attach_in_setup(host, "pk-typo-0123456789", target="prdo")
@@ -1872,7 +2015,7 @@ def test_make_active_does_not_make_a_typo_a_known_deployment_for_the_key(
         await settle(pilot)
         return list(host.notices)
 
-    notices = drive(project, scenario)
+    notices = drive_explainability(project, scenario)
     refused = [m for m, _ in notices if m.startswith("no target 'prdo' on this machine")]
     assert len(refused) == 2, notices
     assert f"named by ${ops.TARGET_ENV_VAR}" in refused[1]
@@ -1906,14 +2049,13 @@ def test_make_active_does_not_make_a_typo_known_beside_a_destination(
         )
 
     async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         host.query_one("#explainability-switch", Checkbox).value = True
         _attach_in_setup(host, "pk-typo-0123456789", target="prdo")
         await settle(pilot)
         return list(host.notices)
 
-    notices = drive(project, scenario)
+    notices = drive_explainability(project, scenario)
     assert any(m.startswith("no target 'prdo' on this machine") for m, _ in notices), notices
     assert not any("setup saved" in m for m, _ in notices), notices
     assert load_config().explainability.target == "stg", "the machine did not move to the typo"
@@ -1959,13 +2101,12 @@ def test_a_key_the_projects_launches_do_not_resolve_is_not_called_the_one_they_u
     G3)."""
 
     async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         _attach_in_setup(host, "pk-prod-0123456789", target="prod", gateway="https://p.example")
         await settle(pilot)
         return list(host.notices)
 
-    notices = drive(project, scenario)
+    notices = drive_explainability(project, scenario)
     [(attached, severity)] = [(m, s) for m, s in notices if m.startswith("✓ key attached to")]
     assert "authenticate the proxy with it" not in attached, attached
     assert "not used by this project's launches, which resolve target stg" in attached
@@ -1981,7 +2122,6 @@ def test_the_save_again_the_attach_asks_for_is_not_refused(
     key it attached."""
 
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[bool, list[tuple[str, str]]]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         _attach_in_setup(host, "pk-prod-0123456789", target="prod", gateway="https://p.example")
         await settle(pilot)
@@ -1991,7 +2131,7 @@ def test_the_save_again_the_attach_asks_for_is_not_refused(
         await settle(pilot)
         return box, list(host.notices)
 
-    box, notices = drive(project, scenario)
+    box, notices = drive_explainability(project, scenario)
     assert box is False, "unticked with the key it attached"
     assert not any("attaches the workspace key typed beside it" in m for m, _ in notices), notices
     assert load_config().explainability.target == "prod", "the machine moved, as the notice said"
@@ -2004,13 +2144,12 @@ def test_this_project_only_with_no_key_is_refused_not_ignored(
     settings saved as the machine's (review of #170's Setup-form merge, G4)."""
 
     async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         _attach_in_setup(host, "", target="stg", gateway="https://g.example")
         await settle(pilot)
         return list(host.notices)
 
-    notices = drive(project, scenario)
+    notices = drive_explainability(project, scenario)
     assert any(
         m.startswith("'this project only' attaches the workspace key") and s == "warning"
         for m, s in notices
@@ -2031,14 +2170,13 @@ def test_a_machine_key_beside_its_own_variable_names_the_box_that_would_work(
     monkeypatch.delenv("MY_KEY", raising=False)
 
     async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         host.query_one("#explainability-key", Input).value = "AIS_machine_0123456789"
         host.query_one("#explainability-save", Button).press()
         await settle(pilot)
         return list(host.notices)
 
-    notices = drive(project, scenario)
+    notices = drive_explainability(project, scenario)
     [refused] = [m for m, _ in notices if "reads its key from $MY_KEY" in m]
     assert "tick 'this project only'" in refused
 
@@ -2058,7 +2196,6 @@ def test_under_a_hub_the_box_and_the_tab_say_whose_key_it_is(
     monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
 
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, list[tuple[str, str]], str]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         label = str(host.query_one("#explainability-key-project", Checkbox).label)
         _attach_in_setup(host, "pk-hub-0123456789")
@@ -2067,7 +2204,7 @@ def test_under_a_hub_the_box_and_the_tab_say_whose_key_it_is(
         await settle(pilot)
         return label, list(host.notices), host.query_one(ExplainabilityView).status_text
 
-    label, notices, status = drive(project, scenario)
+    label, notices, status = drive_explainability(project, scenario)
     assert label == "the hub (hub) only", label
     assert any(m.startswith("'the hub (hub) only' attaches") for m, _ in notices), notices
     [attached] = [m for m, _ in notices if m.startswith("✓ key attached to")]
@@ -2102,7 +2239,6 @@ def test_a_project_key_lands_where_its_destination_does_and_never_over_a_minted_
     explainability_service.store_project_api_key(project.id, "AIS_minted_key")
 
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[tuple[str, str]], str, str]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         _attach_in_setup(host, "pk-over-minted-0123456789")
         await settle(pilot)
@@ -2116,7 +2252,7 @@ def test_a_project_key_lands_where_its_destination_does_and_never_over_a_minted_
         await settle(pilot)
         return refused, kept, on_disk
 
-    refused, kept, on_disk = drive(project, scenario)
+    refused, kept, on_disk = drive_explainability(project, scenario)
     assert any("minted by the CLI" in m and s == "warning" for m, s in refused), refused
     assert kept == "pk-over-minted-0123456789", "refused before a write began: the field keeps it"
     assert on_disk == "AIS_minted_key"
@@ -2153,7 +2289,6 @@ def test_one_save_never_splits_a_project_key_and_its_settings_across_deployments
     async def scenario(
         pilot: Pilot[None], host: Host
     ) -> tuple[list[tuple[str, str]], tuple[str, str], set[str], bool]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         _attach_in_setup(host, "pk-split-0123456789", gateway="https://new.example")
         await settle(pilot)
@@ -2169,7 +2304,7 @@ def test_one_save_never_splits_a_project_key_and_its_settings_across_deployments
         await settle(pilot)
         return refused, kept, gateways, bound
 
-    refused, kept, gateways, bound = drive(project, scenario)
+    refused, kept, gateways, bound = drive_explainability(project, scenario)
     assert any(
         "belongs to target 'prod'" in m and "saved for 'stg'" in m and s == "warning"
         for m, s in refused
@@ -2199,13 +2334,12 @@ def test_a_store_that_cannot_say_whether_the_key_was_minted_refuses_the_attach(
     monkeypatch.setattr(view_module, "store_session", locked)
 
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[tuple[str, str]], str]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         _attach_in_setup(host, "pk-locked-0123456789")
         await settle(pilot)
         return list(host.notices), host.query_one("#explainability-key", Input).value
 
-    notices, kept = drive(project, scenario)
+    notices, kept = drive_explainability(project, scenario)
     refused = [m for m, s in notices if s == "error" and "could not be read" in m]
     assert refused and "database is locked" in refused[0], notices
     assert kept == "pk-locked-0123456789", "refused before a write began: the field keeps it"
@@ -2235,13 +2369,12 @@ def test_the_explainability_tab_is_about_its_own_project_not_the_pinned_one(
     other = _another_project_pinned(tmp_path)
 
     async def scenario(pilot: Pilot[None], host: Host) -> str:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         _attach_in_setup(host, "pk-page-0123456789")
         await settle(pilot)
         return host.query_one(ExplainabilityView).status_text
 
-    status = drive(project, scenario)
+    status = drive_explainability(project, scenario)
     with store_session() as store:
         assert store.project_explainability(project.id) is not None
         assert store.project_explainability(other.id) is None, "never the pinned project"
@@ -2274,13 +2407,12 @@ def test_the_explainability_tab_registers_the_roster_under_its_projects_key(
     monkeypatch.setattr(ops, "register_roster", register_roster)
 
     async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         await pilot.click("#explainability-register")
         await settle(pilot)
         return host.notices
 
-    notices = drive(project, scenario)
+    notices = drive_explainability(project, scenario)
     assert keys == ["pk-roster-0123456789"]
     assert any(m.startswith("✓ registered") for m, _ in notices), notices
 
@@ -2314,7 +2446,6 @@ def test_under_a_hub_the_explainability_tab_is_about_the_hub_its_launches_join(
     monkeypatch.setattr(ops, "register_roster", register_roster)
 
     async def scenario(pilot: Pilot[None], host: Host) -> str:
-        host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         _attach_in_setup(host, "pk-hub-0123456789")
         await settle(pilot)
@@ -2322,7 +2453,7 @@ def test_under_a_hub_the_explainability_tab_is_about_the_hub_its_launches_join(
         await settle(pilot)
         return host.query_one(ExplainabilityView).status_text
 
-    status = drive(project, scenario)
+    status = drive_explainability(project, scenario)
     with store_session() as store:
         assert store.project_explainability(project_id_for(hub)) is not None
         assert store.project_explainability(project.id) is None, "not the page under a hub"

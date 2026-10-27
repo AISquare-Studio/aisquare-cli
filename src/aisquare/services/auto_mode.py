@@ -453,7 +453,7 @@ def spawn_note(
         f"auto mode behind the explainability proxy: {why} — expect its tool calls to be refused "
         f"({SDK_ISSUE}); set a non-classifier mode for {role} ({_mode_step(role, config)}) and "
         f"`{_restart_off_auto(project, label)}` (its session resumes), or see "
-        f"`aisquare doctor` ({CHECK_NAME})"
+        f"`aisquare explainability doctor` ({CHECK_NAME})"
     )
 
 

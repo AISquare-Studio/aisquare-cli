@@ -42,6 +42,8 @@ SHLEX_KEPT: dict[tuple[str, str], tuple[int, str]] = {
     ("cli/team.py", "_reading_env_files"): (2, "the same sh line: $(…) && export"),
     ("cli/team.py", "_describe"): (1, "a binding's args as shown for editing, not a command"),
     ("cli/explainability.py", "env"): (1, "export lines for sh's eval"),
+    ("cli/ui/attach.py", "compose"): (1, "a binding's args put in the bind form to edit"),
+    ("cli/ui/views/app_settings.py", "binding_text"): (1, "a binding's args as shown"),
 }
 
 

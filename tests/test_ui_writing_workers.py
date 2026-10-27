@@ -29,7 +29,6 @@ from aisquare.cli.ui import board
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views import agent as agent_view
 from aisquare.cli.ui.views import app_settings as app_settings_view
-from aisquare.cli.ui.views import explainability as explainability_view
 from aisquare.cli.ui.views import welcome as welcome_view
 from aisquare.core import paths
 from aisquare.core.store import store_session
@@ -133,9 +132,18 @@ def started_workers(source: str, namespace: Mapping[str, Any]) -> set[str]:
     return names
 
 
+DORMANT = {Path("views/explainability.py")}
+"""UI modules no screen mounts: they start workers, but nothing in the shell can run them, so
+the hand-over has none of theirs to wait for or refuse. A re-mounted view (the note at the top
+of the module) goes back into the walk by leaving this set, and into both lists."""
+
+
 def _ui_workers() -> set[str]:
     names: set[str] = set()
-    for path in sorted(Path(ui_package.__file__).parent.rglob("*.py")):
+    package = Path(ui_package.__file__).parent
+    for path in sorted(package.rglob("*.py")):
+        if path.relative_to(package) in DORMANT:
+            continue
         module = importlib.import_module(_module_name(path))
         names |= started_workers(path.read_text(encoding="utf-8"), vars(module))
     return names
@@ -235,22 +243,19 @@ def test_welcomes_folder_check_opens_the_store_so_update_waits_for_it(tmp_path: 
 def test_the_reads_round_22_found_open_the_store_and_are_waited_for_by_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round 22 of #257: the workspace credits, Explainability's status and step 1's list
-    were filed as reads that write nothing. The credits and the status resolve a project's
-    destination in the store and write the credits' cache, and step 1's list with no frame
-    from the shell asks the store, which on a fresh machine makes it. None is listed now:
-    every worker the UI starts is waited for unless it is safe to cut off."""
+    """Round 22 of #257: the workspace credits, Explainability's status (its view is dormant
+    now) and step 1's list were filed as reads that write nothing. The credits and the
+    status resolve a project's destination in the store and write the credits' cache, and
+    step 1's list with no frame from the shell asks the store, which on a fresh machine
+    makes it. None is listed now: every worker the UI starts is waited for unless it is
+    safe to cut off."""
     monkeypatch.chdir(tmp_path)
     assert not paths.db_path().exists()
 
     welcome_view._find_candidates(None)
 
     assert paths.db_path().exists(), "step 1's list without a frame created the store"
-    found = {
-        accounts_view.CREDITS_WORKER,
-        explainability_view.STATUS_WORKER,
-        welcome_view.worker_name("candidates"),
-    }
+    found = {accounts_view.CREDITS_WORKER, welcome_view.worker_name("candidates")}
     assert found <= WAITED, found - WAITED
 
 

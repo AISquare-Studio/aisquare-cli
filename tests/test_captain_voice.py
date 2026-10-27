@@ -66,6 +66,32 @@ class Spoken:
         self.lines.append(text)
 
 
+class StepClock:
+    """The wake window's clock (``Hooks.clock``), moved only by the test: a window is open for
+    exactly as long as the test says, whatever the box does between two frames."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.reads = 0
+        """How often the server has read it: the window's timer reads it on each pass, so a test
+        that moved it waits for the reads that follow to know the timer has looked."""
+
+    def __call__(self) -> float:
+        self.reads += 1
+        return self.now
+
+    def step(self, seconds: float) -> None:
+        self.now += seconds
+
+    def looked(self, times: int = 2, *, seconds: float = 10.0) -> None:
+        """Wait until the server has read the clock ``times`` more times than it had."""
+        wanted = self.reads + times
+        deadline = time.monotonic() + seconds
+        while self.reads < wanted and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert self.reads >= wanted, "the server never read the clock again"
+
+
 class Deliveries:
     """``brain.say`` as a recorder: what was delivered, answered as told."""
 
@@ -78,10 +104,14 @@ class Deliveries:
         raises: Exception | None = None,
         during: Callable[[], None] | None = None,
         before_typing: Callable[[], None] | None = None,
+        hold: threading.Event | None = None,
     ) -> None:
         self.texts: list[str] = []
         self.reply = reply
         self.delay_s = delay_s
+        self.hold = (
+            hold  # the reply waits until the test sets this: a slow one, however fast the box
+        )
         self.fail = fail
         self.raises = raises  # any other exception out of the delivery seam (S2)
         self.during = during  # what the captain does inside the turn (a speak() call)
@@ -98,6 +128,8 @@ class Deliveries:
             self.during()
         if self.delay_s:
             time.sleep(self.delay_s)
+        if self.hold is not None:
+            assert self.hold.wait(30), "the test never let the reply go"
         if self.fail:
             raise DeliveryFailed(self.fail)
         if self.raises is not None:
@@ -117,6 +149,7 @@ class Harness:
         wake_word: str = "",
         wake_window_s: float = 5.0,
         transcriber: voice.Transcriber | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.transcribers: list[FakeTranscriber] = []
         self.spoken = Spoken()
@@ -166,6 +199,7 @@ class Harness:
             poll_s=0.02,
             wake_word=wake_word,
             wake_window_s=wake_window_s,
+            **({} if clock is None else {"clock": clock}),
         )
         self.app = build_app(token=TOKEN, hooks=self.hooks, mode=mode)
 
@@ -596,17 +630,27 @@ def test_when_the_home_board_cannot_be_read_the_reply_is_still_spoken_and_it_is_
 
 
 def test_a_slow_reply_earns_one_spoken_cue_before_it_arrives() -> None:
-    harness = Harness(deliveries=Deliveries("here it is", delay_s=0.3), cue_after_s=0.05)
+    """The reply is held until the cue has been spoken, not slept 0.3 s against a cue due
+    after 0.05 s: on a loaded box the reply could beat its cue."""
+    slow = threading.Event()
+    harness = Harness(deliveries=Deliveries("here it is", hold=slow), cue_after_s=0.05)
     with TestClient(harness.app) as client:
         for connection in _authed(client):
-            _burst(connection)
+            try:
+                _burst(connection)
+                _spoken(harness, 1)  # the cue, with the reply still held
+                assert harness.spoken.lines == ["on it"], "the cue came before the reply"
+            finally:
+                slow.set()
             _until(connection, "reply")
             _spoken(harness, 2)
     assert harness.spoken.lines == ["on it", "here it is"]
 
 
 def test_a_quick_reply_earns_no_cue() -> None:
-    harness = Harness(deliveries=Deliveries("quick"), cue_after_s=0.5)
+    """A reply that is quick is one that beats the cue. The cue is a minute away, so a slow
+    box cannot make this reply late for it: it is quick however long the box takes."""
+    harness = Harness(deliveries=Deliveries("quick"), cue_after_s=60.0)
     with TestClient(harness.app) as client:
         for connection in _authed(client):
             _burst(connection)
@@ -742,11 +786,13 @@ def test_the_wake_word_alone_opens_a_short_window_for_the_next_utterance() -> No
     """'Captain' alone: the awake frame (the page shows listening and plays its tone) and the
     next utterance is delivered without the wake word; after the window it is dropped again.
     Nothing is spoken for the window: the machine's voice would be heard inside it."""
+    clock = StepClock()  # the window is 0.4 s of THIS clock, which stands still until stepped
     harness = Harness(
         canned=["Captain", "find me this", "Captain.", "too late"],
         mode="listen",
         wake_word="captain",
         wake_window_s=0.4,
+        clock=clock,
     )
     with TestClient(harness.app) as client:
         for connection in _authed(client):
@@ -760,10 +806,11 @@ def test_the_wake_word_alone_opens_a_short_window_for_the_next_utterance() -> No
             assert _until(connection, "reply")["text"] == "done"
             _say(connection)  # "Captain." again — the window opens again
             assert _until(connection, "awake")["on"] is True
+            clock.step(0.5)  # silence, past the window's 0.4 s
             assert _until(connection, "awake")["on"] is False, (
                 "silence: the window closes on its own"
             )
-            time.sleep(0.2)  # and stays closed
+            clock.step(0.2)  # and stays closed
             _say(connection)
             final = _until(connection, "stt")
             while not final["final"]:
@@ -893,29 +940,52 @@ def test_listen_in_the_window_the_next_utterance_shows_live() -> None:
 def test_a_request_begun_inside_the_window_is_delivered_though_its_final_lands_after_it() -> None:
     """S1: the window a bare 'Captain' opens is for the NEXT request, judged when it BEGAN. A
     request still being spoken when the window's seconds run out was dropped after its words
-    showed live."""
+    showed live.
+
+    Both halves are pinned on a clock the test moves, which stays past the window for the whole
+    of the request: the window's timer does not close it while the request is being spoken (no
+    ``awake`` frame comes between the words and the end of the audio), and the request is
+    judged by when it began, not by the clock at its final (delivered, and its final not
+    dropped for want of the wake word)."""
+    clock = StepClock()  # the request begins inside the window because the test says it does
     harness = Harness(
-        canned=["Captain", "find me this"], mode="listen", wake_word="captain", wake_window_s=0.3
+        canned=["Captain", "find me this"],
+        mode="listen",
+        wake_word="captain",
+        wake_window_s=0.3,
+        clock=clock,
     )
     with TestClient(harness.app) as client:
         for connection in _authed(client):
             _say(connection)
             assert _until(connection, "awake")["on"] is True
-            for _ in range(FRAMES_PER_SECOND // 4):  # the request begins inside the window …
+            for _ in range(FRAMES_PER_SECOND):  # the request begins inside the window …
                 connection.send_bytes(LOUD)
-            time.sleep(0.6)  # … and is still being spoken when the window's time is up
-            _say(connection)
+            # … which was judged as it began, and the live line it shows (whole, inside a window)
+            # says so: the clock moves on once the server has said it, never before. A step
+            # made on the audio's having been fed alone could land before the verdict did.
+            live = _until(connection, "stt")
+            assert not live["final"] and live["text"] == "find me this"
+            clock.step(0.6)  # … and is still being spoken when the window's time is up
+            # The window's timer has looked at the clock twenty-five times (poll_s is 0.02: half a
+            # second) and held: one that held a few passes and then closed is no better than one
+            # that never held.
+            clock.looked(25)
+            # Every frame the server sent so far is read, up to its answer to a frame it does
+            # not know: an ``awake`` among them is the window closed while the request is spoken.
+            connection.send_text(json.dumps({"t": "probe"}))
+            until_probe: list[dict[str, Any]] = []
+            while not until_probe or until_probe[-1]["t"] != "error":
+                until_probe.append(json.loads(_text(connection)))
+            assert not [f for f in until_probe if f["t"] == "awake"], until_probe
+            _say(connection)  # the request ends, with the window still out of time
             frames: list[dict[str, Any]] = []
             while not frames or frames[-1]["t"] != "reply":
                 frames.append(json.loads(_text(connection)))
+    finals = [f for f in frames if f["t"] == "stt" and f["final"]]
+    assert [f["text"] for f in finals] == ["find me this"], "its final was dropped for no wake word"
     assert frames[-1]["text"] == "done"
     assert harness.deliveries.texts == ["find me this"]
-    order = [
-        f["t"] if f["t"] != "stt" or not f["final"] else "final"
-        for f in frames
-        if f["t"] in ("awake", "reply") or (f["t"] == "stt" and f["final"])
-    ]
-    assert order.index("final") < order.index("awake"), f"the window closed mid-request: {order}"
 
 
 def test_meeting_speech_with_the_captain_mid_sentence_never_shows_on_the_page() -> None:
@@ -1011,9 +1081,11 @@ def test_a_typed_request_closes_an_open_window() -> None:
 
 def test_the_servers_own_speech_closes_an_open_window() -> None:
     """coderp's minor: a reply spoken while a bare 'Captain' window is open reaches the mic
-    inside it, and would be delivered as a request."""
+    inside it, and would be delivered as a request. The answer is held until the window is
+    open (it was slept for half a second, which a loaded box could outlast)."""
+    on_its_way = threading.Event()
     harness = Harness(
-        deliveries=Deliveries(delay_s=0.5),
+        deliveries=Deliveries(hold=on_its_way),
         canned=["Captain"],
         mode="listen",
         wake_word="captain",
@@ -1021,9 +1093,12 @@ def test_the_servers_own_speech_closes_an_open_window() -> None:
     )
     with TestClient(harness.app) as client:
         for connection in _authed(client):
-            connection.send_text(json.dumps({"t": "text", "text": "how is the fold"}))
-            _say(connection)  # 'Captain' alone, while the answer is on its way
-            assert _until(connection, "awake")["on"] is True
+            try:
+                connection.send_text(json.dumps({"t": "text", "text": "how is the fold"}))
+                _say(connection)  # 'Captain' alone, while the answer is on its way
+                assert _until(connection, "awake")["on"] is True
+            finally:
+                on_its_way.set()
             _until(connection, "reply")
             assert _until(connection, "awake")["on"] is False, "closed before the reply is spoken"
             _spoken(harness, 1)

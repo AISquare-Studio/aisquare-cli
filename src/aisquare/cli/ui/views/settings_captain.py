@@ -3,9 +3,10 @@
 One box, *Captain (experimental)*. A tick saves ``[experimental] captain`` through
 ``core.config.save_config``, the one writer, which is what ``aisquare config set
 experimental.captain true`` writes, and posts :class:`CaptainSwitched`. The shell then
-shows or hides the ``★`` and the Captain section and starts or stops the captain's part
-of its fleet read and its ui receiver, at once (``FleetApp.on_captain_switched``). It
-took ``config set`` and a restart, which the owner could not find.
+shows or hides *Start captain* (the captain's row while it runs) and starts or stops the
+captain's part of its fleet read and its ui receiver, at once
+(``FleetApp.on_captain_switched``). It took ``config set`` and a restart, which the owner
+could not find.
 
 ``AISQUARE_EXPERIMENTAL_CAPTAIN`` wins over the config (``core.experimental``). While it is
 set, the box shows the state it forces, greyed, and one line says why: a tick would save
@@ -30,8 +31,8 @@ from aisquare.core import experimental
 from aisquare.core.config import AppConfig, load_config, save_config
 
 ABOUT = (
-    "the home-level agent that unblocks your agents: ★ beside Fleet, and its section above "
-    "the projects"
+    "the home-level agent that unblocks your agents: Start captain at the top of the sidebar, "
+    "and its row there while it runs"
 )
 """The line under the box while the config decides."""
 TITLE = ("Captain", "experimental")
@@ -84,7 +85,7 @@ class CaptainToggle(Vertical):
     def reread(self, config: AppConfig) -> None:
         """The form re-read the file (Reload, Save, Reset all): the box shows what it holds,
         and the shell follows when that moved the switch — Reset all turned a ticked captain
-        off in the file while the ★ and the Captain section stayed until a restart. While
+        off in the file while Start captain and the captain's row stayed until a restart. While
         the variable decides, the box keeps the state it forces."""
         if experimental.captain_forced() is not None:
             return

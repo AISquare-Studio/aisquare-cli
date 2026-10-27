@@ -986,16 +986,20 @@ def test_fix_can_select_the_target_it_enables() -> None:
 
 
 def test_doctor_runs_everything_else_when_the_sdk_is_absent(runner: CliRunner) -> None:
-    """Acceptance: without the extra installed, doctor is unaffected."""
+    """Acceptance: without the extra installed, doctor is unaffected, and the explainability
+    section, which is ``explainability doctor``'s now, answers without it."""
     from aisquare.cli.app import app as cli_app
 
     runner.invoke(cli_app, ["init", "--no-onboard"])
     result = runner.invoke(cli_app, ["doctor"])
+    section = runner.invoke(cli_app, ["explainability", "doctor"])
 
     assert result.exit_code == 0, result.output
     assert "✓ python" in result.output
     assert "✓ home" in result.output
-    assert "explainability" in result.output
+    assert "explainability" not in result.output
+    assert section.exit_code == 0, section.output
+    assert "explainability" in section.output
 
 
 def test_the_group_is_listed_in_help(runner: CliRunner) -> None:
@@ -1030,7 +1034,7 @@ def test_enable_is_the_one_command_that_turns_tracing_on(runner: CliRunner) -> N
     assert settings.target == "prod"
     assert settings.targets["prod"].gateway_url == "https://prod.example"
     assert settings.targets["prod"].api_key_env == "PROD_KEY"
-    assert "aisquare doctor --live" in result.output
+    assert "aisquare explainability doctor --live" in result.output
 
 
 def test_disable_keeps_the_targets_it_was_given(runner: CliRunner) -> None:
@@ -1120,6 +1124,8 @@ def test_no_command_ever_prints_the_key(runner: CliRunner, monkeypatch: pytest.M
             runner.invoke(cli_app, ["explainability", "enable"]).output,
             runner.invoke(cli_app, ["doctor", "--live"]).output,
             runner.invoke(cli_app, ["--json", "doctor", "--live"]).output,
+            runner.invoke(cli_app, ["explainability", "doctor", "--live"]).output,
+            runner.invoke(cli_app, ["--json", "explainability", "doctor", "--live"]).output,
         ]
     finally:
         server.shutdown()
@@ -1138,7 +1144,7 @@ def test_doctor_live_reports_the_round_trip_to_the_operator(
 
     try:
         save_config(AppConfig(explainability=_wired(url, proxy_url="http://127.0.0.1:9")))
-        result = runner.invoke(cli_app, ["doctor", "--live"])
+        result = runner.invoke(cli_app, ["explainability", "doctor", "--live"])
     finally:
         server.shutdown()
 

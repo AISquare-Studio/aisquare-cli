@@ -191,12 +191,12 @@ class HandoffBrief:
             source = claude_accounts_core.agent_label(self.source_agent)
             cut_note = ", its start cut to fit" if cut else ""
             middle = [
-                f"{_name(self.source)}'s conversation on {source}, newest last{cut_note}:",
+                f"{self._name(self.source)}'s conversation on {source}, newest last{cut_note}:",
                 *lines,
             ]
         elif self.conversation:
             where = "in the brief file, too long for here" if self.path else "too long for here"
-            middle = [f"({_name(self.source)}'s conversation is {where})"]
+            middle = [f"({self._name(self.source)}'s conversation is {where})"]
         return _cut_bytes("\n".join([*head, *middle, *tail]), limit)
 
     def _head(self) -> tuple[list[str], list[str], list[str], list[str]]:
@@ -207,7 +207,7 @@ class HandoffBrief:
         # Each text is scrubbed whole BEFORE it is cut to its bound, never after: a clip that
         # takes the end of a key leaves its start, which no pattern of the scrub matches.
         raw = self._raw
-        label, name = _name(self.label), _name(self.source)
+        label, name = self._name(self.label), self._name(self.source)
         why = f" ({raw(self.reason)})" if self.reason else ""
         if self.fork:
             who = f"You are {label}, a fork" if label else "You are a fork"
@@ -258,6 +258,12 @@ class HandoffBrief:
         """``text`` scrubbed at this brief's level, whole."""
         return redact(text, self.redaction)
 
+    def _name(self, label: str | None) -> str:
+        """A teammate's label as a brief quotes it: scrubbed whole, then on one line, then at
+        most :data:`LABEL_MAX`. In that order, as every other text of the brief is: a clip that
+        takes the end of a key leaves its start, which no pattern of the scrub matches."""
+        return _clip(_single_line(self._raw(label or "")), LABEL_MAX)
+
     def _scrubbed_git(self, state: GitState) -> GitState:
         """The tree's facts scrubbed: a path or a commit subject can hold a token."""
         return replace(
@@ -269,7 +275,7 @@ class HandoffBrief:
 
     def _tail(self) -> list[str]:
         task = f" and `aisquare task show {self.task.id}`" if self.task is not None else ""
-        name = _name(self.source)
+        name = self._name(self.source)
         if self.fork:
             lines = [
                 f"Start by reading `aisquare board`{task}, then `git status` and `git log "
@@ -397,7 +403,8 @@ def write(brief: HandoffBrief, *, now: datetime | None = None) -> HandoffBrief:
     with its :attr:`~HandoffBrief.path` set; as it was, with none, when it could not be.
     The briefs older than :data:`KEEP_DAYS` are removed first (:func:`prune`)."""
     moment = now or datetime.now(tz=UTC)
-    named = brief.label or f"{brief.source}-fork"
+    # The label names the file, and the file's path is in the prompt: scrubbed, as the label is.
+    named = redact(brief.label or f"{brief.source}-fork", brief.redaction)
     slug = _SLUG.sub("-", named).strip("-")[:40] or "agent"
     digest = hashlib.sha256(f"{named}\0{moment.isoformat()}".encode()).hexdigest()[:8]
     target = brief_dir() / f"{moment.strftime('%Y%m%dT%H%M%SZ')}-{slug}-{digest}.md"
@@ -648,11 +655,6 @@ def _newest_that_fit(lines: Sequence[str], room: int) -> tuple[list[str], bool]:
 
 def _plain(line: str) -> str:
     return _ESCAPES.sub("", line).rstrip()
-
-
-def _name(label: str | None) -> str:
-    """A teammate's label as a brief quotes it: on one line, at most :data:`LABEL_MAX`."""
-    return _clip(_single_line(label or ""), LABEL_MAX)
 
 
 def _single_line(text: str) -> str:

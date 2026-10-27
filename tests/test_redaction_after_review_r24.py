@@ -21,12 +21,14 @@ hand-off (the first message and the brief file) are in
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
 from aisquare.core import redaction
 from aisquare.core.redaction import MARKER, redact
 from aisquare.models import RedactionLevel
+from aisquare.services import handoff
 from tests.test_the_hand_off_brief_keeps_its_head import _brief
 
 #: Assembled, not written out: a scanner takes a realistic shape in a file for a live key.
@@ -284,3 +286,69 @@ def test_a_brief_made_while_the_scrub_fails_holds_no_secret(
     text = brief.text()
 
     assert "sk-ant" not in text and "Zq9xW3mK" not in text
+
+
+# --- finding 10: the hand-off label is scrubbed, then clipped ---------------------------------
+
+KEY = "sk-" + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7"
+
+
+def _label(at: int) -> str:
+    """A label with :data:`KEY` starting at character ``at`` (after a hyphen, as words in a label
+    are joined: a key is not one after a letter)."""
+    return ("x" * (at - 1) + "-" if at else "") + KEY
+
+
+@pytest.mark.parametrize("fork", [False, True])
+@pytest.mark.parametrize("at", [0, 20, 60, 70, 75])
+def test_a_key_in_a_label_is_scrubbed_before_the_label_is_clipped(fork: bool, at: int) -> None:
+    """A key at character 70 of an 80-character label was cut to ``sk-Ab1Cd2E``, ten characters
+    short of any pattern, and quoted in the brief. Every text of the brief is scrubbed whole
+    before it is cut; the label was the one that was not (r24 10)."""
+    label = _label(at)
+    brief = _brief(1, label=label, source=label, fork=fork, conversation=("> hello",))
+
+    text = brief.text()
+
+    assert KEY[:6] not in text, text
+    if at + len(MARKER) <= handoff.LABEL_MAX:  # else the clip, after it, cuts the marker itself
+        assert MARKER in text
+
+
+def test_a_key_in_a_source_label_is_scrubbed_where_the_conversation_is_named_too() -> None:
+    """The heading of the conversation and the line that says where to start both name the
+    source: neither is part of a section that is scrubbed whole afterwards."""
+    label = _label(70)
+    brief = _brief(1, label="coder-2", source=label, conversation=("> hello",))
+
+    text = brief.text()
+
+    assert KEY[:6] not in text
+    assert text.count(MARKER) >= 3, "the opening, the conversation's heading and the last lines"
+
+
+def test_a_key_in_a_label_does_not_name_the_brief_file() -> None:
+    """The file is named from the label, and its path is the brief's last line."""
+    brief = handoff.write(_brief(0, label=KEY + "-extra", source="coder-1", path=None))
+
+    assert brief.path is not None
+    assert KEY[:8] not in brief.path.name
+    assert KEY[:8] not in handoff.prompt(brief)
+
+
+def test_a_label_with_no_key_in_it_is_quoted_as_it_was() -> None:
+    brief = _brief(0, label="coder-1", source="coder-1")
+
+    assert brief._name("coder-1") == "coder-1"
+    assert brief._name(None) == ""
+    assert brief._name("a\nb  c") == "a b c"
+    assert brief._name("x" * 200) == "x" * (handoff.LABEL_MAX) + " …"
+
+
+def test_a_label_is_taken_out_under_strict_as_the_rest_of_the_brief_is() -> None:
+    label = "me@example.com"
+    brief = _brief(0, label=label, source=label, redaction=RedactionLevel.strict)
+
+    assert "me@example.com" not in brief.text()
+    written = handoff.write(replace(brief, path=None))
+    assert written.path is not None and "example" not in written.path.name

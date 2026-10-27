@@ -3360,9 +3360,15 @@ class SqliteStore:
         (:meth:`upsert_session`, the resumed agent) and ``switch`` or ``restart``
         taking its mark back (:meth:`unmark_handover`) replace it. The rest of
         the heartbeat still lands.
+
+        ``last_seen_at`` never goes back: a notice leaves it one microsecond past its event
+        (:meth:`_seen_after_its_attention_event`), and a heartbeat in the same tick that wrote
+        the tick would step it back to the event's instant, where the needs feed reads the
+        notice after it as a first one again.
         """
         session_id = self._canonical_session_id(session_id)
-        sets, params = ["last_seen_at = ?", "ended_at = NULL"], [_now_iso()]
+        sets = ["last_seen_at = ?", "ended_at = NULL"]
+        params = [self._seen_not_before_its_stamp(session_id)]
         if cursor is not None:
             sets.append("cursor = ?")
             params.append(str(cursor))
@@ -3469,6 +3475,17 @@ class SqliteStore:
         )
         self._commit()
         return cursor.rowcount == 1
+
+    def _seen_not_before_its_stamp(self, session_id: str) -> str:
+        """Now, and never before the stamp the session's row already has (a notice's, a
+        microsecond past its event: see :meth:`_seen_after_its_attention_event`)."""
+        stamp = datetime.now(tz=UTC)
+        seen = self._conn.execute(
+            "SELECT last_seen_at FROM team_session WHERE id = ?", (session_id,)
+        ).fetchone()
+        if seen is not None:
+            stamp = max(stamp, datetime.fromisoformat(seen["last_seen_at"]))
+        return stamp.isoformat()
 
     def _seen_after_its_attention_event(self, session_id: str) -> str:
         """Now, and never the instant of the session's newest ``attention`` event since it was

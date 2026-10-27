@@ -165,3 +165,43 @@ def test_the_stamp_is_after_this_sessions_attention_event_and_no_other(
     assert event.created_at == tick
     assert session.last_seen_at == tick + timedelta(microseconds=1)
     assert remote_needs._needs_later_notice(event, None, session)
+
+
+def test_a_heartbeat_in_the_tick_of_the_notices_does_not_step_the_stamp_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``touch_session`` wrote the clock's reading, which in the tick of the first notice is the
+    event's instant: after the second notice a same-tick heartbeat (the next tool call, a
+    prompt) stepped ``last_seen_at`` back to the event, and the third notice read as the
+    first. The stamp stays one microsecond past the event, and a heartbeat in a later tick
+    still moves it on."""
+    work = tmp_path / "repo"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("AISQUARE_TEAM", "1")
+    tick = datetime.now(tz=UTC)
+    _the_clock_stops_at(monkeypatch, tick)
+    project = team_service.activate(work)
+    team_service.hook_session_start(SESSION, work, "startup")
+    team_service.hook_notification(SESSION, work, PROMPT, notification_type="permission_prompt")
+    team_service.hook_notification(
+        SESSION, work, "Claude Code needs your input", notification_type="elicitation_dialog"
+    )
+
+    def stamp_after(heartbeat: bool) -> tuple[datetime, bool]:
+        with store_session() as store:
+            if heartbeat:
+                store.touch_session(SESSION, cursor=3, state="working")
+            [event] = [
+                e for e in store.recent_events(project.id, limit=50) if e.kind == "attention"
+            ]
+            session = store.get_session(SESSION)
+        assert session is not None
+        return session.last_seen_at, remote_needs._needs_later_notice(event, None, session)
+
+    assert stamp_after(heartbeat=False) == (tick + timedelta(microseconds=1), True)
+    assert stamp_after(heartbeat=True) == (tick + timedelta(microseconds=1), True)
+
+    later_tick = tick + timedelta(milliseconds=16)
+    _the_clock_stops_at(monkeypatch, later_tick)
+    assert stamp_after(heartbeat=True)[0] == later_tick, "a heartbeat later on still lands"

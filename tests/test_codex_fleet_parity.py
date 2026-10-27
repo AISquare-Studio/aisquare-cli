@@ -2656,6 +2656,79 @@ def test_a_remembered_pick_is_claude_codes_alone_and_a_codex_spawn_gets_no_flag_
     assert receipt.agent.launch_spec is not None and receipt.agent.launch_spec.model is None
 
 
+def test_a_codex_pick_runs_through_its_own_model_slot_and_is_the_next_codex_spawns_alone(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """SCOPE #113 091, item 2: the Spawn dialog's Model and Effort on a Codex spawn were
+    inert. They reach Codex in its own words (``AgentAdapter.model_args``: ``--model``,
+    ``model_reasoning_effort``, never ``--effort``), are Codex's next pick
+    (``model_memory`` keyed by agent), and never Claude Code's; as on Claude Code (#441),
+    ``[agents.models.codex]`` wins over the last pick and a pick this spawn makes wins over
+    it. A restart starts the model it was given, the effort read as today's."""
+    config = load_config()
+    config.fleet.max_agents_per_project = 8  # six spawns in one project
+    save_config(config)
+    picked = fleet_service.spawn(
+        project, "coder", agent="codex", model="gpt-x", effort="high", worktree=False
+    )
+    first = _spawn_native(tmux)
+    assert _pair(first, "--model") == "gpt-x" and "--effort" not in first
+    assert 'model_reasoning_effort="high"' in first
+    assert model_memory.remembered(agent="codex") == model_memory.Pick("gpt-x", "high")
+    assert model_memory.remembered() == model_memory.Pick(), "Claude Code's pick is its own"
+
+    fleet_service.spawn(project, "coder", agent="codex", worktree=False)
+    again = _spawn_native(tmux)
+    assert _pair(again, "--model") == "gpt-x" and 'model_reasoning_effort="high"' in again
+    fleet_service.spawn(project, "coder", agent="claude-code", worktree=False)
+    claude = _spawn_native(tmux)
+    assert "--model" not in claude and "gpt-x" not in claude and "--effort" not in claude
+
+    config = load_config()
+    config.agents.models["codex"] = AgentModelSettings(model="gpt-test")
+    save_config(config)
+    fleet_service.spawn(project, "coder", agent="codex", worktree=False)
+    pinned = _spawn_native(tmux)
+    assert _pair(pinned, "--model") == "gpt-test", "the config's pin over the last pick"
+    assert 'model_reasoning_effort="high"' in pinned, "the pick where the config names none"
+    fleet_service.spawn(project, "coder", agent="codex", model="gpt-y", effort="", worktree=False)
+    chosen = _spawn_native(tmux)
+    assert _pair(chosen, "--model") == "gpt-y", "this spawn's pick over the config's pin"
+    assert not any("model_reasoning_effort" in arg for arg in chosen), "a cleared effort"
+    assert model_memory.remembered(agent="codex") == model_memory.Pick("gpt-y", None)
+
+    fleet_service.restart(project, picked.agent.label)
+    replayed = _spawn_native(tmux)
+    assert _pair(replayed, "--model") == "gpt-x", "a restart starts the model it was given"
+
+
+def test_a_codex_pick_the_roles_own_arguments_overrule_is_said_on_the_receipt(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """A Codex role's own arguments (``agent_args``) that name the model are not edited for a
+    pick, as Claude Code's ``--model`` is: the model they name runs, once, and the receipt
+    says the pick was not passed rather than dropping it without a word."""
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(
+        worktree=False, agent_args={"codex": ["--model", "gpt-role"]}
+    )
+    save_config(config)
+    receipt = fleet_service.spawn(project, "coder", agent="codex", model="gpt-x")
+    native = _spawn_native(tmux)
+    assert native.count("--model") == 1 and _pair(native, "--model") == "gpt-role"
+    assert any(
+        "not passed" in note and "gpt-role" in note and "Codex" in note for note in receipt.notes
+    ), receipt.notes
+    plain = fleet_service.spawn(project, "coder", agent="codex")
+    assert not any("not passed" in note for note in plain.notes), "no pick, nothing to say"
+
+
 def test_a_hand_launch_keeps_claude_codes_argv_and_gives_codex_its_pins(
     runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,

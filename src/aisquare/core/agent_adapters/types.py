@@ -356,7 +356,8 @@ class AgentCapabilities:
     """It can be started so that another client continues the session, titled (Claude Code's
     ``--remote-control``, #289): ``cli.launch`` adds the flag where ``[fleet.roles.<role>]
     remote_control`` or the spawn asks for it. A launch that asks of an agent without says
-    so and starts it as it was."""
+    so and starts it as it was, and the Spawn dialog shows its switch for an agent with it
+    alone."""
     compact: CompactCommand | None = None
     """The command that compacts the session when typed at its idle prompt
     (:class:`CompactCommand`): what P1 WS-4's quiet-point compaction of a manager types

@@ -112,10 +112,13 @@ class ReturnTo:
 
 class NewAccountRequested(Message):
     """Open the Accounts page's add-account flow — the picker's *+ New account* — and come
-    back to ``return_to`` once the sign-in lands."""
+    back to ``return_to`` once the sign-in lands. ``agent`` is whose account it adds: the
+    Spawn dialog's agent, so a Codex form signs Codex in (SCOPE #113 091, item 11); ``None``
+    for a caller that follows none (the persona picker's), which adds the default agent's."""
 
-    def __init__(self, return_to: ReturnTo | None = None) -> None:
+    def __init__(self, return_to: ReturnTo | None = None, *, agent: str | None = None) -> None:
         self.return_to = return_to
+        self.agent = agent
         super().__init__()
 
 

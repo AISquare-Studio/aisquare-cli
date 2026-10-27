@@ -23,6 +23,7 @@ import asyncio
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Callable, Coroutine, Iterator, Sequence
@@ -70,6 +71,7 @@ from aisquare.cli.ui.spawn import (
     dice_label,
     role_choices,
 )
+from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views.accounts import AccountsView
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import codenames, experimental, harness, personas
@@ -77,7 +79,7 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
 from aisquare.core.ids import new_task_id
 from aisquare.core.store import store_session
-from aisquare.core.tmux import Completed
+from aisquare.core.tmux import Completed, TmuxServer, WindowInfo
 from aisquare.models import (
     AccountsOverview,
     ClaudeAccount,
@@ -92,7 +94,7 @@ from aisquare.models import (
     TeamTask,
     UsageWindow,
 )
-from aisquare.services import agent_launch
+from aisquare.services import agent_launch, model_memory
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
@@ -1876,7 +1878,9 @@ def test_new_account_from_the_picker_opens_the_accounts_page_and_starts_its_add_
     register(tmp_path / "alpha", project_id="prj_a")
     started: list[object] = []
     monkeypatch.setattr(
-        AccountsView, "begin_claude_sign_in", lambda self, slot: started.append(slot)
+        AccountsView,
+        "begin_claude_sign_in",
+        lambda self, slot, agent=None: started.append((slot, agent)),
     )
 
     async def scenario(pilot: Pilot[None], app: RecordingFleetApp) -> str | None:
@@ -1886,7 +1890,9 @@ def test_new_account_from_the_picker_opens_the_accounts_page_and_starts_its_add_
         return app.content.current
 
     assert drive_app(scenario) == "accounts"
-    assert started == [None]  # a fresh slot's sign-in, the page's own flow
+    # A fresh slot's sign-in, the page's own flow; a request that names no agent adds the
+    # default agent's (the page's ``None``).
+    assert started == [(None, None)]
 
 
 def test_a_persona_this_project_lacks_still_shows_and_says_the_spawn_refuses_it(
@@ -3596,3 +3602,212 @@ def test_the_header_and_the_manager_refusal_name_the_project_by_its_nickname(
     assert options == ["Docs site", "Shared board"]
     assert "Shared board · ruby-fox" in second and "plain" not in second
     assert refusal == "Shared board already has a manager — one per project"
+
+
+# --- Codex beside 0.9.1's Spawn dialog (SCOPE #113 091, items 2, 9 and 11) ------------------
+
+
+def model_fields(dialog: SpawnDialog) -> tuple[str, str]:
+    """What Model and Effort hold: the model's text and the effort's value."""
+    return dialog.query_one("#spawn-model", Input).value, str(select(dialog, "effort").value)
+
+
+def test_model_and_effort_follow_the_agent_and_a_codex_pick_opens_the_next_codex_form(
+    git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 2: the fields showed Claude Code's last pick for a Codex agent, and what was typed
+    there was inert. They show the agent's own pick and follow an Agent pick as they follow a
+    role (a value typed in stays); the blank names what Codex is passed (``model_args``), never
+    Claude Code's ``opus``. A Codex spawn is sent its own pick, which ``fleet.spawn`` passes as
+    ``--model gpt-x`` and keeps for Codex alone (``tests/test_codex_fleet_parity.py``, the
+    service half); the next form on Codex opens on it, and on Claude Code on Claude Code's."""
+    model_memory.remember(model="opus", effort="xhigh")  # Claude Code's
+    sent: list[dict[str, Any]] = []
+
+    def spawn(project: ProjectInfo, role: str, **kwargs: Any) -> fleet_service.SpawnReceipt:
+        sent.append(kwargs)
+        model_memory.remember(model=kwargs["model"], effort=kwargs["effort"], agent=kwargs["agent"])
+        return receipt_for(project)
+
+    monkeypatch.setattr(fleet_service, "spawn", spawn)
+
+    async def pick(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [model_fields(dialog)]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        seen += [model_fields(dialog), dialog.query_one("#spawn-model", Input).placeholder]
+        dialog.query_one("#spawn-model", Input).value = "gpt-x"
+        select(dialog, "effort").value = "high"
+        await pilot.pause()
+        select(dialog, "agent").value = "claude-code"
+        await settle(pilot)
+        seen.append(model_fields(dialog))
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        submit(dialog).press()
+        await settle(pilot)
+        return seen
+
+    async def reopen(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [model_fields(dialog)]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        seen.append(model_fields(dialog))
+        submit(dialog).press()
+        await settle(pilot)
+        return seen
+
+    claude, codex, blank, typed = drive(git_project, pick)
+    assert claude == ("opus", "xhigh") and codex == ("", "")
+    assert "opus" not in blank and "--model MODEL" in blank, blank
+    assert typed == ("gpt-x", "high"), "what the owner typed stays when the agent changes"
+    assert [(k["agent"], k["model"], k["effort"]) for k in sent] == [("codex", "gpt-x", "high")]
+    assert drive(git_project, reopen) == [("opus", "xhigh"), ("gpt-x", "high")]
+    # Untouched, the second Codex spawn is sent no choice: the service runs Codex's pick.
+    assert [(k["model"], k["effort"]) for k in sent[1:]] == [(None, None)]
+
+
+def test_a_roles_pin_shown_for_codex_is_its_own_arguments_never_claude_codes(
+    git_project: ProjectInfo,
+) -> None:
+    """Item 2: a role's pin is shown in the words of the agent the form follows: Claude Code's
+    ``extra_args``, which a Codex spawn never passes, are not shown for Codex; its own
+    ``agent_args`` are, read as Codex reads them (``-m``, ``model_reasoning_effort``)."""
+    configure_role(
+        "reviewer",
+        extra_args=["--model", "haiku", "--effort", "low"],
+        agent_args={"codex": ["-m", "gpt-role", "-c", 'model_reasoning_effort="medium"']},
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "role").value = "reviewer"
+        await settle(pilot)
+        model = dialog.query_one("#spawn-model", Input)
+        seen: list[Any] = [model_fields(dialog)]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        return [*seen, model_fields(dialog), model.placeholder]
+
+    claude, codex, codex_blank = drive(git_project, scenario)
+    assert claude == ("haiku", "low")
+    assert codex == ("gpt-role", "medium")
+    assert "gpt-role" in codex_blank and "haiku" not in codex_blank, codex_blank
+
+
+def test_the_remote_control_row_shows_for_an_agent_that_has_it_alone(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """Item 9: Claude Code's ``--remote-control`` (``capabilities.remote_control``) was offered
+    for every agent. The row shows for Claude Code alone, and a switch turned on before the
+    agent became Codex is not sent: the role's default, which the launch says of."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[bool]:
+        await open_advanced(pilot)
+        row = dialog.query_one("#spawn-remote-row")
+        seen = [row.display]
+        dialog.query_one("#spawn-remote", Switch).value = True
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        seen.append(row.display)
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    assert drive(git_project, scenario) == [True, False]
+    [(_, _, kwargs)] = spawns.calls
+    assert kwargs == {**UNTOUCHED, "agent": "codex"}
+
+
+class AccountsFleetApp(RecordingFleetApp):
+    """``RecordingFleetApp`` whose accounts reader answers ``slots`` as they are when read."""
+
+    def __init__(self, slots: list[tuple[int, str]]) -> None:
+        super().__init__()
+        self._accounts = lambda: agents_overview(*slots)
+
+
+def test_new_account_from_a_codex_form_signs_codex_in_and_reopens_the_form_on_its_slot(
+    tmp_path: Path, fleet: dict[str, list[FleetAgentStatus]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 11: *+ New account* from a Spawn form on Codex opened Claude Code's sign-in (the
+    shell asked for one whatever the form ran), so the slot that landed was Claude Code's and
+    the form came back on an account its agent refuses. The request carries the form's
+    agent: Codex's sign-in opens (``codex login`` in a new Codex slot), and its landing reopens
+    the form on Codex with that slot selected."""
+    project = register(tmp_path / "alpha", project_id="prj_a")
+    slots = [(2, "claude-code")]
+    codex = ClaudeAccount(
+        slot=5, config_dir=tmp_path / "codex-accounts" / "5", agent="codex", managed=True
+    )
+    begun: list[tuple[int | None, str]] = []
+    opened: list[str] = []
+    monkeypatch.setattr(accounts_view, "LOGIN_POLL_SECONDS", 3600.0)  # the tick is the test's
+    monkeypatch.setattr(
+        fleet_service,
+        "server",
+        lambda config=None: TmuxServer(PRIVATE_SOCKET, binary=sys.executable),
+    )
+    monkeypatch.setattr(accounts_service, "cached_usage", lambda accounts, **_: {})
+    monkeypatch.setattr(accounts_service, "read_usage", lambda accounts, **_: {})
+
+    def begin(slot: int | None, *, agent: str) -> ClaudeAccount:
+        begun.append((slot, agent))
+        return codex
+
+    def open_window(account: ClaudeAccount, server: TmuxServer, **_: Any) -> WindowInfo:
+        opened.append(account.agent)
+        return WindowInfo(
+            session=accounts_service.SIGN_IN_SESSION,
+            window_id="@7",
+            name="account-5",
+            pane_id="%7",
+            dead=False,
+            dead_status=None,
+            current_command="codex",
+            activity=False,
+        )
+
+    def complete(account: ClaudeAccount) -> ClaudeAccountStatus:
+        slots.append((account.slot, account.agent))
+        return agents_overview((account.slot, account.agent)).accounts[0]
+
+    monkeypatch.setattr(accounts_service, "begin_sign_in", begin)
+    monkeypatch.setattr(accounts_service, "open_sign_in_window", open_window)
+    monkeypatch.setattr(
+        accounts_service,
+        "sign_in_landed",
+        lambda account, since=None: ClaudeIdentity(email="x@example.com"),
+    )
+    monkeypatch.setattr(accounts_service, "complete_sign_in", complete)
+
+    async def run() -> tuple[str, str, str]:
+        app = AccountsFleetApp(slots)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await settle(pilot)
+            await pilot.click(spawn_button(app))
+            dialog = await wait_for_screen(pilot, SpawnDialog)
+            await settle(pilot)
+            await open_advanced(pilot)
+            select(dialog, "agent").value = "codex"
+            await settle(pilot)
+            await pilot.click("#spawn-pick")
+            await wait_for_screen(pilot, AttachTargetScreen)
+            await pilot.click("#picker-new-account")
+            await settle(pilot)
+            await settle_until(app, lambda: app.content.current == "accounts")
+            view = app.query_one("#accounts", AccountsView)
+            assert view.login is not None, "no sign-in window was opened"
+            view._poll_login()  # the timer's tick, taken by hand: the login landed
+            back = await wait_for_screen(pilot, SpawnDialog)
+            await settle(pilot)
+            assert back is not dialog and back.project.id == project.id
+            return (
+                str(select(back, "agent").value),
+                str(select(back, "account").value),
+                back.launch_agent() or "",
+            )
+
+    agent, account, launches = asyncio.run(run())
+    assert begun == [(None, "codex")], "a fresh Codex slot, not Claude Code's"
+    assert opened == ["codex"], "the Codex login window opened"
+    assert (agent, account, launches) == ("codex", "5", "codex")

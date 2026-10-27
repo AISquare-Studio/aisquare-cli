@@ -2794,10 +2794,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.spawn_finished(event.receipt)
 
     async def on_new_account_requested(self, event: NewAccountRequested) -> None:
-        """The picker's *+ New account*: the Accounts page, its add-account flow started,
-        and the way back once it lands (``event.return_to``)."""
+        """The picker's *+ New account*: the Accounts page, the add-account flow of the agent
+        it names started (``event.agent``: the Spawn dialog's), and the way back once it lands
+        (``event.return_to``)."""
         await self.on_accounts_selected(AccountsSelected(return_to=event.return_to))
-        self.query_one("#accounts", AccountsView).begin_claude_sign_in(None)
+        self.query_one("#accounts", AccountsView).begin_claude_sign_in(None, agent=event.agent)
 
     def _content_switched(self, current: str | None) -> None:
         """Any other page than Accounts drops the way back: the user went elsewhere first."""

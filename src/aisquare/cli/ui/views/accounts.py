@@ -2154,11 +2154,12 @@ class AccountsView(Vertical):
                 row.close_rename()
         self.post_message(AccountsChanged())
 
-    def begin_claude_sign_in(self, slot: int | None, *, agent: str = core.AGENT) -> None:
+    def begin_claude_sign_in(self, slot: int | None, *, agent: str | None = None) -> None:
         """Open Claude Code on ``slot`` (a fresh slot when ``None``) in a pane, watched.
 
-        ``agent`` is whose fresh slot ``None`` makes: ``codex`` opens ``codex login``
-        in a new Codex slot. An existing slot is its own agent's, whatever is passed.
+        ``agent`` is whose fresh slot ``None`` makes, Claude Code's when ``None``: ``codex``
+        opens ``codex login`` in a new Codex slot. An existing slot is its own agent's,
+        whatever is passed.
 
         *Add* and *Log in* both come here. A slot still holding a login — an
         expired or rejected token, a Codex ``auth.json`` ``codex login`` replaces — is
@@ -2174,7 +2175,7 @@ class AccountsView(Vertical):
             self._notice(f"a sign-in for {self._name_of(opening)} is already open below", "warn")
             return
         try:
-            account = accounts_service.begin_sign_in(slot, agent=agent)
+            account = accounts_service.begin_sign_in(slot, agent=agent or core.AGENT)
         except accounts_service.AccountsError as exc:
             self._notice(f"✗ {exc}", "error")
             self.post_message(SignInAbandoned())

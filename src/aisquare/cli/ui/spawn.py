@@ -20,9 +20,10 @@ is *(none) — general-purpose agent*, ``fleet.PLAIN_ROLE``: a plain session of 
 Agent field's agent (Claude Code or Codex) on the board, with no standing cycle and
 no mission; ``coder`` stays the default. Everything else is folded into one *Advanced*
 section (a ``Collapsible``, opened by a click or ``Enter`` on its title): *Pick…*, Agent,
-Binary, Persona with *Import…*, Label with 🎲, Task, Worktree, Claude Remote Control,
-Permission with the agent's own controls (Permission mode, or Sandbox and Approval),
-Model, Effort, Extra agent args and First prompt. It opens by itself when a preset fills
+Binary, Persona with *Import…*, Label with 🎲, Task, Worktree, Claude Remote Control (for an
+agent that has it, ``capabilities.remote_control``: Claude Code's alone), Permission with the
+agent's own controls (Permission mode, or Sandbox and Approval), Model, Effort, Extra agent
+args and First prompt. It opens by itself when a preset fills
 one of its fields (``binary=``, ``agent=``, ``persona=`` from the persona-first flow but
 not the captain's own persona, or the ``label=``, ``task_id=`` and ``prompt=`` a form
 reopened after a sign-in carries) and whenever one of its fields blocks *Spawn* — a bad
@@ -52,9 +53,13 @@ of an agent whose permissions are a sandbox (Codex). *Permission* is the one
 agent's own controls. What the launch would pass for permission is under them
 (``app_settings.launch_line``).
 
-**Model and Effort** (#16 on the board) open on the owner's last pick
-(``services.model_memory``: one per home, made at a spawn or by ``/model`` inside any
-fleet agent), whatever the role; blank is the account's own default. A role whose settings
+**Model and Effort** (#16 on the board) open on the owner's last pick for the agent the form
+follows (``services.model_memory``: one per home and agent, made at a spawn or, on Claude Code,
+by ``/model`` inside any fleet agent), whatever the role; blank is the account's own default.
+They follow the agent as they follow the role: an untouched field shows the new agent's pick,
+and a spawn passes them in that agent's own words (``AgentAdapter.model_args``: Codex's
+``--model`` and ``model_reasoning_effort``), so a Codex pick is Codex's alone (SCOPE #113 091,
+item 2). A role whose settings
 pin one (``[fleet.roles.<role>] extra_args``, a binding's ``--arg``: ``fleet.role_pin``)
 shows its pin instead, and an untouched field follows the role between the two; a value
 the owner typed stays. Untouched, each is sent as ``None`` and the service decides as for
@@ -635,9 +640,12 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._persona_shown = persona if persona is not None else self._persona_default(self._role)
         """The persona value the form itself last put in the field; any other is the user's."""
         self._tasks, self._tasks_unavailable = self._read_tasks()
-        self._memory = model_memory.remembered()
-        """The owner's last pick, as the form opened: what the two fields show for a role
-        whose settings pin neither."""
+        self._memories = model_memory.picks()
+        """The owner's last pick of each agent, as the form opened: what the two fields show
+        for a role whose settings pin neither, the agent's the form follows."""
+        self._pick_agent: str | None = agent
+        """The agent whose pick the two fields show (:meth:`_follow_pick`): the preset one,
+        else the default agent's until the role's agent is known."""
         self._pick = self._shown_pick(self._role)
         """What the Model and Effort fields show for the current role (:meth:`_shown_pick`).
         A field still showing it is sent as ``None``."""
@@ -984,11 +992,11 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                         yield Static(
                             "" if self._git else "not a git repository", id="spawn-worktree-note"
                         )
-                    with Horizontal(classes="spawn-row"):
+                    with Horizontal(classes="spawn-row", id="spawn-remote-row"):
                         # Claude Code's own, never "Remote control": that is the phone
                         # remote's name in Settings (owner call W4-8, revised at the main sync).
-                        # Shown for every agent: the window's `launch` says, dimly, when the
-                        # agent has none and the switch is not turned on.
+                        # Shown for an agent that has it alone (`capabilities.remote_control`,
+                        # :meth:`_follow_agent`); another agent's spawn sends none.
                         yield Label("Claude Remote Control")
                         yield Switch(value=defaults.remote_control, id="spawn-remote")
                         yield Static(
@@ -1306,6 +1314,16 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         return self.launch_agent() is None
 
     @staticmethod
+    def _remote_control(agent: str) -> bool:
+        """Whether ``agent`` can be started for another client to continue
+        (``capabilities.remote_control``, Claude Code's): the Remote Control row shows for it
+        alone (SCOPE #113 091, item 9)."""
+        try:
+            return get_adapter(agent).capabilities.remote_control
+        except ValueError:
+            return False
+
+    @staticmethod
     def _sandboxed(agent: str) -> bool:
         """Whether ``agent``'s permission is a sandbox and an approval policy (Codex), not a
         mode (Claude Code)."""
@@ -1344,6 +1362,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             return
         if not self._captain:
             self.query_one("#spawn-args", Input).placeholder = args_hint(agent)
+            self._follow_pick(agent)
+        self.query_one("#spawn-remote-row").display = self._remote_control(agent)
         self._offer_accounts(agent)
         if self._default_key is None or self._default_key[2] != agent:
             self._read_default()  # the no-account option is the agent's own pick
@@ -1364,7 +1384,12 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         if not self._captain:
             self.query_one("#spawn-args", Input).placeholder = ""
         self._offer_accounts(None)
-        for row in ("#spawn-permission-row", "#spawn-sandbox-row", "#spawn-approval-row"):
+        for row in (
+            "#spawn-permission-row",
+            "#spawn-sandbox-row",
+            "#spawn-approval-row",
+            "#spawn-remote-row",
+        ):
             self.query_one(row).display = False
         self.query_one("#spawn-launch", Static).update(
             Text(f"  {self._role} → {PICKING}", style="dim")
@@ -1499,7 +1524,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         """What ``role``'s settings pin (``fleet.role_pin``); nothing when the config cannot be
         read, which the spawn says itself."""
         try:
-            return fleet_service.role_pin(role, self._fleet)
+            return fleet_service.role_pin(role, self._fleet, agent=self._pick_agent)
         except Exception:  # a hint, never a reason to fail
             return model_memory.Pick()
 
@@ -1511,10 +1536,34 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         model = (
             f"(the {role}'s settings: {pin.model})"
             if pin.model
-            else f"{ACCOUNT_DEFAULT_CHOICE} — e.g. opus, fable"
+            else f"{ACCOUNT_DEFAULT_CHOICE}{self._model_example()}"
         )
         effort = f"(the {role}'s settings: {pin.effort})" if pin.effort else ACCOUNT_DEFAULT_CHOICE
         return model, effort
+
+    def _model_example(self) -> str:
+        """What the Model field's blank gives as an example for the agent it follows: AISquare's
+        model names where they are the agent's (``capabilities.model_ladders``), else what the
+        field is passed as (``AgentAdapter.model_args``), never Claude Code's for Codex."""
+        try:
+            adapter = get_adapter(self._pick_agent or DEFAULT_AGENT)
+            if adapter.capabilities.model_ladders:
+                return " — e.g. opus, fable"
+            return " — passed as " + " ".join(adapter.model_args("MODEL", None))
+        except Exception:  # an agent this install does not know, or one that refuses the name
+            return ""
+
+    def _memory(self) -> model_memory.Pick:
+        """The owner's last pick of the agent the fields follow (:attr:`_pick_agent`)."""
+        return self._memories.get(self._pick_agent or DEFAULT_AGENT, model_memory.Pick())
+
+    def _follow_pick(self, agent: str) -> None:
+        """Model and Effort for the agent the launch starts, as for a new role (:meth:`_repick`):
+        a field still showing the last agent's pick shows ``agent``'s; one typed in stays."""
+        if agent == self._pick_agent:
+            return
+        self._pick_agent = agent
+        self._repick(self._shown_pick(self._role))
 
     def _effort_options(self, role: str) -> list[tuple[str, str]]:
         return [(self._blanks(role)[1], ACCOUNT_DEFAULT), *EFFORT_OPTIONS[1:]]
@@ -1522,10 +1571,10 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     def _shown_pick(self, role: str) -> model_memory.Pick:
         """What Model and Effort show for ``role``: what its settings pin, else the owner's
         last pick; an effort the field does not offer is none."""
-        pin = self._role_pin(role)
+        pin, memory = self._role_pin(role), self._memory()
         return model_memory.Pick(
-            pin.model or self._memory.model,
-            harness.clean_effort(pin.effort) or self._memory.effort,
+            pin.model or memory.model,
+            harness.clean_effort(pin.effort) or memory.effort,
         )
 
     def _repick(self, pick: model_memory.Pick) -> None:
@@ -2030,9 +2079,14 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                 # lost (review of #240, finding 5).
                 return
             # What was typed goes with it: the shell opens this form again from it, on the
-            # new account, once the sign-in lands (#286).
+            # new account, once the sign-in lands (#286). The account is the agent's the form
+            # launches: a Codex form signs Codex in, and its new slot brings Codex back.
             form = self.form_state()
-            self.post_message(NewAccountRequested(ReturnTo("spawn", self.project.id, form)))
+            self.post_message(
+                NewAccountRequested(
+                    ReturnTo("spawn", self.project.id, form), agent=self.launch_agent()
+                )
+            )
             self.dismiss(None)
             return
         self.apply_target(
@@ -2182,6 +2236,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         mode = self.query_one("#spawn-permission", Select).value
         account = self.query_one("#spawn-account", Select).value
         remote = self.query_one("#spawn-remote", Switch).value
+        remote_shown = self.query_one("#spawn-remote-row").display
         prompt = self.query_one("#spawn-prompt", TextArea).text
         sandboxed = self._sandboxed(self.launch_agent() or DEFAULT_AGENT)
         # One value for every agent, as `fleet spawn --permission-mode WRITE:APPROVALS`
@@ -2216,7 +2271,10 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             "agent_args": split_agent_args(self.query_one("#spawn-args", Input).value),
             "account": account if isinstance(account, str) and account != THIS_SHELL else None,
             "persona": persona,
-            "remote_control": None if remote == defaults.remote_control else remote,
+            # Hidden for an agent without it: the role's default, which its launch says of.
+            "remote_control": (
+                None if not remote_shown or remote == defaults.remote_control else remote
+            ),
             # As the form shows them for the role: the service decides, as for the CLI.
             "model": self._model_kwarg(),
             "effort": None if effort == (self._pick.effort or ACCOUNT_DEFAULT) else effort,

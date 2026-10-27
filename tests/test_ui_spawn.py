@@ -546,14 +546,18 @@ def test_the_task_field_lists_only_open_tasks_with_short_id_status_and_title(
 def test_a_bad_label_disables_spawn_and_shows_the_rule(git_project: ProjectInfo) -> None:
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         seen: list[Any] = [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
+        # Each value is read back once its Changed has been handled: a single pause returns
+        # with that message still queued on a slow runner (CI run 40428675826, py3.12: the
+        # button still read disabled for "manager" after "coder-auth" was set), as
+        # ``settle_page`` says of any one pause.
         label_input(dialog).value = "Bad Label!"
-        await pilot.pause()
+        await settle(pilot)
         seen += [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
         label_input(dialog).value = "manager"
-        await pilot.pause()
+        await settle(pilot)
         seen += [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
         label_input(dialog).value = "coder-auth"
-        await pilot.pause()
+        await settle(pilot)
         seen += [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
         await pilot.click("#spawn-submit")  # disabled a moment ago: this press must not be lost
         await settle(pilot)

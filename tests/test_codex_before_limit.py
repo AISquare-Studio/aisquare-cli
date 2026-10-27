@@ -302,6 +302,29 @@ def test_a_turn_begun_since_the_turn_end_is_left_alone(
     assert "switched" not in [kind for kind, _ in row.events()]
 
 
+def test_a_role_whose_binding_sets_codex_home_by_hand_stays_on_it(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    started: list[list[str]],
+) -> None:
+    """A binding that writes the role's ``CODEX_HOME`` itself is an account put by hand
+    (``account_pin``, asked of the row's own agent's home variable): ``before_limit`` leaves
+    the row there, as it leaves a hand-written ``CLAUDE_CONFIG_DIR``'s."""
+    from aisquare.services import settings as settings_service
+
+    _settings(before_limit="switch")
+    full = _codex_slot("full@example.com", 92)
+    row = _Row(project, full)
+    _codex_slot("roomy@example.com", 15)
+    settings_service.bind_role("coder", env={"CODEX_HOME": str(full.config_dir)})
+    row.write(STOPPED)
+
+    row.stop(CliRunner())
+
+    assert started == []
+
+
 def test_a_codex_row_under_the_line_is_looked_at_once_a_cool_down(
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811

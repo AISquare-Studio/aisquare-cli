@@ -29,6 +29,7 @@ from aisquare.models import SessionUsage, UsageStats
 from aisquare.services import usage_stats
 from aisquare.services.agent_events import session_key
 from tests.projects import add_project
+from tests.test_codex_accounts import _sign_in
 from tests.usage_stats_support import Machine
 
 RECORDED = Path(__file__).parent / "fixtures" / "agent_transcripts" / "codex-usage-0.164.0.jsonl"
@@ -185,6 +186,49 @@ def test_a_codex_session_the_sweep_recorded_is_not_counted_again_at_its_stop(
 
     row = _row(codex_home, THREAD)
     assert row.turns == 2 and row.total_tokens == _tokens(rollout)
+
+
+def test_codex_home_redirected_the_plain_codex_folder_is_swept_too(
+    machine: Machine, codex_home: Path
+) -> None:
+    """With ``CODEX_HOME`` pointing elsewhere, the ``~/.codex`` a plain ``codex`` reads with it
+    unset is the plain slot's history too, as ``~/.claude`` is Claude Code's."""
+    alpha = machine.repo("alpha")
+    unset = core.plain_home("codex", {})
+    assert unset != codex_home
+    _rollout(unset, alpha, OTHER)
+
+    assert usage_stats.sweep().sessions_new == 1
+    assert _row(unset, OTHER).account_slot == core.kind("codex").plain_slot
+
+
+def test_a_codex_accounts_plan_is_its_subscription_in_the_stats(
+    machine: Machine, codex_home: Path
+) -> None:
+    """A Codex account's type is the plan its login names (``AgentAccounts.subscription``),
+    never ``unknown`` for want of Claude Code's credentials."""
+    managed = core.create_account("codex")
+    _sign_in(managed.config_dir, "pro@example.com", plan="pro")
+    _rollout(managed.config_dir, machine.repo("alpha"), OTHER)
+
+    usage_stats.sweep()
+
+    [row] = [r for r in usage_stats.stats("lifetime").accounts.rows if r.slot == managed.slot]
+    assert row.subscription == "pro"
+
+
+def test_a_codex_turn_across_local_midnight_is_two_turns(tmp_path: Path) -> None:
+    """``AgentTranscript.turns`` cuts where the local day changes as well as at a prompt: the
+    0.164.0 TUI rollout's second turn (an exec, then its answer: two requests) charged to two
+    days when midnight falls between them."""
+    reader = CODEX.transcript_reader
+    assert reader is not None
+    rollout = RECORDED.with_name("codex-0.164.0.jsonl")
+    one_day = reader.turns(rollout, None, lambda stamp: "today")
+    split = reader.turns(rollout, None, lambda s: "a" if s < "2026-10-24T04:00:21" else "b")
+    assert one_day is not None and split is not None
+    assert len(split.turns) == len(one_day.turns) + 1
+    assert split.scan.delta.totals().total == one_day.scan.delta.totals().total
 
 
 def test_a_rollout_names_the_folder_its_session_ran_in() -> None:

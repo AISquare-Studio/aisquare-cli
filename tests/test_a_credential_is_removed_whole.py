@@ -302,6 +302,11 @@ SIZES = (31_250, 125_000, 500_000, 2_000_000)
 #: quadratic rule 16. Not 4 itself, because the cost per character differs a little by size
 #: and a shared runner adds noise; not 16, which would pass a rule that is nearly quadratic.
 GROWTH = 6.0
+#: Seconds added to that bar. A run of 30 ms is mostly what is around it: CI's py3.13 leg took
+#: 0.03 s for 125 KB of ``jwt-one-dot`` and 0.18 s for 500 KB, 6.3 times where linear is 4
+#: (run 40428675826). A tenth of a second is nothing beside what a quadratic rule costs from
+#: the next size on: the two this must fail took 1.3 s at 125 KB here.
+SLACK = 0.1
 #: A run shorter than this says too little about the next one: the ratio is not asked of it.
 FLOOR = 0.1 if sys.platform == "win32" else 0.02
 #: The process's CPU time, not the wall clock: on a shared runner (several pytest workers on two
@@ -350,7 +355,7 @@ def test_redaction_is_linear_on_hostile_input(name: str) -> None:
     previous: float | None = None
     for size in SIZES:
         text = HOSTILE[name](size)
-        bar = previous * GROWTH if previous is not None and previous >= FLOOR else None
+        bar = previous * GROWTH + SLACK if previous is not None and previous >= FLOOR else None
 
         took = _best_of(text, bar)
 
@@ -359,6 +364,6 @@ def test_redaction_is_linear_on_hostile_input(name: str) -> None:
             assert took <= bar, (
                 f"{name}: {len(text):,} characters took {took:.2f} s, {took / previous:.1f} "
                 f"times the {previous:.2f} s of the {size // 4:,} before (linear is 4, "
-                f"quadratic 16)"
+                f"quadratic 16; the bar is {GROWTH:g} times and {SLACK:g} s)"
             )
         previous = took

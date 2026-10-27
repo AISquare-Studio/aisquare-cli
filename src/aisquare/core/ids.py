@@ -43,17 +43,20 @@ def _encode(value: int, length: int) -> str:
     return "".join(chars)
 
 
-#: The millisecond of the id this process issued last, under the lock that keeps threads
-#: from reading it at once.
+#: The millisecond and the 80 random bits of the id this process issued last, under the lock that
+#: keeps threads from reading them at once.
 _LAST_MS = [0]
+_LAST_TAIL = [0]
 _LAST_LOCK = threading.Lock()
 
 #: How far ahead of the clock a burst of ids may run, in milliseconds. A burst of ``n`` ids
 #: in one millisecond would run ``n`` ahead of it, and an id another process makes at the
-#: clock's time sorts before every later one of the burst; past this, an id waits for the
-#: clock to come within the bound. A lead of more than twice the bound is no burst's (a burst
-#: stops at the bound) but a clock that stepped back, which is not waited for.
+#: clock's time sorts before every later one of the burst; past this, an id stays in the
+#: millisecond of the one before it and is ordered by its tail (see :func:`_new_id`).
 _MAX_LEAD_MS = 50
+
+#: The size of the step a tail takes past the bound: 1 to 2**40, drawn at random.
+_STEP_BYTES = 5
 
 
 def _new_id(prefix: str) -> str:
@@ -70,23 +73,30 @@ def _new_id(prefix: str) -> str:
     of one resolves as it did.
 
     A burst runs ahead of the clock, which then catches up, and an id another process makes
-    meanwhile sorts before the burst's later ones. The lead is held to ``_MAX_LEAD_MS``: an id
-    that would run further sleeps until the clock is within it, once, and then takes the next
-    millisecond whatever the clock says, so a clock that does not move (a test's) delays an id
-    by no more than the bound. Ids of two processes are ordered to within that many
-    milliseconds, and by dice in the same one.
+    meanwhile sorts before the burst's later ones. The lead is held to ``_MAX_LEAD_MS``, and
+    never by waiting: an id that would run further stays in the millisecond of the one before
+    it, and its 80 random bits are that one's plus a random step of 1 to 2**40 (the spec's
+    monotonic form again; the step is random so that the ids stay unguessable). Past the bound
+    the order is kept by the tail and not by the millisecond, and the ids of a burst past it
+    share their first 14 characters, so a prefix of one must reach into the tail. A tail that
+    would overflow takes the next millisecond with randomness of its own. A clock that does not
+    move (a test's), one that stepped back, and a loop that mints faster than a millisecond an
+    id (``context import``) go on at the speed of the loop. Ids of two processes are ordered to
+    within ``_MAX_LEAD_MS`` milliseconds, and by dice in the same one.
     """
     with _LAST_LOCK:
-        after = _LAST_MS[0] + 1
+        last_ms, last_tail = _LAST_MS[0], _LAST_TAIL[0]
         now_ms = int(time.time() * 1000)
-        lead = after - now_ms
-        if _MAX_LEAD_MS < lead <= 2 * _MAX_LEAD_MS:
-            time.sleep((lead - _MAX_LEAD_MS) / 1000)
-            now_ms = int(time.time() * 1000)
-        timestamp_ms = max(now_ms, after)
-        _LAST_MS[0] = timestamp_ms
-    randomness = int.from_bytes(os.urandom(_RAND_BYTES), "big")
-    return prefix + _encode(timestamp_ms, _TS_CHARS) + _encode(randomness, 16)
+        timestamp_ms = max(now_ms, last_ms + 1)
+        tail = None
+        if timestamp_ms - now_ms > _MAX_LEAD_MS:
+            stepped = last_tail + 1 + int.from_bytes(os.urandom(_STEP_BYTES), "big")
+            if stepped >> (8 * _RAND_BYTES) == 0:
+                timestamp_ms, tail = last_ms, stepped
+        if tail is None:
+            tail = int.from_bytes(os.urandom(_RAND_BYTES), "big")
+        _LAST_MS[0], _LAST_TAIL[0] = timestamp_ms, tail
+    return prefix + _encode(timestamp_ms, _TS_CHARS) + _encode(tail, 16)
 
 
 def new_entry_id() -> str:

@@ -37,6 +37,9 @@ HELD_QUOTES: list[tuple[str, str]] = [
     (r'{"token": "ab\"cd"}  tail', '{"token": <R>}  tail'),
     # An assignment, double and single quoted; the text after the value is kept.
     (r"PASSWORD='ab\'cd1234'", "PASSWORD=<R>"),
+    # The floor is four characters of the value, an escaped quote as one, in single quotes too.
+    (r"password='a\'bc'", "password=<R>"),
+    (r"token = '\'\'\'\''", "token = <R>"),
     (r'PASSWORD="ab\"cd1234 and more" next="x"', 'PASSWORD=<R> next="x"'),
     (r'secret = "\"\"\"\"" # why', "secret = <R> # why"),
     # An escaped backslash before the closing quote is not an escaped quote.

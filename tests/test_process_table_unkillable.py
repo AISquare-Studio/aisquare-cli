@@ -84,6 +84,7 @@ def test_a_tool_run_never_comes_back_from_is_left_behind_and_starts_the_back_off
     assert process_table._TIMEOUT <= took < process_table._TIMEOUT + process_table._GRACE + 2.0
     assert time.monotonic() < process_table._BLIND_UNTIL[0], "and the back-off has begun"
     assert len(process_table._STUCK) == 1 and calls == [tool]
+    assert process_table._STUCK[0].daemon, "a tool left behind must not hold the process's exit"
     # Inside the back-off no pane asks again, for any tool.
     assert process_table.held_by_pane(7) is None and process_table.held_by_pane(70) is None
     assert calls == [tool]

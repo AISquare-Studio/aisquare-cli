@@ -677,16 +677,19 @@ adapter.**
   and 80 random bits chose the order `ORDER BY id` listed them in: a board's tasks came
   back as #1, #3, #2. An id issued in the millisecond of the one before it now takes the
   next one, so a burst of ids runs ahead of the clock, which then catches up. The lead is held
-  to 50 ms: an id that would run further waits for the clock (a loop that mints and does
-  nothing else makes about a thousand a second from there on; the product's ids each come
-  with a database write, 13 ms for a `task add`, and build no lead). An id another process
-  makes inside a burst's lead can still sort before the burst's later ids, so across processes
-  the order holds to within 50 ms; two processes' ids in one millisecond are ordered by their
-  random bits, as before. The needs feed tells a turn's second permission prompt (or an MCP
-  form) from its first by the session's `last_seen_at` being past the first notice's event;
-  two notices in one tick tied, and a third, or a heartbeat, wrote the tick back, so the card
-  named the first call's prompt. The stamp now goes one microsecond past the event and stays
-  there.
+  to 50 ms, and nothing waits for the clock to hold it: an id that would run further stays in
+  the millisecond of the one before it and takes a tail a random step (1 to 2^40) above that
+  one's, as the ULID spec's monotonic form has it, so past the bound the order is kept by the
+  tail and not by the millisecond. A loop that mints faster than a millisecond an id, such as
+  `aisquare context import` (a write of ~0.15 ms an entry), goes on at the speed of its writes.
+  The ids of a burst past the bound share their first 14 characters, so a short prefix of one
+  must reach into the tail to name it. An id another process makes inside a burst's lead can
+  still sort before the burst's later ids, so across processes the order holds to within 50 ms;
+  two processes' ids in one millisecond are ordered by their random bits, as before. The
+  needs feed tells a turn's second permission prompt (or an MCP form) from its first by the
+  session's `last_seen_at` being past the first notice's event; two notices in one tick tied,
+  and a third, or a heartbeat, wrote the tick back, so the card named the first call's prompt.
+  The stamp now goes one microsecond past the event and stays there.
 
 - **`redact` removes more of what it used to ship** (#30 of #113). A hand-off brief, a CI
   prompt or an insights spool loses text it kept before: a private-key header with no footer
@@ -701,8 +704,10 @@ adapter.**
   closes at the first quote, so the text after it is read on its own. A secret's name is found
   far into a run of dots or hyphens, and 500 KB of them costs what 500 KB of letters does.
   Still shipped: a lone private-key footer line, a PGP private-key header, an
-  `Authorization` header with a scheme other than Bearer or Basic (`Token …`), and a quoted
-  value that is never closed.
+  `Authorization` header with a scheme other than Bearer or Basic (`Token …`), a quoted value
+  that is never closed, a quoted value on the line after its quoted name (pretty-printed JSON:
+  `"password":` and then `"…"` below it), and, at the `strict` level, an email address or a
+  `C:\Users\…` path right after text in another script, whose rules still start at a `\b`.
 
 - **One ask per Keychain item, and the process table left alone while a tool hangs** (#31 of
   #113). A user with a locked login Keychain got its unlock dialog twice at startup: the

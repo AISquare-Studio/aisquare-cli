@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import itertools
+import os
 import re
 import threading
 import time
@@ -56,37 +58,32 @@ def _without_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _Clock:
-    """A clock that moves only when something sleeps on it, by the whole milliseconds slept: a
-    burst of ids against it takes no time, and the lead it runs up is read off exactly. It
+    """A clock the test moves by hand (``clock.ms``), and nothing sleeps on: ids never wait for
+    the clock, so a ``time.sleep`` from ``_new_id`` raises here instead of delaying the run. It
     reads half a millisecond in, so that ``int(time.time() * 1000)`` never rounds down one."""
 
-    def __init__(
-        self,
-        start_ms: int,
-        monkeypatch: pytest.MonkeyPatch,
-        *,
-        moves_by: float = 1.0,
-        late_by_ms: int = 0,
-    ) -> None:
-        """``moves_by`` is how much of a sleep the clock moves (0: it is stopped) and
-        ``late_by_ms`` how long past it the sleeper wakes (a thread the scheduler left)."""
+    def __init__(self, start_ms: int, monkeypatch: pytest.MonkeyPatch) -> None:
         self.ms = start_ms
-        self.slept: list[float] = []
-        self._moves_by = moves_by
-        self._late_by_ms = late_by_ms
         monkeypatch.setattr(time, "time", lambda: (self.ms + 0.5) / 1000)
-        monkeypatch.setattr(time, "sleep", self.sleep)
+        monkeypatch.setattr(time, "sleep", _no_sleeping)
 
-    def sleep(self, seconds: float) -> None:
-        assert len(self.slept) < 10_000, "an id is waiting on a clock that does not move"
-        self.slept.append(seconds)
-        self.ms += round(seconds * 1000 * self._moves_by) + self._late_by_ms
+
+def _no_sleeping(seconds: float) -> None:
+    raise AssertionError(f"an id slept {seconds} s: ids never wait for the clock")
 
 
 def _stamp(entry_id: str, prefix: str = ENTRY_PREFIX) -> int:
     """The millisecond an id carries."""
     value = 0
     for char in entry_id[len(prefix) : len(prefix) + 10]:
+        value = value * 32 + _ALPHABET.index(char)
+    return value
+
+
+def _tail(entry_id: str, prefix: str = ENTRY_PREFIX) -> int:
+    """The 80 random bits an id carries."""
+    value = 0
+    for char in entry_id[len(prefix) + 10 :]:
         value = value * 32 + _ALPHABET.index(char)
     return value
 
@@ -125,9 +122,12 @@ def test_ids_made_in_one_millisecond_sort_in_the_order_they_were_made(
     assert len(set(made)) == len(made)
 
 
-def test_a_burst_the_cap_holds_back_keeps_its_order_on_the_real_clock() -> None:
-    """Three hundred ids in a tight loop pass the bound six times over, and each past it waits
-    for the clock a millisecond or so: nothing is dropped, repeated or reordered."""
+def test_a_burst_past_the_bound_keeps_its_order_on_the_real_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three hundred ids in a tight loop pass the bound six times over, and the ones past it are
+    ordered by their tails: nothing is dropped, repeated or reordered, and nothing sleeps."""
+    monkeypatch.setattr(time, "sleep", _no_sleeping)
     made = [new_task_id() for _ in range(300)]
     assert made == sorted(made)
     assert len(set(made)) == len(made)
@@ -172,11 +172,16 @@ def test_a_clock_that_steps_back_does_not_reorder_ids(monkeypatch: pytest.Monkey
     assert before < after
 
 
-def test_threads_never_take_one_millisecond_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("past_the_bound", [False, True], ids=["bumping", "stepping-the-tail"])
+def test_threads_never_take_one_millisecond_twice(
+    monkeypatch: pytest.MonkeyPatch, past_the_bound: bool
+) -> None:
     """The clock is frozen, and the first time each thread reads it, outside the lock, it waits
     for the other seven to be there too: all of them have then read the same last millisecond
-    and none has written, which is where unlocked threads take the same next one. Inside the
-    lock the others cannot be at the clock, so nobody waits; no timing decides either way."""
+    (and tail) and none has written, which is where unlocked threads take the same next one.
+    Inside the lock the others cannot be at the clock, so nobody waits; no timing decides either
+    way. Past the bound the ids share a millisecond, and the tails are what must not repeat or
+    run backward in a thread."""
     threads_count = 8
     rendezvous = threading.Barrier(threads_count)
     waited: set[threading.Thread] = set()
@@ -197,89 +202,161 @@ def test_threads_never_take_one_millisecond_twice(monkeypatch: pytest.MonkeyPatc
         return 4_200_000_000.0
 
     monkeypatch.setattr(time, "time", reads_the_frozen_clock)
-    _without_the_cap(monkeypatch)
+    if past_the_bound:
+        ids._LAST_MS[0] = 4_200_000_000_000 + 10 * ids._MAX_LEAD_MS
+    else:
+        _without_the_cap(monkeypatch)
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
     everything = [entry_id for into in made for entry_id in into]
     assert len(everything) == threads_count * 300
-    assert len({_stamp(entry_id, TASK_PREFIX) for entry_id in everything}) == 2_400
+    if past_the_bound:
+        assert len(set(everything)) == 2_400
+        assert len({_stamp(entry_id, TASK_PREFIX) for entry_id in everything}) == 1
+    else:
+        assert len({_stamp(entry_id, TASK_PREFIX) for entry_id in everything}) == 2_400
     assert all(into == sorted(into) for into in made), "each thread's own ids are in its order"
 
 
-# --- the lead of a burst is held to a bound ----------------------------------------------------
+# --- the lead of a burst is held to a bound, and nothing waits for the clock -------------------
+
+_BASE_MS = 4_300_000_000_000
 
 
-def test_a_burst_runs_no_further_ahead_of_the_clock_than_the_bound(
-    monkeypatch: pytest.MonkeyPatch,
+def _a_burst(
+    clock: _Clock, count: int, *, clock_moves_every: int | None
+) -> tuple[list[str], list[int]]:
+    """``count`` ids made in a loop that does nothing else, against ``clock`` (stopped, or one
+    millisecond on after every ``clock_moves_every`` ids): the ids, and how far ahead of the
+    clock each one was when it was made."""
+    made: list[str] = []
+    leads: list[int] = []
+    for n in range(count):
+        made.append(new_task_id())
+        leads.append(_stamp(made[-1], TASK_PREFIX) - clock.ms)
+        if clock_moves_every is not None and n % clock_moves_every == clock_moves_every - 1:
+            clock.ms += 1
+    return made, leads
+
+
+@pytest.mark.parametrize("clock_moves_every", [None, 100, 3], ids=["stopped", "slow", "quick"])
+def test_a_burst_of_two_thousand_ids_is_in_order_and_runs_no_further_ahead_than_the_bound(
+    monkeypatch: pytest.MonkeyPatch, clock_moves_every: int | None
 ) -> None:
     """Without a bound, 200 ids of one burst run 199 ms ahead of the clock, and an id another
-    process makes at the clock's time sorts before 163 of them (r25 measured it). With it, an id
-    that would run past the bound waits for the clock, and the most that can sort after an id
-    made at the clock's time is the bound."""
-    clock = _Clock(4_300_000_000_000, monkeypatch)
-    stamps: list[int] = []
-    leads: list[int] = []
-    for _ in range(500):
-        stamps.append(_stamp(new_task_id(), TASK_PREFIX))
-        leads.append(stamps[-1] - clock.ms)
-    assert stamps == sorted(set(stamps)), "one stamp each, in order"
+    process makes at the clock's time sorts before 163 of them (r25 measured it). With it the lead
+    is the bound at most, so what a second process's id sorts before is 50 ms of the burst's
+    time and no more, and nothing waits for the clock to come up to it: ``_Clock`` raises at a
+    ``time.sleep``."""
+    clock = _Clock(_BASE_MS, monkeypatch)
+    made, leads = _a_burst(clock, 2_000, clock_moves_every=clock_moves_every)
+    assert made == sorted(made) and len(set(made)) == len(made), "strictly increasing"
     assert max(leads) == ids._MAX_LEAD_MS, "it runs up to the bound and no further"
-    assert clock.ms - 4_300_000_000_000 >= 500 - ids._MAX_LEAD_MS - 1, "and waited for the rest"
-    after_the_burst = stamps[-1] + 1 - ids._MAX_LEAD_MS
-    assert sum(1 for stamp in stamps if stamp >= after_the_burst) <= ids._MAX_LEAD_MS + 1
+    assert min(leads) >= 0
 
 
-def test_an_id_another_process_makes_meanwhile_sorts_before_at_most_the_bound_of_a_burst(
+def test_the_ids_within_the_bound_still_differ_inside_the_first_fourteen_characters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    clock = _Clock(4_310_000_000_000, monkeypatch)
-    burst = [_stamp(new_task_id(), TASK_PREFIX) for _ in range(200)]
-    others_stamp = clock.ms  # a second process, whose clock reads what the first one's does
-    assert sum(1 for stamp in burst if stamp > others_stamp) <= ids._MAX_LEAD_MS
+    """Up to the bound each id has a millisecond of its own, so that a short prefix of one
+    (``find_task``'s, ``task show``'s) resolves as it did; past it they share the millisecond and
+    are told apart by the tail."""
+    clock = _Clock(_BASE_MS, monkeypatch)
+    made, _ = _a_burst(clock, 2_000, clock_moves_every=None)
+    within = made[: ids._MAX_LEAD_MS + 1]
+    assert len({entry_id[: len(TASK_PREFIX) + 10] for entry_id in within}) == len(within)
+    past = made[ids._MAX_LEAD_MS :]
+    assert {_stamp(entry_id, TASK_PREFIX) for entry_id in past} == {_BASE_MS + ids._MAX_LEAD_MS}
+    assert len({_tail(entry_id, TASK_PREFIX) for entry_id in past}) == len(past)
 
 
-def test_the_wait_is_for_the_excess_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    clock = _Clock(4_320_000_000_000, monkeypatch)
+def test_past_the_bound_an_id_stays_in_the_millisecond_with_the_tail_a_step_above_the_last(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The step is drawn from the bytes ``os.urandom`` gives: a fixed draw makes it exact."""
+    clock = _Clock(_BASE_MS, monkeypatch)
     for _ in range(ids._MAX_LEAD_MS + 1):
         new_entry_id()
-    assert clock.slept == [], "within the bound nothing waits"
-    new_entry_id()
-    assert clock.slept == [0.001], "one millisecond over: one millisecond"
+    at_the_bound = new_entry_id()
+    assert _stamp(at_the_bound) == _BASE_MS + ids._MAX_LEAD_MS
+    monkeypatch.setattr(os, "urandom", lambda n: bytes(n - 1) + b"\x07")  # a step of 7 + 1
+    after = [new_entry_id() for _ in range(3)]
+    assert [_stamp(entry_id) for entry_id in after] == [_BASE_MS + ids._MAX_LEAD_MS] * 3
+    assert [_tail(entry_id) for entry_id in after] == [
+        _tail(at_the_bound) + 8 * n for n in (1, 2, 3)
+    ]
+    assert clock.ms == _BASE_MS
 
 
-def test_a_clock_that_stepped_back_a_long_way_is_not_waited_for(
+def test_past_the_bound_the_step_is_at_random_and_up_to_two_to_the_fortieth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A lead of a year is no burst's: waiting for it would hold every id for as long as the
-    step is long. The ids go on, one millisecond apart, as they did."""
-    clock = _Clock(4_330_000_000_000, monkeypatch)
-    before = new_entry_id()
-    clock.ms -= 31_536_000_000  # a restored VM, a clock set wrong and then right
-    after = [new_entry_id() for _ in range(5)]
-    assert clock.slept == []
-    assert [before, *after] == sorted([before, *after])
+    """A step of one would make the next id of a burst a guess; one of a few bits would make
+    it a short search. Three hundred steps, each in 1 to 2**40, no two alike, some of them big."""
+    _Clock(_BASE_MS, monkeypatch)
+    for _ in range(ids._MAX_LEAD_MS + 1):
+        new_entry_id()
+    tails = [_tail(new_entry_id()) for _ in range(301)]
+    steps = [later - earlier for earlier, later in itertools.pairwise(tails)]
+    assert min(steps) >= 1 and max(steps) <= 2**40
+    assert max(steps) > 2**39, "drawn from the whole range, not a corner of it"
+    assert len(set(steps)) == len(steps), "not the same step again"
 
 
-def test_a_clock_that_does_not_move_delays_an_id_by_one_wait_and_no_more(
+def test_a_tail_that_would_overflow_takes_the_next_millisecond(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Tests freeze the clock, and a clock under a debugger or a suspended VM stops: an id waits
-    once and takes the next millisecond, not for a time that does not come."""
-    clock = _Clock(4_340_000_000_000, monkeypatch, moves_by=0)
-    made = [new_entry_id() for _ in range(2 * ids._MAX_LEAD_MS)]
+    clock = _Clock(_BASE_MS, monkeypatch)
+    for _ in range(ids._MAX_LEAD_MS + 1):
+        new_entry_id()
+    at_the_bound = _BASE_MS + ids._MAX_LEAD_MS
+    monkeypatch.setattr(os, "urandom", lambda n: bytes(n))  # a step of 1; a fresh tail of 0
+    ids._LAST_TAIL[0] = 2**80 - 2
+    last_that_fits = new_entry_id()
+    assert (_stamp(last_that_fits), _tail(last_that_fits)) == (at_the_bound, 2**80 - 1)
+    rolled = new_entry_id()
+    assert _stamp(rolled) == at_the_bound + 1, "one more would not fit in 80 bits"
+    assert rolled > last_that_fits
+    # And it goes on from there: the bound counts from the clock, which has not moved.
+    again = new_entry_id()
+    assert (_stamp(again), _tail(again)) == (at_the_bound + 1, 1) and again > rolled
+    assert clock.ms == _BASE_MS
+
+
+def test_a_clock_that_does_not_move_delays_no_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests freeze the clock, and a clock under a debugger or a suspended VM stops: no id waits
+    for a time that does not come, and each is above the one before."""
+    _Clock(_BASE_MS + 10, monkeypatch)
+    made = [new_entry_id() for _ in range(2_000)]
     assert made == sorted(made) and len(set(made)) == len(made)
-    assert len(clock.slept) <= len(made), "at most one wait an id"
 
 
-def test_an_id_that_slept_past_the_clock_takes_the_time_it_woke_to(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "step_back_ms", [ids._MAX_LEAD_MS + 10, 5_000, 31_536_000_000], ids=["60ms", "5s", "a-year"]
+)
+def test_a_clock_that_stepped_back_is_not_waited_for(
+    monkeypatch: pytest.MonkeyPatch, step_back_ms: int
 ) -> None:
-    """The thread the scheduler left for a second comes back to a clock a second on: its id is
-    stamped by that clock, not by the millisecond after its own burst, so that what another
-    process made in the second it lost sorts before it."""
-    clock = _Clock(4_350_000_000_000, monkeypatch, late_by_ms=1_000)
-    for _ in range(ids._MAX_LEAD_MS + 1):
-        new_entry_id()
-    assert _stamp(new_entry_id()) == clock.ms
+    """A lead of a year is no burst's, and waiting for it would hold every id for as long as the
+    step is long; neither is one of a minute. The ids go on, above the ones before."""
+    clock = _Clock(_BASE_MS + 40_000_000_000, monkeypatch)
+    before = [new_entry_id() for _ in range(5)]
+    clock.ms -= step_back_ms
+    after = [new_entry_id() for _ in range(2_000)]
+    assert [*before, *after] == sorted([*before, *after])
+    assert len(set(after)) == len(after)
+    assert {_stamp(entry_id) for entry_id in after} == {_stamp(before[-1])}, "and no further ahead"
+
+
+def test_the_clock_catches_up_with_a_burst_past_the_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ten milliseconds on there is still a lead to hold, and the ids take the milliseconds
+    after the last again; once the clock is past the burst's, the clock's own."""
+    clock = _Clock(_BASE_MS, monkeypatch)
+    _a_burst(clock, 500, clock_moves_every=None)
+    at_the_bound = _BASE_MS + ids._MAX_LEAD_MS
+    clock.ms += 10
+    assert _stamp(new_entry_id()) == at_the_bound + 1, "the lead is 41 ms: within the bound"
+    clock.ms = at_the_bound + 5
+    assert _stamp(new_entry_id()) == clock.ms, "the clock is past it"

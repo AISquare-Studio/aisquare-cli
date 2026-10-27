@@ -2671,7 +2671,7 @@ def test_a_codex_pick_runs_through_its_own_model_slot_and_is_the_next_codex_spaw
     config = load_config()
     config.fleet.max_agents_per_project = 8  # six spawns in one project
     save_config(config)
-    picked = fleet_service.spawn(
+    fleet_service.spawn(
         project, "coder", agent="codex", model="gpt-x", effort="high", worktree=False
     )
     first = _spawn_native(tmux)
@@ -2694,15 +2694,18 @@ def test_a_codex_pick_runs_through_its_own_model_slot_and_is_the_next_codex_spaw
     pinned = _spawn_native(tmux)
     assert _pair(pinned, "--model") == "gpt-test", "the config's pin over the last pick"
     assert 'model_reasoning_effort="high"' in pinned, "the pick where the config names none"
-    fleet_service.spawn(project, "coder", agent="codex", model="gpt-y", effort="", worktree=False)
-    chosen = _spawn_native(tmux)
-    assert _pair(chosen, "--model") == "gpt-y", "this spawn's pick over the config's pin"
-    assert not any("model_reasoning_effort" in arg for arg in chosen), "a cleared effort"
+    chosen = fleet_service.spawn(
+        project, "coder", agent="codex", model="gpt-y", effort="", worktree=False
+    )
+    native = _spawn_native(tmux)
+    assert _pair(native, "--model") == "gpt-y", "this spawn's pick over the config's pin"
+    assert not any("model_reasoning_effort" in arg for arg in native), "a cleared effort"
     assert model_memory.remembered(agent="codex") == model_memory.Pick("gpt-y", None)
 
-    fleet_service.restart(project, picked.agent.label)
+    # Recorded with a model and no effort: the model is started again, not the config's.
+    fleet_service.restart(project, chosen.agent.label)
     replayed = _spawn_native(tmux)
-    assert _pair(replayed, "--model") == "gpt-x", "a restart starts the model it was given"
+    assert _pair(replayed, "--model") == "gpt-y", "a restart starts the model it was given"
 
 
 def test_a_codex_pick_the_roles_own_arguments_overrule_is_said_on_the_receipt(

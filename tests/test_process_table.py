@@ -478,6 +478,10 @@ def test_the_tools_are_given_their_timeouts_and_the_back_off_is_half_a_minute(
     assert calls == [("ps", 5.0), ("lsof", 5.0)]
     assert (process_table._TIMEOUT, process_table.BACKOFF) == (5.0, 30.0)
     assert process_table.HELD_FOR < process_table._TIMEOUT < process_table.BACKOFF
+    # A tool that cannot be killed is waited for 2 s more, and four are left behind at most
+    # (``tests/test_process_table_unkillable.py`` runs these in tenths).
+    assert (process_table._GRACE, process_table._STUCK_MAX) == (2.0, 4)
+    assert process_table._TIMEOUT + process_table._GRACE < process_table.BACKOFF
 
 
 def test_a_ps_line_that_is_not_a_pid_pair_is_left_out_of_the_tree(

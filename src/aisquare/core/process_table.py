@@ -34,6 +34,12 @@ a Codex that has run none holds none. So a record is a row's when the pane's pro
   it hangs: K panes, 5 K seconds a listing (r24 8). The first timeout makes every pane's
   answer "cannot tell" for :data:`BACKOFF` seconds, and the next listing after that tries
   once more.
+- **When a tool cannot be killed** (an ``lsof`` stuck in an uninterruptible read on a dead
+  mount ignores even ``SIGKILL``) ``subprocess.run`` kills it at the timeout and then waits for
+  it, and does not come back: no ``TimeoutExpired``, no back-off, and the listing stopped with
+  it. The tool is run on a thread the listing waits for :data:`_TIMEOUT` and :data:`_GRACE`
+  seconds, and then leaves behind (:func:`_run`): the same "cannot tell" and the same back-off.
+  A few are left behind at most, and none is asked for while that many are still stuck.
 """
 
 from __future__ import annotations
@@ -52,8 +58,14 @@ HELD_FOR = 2.0
 """Seconds what a pane holds is kept (:func:`held_by_pane`)."""
 _TIMEOUT = 5.0
 """Seconds ``ps`` or ``lsof`` is given."""
+_GRACE = 2.0
+"""Seconds, past :data:`_TIMEOUT` (when the tool is killed), a tool is given to be gone before it
+is left behind (:func:`_run`)."""
 BACKOFF = 30.0
 """Seconds after one of them timed out in which neither is run (:func:`held_by_pane`)."""
+_STUCK: list[threading.Thread] = []
+_STUCK_MAX = 4
+"""The threads of tools left behind that are still stuck, and how many are put up with."""
 _HELD: dict[int, tuple[float, frozenset[str] | None]] = {}
 _HELD_MAX = 256
 _LOCK = threading.Lock()
@@ -67,22 +79,53 @@ def _hung() -> None:
         _BLIND_UNTIL[0] = time.monotonic() + BACKOFF
 
 
-def descendants(root: int) -> frozenset[int] | None:
-    """``root`` and every process below it, from one ``ps``; ``None`` when ``ps`` cannot say."""
-    try:
-        done = subprocess.run(
-            ["ps", "-A", "-o", "pid=,ppid="],
-            capture_output=True,
-            text=True,
-            timeout=_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
+def _run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
+    """``argv`` run for at most :data:`_TIMEOUT` seconds, killed then, and given :data:`_GRACE`
+    more to be gone; ``None`` when it could not be run or did not answer, which starts the
+    back-off for a tool that ran out of time or could not be killed.
+
+    ``subprocess.run`` kills a tool that runs out of time and then waits for it, which a tool
+    that cannot be killed never ends: the call does not return and the back-off is never reached
+    (r25 4). So it runs on a thread the listing joins, and a thread still in it past the grace
+    is left behind: it ends when the tool does, and until then the listing is not held. Four
+    stuck is a machine whose mount is gone: no fifth is started."""
+    with _LOCK:
+        _STUCK[:] = [thread for thread in _STUCK if thread.is_alive()]
+        if len(_STUCK) >= _STUCK_MAX:
+            return None
+    outcome: list[subprocess.CompletedProcess[str] | BaseException] = []
+
+    def work() -> None:
+        try:
+            outcome.append(
+                subprocess.run(argv, capture_output=True, text=True, timeout=_TIMEOUT, check=False)
+            )
+        except BaseException as error:  # handed to the listing, which decides
+            outcome.append(error)
+
+    thread = threading.Thread(target=work, name=f"process-table-{argv[0]}", daemon=True)
+    thread.start()
+    thread.join(_TIMEOUT + _GRACE)
+    if thread.is_alive():
+        with _LOCK:
+            _STUCK.append(thread)
         _hung()
         return None
-    except (OSError, subprocess.SubprocessError):
+    [result] = outcome
+    if isinstance(result, subprocess.TimeoutExpired):
+        _hung()
         return None
-    if done.returncode != 0:
+    if isinstance(result, OSError | subprocess.SubprocessError | UnicodeDecodeError):
+        return None  # no such tool, or a name this locale cannot decode: not told
+    if isinstance(result, BaseException):
+        raise result
+    return result
+
+
+def descendants(root: int) -> frozenset[int] | None:
+    """``root`` and every process below it, from one ``ps``; ``None`` when ``ps`` cannot say."""
+    done = _run(["ps", "-A", "-o", "pid=,ppid="])
+    if done is None or done.returncode != 0:
         return None
     children: dict[int, list[int]] = {}
     for line in done.stdout.splitlines():
@@ -151,19 +194,9 @@ def _unescaped(name: str) -> str:
 
 
 def _from_lsof(pids: list[int]) -> frozenset[str] | None:
-    try:
-        done = subprocess.run(
-            ["lsof", "-n", "-P", "-w", "-F", "pn", "-p", ",".join(map(str, pids))],
-            capture_output=True,
-            text=True,
-            timeout=_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        _hung()
+    done = _run(["lsof", "-n", "-P", "-w", "-F", "pn", "-p", ",".join(map(str, pids))])
+    if done is None:
         return None
-    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
-        return None  # no lsof, or a name this locale cannot decode: not told
     found: set[str] = set()
     answered = False
     for line in done.stdout.splitlines():

@@ -27,6 +27,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -3455,6 +3456,12 @@ def test_stop_from_an_agent_view_still_asks_after_its_projects_read_failed(
     assert not any("no longer listed" in line for line in said)
 
 
+def _viewing(app: FleetApp, label: str) -> bool:
+    """Whether the right pane shows the agent view of the agent labelled ``label``."""
+    view = app.current_view()
+    return isinstance(view, AgentView) and view.status.agent.label == label
+
+
 def test_the_agent_view_offers_stop_exactly_while_there_is_a_process(
     tmp_path: Path, script: Script
 ) -> None:
@@ -3485,7 +3492,14 @@ def test_the_agent_view_offers_stop_exactly_while_there_is_a_process(
         offered: set[str] = set()
         for state in states:
             await pilot.click(row_for(app, f"agt_a_agent-{state}"))
-            await pilot.pause()
+            # The selection is a handler that awaits the view's mount, a later turn of the
+            # loop: one pause returned before it on Windows CI (run 40479198453) and read the
+            # PREVIOUS agent's Stop. So the test waits for this agent's own view, painted.
+            await settle_until_held(
+                app,
+                partial(_viewing, app, f"agent-{state}"),
+                what=f"agent-{state}'s view",
+            )
             view = app.current_view()
             assert isinstance(view, AgentView)
             if view.query_one("#agent-stop", Button).display:

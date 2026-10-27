@@ -2167,7 +2167,7 @@ def test_real_codex_trust_one_slot_gave_reaches_another_and_its_spawn_asks_nothi
             subprocess.run(["tmux", "-L", human, "send-keys", "-t", "0", "Enter"], check=True)
             until(
                 lambda: codex_sharing.read_trust(given.config_dir) == {root: True},
-                15,
+                40,  # as the other waits on Codex: 15 s ran out on a CI runner (run 40479198453)
                 "the yes in slot A's config.toml",
                 lambda: codex_sharing.config_path(given.config_dir).read_text(encoding="utf-8"),
             )

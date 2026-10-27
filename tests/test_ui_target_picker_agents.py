@@ -164,13 +164,25 @@ def test_a_new_bind_on_a_codex_slot_carries_codex_home_and_its_agent(
             form.query_one("#bind-binary", Input).value,
             [value for _, value in accounts._options],
         ]
+        binary = form.query_one("#bind-binary", Input)
         form.query_one("#bind-agent", Select).value = "codex"
-        await pilot.pause()
-        seen += [form.query_one("#bind-binary", Input).value, [v for _, v in accounts._options]]
+        # The binary and the accounts follow on the Select's Changed, a later turn of the loop
+        # (``test_new_binds_binary_follows_the_agent_until_one_is_typed`` says the same): one
+        # pause returned before it on CI (py3.11, run 40479198453) and read Claude Code's binary.
+        # So each step waits for its effect, not for a pause.
+        await until(
+            pilot,
+            lambda: binary.value == "codex" and [v for _, v in accounts._options] == ["", "5"],
+            what="codex's binary and accounts",
+        )
+        seen += [binary.value, [v for _, v in accounts._options]]
         accounts.value = "5"
         form.query_one("#bind-seat", Input).value = "coder4"
-        await pilot.pause()
-        form.query_one("#bind-save", Button).press()
+        # The form is checked on the inputs' Changed, a later turn too; a disabled Save ignores
+        # the press.
+        save = form.query_one("#bind-save", Button)
+        await until(pilot, lambda: not save.disabled, what="the form valid")
+        save.press()
         await wait_for(pilot, AttachTargetScreen)
         await settle_page(host)
         listing = picker.query_one("#picker-list", OptionList)

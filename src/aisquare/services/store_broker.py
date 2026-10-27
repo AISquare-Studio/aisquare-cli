@@ -322,21 +322,92 @@ def check_cwd(environ: Mapping[str, str] | None = None) -> str | None:
     return f"{here} is outside this agent's tree: its broker runs commands only there"
 
 
-def outside_tree(path: Path, environ: Mapping[str, str] | None = None) -> str | None:
-    """Why a command a broker runs may not read ``path`` (an artifact, a checkout), or
-    ``None``: it must be in the launch's tree (:data:`ROOTS_ENV`), as the command's own
-    directory must (:func:`check_cwd`). The broker reads outside the sandbox, so a path the
-    agent names is read as the user: ``/etc``, ``~/.ssh`` and another project's files would
-    be read, hashed and (an artifact) kept in the store, which the sandbox reads. ``None``
-    for any command that is not brokered."""
-    source = os.environ if environ is None else environ
+def _tree_roots(source: Mapping[str, str]) -> list[Path] | None:
+    """The launch's tree (:data:`ROOTS_ENV`), or ``None`` for any command that is not
+    brokered."""
     if not brokered_call(source) or not source.get(ROOTS_ENV):
         return None
-    roots = [Path(root) for root in source[ROOTS_ENV].split(os.pathsep) if root]
-    there = _resolved(path.expanduser())
-    if any(there == root or there.is_relative_to(root) for root in roots):
-        return None
+    return [Path(root) for root in source[ROOTS_ENV].split(os.pathsep) if root]
+
+
+def _placed(path: Path, roots: Sequence[Path]) -> tuple[Path, Path] | str:
+    """``path`` as the kernel resolves it and the root of the tree it is in, or why it is
+    in none. A relative path is no place: it is read from the directory of whoever reads it
+    (a report's ``cwd`` or ``source_root`` of ``""`` or ``sub`` was the broker's own
+    directory, which is in the tree: review r24 of #113, finding 7)."""
+    named = path.expanduser()
+    if not named.is_absolute():
+        return (
+            f"{path} is not an absolute path: its broker reads only a place in this agent's "
+            "tree that the path itself names"
+        )
+    there = _resolved(named)
+    for root in roots:
+        if there == root or there.is_relative_to(root):
+            return root, there
     return f"{path} is outside this agent's tree: its broker reads only there"
+
+
+def outside_tree(path: Path, environ: Mapping[str, str] | None = None) -> str | None:
+    """Why a command a broker runs may not read ``path`` (an artifact, a checkout), or
+    ``None``: it must be an absolute path in the launch's tree (:data:`ROOTS_ENV`), as the
+    command's own directory must be (:func:`check_cwd`). The broker reads outside the
+    sandbox, so a path the agent names is read as the user: ``/etc``, ``~/.ssh`` and another
+    project's files would be read, hashed and (an artifact) kept in the store, which the
+    sandbox reads. A directory beside the tree that begins with its name (``<tree>-evil``)
+    is not in it: the comparison is by path components. ``None`` for any command that is not
+    brokered."""
+    roots = _tree_roots(os.environ if environ is None else environ)
+    if roots is None:
+        return None
+    placed = _placed(path, roots)
+    return placed if isinstance(placed, str) else None
+
+
+def open_in_tree(path: Path, environ: Mapping[str, str] | None = None) -> int | None:
+    """A descriptor on the file ``path`` names, opened so that the file it holds is in the
+    launch's tree, or ``None`` for a command that is not brokered (the caller opens as it
+    always did). :class:`OutOfScope` for a path outside the tree (:func:`outside_tree`), and
+    for one whose way in turned into a link after it was resolved.
+
+    :func:`outside_tree` alone answers about a name, and the name is read again to open it:
+    a directory the sandbox swapped for a link between the two sent the read outside the
+    tree (a helper found 5 leaks in 669 flips: review r24 of #113, finding 6). The file is
+    opened here by walking from the tree's root, one step at a time, with ``O_NOFOLLOW`` at
+    each: the descriptor is a file of the tree, and the bytes are read from it. A file with
+    a second name (a hard link in the tree to a file outside it) is not told from a file of
+    the tree: the docs say so (``docs/coding-agents.md``)."""
+    roots = _tree_roots(os.environ if environ is None else environ)
+    if roots is None:
+        return None
+    placed = _placed(path, roots)
+    if isinstance(placed, str):
+        raise OutOfScope(placed, kind="path")
+    if sys.platform == "win32":
+        raise OutOfScope(f"{path} cannot be read safely here: a broker runs on POSIX", kind="path")
+    root, there = placed
+    walk = os.O_RDONLY | os.O_NOFOLLOW
+    descriptor = -1
+    try:
+        descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        names = there.relative_to(root).parts
+        for name in names[:-1]:
+            deeper = os.open(name, walk | os.O_DIRECTORY, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = deeper
+        if names:  # a FIFO would block an open that waits for its writer
+            deeper = os.open(names[-1], walk | os.O_NONBLOCK, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = deeper
+        return descriptor
+    except OSError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise OutOfScope(
+            f"{path} cannot be opened below this agent's tree ({exc.strerror}): a way in "
+            "that was a directory is a link now",
+            kind="path",
+        ) from None
 
 
 def record_refusal(kind: str, detail: str, *, board: str | None = None) -> None:

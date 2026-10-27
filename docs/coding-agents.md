@@ -1032,10 +1032,13 @@ this list to it, and every board call a role's cycle teaches to it:
 - `aisquare brief show`
 - `aisquare brief update`
 - `aisquare brief link`
-- `aisquare brief evidence` (an `--artifact` only from the launch's own tree; a `--report`
-  from the sandbox is adopted first, below)
+- `aisquare brief evidence` (an `--artifact` only from the launch's own tree: the file is
+  opened below the tree's root with no link followed and read from that descriptor, so a
+  directory or the file swapped for a link after the path was checked is refused, and a FIFO
+  swapped in does not block the broker; a hard link in the tree to a file outside it is not
+  told from a file of the tree. A `--report` from the sandbox is adopted first, below)
 - `aisquare brief check`
-- `aisquare brief finding`
+- `aisquare brief finding` (its `--artifact` as `evidence`'s)
 - `aisquare reports seal` (hidden: what `asq exec` asks of its broker when a run ends)
 
 Global output flags (`--json`, `-q`, `-v`, `--no-color`) and `--help` are fine; `aisquare
@@ -1054,7 +1057,8 @@ no store (read-only there). When the run ends `exec` has the broker seal the rep
 cannot write, once). `brief evidence --report` then adopts it into the home's `reports/`,
 and the evidence cites the copy: the report must be sealed and unchanged since; owner-only,
 with its own files and nothing else, none a link or a pipe; its directory and checkout
-inside the launch's tree and its board the launch's. The copy is written from the bytes that
+absolute paths inside the launch's tree (a relative one is refused: it would be read from
+the directory of whoever reads it) and its board the launch's. The copy is written from the bytes that
 were checked. A pass is judged as for any report, by the broker reading the source again
 (the same files before the run, after it and now), and `task done` is gated at the store.
 What this does not settle: that the command ran as the report says. An agent that writes

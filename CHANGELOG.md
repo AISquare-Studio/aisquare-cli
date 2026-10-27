@@ -671,6 +671,17 @@ adapter.**
 
 ### Fixed
 
+- **A sandboxed agent's `--artifact` is read from the file that was checked, and a report's
+  relative paths are refused** (r24 of #113, findings 6 and 7). `brief evidence|finding
+  --artifact` run through the agent's broker (Codex) asked whether the path was in the
+  launch's tree and then opened the path again, so a directory or the file swapped for a
+  link in between sent the read outside it (5 leaks in 669 flips of a probe), and a FIFO
+  swapped in held a broker worker. The file is opened below the tree's root, one step at a
+  time with no link followed, and read from that descriptor. A sandbox report whose `cwd` or
+  `source_root` is not an absolute path (`""`, `.`, `sub`) is refused at its seal: it was
+  read from the broker's own directory, which is in the tree, and kept as the evidence's
+  `source_root`. A hard link in the tree to a file outside it is still not told from a file
+  of the tree (`docs/coding-agents.md` says so).
 - **Words and costs that named one agent or ignored another's rows** (r23 of the 0.9.0 merge).
   asq's one tmux process per tick holds once a project has a stopped worker: the windows of
   ended rows are read out of the tick's one answer (it asked tmux twice a project). The Spawn

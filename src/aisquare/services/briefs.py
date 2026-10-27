@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -178,16 +179,26 @@ def _read_artifact(path: Path) -> _Artifact:
     except (OSError, RuntimeError) as exc:
         raise ValueError(f"artifact {path} cannot be read ({exc})") from None
     # A command an agent's broker runs reads as the user, outside the sandbox, and keeps a
-    # copy in the store: only a file of the launch's own tree (`store_broker.outside_tree`).
-    why = store_broker.outside_tree(resolved)
-    if why is not None:
-        raise store_broker.OutOfScope(why, kind="path")
-    if not resolved.is_file():
-        raise ValueError(f"artifact {path} is not a regular file")
+    # copy in the store: only a file of the launch's own tree. Checked on the descriptor it
+    # is read from, opened below the tree with no link followed: a name checked and then
+    # opened again was swapped for a link in between (`store_broker.open_in_tree`).
+    descriptor = store_broker.open_in_tree(resolved)
+    if descriptor is None:
+        if not resolved.is_file():
+            raise ValueError(f"artifact {path} is not a regular file")
+        handle = resolved.open("rb")
+    else:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):  # a directory, a FIFO swapped in
+            os.close(descriptor)
+            raise ValueError(f"artifact {path} is not a regular file")
+        handle = os.fdopen(descriptor, "rb")
     limit = MAX_ARTIFACT_BYTES // (1024 * 1024)
-    if resolved.stat().st_size > MAX_ARTIFACT_BYTES:
-        raise ValueError(f"artifact {path} is over the {limit} MiB limit; record a smaller one")
-    with resolved.open("rb") as handle:
+    with handle:
+        status = os.fstat(handle.fileno())
+        if not stat.S_ISREG(status.st_mode):
+            raise ValueError(f"artifact {path} is not a regular file")
+        if status.st_size > MAX_ARTIFACT_BYTES:
+            raise ValueError(f"artifact {path} is over the {limit} MiB limit; record a smaller one")
         body = handle.read(MAX_ARTIFACT_BYTES + 1)
     if len(body) > MAX_ARTIFACT_BYTES:  # it grew between the stat and the read
         raise ValueError(f"artifact {path} is over the {limit} MiB limit; record a smaller one")

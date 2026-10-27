@@ -48,6 +48,7 @@ from aisquare.core.agent_adapters.types import (
     command_entry,
     config_assignment,
     config_home,
+    executable_name,
     option_occurrences,
     option_values,
     package_version,
@@ -1419,6 +1420,35 @@ class CodexAdapter:
         ``resume_cwd = "session"`` its "Always use session directory" saved, and the fork
         runs in that directory with the source's turns and its own line."""
         return ForkArgs(("fork", native_session_id, "-C", "."), mints_id=False)
+
+    def adoptable(self, args: Sequence[str]) -> str | None:
+        """``codex [options] resume [options] <thread id>``, ``exec resume`` as well: the first
+        word after ``resume`` that is neither an option nor an option's value
+        (``capabilities.value_options``). Its npm wrapper (``node …/bin/codex resume <id>``)
+        and the native binary it starts both name it. ``resume --last``, a bare ``resume``
+        (its picker) and a ``fork`` (whose source goes on unheld) name none, nor does what
+        follows ``--``, a prompt."""
+        start = next(
+            (at for at, word in enumerate(args) if executable_name(word) == self.binary), None
+        )
+        if start is None:
+            return None
+        words = iter(args[start + 1 :])
+        resumes = False
+        for word in words:
+            if word in ("--", "--last"):
+                return None
+            if word.startswith("-"):
+                if "=" not in word and word in self.capabilities.value_options:
+                    next(words, None)  # its value
+                continue
+            if resumes:
+                return word
+            if word == "resume":
+                resumes = True
+            elif word != "exec":
+                return None  # another subcommand, or a prompt
+        return None
 
     def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
         """``codex queue --thread <id> --message=<text>``: measured on 0.162.1 against an

@@ -146,7 +146,8 @@ OPTION_CALLS = frozenset({"Option", "Argument"})
 #:
 #: 0.9.1's Claude-Code-only features carry the rows marked below (SCOPE #113 091, each a GAP
 #: with a lane in its note): Remote Control's launch line and doctor row (#289), the status
-#: line (#287), ``fleet adopt`` (#290) and before-limit's gate on the transcript reader (F2).
+#: line (#287) and before-limit's gate on the transcript reader (F2). ``fleet adopt`` (#290)
+#: reads a process's arguments and a transcript through its agent's adapter: no row.
 BASELINE: dict[str, dict[Shape, int]] = {
     "cli/fleet.py": {"flag": 1},
     "cli/hook.py": {"binary": 3},
@@ -158,7 +159,6 @@ BASELINE: dict[str, dict[Shape, int]] = {
     "core/config.py": {"flag": 3},
     "core/harness.py": {"env": 30, "dir": 1, "flag": 6},  # + MODEL_FLAG and EFFORT_FLAG
     "core/spawn.py": {"env": 1},
-    "services/adopt.py": {"binary": 1, "flag": 1},  # fleet adopt reads a `claude --resume` (#290)
     "services/diagnostics.py": {"env": 6, "dir": 4},  # + the remote control row (#289)
     "services/explainability.py": {"env": 4},
     "services/explainability_ops.py": {"env": 1, "dir": 4},

@@ -705,10 +705,14 @@ class StatuslineSite(BaseModel):
 
 
 class AdoptableConversation(BaseModel):
-    """A Claude Code conversation on one of the CLI's accounts that no fleet row owns (#290):
-    what ``fleet adopt --list`` shows and ``fleet adopt`` takes."""
+    """A coding agent's conversation on one of the CLI's accounts that no fleet row owns
+    (#290): what ``fleet adopt --list`` shows and ``fleet adopt`` takes."""
 
     session_id: str
+    """The agent's own id for it, which ``fleet adopt`` takes (Claude Code's is the board's
+    too; Codex's is its thread id, which ``codex resume`` names)."""
+    agent: str = "claude-code"
+    """The agent whose conversation it is (``core.agent_adapters`` id): the one it resumes on."""
     transcript_path: str
     slot: int
     """The account whose config dir holds the transcript: the one it resumes on."""
@@ -722,7 +726,7 @@ class AdoptableConversation(BaseModel):
     first_prompt: str | None = None
     """The first thing the user typed, cut to a line."""
     held_by: int | None = None
-    """The pid of a live ``claude`` still holding the session; ``None`` when none does."""
+    """The pid of a live process still holding the session; ``None`` when none does."""
 
 
 class ClaudeAccountStatus(BaseModel):

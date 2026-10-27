@@ -14,6 +14,7 @@ import hashlib
 import json
 import shlex
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from aisquare.core.agent_adapters.transcripts import (
     PendingTool,
     TranscriptTail,
     dim_note,
+    head_records,
     kept_input,
     lines_backwards,
     one_per_line,
@@ -67,6 +69,7 @@ from aisquare.core.agent_adapters.types import (
     UsageScan,
     WriteScope,
     config_home,
+    executable_name,
     option_occurrences,
     option_values,
     package_version,
@@ -289,6 +292,26 @@ class FakeTranscript:
             record.get("kind") == "compacted" and (ledger.stamped(record) or since) >= since
             for record in ledger.entries(file, row)
         )
+
+    #: Its log is closed between records: who runs a thread is its arguments' to say.
+    held_open = False
+
+    def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
+        # Its threads: ``threads/<id>.log``, one record a line.
+        with suppress(OSError):
+            for path in (home / "threads").glob("*.log"):
+                yield path.stem, path
+
+    def opening(self, file: Path) -> tuple[str | None, str | None]:
+        # A ``begin`` record names its ``dir``; the first ``heard`` is what the human typed.
+        where: str | None = None
+        heard: str | None = None
+        for record in head_records(file):
+            if where is None and record.get("kind") == "begin":
+                where = str(record.get("dir", "")) or None
+            if heard is None and record.get("kind") == "heard":
+                heard = str(record.get("text", "")) or None
+        return where, heard
 
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         # What it said since the newest thing it heard; a run or a pick answers with no words.
@@ -806,6 +829,13 @@ class FakeAgentAdapter:
 
     def fork_args(self, native_session_id: str, transcript_path: Path | None) -> ForkArgs | None:
         return None  # its threads cannot branch: a fork starts fresh
+
+    def adoptable(self, args: Sequence[str]) -> str | None:
+        # ``fakeagent … --thread <id>``, as :meth:`resume_args` writes it.
+        if not any(executable_name(word) == self.binary for word in args):
+            return None
+        at = next((i for i, word in enumerate(args) if word == "--thread"), None)
+        return args[at + 1] if at is not None and at + 1 < len(args) else None
 
     def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
         return ["inbox", native_session_id, message]

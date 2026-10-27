@@ -54,6 +54,7 @@ from aisquare.core.agent_adapters.transcripts import (
     TranscriptTail,
     dim_note,
     first_question,
+    head_records,
     kept_input,
     lines_backwards,
     one_per_line,
@@ -184,6 +185,41 @@ class CodexTranscript:
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         return _rollout_reply(file, since)
 
+    #: Its native binary holds the rollout open from the first prompt on for as long as the
+    #: session lives (``lsof`` on 0.164.0, ``core.process_table``).
+    held_open = True
+
+    def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
+        """``sessions/YYYY/MM/DD/rollout-<local time>-<thread id>.jsonl``, by its name."""
+        with suppress(OSError):
+            for path in (home / "sessions").glob("*/*/*/rollout-*.jsonl"):
+                if named := _ROLLOUT_NAME.match(path.name):
+                    yield named.group(1), path
+
+    def opening(self, file: Path) -> tuple[str | None, str | None]:
+        """The ``cwd`` its ``session_meta`` names, and the first ``user`` message that is not
+        Codex's own context (:func:`_own`: AGENTS.md, ``<environment_context>``…)."""
+        cwd: str | None = None
+        first: str | None = None
+        for record in head_records(file):
+            payload = _payload(record)
+            if cwd is None and record.get("type") == "session_meta":
+                cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+            elif (
+                first is None
+                and record.get("type") == "response_item"
+                and payload.get("type") == "message"
+                and payload.get("role") == "user"
+            ):
+                text = _message_text(payload)
+                first = text if text.strip() and not _own(text.lstrip()) else None
+            if cwd is not None and first is not None:
+                break
+        return cwd, first
+
+
+_ROLLOUT_NAME = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)\.jsonl$")
+"""A rollout's name: the local time its session began, then its thread id."""
 
 _REPLY_MAX_BYTES = 64_000_000
 """How far back :func:`_rollout_reply` reads for the prompt a reply answers, as Claude Code's

@@ -1499,7 +1499,9 @@ def rename(
 def adopt(
     ref: Annotated[
         str | None,
-        typer.Argument(help="The conversation: its session id, or its transcript's .jsonl path."),
+        typer.Argument(
+            help="The conversation: its session id (a Codex thread's), or its transcript's path."
+        ),
     ] = None,
     role: Annotated[str, typer.Option("--role", help="Role it runs as in the fleet.")] = "coder",
     label: Annotated[
@@ -1515,14 +1517,14 @@ def adopt(
         int, typer.Option("--limit", help="With --list: how many.", min=1, max=50)
     ] = adopt_service.LIST_LIMIT,
 ) -> None:
-    """Bring a Claude Code conversation you started by hand under the fleet (#290).
+    """Bring a coding-agent conversation you started by hand under the fleet (#290).
 
-    It resumes on the account whose directory holds its transcript (a slot, or the plain
-    claude's ~/.claude) and in the directory it ran in, as a row on that directory's
-    project, keeping its session id: the board row is its own. Refused while a claude
-    still holds it, when the fleet already owns it, and when its directory is no onboarded
-    project. --list shows the recent ones no fleet row owns: id, account, directory, last
-    activity and the first thing you typed.
+    It resumes on its own agent (a Claude Code session, a Codex thread), on the account whose
+    directory holds its transcript (a slot, or the agent's plain home) and in the directory
+    it ran in, as a row on that directory's project, keeping its session: the board row is
+    its own. Refused while a process still holds it, when the fleet already owns it, and
+    when its directory is no onboarded project. --list shows the recent ones no fleet row
+    owns: id, agent, account, directory, last activity and the first thing you typed.
     """
     if listing:
         conversations = adopt_service.recent(limit)
@@ -1536,7 +1538,7 @@ def adopt(
         now = datetime.now(tz=UTC)
         for c in conversations:
             line = Text(c.session_id[:8], style="bold")
-            line.append(f"  {c.account}  {c.cwd or '—'}  ")
+            line.append(f"  {c.agent}  {c.account}  {c.cwd or '—'}  ")
             line.append(_ago(now - c.last_activity), style="dim")
             if c.held_by is not None:
                 line.append(f"  held by pid {c.held_by}", style="yellow")

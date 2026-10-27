@@ -41,6 +41,7 @@ from aisquare.core.agent_adapters.transcripts import (
     PendingTool,
     TranscriptTail,
     dim_note,
+    head_records,
     kept_input,
     lines_backwards,
     parse_line,
@@ -79,6 +80,7 @@ from aisquare.core.agent_adapters.types import (
     UsageScan,
     WriteScope,
     config_home,
+    executable_name,
     merged_settings,
     option_values,
     package_version,
@@ -368,6 +370,20 @@ class GeminiShapedTranscript:
 
     def compacted_since(self, file: Path, since: datetime) -> bool:
         return False  # no compaction record of its own
+
+    #: Unmeasured: nothing is asked of the process table for it.
+    held_open = False
+
+    def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
+        """None listed: its chats are kept per project hash (``tmp/<hash>/chats``), unmeasured."""
+        return iter(())
+
+    def opening(self, file: Path) -> tuple[str | None, str | None]:
+        """The first ``user`` record's ``content``; its log names no folder."""
+        for record in head_records(file):
+            if record.get("type") == "user" and isinstance(record.get("content"), str):
+                return None, record["content"]
+        return None, None
 
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         said: list[str] = []
@@ -922,6 +938,13 @@ class GeminiShapedAdapter:
 
     def fork_args(self, native_session_id: str, transcript_path: Path | None) -> ForkArgs | None:
         return None
+
+    def adoptable(self, args: Sequence[str]) -> str | None:
+        """``gemini --resume <id>``, as :meth:`resume_args` writes it."""
+        if not any(executable_name(word) == self.binary for word in args):
+            return None
+        at = next((i for i, word in enumerate(args) if word == "--resume"), None)
+        return args[at + 1] if at is not None and at + 1 < len(args) else None
 
     def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
         return None

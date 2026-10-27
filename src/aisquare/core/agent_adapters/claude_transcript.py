@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable, Iterator, Mapping
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,7 @@ from aisquare.core.agent_adapters.transcripts import (
     TranscriptTail,
     dim_note,
     first_question,
+    head_records,
     kept_input,
     lines_backwards,
     one_per_line,
@@ -174,6 +176,50 @@ class ClaudeTranscript:
 
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         return last_reply(file, since=since)
+
+    #: Claude Code appends to its transcript and holds it open no longer: which process runs a
+    #: session is its registry's to say (``<config dir>/sessions/<pid>.json``).
+    held_open = False
+
+    def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
+        """``projects/<folder>/<id>.jsonl``: a subagent's, one level further down, is no
+        conversation of its own."""
+        with suppress(OSError):
+            for path in (home / "projects").glob("*/*.jsonl"):
+                yield path.stem, path
+
+    def opening(self, file: Path) -> tuple[str | None, str | None]:
+        """The ``cwd`` an entry records, and the first ``user`` entry's text that is no meta
+        line, sidechain, tool result or command wrapper (``<command-name>…``)."""
+        cwd: str | None = None
+        first: str | None = None
+        for entry in head_records(file):
+            if cwd is None and isinstance(entry.get("cwd"), str):
+                cwd = entry["cwd"]
+            if first is None:
+                first = _typed(entry)
+            if cwd is not None and first is not None:
+                break
+        return cwd, first
+
+
+def _typed(entry: dict[str, Any]) -> str | None:
+    """What the user typed in a ``user`` entry: text, never a tool result, a command's
+    wrapper (``<command-name>…``) or a meta line."""
+    if entry.get("type") != "user" or entry.get("isMeta") or entry.get("isSidechain"):
+        return None
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, list):
+        texts = [
+            part.get("text")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        content = next((text for text in texts if isinstance(text, str)), None)
+    if not isinstance(content, str) or not content.strip() or content.lstrip().startswith("<"):
+        return None
+    return content
 
 
 # --- the reply the captain reads back: main's ``core.transcripts.last_reply``, moved ---------

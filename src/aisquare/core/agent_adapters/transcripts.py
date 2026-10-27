@@ -20,8 +20,10 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable, Iterator, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -208,6 +210,25 @@ def parse_line(raw: bytes) -> dict[str, Any] | None:
     except (ValueError, UnicodeDecodeError, RecursionError):
         return None
     return record if isinstance(record, dict) else None
+
+
+OPENING_LINES = 400
+"""How many of a transcript's first lines ``AgentTranscript.opening`` reads for the folder its
+session ran in and its first prompt (``fleet adopt``)."""
+OPENING_BUDGET = 4_194_304
+"""Most bytes of a transcript's head read for them: a paste can be megabytes on one line."""
+
+
+def head_records(file: Path) -> Iterator[dict[str, Any]]:
+    """The records of the transcript's first :data:`OPENING_LINES` lines, oldest first, read
+    within :data:`OPENING_BUDGET` bytes, for a transcript of one whole record a line (Claude
+    Code's, Codex's): a line that is none (:func:`parse_line`) is passed over. None where the
+    file cannot be read."""
+    with suppress(OSError):
+        lines = lines_forward(file, 0, budget=OPENING_BUDGET)
+        for _offset, raw in islice(lines, OPENING_LINES):
+            if (record := parse_line(raw)) is not None:
+                yield record
 
 
 def one_per_line(lines: Iterable[tuple[int, bytes]]) -> Iterator[tuple[int, dict[str, Any] | None]]:

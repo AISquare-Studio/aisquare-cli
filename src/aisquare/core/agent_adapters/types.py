@@ -999,6 +999,28 @@ class AgentTranscript(Protocol):
 
     speaker: str
     """How a page names the agent's own turns: ``* <speaker>`` (``claude``, ``codex``)."""
+    held_open: bool
+    """Whether the process that writes a transcript holds it open for as long as its session
+    lives (Codex's rollouts: its native binary, measured with ``lsof`` on 0.164.0; Claude
+    Code's transcript is held by none, its session registry says who runs one). ``fleet
+    adopt`` asks the process table (``core.process_table``) then whether a process of the
+    agent's holds a conversation whose arguments name no session (a fresh start)."""
+
+    def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
+        """Each conversation the agent keeps under config dir ``home``: its native id and its
+        transcript, what ``fleet adopt`` lists and looks a session up among (Claude Code's
+        ``projects/<folder>/<id>.jsonl``, a subagent's one level further down being no
+        conversation of its own; Codex's ``sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl``).
+        Reads names, opens no file; none where ``home`` cannot be listed. Never raises."""
+        ...
+
+    def opening(self, file: Path) -> tuple[str | None, str | None]:
+        """``(cwd, first prompt)`` from the head of the transcript ``file``: the folder the
+        session ran in and the first thing the human typed, as typed (never the agent's own
+        context, a command's wrapper, a meta line or a tool's result); ``None`` for what its
+        first ``transcripts.OPENING_LINES`` lines lack. Nothing further is read, and nothing
+        of it is kept. Never raises."""
+        ...
 
     def tail_facts(self, file: Path, size: int, budget: int, written: datetime) -> TranscriptTail:
         """What the end of the transcript says (SPEC §4.3): the calls still waiting for their
@@ -1488,6 +1510,16 @@ class AgentAdapter(Protocol):
         unchanged (a hand-off's Fork; :class:`ForkArgs`); ``None`` for an agent that cannot
         fork one, whose fork starts fresh with a hand-off prompt instead. Run in the session's
         own config dir unless ``capabilities.resumes_across_homes``."""
+        ...
+
+    def adoptable(self, args: Sequence[str]) -> str | None:
+        """The session a process whose command line is ``args`` (word by word, as ``ps``
+        lists it) runs, as those words name it, when the process is this agent's: its native
+        id, or the path of its transcript where the agent takes one. What ``fleet adopt``
+        reads for a live process still holding a conversation started by hand, which it
+        refuses to adopt (``services.adopt``). ``None`` for another program's process, and
+        for one of this agent's that names no session (a fresh start, a resume picked at run
+        time)."""
         ...
 
     def tools_only_args(

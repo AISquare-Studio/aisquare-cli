@@ -44,6 +44,7 @@ from aisquare.core.agent_adapters.types import (
     WriteScope,
     block_reply,
     command_entry,
+    executable_name,
     option_occurrences,
     option_values,
     package_version,
@@ -691,6 +692,25 @@ class ClaudeCodeAdapter:
         the old one's conversation, which the launch names with ``--session-id <new>``."""
         resume = self.resume_args(native_session_id, transcript_path)
         return ForkArgs((*resume, "--fork-session"), mints_id=True)
+
+    def adoptable(self, args: Sequence[str]) -> str | None:
+        """A word that runs ``claude`` (``types.executable_name``: a path, a Windows shim) and
+        a session flag (``session_flags``: ``--resume``/``-r``, ``--session-id``) followed by
+        what it names, as ``--flag value`` or ``--flag=value``: the id or the transcript's
+        path. A shell whose command line merely mentions an id runs none (review of #370:
+        Claude Code's Bash wrapper around ``aisquare fleet adopt <id>``), and nor does a
+        ``--resume`` with no value, its picker."""
+        flags = self.capabilities.session_flags
+        if flags is None or not any(executable_name(word) == self.binary for word in args):
+            return None
+        named = {flags.names, *flags.resumes}
+        for at, word in enumerate(args):
+            flag, equals, value = word.partition("=")
+            if equals and flag in named and value:
+                return value
+            if word in named and at + 1 < len(args) and not args[at + 1].startswith("-"):
+                return args[at + 1]
+        return None
 
     def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
         return None  # no queue: `fleet tell` types into its prompt when the pane waits

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import stat
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -191,7 +192,8 @@ def test_the_dialogs_take_over_onto_another_agent_starts_it_fresh_with_the_brief
     kept = [note for note in receipt.notes if note.startswith("hand-off brief: ")]
     [brief] = [Path(note.removeprefix("hand-off brief: ")) for note in kept]
     assert brief.parent == handoff.brief_dir() and brief.is_file()
-    assert stat.S_IMODE(brief.stat().st_mode) == 0o600
+    if sys.platform != "win32":  # Windows keeps no mode bits to read back
+        assert stat.S_IMODE(brief.stat().st_mode) == 0o600
     # the claim moved with the row; the other session's did not
     assert _task_now(leg.claimed).claimed_by == new.session_id
     assert _task_now(leg.elsewhere).claimed_by == "somebody-else"

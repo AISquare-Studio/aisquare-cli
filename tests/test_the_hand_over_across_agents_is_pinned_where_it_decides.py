@@ -275,6 +275,7 @@ def _record_of_role(where: ProjectInfo, tmp_path: Path, role: str) -> launch_sea
 
 @pytest.mark.needs_captain
 def test_a_take_over_or_a_fork_of_the_captain_onto_another_agent_is_refused(
+    tmux: FakeTmux,  # noqa: F811 - pytest resolves fixtures by NAME
     claude_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
     tmp_path: Path,
@@ -326,6 +327,7 @@ def test_the_automatic_hand_over_of_the_captain_never_crosses_agents(
 
 
 def test_a_brief_is_built_at_the_redaction_level_the_config_holds(
+    tmux: FakeTmux,  # noqa: F811 - pytest resolves fixtures by NAME
     claude_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
     tmp_path: Path,

@@ -318,9 +318,10 @@ def test_a_key_in_the_board_text_is_redacted_too() -> None:
 
 def test_the_last_two_lines_are_ours_and_are_not_scrubbed() -> None:
     """The brief file's path is the agent's way to the rest, whatever the level."""
-    brief = _brief(0, redaction=RedactionLevel.strict, path=Path("/Users/someone/h/b.md"))
+    path = Path("/Users/someone/h/b.md")
+    brief = _brief(0, redaction=RedactionLevel.strict, path=path)
 
-    assert brief.text().endswith("The whole brief is kept at /Users/someone/h/b.md.")
+    assert brief.text().endswith(f"The whole brief is kept at {path}.")
 
 
 def test_strict_takes_who_and_where_out_as_well_and_off_sends_as_typed() -> None:
@@ -373,7 +374,7 @@ def test_a_brief_made_by_hand_is_scrubbed_at_the_default() -> None:
 def _aged(path: Path, days: float, *, now: datetime) -> Path:
     path.write_text("a brief\n", encoding="utf-8")
     stamp = (now - timedelta(days=days)).timestamp()
-    os.utime(path, (stamp, stamp), follow_symlinks=False)
+    os.utime(path, (stamp, stamp))  # a regular file just written; Windows has no lutimes
     return path
 
 

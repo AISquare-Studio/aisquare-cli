@@ -183,6 +183,7 @@ def test_the_brief_keeps_every_section_and_cuts_the_oldest_of_the_conversation_t
     section is in it, and the conversation keeps its newest lines, saying the start was
     cut; the file's version keeps more."""
     now = datetime.now(tz=UTC)
+    kept_at = Path("/home/.aisquare/handoffs/brief.md")  # spelled as the platform spells it
     task = TeamTask(
         id="tsk_brief",
         project_id="prj",
@@ -208,7 +209,7 @@ def test_the_brief_keeps_every_section_and_cuts_the_oldest_of_the_conversation_t
             tree=Path("/w"), branch="feat/x", changed=(" M a.py",), commits=("abc fix",)
         ),
         conversation=conversation,
-        path=Path("/home/.aisquare/handoffs/brief.md"),
+        path=kept_at,
     )
 
     text = brief.text()
@@ -224,7 +225,7 @@ def test_the_brief_keeps_every_section_and_cuts_the_oldest_of_the_conversation_t
     assert "on branch feat/x" in text and "uncommitted: M a.py" in text and "abc fix" in text
     assert "its start cut to fit" in text
     assert "line 399" in text and "line 0 " not in text  # the newest kept, the oldest cut
-    assert text.endswith("The whole brief is kept at /home/.aisquare/handoffs/brief.md.")
+    assert text.endswith(f"The whole brief is kept at {kept_at}.")
     whole = brief.text(handoff.FILE_MAX)
     assert len(whole.encode("utf-8")) <= handoff.FILE_MAX and whole.count("line ") > text.count(
         "line "

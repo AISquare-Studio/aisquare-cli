@@ -427,3 +427,20 @@ def test_an_end_too_long_to_parse_is_read_off_its_head(tmp_path: Path) -> None:
     assert record["payload"]["item"]["type"] == "CommandExecution"
     record["payload"]["item"]["aggregated_output"] = "x" * 400_000
     assert _scan(tmp_path, [*LINES[:18], json.dumps(record, separators=(",", ":"))]) == []
+
+
+def test_a_record_begun_before_the_turn_end_is_not_a_turn_begun_since(tmp_path: Path) -> None:
+    """The turn end's length can fall inside a line Codex was still writing (a record of the
+    turn that ended): that line began before it and is no turn begun since, though the rest
+    of it, read from there, names a ``response_item``; a turn opened after it is one."""
+    file = tmp_path / "rollout.jsonl"
+    file.write_text("".join(line + "\n" for line in LINES[:STOPPED]), encoding="utf-8")
+    last_response = max(i for i, line in enumerate(LINES[:STOPPED]) if '"response_item"' in line)
+    begun = len("".join(line + "\n" for line in LINES[:last_response]).encode())
+    inside = begun + 2  # in its first bytes: what follows still names it a response_item
+    assert '"response_item"' in LINES[last_response][2:]
+    reader = CodexTranscript()
+    assert not reader.activity_since(file, inside)
+    assert reader.activity_since(file, begun)
+    file.write_text("".join(line + "\n" for line in LINES[:NEXT_TURN]), encoding="utf-8")
+    assert reader.activity_since(file, inside)

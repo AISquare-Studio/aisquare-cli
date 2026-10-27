@@ -3472,7 +3472,7 @@ class SqliteStore:
 
     def _seen_after_its_attention_event(self, session_id: str) -> str:
         """Now, and never the instant of the session's newest ``attention`` event since it was
-        last seen.
+        last seen, nor before the stamp the row already has.
 
         A turn's first notice leaves the event, and each later one moves ``last_seen_at`` past
         it: that order is what tells the second of two parallel permission prompts, or an MCP
@@ -3481,12 +3481,17 @@ class SqliteStore:
         taken for the first, its card naming the first call's prompt. One microsecond past the
         event keeps the order the clock could not. Only the events at or after the session's
         last stamp are asked for: a range of the ``(project_id, created_at)`` index, a few
-        rows, on the hook's path."""
+        rows, on the hook's path.
+
+        That range starts past the event once the second notice has stamped the row, so a
+        third notice in the same tick asks for no event, and the tick's own reading would
+        write the stamp back to the event's instant: the row's stamp is the floor for that."""
         stamp = datetime.now(tz=UTC)
         seen = self._conn.execute(
             "SELECT project_id, last_seen_at FROM team_session WHERE id = ?", (session_id,)
         ).fetchone()
         if seen is not None:
+            stamp = max(stamp, datetime.fromisoformat(seen["last_seen_at"]))
             newest = self._conn.execute(
                 "SELECT MAX(created_at) FROM team_event WHERE project_id = ? AND session_id = ? "
                 "AND kind = 'attention' AND created_at >= ?",

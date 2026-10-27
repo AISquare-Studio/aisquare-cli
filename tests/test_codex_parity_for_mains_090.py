@@ -12,12 +12,12 @@ own hook payloads: the rows that say PARITY, each through the adapter.
 - W5, the symbol index: Codex's SessionStart refreshes it as Claude Code's does, and Codex's
   MCP config mounts the one server that serves ``code_lookup``.
 - #405, the role-less ``agent``: it starts on Codex with none of a role's flags.
-- #402, the installer hand-off: ``--agent codex`` goes to the release's own installer only once
-  that one has the option, and otherwise this script carries on with its own Codex route.
 
-The accounts rows (#406, #408, Log in again) are in ``test_codex_parity_for_mains_090_accounts``
-and the evidence gate's (#417) in ``test_codex_parity_for_mains_090_evidence``: each family has
-fixtures of its own that cannot share a module.
+The accounts rows (#406, #408, Log in again) are in ``test_codex_parity_for_mains_090_accounts``,
+the evidence gate's (#417) in ``test_codex_parity_for_mains_090_evidence`` and the installer
+hand-off's (#402) in ``test_codex_parity_for_mains_090_installer``: each family has fixtures of
+its own that cannot share a module, and the last drives ``install.sh``, so it is skipped whole on
+Windows, where this one runs.
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ from aisquare.models import FleetAgent, ProjectInfo, TeamTask
 from aisquare.services import agent_launch, autostop, delivery, hooks, remote_needs, updates
 from aisquare.services import fleet as fleet_service
 from aisquare.services import watch as watch_service
-from tests.install_flags import DRY
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
 from tests.test_codex_fleet_parity import (  # noqa: F401 - fixtures, by name
     DRAFT,
@@ -53,17 +52,8 @@ from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     repo,
     tmux,
 )
-from tests.test_install_script_handoff import (  # noqa: F401 - fixture, by name
-    STAMP,
-    Machine,
-    machine,
-    reporting_release,
-)
 
 CODEX = "codex"
-#: The flags of a run that ends quickly and changes nothing, and asks for Codex: `--no-agent`
-#: would contradict `--agent`.
-DRY_CODEX = tuple(flag for flag in DRY if flag != "--no-agent")
 
 # --- W1a: admission -----------------------------------------------------------------------
 
@@ -250,45 +240,3 @@ def test_a_role_less_agent_starts_on_codex_with_none_of_a_roles_flags(
     assert (receipt.agent.agent, receipt.agent.role) == (CODEX, fleet_service.PLAIN_ROLE)
     command = " ".join(_command(tmux))
     assert "--model" not in command and "--effort" not in command, command
-
-
-# --- #402: the installer hand-off ---------------------------------------------------------
-
-
-def test_a_codex_install_stays_on_this_installer_until_the_release_has_the_option(
-    machine: Machine,  # noqa: F811
-) -> None:
-    machine.pypi(STAMP)
-    machine.serve_latest(reporting_release())  # a release that does not parse --agent
-
-    result = machine.run(*DRY_CODEX, "--agent", "codex")
-
-    assert "using this installer (the v7.7.7 installer has no --agent option)" in result.stdout
-    assert "RELEASE RAN" not in result.stdout, "the release's installer must not run"
-    assert "Codex" in result.stdout, "this script's own Codex route carried on"
-
-
-def test_a_codex_install_is_handed_to_a_release_that_has_the_option(
-    machine: Machine,  # noqa: F811
-) -> None:
-    machine.pypi(STAMP)
-    machine.serve_latest(
-        reporting_release(
-            options=(
-                "--yes",
-                "--no-agent",
-                "--no-system-deps",
-                "--no-project",
-                "--project",
-                "--version",
-                "--version=*",
-                "--dry-run",
-                "--agent",
-            )
-        )
-    )
-
-    result = machine.run(*DRY_CODEX, "--agent", "codex")
-
-    assert "using the v7.7.7 installer" in result.stdout
-    assert "ARG[--agent]" in result.stdout and "ARG[codex]" in result.stdout, result.stdout

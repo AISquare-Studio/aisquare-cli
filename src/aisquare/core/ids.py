@@ -4,8 +4,9 @@ Entry ids are ULID-style: a 48-bit millisecond timestamp followed by 80 bits
 of randomness, rendered in lowercase Crockford base32 behind a ``ctx_`` prefix
 (e.g. ``ctx_01j9q8p3k7zr4m2n6v0c1d8e5f``). Two properties matter:
 
-- **time-sortable** — lexicographic order of ids matches creation order, so a
-  plain ``ORDER BY id`` lists entries oldest-first;
+- **time-sortable** — lexicographic order of ids matches creation order (within one
+  process, to the id: see :func:`_new_id`), so a plain ``ORDER BY id`` lists entries
+  oldest-first;
 - **prefix-addressable** — like a git short hash, an unambiguous leading
   substring resolves to the full id (see ``core.store``).
 """
@@ -13,6 +14,7 @@ of randomness, rendered in lowercase Crockford base32 behind a ``ctx_`` prefix
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 # Crockford base32, lowercased: digits plus letters minus i, l, o and u.
@@ -41,9 +43,30 @@ def _encode(value: int, length: int) -> str:
     return "".join(chars)
 
 
+#: The millisecond of the id this process issued last, under the lock that keeps threads
+#: from reading it at once.
+_LAST_MS = [0]
+_LAST_LOCK = threading.Lock()
+
+
 def _new_id(prefix: str) -> str:
-    """A fresh, time-sortable ULID-style id behind ``prefix``."""
-    timestamp_ms = int(time.time() * 1000)
+    """A fresh, time-sortable ULID-style id behind ``prefix``.
+
+    Ordered in the process: an id issued in the millisecond of the one before it (or after a
+    clock that stepped back) takes the millisecond after that one, with randomness of its
+    own. Ids made within a millisecond are common (a script's ``task add`` loop, a Remote
+    batch) and a clock that reads every 15 ms (Windows') puts a hundred rows in one, so 80
+    random bits chose the order ``ORDER BY id`` listed them in: a board's tasks came back as
+    #1, #3, #2, and a tie on ``created_at`` fell to the order of dice. The millisecond is
+    bumped rather than the randomness incremented, as the ULID spec's monotonic form has it,
+    so that two ids of a burst still differ inside the first 14 characters and a short prefix
+    of one resolves as it did. A burst of ``n`` ids runs ``n`` ms ahead of the clock, which
+    then catches up.
+    """
+    with _LAST_LOCK:
+        after = _LAST_MS[0] + 1
+        timestamp_ms = max(int(time.time() * 1000), after)
+        _LAST_MS[0] = timestamp_ms
     randomness = int.from_bytes(os.urandom(_RAND_BYTES), "big")
     return prefix + _encode(timestamp_ms, _TS_CHARS) + _encode(randomness, 16)
 

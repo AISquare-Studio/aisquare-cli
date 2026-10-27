@@ -12,9 +12,9 @@ import shutil
 import subprocess
 import time
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -22,17 +22,20 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import feature_use, paths, procs, repo_profile
 from aisquare.core import usage as usage_core
+from aisquare.core.claude_sharing import memory_key
 from aisquare.core.store import store_session
 from aisquare.models import SessionUsage, TurnUsage, UsageStats
 from aisquare.services import hooks as hooks_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services import usage_stats
+from tests.fsperms import can_symlink
 from tests.projects import add_project
 from tests.usage_stats_support import (
     IST,
     MODEL,
     NOW,
     Machine,
+    project_folder,
     prompt,
     request,
     stamp,
@@ -414,14 +417,47 @@ def test_one_message_written_on_two_lines_is_one_request(machine: Machine) -> No
     assert _read("today").tokens.total == tokens()
 
 
+def test_a_transcript_is_kept_under_projects_whatever_the_path_of_its_directory_looks_like(
+    machine: Machine,
+) -> None:
+    """A Windows path has a drive and backslashes: joined as it is it is absolute, and the
+    harness wrote every transcript inside its repository (the sweep found none on Windows)."""
+    windows, posix = PureWindowsPath(r"C:\Users\me\repo"), PurePosixPath("/home/me/repo")
+    assert project_folder(windows) == "C--Users-me-repo"
+    assert project_folder(posix) == "-home-me-repo"
+    # the harness's copy of the rule is the product's (it files the same memory under the same key)
+    for sample in (windows, posix):
+        assert project_folder(sample) == memory_key(cast("Path", sample))
+    repo = machine.repo("anywhere")
+    kept = machine.transcript(1, repo, SESSION)
+
+    assert kept.parents[1] == machine.account(1) / "projects"
+    assert kept.parent.name == project_folder(repo) and not set(kept.parent.name) & set("/\\:.")
+
+
 def test_a_session_found_under_two_directories_is_read_once(machine: Machine) -> None:
     repo = machine.repo("shared")
     first = _one_turn(machine, repo, SESSION, _day(0, 9))
     other = machine.transcript(2, repo, SESSION)
     other.parent.mkdir(parents=True)
-    other.symlink_to(first)  # a shared projects folder
-    usage_stats.sweep(tz=IST)
+    shutil.copy2(first, other)  # the same session under a second account's projects
+    report = usage_stats.sweep(tz=IST)
 
+    # what the sweep FOUND: the store dedupes by session id, so its totals alone cannot tell
+    assert report.transcripts == 1
+    assert _totals() == (tokens(), 1, 1)
+
+
+@pytest.mark.skipif(not can_symlink(), reason="needs symlinks")
+def test_a_session_reached_through_a_symlink_is_read_once(machine: Machine) -> None:
+    repo = machine.repo("linked")
+    first = _one_turn(machine, repo, SESSION, _day(0, 9))
+    other = machine.transcript(2, repo, SESSION)
+    other.parent.mkdir(parents=True)
+    other.symlink_to(first)  # a shared projects folder
+    report = usage_stats.sweep(tz=IST)
+
+    assert report.transcripts == 1
     assert _totals() == (tokens(), 1, 1)
 
 
@@ -694,6 +730,9 @@ def test_a_repository_is_profiled_once_a_day(
         ("https://bitbucket.org/a/b/", "bitbucket.org/a/b", "bitbucket"),
         ("git@git.corp.example:team/x.git", "git.corp.example/team/x", "other"),
         ("/srv/git/x.git", None, "none"),
+        ("C:/git/x.git", None, "none"),  # a Windows path is no host "C"
+        ("x:/org/repo", None, "none"),  # ambiguous with a drive; read as a path
+        ("D:\\repos\\x", None, "none"),
         ("file:///srv/git/x.git", None, "none"),
         ("", None, "none"),
     ],

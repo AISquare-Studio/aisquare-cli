@@ -671,6 +671,18 @@ adapter.**
 
 ### Fixed
 
+- **Ids made in one clock tick sort in the order they were made, and a turn's later notices
+  keep their place after its first** (#29). `task add` in a loop, a Remote batch, or any
+  burst of rows read the same millisecond (a Windows clock reads the same one for ~15 ms),
+  and 80 random bits chose the order `ORDER BY id` listed them in: a board's tasks came
+  back as #1, #3, #2. An id issued in the millisecond of the one before it now takes the
+  next one, so a burst of `n` ids runs `n` ms ahead of the clock, which then catches up;
+  ids made by two processes in the same millisecond are ordered as before. The needs feed
+  tells a turn's second permission prompt (or an MCP form) from its first by the session's
+  `last_seen_at` being past the first notice's event; two notices in one tick tied, and a
+  third wrote the tick back, so the card named the first call's prompt. The stamp now
+  goes one microsecond past the event and stays there.
+
 - **A sandboxed agent's `--artifact` is read from the file that was checked, and a report's
   relative paths are refused** (r24 of #113, findings 6 and 7). `brief evidence|finding
   --artifact` run through the agent's broker (Codex) asked whether the path was in the

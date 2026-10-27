@@ -148,3 +148,32 @@ def test_unknown_root_command_without_json_stays_human(runner: CliRunner) -> Non
     assert result.exit_code == 2
     assert result.stdout == ""
     assert "No such command 'nosuchcmd'" in _plain(result.stderr)
+
+
+def test_json_after_profile_value_before_bad_root_option_emits_json(runner: CliRunner) -> None:
+    # Reopen of #5: the prescan used to stop at "default" (the first token
+    # that doesn't start with "-"), never reaching --json, because it didn't
+    # know --profile consumes the next token as its value.
+    result = runner.invoke(app, ["--profile", "default", "--json", "--badopt"])
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "usage"
+    assert "--badopt" in payload["message"]
+
+
+def test_json_before_profile_before_unknown_root_command_emits_json(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["--json", "--profile", "default", "nosuchcmd"])
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "unknown_command"
+    assert payload["given"] == "nosuchcmd"
+
+
+def test_json_as_profiles_own_value_does_not_count_as_leading_json(runner: CliRunner) -> None:
+    # "--json" right after "--profile" is --profile's value, not the --json
+    # flag: the next token consumed by a value-taking option is never
+    # re-examined as a flag, no matter what it spells.
+    result = runner.invoke(app, ["--profile", "--json", "--badopt"])
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "--badopt" in _plain(result.stderr)

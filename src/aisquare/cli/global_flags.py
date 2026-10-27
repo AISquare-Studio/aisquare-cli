@@ -207,21 +207,48 @@ def _suggestions(given: str, verbs: list[str]) -> list[str]:
     return near
 
 
-def _json_led(args: Any) -> bool:
-    """True when ``--json`` appears among the flags before the first non-flag
-    token (the attempted subcommand name).
+def _value_taking_root_options(command: Any) -> set[str]:
+    """Declarations among the root's own options that consume a following
+    token (``--profile NAME``), as opposed to a bare flag like ``--json``.
+
+    Derived from the live params instead of a hardcoded name so a future
+    value-taking root option is picked up automatically.
+    """
+    opts: set[str] = set()
+    for param in getattr(command, "params", []):
+        if getattr(param, "is_flag", False) or getattr(param, "count", False):
+            continue
+        opts |= set(getattr(param, "opts", ()))
+    return opts
+
+
+def _json_led(args: Any, value_taking: frozenset[str] = frozenset()) -> bool:
+    """True when ``--json`` appears among the root's own options before the
+    first non-flag token (the attempted subcommand name).
 
     Only called where ``get_state()`` cannot yet answer — a root option or
     subcommand failing before ``main_callback`` runs (see module docstring,
     issue #5) — so this, not ``get_state()``, is what decides those two
     spots. A trailing ``--json`` stops the scan same as everywhere else:
     click never parses past the unknown token either, so the two agree.
+
+    ``value_taking`` lists the root's own value-taking option declarations
+    (``--profile``): the token right after one of those is that option's
+    value, not the attempted subcommand, even though it does not itself
+    start with ``-`` (``--profile default --json --badopt``).
     """
+    skip_next = False
     for token in args:
-        if token == "--json":
+        token_str = str(token)
+        if skip_next:
+            skip_next = False
+            continue
+        if token_str == "--json":
             return True
-        if not str(token).startswith("-"):
+        if not token_str.startswith("-"):
             break
+        if token_str in value_taking:
+            skip_next = True
     return False
 
 
@@ -312,7 +339,7 @@ class GlobalFlagsGroup(TyperGroup):
         try:
             return super().parse_args(ctx, args)
         except USAGE_ERROR as error:
-            if _json_led(original_args):
+            if _json_led(original_args, frozenset(_value_taking_root_options(self))):
                 get_state().json_output = True
             _handle_usage_error(error)
             raise

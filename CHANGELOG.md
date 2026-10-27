@@ -82,9 +82,11 @@ adapter.**
     share left. A spawn's model and effort (#441) are each agent's own: the Spawn dialog's
     Model and Effort follow its Agent, a Codex spawn passes them as Codex's `--model` and
     `model_reasoning_effort` and remembers them for Codex alone (a pick never crosses
-    agents), and `[agents.models.<agent>]` pins win over the last pick for either. The Spawn
-    dialog's *+ New account* signs in its own agent and comes back on the new slot, and a
-    Codex row's `!` hover names Codex's sign-in (`aisquare accounts run <slot> login`).
+    agents), and `[agents.models.<agent>]` pins win over the last pick for either; a Codex
+    role's own `agent_args` that name the model or the effort run over the pick, and the
+    receipt says each pick they overrule. The Spawn dialog's *+ New account* signs in its
+    own agent and comes back on the new slot, and a Codex row's `!` hover names Codex's
+    sign-in (`aisquare accounts run <slot> login`).
     `fleet adopt` takes a hand-started Codex thread as it takes a Claude Code session: each
     agent's conversations, their folder and first prompt are read by its adapter
     (`AgentTranscript.conversations`, `opening`), a process's arguments by
@@ -103,9 +105,10 @@ adapter.**
     sweep reads every agent's sessions as its reader lists them (Codex's rollouts too), cut
     into turns by that reader (`AgentTranscript.turns`), each with the slot of the home it
     was found in (`AgentAccounts.transcript_roots`) and the repository it ran in; a Codex
-    Stop's row now carries both, and a Stop and a sweep read on from each other. The
-    doctor's `role bindings` row asks every agent's home variable, `CODEX_HOME` too, with
-    that agent's own connected test and `agents connect <agent>` fix.
+    Stop's row now carries both, and a Stop and a sweep read on from each other; the page
+    and `metrics stats` say "the agents' transcripts", naming none. The doctor's `role
+    bindings` row asks every agent's home variable, `CODEX_HOME` too, with that agent's own
+    connected test and `agents connect <agent>` fix.
   - **Claude Code's alone** (N-A): Remote Control (`AgentCapabilities.remote_control`: a launch
     that asks of Codex says so and starts it as it was, and the Spawn dialog shows the switch
     for Claude Code alone) and `asq-statusline` (Claude Code's `statusLine` setting; Codex's

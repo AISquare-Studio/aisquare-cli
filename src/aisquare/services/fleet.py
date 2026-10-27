@@ -9159,17 +9159,19 @@ def _overruled_picks(
     and effort that its role's own arguments overrule: they are not edited for a pick
     (:func:`_own_pick`), so what they name runs and the pick is said, never dropped without a
     word (SCOPE #113 091, item 2). Arguments that name the model take the effort too (#129 b).
-    Nothing for what the spawn's own arguments (``extra``) name: those are the pick."""
-    own = adapter.native_choice(extra)
-    model = arguments.model if own.model is None else None
+    Nothing for a pick they name too (an effort picked medium over a role pinning medium runs
+    medium: seq 4204 (3)), nor for what the spawn's own arguments (``extra``) name: those are
+    the pick, and run, the role's merged out under them (``merged_args``), and a model they
+    name takes the effort as the role's would (seq 4204 (2))."""
+    model = arguments.model if adapter.native_choice(extra).model is None else None
     notes: list[str] = []
-    if picked.model and model is not None:
+    if picked.model and model is not None and model != picked.model:
         notes.append(_not_passed("model", role, f"the model {model}", adapter))
-    if picked.effort and own.effort is None:
-        if arguments.original_effort is not None:
-            named = f"the effort {arguments.original_effort}"
-            notes.append(_not_passed("effort", role, named, adapter))
-        elif model is not None:
+    if picked.effort:
+        named = arguments.original_effort
+        if named is not None and adapter.effort_alias(named) != adapter.effort_alias(picked.effort):
+            notes.append(_not_passed("effort", role, f"the effort {named}", adapter))
+        elif named is None and model is not None:
             notes.append(_not_passed("effort", role, f"the model {model}", adapter))
     return notes
 

@@ -2759,6 +2759,35 @@ def _not_passed(name: str, named: str) -> str:
             [],
             id="neither",
         ),
+        # seq 4204 (3): a pick the role's arguments name too runs, and nothing is said of it.
+        pytest.param(
+            ["-c", 'model_reasoning_effort="medium"'],
+            ("gpt-x", "medium"),
+            ("gpt-x", "medium"),
+            [],
+            id="the-effort-the-role-pins",
+        ),
+        pytest.param(
+            ["-c", 'model_reasoning_effort="max"'],
+            ("gpt-x", "ultracode"),
+            ("gpt-x", "max"),
+            [],
+            id="the-effort-the-role-pins-by-its-alias",
+        ),
+        pytest.param(
+            ["--model", "gpt-role", "-c", 'model_reasoning_effort="medium"'],
+            ("gpt-role", "medium"),
+            ("gpt-role", "medium"),
+            [],
+            id="the-model-and-effort-the-role-pins",
+        ),
+        pytest.param(
+            ["--model", "gpt-role"],
+            ("gpt-role", "high"),
+            ("gpt-role", None),
+            [_not_passed("effort", "the model gpt-role")],
+            id="the-model-the-role-pins-taking-the-effort",
+        ),
     ],
 )
 def test_a_codex_pick_the_roles_own_arguments_overrule_is_said_on_the_receipt(
@@ -2808,6 +2837,52 @@ def test_a_claude_code_pick_replaces_its_roles_flags_and_nothing_is_said(
     native = _spawn_native(tmux)
     assert native.count("--effort") == 1 and _pair(native, "--effort") == "high", native
     assert native.count("--model") == 1 and _pair(native, "--model") == "sonnet", native
+    assert not any("not passed" in note for note in receipt.notes), receipt.notes
+
+
+@pytest.mark.parametrize(
+    ("pinned", "own", "pick", "runs"),
+    [
+        pytest.param(
+            ["--model", "gpt-role", "-c", 'model_reasoning_effort="medium"'],
+            ["-c", 'model_reasoning_effort="low"'],
+            (None, "high"),
+            ("gpt-role", "low"),
+            id="effort",
+        ),
+        pytest.param(
+            ["--model", "gpt-role"],
+            ["--model", "gpt-own"],
+            ("gpt-x", "high"),
+            ("gpt-own", None),
+            id="model",
+        ),
+    ],
+)
+def test_nothing_is_said_of_what_a_codex_spawns_own_arguments_name(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    pinned: list[str],
+    own: list[str],
+    pick: tuple[str | None, str],
+    runs: tuple[str, str | None],
+) -> None:
+    """seq 4204 (2): what the spawn's own arguments name is the pick, and runs, over the
+    role's (``merged_args``) and over the Spawn dialog's fields: nothing is said of it. A model
+    they name takes the effort (#129 b), so the dialog's is not passed and not said either,
+    and never as the role's settings naming that model."""
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(worktree=False, agent_args={"codex": pinned})
+    save_config(config)
+    receipt = fleet_service.spawn(
+        project, "coder", agent="codex", agent_args=own, model=pick[0], effort=pick[1]
+    )
+    native = _spawn_native(tmux)
+    efforts = [arg for arg in native if arg.startswith("model_reasoning_effort=")]
+    assert native.count("--model") == 1 and _pair(native, "--model") == runs[0], native
+    assert efforts == ([f'model_reasoning_effort="{runs[1]}"'] if runs[1] else []), native
     assert not any("not passed" in note for note in receipt.notes), receipt.notes
 
 

@@ -94,15 +94,23 @@ adapter.**
     server writes as the session: its process is the one of the hook's ancestors that holds
     its rollout open (measured on 0.164.0), its hooks being handed no pid. `project fresh`
     removes the worktrees the launch records name, never a `cwd` rewritten in the store.
+    `[accounts] before_limit` moves a Codex agent too: whether its turn end is a safe point
+    is read off its rollout by its own reader (`AgentTranscript.background_work`: an exec
+    answered `Process running with session ID <n>` runs until its `CommandExecution`
+    completes, by itself or `/stop`; `activity_since`: a turn begun since), measured on
+    0.164.0, and the move weighs its own agent's accounts; a Codex reading, read off its home
+    and never cached, is looked at once a cool-down, not at every turn end. Usage & stats'
+    sweep reads every agent's sessions as its reader lists them (Codex's rollouts too), cut
+    into turns by that reader (`AgentTranscript.turns`), each with the slot of the home it
+    was found in (`AgentAccounts.transcript_roots`) and the repository it ran in; a Codex
+    Stop's row now carries both, and a Stop and a sweep read on from each other. The
+    doctor's `role bindings` row asks every agent's home variable, `CODEX_HOME` too, with
+    that agent's own connected test and `agents connect <agent>` fix.
   - **Claude Code's alone** (N-A): Remote Control (`AgentCapabilities.remote_control`: a launch
     that asks of Codex says so and starts it as it was, and the Spawn dialog shows the switch
     for Claude Code alone) and `asq-statusline` (Claude Code's `statusLine` setting; Codex's
-    takes items, not a command).
-  - **Gaps, each with a lane** (SCOPE #113 091): the move before the limit is Claude Code's
-    (the hook needs a background-work reader of the transcript); the usage sweep reads Claude
-    Code's transcripts, not Codex's rollouts; the doctor's `role bindings` row checks
-    `CLAUDE_CONFIG_DIR`, not `CODEX_HOME`.
-    `tests/test_no_agent_literals.py`'s BASELINE counts the shared code behind them.
+    takes items, not a command); `tests/test_no_agent_literals.py`'s BASELINE counts the
+    shared code behind them. No 0.9.1 gap is left for Codex.
 - **No `docs/` pages for this line** (the owner, 2026-10-27, to match main's removal): the
   adapter contract (the protocol table and "Adding a terminal agent" with its file and fixture
   list) is the docstring of `aisquare.core.agent_adapters`, held to `types.py` by

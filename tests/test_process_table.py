@@ -210,7 +210,10 @@ def test_proc_holds_nothing_for_a_process_that_exited_since_ps(tmp_path: Path) -
     assert process_table.open_files([10, 99], proc=proc) == frozenset({"/home/x/a"})
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads every process")
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,  # mypy narrows on the first; Windows has no uid
+    reason="a /proc to hide a process from is POSIX's, and root reads every process",
+)
 def test_proc_that_hides_a_process_descriptors_is_not_told_never_read_as_holding_none(
     tmp_path: Path,
 ) -> None:

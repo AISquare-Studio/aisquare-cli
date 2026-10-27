@@ -2493,6 +2493,46 @@ def test_the_role_less_note_names_the_agent_it_starts_not_claude(
     assert with_role == "(no persona — the agent runs as its role alone)"
 
 
+def test_the_role_less_note_follows_the_binary_typed_and_cleared_asked_or_cached(
+    git_project: ProjectInfo,
+) -> None:
+    """The ui-tester on 874aeff6 (r23 of #113, 6): Role *(none)*, Binary ``codex`` typed — the
+    note said "plain Codex" once the ask landed — and the Binary cleared, the launch back on
+    Claude Code (``launch_agent``, ``_plain_agent``), the note stayed "plain Codex". A
+    Binary whose answer is cached follows the agent at once (``_binary_changed``), which
+    never described the persona; only an Agent pick or an answer from the worker did. Both
+    directions are pinned, the first asked of the worker and the others read from the cache."""
+    plain = "(plain {}: no role, no persona)"
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        binary = dialog.query_one("#spawn-binary", Input)
+
+        def state() -> tuple[str | None, str | None, str]:
+            return (
+                note(dialog, "#spawn-persona-description"),
+                dialog.launch_agent(),
+                dialog._plain_agent(),
+            )
+
+        select(dialog, "role").value = spawn_module.NO_ROLE
+        await settle(pilot)
+        seen: list[Any] = [state()]  # the role's agent: Claude Code's
+        for typed in ("codex", "", "codex", ""):  # the first from the worker, the rest cached
+            binary.value = typed
+            await settle(pilot)
+            seen.append((typed, state()))
+        return seen
+
+    first, *steps = drive(git_project, scenario)
+    assert first == (plain.format("Claude"), "claude-code", "Claude")
+    assert steps == [
+        ("codex", (plain.format("Codex"), "codex", "Codex")),
+        ("", (plain.format("Claude"), "claude-code", "Claude")),  # cached: not yet described
+        ("codex", (plain.format("Codex"), "codex", "Codex")),  # cached too
+        ("", (plain.format("Claude"), "claude-code", "Claude")),
+    ]
+
+
 def test_a_role_change_re_describes_the_note_under_the_owners_own_empty_persona(
     git_project: ProjectInfo,
 ) -> None:

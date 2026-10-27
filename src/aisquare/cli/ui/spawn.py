@@ -841,8 +841,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             self.query_one("#spawn-how-row").display = False
             self._note("#spawn-how-note", None)
             self._note("#spawn-from-note", self._sources_unavailable, style="dim")
-        self._describe_persona()
-        self._follow_agent()
+        self._follow_agent()  # which describes the persona
         self._lock_other_screens()
         self._validate()
         if self._accounts is not None:
@@ -997,8 +996,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             # _offer_role_personas for a role that joined the list since), so this
             # never needs set_options — which would put "(none)" in the field first.
             self._put_persona(self._persona_default(role))
-        self._follow_agent()
-        self._describe_persona()  # the empty persona reads differently with no role
+        self._follow_agent()  # the empty persona reads differently with no role: it describes
         self._validate()
 
     # --- the agent the launch starts, and what follows it ---------------------------------
@@ -1050,6 +1048,10 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         known = picked or self._role_agent(role, binary)
         if known is not None:
             self._agent_shown = known
+        # A role-less note names the agent, so it follows the agent wherever that changes: an
+        # Agent pick, a role, an answer from the worker, and a Binary whose answer is cached
+        # (which stayed "plain Codex" after the Binary was cleared; r23 of #113, 6).
+        self._describe_persona()
         if self._role_agent(role, binary) is None:
             self._ask_agent_of(role, binary)
         agent = known or self._agent_shown
@@ -1126,7 +1128,6 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     @on(Select.Changed, "#spawn-approval")
     def _agent_changed(self) -> None:
         self._follow_agent()
-        self._describe_persona()  # a role-less note names the agent
         if self._source is not None:
             self._apply_handoff()  # its note and its Start fresh follow the agent picked
 

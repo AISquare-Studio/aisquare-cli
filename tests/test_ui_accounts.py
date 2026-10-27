@@ -3284,19 +3284,22 @@ def _columns_at(view: AccountsView) -> dict[str, list[tuple[int, int]]]:
 
 
 @pytest.mark.parametrize("size", [(100, 40), (140, 40), (240, 40)], ids=["100", "140", "240"])
+@pytest.mark.parametrize("agents", ["one", "both"])
 def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
-    no_network: dict[str, Any], size: tuple[int, int]
+    no_network: dict[str, Any], size: tuple[int, int], agents: str
 ) -> None:
     """The human: "the usage of daily and weekly although correct is rendered as a string
     making it very messy, instead put it into a neat table so everything is well aligned".
     Measured, not looked at: every column starts at the same x on the header and on every
     row, at its fixed width, one line high; a long name or email ends in "…" rather than
     wrapping or pushing the next column; the name's field, open, covers the name's cell and
-    moves nothing; scrolled sideways, the header moves with the rows."""
+    moves nothing; scrolled sideways, the header moves with the rows. Of one agent's accounts
+    and of both (the mark and its header are the second's alone)."""
     no_network["usage"] = _table_usage
+    frame = _table_frame if agents == "one" else _mixed_frame
 
     async def run() -> dict[str, Any]:
-        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_table_frame)
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=frame)
         async with app.run_test(size=size) as pilot:
             await settle(app)
             view = await open_accounts(pilot)
@@ -3311,6 +3314,7 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
             out["open"] = _columns_at(view)
             out["field"] = (field(view, 2).region, name_box)
             await pilot.press("escape")
+            out["marks"] = [row(view, slot).cell("agent").display for slot in (1, 2, 3, 4)]
             table = view.query_one("#accounts-table")
             out["scrolls"] = table.max_scroll_x
             table.scroll_to(x=table.max_scroll_x, animate=False, immediate=True)
@@ -3333,7 +3337,9 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
     assert starts == sorted(starts) and len(set(starts)) == len(starts)  # left to right
     assert out["heights"] == [1, 1, 1, 1]  # never wrapped onto a second line
     # The arrows first (#8 on the board); the agent is the first word of the name's column.
-    assert out["header"][:4] == ["↑", "↓", "#", "agent name"]
+    title = "agent name" if agents == "both" else "name"  # the mark is a second agent's
+    assert out["header"][:4] == ["↑", "↓", "#", title]
+    assert out["marks"] == [agents == "both"] * 4  # a closed rename gives it back, or not
     assert out["header"][5:8] == ["session used", "week used", ""]  # USED; Log in
     assert out["header"][8:] == ["session resets", "week resets", "plan"]  # the plan last
     assert out["name 2"].rstrip().endswith("…") and out["email 2"].rstrip().endswith("…")
@@ -3431,6 +3437,7 @@ def test_every_button_of_a_row_is_on_screen_at_200_columns_unscrolled(
                 "whole": all(seen.contains_region(b.region) for b in buttons),
                 "labels": {str(b.label) for b in buttons},
                 "marks": {slot: shown(row(view, slot).cell("agent")) for slot in (1, 4)},
+                "marked": [row(view, slot).cell("agent").display for slot in (1, 2, 3, 4)],
                 "tip": str(row(view, 4).cell("agent").tooltip),
             }
 
@@ -3441,53 +3448,118 @@ def test_every_button_of_a_row_is_on_screen_at_200_columns_unscrolled(
     table_width, shown_width = out["width"]
     assert out["scrolls"] == 0 and table_width <= shown_width and out["whole"]
     assert out["marks"] == {1: "Cl", 4: "Co"} and out["tip"] == "Codex"
+    assert out["marked"] == [True] * 4  # rows mounted into a table of both agents carry the mark
 
 
-def test_a_name_past_the_cells_it_has_ends_in_an_ellipsis_and_is_whole_in_its_tooltip(
+def test_a_machines_names_keep_their_16_cells_until_a_second_agent_marks_the_rows(
     no_network: dict[str, Any],
 ) -> None:
-    """The ui-tester on 874aeff6 (r23 of #113): a Claude-only machine's names fell from 16
-    cells to 13 (the agent's mark and its space share the column), so a 16-character alias
-    that 0.9.0 showed whole read ``Cl abcdefghijkl…`` and the CHANGELOG said nothing of it.
-    It says it now (the cells it names are measured here, not copied), and the cut name's
-    whole text is its tooltip, with the rename hint after it."""
+    """The ui-tester on 874aeff6 (r23 of #113): a Claude-only machine's names fell from 16 cells
+    to 13 (the agent's mark and its space share the column), so a 16-character alias that
+    0.9.0 showed whole read ``Cl abcdefghijkl…`` and the CHANGELOG said nothing of it. With
+    one agent's accounts there is no mark and no "agent" in the header: the names have their
+    16 cells. With both the mark is back and the name has 13, a longer one ends in ``…`` and
+    is whole in its tooltip, and the CHANGELOG says so (the cells it names are measured here,
+    not copied). At 200x50 either way nothing scrolls and the last button ends on screen."""
     no_network["usage"] = _table_usage
     sixteen, fourteen, thirteen = "abcdefghijklmnop", "abcdefghijklmn", "abcdefghijklm"
-    frame = _overview(
-        _arranged(_status(1, "me@example.com"), alias=sixteen, position=1),
-        _arranged(_status(2, "two@example.com"), alias=fourteen, position=2),
-        _arranged(_status(3, "three@example.com"), alias=thirteen, position=3),
+    aliases = {1: sixteen, 2: fourteen, 3: thirteen}
+    one = _overview(
+        *(
+            _arranged(_status(slot, f"{slot}@example.com"), alias=alias, position=slot)
+            for slot, alias in aliases.items()
+        )
     )
+    last = one.accounts[-1]
+    codex = last.account.model_copy(update={"agent": "codex"})
+    both = _overview(*one.accounts[:-1], last.model_copy(update={"account": codex}))
+    frames = [one]
 
-    async def run() -> dict[str, Any]:
-        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: frame)
+    async def look(app: FleetApp, view: AccountsView) -> dict[str, Any]:
+        buttons = [b for each in view.rows() for b in each.query(Button) if b.visible]
+        seen = view.query_one("#accounts-table").scrollable_content_region
+        return {
+            "header": shown(view.query_one("#accounts-header").query_one(".col-name", Static)),
+            "cells": row(view, 1).cell("name").region.width,
+            "marks": {
+                slot: (row(view, slot).cell("agent").display, shown(row(view, slot).cell("agent")))
+                for slot in aliases
+            },
+            "drawn": {
+                slot: row(view, slot).cell("name").render_line(0).text.rstrip() for slot in aliases
+            },
+            "tips": {slot: str(row(view, slot).cell("name").tooltip) for slot in aliases},
+            "scrolls": view.query_one("#accounts-table").max_scroll_x,
+            "right": (max(b.region.right for b in buttons), app.size.width),
+            "whole": all(seen.contains_region(b.region) for b in buttons),
+        }
+
+    async def swap(app: FleetApp, view: AccountsView, frame: AccountsOverview) -> dict[str, Any]:
+        frames[0] = frame
+        app.refresh_accounts()
+        await accounts_read(app)
+        await settle(app)
+        return await look(app, view)
+
+    async def run() -> list[dict[str, Any]]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: frames[0])
         async with app.run_test(size=(200, 50)) as pilot:
             await settle(app)
             view = await open_accounts(pilot)
             await settle_until(app, lambda: painted(view, 1, 2, 3))
-            return {
-                "cells": row(view, 1).cell("name").region.width,
-                "marks": {slot: shown(row(view, slot).cell("agent")) for slot in (1, 2, 3)},
-                "drawn": {
-                    slot: row(view, slot).cell("name").render_line(0).text.rstrip()
-                    for slot in (1, 2, 3)
-                },
-                "tips": {slot: str(row(view, slot).cell("name").tooltip) for slot in (1, 2, 3)},
-            }
+            first = await look(app, view)
+            marked = await swap(app, view, both)  # a Codex account is added: the rows mark
+            return [first, marked, await swap(app, view, one)]  # …and removed: they unmark
 
-    out = asyncio.run(run())
+    alone, marked, alone_again = asyncio.run(run())
     name_column = next(column for column in accounts_view.COLUMNS if column.key == "name")
-    assert out["marks"] == {1: "Cl", 2: "Cl", 3: "Cl"}  # a Claude-only table has the mark too
-    assert out["cells"] == 13 == name_column.width - len("Cl") - 1
-    assert out["drawn"][1] == sixteen[:12] + "…" and out["drawn"][2] == fourteen[:12] + "…"
-    assert out["drawn"][3] == thirteen  # a name of exactly the cells it has is whole
-    for slot, alias in ((1, sixteen), (2, fourteen), (3, thirteen)):
-        assert out["tips"][slot].startswith(f"{alias} — "), out["tips"][slot]
-        assert "double-click" in out["tips"][slot]
+    assert alone_again == alone  # the mark follows the accounts the table lists, no row remounted
+    for table in (alone, marked):
+        assert table["scrolls"] == 0 and table["whole"], table
+        assert table["right"][0] <= table["right"][1], table["right"]
+        for slot, alias in aliases.items():
+            assert table["tips"][slot].startswith(f"{alias} — "), table["tips"][slot]
+            assert "double-click" in table["tips"][slot]
+    # One agent's accounts: 0.9.0's table, the name whole in its 16 cells.
+    assert alone["header"] == "name" and alone["cells"] == name_column.width == 16
+    assert {shown_ for shown_, _ in alone["marks"].values()} == {False}
+    assert alone["drawn"] == aliases
+    # Both: the mark, its space and 13 cells of name; the longer ones cut, the tooltip whole.
+    assert marked["header"] == "agent name"
+    assert marked["marks"] == {1: (True, "Cl"), 2: (True, "Cl"), 3: (True, "Co")}
+    assert marked["cells"] == 13 == name_column.width - len("Cl") - 1
+    assert marked["drawn"] == {1: sixteen[:12] + "…", 2: fourteen[:12] + "…", 3: thirteen}
     changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
-    unreleased = changelog.split("\n## [0.9.0]", 1)[0]
-    flat = " ".join(unreleased.split())
-    assert f"The name has {out['cells']} cells, not {name_column.width}" in flat.replace("**", "")
+    flat = " ".join(changelog.split("\n## [0.9.0]", 1)[0].replace("**", "").split())
+    assert f"With both agents the name has {marked['cells']} cells, not {alone['cells']}" in flat
+    assert "there is no mark and the names keep the 16 cells 0.9.0's had" in flat
+
+
+def test_a_frame_while_a_name_is_renamed_leaves_the_mark_under_the_open_field(
+    no_network: dict[str, Any],
+) -> None:
+    """The field covers the whole name column, the mark included (``open_rename``), and "a frame
+    never touches what is being typed": the repaint a frame brings must not show the mark
+    again over it. Closed, the mark is back."""
+    no_network["usage"] = _table_usage
+
+    async def run() -> list[Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_mixed_frame)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 4))
+            await rename(pilot, 2)
+            seen: list[Any] = [row(view, 2).cell("agent").display]
+            app.refresh_accounts()  # a frame, and the usage read after it, mid-rename
+            await accounts_read(app)
+            await settle(app)
+            seen += [row(view, 2).cell("agent").display, field(view, 2).display]
+            await pilot.press("escape")
+            seen.append(row(view, 2).cell("agent").display)
+            return seen
+
+    assert asyncio.run(run()) == [False, False, True, True]
 
 
 def test_an_agents_mark_is_the_shortest_start_of_its_label_no_other_agent_shares() -> None:

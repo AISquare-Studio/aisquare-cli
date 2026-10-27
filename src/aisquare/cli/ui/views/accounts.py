@@ -63,7 +63,7 @@ import asyncio
 import contextlib
 import math
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -341,7 +341,7 @@ class Column(NamedTuple):
 COLUMNS: tuple[Column, ...] = (
     Column("slot", "#", 2),
     Column("agent", "agent", 2),
-    Column("name", "agent name", 16),
+    Column("name", "name", 16),
     Column("email", "signed in as", 20),
     Column("session", "session used", 16),
     Column("week", "week used", 10),
@@ -352,11 +352,15 @@ COLUMNS: tuple[Column, ...] = (
 """The table's data columns, left to right; the header and every row are cut from them.
 
 The ``agent`` cell is not a column of its own: it is the first word of the name's column
-(:func:`agent_marks`, two letters), whose 16 cells it shares with the name: the name has 13
-(the mark takes two and a space), and one longer ends in ``…`` with the whole in its
-tooltip, which the CHANGELOG says. As a column of 11 it took the table to 179 cells, past
-the 163 a 200-column screen shows, and the buttons at the end of a line were cut (the
-ui-tester at 200x50, r23 of #113). The ``email`` column gave up four cells to fit.
+(:func:`agent_marks`, two letters), whose 16 cells it shares with the name, and only when the
+table lists the accounts of more than one agent (:func:`marks_shown`). So a table of one
+agent's accounts, a Claude-only machine's, has no mark and names of 16 cells, as 0.9.0's
+had; with both agents' the name has 13 (the mark takes two and a space), and one longer ends
+in ``…`` with the whole in its tooltip, which the CHANGELOG says. As a column of 11 it took
+the table to 179 cells, past the 163 a 200-column screen shows, and the buttons at the end of
+a line were cut (the ui-tester at 200x50, r23 of #113). The ``email`` column gave up four
+cells to fit. No other column has a cell to give: a five-hour window that resets past
+midnight reads ``in 4h 59m (Tue 02:00)``, 21 cells, as the week's longest does.
 
 Fixed widths, so a column starts at the same x on every row whatever its values:
 a value too long for its cell ends in ``…`` and never wraps (the whole text is the
@@ -395,7 +399,8 @@ scrolling sideways at 160 columns — and the plan last; then the arranging butt
 def agent_marks() -> dict[str, str]:
     """Each agent with account slots by the shortest start of its label, two characters at
     least, that no other agent's label starts with (``Cl`` for Claude Code, ``Co`` for Codex):
-    the first word of the name's column. The full label is the mark's tooltip."""
+    the first word of the name's column, shown only while the table lists the accounts of
+    more than one agent (:func:`marks_shown`). The full label is the mark's tooltip."""
     labels = {agent: core.agent_label(agent) for agent in core.account_agents()}
     marks: dict[str, str] = {}
     for agent, label in labels.items():
@@ -405,6 +410,18 @@ def agent_marks() -> dict[str, str]:
             size += 1
         marks[agent] = label[:size]
     return marks
+
+
+MARKED_NAME_TITLE = "agent name"
+"""The name column's header when the rows carry their agent's mark (:func:`marks_shown`)."""
+
+
+def marks_shown(statuses: Iterable[ClaudeAccountStatus]) -> bool:
+    """Whether the table marks each row with its agent: only when the accounts it lists are
+    of more than one agent. With one agent's the mark says nothing, and the three cells it
+    takes (two and a space) are the name's, which keeps the 16 a Claude-only machine's names
+    had in 0.9.0 (the ui-tester at 874aeff6, r23 of #113)."""
+    return len({status.account.agent for status in statuses}) > 1
 
 
 def offers_login_again(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> bool:
@@ -763,9 +780,25 @@ class AccountsHeader(Horizontal):
     AccountsHeader { width: auto; height: 1; text-style: bold; color: $text-muted; }
     """
 
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self.marked = False
+        """Whether the rows carry their agent's mark: the name column then says so."""
+
+    def _title(self, column: Column) -> Text:
+        title = MARKED_NAME_TITLE if column.key == "name" and self.marked else column.title
+        return Text(title, no_wrap=True)
+
     def compose(self) -> ComposeResult:
         for column in LAYOUT:
-            yield Static(Text(column.title, no_wrap=True), classes=f"cell col-{column.key}")
+            yield Static(self._title(column), classes=f"cell col-{column.key}")
+
+    def mark(self, marked: bool) -> None:
+        """Say whether the rows are marked with their agent (:func:`marks_shown`)."""
+        self.marked = marked
+        if self.is_mounted:
+            name = next(column for column in LAYOUT if column.key == "name")
+            self.query_one(".col-name", Static).update(self._title(name))
 
 
 class AliasInput(InPlaceField, Input):
@@ -867,6 +900,8 @@ class AccountRow(Vertical, can_focus=True):
         self._wait_ends: asyncio.TimerHandle | None = None
         self.first = True
         self.last = True
+        self.marked = False
+        """Whether the row shows its agent's mark before its name (:func:`marks_shown`)."""
         self.openings = 0
         """How often the name's field has opened: a write closes only the opening it came from."""
         self.prefill = ""
@@ -984,7 +1019,7 @@ class AccountRow(Vertical, can_focus=True):
         field.display = False
         field.value = ""
         self.query_one(NameCell).display = True
-        self.cell("agent").display = True
+        self.cell("agent").display = self.marked
         if had_focus:
             self.focus()
 
@@ -996,6 +1031,7 @@ class AccountRow(Vertical, can_focus=True):
         first: bool | None = None,
         last: bool | None = None,
         trend: UsageTrend | None = None,
+        marked: bool | None = None,
     ) -> None:
         self.status = status
         self.usage = usage
@@ -1004,6 +1040,8 @@ class AccountRow(Vertical, can_focus=True):
             self.first = first
         if last is not None:
             self.last = last
+        if marked is not None:
+            self.marked = marked
         if self.is_mounted:
             self._paint()
 
@@ -1045,6 +1083,7 @@ class AccountRow(Vertical, can_focus=True):
     def _paint(self) -> None:
         account = self.status.account
         cells = account_cells(self.status, self.usage)
+        self.cell("agent").display = self.marked and not self.renaming  # the field covers it
         self._repaint_when_the_wait_ends()
         for column in COLUMNS:
             cell = self.cell(column.key)
@@ -1397,6 +1436,8 @@ class AccountsView(Vertical):
         at its ends."""
         existing = {row.slot: row for row in holder.query(AccountRow)}
         count = len(statuses)
+        marked = marks_shown(statuses)
+        self.query_one("#accounts-header", AccountsHeader).mark(marked)
         for index, frame_status in enumerate(statuses):
             status = self._as_saved(frame_status)
             slot = status.account.slot
@@ -1406,7 +1447,7 @@ class AccountsView(Vertical):
                 row = AccountRow(status, id=f"account-row-{slot}")
                 row.usage = self.usage.get(slot)
                 row.trend = self.trends.get(slot)
-                row.first, row.last = first, last
+                row.first, row.last, row.marked = first, last, marked
                 if index < len(holder.children):
                     holder.mount(row, before=index)
                 else:
@@ -1418,6 +1459,7 @@ class AccountsView(Vertical):
                     first=first,
                     last=last,
                     trend=self.trends.get(slot),
+                    marked=marked,
                 )
                 if index < len(holder.children) and holder.children[index] is not row:
                     holder.move_child(row, before=index)

@@ -819,10 +819,14 @@ def test_metrics_share_on_says_which_repositories_are_counted(
 
     human = runner.invoke(app, ["metrics", "share", "on"])
     machine_readable = runner.invoke(app, ["--json", "metrics", "share", "on"])
-    helped = runner.invoke(app, ["metrics", "share", "on", "--help"])
 
     assert human.exit_code == 0 and usage_share.COVERAGE in human.output
-    assert "including ones you haven't added" in " ".join(helped.output.split())
+    # its --help is this docstring (the rendered page is boxed and coloured by the terminal)
+    from aisquare.cli import metrics as metrics_cli
+
+    assert "including ones you haven't added" in " ".join(
+        (metrics_cli.share_on.__doc__ or "").split()
+    )
     assert json.loads(machine_readable.output)["enabled"] is True  # still one JSON object
 
 

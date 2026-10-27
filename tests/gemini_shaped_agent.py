@@ -27,7 +27,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -78,7 +77,6 @@ from aisquare.core.agent_adapters.types import (
     SharePart,
     SkillDirs,
     TelemetryReader,
-    TranscriptRoot,
     TurnsScan,
     UsageScan,
     WriteScope,
@@ -328,9 +326,6 @@ class GeminiShapedTranscript:
             lambda record: record.get("type") == "user",
             day_of,
         )
-
-    def session_cwd(self, file: Path) -> Path | None:
-        return None  # its chats are kept per project, and name no folder
 
     def ledger(
         self, file: Path, *, since: datetime | None, until: datetime | None
@@ -621,10 +616,8 @@ class GeminiShapedAccounts:
     def config_dir(self, slot_dir: Path) -> Path:
         return slot_dir / CONFIG
 
-    def transcript_roots(self, config_dir: Path) -> tuple[TranscriptRoot, ...]:
-        # tmp/<project hash>/chats/session-<time>-<id>.json, as Gemini CLI keeps its chats.
-        name = re.compile(r"^session-.+-(?P<id>[^-.]+)\.json$")
-        return (TranscriptRoot(config_dir / "tmp", 2, name),)
+    def transcript_roots(self, config_dir: Path) -> tuple[Path, ...]:
+        return (config_dir / "tmp",)  # tmp/<project hash>/chats, which its reader lists none of
 
     def _read(self, account: ClaudeAccount, name: str) -> dict[str, Any] | None:
         try:

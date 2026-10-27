@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import shlex
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import suppress
@@ -67,7 +66,6 @@ from aisquare.core.agent_adapters.types import (
     SharePart,
     SkillDirs,
     TelemetryReader,
-    TranscriptRoot,
     TurnsScan,
     UsageScan,
     WriteScope,
@@ -250,9 +248,6 @@ class FakeTranscript:
             lambda record: record.get("kind") == "heard",
             day_of,
         )
-
-    def session_cwd(self, file: Path) -> Path | None:
-        return None  # its log names no folder
 
     def ledger(
         self, file: Path, *, since: datetime | None, until: datetime | None
@@ -526,8 +521,8 @@ class FakeAccounts:
     def config_dir(self, slot_dir: Path) -> Path:
         return slot_dir  # FAKE_AGENT_HOME names its config dir itself
 
-    def transcript_roots(self, config_dir: Path) -> tuple[TranscriptRoot, ...]:
-        return (TranscriptRoot(config_dir / "logs", 0, re.compile(r"^(?P<id>.+)\.log$")),)
+    def transcript_roots(self, config_dir: Path) -> tuple[Path, ...]:
+        return (config_dir / "threads",)  # where its reader's conversations are
 
     def _login(self, account: ClaudeAccount) -> dict[str, Any] | None:
         try:

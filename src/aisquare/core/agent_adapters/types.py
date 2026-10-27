@@ -994,19 +994,6 @@ class TurnsScan:
 
 
 @dataclass(frozen=True)
-class TranscriptRoot:
-    """Where an account's home keeps its sessions' transcripts, for a reader that walks them
-    all (the usage sweep, ``services.usage_stats``): each a file ``depth`` folders below
-    ``path`` whose name ``name`` matches, its group ``id`` the agent's own id for the session
-    (``AgentEvent.session_id``). Claude Code's ``projects/<folder>/<id>.jsonl``, Codex's
-    ``sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl``."""
-
-    path: Path
-    depth: int
-    name: re.Pattern[str]
-
-
-@dataclass(frozen=True)
 class PromptRecord:
     """The prompts an agent's own record says its sessions ran
     (:meth:`AgentAdapter.first_prompts_since`)."""
@@ -1191,13 +1178,6 @@ class AgentTranscript(Protocol):
         no turn holds sum to what :meth:`usage` reads of the same bytes, and the state is the
         one it takes: the sweep and the Stop hook read on from each other. ``None`` where
         :meth:`usage` is. Never raises."""
-        ...
-
-    def session_cwd(self, file: Path) -> Path | None:
-        """The folder the session ran in, the first one its transcript names (Claude Code's
-        first ``cwd``, Codex's ``session_meta``), read off the transcript's head; ``None``
-        when it names none or cannot be read. Which repository a swept session counts under
-        (``services.usage_stats``)."""
         ...
 
 
@@ -2052,12 +2032,13 @@ class AgentAccounts(Protocol):
         Claude Code and Codex; Gemini CLI's names the folder its ``.gemini`` is in."""
         ...
 
-    def transcript_roots(self, config_dir: Path) -> tuple[TranscriptRoot, ...]:
-        """Where the agent keeps its sessions' transcripts under ``config_dir`` (an account's,
-        :meth:`config_dir`): what the usage sweep reads of every session on the machine,
-        launched by aisquare or not, and how a transcript's path names the account it ran on
-        (``services.usage_stats``). Claude Code's ``projects``, Codex's ``sessions``; ``()``
-        for an agent whose transcripts are kept nowhere an account names."""
+    def transcript_roots(self, config_dir: Path) -> tuple[Path, ...]:
+        """The folders under ``config_dir`` (an account's, :meth:`config_dir`) that hold its
+        sessions' transcripts, every one its reader's ``AgentTranscript.conversations`` lists
+        there among them: how a transcript's path names the account it ran on, which the
+        usage sweep and a Stop's first record ask (``services.usage_stats``). Claude Code's
+        ``projects``, Codex's ``sessions``; ``()`` for an agent whose transcripts are kept
+        nowhere an account names."""
         ...
 
     def identity(

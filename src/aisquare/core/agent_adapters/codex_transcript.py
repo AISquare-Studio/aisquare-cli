@@ -254,10 +254,6 @@ class CodexTranscript:
 
         return codex_usage.turns(file, state, day_of)
 
-    def session_cwd(self, file: Path) -> Path | None:
-        """The folder its ``session_meta`` names, else its first ``turn_context``'s."""
-        return _rollout_cwd(file)
-
 
 _ROLLOUT_NAME = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)\.jsonl$")
 """A rollout's name: the local time its session began, then its thread id."""
@@ -609,31 +605,6 @@ def _rollout_unparsed(
             own = words.startswith(_INSTRUCTIONS) or _OWN_TEXT.match(words) is not None
             return ("own" if own else "user_prompt"), None
     return None, None
-
-
-_CWD_HEAD = 1_048_576
-"""How much of a rollout's head :func:`_rollout_cwd` reads: its ``session_meta``, Codex's base
-instructions inside it, and the first turn's ``turn_context``."""
-
-
-def _rollout_cwd(file: Path) -> Path | None:
-    """``AgentTranscript.session_cwd`` for a rollout: the ``cwd`` of its ``session_meta`` (its
-    first line), else of the first ``turn_context`` in its head; ``None`` with neither."""
-    try:
-        with file.open("rb") as handle:
-            head = handle.read(_CWD_HEAD)
-    except OSError:
-        return None
-    for line in head.split(b"\n"):
-        if b'"cwd"' not in line:
-            continue
-        record = parse_line(line)
-        if record is None or record.get("type") not in ("session_meta", "turn_context"):
-            continue
-        cwd = _payload(record).get("cwd")
-        if isinstance(cwd, str) and cwd:
-            return Path(cwd)
-    return None
 
 
 # --- a turn end: the exec sessions it left running, and a turn begun since ------------------

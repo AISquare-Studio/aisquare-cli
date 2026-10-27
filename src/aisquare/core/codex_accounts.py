@@ -43,7 +43,6 @@ import binascii
 import hashlib
 import json
 import os
-import re
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -62,12 +61,10 @@ from aisquare.models import (
 )
 
 if TYPE_CHECKING:
-    from aisquare.core.agent_adapters.types import SharedMemory, SharePart, TranscriptRoot
+    from aisquare.core.agent_adapters.types import SharedMemory, SharePart
 
 AGENT = "codex"
 HOME_VAR = "CODEX_HOME"
-_ROLLOUT_NAME = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(?P<id>.+)\.jsonl$")
-"""A rollout's name: the local time it began, then its thread id (the session's own id)."""
 PLAIN_VARS = {HOME_VAR: "AISQUARE_PLAIN_CODEX_HOME"}
 """Where a launch onto a managed Codex slot keeps the shell's own ``CODEX_HOME``."""
 PLAIN_SLOT = 0
@@ -638,11 +635,8 @@ class CodexAccounts:
     def config_dir(self, slot_dir: Path) -> Path:
         return slot_dir  # CODEX_HOME names the config dir itself
 
-    def transcript_roots(self, config_dir: Path) -> tuple[TranscriptRoot, ...]:
-        """``sessions/YYYY/MM/DD/rollout-<local time>-<thread id>.jsonl``: the rollouts."""
-        from aisquare.core.agent_adapters.types import TranscriptRoot  # lazy, as `SharePart`
-
-        return (TranscriptRoot(config_dir / "sessions", 3, _ROLLOUT_NAME),)
+    def transcript_roots(self, config_dir: Path) -> tuple[Path, ...]:
+        return (config_dir / "sessions",)  # sessions/YYYY/MM/DD/rollout-<time>-<thread>.jsonl
 
     def launched_account(
         self, env: Mapping[str, str], accounts: Sequence[ClaudeAccount]

@@ -104,14 +104,11 @@ if TYPE_CHECKING:
         AgentAccounts,
         SharedMemory,
         SharePart,
-        TranscriptRoot,
         UsageFetch,
     )
 
 AGENT = "claude-code"
 """The adapter id of Claude Code, whose slots this module has always kept."""
-_SESSION_FILE = re.compile(r"^(?P<id>.+)\.jsonl$")
-"""A session's transcript under ``projects/<folder>/``: its name is the session's id."""
 
 DEFAULT_SLOT = 1
 """The slot that is the machine's plain ``claude`` — never a directory of ours."""
@@ -1717,12 +1714,8 @@ class ClaudeCodeAccounts:
     def config_dir(self, slot_dir: Path) -> Path:
         return slot_dir  # CLAUDE_CONFIG_DIR names the config dir itself
 
-    def transcript_roots(self, config_dir: Path) -> tuple[TranscriptRoot, ...]:
-        """``projects/<the folder's key>/<session id>.jsonl`` (its subagents' files under
-        ``<session id>/`` beside it are the session's, read with it)."""
-        from aisquare.core.agent_adapters.types import TranscriptRoot  # lazy: see `kind`
-
-        return (TranscriptRoot(config_dir / "projects", 1, _SESSION_FILE),)
+    def transcript_roots(self, config_dir: Path) -> tuple[Path, ...]:
+        return (config_dir / "projects",)  # projects/<the folder's key>/<session id>.jsonl
 
     def launched_account(
         self, env: Mapping[str, str], accounts: Sequence[ClaudeAccount]

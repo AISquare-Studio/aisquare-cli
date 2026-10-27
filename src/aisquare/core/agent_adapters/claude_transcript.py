@@ -227,30 +227,6 @@ class ClaudeTranscript:
 
         return claude_usage.turns(file, state, day_of)
 
-    def session_cwd(self, file: Path) -> Path | None:
-        """The first ``cwd`` an entry in the head of the session's file names (every entry
-        carries one)."""
-        try:
-            with file.open("rb") as handle:
-                head = handle.read(_HEAD_BYTES)
-        except OSError:
-            return None
-        for line in head.split(b"\n"):
-            if b'"cwd"' not in line:
-                continue
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
-            cwd = entry.get("cwd") if isinstance(entry, dict) else None
-            if isinstance(cwd, str) and cwd:
-                return Path(cwd)
-        return None
-
-
-_HEAD_BYTES = 262_144
-"""How much of a transcript's head :meth:`ClaudeTranscript.session_cwd` reads."""
-
 
 def _typed(entry: dict[str, Any]) -> str | None:
     """What the user typed in a ``user`` entry: text, never a tool result, a command's

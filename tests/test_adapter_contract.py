@@ -1738,15 +1738,14 @@ def test_the_turns_a_sweep_reads_sum_to_the_usage_and_share_its_state(
 def test_an_accounts_transcript_roots_are_in_its_config_dir(
     adapter: AgentAdapter, tmp_path: Path
 ) -> None:
-    """``AgentAccounts.transcript_roots``: where the usage sweep finds a home's sessions is
-    inside that home's config dir, and a root's ``name`` gives the session's own id."""
+    """``AgentAccounts.transcript_roots``: the folders that name a transcript's account are
+    inside that home's config dir, as every conversation its reader lists there is."""
     accounts = adapter.accounts
     if accounts is None:
         pytest.skip(f"{adapter.id} has no account slots")
     config_dir = accounts.config_dir(tmp_path / "slot")
     for root in accounts.transcript_roots(config_dir):
-        assert root.path.is_relative_to(config_dir) and root.depth >= 0
-        assert "id" in root.name.groupindex
+        assert root.is_relative_to(config_dir) and root != config_dir
 
 
 # --- the instruction files a session loads -----------------------------------------------

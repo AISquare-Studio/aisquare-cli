@@ -1,10 +1,11 @@
 """SCOPE #113 091, item 4: Usage & stats sweeps Codex's rollouts, as it sweeps Claude Code's.
 
 The sweep (``aisquare metrics backfill``, the dashboard's tick) reads every session of every
-agent with account slots, where its agent keeps them (``AgentAccounts.transcript_roots``:
-Codex's ``sessions/YYYY/MM/DD/rollout-<time>-<thread>.jsonl`` in each home), cut into turns by
-its own reader (``AgentTranscript.turns``), each row with the slot of the home it was found in
-and the repository its rollout's ``session_meta`` names. A Codex session aisquare launched is
+agent with account slots, as its agent's reader lists them in each home
+(``AgentTranscript.conversations``: Codex's ``sessions/YYYY/MM/DD/rollout-<time>-<thread>.jsonl``),
+cut into turns by that reader (``AgentTranscript.turns``), each row with the slot of the home
+it was found in (``AgentAccounts.transcript_roots``) and the repository its rollout's
+``session_meta`` names (``AgentTranscript.opening``). A Codex session aisquare launched is
 recorded at its Stop as well: the two share the session's row (the board's id for it,
 ``agent_events.session_key``) and its scan state, so neither counts what the other did. The
 rollout is Codex 0.164.0's own (``tests/fixtures/agent_transcripts/codex-usage-0.164.0.jsonl``:
@@ -231,9 +232,20 @@ def test_a_codex_turn_across_local_midnight_is_two_turns(tmp_path: Path) -> None
     assert split.scan.delta.totals().total == one_day.scan.delta.totals().total
 
 
-def test_a_rollout_names_the_folder_its_session_ran_in() -> None:
-    """``AgentTranscript.session_cwd``: a rollout's ``session_meta``, read off its head."""
+def test_every_rollout_codex_lists_names_the_slot_of_its_home(
+    machine: Machine, codex_home: Path
+) -> None:
+    """What the sweep lists of a home (``AgentTranscript.conversations``) is under that home's
+    ``AgentAccounts.transcript_roots``, by which a Stop's first record names its slot too: the
+    two agree. A rollout outside every home names none."""
     reader = CODEX.transcript_reader
     assert reader is not None
-    assert reader.session_cwd(RECORDED) == Path("/work/alpha")
-    assert reader.session_cwd(RECORDED.with_name("missing.jsonl")) is None
+    rollout = _rollout(codex_home, machine.repo("alpha"), THREAD)
+    roots = core.kind("codex").transcript_roots(codex_home)
+
+    listed = [path for _, path in reader.conversations(codex_home)]
+
+    assert listed == [rollout]
+    assert all(any(path.is_relative_to(root) for root in roots) for path in listed)
+    assert usage_stats.account_slot(rollout) == core.kind("codex").plain_slot
+    assert usage_stats.account_slot(machine.root / "elsewhere" / rollout.name) is None

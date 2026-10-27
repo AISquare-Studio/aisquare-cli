@@ -10,8 +10,8 @@ works):
 - the **Stop hook** of a session aisquare launched, on the hot path, as before; and
 - the **sweep** (:func:`sweep`), which reads the transcripts of every session of every agent
   with account slots, in every repository on every account home — ``~/.claude`` and
-  ``~/.codex``, each registered slot's — whether or not aisquare launched it, where its agent
-  keeps them (``AgentAccounts.transcript_roots``: Claude Code's ``projects``, Codex's
+  ``~/.codex``, each registered slot's — whether or not aisquare launched it, as its agent's
+  reader lists them (``AgentTranscript.conversations``: Claude Code's ``projects``, Codex's
   ``sessions``). It runs off the hot path: when the dashboard opens or the TUI ticks, at most
   every :data:`SWEEP_EVERY` (:func:`maybe_sweep`), and as ``aisquare metrics backfill``. Claude
   Code deletes a transcript after ``cleanupPeriodDays`` (30 by default), so a first sweep
@@ -45,11 +45,10 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from datetime import time as day_time
@@ -59,7 +58,6 @@ from typing import Any
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import feature_use, locking, paths, pricing, repo_profile
 from aisquare.core import usage as usage_core
-from aisquare.core.agent_adapters.types import TranscriptRoot
 from aisquare.core.ids import new_usage_id
 from aisquare.core.store import USAGE_PURGED_PREFIX, ContextStore, store_session
 from aisquare.core.workspace import current_project
@@ -185,11 +183,15 @@ class Home:
     agent: str
     path: Path
 
-    def roots(self) -> tuple[TranscriptRoot, ...]:
-        """Where its agent keeps its sessions' transcripts in it
+    @property
+    def config_dir(self) -> Path:
+        """The config dir its agent reads in it (``AgentAccounts.config_dir``)."""
+        return accounts_core.kind(self.agent).config_dir(self.path)
+
+    def roots(self) -> tuple[Path, ...]:
+        """The folders its agent keeps its sessions' transcripts in
         (``AgentAccounts.transcript_roots``)."""
-        accounts = accounts_core.kind(self.agent)
-        return accounts.transcript_roots(accounts.config_dir(self.path))
+        return accounts_core.kind(self.agent).transcript_roots(self.config_dir)
 
 
 def homes() -> list[Home]:
@@ -216,8 +218,8 @@ def _same_path(a: Path, b: Path) -> bool:
 
 
 def discover(found_in: Iterable[Home]) -> list[Transcript]:
-    """The session transcripts in the homes ``found_in`` (each agent's own layout, its
-    ``AgentAccounts.transcript_roots``: Claude Code's ``projects/<folder>/<session>.jsonl``,
+    """The session transcripts in the homes ``found_in``, as each agent's reader lists them
+    (``AgentTranscript.conversations``: Claude Code's ``projects/<folder>/<session>.jsonl``,
     Codex's ``sessions/YYYY/MM/DD/rollout-…-<thread>.jsonl``), newest first, each session once:
     a directory reached twice (a shared ``projects`` link, the default slot named by both the
     variable and ``~/.claude``) is read once."""
@@ -230,47 +232,23 @@ def discover(found_in: Iterable[Home]) -> list[Transcript]:
     seen_sessions: set[str] = set()
     for home in found_in:
         adapter = get_adapter(home.agent)
-        config_dir = accounts_core.kind(home.agent).config_dir(home.path)
-        for root in home.roots():
-            for entry, native in _session_files(root):
-                try:
-                    real = Path(entry.path).resolve()
-                    mtime = entry.stat().st_mtime
-                except (OSError, RuntimeError):
-                    continue
-                session_id = session_key(adapter, config_dir, native)
-                if real in seen_files or session_id in seen_sessions:
-                    continue
-                seen_files.add(real)
-                seen_sessions.add(session_id)
-                found.append(
-                    (mtime, Transcript(session_id, Path(entry.path), home.slot, home.agent))
-                )
+        reader = adapter.transcript_reader
+        if reader is None:
+            continue
+        for native, path in reader.conversations(home.config_dir):
+            try:
+                real = path.resolve()
+                mtime = path.stat().st_mtime
+            except (OSError, RuntimeError):
+                continue
+            session_id = session_key(adapter, home.config_dir, native)
+            if real in seen_files or session_id in seen_sessions:
+                continue
+            seen_files.add(real)
+            seen_sessions.add(session_id)
+            found.append((mtime, Transcript(session_id, path, home.slot, home.agent)))
     found.sort(key=lambda item: (-item[0], item[1].session_id))
     return [item[1] for item in found]
-
-
-def _session_files(root: TranscriptRoot) -> Iterator[tuple[os.DirEntry[str], str]]:
-    """Each file ``root.depth`` folders below ``root.path`` whose name ``root.name`` matches,
-    with the agent's id for its session (the pattern's ``id``); folders in name order."""
-    level = [root.path]
-    for _ in range(root.depth):
-        below: list[Path] = []
-        for folder in level:
-            try:
-                below.extend(sorted(Path(e.path) for e in os.scandir(folder) if e.is_dir()))
-            except OSError:
-                continue
-        level = below
-    for folder in level:
-        try:
-            entries = list(os.scandir(folder))
-        except OSError:
-            continue
-        for entry in entries:
-            matched = root.name.match(entry.name)
-            if matched is not None:
-                yield entry, matched.group("id")
 
 
 class _Places:
@@ -282,9 +260,9 @@ class _Places:
         for home in homes() if found_in is None else found_in:
             for root in home.roots():
                 try:
-                    self.roots.append((root.path.resolve(), home))
+                    self.roots.append((root.resolve(), home))
                 except (OSError, RuntimeError):
-                    self.roots.append((root.path, home))
+                    self.roots.append((root, home))
 
     def of(self, transcript: Path) -> Home | None:
         """The home whose transcript roots hold ``transcript``, or ``None``."""
@@ -308,14 +286,15 @@ def account_slot(transcript: Path, places: _Places | None = None) -> int | None:
 
 def session_cwd(transcript: Path, places: _Places | None = None) -> Path | None:
     """The directory the session ran in, as its agent's reader reads its transcript's head
-    (``AgentTranscript.session_cwd``): the agent of the home that holds it, Claude Code's for
-    a transcript no home holds (the transcripts recorded before agents)."""
+    (``AgentTranscript.opening``): the reader of the agent of the home that holds it, Claude
+    Code's for a transcript no home holds (the transcripts recorded before agents)."""
     from aisquare.core.agent_adapters import recorded_adapter
 
     home = (places or _Places()).of(transcript)
     adapter = recorded_adapter(home.agent if home is not None else None)
     reader = adapter.transcript_reader if adapter is not None else None
-    return reader.session_cwd(transcript) if reader is not None else None
+    cwd = reader.opening(transcript)[0] if reader is not None else None
+    return Path(cwd) if cwd else None
 
 
 def repo_of(cwd: Path | None) -> tuple[str, Path] | None:

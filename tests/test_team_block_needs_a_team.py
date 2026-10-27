@@ -23,6 +23,7 @@ from aisquare.core.store import store_session
 from aisquare.core.workspace import current_project
 from aisquare.services import mcp_server
 from aisquare.services import team as team_service
+from tests.wall_clock import after_the_tick
 
 pytestmark = pytest.mark.usefixtures("project_capture")
 
@@ -366,6 +367,7 @@ def test_a_solo_session_pruned_while_alive_is_still_briefed_when_a_team_forms(
     mark is kept, and the board comes once."""
     _team_on(runner)
     _start(runner, SOLO, work_dir)
+    after_the_tick()  # "older than 0 minutes": a session seen in this very tick is not
     report = team_service.prune_sessions(older_than_minutes=0)
     assert [pruned.id for pruned in report.pruned] == [SOLO]
     with store_session() as store:

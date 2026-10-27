@@ -9,18 +9,23 @@ of an app a test makes. Each pin below goes red when the fixture drops its half 
 
 from __future__ import annotations
 
+import itertools
 import os
 import sqlite3
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 import typer
 import typer.testing
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core.store import store_session
+from tests import wall_clock
 
 #: SQLite's own numbers for ``PRAGMA synchronous``.
 OFF, FULL = 0, 2
@@ -159,3 +164,37 @@ def test_the_kept_tree_runs_the_same_command_every_time() -> None:
     first, second = runner.invoke(app, ["--version"]), runner.invoke(app, ["--version"])
     assert first.exit_code == second.exit_code == 0
     assert first.output == second.output != ""
+
+
+class _ClockThatTicks:
+    """A wall clock that reads the same instant ``stuck_for`` times, then a later one."""
+
+    def __init__(self, stuck_for: int) -> None:
+        self.reads = 0
+        self.stuck_for = stuck_for
+
+    def now(self, tz: object = None) -> datetime:
+        self.reads += 1
+        late = self.reads > self.stuck_for
+        return datetime(2026, 9, 9, 12, 0, tzinfo=UTC) + timedelta(milliseconds=16 * late)
+
+
+def test_after_the_tick_waits_for_a_later_reading_of_the_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _ClockThatTicks(stuck_for=5)
+    monkeypatch.setattr(wall_clock, "datetime", clock)
+    monkeypatch.setattr(wall_clock, "_sleep", lambda seconds: None)
+    wall_clock.after_the_tick()
+    assert clock.reads == 6, "one read to start, four that still show it, one that has moved on"
+
+
+def test_a_clock_that_never_moves_is_an_error_and_not_a_hang(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    steps = itertools.count()
+    monkeypatch.setattr(wall_clock, "datetime", _ClockThatTicks(stuck_for=10**9))
+    monkeypatch.setattr(wall_clock, "_sleep", lambda seconds: None)
+    monkeypatch.setattr(wall_clock, "time", SimpleNamespace(monotonic=lambda: float(next(steps))))
+    with pytest.raises(AssertionError, match="did not move"):
+        wall_clock.after_the_tick()

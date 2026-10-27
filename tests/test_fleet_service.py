@@ -99,6 +99,7 @@ from tests.cycles import unscoped
 from tests.fsperms import can_deny_reads, can_symlink, remove_tree
 from tests.projects import add_project
 from tests.unix_listener import Accepting
+from tests.wall_clock import after_the_tick
 
 PYTHON_LAUNCHER = "python3"
 """What ``pane_current_command`` reads while ``python -m aisquare launch`` is resolving."""
@@ -17862,6 +17863,7 @@ def test_a_resumed_replacement_that_dies_before_its_first_hook_is_ended_like_any
     # its session marked. Inside the grace that is a hand-over in flight; after it, not.
     coder = _coder(project)
     _with_transcript(coder, None)
+    after_the_tick()  # the mark guards a row OLDER than it: not one made in its own tick
     with store_session() as store:
         store.touch_session(coder.session_id or "", state=team_service.HANDOVER_STATE)
     tmux.die(coder.pane_id, 0)

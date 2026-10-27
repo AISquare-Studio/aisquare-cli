@@ -81,6 +81,7 @@ from aisquare.services.transcript import (
 )
 from tests.fleet_fakes import list_agents_as
 from tests.remote_kit_helpers import base, make_client, make_runtime, receive_within, unlock
+from tests.wall_clock import after_the_tick
 
 _LIVE_NEEDS_SOURCES = remote_needs.live_needs_sources
 """The live sources as the module defines them, which the ``live`` fixture replaces."""
@@ -5631,6 +5632,7 @@ def _seated(
         for seat in seats:
             project = projects[seat.where]
             _seat_up(store, seat, project, board if hub else project)
+            after_the_tick()  # the cards are listed by when their seats ended: not by a tie
     return projects
 
 
@@ -7541,6 +7543,7 @@ def test_an_answer_types_into_the_agent_is_audited_and_clears_its_card(live: Liv
     card = live.card("permission")
     watcher = live.app.kit.lane_state["needs"]
     scanned = watcher.needs_scanned_at()
+    after_the_tick()  # the rescan the answer asks for is stamped later than this scan
     response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
     assert response.status_code == 200, response.text
     assert response.json() == {

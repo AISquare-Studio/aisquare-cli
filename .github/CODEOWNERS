@@ -1,0 +1,3 @@
+# Pull requests need one approval from a listed owner to merge.
+* @AISquare-Studio/rev-agents @AISquare-Studio/superusers
+/.github/CODEOWNERS @AISquare-Studio/superusers

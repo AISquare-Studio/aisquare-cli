@@ -102,12 +102,15 @@ adapter.**
     answered `Process running with session ID <n>` runs until its `CommandExecution`
     completes, by itself or `/stop`; `activity_since`: a turn begun since), measured on
     0.164.0, and the move weighs its own agent's accounts; a Codex reading, read off its home
-    and never cached, is looked at once a cool-down, not at every turn end. Usage & stats'
-    sweep reads every agent's sessions as its reader lists them (Codex's rollouts too), cut
-    into turns by that reader (`AgentTranscript.turns`), each with the slot of the home it
-    was found in (`AgentAccounts.transcript_roots`) and the repository it ran in; a Codex
-    Stop's row now carries both, and a Stop and a sweep read on from each other; the page
-    and `metrics stats` say "the agents' transcripts", naming none. The doctor's `role
+    and never cached, is looked at once a cool-down, not at every turn end. The move's last
+    look at the pane reads it as the screen readers take it, the escapes of the capture
+    stripped: Codex draws its prompt styled, and read with them its idle prompt was none, so
+    no Codex row was ever moved (live on 0.164.0, `tests/test_codex_native.py`). Usage &
+    stats' sweep reads every agent's sessions as its reader lists them (Codex's rollouts
+    too), cut into turns by that reader (`AgentTranscript.turns`), each with the slot of the
+    home it was found in (`AgentAccounts.transcript_roots`) and the repository it ran in; a
+    Codex Stop's row now carries both, and a Stop and a sweep read on from each other; the
+    page and `metrics stats` say "the agents' transcripts", naming none. The doctor's `role
     bindings` row asks every agent's home variable, `CODEX_HOME` too, with that agent's own
     connected test and `agents connect <agent>` fix.
   - **Claude Code's alone** (N-A): Remote Control (`AgentCapabilities.remote_control`: a launch

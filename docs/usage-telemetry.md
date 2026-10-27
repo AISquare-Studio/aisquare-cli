@@ -56,7 +56,7 @@ hook (see [Usage & stats](usage-stats.md)).
 
 Repository **names**, **paths** and **remotes**; **prompts**, replies, file names or any text you
 or an agent wrote; **emails**, account aliases or any name of a person; **command arguments**
-or their values; your machine's name or IP address. The telemetry tables never store an IP
+or their values; your machine's name. The telemetry tables never store an IP
 address. If you are signed in, the request also goes through AISquare's normal sign-in token
 check, which records the token's last-used IP address, as it does for any signed-in API call.
 A repository is sent only as `HMAC-SHA256(a random salt kept on your machine, its normalised git

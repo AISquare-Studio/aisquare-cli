@@ -50,6 +50,12 @@ project is added back on purpose
 (`project onboard` / `team on`); from then on its usage is counted again, from whatever
 transcripts Claude Code still has. A directory merely captured by a hook does not end it.
 
+*Known follow-up:* while any tombstone exists on the machine, the sweep resolves the repository of
+a session that has no row (an idle or hook-only transcript) before it reads it, which is a `git`
+call per distinct directory on every sweep (about 8 ms each; 60 repositories: about 1.4 s). It
+only affects a machine that has purged a project and has many repositories; remembering the
+repository per directory across sweeps would remove it.
+
 ## Repositories
 
 A repository is identified by its **normalised git remote** (`github.com/org/repo`), and by its

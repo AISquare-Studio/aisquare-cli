@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import random
 import string
+import sys
 import time
 from collections.abc import Callable
 
@@ -275,34 +276,89 @@ def test_text_with_no_header_or_no_footer_is_returned_as_it_is() -> None:
 
 # --- every other rule is linear on hostile input ------------------------------------------------
 
-HOSTILE: dict[str, Callable[[], str]] = {
-    "jwt-starts-inside-a-run": lambda: "eyJ-" * 500_000,
-    "jwt-starts-no-dots": lambda: ("eyJ" + "a" * 20 + " ") * 80_000,
-    "jwt-one-dot": lambda: "eyJ" + "a" * 20 + "." + "b" * 1_900_000,
-    "assignment-unclosed-quote": lambda: 'token="' * 280_000,
-    "assignment-unclosed-single": lambda: "secret='" * 250_000,
-    "assignment-long-prefix": lambda: ("a" * 48 + "token ") * 150_000,
-    "assignment-equals": lambda: "api_key=" * 250_000,
-    "bearer-words": lambda: "bearer " * 280_000,
-    "basic-words": lambda: "basic ab " * 220_000,
-    "authorization": lambda: "authorization:" * 140_000,
-    "url-colons": lambda: "://a:b" * 300_000,
-    "url-userinfo": lambda: "://" + "u" * 1_000_000 + ":" + "p" * 900_000,
-    "prefixes": lambda: "sk-ghp_xoxb-AKIAglpat-aisq_AIzawk_live_" * 50_000,
-    "dashes": lambda: "-" * 2_000_000,
-    "alnum": lambda: "a" * 2_000_000,
-    "headers-only": lambda: (HEADER + "\n") * 60_000,
+#: A text of about ``size`` characters, built to make some backtracking engine's case.
+HOSTILE: dict[str, Callable[[int], str]] = {
+    "jwt-starts-inside-a-run": lambda size: "eyJ-" * (size // 4),
+    "jwt-starts-no-dots": lambda size: ("eyJ" + "a" * 20 + " ") * (size // 24),
+    "jwt-one-dot": lambda size: "eyJ" + "a" * 20 + "." + "b" * (size - 24),
+    "assignment-unclosed-quote": lambda size: 'token="' * (size // 7),
+    "assignment-unclosed-single": lambda size: "secret='" * (size // 8),
+    "assignment-long-prefix": lambda size: ("a" * 48 + "token ") * (size // 54),
+    "assignment-equals": lambda size: "api_key=" * (size // 8),
+    "bearer-words": lambda size: "bearer " * (size // 7),
+    "basic-words": lambda size: "basic ab " * (size // 9),
+    "authorization": lambda size: "authorization:" * (size // 14),
+    "url-colons": lambda size: "://a:b" * (size // 6),
+    "url-userinfo": lambda size: "://" + "u" * (size // 2) + ":" + "p" * (size // 2),
+    "prefixes": lambda size: "sk-ghp_xoxb-AKIAglpat-aisq_AIzawk_live_" * (size // 40),
+    "dashes": lambda size: "-" * size,
+    "alnum": lambda size: "a" * size,
+    "headers-only": lambda size: (HEADER + "\n") * (size // (len(HEADER) + 1)),
 }
+
+#: Four sizes, each four times the one before, the last 2 MB.
+SIZES = (31_250, 125_000, 500_000, 2_000_000)
+#: What a size four times as long may cost, as a multiple of the one before: linear is 4, a
+#: quadratic rule 16. Not 4 itself, because the cost per character differs a little by size
+#: and a shared runner adds noise; not 16, which would pass a rule that is nearly quadratic.
+GROWTH = 6.0
+#: A run shorter than this says too little about the next one: the ratio is not asked of it.
+FLOOR = 0.1 if sys.platform == "win32" else 0.02
+#: The process's CPU time, not the wall clock: on a shared runner (several pytest workers on two
+#: cores) a long run is stalled by its neighbours more than a short one, which is a ratio that
+#: is not the rule's. Windows' CPU clock ticks every 15.6 ms, too coarse for the short runs, so
+#: it keeps the wall clock.
+_clock = time.perf_counter if sys.platform == "win32" else time.process_time
+#: Seconds. Not a bound on speed (a loaded runner takes four times what a laptop does for the
+#: same text, which is what a tight absolute budget failed on), only on a rule that has stopped
+#: being a scrub: 30 microseconds a character.
+CEILING = budget(60.0)
+
+
+def _best_of(text: str, bar: float | None) -> float:
+    """The least of several runs of ``redact`` over ``text``: five while they are short (a short
+    run is mostly noise), three up to half a second, one beyond that, where a repeat would only
+    cost. Three at least while the least is over ``bar``: a stall on a shared runner looks like a
+    regression once, and a regression looks like one every time."""
+    best = float("inf")
+    runs = 0
+    while True:
+        started = _clock()
+        redact(text, RedactionLevel.strict)
+        best = min(best, _clock() - started)
+        runs += 1
+        if best > 40.0:
+            return best
+        wanted = 5 if best <= 0.1 else 3 if best <= 0.5 else 1
+        if bar is not None and best > bar:
+            wanted = max(wanted, 3)
+        if runs >= wanted:
+            return best
 
 
 @pytest.mark.parametrize("name", sorted(HOSTILE))
 def test_redaction_is_linear_on_hostile_input(name: str) -> None:
-    """Seconds, not minutes: each of these made some backtracking engine's cubic or
-    quadratic case; a regression is a hang on the hook path."""
-    text = HOSTILE[name]()
-    started = time.perf_counter()
+    """Each of these made some backtracking engine's cubic or quadratic case, and a regression
+    is a hang on the hook path. Asked as growth, not as speed: four times the text costs under
+    ``GROWTH`` times the time, at every size from 31 KB to 2 MB, so a runner that is slow all
+    over still passes and a rule that is quadratic fails at the first size that can show it
+    (the next size is not run), where 16 times the time is 16 and not 4. A text that costs
+    under ``FLOOR`` at every size (``assignment-equals``) has only the ceiling.
 
-    redact(text, RedactionLevel.strict)
+    Quadratic rules this test fails: the private-key pattern ``BEGIN .*? END`` (headers-only)
+    and a JWT that starts at every ``eyJ`` after ``\\b`` (jwt-starts-inside-a-run)."""
+    previous: float | None = None
+    for size in SIZES:
+        text = HOSTILE[name](size)
+        bar = previous * GROWTH if previous is not None and previous >= FLOOR else None
 
-    elapsed = time.perf_counter() - started
-    assert elapsed < budget(8.0), f"{name}: {elapsed:.2f} s for {len(text):,} characters"
+        took = _best_of(text, bar)
+
+        assert took < CEILING, f"{name}: {took:.2f} s for {len(text):,} characters"
+        if bar is not None and previous is not None:
+            assert took <= bar, (
+                f"{name}: {len(text):,} characters took {took:.2f} s, {took / previous:.1f} "
+                f"times the {previous:.2f} s of the {size // 4:,} before (linear is 4, "
+                f"quadratic 16)"
+            )
+        previous = took

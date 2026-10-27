@@ -202,7 +202,8 @@ class GeminiShapedTranscript:
     ``cached``, the prompt's cached part; ``thoughts``; ``tool``, the tool-use prompt;
     ``total``), the same id appended again once they land, so the last line of an id holds
     them (Gemini CLI's chatRecordingService.ts, SCOPE #113 main-274 A1). Billed, as its
-    pricing page reads: thoughts as output, the tool-use prompt as input."""
+    pricing page reads: thoughts as output, the tool-use prompt as input. Its calls run in
+    the foreground: a turn leaves nothing running."""
 
     speaker = "gemini"
 
@@ -384,6 +385,23 @@ class GeminiShapedTranscript:
             if record.get("type") == "user" and isinstance(record.get("content"), str):
                 return None, record["content"]
         return None, None
+
+    def background_work(self, file: Path, since: datetime | None) -> list[str]:
+        file.stat()  # a log that cannot be read cannot say: OSError, as the slot says
+        return []
+
+    def activity_since(self, file: Path, offset: int) -> bool:
+        with file.open("rb") as handle:
+            if handle.seek(0, 2) < offset:
+                return True
+            handle.seek(0)
+            position = 0
+            for raw in handle:
+                start, position = position, position + len(raw)
+                kind = (parse_line(raw) or {}).get("type")
+                if start >= offset and kind in ("user", "gemini"):
+                    return True
+        return False
 
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         said: list[str] = []

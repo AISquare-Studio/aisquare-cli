@@ -240,5 +240,95 @@
         }
       }
     }
+  ],
+  "turn_end": [
+    {
+      "what": "a run left behind its turn",
+      "records": [
+        {
+          "timestamp": "2026-10-26T09:00:00.000Z",
+          "kind": "heard",
+          "text": "build it"
+        },
+        {
+          "timestamp": "2026-10-26T09:00:01.000Z",
+          "kind": "run",
+          "id": "r1",
+          "tool": "shell",
+          "args": {
+            "line": "make"
+          }
+        },
+        {
+          "timestamp": "2026-10-26T09:00:02.000Z",
+          "kind": "behind",
+          "id": "r1"
+        },
+        {
+          "timestamp": "2026-10-26T09:00:03.000Z",
+          "kind": "said",
+          "text": "it builds on"
+        },
+        {
+          "timestamp": "2026-10-26T09:00:04.000Z",
+          "kind": "over"
+        }
+      ],
+      "turn_end": 5,
+      "expect": {
+        "background": [
+          "r1"
+        ],
+        "begun": false
+      }
+    },
+    {
+      "what": "back, and heard again",
+      "records": [
+        {
+          "timestamp": "2026-10-26T09:00:00.000Z",
+          "kind": "heard",
+          "text": "build it"
+        },
+        {
+          "timestamp": "2026-10-26T09:00:01.000Z",
+          "kind": "run",
+          "id": "r1",
+          "tool": "shell",
+          "args": {
+            "line": "make"
+          }
+        },
+        {
+          "timestamp": "2026-10-26T09:00:02.000Z",
+          "kind": "behind",
+          "id": "r1"
+        },
+        {
+          "timestamp": "2026-10-26T09:00:03.000Z",
+          "kind": "said",
+          "text": "it builds on"
+        },
+        {
+          "timestamp": "2026-10-26T09:00:04.000Z",
+          "kind": "over"
+        },
+        {
+          "timestamp": "2026-10-26T09:00:09.000Z",
+          "kind": "back",
+          "id": "r1"
+        },
+        {
+          "timestamp": "2026-10-26T09:00:10.000Z",
+          "kind": "heard",
+          "text": "and now?"
+        }
+      ],
+      "turn_end": 5,
+      "expect": {
+        "background": [],
+        "begun": true
+      }
+    }
   ]
 }

@@ -202,6 +202,19 @@ class ClaudeTranscript:
                 break
         return cwd, first
 
+    def background_work(self, file: Path, since: datetime | None) -> list[str]:
+        """Main's reader (``core.transcripts.background_running``): its session's file and
+        its subagents'."""
+        from aisquare.core import transcripts
+
+        return transcripts.background_running(file, since=since)
+
+    def activity_since(self, file: Path, offset: int) -> bool:
+        """Main's reader (``core.transcripts.activity_since``): its queue's operations too."""
+        from aisquare.core import transcripts
+
+        return transcripts.activity_since(file, offset)
+
 
 def _typed(entry: dict[str, Any]) -> str | None:
     """What the user typed in a ``user`` entry: text, never a tool result, a command's

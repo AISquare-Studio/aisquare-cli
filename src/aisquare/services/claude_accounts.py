@@ -3832,14 +3832,20 @@ def line_reading(
 
 
 def room_on_record(
-    leaving: int, *, switch_at: int, family: str | None = None, now: datetime | None = None
+    leaving: int,
+    *,
+    switch_at: int,
+    family: str | None = None,
+    agent: str = AGENT,
+    now: datetime | None = None,
 ) -> bool:
-    """Whether an account other than ``leaving`` may take an agent of ``family``, by what is on
-    record alone (nothing is asked): ``False`` only when every candidate the automatic pick
-    would weigh (:func:`choose_for_handover`) is known not to — at a limit mark for the family,
-    its family week spent, or its live reading on record at or over ``switch_at`` — or the
-    registry cannot be read, when that pick takes nothing. A candidate with no live reading on
-    record may: only a read can say, and that is the worker's.
+    """Whether an account of ``agent`` other than ``leaving`` may take an agent of ``family``,
+    by what is on record alone (nothing is asked): ``False`` only when every candidate the
+    automatic pick would weigh (:func:`choose_for_handover`, among the agent's own accounts) is
+    known not to — at a limit mark for the family, its family week spent, or its live reading
+    on record at or over ``switch_at`` — or the registry cannot be read, when that pick takes
+    nothing. A candidate with no live reading on record may: only a read can say, and that is
+    the worker's.
 
     A hook's question (F2 of #400): with every other account over the line, a turn end then
     reads none of them, however long that lasts, where a pick a minute deep re-read each one a
@@ -3853,7 +3859,8 @@ def room_on_record(
     candidates = [
         account
         for account in accounts
-        if not account.disabled
+        if account.agent == agent
+        and not account.disabled
         and account.slot != leaving
         and core.signed_in(account)
         and not any(mark.blocks(family) for mark in marks.get(account.slot, []))

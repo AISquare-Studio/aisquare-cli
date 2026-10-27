@@ -181,5 +181,49 @@
         }
       }
     }
+  ],
+  "turn_end": [
+    {
+      "what": "0.164.0: an exec_command answered `Process running with session ID 48812`, and the turn ended (its task_complete written after the Stop hook)",
+      "rollout": "codex-background-0.164.0.jsonl",
+      "lines": 18,
+      "turn_end": 17,
+      "expect": {
+        "background": [
+          "48812"
+        ],
+        "begun": false
+      }
+    },
+    {
+      "what": "/stop at the idle prompt: its CommandExecution completed (failed, 137), then a setting applied",
+      "rollout": "codex-background-0.164.0.jsonl",
+      "lines": 20,
+      "turn_end": 17,
+      "expect": {
+        "background": [],
+        "begun": false
+      }
+    },
+    {
+      "what": "the next prompt's turn started",
+      "rollout": "codex-background-0.164.0.jsonl",
+      "lines": 21,
+      "turn_end": 17,
+      "expect": {
+        "background": [],
+        "begun": true
+      }
+    },
+    {
+      "what": "a second exec still running at its turn end, which ends by itself at the idle prompt",
+      "rollout": "codex-background-0.164.0.jsonl",
+      "lines": 34,
+      "turn_end": 32,
+      "expect": {
+        "background": [],
+        "begun": false
+      }
+    }
   ]
 }

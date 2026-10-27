@@ -260,5 +260,57 @@
         }
       }
     }
+  ],
+  "turn_end": [
+    {
+      "what": "a turn's end: its calls ran in the foreground",
+      "records": [
+        {
+          "type": "user",
+          "content": "build it",
+          "timestamp": "2026-10-26T09:00:00.000Z"
+        },
+        {
+          "type": "gemini",
+          "content": "built",
+          "timestamp": "2026-10-26T09:00:03.000Z"
+        },
+        {
+          "type": "info",
+          "content": "saved",
+          "timestamp": "2026-10-26T09:00:04.000Z"
+        }
+      ],
+      "turn_end": 2,
+      "expect": {
+        "background": [],
+        "begun": false
+      }
+    },
+    {
+      "what": "the next prompt",
+      "records": [
+        {
+          "type": "user",
+          "content": "build it",
+          "timestamp": "2026-10-26T09:00:00.000Z"
+        },
+        {
+          "type": "gemini",
+          "content": "built",
+          "timestamp": "2026-10-26T09:00:03.000Z"
+        },
+        {
+          "type": "user",
+          "content": "and now?",
+          "timestamp": "2026-10-26T09:00:09.000Z"
+        }
+      ],
+      "turn_end": 2,
+      "expect": {
+        "background": [],
+        "begun": true
+      }
+    }
   ]
 }

@@ -1492,15 +1492,19 @@ def test_what_cannot_be_read_counts_as_a_turn_and_as_background_work(
         session = store.get_session(SESSION)
     assert session is not None
     gone = tmp_path / "gone.jsonl"
-    assert hooks_service._TurnEnd(now, None, None).begun_since(session)
-    assert hooks_service._TurnEnd(now, _transcript(work), None).begun_since(session)
-    assert hooks_service._TurnEnd(now, gone, 0).begun_since(session)
+    reader = hooks_service._reader_of(agent)
+    assert reader is not None
+    assert hooks_service._TurnEnd(now, None, None).begun_since(session, reader)
+    assert hooks_service._TurnEnd(now, _transcript(work), None).begun_since(session, reader)
+    assert hooks_service._TurnEnd(now, gone, 0).begun_since(session, reader)
     size = _transcript(work).stat().st_size
-    assert not hooks_service._TurnEnd(now, _transcript(work), size).begun_since(session)
+    assert not hooks_service._TurnEnd(now, _transcript(work), size).begun_since(session, reader)
+    assert hooks_service._TurnEnd(now, _transcript(work), size).begun_since(session, None)
     assert transcripts.activity_since(_transcript(work), size + 1)
-    assert hooks_service._background_work(None, agent.created_at)
-    assert hooks_service._background_work(gone, agent.created_at)
-    assert not hooks_service._background_work(_transcript(work), agent.created_at)
+    assert hooks_service._background_work(reader, None, agent.created_at)
+    assert hooks_service._background_work(reader, gone, agent.created_at)
+    assert hooks_service._background_work(None, _transcript(work), agent.created_at)
+    assert not hooks_service._background_work(reader, _transcript(work), agent.created_at)
 
     endpoint = _accounts(monkeypatch, work=_payload(92), home=_payload(10))
     _settings(before_limit="switch")

@@ -145,9 +145,10 @@ OPTION_CALLS = frozenset({"Option", "Argument"})
 #: ``settings_name``), which six of these lines already spelled (review r18 of #113, 6).
 #:
 #: 0.9.1's Claude-Code-only features carry the rows marked below (SCOPE #113 091, each a GAP
-#: with a lane in its note): Remote Control's launch line and doctor row (#289), the status
-#: line (#287) and before-limit's gate on the transcript reader (F2). ``fleet adopt`` (#290)
-#: reads a process's arguments and a transcript through its agent's adapter: no row.
+#: with a lane in its note): Remote Control's launch line and doctor row (#289) and the
+#: status line (#287). ``fleet adopt`` (#290) reads a process's arguments and a transcript through
+#: its agent's adapter, and before-limit's gate (F2) the row's own agent's transcript reader
+#: (``AgentTranscript.background_work``): no row for either.
 BASELINE: dict[str, dict[Shape, int]] = {
     "cli/fleet.py": {"flag": 1},
     "cli/hook.py": {"binary": 3},
@@ -163,7 +164,6 @@ BASELINE: dict[str, dict[Shape, int]] = {
     "services/explainability.py": {"env": 4},
     "services/explainability_ops.py": {"env": 1, "dir": 4},
     "services/first_run.py": {"dir": 1},
-    "services/hooks.py": {"decide_named": 1},  # before-limit: the transcript reader is Claude's
     "services/store_broker.py": {"flag": 1},
     "statusline.py": {"binary": 1, "env": 1, "dir": 1},  # asq-statusline wraps Claude Code's (#287)
 }

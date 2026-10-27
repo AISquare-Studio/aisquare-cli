@@ -403,5 +403,180 @@
         }
       }
     }
+  ],
+  "turn_end": [
+    {
+      "what": "a turn ended with a Bash it put in the background still running, then Claude Code's own records at the idle prompt",
+      "records": [
+        {
+          "type": "user",
+          "timestamp": "2026-10-26T09:00:00.000Z",
+          "message": {
+            "role": "user",
+            "content": "run the suite"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-10-26T09:00:04.000Z",
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "Bash",
+                "input": {
+                  "command": "make test",
+                  "run_in_background": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-10-26T09:00:05.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": "Running in the background: b1."
+              }
+            ]
+          },
+          "toolUseResult": {
+            "stdout": "",
+            "stderr": "",
+            "backgroundTaskId": "b1"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-10-26T09:00:06.000Z",
+          "message": {
+            "id": "m2",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "It runs in the background."
+              }
+            ]
+          }
+        },
+        {
+          "type": "system",
+          "subtype": "stop_hook_summary",
+          "timestamp": "2026-10-26T09:00:07.000Z"
+        },
+        {
+          "type": "system",
+          "subtype": "turn_duration",
+          "timestamp": "2026-10-26T09:00:07.000Z"
+        }
+      ],
+      "turn_end": 4,
+      "expect": {
+        "background": [
+          "b1"
+        ],
+        "begun": false
+      }
+    },
+    {
+      "what": "its final <task-notification> queued and taken: the work is over and a turn begins on it",
+      "records": [
+        {
+          "type": "user",
+          "timestamp": "2026-10-26T09:00:00.000Z",
+          "message": {
+            "role": "user",
+            "content": "run the suite"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-10-26T09:00:04.000Z",
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "Bash",
+                "input": {
+                  "command": "make test",
+                  "run_in_background": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-10-26T09:00:05.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": "Running in the background: b1."
+              }
+            ]
+          },
+          "toolUseResult": {
+            "stdout": "",
+            "stderr": "",
+            "backgroundTaskId": "b1"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-10-26T09:00:06.000Z",
+          "message": {
+            "id": "m2",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "It runs in the background."
+              }
+            ]
+          }
+        },
+        {
+          "type": "system",
+          "subtype": "stop_hook_summary",
+          "timestamp": "2026-10-26T09:00:07.000Z"
+        },
+        {
+          "type": "system",
+          "subtype": "turn_duration",
+          "timestamp": "2026-10-26T09:00:07.000Z"
+        },
+        {
+          "type": "queue-operation",
+          "operation": "enqueue",
+          "timestamp": "2026-10-26T09:00:30.000Z",
+          "content": "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>"
+        },
+        {
+          "type": "queue-operation",
+          "operation": "dequeue",
+          "timestamp": "2026-10-26T09:00:30.000Z"
+        }
+      ],
+      "turn_end": 4,
+      "expect": {
+        "background": [],
+        "begun": true
+      }
+    }
   ]
 }

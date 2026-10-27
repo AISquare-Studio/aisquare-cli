@@ -1123,6 +1123,27 @@ class AgentTranscript(Protocol):
         far enough to find that prompt behind one turn's tool results. Never raises."""
         ...
 
+    def background_work(self, file: Path, since: datetime | None) -> list[str]:
+        """The ids of the work the session's turns left running in the agent's own process,
+        which an ``/exit`` would kill and a resumed conversation would wait on for good:
+        Claude Code's background Bash, ``Monitor``, background subagent or forked skill
+        (``core.transcripts.background_running``), Codex's exec sessions its turns left open.
+        ``since`` leaves out what was started before it, the start of the process that runs
+        the agent now (a restart or a switch resumes the conversation, not the work). A shape
+        it does not know counts as running until it is seen to end. What ``[accounts]
+        before_limit`` asks before it moves an agent (``services.hooks``). Reads the whole
+        transcript a line at a time; ``OSError`` when it cannot be read."""
+        ...
+
+    def activity_since(self, file: Path, offset: int) -> bool:
+        """Whether the transcript shows a turn begun after byte ``offset`` (its size at a turn
+        end), or one about to begin: a prompt, a notice, a queued message taken or the
+        agent's own words, not what the agent writes at an idle prompt (its settings, a
+        background command's end). A file shorter than ``offset`` (rewritten) counts as
+        begun, and so does a line too long to read. What ``[accounts] before_limit`` asks
+        between the turn end it looked at and its move. ``OSError`` when it cannot be read."""
+        ...
+
 
 @dataclass(frozen=True)
 class PriceTable:

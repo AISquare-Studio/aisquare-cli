@@ -13,7 +13,8 @@ docstring, "Adding a terminal agent"): a recorded-payload fixture for every hook
 its hooks off, and the files of a home that keeps aisquare's MCP server: ``lasting``), a row in
 :data:`EXPECTED_PERMISSIONS`, and its transcript at four moments
 (``tests/fixtures/agent_transcripts/<id>.json``: a permission prompt up, a question, an
-interruption, a turn ended on a question) for its ``transcript_reader``; and with
+interruption, a turn ended on a question), its token records and its turn ends for its
+``transcript_reader``; and with
 ``AgentScreen.dialog_on_screen`` or ``screen_prompt``, its screens
 (``tests/fixtures/agent_screens/<id>.json``: each dialog of its own with the words it reads
 and, where it says, the prompt, and screens that show none).
@@ -29,6 +30,7 @@ import tomllib
 from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import replace
+from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path, PureWindowsPath
 from typing import Any, cast, get_args
@@ -1240,6 +1242,44 @@ def test_the_transcript_reader_reads_each_recorded_moment(
             assert reader.call_mark(tail.pending[0]) == expect["mark"]
         if "last_text_end" in expect:
             assert tail.last_text is not None and tail.last_text.endswith(expect["last_text_end"])
+
+
+def _turn_end_moments(adapter: AgentAdapter) -> list[dict[str, Any]]:
+    """The adapter's recorded turn ends (``turn_end`` in its transcript fixture)."""
+    recorded = json.loads((TRANSCRIPTS / f"{adapter.id}.json").read_text(encoding="utf-8"))
+    moments: list[dict[str, Any]] = recorded.get("turn_end", [])
+    assert moments, f"add a turn_end moment to tests/fixtures/agent_transcripts/{adapter.id}.json"
+    return moments
+
+
+def test_a_turn_end_says_what_it_left_running_and_whether_a_turn_began_since(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """``AgentTranscript.background_work`` and ``activity_since``, what ``[accounts]
+    before_limit`` reads at a turn end (SCOPE #113 091, item 1), on the agent's recorded turn
+    ends: the work its turns left running and not seen to end, and whether a turn began after
+    the transcript's length at the turn end (``turn_end``: how many of its lines were written
+    then). A rewritten transcript, shorter than that, has begun one; a work left before
+    ``since`` (an earlier process's) is none, and one that cannot be read raises."""
+    reader = _reader(adapter)
+    for moment in _turn_end_moments(adapter):
+        what, expect = moment["what"], moment["expect"]
+        if "rollout" in moment:
+            lines = (TRANSCRIPTS / moment["rollout"]).read_text(encoding="utf-8").splitlines()
+            lines = lines[: moment["lines"]]
+        else:
+            lines = [json.dumps(record) for record in moment["records"]]
+        file = tmp_path / "session.jsonl"
+        file.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+        offset = len("".join(line + "\n" for line in lines[: moment["turn_end"]]).encode())
+        assert reader.background_work(file, None) == expect["background"], what
+        assert reader.activity_since(file, offset) is expect["begun"], what
+        assert reader.activity_since(file, file.stat().st_size + 1) is True, what
+        assert reader.background_work(file, datetime(2100, 1, 1, tzinfo=UTC)) == [], what
+    with pytest.raises(OSError):
+        reader.background_work(tmp_path / "missing.jsonl", None)
+    with pytest.raises(OSError):
+        reader.activity_since(tmp_path / "missing.jsonl", 0)
 
 
 def test_a_card_is_made_from_the_readers_facts_and_answered_with_its_keys(

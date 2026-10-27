@@ -32,6 +32,23 @@ and with Esc, a ``request_user_input`` in Plan mode answered with a digit, a pla
 - **The dialogs' keys**: an approval view's ``1. Yes, proceed``, ``2. Yes, and don't ask
   again…`` and ``3. No… (esc)`` take their digit, and Esc stops the turn; a question's
   options take their digit (one question: picked and submitted), Esc stops the turn.
+
+**What a turn end leaves** (``[accounts] before_limit``'s safe point; measured on 0.164.0 with
+a loopback provider and the TUI under tmux, ``tests/fixtures/agent_transcripts/
+codex-background-0.164.0.jsonl``):
+
+- **An exec still running.** An ``exec_command`` that outlives its ``yield_time_ms`` is
+  answered ``Process running with session ID <n>`` (its result's header, above ``Output:``)
+  and the turn can end with it running: the TUI then says ``1 background terminal running ·
+  /ps to view · /stop to close``. When the process ends, by itself or by ``/stop`` (status
+  ``failed``, exit 137), Codex writes an ``event_msg`` ``item_completed`` whose ``item`` is a
+  ``CommandExecution`` with the call's ``id`` and ``process_id`` ``<n>``, at an idle prompt as
+  well as in a turn; a ``write_stdin`` to session ``<n>`` answered ``Process exited with code
+  <c>`` says it ended too (:func:`_open_execs`).
+- **A turn begun.** The Stop hook runs with the rollout ending on the turn's last record:
+  only its ``task_complete`` follows. A turn opens with ``task_started`` and every
+  ``response_item`` is one at work; between turns Codex writes ``thread_settings_applied`` (a
+  mode or setting changed) and that ``item_completed``, which are none (:func:`_turn_begun`).
 """
 
 from __future__ import annotations
@@ -216,6 +233,14 @@ class CodexTranscript:
             if cwd is not None and first is not None:
                 break
         return cwd, first
+
+    def background_work(self, file: Path, since: datetime | None) -> list[str]:
+        """The exec sessions its turns left running (:func:`_open_execs`)."""
+        return _open_execs(file, since)
+
+    def activity_since(self, file: Path, offset: int) -> bool:
+        """A turn opened or at work after ``offset`` (:func:`_turn_begun`)."""
+        return _turn_begun(file, offset)
 
 
 _ROLLOUT_NAME = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)\.jsonl$")
@@ -568,6 +593,142 @@ def _rollout_unparsed(
             own = words.startswith(_INSTRUCTIONS) or _OWN_TEXT.match(words) is not None
             return ("own" if own else "user_prompt"), None
     return None, None
+
+
+# --- a turn end: the exec sessions it left running, and a turn begun since ------------------
+
+_STDIN_TOOL = "write_stdin"
+"""Codex's tool that writes to (or polls) an exec session: ``arguments.session_id``."""
+_RUNNING = re.compile(r"^Process running with session ID (\d+)\s*$", re.MULTILINE)
+_EXITED = re.compile(r"^Process exited with code -?\d+\s*$", re.MULTILINE)
+_OUTPUT = "\nOutput:"
+"""Where an exec result's header ends and the command's own output begins: only the header
+says whether the process runs, so a command that prints the words is not taken for one."""
+_EXEC_MARKS = (
+    b"Process running with session ID",
+    b"Process exited with code",
+    b'"CommandExecution"',
+    b'"write_stdin"',
+)
+"""What a line must hold to say anything of an exec session; every other one is skipped
+unparsed."""
+_RAW_RUNNING = re.compile(rb"Process running with session ID (\d+)")
+_RAW_EXITED = re.compile(rb"Process exited with code -?\d+")
+_RAW_PROCESS = re.compile(rb'"process_id"\s*:\s*"(\d+)"')
+_TURN_MARKS = (b'"response_item"', b'"task_started"')
+
+
+def _open_execs(file: Path, since: datetime | None) -> list[str]:
+    """``AgentTranscript.background_work`` for a rollout: the session id of each exec its
+    turns left running (the module docstring's "What a turn end leaves"), oldest first.
+
+    One is running from a result saying ``Process running with session ID <n>`` until a
+    ``CommandExecution`` ``item_completed`` names process ``<n>`` or a ``write_stdin`` to it is
+    answered ``Process exited``. ``since`` leaves out the sessions a result reported before
+    it: they ran in an earlier process of the agent, gone with it. A line too long to parse
+    is read by its header's bytes. ``OSError`` when the file cannot be read."""
+    running: dict[str, None] = {}  # ordered: the oldest first
+    polled: dict[str, str] = {}  # a ``write_stdin`` call → the session it writes to
+    with file.open("rb") as handle:
+        for raw in handle:
+            if not any(mark in raw for mark in _EXEC_MARKS):
+                continue
+            fact = _exec_fact(raw)
+            if fact is None:
+                continue
+            kind, call, session, when = fact
+            if kind == "polls" and call is not None and session is not None:
+                polled[call] = session
+            elif kind == "running" and session is not None:
+                if since is None or when is None or when >= since:
+                    running.setdefault(session)
+            elif kind == "exited" and call is not None:
+                running.pop(polled.get(call, ""), None)
+            elif kind == "ended" and session is not None:
+                running.pop(session, None)
+    return list(running)
+
+
+def _exec_fact(raw: bytes) -> tuple[str, str | None, str | None, datetime | None] | None:
+    """What one rollout line says of an exec session, as ``(kind, call id, session, when)``:
+    ``polls`` (a ``write_stdin`` call and the session it names), ``running`` (a result whose
+    header says its process runs), ``exited`` (a result whose header says it exited),
+    ``ended`` (a ``CommandExecution`` completed); ``None`` for anything else."""
+    record = parse_line(raw)
+    if record is None:
+        return _raw_exec_fact(raw) if len(raw) > MAX_LINE else None
+    payload = _payload(record)
+    when = record_time(record)
+    if record.get("type") == "event_msg" and payload.get("type") == "item_completed":
+        item = payload.get("item")
+        if not isinstance(item, dict) or item.get("type") != "CommandExecution":
+            return None
+        process = item.get("process_id")
+        return "ended", None, str(process) if isinstance(process, str | int) else None, when
+    if record.get("type") != "response_item":
+        return None
+    kind = payload.get("type")
+    if kind in _CALLS and _call_name(payload) == _STDIN_TOOL:
+        arguments = _call_input(payload)
+        session = arguments.get("session_id") if isinstance(arguments, dict) else None
+        named = str(session) if isinstance(session, str | int) else None
+        return "polls", _call_id(payload), named, when
+    if kind not in _RESULTS:
+        return None
+    header = _message_text({"content": payload.get("output")}).split(_OUTPUT, 1)[0]
+    found = _RUNNING.search(header)
+    if found is not None:
+        return "running", _call_id(payload), found.group(1), when
+    if _EXITED.search(header) is not None:
+        return "exited", _call_id(payload), None, when
+    return None
+
+
+def _raw_exec_fact(raw: bytes) -> tuple[str, str | None, str | None, datetime | None] | None:
+    """:func:`_exec_fact` off the head of a line too long to parse: its keys and a result's
+    header come before any long content (a ``write_stdin`` call is not read: its session
+    ends by its ``item_completed`` all the same)."""
+    head = raw[:_RAW_HEAD]
+    types = [match.decode() for match in _RAW_TYPE.findall(head)[:2]]
+    stamp = _RAW_TIMESTAMP.match(raw)
+    when = record_time({"timestamp": stamp.group(1).decode()}) if stamp else None
+    if types[:1] == ["event_msg"] and b'"CommandExecution"' in head:
+        process = _RAW_PROCESS.search(head)
+        return ("ended", None, process.group(1).decode(), when) if process else None
+    if types[:1] != ["response_item"] or len(types) < 2 or types[1] not in _RESULTS:
+        return None
+    found = _RAW_CALL_ID.search(head)
+    call = found.group(1).decode("utf-8", "replace") if found else None
+    running = _RAW_RUNNING.search(head)
+    if running is not None:
+        return "running", call, running.group(1).decode(), when
+    return ("exited", call, None, when) if _RAW_EXITED.search(head) else None
+
+
+def _turn_begun(file: Path, offset: int) -> bool:
+    """``AgentTranscript.activity_since`` for a rollout: a ``task_started`` or any
+    ``response_item`` on a line that starts at or after byte ``offset``. A rollout shorter than
+    ``offset`` was rewritten, and a line of either kind that does not parse (too long, or still
+    being written) counts: both are a turn as like as not. ``OSError`` when it cannot be read."""
+    with file.open("rb") as handle:
+        if handle.seek(0, 2) < offset:
+            return True
+        handle.seek(max(0, offset - 1))
+        if offset > 0:
+            handle.readline()  # the rest of the line ``offset`` falls in: begun before it
+        for raw in handle:
+            if not any(mark in raw for mark in _TURN_MARKS):
+                continue
+            record = parse_line(raw)
+            if record is None:
+                return True
+            if record.get("type") == "response_item":
+                return True
+            if record.get("type") == "event_msg" and _payload(record).get("type") == (
+                "task_started"
+            ):
+                return True
+    return False
 
 
 # --- the page: one record as terminal lines ---------------------------------------------------

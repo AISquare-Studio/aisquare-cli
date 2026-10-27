@@ -30,6 +30,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from aisquare.core import agents as agents_core
 from aisquare.core import claude_accounts as claude_accounts_core
@@ -41,7 +42,6 @@ from aisquare.core import (
     orchestrator,
     paths,
     selfcli,
-    transcripts,
 )
 from aisquare.core import spawn as spawn_core
 from aisquare.core.config import AccountsSettings, load_config
@@ -56,6 +56,9 @@ from aisquare.services import explainability as explainability_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services import project as project_service
 from aisquare.services import team as team_service
+
+if TYPE_CHECKING:
+    from aisquare.core.agent_adapters.types import AgentTranscript
 
 
 def record_trace_join(session_id: str | None) -> str | None:
@@ -814,7 +817,7 @@ the account reads under the line, those windows have reset, or the agent runs el
 class _TurnEnd:
     """The turn end a before-limit look started from: when, and how long the transcript was.
     Anything the agent began after it — a prompt stamped (``prompted_at``), a record written
-    (``transcripts.activity_since``) — means it is no longer at that safe point."""
+    (``AgentTranscript.activity_since``) — means it is no longer at that safe point."""
 
     at: datetime
     transcript: Path | None
@@ -854,19 +857,20 @@ class _TurnEnd:
             offset = None
         return cls(datetime.now(tz=UTC), transcript, offset)
 
-    def begun_since(self, session: TeamSession) -> bool:
+    def begun_since(self, session: TeamSession, reader: AgentTranscript | None) -> bool:
         """Whether ``session`` began a turn after this turn end, or is about to: its prompt
         stamped since (``UserPromptSubmit``), or its transcript grown by a prompt, a notice, a
-        queued message taken or the agent's own words, or a message queued and not yet taken.
-        A typed prompt reaches the transcript only once its hook has passed, so for one the
-        stamp comes first; a queued message or a task's notice is on disk at once. No
+        queued message taken or the agent's own words, or a message queued and not yet taken,
+        as its agent's ``reader`` reads it (``AgentTranscript.activity_since``). A typed
+        prompt reaches the transcript only once its hook has passed, so for one the stamp
+        comes first; a queued message or a task's notice is on disk at once. No reader,
         transcript or offset to read cannot say it has not: it has."""
         if session.prompted_at is not None and session.prompted_at > self.at:
             return True
-        if self.transcript is None or self.offset is None:
+        if reader is None or self.transcript is None or self.offset is None:
             return True
         try:
-            return transcripts.activity_since(self.transcript, self.offset)
+            return reader.activity_since(self.transcript, self.offset)
         except OSError:
             return True
 
@@ -882,6 +886,9 @@ class _BeforeLimitAgent:
     slot: int
     family: str | None
     transcript: Path | None
+    reader: AgentTranscript
+    """Its agent's transcript reader (:func:`_reader_of`), which says whether the turn end
+    is still a safe point."""
 
 
 def check_before_limit(session_id: str, *, transcript_path: str | None = None) -> None:
@@ -903,8 +910,9 @@ def check_before_limit(session_id: str, *, transcript_path: str | None = None) -
     :data:`HANDOVER_COOLDOWN` or looked at within it, an account the cache reads under the
     line (or over it with every window over it resetting within
     ``wait_if_reset_within_minutes``), a crossing ``warn`` has named, background work its turn
-    left running (``transcript.background_running``: an ``/exit`` would kill it), or when the
-    cache says no other account is under the line (``claude_accounts.room_on_record``).
+    left running (its agent's ``AgentTranscript.background_work``: an ``/exit`` would kill it;
+    an agent whose adapter has no transcript reader is never moved early), or when the cache
+    says no other account of its agent is under the line (``claude_accounts.room_on_record``).
 
     An extra on the turn end, never part of it: it swallows its own failures, said on stderr,
     so a Stop is never reported as lost for it.
@@ -931,8 +939,6 @@ def _before_limit_agent(
     session_id: str, transcript_path: str | None = None
 ) -> _BeforeLimitAgent | None:
     """The agent of ``session_id`` when it is one ``before_limit`` may act on, or ``None``."""
-    from aisquare.core.agent_adapters import DEFAULT_AGENT
-
     with store_session() as store:
         session = store.get_session(session_id)
         if session is None or session.state != "waiting":
@@ -943,17 +949,19 @@ def _before_limit_agent(
             return None  # a hand-typed session is the operator's to move
         if harness.base_role(agent.role) in _NOT_MOVED_EARLY:
             return None
-        if (agent.agent or DEFAULT_AGENT) != DEFAULT_AGENT:
-            # The background-work read of its transcript is the default agent's
-            # (``transcripts.background_running``): an agent whose adapter has no such reader
-            # is never moved early, as a transcript that cannot be read counts as running.
+        reader = _reader_of(agent)
+        if reader is None:
+            # Whether its turn end is a safe point is read off its transcript: an agent
+            # whose adapter has no reader is never moved early, as a transcript that cannot
+            # be read counts as background work running.
             return None
         if team_service.fleet_paused(store, agent):
             return None
         if _auto_stop_has_it(store, agent, session):
             return None
     named = agent.launch_spec is not None and agent.launch_spec.account_pinned
-    if claude_accounts_service.account_pin(agent.role, named=named) is not None:
+    pin = claude_accounts_service.account_pin(agent.role, named=named, agent=_agent_of(agent))
+    if pin is not None:
         return None
     slot = claude_accounts_service.leaving_slot(agent.account_slot, session.account)
     if slot is None:
@@ -965,7 +973,26 @@ def _before_limit_agent(
         slot,
         harness.model_family(session.model),
         _transcript_of(session, transcript_path),
+        reader,
     )
+
+
+def _agent_of(agent: FleetAgent) -> str:
+    """The id of the agent ``agent`` runs: its row's, the default agent's for a row from
+    before adapters (``recorded_adapter``)."""
+    from aisquare.core.agent_adapters import DEFAULT_AGENT
+
+    return agent.agent or DEFAULT_AGENT
+
+
+def _reader_of(agent: FleetAgent) -> AgentTranscript | None:
+    """The transcript reader of the agent ``agent`` runs (``AgentAdapter.transcript_reader``),
+    which says whether its turn end is a safe point; ``None`` for an agent this install does
+    not know, or one with no reader."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(agent.agent)
+    return adapter.transcript_reader if adapter is not None else None
 
 
 def _auto_stop_has_it(store: ContextStore, agent: FleetAgent, session: TeamSession) -> bool:
@@ -992,15 +1019,18 @@ def _transcript_of(session: TeamSession, given: str | None) -> Path | None:
     return None
 
 
-def _background_work(transcript: Path | None, since: datetime) -> bool:
-    """Whether the agent's turn left background work running (a ``run_in_background`` Bash, a
-    background subagent) that an ``/exit`` would kill; ``since`` is the start of the process
-    running it, its fleet row's. A transcript that cannot be read cannot say it left none: it
-    counts as running."""
-    if transcript is None:
+def _background_work(
+    reader: AgentTranscript | None, transcript: Path | None, since: datetime
+) -> bool:
+    """Whether the agent's turn left background work running that an ``/exit`` would kill (a
+    ``run_in_background`` Bash or a background subagent of Claude Code's, an exec session of
+    Codex's), as its agent's ``reader`` reads it (``AgentTranscript.background_work``);
+    ``since`` is the start of the process running it, its fleet row's. No reader, or a
+    transcript that cannot be read, cannot say it left none: it counts as running."""
+    if reader is None or transcript is None:
         return True
     try:
-        return bool(transcripts.background_running(transcript, since=since))
+        return bool(reader.background_work(transcript, since))
     except OSError:
         return True
 
@@ -1056,13 +1086,13 @@ def _worth_a_look(
         return None
     if settings.before_limit == "warn" and _warned(warned, found.slot):
         return None
-    if _background_work(found.transcript, agent.created_at):
+    if _background_work(found.reader, found.transcript, agent.created_at):
         return None  # its next turn end, once the work has reported, asks again
     turn_end = _TurnEnd.now(found.transcript)
-    if turn_end.begun_since(found.session):
+    if turn_end.begun_since(found.session, found.reader):
         return None  # a message queued during the turn starts the next one now
     if line is not None and not claude_accounts_service.room_on_record(
-        found.slot, switch_at=settings.switch_at, family=found.family
+        found.slot, switch_at=settings.switch_at, family=found.family, agent=_agent_of(agent)
     ):
         return None  # every other account is over the line: no read, no worker
     with store_session() as store:
@@ -1107,7 +1137,10 @@ def before_limit_worker(session_id: str) -> None:
     The cool-down the hook claimed is given back when it ends on what the next turn end can
     decide from the cache — the agent busy again, background work started, the account under
     the line or about to reset — and kept when a read failed or no account had room, so a
-    failing endpoint or a full fleet is asked at most once a cool-down per agent.
+    failing endpoint or a full fleet is asked at most once a cool-down per agent. An account
+    whose reading is read off its own home (Codex's, ``AgentAccounts.network_usage`` off) is
+    never in the cache, so the next turn end could not decide it: under the line, it keeps
+    the cool-down too, and such an agent is looked at once a cool-down, not at every turn end.
     """
     settings = claude_accounts_service.accounts_settings()
     if settings.before_limit == "off" or not orchestrator.team_enabled():
@@ -1122,7 +1155,7 @@ def before_limit_worker(session_id: str) -> None:
     agent = found.agent
     if datetime.now(tz=UTC) - agent.created_at < HANDOVER_COOLDOWN:
         return  # started or moved within the cool-down: the hook would not have asked
-    if _background_work(found.transcript, agent.created_at):
+    if _background_work(found.reader, found.transcript, agent.created_at):
         _give_back(agent)
         return
     line = claude_accounts_service.line_reading(
@@ -1131,7 +1164,8 @@ def before_limit_worker(session_id: str) -> None:
     if line is None:
         return  # no live reading: the cool-down is spent, so a failing read is not retried
     if not line.over or line.lifts_within(settings.wait_if_reset_within_minutes):
-        _give_back(agent)
+        if claude_accounts_core.kind(line.account.agent).network_usage:
+            _give_back(agent)  # the cache now holds the reading the next turn end decides on
         return
     with store_session() as store:
         warned = store.ui_state(_key(_WARNED_KEY, agent))
@@ -1142,6 +1176,7 @@ def before_limit_worker(session_id: str) -> None:
         project=found.project,
         exclude=(found.slot,),
         automatic=True,
+        agent=_agent_of(agent),
         family=found.family,
         max_age=claude_accounts_service.PICK_MAX_AGE_SECONDS,
     )
@@ -1202,9 +1237,9 @@ def _still_waiting(session_id: str, turn_end: _TurnEnd) -> Callable[[], None]:
         found = _before_limit_agent(session_id)
         if found is None:
             raise _StartedATurn(session_id)
-        if turn_end.begun_since(found.session):
+        if turn_end.begun_since(found.session, found.reader):
             raise _StartedATurn(session_id, prompted=True)
-        if _background_work(found.transcript, found.agent.created_at):
+        if _background_work(found.reader, found.transcript, found.agent.created_at):
             raise _StartedATurn(session_id)
 
     return check
@@ -1225,12 +1260,13 @@ def _still_idle_after_mark(session_id: str, turn_end: _TurnEnd) -> Callable[[], 
         with store_session() as store:
             session = store.get_session(session_id)
             agent = store.fleet_agent_for_session(session_id)
-        if session is None or agent is None or turn_end.begun_since(session):
+        reader = _reader_of(agent) if agent is not None else None
+        if session is None or agent is None or turn_end.begun_since(session, reader):
             raise _StartedATurn(session_id, prompted=True)
         shown = _pane_shows(agent)
         if shown != "idle":
             raise _StartedATurn(session_id, prompted=shown == "busy")
-        if _background_work(_transcript_of(session, None), agent.created_at):
+        if _background_work(reader, _transcript_of(session, None), agent.created_at):
             raise _StartedATurn(session_id)
 
     return check

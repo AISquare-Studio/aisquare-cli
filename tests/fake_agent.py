@@ -145,7 +145,8 @@ class FakeTranscript:
     ``y``/``n``, and a choice is picked by moving down to it and confirming. A reply's bill
     comes before the calls it makes, a line of its own: ``billed`` (``model``, ``fresh``,
     ``reused`` and ``out`` tokens under the reply's ``id``), written again, whole, as a
-    reply grows; ``brief`` is what aisquare's hooks handed it (its ``text``)."""
+    reply grows; ``brief`` is what aisquare's hooks handed it (its ``text``). A ``run`` it
+    leaves working past its turn is ``behind`` (under the run's ``id``) until its ``back``."""
 
     speaker = "fake"
 
@@ -312,6 +313,33 @@ class FakeTranscript:
             if heard is None and record.get("kind") == "heard":
                 heard = str(record.get("text", "")) or None
         return where, heard
+
+    def background_work(self, file: Path, since: datetime | None) -> list[str]:
+        # Each run left `behind` since `since` that has not come `back`.
+        left: dict[str, None] = {}
+        with file.open("rb") as handle:
+            for raw in handle:
+                record = parse_line(raw) or {}
+                at = record_time(record)
+                if record.get("kind") == "behind" and (since is None or at is None or at >= since):
+                    left.setdefault(str(record.get("id")))
+                elif record.get("kind") == "back":
+                    left.pop(str(record.get("id")), None)
+        return list(left)
+
+    def activity_since(self, file: Path, offset: int) -> bool:
+        # Anything heard, said, run or picked on a line that starts at `offset` or later.
+        with file.open("rb") as handle:
+            if handle.seek(0, 2) < offset:
+                return True
+            handle.seek(0)
+            position = 0
+            for raw in handle:
+                start, position = position, position + len(raw)
+                kind = (parse_line(raw) or {}).get("kind")
+                if start >= offset and kind in ("heard", "said", "run", "pick"):
+                    return True
+        return False
 
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         # What it said since the newest thing it heard; a run or a pick answers with no words.

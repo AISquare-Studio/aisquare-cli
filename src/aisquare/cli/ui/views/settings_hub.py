@@ -1,10 +1,11 @@
 """The Settings hub: what *⚙ Settings* in the sidebar opens.
 
-Five links, each a button with one line saying what is behind it — *App
+Six links, each a button with one line saying what is behind it — *App
 settings* (the machine-wide settings, ``views.app_settings``), *Remote control* and
 *Captain* (App settings again, on its *Remote* tab and on the *Agent settings* tab the
 captain's box tops: one obvious way in to each, #41), *Accounts* (the AISquare sign-in
-and the Claude Code accounts, ``views.accounts``) and *Doctor* (the checks, which
+and the Claude Code accounts, ``views.accounts``), *Usage & stats* (what the Claude Code
+sessions on this machine spent, ``views.usage_stats``) and *Doctor* (the checks, which
 opening it runs). A link posts the message the app routes;
 the pages it opens keep *⚙ Settings* highlighted in the sidebar. ↑/↓ move between
 the links, Enter or a click opens one.
@@ -38,6 +39,7 @@ from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AppSettingsSelected,
     DoctorSelected,
+    UsageStatsSelected,
     doctor_badge,
 )
 from aisquare.cli.ui.views.agent import AgentRestarted
@@ -54,6 +56,11 @@ LINKS: tuple[tuple[str, str, str], ...] = (
     ("remote", "Remote control", "the fleet on your phone: a link, its QR code and a password"),
     ("captain", "Captain", "the experimental captain, on or off (App settings ▸ Agent settings)"),
     ("accounts", "Accounts", "the AISquare sign-in and the Claude Code accounts"),
+    (
+        "usage-stats",
+        "Usage & stats",
+        "tokens, cost, repositories and accounts across all your Claude Code sessions",
+    ),
     ("doctor", "Doctor", "the checks — they run when the page opens"),
 )
 """The hub's links, top to bottom: each one's id stem, label and line of description."""
@@ -129,6 +136,7 @@ class SettingsHubView(VerticalScroll, can_focus=False):
             "remote": AppSettingsSelected(REMOTE_TAB),
             "captain": AppSettingsSelected(AGENT_TAB),
             "accounts": AccountsSelected(),
+            "usage-stats": UsageStatsSelected(),
             "doctor": DoctorSelected(None),
         }.get(stem)
         if message is not None:

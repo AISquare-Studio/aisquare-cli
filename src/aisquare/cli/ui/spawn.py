@@ -21,9 +21,9 @@ session on the board, with no standing cycle and no mission; ``coder`` stays
 the default. Everything else is folded into one *Advanced* section (a
 ``Collapsible``, opened by a click or ``Enter`` on its title): *Pick…*, Binary,
 Persona with *Import…*, Label with 🎲, Task, Worktree, Claude Remote Control,
-Permission mode, Extra agent args and First prompt. It opens by itself when a preset fills one
-of its fields (``binary=``, ``persona=`` from the persona-first flow but not the
-captain's own persona, or the ``label=``, ``task_id=`` and ``prompt=`` a form
+Permission mode, Model, Effort, Extra agent args and First prompt. It opens by itself when a
+preset fills one of its fields (``binary=``, ``persona=`` from the persona-first flow but not
+the captain's own persona, or the ``label=``, ``task_id=`` and ``prompt=`` a form
 reopened after a sign-in carries) and whenever one of its fields blocks *Spawn* — a bad
 label, a quoting error in the args — so *Spawn* is never disabled for a reason
 folded out of sight; folded again over such a field, it opens again. Folding
@@ -40,8 +40,21 @@ role's default, the name once one is chosen, and ``""`` for an explicit *(none)*
 over a role that has a default — ``spawn`` reads an empty name as "no persona",
 so that choice is honoured rather than replaced by the config.
 
+**Model and Effort** (#16 on the board) open on the owner's last pick
+(``services.model_memory``: one per home, made at a spawn or by ``/model`` inside any
+fleet agent), whatever the role; blank is the account's own default. A role whose settings
+pin one (``[fleet.roles.<role>] extra_args``, a binding's ``--arg``: ``fleet.role_pin``)
+shows its pin instead, and an untouched field follows the role between the two; a value
+the owner typed stays. Untouched, each is sent as ``None`` and the service decides as for
+``fleet spawn``: the Extra agent args, the role's settings, then the pick. A changed one is
+this spawn's pick and the next one, and a cleared one (``""``) runs the account's default
+and forgets the pick. Over a role whose settings pin that flag (its ``extra_args``, or its
+binding's ``--arg``, which ``aisquare launch`` adds) a cleared field is no choice: the pin
+runs, the pick stays, and the blank says so (``(the reviewer's settings: haiku)``). The pick
+is the owner's: the dialog is asq's, run from the owner's shell.
+
 **Presets** — ``SpawnDialog(project, persona=, role=, binary=, account=, label=,
-task_id=, prompt=)`` — are applied at compose, never by poking widgets after mount:
+task_id=, prompt=, model=, effort=)`` — are applied at compose, never by poking widgets after mount:
 the persona-first flow (the target picker, P7) opens the dialog already filled in. A
 preset is a choice, and is sent. A preset role the list does not name (a numbered
 seat, ``coder2``) and a preset account the accounts read has not produced yet are
@@ -68,7 +81,8 @@ that ladder; and the spawn goes to the project the field shows.
 ``services.captain.brain.start``, never ``fleet.spawn``, which refuses a captain
 without its brain folder and its one server (T2). So the fields that would change
 what the captain IS are fixed: the role, the label (one per home), the task (it
-has none) and the extra agent args (its own: the server, no other tool). Account,
+has none), the extra agent args (its own: the server, no other tool), and the model
+and effort, which ``brain.start`` does not take. Account,
 binary, permission mode, persona and a first prompt are the owner's to choose.
 
 Two things are sent although nobody touched them, because the default cannot
@@ -149,6 +163,7 @@ from aisquare.models import (
 )
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import model_memory
 from aisquare.services import personas as personas_service
 from aisquare.services.project import display_name
 
@@ -180,6 +195,15 @@ NO_SOURCE = ""
 NO_ROLE = fleet_service.PLAIN_ROLE
 """The Role field's ``(none)``: a plain Claude Code session, no standing cycle or mission."""
 NO_ROLE_CHOICE = "(none) — general-purpose Claude"
+ACCOUNT_DEFAULT = ""
+"""The Model and Effort fields' blank: no flag, so Claude Code runs the account's default."""
+ACCOUNT_DEFAULT_CHOICE = "(account default)"
+EFFORT_OPTIONS: tuple[tuple[str, str], ...] = (
+    (ACCOUNT_DEFAULT_CHOICE, ACCOUNT_DEFAULT),
+    *((level, level) for level in harness.EFFORT_SCALE),
+    (harness.ULTRACODE, harness.ULTRACODE),
+)
+"""What the Effort field offers: every level ``claude --effort`` takes, and none."""
 NO_ROLE_NOTE = "a plain Claude Code session on the board: no standing cycle, no mission"
 
 OPEN_TASK_STATUSES = ("todo", "doing", "review", "blocked")
@@ -254,15 +278,19 @@ def task_choice(task: TeamTask) -> str:
 
 
 def read_launch_default(
-    project: ProjectInfo, role: str, agent_args: Sequence[str] = ()
+    project: ProjectInfo, role: str, agent_args: Sequence[str] = (), model: str | None = None
 ) -> accounts_service.LaunchDefault:
     """What a spawn of ``role`` in ``project`` with no account runs on: the service's
-    ``launch_default``, with the model family ``fleet.spawn`` passes the ladder (#277), from
-    the role's configured args and then the form's ``agent_args`` (a ``--model opus`` typed
-    into *Extra agent args* reads that family's week; review of #424)."""
-    args = [*fleet_service.role_settings(role).extra_args, *agent_args]
-    family = harness.launch_family(role, args)
-    return accounts_service.launch_default(role, project=project, family=family)
+    ``launch_default``, with the model family ``fleet.spawn`` passes the account pick (#277).
+    The model is the spawn's own answer (``fleet.spawn_runs``) for the form's ``agent_args``
+    and its Model field as sent (``model``: ``None`` untouched, ``""`` cleared), so a
+    ``--model opus`` typed into *Extra agent args* reads that family's week (review of #424)
+    and the label never reads another model than the spawn runs (review of #441). None at
+    all, the agent runs its account's default: no family."""
+    runs = fleet_service.spawn_runs(role, agent_args, model=model)
+    return accounts_service.launch_default(
+        role, project=project, family=harness.model_family(runs.model)
+    )
 
 
 def default_account_label(default: accounts_service.LaunchDefault, role: str) -> str:
@@ -469,16 +497,21 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         label: str | None = None,
         task_id: str | None = None,
         prompt: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
         accounts: Callable[[], AccountsOverview] | None = accounts_service.overview,
-        defaults: Callable[[ProjectInfo, str, list[str]], accounts_service.LaunchDefault]
+        defaults: Callable[
+            [ProjectInfo, str, list[str], str | None], accounts_service.LaunchDefault
+        ]
         | None = read_launch_default,
     ) -> None:
         super().__init__()
         self.project = project
         self._accounts = accounts
         self._launch_default = defaults
-        self._default_model: str | None = None
-        """The ``--model`` of the args the no-account option was last read with."""
+        self._default_key: tuple[str | None, str | None] | None = None
+        """The ``--model`` of the args and the Model field as sent, which the no-account
+        option was last read with."""
         self._default_label = DEFAULT_PENDING
         """The no-account option's label: what the spawn runs on (:func:`default_account_label`)."""
         self._default_noted = False
@@ -506,6 +539,20 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._persona_shown = persona if persona is not None else self._persona_default(self._role)
         """The persona value the form itself last put in the field; any other is the user's."""
         self._tasks, self._tasks_unavailable = self._read_tasks()
+        self._memory = model_memory.remembered()
+        """The owner's last pick, as the form opened: what the two fields show for a role
+        whose settings pin neither."""
+        self._pick = self._shown_pick(self._role)
+        """What the Model and Effort fields show for the current role (:meth:`_shown_pick`).
+        A field still showing it is sent as ``None``."""
+        self._preset_model = None if self._captain else model
+        self._preset_effort = (
+            effort
+            if not self._captain and any(effort == value for _, value in EFFORT_OPTIONS)
+            else None
+        )
+        """The Model and Effort the owner chose before a sign-in (``form_state``), ``""``
+        cleared; ``None``: the form fills them in (:attr:`_pick`)."""
         self._preset_task: str = (
             task_id if task_id and any(t.id == task_id for t in self._tasks) else NO_TASK
         )
@@ -520,6 +567,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             or bool(self._preset_label)
             or self._preset_task != NO_TASK
             or bool(self._preset_prompt)
+            or self._preset_model is not None
+            or self._preset_effort is not None
         )
         """A preset fills an Advanced field, so the section opens with the form: a form
         reopened after a sign-in (#286) shows the label, task and prompt it kept. Not the
@@ -795,6 +844,32 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                             id="spawn-permission",
                         )
                     with Horizontal(classes="spawn-row"):
+                        yield Label("Model")
+                        yield Input(
+                            value=(
+                                self._preset_model
+                                if self._preset_model is not None
+                                else self._pick.model or ACCOUNT_DEFAULT
+                            ),
+                            placeholder=self._blanks(self._role)[0],
+                            disabled=self._captain,
+                            id="spawn-model",
+                        )
+                    yield Static(id="spawn-model-error", classes="spawn-note")
+                    with Horizontal(classes="spawn-row"):
+                        yield Label("Effort")
+                        yield Select(
+                            self._effort_options(self._role),
+                            value=(
+                                self._preset_effort
+                                if self._preset_effort is not None
+                                else self._pick.effort or ACCOUNT_DEFAULT
+                            ),
+                            allow_blank=False,
+                            disabled=self._captain,
+                            id="spawn-effort",
+                        )
+                    with Horizontal(classes="spawn-row"):
                         yield Label("Extra agent args")
                         yield Input(
                             placeholder=(
@@ -850,11 +925,11 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         defaults = self._launch_default
         if defaults is None:
             return
-        args = self._form_args()
-        self._default_model = harness.model_arg(args)
-        project, role, model = self.project, self._role, self._default_model
+        args, model = self._form_args(), self._model_kwarg()
+        self._default_key = key = (harness.model_arg(args), model)
+        project, role = self.project, self._role
         self.run_worker(
-            lambda: (project.id, role, model, defaults(project, role, args)),
+            lambda: (project.id, role, key, defaults(project, role, args, model)),
             name=DEFAULT_WORKER,
             group=DEFAULT_WORKER,
             thread=True,
@@ -904,15 +979,27 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             split_agent_args(self.query_one("#spawn-args", Input).value)
         except ValueError as exc:
             args_problem = f"extra agent args: {exc}"
+        model = self._model_value()
+        model_problem = (
+            f"model: {model!r} is no model name (blank runs the account's default)"
+            if model and harness.clean_model_id(model) is None
+            else None
+        )
         if role_problem is None and self._role == NO_ROLE:
             self._note("#spawn-role-note", NO_ROLE_NOTE, style="dim")
         else:
             self._note("#spawn-role-note", role_problem)
         self._note("#spawn-label-rule", label_problem)
         self._note("#spawn-args-error", args_problem)
-        if label_problem or args_problem:
+        self._note("#spawn-model-error", model_problem)
+        if label_problem or args_problem or model_problem:
             self._open_advanced()  # never a disabled Spawn whose reason is folded away
-        ok = role_problem is None and label_problem is None and args_problem is None
+        ok = (
+            role_problem is None
+            and label_problem is None
+            and args_problem is None
+            and model_problem is None
+        )
         self.query_one("#spawn-submit", Button).disabled = self._spawning or not ok
         return ok
 
@@ -1005,9 +1092,67 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             # never needs set_options — which would put "(none)" in the field first.
             self._put_persona(self._persona_default(role))
         self.query_one("#spawn-binary", Input).placeholder = self._binary_hint(role)
+        self._repick(self._shown_pick(role))
         self._describe_persona()  # the empty persona reads differently with no role
         self._read_default()  # a role's binding is a rung of the ladder
         self._validate()
+
+    def _model_value(self) -> str:
+        return self.query_one("#spawn-model", Input).value.strip()
+
+    def _effort_value(self) -> str:
+        value = self.query_one("#spawn-effort", Select).value
+        return value if isinstance(value, str) else ACCOUNT_DEFAULT
+
+    def _role_pin(self, role: str) -> model_memory.Pick:
+        """What ``role``'s settings pin (``fleet.role_pin``); nothing when the config cannot be
+        read, which the spawn says itself."""
+        try:
+            return fleet_service.role_pin(role, self._fleet)
+        except Exception:  # a hint, never a reason to fail
+            return model_memory.Pick()
+
+    def _blanks(self, role: str) -> tuple[str, str]:
+        """What a blank Model and a blank Effort run for ``role``, as the fields say it: the
+        role's own pin where its settings name one (a cleared field is no choice, and the
+        settings win over the pick, review of #441), else the account's own default."""
+        pin = self._role_pin(role)
+        model = (
+            f"(the {role}'s settings: {pin.model})"
+            if pin.model
+            else f"{ACCOUNT_DEFAULT_CHOICE} — e.g. opus, fable"
+        )
+        effort = f"(the {role}'s settings: {pin.effort})" if pin.effort else ACCOUNT_DEFAULT_CHOICE
+        return model, effort
+
+    def _effort_options(self, role: str) -> list[tuple[str, str]]:
+        return [(self._blanks(role)[1], ACCOUNT_DEFAULT), *EFFORT_OPTIONS[1:]]
+
+    def _shown_pick(self, role: str) -> model_memory.Pick:
+        """What Model and Effort show for ``role``: what its settings pin, else the owner's
+        last pick; an effort the field does not offer is none."""
+        pin = self._role_pin(role)
+        return model_memory.Pick(
+            pin.model or self._memory.model,
+            harness.clean_effort(pin.effort) or self._memory.effort,
+        )
+
+    def _repick(self, pick: model_memory.Pick) -> None:
+        """Model and Effort for a new role (:meth:`_shown_pick`), in each field still showing
+        what the form put there; a value the owner put there stays."""
+        old, self._pick = self._pick, pick
+        model = self.query_one("#spawn-model", Input)
+        model.placeholder = self._blanks(self._role)[0]
+        if model.value.strip() == (old.model or ACCOUNT_DEFAULT):
+            model.value = pick.model or ACCOUNT_DEFAULT
+        effort = self.query_one("#spawn-effort", Select)
+        kept = self._effort_value()
+        with self.prevent(Select.Changed):
+            effort.set_options(self._effort_options(self._role))
+        if kept == (old.effort or ACCOUNT_DEFAULT):
+            kept = pick.effort or ACCOUNT_DEFAULT
+        with self.prevent(Select.Changed):
+            effort.value = kept
 
     @on(Select.Changed, "#spawn-persona")
     def _persona_changed(self, event: Select.Changed) -> None:
@@ -1262,7 +1407,13 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         label = self.query_one("#spawn-label", Input)
         worktree = self.query_one("#spawn-worktree", Switch)
         prompt = self.query_one("#spawn-prompt", TextArea)
-        for selector in ("#spawn-binary", "#spawn-permission", "#spawn-args"):
+        for selector in (
+            "#spawn-binary",
+            "#spawn-permission",
+            "#spawn-model",
+            "#spawn-effort",
+            "#spawn-args",
+        ):
             self.query_one(selector).disabled = source is not None
         self._lock_other_screens()  # Pick…: the teammate's lock, and a running spawn's
         submit = self.query_one("#spawn-submit", Button)
@@ -1354,16 +1505,24 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     @on(Input.Changed, "#spawn-label")
     @on(Input.Changed, "#spawn-args")
+    @on(Input.Changed, "#spawn-model")
     def _field_changed(self) -> None:
         self._validate()
 
     @on(Input.Changed, "#spawn-args")
+    @on(Input.Changed, "#spawn-model")
     def _args_changed(self) -> None:
-        """A ``--model`` in the extra args is the family a headroom pick reads (#277): the
-        no-account option is read again when the args name another model, not on every key
-        typed (review of #424)."""
-        if harness.model_arg(self._form_args()) != self._default_model:
+        """A ``--model`` in the extra args, or the Model field, is the family a headroom pick
+        reads (#277): the no-account option is read again when they name another model, not
+        on every key typed (review of #424)."""
+        if (harness.model_arg(self._form_args()), self._model_kwarg()) != self._default_key:
             self._read_default()
+
+    def _model_kwarg(self) -> str | None:
+        """The Model field as the spawn is sent it: ``None`` while it shows what the form put
+        there (the service decides), else its value, ``""`` for cleared."""
+        model = self._model_value()
+        return None if model == (self._pick.model or ACCOUNT_DEFAULT) else model
 
     def _form_args(self) -> list[str]:
         """*Extra agent args* as the spawn would send them; none while they do not parse
@@ -1427,7 +1586,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
         Only what the user chose: a field still showing what the form put there is left
         out, so the reopened dialog fills it the same way (the label for the role and
-        task, the persona for the role). Worktree, permission mode, extra args and a
+        task, the persona for the role, Model and Effort for the role and the pick; a
+        cleared one is carried as ``""``). Worktree, permission mode, extra args and a
         hand-off are not carried; they open at the role's defaults again.
 
         The projects the Project field offers are carried too, when it has them (*Spawn
@@ -1453,6 +1613,12 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         prompt = self.query_one("#spawn-prompt", TextArea).text
         if prompt.strip():
             state["prompt"] = prompt
+        model = self._model_kwarg()
+        if model is not None:
+            state["model"] = model
+        effort = self._effort_value()
+        if effort != (self._pick.effort or ACCOUNT_DEFAULT):
+            state["effort"] = effort
         return state
 
     def apply_target(
@@ -1551,6 +1717,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             chosen == NO_PERSONA and not self._persona_default(self._role)
         ):
             persona = None  # the role's default — or no persona where there is no default
+        effort = self._effort_value()
         return {
             "label": None if self._label_fixed() or label == self._prefill else label,
             "task_id": self._task_value() or None,
@@ -1562,6 +1729,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             "account": account if isinstance(account, str) and account != THIS_SHELL else None,
             "persona": persona,
             "remote_control": None if remote == defaults.remote_control else remote,
+            # As the form shows them for the role: the service decides, as for the CLI.
+            "model": self._model_kwarg(),
+            "effort": None if effort == (self._pick.effort or ACCOUNT_DEFAULT) else effort,
         }
 
     @on(Button.Pressed, "#spawn-submit")
@@ -1688,11 +1858,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         dropped. A ladder that would refuse the spawn (a binding to a removed slot) says so
         under the field, until a read that does not."""
         if state is WorkerState.SUCCESS:
-            project_id, role, model, default = worker.result or (None, None, None, None)
+            project_id, role, key, default = worker.result or (None, None, None, None)
             current = (
-                project_id == self.project.id
-                and role == self._role
-                and model == self._default_model
+                project_id == self.project.id and role == self._role and key == self._default_key
             )
             if current and isinstance(default, accounts_service.LaunchDefault):
                 self._label_default(default_account_label(default, self._role))

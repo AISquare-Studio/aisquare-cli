@@ -9,7 +9,7 @@ the same refusal is one JSON object, because there stdout belongs to a program.
 from __future__ import annotations
 
 import json
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -41,7 +41,8 @@ from aisquare.cli import (
 )
 from aisquare.cli import config as config_cli
 from aisquare.cli import metrics as metrics_cli
-from aisquare.cli.global_flags import GlobalFlagsGroup
+from aisquare.cli.global_flags import DISPATCHED_WORDS, GlobalFlagsGroup
+from aisquare.core import feature_use, sharing
 from aisquare.core.state import RuntimeState, get_state, set_state
 from aisquare.core.version import __version__
 
@@ -109,6 +110,81 @@ def main_callback(
     ctx.obj = state
     if ctx.invoked_subcommand is None:
         _no_arguments(ctx)
+    else:
+        _count_command(ctx)
+
+
+#: Commands that tools run for the user, on every prompt or for the life of a session: what
+#: they do is not a choice of the user's, so they are not counted as features used. And
+#: ``uninstall``, whose plan must change no file of the home and whose purge removes it.
+_NOT_FEATURES = frozenset({"hook", "serve", "inject", "uninstall"})
+
+
+#: The detached shipper itself: not a feature, and it must not start another.
+_SHIPPER = "cli.metrics.ship"
+
+
+#: The hidden aliases of a group (registered below with the group's own app): counted under the
+#: name of the group, so ``ctx list`` and ``context list`` are one feature.
+_GROUP_ALIASES = {"ctx": "context", "workspace": "project"}
+
+#: The hidden aliases of a command (``app.command("reset", hidden=True)(fresh)``), by the path
+#: they resolve to: counted under the command's own name.
+_COMMAND_ALIASES = {"cli.project.reset": "cli.project.fresh"}
+
+
+def _asks_for_help(words: list[str]) -> bool:
+    """Whether the words after the command ask for its help page (``--help`` / ``-h`` before any
+    ``--``): the page is read, nothing is run, and the root callback has already run."""
+    for word in words:
+        if word == "--":
+            return False
+        if word in ("--help", "-h"):
+            return True
+    return False
+
+
+def command_path(ctx: typer.Context) -> str | None:
+    """The command being run as ``cli.<group>.<verb>``, built from the NAMES of the commands
+    it resolves to and nothing the user typed: a word counts only when it names a subcommand
+    of the group before it, and the walk stops at the first one that does not (an argument,
+    or an option's value). A hidden alias of a group or a command counts as the group or the
+    command (:data:`_GROUP_ALIASES`, :data:`_COMMAND_ALIASES`). ``None`` for a command
+    that is not a feature (:data:`_NOT_FEATURES`), or for a request for its help page.
+    """
+    name = ctx.invoked_subcommand
+    if name is None or name in _NOT_FEATURES:
+        return None
+    if _asks_for_help(list(ctx.meta.get(DISPATCHED_WORDS, []))):
+        return None
+    names = [_GROUP_ALIASES.get(name, name)]
+    # Duck-typed: Typer 0.27's groups are not click's ``Group``.
+    command: Any = (
+        ctx.command.get_command(ctx, name) if hasattr(ctx.command, "get_command") else None
+    )
+    rest = list(ctx.meta.get(DISPATCHED_WORDS, []))[1:]  # the first word is `name`
+    while hasattr(command, "get_command"):
+        words = [word for word in rest if not word.startswith("-")]
+        child = command.get_command(ctx, words[0]) if words else None
+        if child is None:
+            break
+        names.append(child.name or words[0])
+        rest = rest[rest.index(words[0]) + 1 :]
+        command = child
+    path = "cli." + ".".join(names)
+    return _COMMAND_ALIASES.get(path, path)
+
+
+def _count_command(ctx: typer.Context) -> None:
+    """Count this command in the local feature counters: an append to a spool file, failing
+    open (``core.feature_use``)."""
+    try:
+        path = command_path(ctx)
+        if path is not None and path != _SHIPPER:
+            feature_use.record(path)
+            sharing.start_background_ship()  # a detached `metrics ship`, once in 6 h if on
+    except Exception:  # a counter never costs a command
+        return
 
 
 def _no_arguments(ctx: typer.Context) -> None:

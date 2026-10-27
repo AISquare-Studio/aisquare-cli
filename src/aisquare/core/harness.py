@@ -94,25 +94,62 @@ def model_family(model: str | None) -> str | None:
     return next((family for family in MODEL_FAMILIES.values() if family in lowered), None)
 
 
-def model_arg(args: Sequence[str]) -> str | None:
-    """The model ``args`` name, the first ``--model X`` or ``--model=X``; ``None`` for none."""
+def flag_arg(args: Sequence[str], flag: str) -> str | None:
+    """The value ``args`` give ``flag``, the first ``<flag> X`` or ``<flag>=X``; ``None`` for
+    none."""
     for index, arg in enumerate(args):
-        if arg == "--model" and index + 1 < len(args):
+        if arg == flag and index + 1 < len(args):
             return args[index + 1]
-        if arg.startswith("--model="):
+        if arg.startswith(f"{flag}="):
             return arg.partition("=")[2]
     return None
 
 
-def launch_family(role: str, args: Sequence[str] = ()) -> str | None:
-    """The family a launch of ``role`` will run: its ``--model`` when ``args`` name one, else
-    the role's ladder as resolved WITHOUT probing (a cached verdict, or the first rung) —
-    a pick must not wait 150 s on a probe, and a wrong guess only costs the family window."""
-    named = model_arg(args)
-    if named is not None:
-        return model_family(named)
-    resolution = resolve_model(role, probe=False)
-    return model_family(resolution.model) if resolution is not None else None
+def model_arg(args: Sequence[str]) -> str | None:
+    """The model ``args`` name, the first ``--model X`` or ``--model=X``; ``None`` for none."""
+    return flag_arg(args, "--model")
+
+
+def without_flag(args: Sequence[str], flag: str) -> list[str]:
+    """``args`` less every ``<flag> X`` and ``<flag>=X``."""
+    kept: list[str] = []
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg == flag:
+            skip = True
+        elif not arg.startswith(f"{flag}="):
+            kept.append(arg)
+    return kept
+
+
+#: A context-window suffix Claude Code accepts on a model (``opus[1m]``); a reply names the
+#: model without it.
+_MODEL_SUFFIX = re.compile(r"\[[^\]]*\]$")
+
+
+def same_reading(one: str, other: str) -> bool:
+    """Whether two model ids a session reported are one model: the same id, its case and a
+    ``[1m]`` suffix aside. An alias is never the same as an id here: ``opus`` is only the id
+    it resolved to, which the session itself reports (#16, seq 3424)."""
+    first, second = (_MODEL_SUFFIX.sub("", value.strip().lower()) for value in (one, other))
+    return first == second
+
+
+#: Model aliases that run more than one model, by mode, with the families each runs:
+#: ``opusplan`` is opus in plan mode and sonnet otherwise, so no one reply names it, and a
+#: reply of either is no ``/model`` (#16, seq 3428 c).
+MODE_ALIASES: dict[str, frozenset[str]] = {"opusplan": frozenset({"opus", "sonnet"})}
+
+
+def runs_under(alias: str | None, reading: str) -> bool:
+    """Whether ``reading`` is a model the mode alias ``alias`` runs (``opusplan``: an opus or
+    a sonnet id); never for anything that is no mode alias."""
+    if alias is None:
+        return False
+    families = MODE_ALIASES.get(_MODEL_SUFFIX.sub("", alias.strip().lower()))
+    return families is not None and model_family(reading) in families
 
 
 #: The effort scale, weakest first — the levels ``claude --effort`` accepts.
@@ -858,11 +895,14 @@ def resolve_model(
     return None  # unreachable: the last rung always returns
 
 
-def model_mismatch(role: str, model: str | None) -> str | None:
+def model_mismatch(role: str, model: str | None, *, chosen: Sequence[str] = ()) -> str | None:
     """A warning when a session's captured model does not fit its role's tiering.
 
-    ``None`` when there is nothing to say: untiered role, no capture, or a
-    model that belongs to one of the ladder's families.
+    ``None`` when there is nothing to say: untiered role, no capture, a
+    model that belongs to one of the ladder's families, or one the owner chose
+    (``chosen``: the pick a fleet spawn runs whatever the role, the agent's own
+    spawn args, its role's settings, ``services.model_memory.chosen_models``;
+    an alias there is any id of its family, a mode alias any it runs).
 
     Deliberately env-blind: this judges *other* sessions (from the shared
     store, in other processes), so reading this process's
@@ -875,6 +915,13 @@ def model_mismatch(role: str, model: str | None) -> str | None:
         return None
     profile = ROLE_PROFILES.get(base_role(role))
     if profile is None:
+        return None
+    if any(
+        same_reading(model, one)
+        or model_family(model) == _MODEL_SUFFIX.sub("", one.strip().lower())
+        or runs_under(one, model)
+        for one in chosen
+    ):
         return None
     families = [MODEL_FAMILIES[alias] for alias in profile.ladder if alias in MODEL_FAMILIES]
     if not families:
@@ -1640,6 +1687,15 @@ def parse_env_pairs(pairs: Sequence[str]) -> dict[str, str]:
             raise ValueError(f"expected KEY=VALUE, got {pair!r}")
         parsed[key] = value
     return parsed
+
+
+def binding_args(role: str) -> list[str]:
+    """The arguments ``role``'s binding adds to every launch (``team bind --arg``), as
+    :func:`resolve_profile` gives them, without reading its bound files; none when the config
+    cannot be read."""
+    team, _unreadable = _team_settings()
+    profile = (team.profiles or {}).get(role) if team is not None else None
+    return list(profile.args or []) if profile is not None else []
 
 
 def resolve_profile(

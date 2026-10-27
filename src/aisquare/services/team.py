@@ -51,7 +51,7 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import install_route, mcp_host
+from aisquare.services import install_route, mcp_host, model_memory
 from aisquare.services import project as project_service
 
 #: The fail-open reads of the fleet row say here what they swallowed. Nothing
@@ -3798,6 +3798,15 @@ def _render_board(
                 # base_role: a seat rides its role's ladder, so `coder1` on a
                 # model outside the coder ladder is flagged like `coder` is.
                 mismatch = harness.model_mismatch(base_role(session.role), session.model)
+                if mismatch:
+                    # A model the owner chose for it (the pick, its spawn's args, its role's
+                    # settings) is on no ladder and off none: asked only for a session off
+                    # its role's ladder (#16, review of #441).
+                    mismatch = harness.model_mismatch(
+                        base_role(session.role),
+                        session.model,
+                        chosen=model_memory.chosen_models(session),
+                    )
                 if mismatch:
                     parts.append("⚠ off-ladder")
             if session.persona:

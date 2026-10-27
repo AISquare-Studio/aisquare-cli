@@ -14,6 +14,7 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -246,3 +247,36 @@ def test_a_process_that_is_gone_is_not_a_process() -> None:
 @pytest.mark.parametrize("pid", [0, -1, 2**31 - 2])
 def test_a_pid_that_names_nothing_is_none(pid: int) -> None:
     assert procs.inspect(pid) is None
+
+
+def test_a_process_that_runs_is_alive_and_one_that_is_gone_is_not() -> None:
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    deadline = time.monotonic() + 10
+    while procs.alive(proc.pid) and time.monotonic() < deadline:
+        time.sleep(0.05)  # Windows keeps a finished process readable while a handle is open
+
+    assert procs.alive(os.getpid()) is True
+    assert procs.alive(proc.pid) is False
+    assert procs.alive(0) is False and procs.alive(-1) is False
+
+
+def test_liveness_on_windows_asks_the_process_and_never_signals_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """rc/p3's Windows leg: ``os.kill(pid, 0)`` is a CTRL_C_EVENT there, and adopt asking
+    after the test runner's own pid interrupted the suite. Windows asks the process."""
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: signalled.append((pid, sig)))
+    monkeypatch.setattr(procs, "sys", SimpleNamespace(platform="win32"))
+    asked: list[int] = []
+
+    def query(pid: int) -> bool:
+        asked.append(pid)
+        return True
+
+    monkeypatch.setattr(procs, "_alive_on_windows", query)
+
+    assert procs.alive(os.getpid()) is True
+    assert procs.alive(0) is False
+    assert (signalled, asked) == ([], [os.getpid()])

@@ -456,6 +456,17 @@ def db_path() -> Path:
     return aisquare_home() / "context.db"
 
 
+def feature_use_path() -> Path:
+    """The spool the feature counters append to (``core.feature_use``): one line per use,
+    folded into the store's ``feature_use`` table whenever the stats are read."""
+    return aisquare_home() / "feature-use.log"
+
+
+def usage_sweep_lock_path() -> Path:
+    """The lock file one transcript sweep at a time holds (``services.usage_stats``)."""
+    return aisquare_home() / "usage-sweep.lock"
+
+
 def last_injection_path() -> Path:
     """Path of the record describing the most recent context injection."""
     return cache_dir() / "last_injection.json"

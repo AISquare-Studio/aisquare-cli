@@ -240,6 +240,8 @@ UNTOUCHED: Kwargs = {
     "account": None,
     "persona": None,
     "remote_control": None,
+    "model": None,
+    "effort": None,
 }
 """What a Spawn press sends for a form nobody changed: the role's default everywhere."""
 
@@ -751,6 +753,7 @@ def test_spawn_sends_exactly_the_chosen_values_with_the_agent_args_shlex_split(
         dialog.query_one("#spawn-worktree", Switch).value = True  # a tester's default is False
         select(dialog, "permission").value = "plan"
         select(dialog, "account").value = "2"
+        select(dialog, "effort").value = "max"
         dialog.query_one("#spawn-binary", Input).value = " claude2 "
         dialog.query_one(
             "#spawn-args", Input
@@ -776,6 +779,8 @@ def test_spawn_sends_exactly_the_chosen_values_with_the_agent_args_shlex_split(
                 "account": "2",
                 "persona": None,
                 "remote_control": None,
+                "model": None,  # untouched: the typed --model is this spawn's
+                "effort": "max",
             },
         )
     ]
@@ -1111,7 +1116,7 @@ def test_the_label_follows_the_role_and_says_which_rung_picked(git_project: Proj
     work = _account(3, alias="work", position=1)
 
     def defaults(
-        project: ProjectInfo, role: str, args: list[str]
+        project: ProjectInfo, role: str, args: list[str], model: str | None = None
     ) -> accounts_service.LaunchDefault:
         asked.append((project.id, role))
         if role == "reviewer":
@@ -1170,9 +1175,11 @@ def test_a_model_in_the_extra_args_is_the_family_the_label_picks_by(
     monkeypatch.setattr(accounts_service, "_http_get", endpoint)
     reads: list[list[str]] = []
 
-    def counted(project: ProjectInfo, role: str, args: list[str]) -> accounts_service.LaunchDefault:
+    def counted(
+        project: ProjectInfo, role: str, args: list[str], model: str | None = None
+    ) -> accounts_service.LaunchDefault:
         reads.append(list(args))
-        return spawn_module.read_launch_default(project, role, args)
+        return spawn_module.read_launch_default(project, role, args, model)
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
         field = dialog.query_one("#spawn-args", Input)
@@ -1203,7 +1210,7 @@ def test_the_captains_dialog_says_what_the_captain_runs_on(spawns: SpawnRecorder
     asked: list[tuple[str, str]] = []
 
     def defaults(
-        project: ProjectInfo, role: str, args: list[str]
+        project: ProjectInfo, role: str, args: list[str], model: str | None = None
     ) -> accounts_service.LaunchDefault:
         asked.append((project.id, role))
         work = _account(2, alias="work", position=1)
@@ -2651,7 +2658,7 @@ def test_a_switch_reads_the_no_account_label_again_for_the_new_project(
     work = _account(3, alias="work", position=1)
 
     def defaults(
-        project: ProjectInfo, role: str, args: list[str]
+        project: ProjectInfo, role: str, args: list[str], model: str | None
     ) -> accounts_service.LaunchDefault:
         asked.append((project.id, role))
         if project.id == other_project.id:

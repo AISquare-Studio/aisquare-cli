@@ -121,6 +121,12 @@ backed by one SQLite file: no daemon, no cloud dependency. Sign in with
 The package is `aisquare-cli`; the command is `aisquare`, with `asq` as the
 short alias.
 
+## Documentation
+
+| Page | What is in it |
+| --- | --- |
+| [Usage sharing](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/usage-telemetry.md) | Optional and off by default: anonymous daily counts of how aisquare is used. What is collected, what never is, how to see exactly what would be sent and turn it off |
+
 ## Community
 
 Questions and ideas go to

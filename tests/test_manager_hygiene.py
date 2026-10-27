@@ -12,6 +12,7 @@ into ``--detail``, where they rode every later request: ``task add --detail-file
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,7 +20,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import harness, paths
+from aisquare.core import harness, ids, paths
 from aisquare.core.config import load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
@@ -115,6 +116,16 @@ def test_the_pack_stays_within_its_budget_and_says_what_it_left_out(
     200 open tasks of 150 chars cannot all fit, and the line that ends them says how many did
     not and where they are. Every line it keeps is whole."""
     _start(monkeypatch, work, MANAGER, "manager", "startup")
+    # Every task id ends in a title's look-alike, `t199`, as one in about 5,000 does by chance
+    # (a line carries the id before the title): a test that finds a title anywhere in the pack
+    # reads task 199 as shown, and the 0.9% of runs it failed in were a draw of this.
+    make_id = ids._new_id
+
+    def look_alike(prefix: str) -> str:
+        made = make_id(prefix)
+        return made[:-4] + "t199" if prefix == ids.TASK_PREFIX else made
+
+    monkeypatch.setattr(ids, "_new_id", look_alike)
     for n in range(200):
         team_service.add_task(f"t{n:03d} " + "x" * 145, session_ref=MANAGER)
     state = _state(work, "s" * 12_000)
@@ -128,7 +139,9 @@ def test_the_pack_stays_within_its_budget_and_says_what_it_left_out(
     assert len(pack) <= 20_000, len(pack)
     assert "s" * 4_000 in pack and "s" * 4_001 not in pack
     assert f"… clipped at 4,000 chars; the rest is in {state}" in pack
-    shown = [n for n in range(200) if f"t{n:03d} " in pack]
+    # The title after the status's bracket, not `t000 ` anywhere in the pack: a line also
+    # carries the task's id, and a random tail that ends in `t124` before the space matches.
+    shown = [int(n) for n in re.findall(r"\] t(\d{3}) ", pack)]
     assert shown == list(range(len(shown))) and 0 < len(shown) < 200
     assert f"  … {200 - len(shown)} more open tasks — `aisquare task list`" in pack
     assert "wake events pending past your cursor: 0" in pack, "the short items are never cut"

@@ -1,4 +1,4 @@
-"""The Usage & stats page: what this machine's Claude Code sessions spent, in a range.
+"""The Usage & stats page: what this machine's agent sessions spent, in a range.
 
 Opened from *⚙ Settings ▸ Usage & stats*. Under the title, the range switcher — *Today*,
 *7 days*, *30 days*, *Lifetime*, keys ``1`` to ``4`` — then the figures of that range
@@ -8,7 +8,7 @@ tokens, cost at list prices, sessions, turns, active days and repositories; a ba
 the most tokens; the accounts; the busiest days; the models; and the features used most.
 
 **Everything is read off the UI thread.** Opening the page reads what is recorded
-(:data:`LOAD_WORKER`) and paints it at once, and sweeps Claude Code's transcripts for sessions
+(:data:`LOAD_WORKER`) and paints it at once, and sweeps the agents' transcripts for sessions
 no hook saw in a worker of its own (:data:`SWEEP_WORKER`; ``usage_stats.maybe_sweep``, at most
 once in ten minutes, the first time reading history that still exists), saying how far it is.
 A range key only reads what is recorded and never touches the sweep, which can take half a
@@ -74,8 +74,7 @@ TILES: tuple[tuple[str, str], ...] = (
 """The tiles, row by row: each one's id stem and label."""
 
 EMPTY_RANGE = (
-    "Nothing in {range} — Claude Code was not used in it.\n\n"
-    "{turns:,} turns are recorded in all: {hint}."
+    "Nothing in {range} — no agent was used in it.\n\n{turns:,} turns are recorded in all: {hint}."
 )
 """What an empty range says when another range has something."""
 
@@ -95,8 +94,8 @@ def longer_ranges_hint(range_: UsageRange) -> str:
 
 EMPTY = (
     "No usage recorded yet.\n\n"
-    "Claude Code's transcripts are read when this page opens, and each session aisquare "
-    "launches adds its turns as it goes. If you use Claude Code and still see this, run "
+    "The agents' transcripts are read when this page opens, and each session aisquare "
+    "launches adds its turns as it goes. If you use an agent and still see this, run "
     "`aisquare metrics backfill`."
 )
 
@@ -372,7 +371,7 @@ class UsageStatsView(VerticalScroll):
     def _reading(self, done: int, total: int) -> None:
         if total and done < total:
             self.query_one("#usage-status", Static).update(
-                Text(f"Reading Claude Code's transcripts… {done}/{total}")
+                Text(f"Reading the agents' transcripts… {done}/{total}")
             )
 
     @on(Worker.StateChanged)

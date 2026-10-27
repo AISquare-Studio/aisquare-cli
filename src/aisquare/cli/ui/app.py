@@ -241,7 +241,7 @@ HOUSEKEEPING_SECONDS = 30.0
 """How often asq's housekeeping tick runs (:meth:`FleetApp._housekeeping`): Remote's auto-off,
 the release check's hourly ask and the usage sweep, none of which has a timer of its own."""
 USAGE_SWEEP_WORKER = "usage-sweep"
-"""The worker that reads Claude Code's transcripts for the Usage & stats page's numbers
+"""The worker that reads the agents' transcripts for the Usage & stats page's numbers
 (``services.usage_stats.maybe_sweep``), off the UI thread, at most every ten minutes."""
 USAGE_SWEEP_FIRST_SECONDS = 45.0
 """How long after start the first sweep waits: the first frame and the first reads go first."""
@@ -1024,7 +1024,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """When the release check was last asked (``time.monotonic``): the housekeeping tick
         asks again once ``updates.ASK_EVERY_SECONDS`` have passed (:meth:`_housekeeping`)."""
         self._usage_sweep_at = time.monotonic() + USAGE_SWEEP_FIRST_SECONDS
-        """When the housekeeping tick next sweeps Claude Code's transcripts for the Usage & stats
+        """When the housekeeping tick next sweeps the agents' transcripts for the Usage & stats
         page (``time.monotonic``): soon after start, then every ``SWEEP_EVERY``."""
         self._release_off = release_check is not None and not updates_service.check_enabled()
         """``[updates] check`` as App settings last read it, off: the row is taken away at once

@@ -27,6 +27,7 @@ from aisquare.cli.ui.sidebar import SETTINGS_KEY, SettingsRow
 from aisquare.cli.ui.views.usage_stats import (
     DEFAULT_RANGE,
     EMPTY,
+    EMPTY_RANGE,
     KEYS,
     LOAD_WORKER,
     SWEEP_WORKER,
@@ -34,6 +35,7 @@ from aisquare.cli.ui.views.usage_stats import (
     chart_text,
     longer_ranges_hint,
 )
+from aisquare.core.agent_adapters import adapters
 from aisquare.core.store import store_session
 from aisquare.models import USAGE_RANGES, UsageDay, UsageRange, UsageStats, UsageTokens
 from aisquare.services import usage_stats
@@ -406,7 +408,7 @@ def test_how_far_the_sweep_has_got_is_said_while_it_reads(machine: Machine) -> N
 
     reading, done = _drive_page(loader, go, settle=False)
 
-    assert reading == "Reading Claude Code's transcripts… 2/5"
+    assert reading == "Reading the agents' transcripts… 2/5"
     assert done.startswith("Updated ")
 
 
@@ -444,6 +446,18 @@ def test_with_nothing_recorded_the_page_says_so_and_how_to_record_it() -> None:
     assert empty_shown and not body_shown
     assert "No usage recorded yet." in empty and "aisquare metrics backfill" in empty
     assert EMPTY.splitlines()[0] == "No usage recorded yet."
+
+
+def test_the_pages_words_name_no_agent() -> None:
+    """The sweep reads every agent's transcripts (Codex's rollouts too: SCOPE #113 091, item
+    4), so what the page says when a range or the machine has nothing, as its sweep goes,
+    names none of them (seq 4194)."""
+    words = [EMPTY, EMPTY_RANGE]
+    assert not [
+        (adapter.label, text) for adapter in adapters() for text in words if adapter.label in text
+    ]
+    assert "If you use an agent and still see this" in EMPTY
+    assert EMPTY_RANGE.startswith("Nothing in {range} — no agent was used in it.")
 
 
 def test_each_range_with_nothing_in_it_is_the_empty_state_not_a_page_of_zeros(
@@ -542,7 +556,7 @@ def test_a_range_key_pressed_during_the_first_long_sweep_does_not_lose_the_sweep
     during, mid_status, status, shown_range = _drive_page(loader, go, settle=False)
 
     assert during == "1.0K", "a range key paints what is recorded at once, mid-sweep"
-    assert mid_status == "Reading Claude Code's transcripts… 1/638"
+    assert mid_status == "Reading the agents' transcripts… 1/638"
     assert shown_range == "30d"
     assert status.startswith("Updated "), status  # not stuck on "Reading…"; and no `r` needed
 

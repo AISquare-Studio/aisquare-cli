@@ -19,13 +19,13 @@ def emit_usage_stats(stats: UsageStats) -> None:
     label = fmt.RANGE_LABELS[stats.range]
     if not stats.turns and stats.recorded_turns:
         console.print(
-            f"Nothing in {label.lower()}: Claude Code was not used in it. "
+            f"Nothing in {label.lower()}: no agent was used in it. "
             f"{stats.recorded_turns:,} turns are recorded in all: try --range lifetime."
         )
         return
     if not stats.turns:
         console.print(
-            f"No usage recorded for {label.lower()} yet. Claude Code's transcripts are read "
+            f"No usage recorded for {label.lower()} yet. The agents' transcripts are read "
             "by `aisquare metrics backfill`, and each Stop hook adds its turn."
         )
         return

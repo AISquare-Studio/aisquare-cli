@@ -1196,6 +1196,7 @@ def test_metrics_stats_on_an_empty_machine_says_how_to_fill_it() -> None:
     assert result.exit_code == 0
     assert "No usage recorded for 7 days yet" in result.output
     assert "aisquare metrics backfill" in result.output
+    assert "Claude Code" not in result.output, "the sweep reads every agent's transcripts"
 
 
 def test_an_empty_range_says_nothing_is_in_it_when_other_ranges_have_something(
@@ -1208,7 +1209,7 @@ def test_an_empty_range_says_nothing_is_in_it_when_other_ranges_have_something(
     quiet = runner.invoke(app, ["metrics", "stats", "--range", "today", "--no-sweep"])
     everything = runner.invoke(app, ["metrics", "stats", "--range", "lifetime", "--no-sweep"])
 
-    assert "Nothing in today: Claude Code was not used in it." in quiet.output
+    assert "Nothing in today: no agent was used in it." in quiet.output
     assert "1 turns are recorded in all: try --range lifetime." in quiet.output
     assert "backfill" not in quiet.output
     assert "Usage — Lifetime" in everything.output

@@ -1950,7 +1950,9 @@ class AgentAccounts(Protocol):
         does it again; Gemini CLI's). A sign-in window then starts the binary in the slot
         with nothing after it, and waits until :meth:`login_fingerprint` changes
         (``services.claude_accounts.sign_in_landed``): the human signs in there and leaves
-        it with the adapter's ``exit_command``."""
+        it with the adapter's ``exit_command``. A slot with no login is told to sign in with
+        it, after ``aisquare accounts run <slot>``, else with :attr:`relogin`: the doctor's
+        accounts row and the Accounts page's ``!`` (``claude_accounts.usage_fix``)."""
         ...
 
     def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:

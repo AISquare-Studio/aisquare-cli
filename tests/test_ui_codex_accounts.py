@@ -275,6 +275,35 @@ def test_a_codex_row_says_how_old_its_reading_is_and_never_asks_to_open_a_sessio
     assert reading_age(old, now=NOW) == " · as of 3d ago"
 
 
+@pytest.mark.parametrize("slot", [0, 4], ids=["plain", "managed"])
+def test_a_codex_rows_fix_is_codexs_own_sign_in_never_claudes(slot: int) -> None:
+    """SCOPE #113 091, item 17: the ``!``'s hover said Claude Code's remedy for a Codex row
+    with no login ("…, then /login"). Its fix is Codex's own sign-in command
+    (``AgentAccounts.sign_in_args``: ``login``) run on that slot, as the doctor's accounts row
+    words it, so it signs in the slot it names, the plain home or a managed one; a Claude row's
+    keeps Claude Code's ``/login`` (``relogin``)."""
+    for signed_in, email in ((False, "me@example.com"), (None, None)):  # incomplete, then none
+        tip = problem_tooltip(_codex_status(slot, email, signed_in=signed_in), None, now=NOW)
+        assert tip is not None
+        fix = tip.splitlines()[-1]
+        assert fix == f"fix: press Log in (in a terminal: aisquare accounts run {slot} login)"
+        assert "/login" not in tip and "Claude" not in tip
+    claude = ClaudeAccountStatus(
+        account=ClaudeAccount(slot=3, config_dir=Path("/h/.aisquare/claude-accounts/3")),
+        label="account 3",
+    )
+    claude_tip = problem_tooltip(claude, None, now=NOW)
+    assert claude_tip is not None
+    assert claude_tip.endswith(
+        "fix: press Log in (in a terminal: aisquare accounts run 3, then /login)"
+    )
+    # The same words where there is no hover (``accounts usage``, ``accounts list --usage``).
+    problem = accounts_service.usage_problem(_codex_status(slot, None), None)
+    assert problem is not None and accounts_service.explain_usage(problem).endswith(
+        f"aisquare accounts run {slot} login)"
+    )
+
+
 def test_the_codex_section_shows_once_codex_is_installed_or_has_a_slot() -> None:
     claude_only = AccountsOverview(claude=INSTALLED[core.AGENT], accounts=[])
     assert not agent_section_shown(CODEX, claude_only)  # an overview from before installs

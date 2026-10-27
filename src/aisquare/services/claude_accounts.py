@@ -1203,11 +1203,40 @@ _FAMILIES = core.MODEL_FAMILY_NAMES
 # Accounts page shows the two on hover over its '!', and `accounts usage` beside the
 # reason: neither works out the cause or the fix from the reason's words.
 
-_LOG_IN = "press Log in (in a terminal: aisquare accounts run {slot}, then /login)"
-_REFRESH_TOKEN = (
-    "press Log in, or open a session on this account (aisquare accounts run {slot}): "
-    "Claude Code refreshes the token"
-)
+
+def _log_in(agent: str | None = None) -> str:
+    """How a slot of ``agent`` (Claude Code's when ``None``) is signed in: *Log in* on its
+    row, or in a terminal ``aisquare accounts run <slot>`` with the agent's own sign-in
+    command after it (``AgentAccounts.sign_in_args``: Codex's ``login``, as the doctor's
+    accounts row says it), else with what to type once its TUI opens (``relogin``: Claude
+    Code's ``/login``). Never another agent's remedy (SCOPE #113 091, item 17)."""
+    accounts = core.kind(agent or core.AGENT)
+    run = "aisquare accounts run {slot}"
+    if accounts.sign_in_args():
+        run = " ".join((run, *accounts.sign_in_args()))
+    elif accounts.relogin:
+        run = f"{run}, then {accounts.relogin}"
+    return f"press Log in (in a terminal: {run})"
+
+
+def _refresh_token(agent: str | None = None) -> str:
+    """How a slot of ``agent`` whose token expired or was refused gets a fresh one: the agent
+    refreshes it in a session on that slot."""
+    return (
+        "press Log in, or open a session on this account (aisquare accounts run {slot}): "
+        f"{core.agent_label(agent or core.AGENT)} refreshes the token"
+    )
+
+
+_LOG_IN = _log_in()
+_REFRESH_TOKEN = _refresh_token()
+_SIGN_IN_FIXES: dict[UsageCause, Callable[[str | None], str]] = {
+    UsageCause.not_signed_in: _log_in,
+    UsageCause.token_missing: _log_in,
+    UsageCause.token_expired: _refresh_token,
+    UsageCause.token_rejected: _refresh_token,
+}
+"""The causes whose fix names the agent: its sign-in, its token refresh (:func:`usage_fix`)."""
 _THEN_REFRESH = "then ↻ Refresh usage (or --refresh)"
 
 USAGE_FIXES: dict[UsageCause, str | None] = {
@@ -1245,11 +1274,17 @@ NO_FIX = "fix: none from here, the next read tries again by itself"
 
 
 def usage_fix(
-    cause: UsageCause, *, slot: int | None = None, until: datetime | None = None
+    cause: UsageCause,
+    *,
+    slot: int | None = None,
+    until: datetime | None = None,
+    agent: str | None = None,
 ) -> str | None:
     """What to do about ``cause`` on slot ``slot`` (:data:`USAGE_FIXES`): ``until`` is a rate
-    limit's end, ``reads resume at 14:32 by themselves``."""
-    fix = USAGE_FIXES[cause]
+    limit's end, ``reads resume at 14:32 by themselves``. A sign-in's or a token's fix is the
+    slot's agent's own (``agent``, Claude Code's when ``None``: :data:`_SIGN_IN_FIXES`)."""
+    own = _SIGN_IN_FIXES.get(cause)
+    fix = own(agent) if own is not None and agent is not None else USAGE_FIXES[cause]
     if fix is None:
         return None
     at = f"at {until.astimezone().strftime('%H:%M')} " if until is not None else ""
@@ -1257,16 +1292,22 @@ def usage_fix(
 
 
 def unreadable_usage(
-    cause: UsageCause, reason: str, *, slot: int | None = None, **fields: Any
+    cause: UsageCause,
+    reason: str,
+    *,
+    slot: int | None = None,
+    agent: str | None = None,
+    **fields: Any,
 ) -> ClaudeUsage:
     """A reading with nothing to show: ``reason`` says what is wrong, and ``cause`` and its
-    fix (:func:`usage_fix`) are stamped here, the one place they are."""
+    fix (:func:`usage_fix`, in the words of the slot's ``agent``) are stamped here, the one
+    place they are."""
     until = fields.get("rate_limited_until")
     return ClaudeUsage(
         available=False,
         reason=reason,
         cause=cause,
-        fix=usage_fix(cause, slot=slot, until=until),
+        fix=usage_fix(cause, slot=slot, until=until, agent=agent),
         **fields,
     )
 
@@ -1305,13 +1346,17 @@ def usage_problem(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> C
     then the reading's own cause (a 401, a locked Keychain, the endpoint). The page's
     '!' and its tooltip, and ``accounts usage``, are drawn from it alone.
     """
-    slot = status.account.slot
+    slot, agent = status.account.slot, status.account.agent
     if status.identity is None:
-        return unreadable_usage(UsageCause.not_signed_in, "not signed in", slot=slot)
+        return unreadable_usage(UsageCause.not_signed_in, "not signed in", slot=slot, agent=agent)
     if not status.signed_in:
-        return unreadable_usage(UsageCause.token_missing, _no_login_reason(), slot=slot)
+        return unreadable_usage(
+            UsageCause.token_missing, _no_login_reason(), slot=slot, agent=agent
+        )
     if status.token_state == "expired":
-        return unreadable_usage(UsageCause.token_expired, _EXPIRED, slot=slot, needs_login=True)
+        return unreadable_usage(
+            UsageCause.token_expired, _EXPIRED, slot=slot, agent=agent, needs_login=True
+        )
     if reading is not None and not reading.available:
         return reading
     return None
@@ -1347,7 +1392,12 @@ def usage(
     if reading.cause is not None and reading.fix is None:
         # The adapter set the kind of what went wrong; the fix for it is this module's one
         # table (:data:`USAGE_FIXES`), whichever agent's reading it is.
-        fix = usage_fix(reading.cause, slot=account.slot, until=reading.rate_limited_until)
+        fix = usage_fix(
+            reading.cause,
+            slot=account.slot,
+            until=reading.rate_limited_until,
+            agent=account.agent,
+        )
         reading = reading.model_copy(update={"fix": fix})
     return reading
 

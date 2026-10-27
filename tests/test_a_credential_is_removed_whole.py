@@ -334,7 +334,17 @@ HOSTILE: dict[str, Callable[[int], str]] = {
     "url-userinfo": lambda size: "://" + "u" * (size // 2) + ":" + "p" * (size // 2),
     "prefixes": lambda size: "sk-ghp_xoxb-AKIAglpat-aisq_AIzawk_live_" * (size // 40),
     "non-ascii-before-prefixes": lambda size: "日sk-ghp_AKIAxoxb-" * (size // 14),
+    "assignment-escaped-quotes-closing-late": lambda size: 'token="' + 'a\\"' * (size // 4) + '"',
+    "assignment-escaped-delimiters-with-inner-quotes": lambda size: (
+        'token=\\"' + 'a\\\\\\"' * (size // 6)
+    ),
+    "assignment-values-ending-in-a-backslash": lambda size: 'password="abcd\\" ' * (size // 15),
+    "assignment-json-values-with-escaped-quotes": lambda size: (
+        '{"password": "ab\\"cd1234", ' * (size // 28)
+    ),
     "dashes": lambda size: "-" * size,
+    "dots": lambda size: "." * size,
+    "dashes-and-dots": lambda size: "-." * (size // 2),
     "alnum": lambda size: "a" * size,
     "headers-only": lambda size: (HEADER + "\n") * (size // (len(HEADER) + 1)),
 }

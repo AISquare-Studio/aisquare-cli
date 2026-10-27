@@ -196,6 +196,8 @@ def test_the_switch_starts_off_and_says_nothing_leaves_the_machine() -> None:
     assert (
         "Never names, paths, remotes, prompts or arguments" in about and "Off by default" in about
     )
+    # re-review of #444 (m2): whoever opts in here, not only in the dialog, is told
+    assert "every repo you run Claude Code in, including ones you haven't added" in about
 
 
 def test_one_click_turns_it_on_and_sends_the_first_shipment_and_one_click_turns_it_off(

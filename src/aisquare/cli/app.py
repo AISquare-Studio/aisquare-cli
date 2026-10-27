@@ -128,6 +128,10 @@ _SHIPPER = "cli.metrics.ship"
 #: name of the group, so ``ctx list`` and ``context list`` are one feature.
 _GROUP_ALIASES = {"ctx": "context", "workspace": "project"}
 
+#: The hidden aliases of a command (``app.command("reset", hidden=True)(fresh)``), by the path
+#: they resolve to: counted under the command's own name.
+_COMMAND_ALIASES = {"cli.project.reset": "cli.project.fresh"}
+
 
 def _asks_for_help(words: list[str]) -> bool:
     """Whether the words after the command ask for its help page (``--help`` / ``-h`` before any
@@ -144,7 +148,8 @@ def command_path(ctx: typer.Context) -> str | None:
     """The command being run as ``cli.<group>.<verb>``, built from the NAMES of the commands
     it resolves to and nothing the user typed: a word counts only when it names a subcommand
     of the group before it, and the walk stops at the first one that does not (an argument,
-    or an option's value). A group's hidden alias counts as the group. ``None`` for a command
+    or an option's value). A hidden alias of a group or a command counts as the group or the
+    command (:data:`_GROUP_ALIASES`, :data:`_COMMAND_ALIASES`). ``None`` for a command
     that is not a feature (:data:`_NOT_FEATURES`), or for a request for its help page.
     """
     name = ctx.invoked_subcommand
@@ -166,7 +171,8 @@ def command_path(ctx: typer.Context) -> str | None:
         names.append(child.name or words[0])
         rest = rest[rest.index(words[0]) + 1 :]
         command = child
-    return "cli." + ".".join(names)
+    path = "cli." + ".".join(names)
+    return _COMMAND_ALIASES.get(path, path)
 
 
 def _count_command(ctx: typer.Context) -> None:

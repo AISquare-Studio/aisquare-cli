@@ -533,10 +533,10 @@ def _sweep_one(
             if not recorded.exists():
                 return outcome  # the file moved: its offsets name one that is gone
             transcript = recorded  # the offsets are keyed by this spelling of the path
-    cwd = session_cwd(transcript) if existing is None or not existing.repo_id else None
-    if cwd is not None and cwd not in repos:
-        repos[cwd] = repo_of(cwd)
-    repo = repos.get(cwd) if cwd is not None else None
+    # Which repository it is costs a git call per distinct directory, and a session with no turn
+    # (idle, or only a hook's attachment) never gets a row, so is looked at on every sweep:
+    # asked before the scan only when there is a repository to refuse, after it otherwise.
+    repo = _session_repo(transcript, existing, repos) if purged else None
     if repo is not None and repo[0] in purged:
         outcome.unchanged = 1  # forgotten on purpose: its usage does not come back from here
         return outcome
@@ -552,6 +552,8 @@ def _sweep_one(
         return outcome
     delta = scanned.total()
     recorded_at = now or datetime.now(UTC)  # no turn is recorded as later than this
+    if not purged:
+        repo = _session_repo(transcript, existing, repos)
     outcome.repo = repo
     total = usage_core.Usage.from_dict(existing.usage) if existing else usage_core.Usage()
     total.add(delta)
@@ -613,6 +615,23 @@ def _sweep_one(
     else:
         outcome.updated = 1
     return outcome
+
+
+def _session_repo(
+    transcript: Path,
+    existing: SessionUsage | None,
+    repos: dict[Path, tuple[str, Path] | None],
+) -> tuple[str, Path] | None:
+    """The repository a session without a recorded one ran in (its first ``cwd``), resolved once
+    per directory in ``repos``; ``None`` when it has one already or none can be told."""
+    if existing is not None and existing.repo_id:
+        return None
+    cwd = session_cwd(transcript)
+    if cwd is None:
+        return None
+    if cwd not in repos:
+        repos[cwd] = repo_of(cwd)
+    return repos[cwd]
 
 
 def purged_repos(store: ContextStore) -> frozenset[str]:

@@ -68,10 +68,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   machine (`docs/usage-stats.md`).
 - **Usage is counted for every repository you run Claude Code in, including ones you have not
   added to aisquare**, whatever `[projects] capture` says (the sweep reads every transcript on
-  the machine); `project forget --purge` now leaves a tombstone so a forgotten project is not
-  read back from the transcripts Claude Code keeps, until it is added back on purpose
-  (`docs/usage-stats.md`). The sweep no longer fails on a session that only has aisquare's start
-  hook in it; `ctx`/`workspace` count as `context`/`project` and `--help` is not a use;
+  the machine) - said in the question, in the Settings switch's description and by
+  `aisquare metrics share on`; `project forget --purge` now leaves a tombstone so a forgotten
+  project is not read back from the transcripts Claude Code keeps (by the sweep or the Stop
+  hook), until it is added back on purpose (`docs/usage-stats.md`). The sweep no longer fails
+  on a session that only has aisquare's start hook in it; `ctx`/`workspace` count as
+  `context`/`project`, `project reset` as `project fresh`, and `--help` is not a use;
   `metrics stats` shows progress on its first sweep.
 - **Optional, off-by-default anonymous usage sharing** (`docs/usage-telemetry.md`). A one-time
   question in the UI after you have set up a project (*Share anonymous usage* / *No thanks* /

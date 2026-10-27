@@ -46,9 +46,11 @@ Usage is counted for **every repository you run Claude Code in, including ones y
 added to aisquare**: the local sweep reads the transcripts of every session on the machine, and
 `[projects] capture` (which decides whether a hook records rows for a directory nobody added)
 does not change that. When you turn sharing on, those repositories are part of the repository
-counts that are sent, each as a salted hash with four coarse traits, like any other. A project
-you forgot with `project forget --purge` is not counted, shown or sent again (see
-[Usage & stats](usage-stats.md)).
+counts that are sent, each as a salted hash with four coarse traits, like any other. This is
+said wherever sharing is switched on: in the question, in the description of the switch in
+Settings ▸ Usage & stats, and when `aisquare metrics share on` turns it on. A project you forgot
+with `project forget --purge` is not counted, shown or sent again, by the sweep or by the Stop
+hook (see [Usage & stats](usage-stats.md)).
 
 ## What we never collect
 
@@ -88,8 +90,10 @@ A shipment that cannot be delivered (offline, a server that is not there yet, a 
 and go the next time the server answers, oldest first, in batches of at most 31 days, however
 long that takes; nothing is lost and nothing is given up on. A batch the server refuses for good
 (a 4xx other than a throttle or a timeout) does not hold the newer ones back: they, and today,
-go on, and the refused days are asked again at every shipment (after three refusals in a row the
-shipment stops for now and is retried after the backoff).
+go on, and the refused days are asked again at every shipment. After three refusals in a row the
+shipment skips the older batches for now and tries only the newest (with today): a server that
+refuses everything, a route not deployed yet among them, costs at most four POSTs an attempt, and
+the attempt is retried after the backoff.
 
 ## Switching it off
 

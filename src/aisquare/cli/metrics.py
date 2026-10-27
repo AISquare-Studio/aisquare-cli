@@ -246,7 +246,9 @@ def share_on() -> None:
 
     What is sent is counts: tokens, sessions, commands used and a salted hash per repository,
     never names, paths, remotes, prompts or arguments (`aisquare metrics share preview` prints
-    the exact body). Not available with DO_NOT_TRACK=1, AISQUARE_NO_TELEMETRY=1 or CI set.
+    the exact body). Usage is counted for every repo you run Claude Code in, including ones you
+    haven't added to aisquare; capture settings don't change this. Not available with
+    DO_NOT_TRACK=1, AISQUARE_NO_TELEMETRY=1 or CI set.
     """
     try:
         status = usage_share.enable()
@@ -264,6 +266,7 @@ def share_on() -> None:
         _json(status.model_dump(mode="json"))
         return
     emit_sharing_status(status)
+    typer.echo(usage_share.COVERAGE)
 
 
 @share_app.command("off")

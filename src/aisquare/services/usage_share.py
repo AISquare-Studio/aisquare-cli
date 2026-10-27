@@ -53,7 +53,9 @@ WINDOW_DAYS = 31
 """A batch holds at most this many days: today and the 30 before."""
 REJECTED_IN_A_ROW = 3
 """A shipment goes on past a batch the server refused (a 4xx that is not a throttle), but gives up
-for now after this many in a row: a server that refuses everything is not asked 14 times."""
+on the older ones for now after this many in a row: a server that refuses everything is not asked
+14 times. The newest batch, with today, is still tried: the oldest days are the ones a server is
+most likely to refuse, and they must not keep today from going."""
 MAX_BATCHES = 14
 """Batches one shipment sends: 14 of 31 days reach back the 400 days the server takes."""
 MAX_FEATURES = 200
@@ -69,6 +71,13 @@ BY_TYPE_KEYS = frozenset({"pro", "max", "team", "enterprise", "api", "unknown"})
 PLACEHOLDER_ID = "00000000-0000-4000-8000-000000000000"
 PLACEHOLDER_SALT = "00" * 32
 """A sample is hashed with this, so that two previews of one history agree."""
+
+COVERAGE = (
+    "Usage is counted for every repo you run Claude Code in, including ones you haven't added to "
+    "aisquare; capture settings don't change this."
+)
+"""Said wherever sharing is switched on (the consent dialog, the Settings switch, ``metrics share
+on``): the counts are not limited to the projects aisquare knows."""
 
 _MODEL_ID = re.compile(r"^claude-[a-z0-9.-]{1,60}$")
 _FEATURE = re.compile(r"^[a-z0-9_.-]{1,64}$")
@@ -547,7 +556,9 @@ def _ship(
     refused_in_a_row = 0
     held_from: str | None = None  # the oldest day the server refused: nothing from it is settled
     first_refusal: str | None = None
-    for batch in batches[:MAX_BATCHES]:
+    pending = batches[:MAX_BATCHES]  # oldest first
+    while pending:
+        batch = pending.pop(0)
         if not _still_on():  # turned off since the last POST: nothing more goes
             report.skipped = "sharing was turned off"
             return report
@@ -586,8 +597,8 @@ def _ship(
             oldest = min(batch.digests)
             held_from = oldest if held_from is None else min(held_from, oldest)
             refused_in_a_row += 1
-            if refused_in_a_row >= REJECTED_IN_A_ROW:
-                break
+            if refused_in_a_row == REJECTED_IN_A_ROW:
+                del pending[:-1]  # the rest wait for next time; the newest, with today, still goes
             continue
         wait = result.retry_after() if result.status == 429 else None
         return _failed(moment, f"{what}{_detail(result)}", retry_after=wait, report=report)

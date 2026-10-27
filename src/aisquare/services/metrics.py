@@ -242,8 +242,10 @@ def _record_usage(
     trace_id: str | None,
     ended: bool,
 ) -> TurnUsage | None:
-    # Lazy: services.project imports the store layer this module is imported by.
+    # Lazy: services.project imports the store layer this module is imported by, and
+    # services.usage_stats imports this module.
     from aisquare.services import project as project_service
+    from aisquare.services import usage_stats
 
     now = datetime.now(tz=UTC)
     with store_session() as store:
@@ -253,6 +255,10 @@ def _record_usage(
             # `git rev-parse`, and a session does not change projects.
             project = active_project(store, cwd)
             if not project_service.tracked(store, project):
+                return None
+            # A project forgotten with its data stays at nothing: with capture on, a session
+            # resumed after the purge would otherwise be read from its first line again.
+            if project.id in usage_stats.purged_repos(store):
                 return None
             project_id = project.id
             attribution = _attribution(store, transcript, cwd, (project.id, project.root))

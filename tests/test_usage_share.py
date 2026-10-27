@@ -810,6 +810,22 @@ def test_metrics_share_on_status_preview_off(
     assert server.calls[1].body["opt_out"] is True
 
 
+def test_metrics_share_on_says_which_repositories_are_counted(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review of #444 (m2): the dialog said it; `share on` and the Settings switch did not."""
+    monkeypatch.setattr(sharing, "_spawn", lambda: None)
+    runner = CliRunner()
+
+    human = runner.invoke(app, ["metrics", "share", "on"])
+    machine_readable = runner.invoke(app, ["--json", "metrics", "share", "on"])
+    helped = runner.invoke(app, ["metrics", "share", "on", "--help"])
+
+    assert human.exit_code == 0 and usage_share.COVERAGE in human.output
+    assert "including ones you haven't added" in " ".join(helped.output.split())
+    assert json.loads(machine_readable.output)["enabled"] is True  # still one JSON object
+
+
 def test_metrics_share_on_is_refused_where_something_forces_it_off(
     machine: Machine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1742,10 +1758,33 @@ def test_a_server_that_refuses_everything_is_asked_a_few_times_not_fourteen(
 
     report = usage_share.ship(now=NOW, tz=IST, transport=server)
 
-    assert len(server.calls) == 2  # not three: it gave up for now after two in a row
-    assert not report.sent and report.error == "HTTP 404" and report.rejected_days == 62
+    assert len(server.calls) == 3  # two in a row, then only the newest (8 days, with today)
+    assert [len(batch) for batch in _dates(server)] == [31, 31, 8]
+    assert not report.sent and report.error == "HTTP 404" and report.rejected_days == 70
     state = sharing.read()
     assert state.failures == 1 and state.acked == {} and state.next_due_at is not None
+
+
+def test_after_three_refusals_the_newest_batch_with_today_is_still_tried(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review of #444 (nit): the three oldest batches refused kept today from going."""
+    monkeypatch.setattr(usage_share, "WINDOW_DAYS", 14)  # 70 days: five batches
+    _backlog(machine)
+    server = Server(*[status(400, {"errors": {"days": ["no"]}})] * 3)
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=server)
+
+    sent = _dates(server)
+    assert [len(batch) for batch in sent] == [14, 14, 14, 14]  # the three oldest, then the newest
+    assert sent[-1][-1] == NOW.astimezone(IST).date().isoformat()  # today
+    assert report.sent and report.error is None and report.rejected_days == 42
+    state = sharing.read()
+    assert set(state.acked) == set(sent[-1])  # only what the server took
+    assert state.settled_through is None  # and nothing is settled past a refused day
+    again = Server()
+    usage_share.ship(now=NOW + timedelta(hours=7), tz=IST, transport=again)
+    assert _dates(again)[0] == sent[0]  # the refused days are asked again, oldest first
 
 
 def test_a_day_the_server_refused_is_never_settled_past(machine: Machine) -> None:

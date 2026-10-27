@@ -44,7 +44,9 @@ Everything here is recorded and shown **on this machine only**. Nothing is sent 
 `aisquare project forget --purge` (and `prune --purge`) deletes a project's usage rows and its
 repository profile for good, and **leaves a tombstone** so that the sweep does not read the same
 transcripts again (Claude Code keeps them for about a month): the repository is not counted,
-shown or shared again. The tombstone ends when the project is added back on purpose
+shown or shared again, by the sweep or by the Stop hook (whatever `[projects] capture` says: a
+session resumed after the purge is not read from its first line). The tombstone ends when the
+project is added back on purpose
 (`project onboard` / `team on`); from then on its usage is counted again, from whatever
 transcripts Claude Code still has. A directory merely captured by a hook does not end it.
 

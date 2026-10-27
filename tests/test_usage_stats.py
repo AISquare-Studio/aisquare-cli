@@ -10,15 +10,17 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import feature_use, paths, repo_profile
+from aisquare.core import feature_use, paths, procs, repo_profile
 from aisquare.core import usage as usage_core
 from aisquare.core.store import store_session
 from aisquare.models import SessionUsage, TurnUsage, UsageStats
@@ -937,6 +939,43 @@ def test_every_hidden_alias_of_a_group_is_counted_under_the_group() -> None:
     assert aliases == _GROUP_ALIASES
 
 
+def test_every_hidden_alias_of_a_command_is_counted_under_the_command() -> None:
+    """Re-review of #444 (nit): `project reset` is `app.command("reset", hidden=True)(fresh)`; a
+    hidden command that shares its callback with a visible one in its group must be put in
+    `_COMMAND_ALIASES`, or its uses are counted as a feature of their own."""
+    from aisquare.cli.app import _COMMAND_ALIASES
+
+    found: dict[str, str] = {}
+
+    def walk(typer_app: Any, prefix: str) -> None:
+        def named(info: Any) -> str:
+            return str(info.name or info.callback.__name__.replace("_", "-"))
+
+        visible = {id(i.callback): named(i) for i in typer_app.registered_commands if not i.hidden}
+        for info in typer_app.registered_commands:
+            if info.hidden and id(info.callback) in visible:
+                found[f"{prefix}.{named(info)}"] = f"{prefix}.{visible[id(info.callback)]}"
+        seen: set[int] = set()
+        for group in typer_app.registered_groups:
+            if not group.hidden and id(group.typer_instance) not in seen:
+                seen.add(id(group.typer_instance))
+                walk(group.typer_instance, f"{prefix}.{group.name}")
+
+    walk(app, "cli")
+
+    assert found == _COMMAND_ALIASES
+
+
+def test_a_hidden_alias_of_a_command_is_the_same_feature(machine: Machine) -> None:
+    paths.ensure_home()
+    runner = CliRunner()
+    for words in ("project reset", "project fresh", "workspace reset"):
+        # an option that does not exist: the command is counted and then refuses to run
+        assert runner.invoke(app, [*words.split(), "--no-such-option"]).exit_code == 2
+
+    assert _recorded() == ["cli.project.fresh"] * 3
+
+
 def test_asking_for_help_is_not_using_the_command(machine: Machine) -> None:
     paths.ensure_home()
     runner = CliRunner()
@@ -974,40 +1013,57 @@ def test_counting_fails_open_and_a_command_never_notices(
     assert result.exit_code == 0, result.output
 
 
-def _dead_pid() -> int:
-    """The pid of a process that has exited (one that was just run and waited for)."""
-    import sys
+def _folding(spool: Path, pid: int, text: str, *, age_s: float = 0) -> Path:
+    """The file a fold of process ``pid`` has taken, last touched ``age_s`` ago."""
+    path = spool.with_name(f"{spool.name}.{pid}.folding")
+    path.write_text(text, encoding="utf-8")
+    then = time.time() - age_s
+    os.utime(path, (then, then))
+    return path
 
-    child = subprocess.Popen([sys.executable, "-c", "pass"])
-    child.wait()
-    return child.pid
+
+def _processes(monkeypatch: pytest.MonkeyPatch, *alive: int) -> list[int]:
+    """The processes there are (only ``alive``'s pids), and the pids the fold asked about: no
+    real pid, and no ``os.kill``, which on Windows is a signal to the pid's console group."""
+    asked: list[int] = []
+
+    def running(pid: int) -> bool:
+        asked.append(pid)
+        return pid in alive
+
+    monkeypatch.setattr(procs, "alive", running)
+    return asked
 
 
-def test_a_full_spool_stops_growing_and_a_dead_folds_leftovers_are_still_read() -> None:
+def test_a_full_spool_stops_growing_and_a_dead_folds_leftovers_are_still_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     paths.ensure_home()
     spool = paths.feature_use_path()
     spool.write_bytes(b"x" * (feature_use.MAX_SPOOL_BYTES + 1))
     assert feature_use.record("cli.config.set") is False
     spool.unlink()
-    # a fold that died after its rename
-    leftover = spool.with_name(f"{spool.name}.{_dead_pid()}.folding")
-    leftover.write_text("2026-10-25\tcli.config.set\n2026-10-25\tnot a name\n", encoding="utf-8")
+    # a fold that died after its rename, a moment ago
+    asked = _processes(monkeypatch)
+    leftover = _folding(spool, 4242, "2026-10-25\tcli.config.set\n2026-10-25\tnot a name\n")
 
     with store_session() as store:
         folded = feature_use.fold(store)
         rows = store.feature_uses(None, None)
 
     assert folded == 1 and rows == [("2026-10-25", "cli.config.set", 1)]
-    assert not leftover.exists()
+    assert not leftover.exists() and asked == [4242]
 
 
-def test_a_fold_another_process_is_working_on_is_not_taken_from_it() -> None:
+def test_a_fold_another_process_is_working_on_is_not_taken_from_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Review of #444 (nit): a live fold's file was adopted by a second fold, and both counted
-    it. A file whose process is alive (the test's parent stands for one) is left alone."""
+    it. A file whose process is alive and which was taken just now is left alone."""
     paths.ensure_home()
     spool = paths.feature_use_path()
-    live = spool.with_name(f"{spool.name}.{os.getppid()}.folding")
-    live.write_text("2026-10-25\tcli.config.set\n", encoding="utf-8")
+    _processes(monkeypatch, 4242)
+    live = _folding(spool, 4242, "2026-10-25\tcli.config.set\n")
 
     with store_session() as store:
         folded = feature_use.fold(store)
@@ -1015,6 +1071,48 @@ def test_a_fold_another_process_is_working_on_is_not_taken_from_it() -> None:
 
     assert folded == 0 and rows == []
     assert live.exists()  # still the other fold's to read and remove
+
+
+def test_a_file_held_longer_than_any_fold_is_adopted_whoever_has_its_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-review of #444 (M1): a pid that a stranger has since taken reads as a live fold, and
+    its file was left for ever. A fold never holds its file ``STALE_FOLD_S``."""
+    paths.ensure_home()
+    spool = paths.feature_use_path()
+    _processes(monkeypatch, 4242, 4343)  # both pids "run"
+    held = _folding(
+        spool, 4242, "2026-10-25\tcli.config.set\n", age_s=feature_use.STALE_FOLD_S + 60
+    )
+    fresh = _folding(
+        spool, 4343, "2026-10-25\tcli.config.set\n", age_s=feature_use.STALE_FOLD_S - 60
+    )
+
+    with store_session() as store:
+        folded = feature_use.fold(store)
+        rows = store.feature_uses(None, None)
+
+    assert folded == 1 and rows == [("2026-10-25", "cli.config.set", 1)]
+    assert not held.exists() and fresh.exists()
+
+
+def test_a_fold_never_signals_a_process_to_find_out_whether_it_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-review of #444 (M1): ``os.kill(pid, 0)`` is a CTRL_C_EVENT on Windows, sent to the
+    console group the pid is in. A fold asks :func:`procs.alive` and nothing else."""
+    paths.ensure_home()
+    spool = paths.feature_use_path()
+    _folding(spool, 4242, "2026-10-25\tcli.config.set\n")
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: signalled.append((pid, sig)))
+    monkeypatch.setattr(procs, "sys", SimpleNamespace(platform="win32"))  # only procs sees it
+    monkeypatch.setattr(procs, "_alive_on_windows", lambda pid: pid == 4242)
+
+    with store_session() as store:
+        assert feature_use.fold(store) == 0  # its process "runs": the file is not ours
+
+    assert signalled == []
 
 
 def test_recording_a_use_is_a_few_microseconds_not_a_database_open() -> None:
@@ -1210,6 +1308,60 @@ def test_a_directory_merely_captured_does_not_end_the_tombstone(machine: Machine
     with store_session() as store:
         assert store.get_meta(f"usage/purged/{gone}") is not None
         assert store.usage_turn_rows(None, None) == []
+
+
+def test_a_forgotten_project_stays_at_nothing_for_the_hook_too_with_capture_on(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review of #444 (nit): a session resumed after the purge is read from its first line by
+    the Stop hook (not by the sweep), and with capture on the directory is tracked: the old
+    115 tokens came back with the new 2. The hook asks the tombstone at a session's first
+    record."""
+    from aisquare.services import project as project_service
+
+    repo = machine.repo("purged")
+    add_project(repo)
+    transcript = _one_turn(machine, repo, SESSION, _day(0, 9))
+    usage_stats.sweep(tz=IST)  # counts it and profiles the repository, which a purge names
+    assert _totals() == (tokens(), 1, 1)
+    _forget_for_good(repo)
+    assert _totals() == (0, 0, 0)
+    monkeypatch.setattr(project_service, "capture_on", lambda: True)
+    write(transcript, prompt(_day(0, 10), cwd=repo), request(_day(0, 10, 1), "m2", cwd=repo))
+
+    hooks_service.turn_stopped(repo, session_id=SESSION, transcript_path=str(transcript))
+    usage_stats.sweep(tz=IST)
+
+    assert _totals() == (0, 0, 0)
+    add_project(repo)  # added back on purpose: it counts again
+    hooks_service.turn_stopped(repo, session_id=SESSION, transcript_path=str(transcript))
+    assert _totals()[1] == 1
+
+
+def test_a_sweep_with_nothing_new_does_not_ask_git_about_sessions_that_have_no_turn(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review of #444 (m1): resolving the repository before the scan cost a git call per
+    distinct directory for every idle session, every sweep (60 repositories: 11 ms → 520 ms).
+    With nothing to refuse, a session is placed only once it has a turn to place."""
+    repo = machine.repo("busy")
+    quiet = machine.repo("quiet")
+    _one_turn(machine, repo, SESSION, _day(0, 9))
+    machine.session(1, quiet, "77777777-2222-3333-4444-555555555555", prompt(_day(0, 9), cwd=quiet))
+    asked: list[Path | None] = []
+    resolve = usage_stats.repo_of
+
+    def counted(cwd: Path | None) -> Any:
+        asked.append(cwd)
+        return resolve(cwd)
+
+    monkeypatch.setattr(usage_stats, "repo_of", counted)
+
+    first = usage_stats.sweep(tz=IST)
+    second = usage_stats.sweep(tz=IST)
+
+    assert first.sessions_new == 1 and second.unchanged == 2 and second.sessions_new == 0
+    assert asked == [repo]  # the idle session's directory was never looked up
 
 
 def test_a_session_with_only_the_start_hook_in_it_is_no_failure_and_counts_when_it_starts(

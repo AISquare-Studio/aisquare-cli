@@ -16,12 +16,18 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from aisquare.core.agent_adapters.types import FirstEdit, PriceTable, UsageScan
+from aisquare.core.agent_adapters.types import (
+    FirstEdit,
+    PriceTable,
+    TurnChunk,
+    TurnsScan,
+    UsageScan,
+)
 from aisquare.core.pricing import RequestTokens
 from aisquare.core.usage import AISQUARE_MARKERS, ModelUsage, Usage
 
@@ -271,6 +277,47 @@ class Tally:
     def scan(self, usage: Usage) -> UsageScan:
         """``usage``, what this scan read, with the state to pass to the next."""
         return UsageScan(usage, self.to_json(), self.first_edit())
+
+
+def cut_turns(
+    tally: Tally,
+    records: Iterable[Mapping[str, Any]],
+    count: Callable[[Mapping[str, Any], Usage], None],
+    opens: Callable[[Mapping[str, Any]], bool],
+    day_of: Callable[[str], str],
+) -> TurnsScan:
+    """A reader's ``AgentTranscript.turns``: the ``records`` its scan reads (``tally.read``),
+    each counted as its ``usage`` counts it (``count``), cut where a record ``opens`` a turn
+    (a prompt of the human's) or ``day_of`` its ``timestamp`` changes, once a request is in
+    the stretch; a stretch with no request carries over into the next. The same records go
+    through the same count in the same order, so the turns and what no turn holds sum to
+    what the scan reads, and the state handed back is the scan's own."""
+    chunks: list[TurnChunk] = []
+    found, ended, day = Usage(), "", None
+    for record in records:
+        stamp = record.get("timestamp")
+        stamp = stamp if isinstance(stamp, str) else ""
+        here = day_of(stamp) if stamp else day
+        if found.requests > 0 and (opens(record) or (day is not None and here != day)):
+            chunks.append(TurnChunk(ended, found))
+            found, ended = Usage(), ""
+        day = here if here is not None else day
+        before = found.requests
+        count(record, found)
+        if found.requests > before and stamp:
+            ended = max(ended, stamp)
+    rest = Usage()
+    if found.requests > 0:
+        chunks.append(TurnChunk(ended, found))
+    elif chunks:
+        chunks[-1].usage.add(found)
+    else:
+        rest = found
+    whole = Usage()
+    for chunk in chunks:
+        whole.add(chunk.usage)
+    whole.add(rest)
+    return TurnsScan(tuple(chunks), tally.scan(whole))
 
 
 def trace(usage: Usage, text: str) -> None:

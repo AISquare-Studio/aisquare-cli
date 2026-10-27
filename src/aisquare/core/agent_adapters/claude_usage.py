@@ -55,7 +55,7 @@ from typing import Any
 
 from aisquare.core import pricing
 from aisquare.core.agent_adapters import usage_tally
-from aisquare.core.agent_adapters.types import FirstEdit, UsageScan
+from aisquare.core.agent_adapters.types import FirstEdit, TurnChunk, TurnsScan, UsageScan
 from aisquare.core.pricing import RequestTokens
 from aisquare.core.usage import AISQUARE_MARKERS, ModelUsage, Usage
 
@@ -221,16 +221,6 @@ def scan(transcript: Path, state: ScanState | None = None) -> tuple[Usage, ScanS
         _account(entry, usage, state)
     _trim(state)
     return usage, state
-
-
-@dataclass
-class TurnChunk:
-    """One stretch of a transcript a sweep reads as a turn: the work between two human
-    prompts, cut where the local day changes. ``ended_at`` is the timestamp of the last
-    request in it (ISO-8601 UTC, as the transcript writes it)."""
-
-    ended_at: str
-    usage: Usage
 
 
 @dataclass
@@ -577,3 +567,11 @@ def usage(file: Path, state: str | None) -> UsageScan:
     """:func:`scan` as the slot answers it: ``state`` is :meth:`ScanState.to_json`'s text."""
     delta, scanned = scan(file, ScanState.parse(state))
     return UsageScan(delta, scanned.to_json(), FirstEdit(**scanned.first_edit()))
+
+
+def turns(file: Path, state: str | None, day_of: Callable[[str], str]) -> TurnsScan:
+    """:func:`scan_turns` as the slot answers it (``AgentTranscript.turns``): the state is
+    :func:`usage`'s."""
+    scanned, kept = scan_turns(file, ScanState.parse(state), day_of=day_of)
+    whole = UsageScan(scanned.total(), kept.to_json(), FirstEdit(**kept.first_edit()))
+    return TurnsScan(tuple(scanned.chunks), whole)

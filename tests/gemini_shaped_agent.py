@@ -27,7 +27,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+import re
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,8 @@ from aisquare.core.agent_adapters.types import (
     SharePart,
     SkillDirs,
     TelemetryReader,
+    TranscriptRoot,
+    TurnsScan,
     UsageScan,
     WriteScope,
     config_home,
@@ -88,7 +91,7 @@ from aisquare.core.agent_adapters.types import (
     payload_text,
     stepped_down,
 )
-from aisquare.core.agent_adapters.usage_tally import Tally, is_lookup_command
+from aisquare.core.agent_adapters.usage_tally import Tally, cut_turns, is_lookup_command
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice
 from aisquare.core.claude_sharing import SharingError, TrustScope
 from aisquare.core.config import FleetSettings
@@ -313,27 +316,21 @@ class GeminiShapedTranscript:
         tally = Tally.parse(state)
         found = Usage()
         for record in tally.read(file):
-            if record.get("type") != "gemini":
-                continue
-            raw = record.get("tokens")
-            if isinstance(raw, dict):
-                cached = _count(raw, "cached")
-                tokens = RequestTokens(
-                    input=max(0, _count(raw, "input") - cached) + _count(raw, "tool"),
-                    cache_read=cached,
-                    output=_count(raw, "output") + _count(raw, "thoughts"),
-                )
-                key = record.get("id") if isinstance(record.get("id"), str) else None
-                tally.request(found, PRICES, str(record.get("model", "")), key, tokens)
-            for call in _calls(record):
-                name = str(call.get("name", "tool"))
-                args = call.get("args")
-                command = args.get("command") if isinstance(args, dict) else None
-                lookup = isinstance(command, str) and is_lookup_command(command)
-                tally.tool(
-                    found, name, str(call.get("id")), edits=name in EDIT_TOOLS, lookup=lookup
-                )
+            _count_gemini(record, tally, found)
         return tally.scan(found)
+
+    def turns(self, file: Path, state: str | None, day_of: Callable[[str], str]) -> TurnsScan:
+        tally = Tally.parse(state)
+        return cut_turns(
+            tally,
+            tally.read(file),
+            lambda record, found: _count_gemini(record, tally, found),
+            lambda record: record.get("type") == "user",
+            day_of,
+        )
+
+    def session_cwd(self, file: Path) -> Path | None:
+        return None  # its chats are kept per project, and name no folder
 
     def ledger(
         self, file: Path, *, since: datetime | None, until: datetime | None
@@ -423,6 +420,28 @@ class GeminiShapedTranscript:
                 if record.get("content"):
                     said.insert(0, str(record["content"]))
         return None
+
+
+def _count_gemini(record: Mapping[str, Any], tally: Tally, found: Usage) -> None:
+    """One record of its log into ``found``: a reply's tokens (its id's last line), its calls."""
+    if record.get("type") != "gemini":
+        return
+    raw = record.get("tokens")
+    if isinstance(raw, dict):
+        cached = _count(raw, "cached")
+        tokens = RequestTokens(
+            input=max(0, _count(raw, "input") - cached) + _count(raw, "tool"),
+            cache_read=cached,
+            output=_count(raw, "output") + _count(raw, "thoughts"),
+        )
+        key = record.get("id") if isinstance(record.get("id"), str) else None
+        tally.request(found, PRICES, str(record.get("model", "")), key, tokens)
+    for call in _calls(record):
+        name = str(call.get("name", "tool"))
+        args = call.get("args")
+        command = args.get("command") if isinstance(args, dict) else None
+        lookup = isinstance(command, str) and is_lookup_command(command)
+        tally.tool(found, name, str(call.get("id")), edits=name in EDIT_TOOLS, lookup=lookup)
 
 
 def _overridden(ours: Mapping[str, Any], theirs: Mapping[str, Any], prefix: str = "") -> list[str]:
@@ -601,6 +620,11 @@ class GeminiShapedAccounts:
 
     def config_dir(self, slot_dir: Path) -> Path:
         return slot_dir / CONFIG
+
+    def transcript_roots(self, config_dir: Path) -> tuple[TranscriptRoot, ...]:
+        # tmp/<project hash>/chats/session-<time>-<id>.json, as Gemini CLI keeps its chats.
+        name = re.compile(r"^session-.+-(?P<id>[^-.]+)\.json$")
+        return (TranscriptRoot(config_dir / "tmp", 2, name),)
 
     def _read(self, account: ClaudeAccount, name: str) -> dict[str, Any] | None:
         try:

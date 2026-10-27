@@ -1707,6 +1707,48 @@ def test_a_session_read_in_two_scans_adds_up_to_one_read_whole(
         assert _rounded(restarted) == _rounded(expected.delta.to_dict()), what
 
 
+def test_the_turns_a_sweep_reads_sum_to_the_usage_and_share_its_state(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """``AgentTranscript.turns`` (SCOPE #113 091, item 4), what the usage sweep records of a
+    session no hook watched: each turn holds a request, the turns are what ``usage`` reads of
+    the same bytes, cut, and the state is the one ``usage`` takes, so a sweep and a Stop read
+    on from each other: neither counts what the other has."""
+    reader = _usage_reader(adapter)
+    for moment in _usage_moments(adapter):
+        what = moment["what"]
+        file = tmp_path / "session.jsonl"
+        file.write_text("".join(line + "\n" for line in _usage_lines(moment)), encoding="utf-8")
+        whole = reader.usage(file, None)
+        cut = reader.turns(file, None, lambda stamp: stamp[:10])
+        assert cut is not None and cut.turns, what
+        assert all(turn.usage.requests > 0 and turn.ended_at for turn in cut.turns), what
+        summed = type(whole.delta)()
+        for turn in cut.turns:
+            summed.add(turn.usage)
+        assert summed.totals().total == cut.scan.delta.totals().total, what
+        assert _rounded(cut.scan.delta.to_dict()) == _rounded(whole.delta.to_dict()), what
+        assert cut.scan.first_edit == whole.first_edit, what
+        assert reader.usage(file, cut.scan.state).delta.is_empty(), what
+        assert reader.turns(file, whole.state, lambda stamp: stamp[:10]).turns == (), what
+        by_day = reader.turns(file, None, lambda stamp: stamp)  # every record its own "day"
+        assert len(by_day.turns) >= len(cut.turns), what
+
+
+def test_an_accounts_transcript_roots_are_in_its_config_dir(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """``AgentAccounts.transcript_roots``: where the usage sweep finds a home's sessions is
+    inside that home's config dir, and a root's ``name`` gives the session's own id."""
+    accounts = adapter.accounts
+    if accounts is None:
+        pytest.skip(f"{adapter.id} has no account slots")
+    config_dir = accounts.config_dir(tmp_path / "slot")
+    for root in accounts.transcript_roots(config_dir):
+        assert root.path.is_relative_to(config_dir) and root.depth >= 0
+        assert "id" in root.name.groupindex
+
+
 # --- the instruction files a session loads -----------------------------------------------
 
 

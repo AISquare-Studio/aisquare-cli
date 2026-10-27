@@ -1249,8 +1249,8 @@ def test_the_first_stats_sweep_says_it_is_reading_the_transcripts_on_a_terminal(
         store.delete_meta("usage.sweep.at")  # the throttle is open again
     shown = runner.invoke(app, ["metrics", "stats", "--range", "lifetime"])
 
-    assert "reading Claude Code's transcripts" not in piped.stderr  # not a terminal: silent
-    assert "reading Claude Code's transcripts 1/1" in shown.stderr
+    assert "reading the agents' transcripts" not in piped.stderr  # not a terminal: silent
+    assert "reading the agents' transcripts 1/1" in shown.stderr
 
 
 def test_the_utc_stamp_the_sweep_writes_sorts_with_the_hooks() -> None:

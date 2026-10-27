@@ -92,9 +92,9 @@ def test_a_pick_never_overrides_a_hand_written_codex_home_binding(
 
 @pytest.mark.usefixtures("project_capture")
 def test_a_codex_stop_is_in_the_usage_stats(tmp_path: Path) -> None:
-    """The sweep reads Claude Code's transcripts alone (the lane for Codex's is in the SCOPE
-    note), but a Codex session aisquare launched records its rollout's tokens at its Stop
-    (``AgentTranscript.usage``) and Usage & stats sums every recorded turn."""
+    """A Codex session aisquare launched records its rollout's tokens at its Stop
+    (``AgentTranscript.usage``) and Usage & stats sums every recorded turn; the sweep over the
+    rollouts no hook watched is ``tests/test_codex_usage_sweep.py``."""
     from aisquare.core.agent_adapters import get_adapter
 
     codex = get_adapter("codex")

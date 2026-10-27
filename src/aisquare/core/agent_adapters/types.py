@@ -971,6 +971,41 @@ class UsageScan:
     first_edit: FirstEdit
 
 
+@dataclass
+class TurnChunk:
+    """One stretch of a transcript a sweep reads as a turn: the work between two human
+    prompts, cut where the local day changes. ``ended_at`` is the timestamp of the last
+    request in it (ISO-8601 UTC, as the transcript writes it)."""
+
+    ended_at: str
+    usage: Usage
+
+
+@dataclass(frozen=True)
+class TurnsScan:
+    """What one scan of a session's transcript found, cut into its turns
+    (:meth:`AgentTranscript.turns`): the turns, oldest first, and the scan they are cut from
+    (``scan``: its ``delta`` the whole of them, usage no turn holds included, the state to
+    hand the next scan, which :meth:`AgentTranscript.usage` takes too, and the first-edit
+    figures)."""
+
+    turns: tuple[TurnChunk, ...]
+    scan: UsageScan
+
+
+@dataclass(frozen=True)
+class TranscriptRoot:
+    """Where an account's home keeps its sessions' transcripts, for a reader that walks them
+    all (the usage sweep, ``services.usage_stats``): each a file ``depth`` folders below
+    ``path`` whose name ``name`` matches, its group ``id`` the agent's own id for the session
+    (``AgentEvent.session_id``). Claude Code's ``projects/<folder>/<id>.jsonl``, Codex's
+    ``sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl``."""
+
+    path: Path
+    depth: int
+    name: re.Pattern[str]
+
+
 @dataclass(frozen=True)
 class PromptRecord:
     """The prompts an agent's own record says its sessions ran
@@ -1142,6 +1177,27 @@ class AgentTranscript(Protocol):
         background command's end). A file shorter than ``offset`` (rewritten) counts as
         begun, and so does a line too long to read. What ``[accounts] before_limit`` asks
         between the turn end it looked at and its move. ``OSError`` when it cannot be read."""
+        ...
+
+    def turns(
+        self, file: Path, state: str | None, day_of: Callable[[str], str]
+    ) -> TurnsScan | None:
+        """:meth:`usage`, cut into the turns the transcript holds, for a reader that was not
+        there at each Stop (the usage sweep over transcripts no hook watched,
+        ``services.usage_stats``): a turn is what lies between two of the human's prompts (not
+        the agent's own context, a tool's result or a summary), cut too wherever
+        ``day_of(timestamp)`` changes, so a turn over midnight is charged to each day what was
+        spent in it; a stretch with no request carries over into the next. The turns and what
+        no turn holds sum to what :meth:`usage` reads of the same bytes, and the state is the
+        one it takes: the sweep and the Stop hook read on from each other. ``None`` where
+        :meth:`usage` is. Never raises."""
+        ...
+
+    def session_cwd(self, file: Path) -> Path | None:
+        """The folder the session ran in, the first one its transcript names (Claude Code's
+        first ``cwd``, Codex's ``session_meta``), read off the transcript's head; ``None``
+        when it names none or cannot be read. Which repository a swept session counts under
+        (``services.usage_stats``)."""
         ...
 
 
@@ -1994,6 +2050,14 @@ class AgentAccounts(Protocol):
         """The config dir the agent reads in a home :attr:`home_env` names (a slot's, the
         plain one): where its hooks file, settings and login are. The home itself for
         Claude Code and Codex; Gemini CLI's names the folder its ``.gemini`` is in."""
+        ...
+
+    def transcript_roots(self, config_dir: Path) -> tuple[TranscriptRoot, ...]:
+        """Where the agent keeps its sessions' transcripts under ``config_dir`` (an account's,
+        :meth:`config_dir`): what the usage sweep reads of every session on the machine,
+        launched by aisquare or not, and how a transcript's path names the account it ran on
+        (``services.usage_stats``). Claude Code's ``projects``, Codex's ``sessions``; ``()``
+        for an agent whose transcripts are kept nowhere an account names."""
         ...
 
     def identity(

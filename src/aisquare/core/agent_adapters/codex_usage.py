@@ -32,7 +32,7 @@ written.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -42,11 +42,13 @@ from aisquare.core.agent_adapters.codex_transcript import (
     _call_input,
     _call_name,
     _message_text,
+    _own,
 )
-from aisquare.core.agent_adapters.types import UsageScan
+from aisquare.core.agent_adapters.types import TurnsScan, UsageScan
 from aisquare.core.agent_adapters.usage_tally import (
     Tally,
     carries_context,
+    cut_turns,
     is_lookup_command,
     is_lookup_server,
     trace,
@@ -68,6 +70,8 @@ _WANTED = (
     b"_call",
     b"<aisquare-",
 )
+#: And a line that may open a turn (:func:`turns`): a ``user`` message.
+_TURN_WANTED = (*_WANTED, b'"user"')
 #: The model a record whose turn named none is counted under: unpriced.
 UNKNOWN_MODEL = "unknown"
 
@@ -77,17 +81,49 @@ def usage(file: Path, state: str | None) -> UsageScan:
     tally = Tally.parse(state)
     found = Usage()
     for record in tally.read(file, _WANTED):
-        kind = record.get("type")
-        payload = record.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        if kind == "turn_context":
-            _turn(payload, tally)
-        elif kind == "token_usage_record":
-            _response(payload, tally, found)
-        elif kind == "response_item":
-            _item(payload, tally, found)
+        _count_record(record, tally, found)
     return tally.scan(found)
+
+
+def turns(file: Path, state: str | None, day_of: Callable[[str], str]) -> TurnsScan:
+    """:func:`usage`, cut into the rollout's turns (``AgentTranscript.turns``,
+    ``usage_tally.cut_turns``): at each ``user`` message that is the human's, not Codex's own
+    context (``codex_transcript._own``), and wherever the local day changes. The state is
+    :func:`usage`'s: the sweep and the Stop hook read on from each other."""
+    tally = Tally.parse(state)
+    records = tally.read(file, _TURN_WANTED)
+    return cut_turns(
+        tally,
+        records,
+        lambda record, found: _count_record(record, tally, found),
+        _is_prompt,
+        day_of,
+    )
+
+
+def _count_record(record: Mapping[str, Any], tally: Tally, found: Usage) -> None:
+    """Count one rollout record into ``found``: a turn's model, a response's tokens, a call."""
+    kind = record.get("type")
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return
+    if kind == "turn_context":
+        _turn(payload, tally)
+    elif kind == "token_usage_record":
+        _response(payload, tally, found)
+    elif kind == "response_item":
+        _item(payload, tally, found)
+
+
+def _is_prompt(record: Mapping[str, Any]) -> bool:
+    """Whether ``record`` is a prompt of the human's: it opens a turn."""
+    payload = record.get("payload")
+    if record.get("type") != "response_item" or not isinstance(payload, dict):
+        return False
+    if payload.get("type") != "message" or payload.get("role") != "user":
+        return False
+    text = _message_text(payload)
+    return bool(text.strip()) and not _own(text)
 
 
 def _string(value: object) -> str | None:

@@ -1,24 +1,29 @@
-"""Local usage stats: every Claude Code session on this machine, recorded and summed on read.
+"""Local usage stats: every agent's sessions on this machine, recorded and summed on read.
 
-**What is recorded.** Tokens are read off Claude Code's transcripts, exactly and once per API
-request (``core.agent_adapters.claude_usage``, which the sweep reads turn by turn: the Stop
-hook reads the same through the adapter's ``AgentTranscript.usage``). Two paths write them to
-the store's ``usage_session`` and ``usage_turn`` tables (``services.metrics`` says how the
-first works):
+**What is recorded.** Tokens are read off each agent's transcripts by its own reader, exactly and
+once per model request (``AgentTranscript.usage``, which the Stop hook reads, and
+``AgentTranscript.turns``, the same cut turn by turn, which the sweep reads: Claude Code's
+``core.agent_adapters.claude_usage``, Codex's ``codex_usage``). Two paths write them to the
+store's ``usage_session`` and ``usage_turn`` tables (``services.metrics`` says how the first
+works):
 
 - the **Stop hook** of a session aisquare launched, on the hot path, as before; and
-- the **sweep** (:func:`sweep`), which reads the transcripts of every Claude Code session in
-  every repository on every account directory — ``~/.claude`` and each registered slot's —
-  whether or not aisquare launched it. It runs off the hot path: when the dashboard opens or the
-  TUI ticks, at most every :data:`SWEEP_EVERY` (:func:`maybe_sweep`), and as ``aisquare metrics
-  backfill``. Claude Code deletes a transcript after ``cleanupPeriodDays`` (30 by default), so a
-  first sweep records the history that still exists and later ones keep it.
+- the **sweep** (:func:`sweep`), which reads the transcripts of every session of every agent
+  with account slots, in every repository on every account home — ``~/.claude`` and
+  ``~/.codex``, each registered slot's — whether or not aisquare launched it, where its agent
+  keeps them (``AgentAccounts.transcript_roots``: Claude Code's ``projects``, Codex's
+  ``sessions``). It runs off the hot path: when the dashboard opens or the TUI ticks, at most
+  every :data:`SWEEP_EVERY` (:func:`maybe_sweep`), and as ``aisquare metrics backfill``. Claude
+  Code deletes a transcript after ``cleanupPeriodDays`` (30 by default), so a first sweep
+  records the history that still exists and later ones keep it.
 
 The two cannot count a session twice: they share one scan state per session (the byte offset
-reached in each transcript file, the message ids counted), kept on its ``usage_session`` row
-and written with a compare-and-set on the state each started from (``store.record_usage``). A
-session the hook counted to byte N is read by the sweep from byte N; a session read by both
-at once is counted by the one that wins the write, and the other reads the rest next time.
+reached in each transcript file, the requests counted), kept on its ``usage_session`` row
+under the board's id for the session (``agent_events.session_key``: Claude Code's own id,
+Codex's derived from its home and thread) and written with a compare-and-set on the state each
+started from (``store.record_usage``). A session the hook counted to byte N is read by the
+sweep from byte N; a session read by both at once is counted by the one that wins the write,
+and the other reads the rest next time.
 
 **What is read.** :func:`stats` sums the turn rows of a range (``today``, ``7d``, ``30d``,
 ``lifetime``) into a :class:`~aisquare.models.UsageStats`, and :func:`daily_rollups` cuts the
@@ -44,7 +49,7 @@ import os
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from datetime import time as day_time
@@ -54,7 +59,7 @@ from typing import Any
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import feature_use, locking, paths, pricing, repo_profile
 from aisquare.core import usage as usage_core
-from aisquare.core.agent_adapters import claude_usage
+from aisquare.core.agent_adapters.types import TranscriptRoot
 from aisquare.core.ids import new_usage_id
 from aisquare.core.store import USAGE_PURGED_PREFIX, ContextStore, store_session
 from aisquare.core.workspace import current_project
@@ -161,24 +166,46 @@ def window(range_: UsageRange, today: date) -> tuple[date | None, date]:
 
 @dataclass(frozen=True)
 class Transcript:
-    """One session's transcript file, and the account directory it was found under."""
+    """One session's transcript file, the account home it was found under, and its agent.
+    ``session_id`` is the board's id for it, the one the agent's Stop hook records it under
+    (``agent_events.session_key``)."""
 
     session_id: str
     path: Path
     slot: int | None
+    agent: str
 
 
-def transcript_roots() -> list[tuple[int | None, Path]]:
-    """Every directory Claude Code keeps transcripts under, with the slot it belongs to: the
-    plain ``claude``'s (slot 1), each registered slot's, and ``~/.claude`` when the plain
-    ``claude`` is redirected elsewhere (``CLAUDE_CONFIG_DIR``)."""
-    roots: list[tuple[int | None, Path]] = [
-        (account.slot, account.config_dir) for account in accounts_core.list_accounts()
+@dataclass(frozen=True)
+class Home:
+    """An account home the sweep reads: the slot it is, the agent whose it is, and the
+    directory its agent's home variable names (``ClaudeAccount.config_dir``)."""
+
+    slot: int | None
+    agent: str
+    path: Path
+
+    def roots(self) -> tuple[TranscriptRoot, ...]:
+        """Where its agent keeps its sessions' transcripts in it
+        (``AgentAccounts.transcript_roots``)."""
+        accounts = accounts_core.kind(self.agent)
+        return accounts.transcript_roots(accounts.config_dir(self.path))
+
+
+def homes() -> list[Home]:
+    """Every account home an agent keeps its sessions' transcripts in, with its slot: each
+    agent's plain home and registered slots, and each agent's plain home as its binary finds
+    it with its variable unset (``~/.claude``, ``~/.codex``) when the variable points the
+    plain slot elsewhere (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``)."""
+    found = [
+        Home(account.slot, account.agent, account.config_dir)
+        for account in accounts_core.list_accounts()
     ]
-    home = accounts_core.home_config_dir()
-    if all(not _same_path(home, directory) for _, directory in roots):
-        roots.append((accounts_core.DEFAULT_SLOT, home))
-    return roots
+    for agent in accounts_core.account_agents():
+        unset = accounts_core.plain_home(agent, {})
+        if all(not _same_path(unset, home.path) for home in found):
+            found.append(Home(accounts_core.kind(agent).plain_slot, agent, unset))
+    return found
 
 
 def _same_path(a: Path, b: Path) -> bool:
@@ -188,76 +215,107 @@ def _same_path(a: Path, b: Path) -> bool:
         return a == b
 
 
-def discover(roots: Iterable[tuple[int | None, Path]]) -> list[Transcript]:
-    """The session transcripts under ``roots`` (``<dir>/projects/<folder>/<session>.jsonl``),
-    newest first, each session once: a directory reached twice (a shared ``projects`` link, the
-    default slot named by both the variable and ``~/.claude``) is read once."""
+def discover(found_in: Iterable[Home]) -> list[Transcript]:
+    """The session transcripts in the homes ``found_in`` (each agent's own layout, its
+    ``AgentAccounts.transcript_roots``: Claude Code's ``projects/<folder>/<session>.jsonl``,
+    Codex's ``sessions/YYYY/MM/DD/rollout-…-<thread>.jsonl``), newest first, each session once:
+    a directory reached twice (a shared ``projects`` link, the default slot named by both the
+    variable and ``~/.claude``) is read once."""
+    # Lazy: services.agent_events imports the hooks, which a sweep needs only for its key.
+    from aisquare.core.agent_adapters import get_adapter
+    from aisquare.services.agent_events import session_key
+
     found: list[tuple[float, Transcript]] = []
     seen_files: set[Path] = set()
     seen_sessions: set[str] = set()
-    for slot, directory in roots:
-        projects = directory / "projects"
-        try:
-            folders = [entry.path for entry in os.scandir(projects) if entry.is_dir()]
-        except OSError:
-            continue
-        for folder in sorted(folders):
-            try:
-                entries = [e for e in os.scandir(folder) if e.name.endswith(".jsonl")]
-            except OSError:
-                continue
-            for entry in entries:
+    for home in found_in:
+        adapter = get_adapter(home.agent)
+        config_dir = accounts_core.kind(home.agent).config_dir(home.path)
+        for root in home.roots():
+            for entry, native in _session_files(root):
                 try:
                     real = Path(entry.path).resolve()
                     mtime = entry.stat().st_mtime
                 except (OSError, RuntimeError):
                     continue
-                session_id = entry.name.removesuffix(".jsonl")
+                session_id = session_key(adapter, config_dir, native)
                 if real in seen_files or session_id in seen_sessions:
                     continue
                 seen_files.add(real)
                 seen_sessions.add(session_id)
-                found.append((mtime, Transcript(session_id, Path(entry.path), slot)))
+                found.append(
+                    (mtime, Transcript(session_id, Path(entry.path), home.slot, home.agent))
+                )
     found.sort(key=lambda item: (-item[0], item[1].session_id))
     return [item[1] for item in found]
 
 
-def account_slot(transcript: Path) -> int | None:
-    """The slot whose config directory holds ``transcript``
-    (``<dir>/projects/<folder>/<session>.jsonl``); ``None`` for a directory none names."""
-    try:
-        directory = transcript.parents[2]
-    except IndexError:
-        return None
-    if transcript.parents[1].name != "projects":
-        return None
-    slot = accounts_core.managed_slot(directory)
-    if slot is not None:
-        return slot
-    for candidate in (accounts_core.default_config_dir(), accounts_core.home_config_dir()):
-        if _same_path(directory, candidate):
-            return accounts_core.DEFAULT_SLOT
-    return None
-
-
-def session_cwd(transcript: Path) -> Path | None:
-    """The directory the session ran in: the first ``cwd`` in the head of its transcript."""
-    try:
-        with transcript.open("rb") as handle:
-            head = handle.read(_HEAD_BYTES)
-    except OSError:
-        return None
-    for line in head.split(b"\n"):
-        if b'"cwd"' not in line:
-            continue
+def _session_files(root: TranscriptRoot) -> Iterator[tuple[os.DirEntry[str], str]]:
+    """Each file ``root.depth`` folders below ``root.path`` whose name ``root.name`` matches,
+    with the agent's id for its session (the pattern's ``id``); folders in name order."""
+    level = [root.path]
+    for _ in range(root.depth):
+        below: list[Path] = []
+        for folder in level:
+            try:
+                below.extend(sorted(Path(e.path) for e in os.scandir(folder) if e.is_dir()))
+            except OSError:
+                continue
+        level = below
+    for folder in level:
         try:
-            entry = json.loads(line)
-        except ValueError:
+            entries = list(os.scandir(folder))
+        except OSError:
             continue
-        cwd = entry.get("cwd") if isinstance(entry, dict) else None
-        if isinstance(cwd, str) and cwd:
-            return Path(cwd)
-    return None
+        for entry in entries:
+            matched = root.name.match(entry.name)
+            if matched is not None:
+                yield entry, matched.group("id")
+
+
+class _Places:
+    """Which account, of which agent, a transcript's path is under: every home's transcript
+    roots, resolved once (:func:`homes`)."""
+
+    def __init__(self, found_in: Iterable[Home] | None = None) -> None:
+        self.roots: list[tuple[Path, Home]] = []
+        for home in homes() if found_in is None else found_in:
+            for root in home.roots():
+                try:
+                    self.roots.append((root.path.resolve(), home))
+                except (OSError, RuntimeError):
+                    self.roots.append((root.path, home))
+
+    def of(self, transcript: Path) -> Home | None:
+        """The home whose transcript roots hold ``transcript``, or ``None``."""
+        try:
+            path = transcript.resolve()
+        except (OSError, RuntimeError):
+            path = transcript
+        for root, home in self.roots:
+            if path.is_relative_to(root):
+                return home
+        return None
+
+
+def account_slot(transcript: Path, places: _Places | None = None) -> int | None:
+    """The slot whose home holds ``transcript`` under its agent's transcript roots (Claude
+    Code's ``<dir>/projects/<folder>/<session>.jsonl``, Codex's ``<home>/sessions/…``);
+    ``None`` for a directory none names."""
+    home = (places or _Places()).of(transcript)
+    return home.slot if home is not None else None
+
+
+def session_cwd(transcript: Path, places: _Places | None = None) -> Path | None:
+    """The directory the session ran in, as its agent's reader reads its transcript's head
+    (``AgentTranscript.session_cwd``): the agent of the home that holds it, Claude Code's for
+    a transcript no home holds (the transcripts recorded before agents)."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    home = (places or _Places()).of(transcript)
+    adapter = recorded_adapter(home.agent if home is not None else None)
+    reader = adapter.transcript_reader if adapter is not None else None
+    return reader.session_cwd(transcript) if reader is not None else None
 
 
 def repo_of(cwd: Path | None) -> tuple[str, Path] | None:
@@ -310,7 +368,9 @@ def repo_id_of(repo_id: str, root: Path) -> str:
 def _subscription_of(account: ClaudeAccount) -> str:
     """The subscription an account's login holds: ``pro``, ``max``, ``team``, ``enterprise`` …
     as Claude Code stores it; ``api`` for an account with an approved API key and no login;
-    ``unknown`` otherwise. Reads the Keychain: never on a hook's path."""
+    for another agent's account, the plan its accounts slot reads (``AgentAccounts.
+    subscription``: Codex's ``plus``, ``pro`` …); ``unknown`` otherwise. Reads the Keychain:
+    never on a hook's path."""
     creds = accounts_core.credentials(account)
     if creds is not None and creds.subscription_type:
         return creds.subscription_type.strip().lower()
@@ -323,6 +383,10 @@ def _subscription_of(account: ClaudeAccount) -> str:
                 return kind.removeprefix("claude_").strip().lower()
         elif data.get("customApiKeyResponses"):
             return "api"
+    if not accounts_core.kind(account.agent).legacy_slots:
+        plan = accounts_core.kind(account.agent).subscription(account)
+        if plan:
+            return plan.strip().lower()
     return UNKNOWN_TYPE
 
 
@@ -430,12 +494,14 @@ def sweep(
     *,
     store: ContextStore | None = None,
     now: datetime | None = None,
-    roots: list[tuple[int | None, Path]] | None = None,
+    found_in: list[Home] | None = None,
     tz: tzinfo | None = None,
     progress: Callable[[int, int], None] | None = None,
 ) -> SweepReport:
-    """Read every Claude Code transcript on this machine that has grown since it was last read,
-    and record what it added. Idempotent, incremental, and safe to run beside the hooks.
+    """Read every agent's session transcript on this machine that has grown since it was last
+    read (in ``found_in``, else every account home, :func:`homes`), and record what it added
+    through the agent's own reader (``AgentTranscript.turns``). Idempotent, incremental, and
+    safe to run beside the hooks.
 
     One sweep at a time per machine (a lock file); a second asking meanwhile returns at once
     with ``skipped`` set. Never raises for a transcript it cannot read: that one is counted in
@@ -446,10 +512,10 @@ def sweep(
         paths.ensure_home()  # the lock file lives in it, and the store may not have made it yet
         with locking.holding(paths.usage_sweep_lock_path(), wait_s=0):
             if store is not None:
-                report = _sweep(store, now, roots, tz, progress)
+                report = _sweep(store, now, found_in, tz, progress)
             else:
                 with store_session() as owned:
-                    report = _sweep(owned, now, roots, tz, progress)
+                    report = _sweep(owned, now, found_in, tz, progress)
     except TimeoutError:
         return SweepReport(skipped="another sweep is running")
     except OSError:
@@ -461,12 +527,14 @@ def sweep(
 def _sweep(
     store: ContextStore,
     now: datetime | None,
-    roots: list[tuple[int | None, Path]] | None,
+    found_in: list[Home] | None,
     tz: tzinfo | None,
     progress: Callable[[int, int], None] | None,
 ) -> SweepReport:
     report = SweepReport()
-    found = discover(roots if roots is not None else transcript_roots())
+    read = found_in if found_in is not None else homes()
+    places = _Places(read)
+    found = discover(read)
     report.transcripts = len(found)
     known = store.usage_transcripts()
     purged = purged_repos(store)
@@ -477,7 +545,9 @@ def _sweep(
         if progress is not None:
             progress(index, len(found))
         try:
-            outcome = _sweep_one(store, transcript, known, repos, types, tz, now, purged)
+            outcome = _sweep_one(
+                store, transcript, known, repos, types, tz, now, purged, places=places
+            )
         except Exception as exc:  # one unreadable transcript costs that one
             metrics_service.log_failure(f"usage sweep failed for {transcript.path}", exc)
             report.failed += 1
@@ -490,7 +560,7 @@ def _sweep(
             seen_repos.setdefault(outcome.repo[0], outcome.repo[1])
     if progress is not None:
         progress(len(found), len(found))
-    report.attributed = _attribute(store, types, repos)
+    report.attributed = _attribute(store, types, repos, places)
     report.profiles = refresh_profiles(store, seen_repos, now=now)
     report.features = feature_use.fold(store)
     store.set_meta(_SWEPT_KEY, (now or datetime.now(UTC)).isoformat())
@@ -523,10 +593,21 @@ def _sweep_one(
     tz: tzinfo | None,
     now: datetime | None,
     purged: frozenset[str] = frozenset(),
+    *,
+    places: _Places,
 ) -> _Outcome:
-    """Record what one transcript added since the session's row was last written. A session of a
-    repository whose usage was purged (``purged``) is not read at all."""
+    """Record what one transcript added since the session's row was last written, read by its
+    agent's own reader (``AgentTranscript.turns``, from the state the session's Stop hook and
+    the last sweep left). A session of a repository whose usage was purged (``purged``) is not
+    read at all, nor is one of an agent whose transcript holds no token record."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
     outcome = _Outcome()
+    adapter = recorded_adapter(found.agent)
+    reader = adapter.transcript_reader if adapter is not None else None
+    if reader is None:
+        outcome.unchanged = 1
+        return outcome
     session_id = known.get(str(found.path), found.session_id)
     existing = store.session_usage(session_id)
     transcript = found.path
@@ -539,24 +620,23 @@ def _sweep_one(
     # Which repository it is costs a git call per distinct directory, and a session with no turn
     # (idle, or only a hook's attachment) never gets a row, so is looked at on every sweep:
     # asked before the scan only when there is a repository to refuse, after it otherwise.
-    repo = _session_repo(transcript, existing, repos) if purged else None
+    repo = _session_repo(transcript, existing, repos, places) if purged else None
     if repo is not None and repo[0] in purged:
         outcome.unchanged = 1  # forgotten on purpose: its usage does not come back from here
         return outcome
-    state = claude_usage.ScanState.parse(existing.state if existing else None)
-    scanned, state = claude_usage.scan_turns(
-        transcript, state, day_of=lambda stamp: _day_key(stamp, tz)
+    scanned = reader.turns(
+        transcript, existing.state if existing else None, lambda stamp: _day_key(stamp, tz)
     )
-    if not scanned.chunks:
+    if scanned is None or not scanned.turns:
         # Nothing that is a turn: no row to write, and none whose state is worth saving. (A
         # transcript of only a session-start hook's attachment has a non-empty delta, no turn,
         # and nothing to take the first turn's time from.)
         outcome.unchanged = 1
         return outcome
-    delta = scanned.total()
+    delta = scanned.scan.delta
     recorded_at = now or datetime.now(UTC)  # no turn is recorded as later than this
     if not purged:
-        repo = _session_repo(transcript, existing, repos)
+        repo = _session_repo(transcript, existing, repos, places)
     outcome.repo = repo
     total = usage_core.Usage.from_dict(existing.usage) if existing else usage_core.Usage()
     total.add(delta)
@@ -564,7 +644,7 @@ def _sweep_one(
     before = existing.turns if existing else 0
     project_id = existing.project_id if existing else (repo[0] if repo else found.session_id)
     rows: list[TurnUsage] = []
-    for seq, chunk in enumerate(scanned.chunks, start=before + 1):
+    for seq, chunk in enumerate(scanned.turns, start=before + 1):
         figures = chunk.usage.totals()
         rows.append(
             TurnUsage(
@@ -582,15 +662,15 @@ def _sweep_one(
             )
         )
     last_seen = max((row.recorded_at for row in rows), default=recorded_at)
-    slot = account_slot(transcript)
+    slot = account_slot(transcript, places)
     if slot is None:
         slot = found.slot
     session = SessionUsage(
         session_id=session_id,
         project_id=project_id,
         transcript_path=str(transcript),
-        state=state.to_json(),
-        usage={**total.to_dict(), "first_edit": state.first_edit()},
+        state=scanned.scan.state,
+        usage={**total.to_dict(), "first_edit": scanned.scan.first_edit.as_dict()},
         turns=before + len(rows),
         total_tokens=totals.total,
         weighted=totals.weighted,
@@ -624,12 +704,14 @@ def _session_repo(
     transcript: Path,
     existing: SessionUsage | None,
     repos: dict[Path, tuple[str, Path] | None],
+    places: _Places,
 ) -> tuple[str, Path] | None:
-    """The repository a session without a recorded one ran in (its first ``cwd``), resolved once
-    per directory in ``repos``; ``None`` when it has one already or none can be told."""
+    """The repository a session without a recorded one ran in (the folder its transcript names
+    first, :func:`session_cwd`), resolved once per directory in ``repos``; ``None`` when it has
+    one already or none can be told."""
     if existing is not None and existing.repo_id:
         return None
-    cwd = session_cwd(transcript)
+    cwd = session_cwd(transcript, places)
     if cwd is None:
         return None
     if cwd not in repos:
@@ -662,7 +744,10 @@ def _day_key(stamp: str, tz: tzinfo | None) -> str:
 
 
 def _attribute(
-    store: ContextStore, types: dict[int, str], repos: dict[Path, tuple[str, Path] | None]
+    store: ContextStore,
+    types: dict[int, str],
+    repos: dict[Path, tuple[str, Path] | None],
+    places: _Places,
 ) -> int:
     """Fill the account and repository of sessions recorded without them (by hooks before this
     existed): from the directory the transcript lives in and the one the session ran in. A
@@ -674,12 +759,12 @@ def _attribute(
         slot = session.account_slot
         path = Path(session.transcript_path) if session.transcript_path else None
         if slot is None and path is not None:
-            slot = account_slot(path)
+            slot = account_slot(path, places)
         kind = session.account_type or (types.get(slot) if slot is not None else None)
         repo_id = session.repo_id
         if repo_id is None:
             repo_id = session.project_id
-            cwd = session_cwd(path) if path is not None and path.exists() else None
+            cwd = session_cwd(path, places) if path is not None and path.exists() else None
             if cwd is not None:
                 if cwd not in repos:
                     repos[cwd] = repo_of(cwd)

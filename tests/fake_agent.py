@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shlex
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -66,6 +67,8 @@ from aisquare.core.agent_adapters.types import (
     SharePart,
     SkillDirs,
     TelemetryReader,
+    TranscriptRoot,
+    TurnsScan,
     UsageScan,
     WriteScope,
     config_home,
@@ -77,7 +80,7 @@ from aisquare.core.agent_adapters.types import (
     store_dir,
     store_read_only,
 )
-from aisquare.core.agent_adapters.usage_tally import Tally, carries_context, trace
+from aisquare.core.agent_adapters.usage_tally import Tally, carries_context, cut_turns, trace
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice
 from aisquare.core.claude_sharing import SharingError, TrustScope
 from aisquare.core.config import FleetSettings
@@ -234,24 +237,22 @@ class FakeTranscript:
         tally = Tally.parse(state)
         found = Usage()
         for record in tally.read(file):
-            kind = record.get("kind")
-            call = record.get("id") if isinstance(record.get("id"), str) else None
-            if kind == "billed":
-                tokens = RequestTokens(
-                    input=_tokens(record, "fresh"),
-                    cache_read=_tokens(record, "reused"),
-                    output=_tokens(record, "out"),
-                )
-                tally.request(found, PRICES, str(record.get("model", "")), call, tokens)
-            elif kind in ("run", "pick"):
-                tool = str(record.get("tool", "tool")) if kind == "run" else "pick"
-                tally.tool(found, tool, call, edits=tool == EDIT_TOOL)
-            elif kind == "ran":
-                found.tool_result_chars += len(str(record.get("output", "")))
-            elif kind == "brief" and carries_context(text := str(record.get("text", ""))):
-                found.injected_chars += len(text)
-                trace(found, "aisquare context in its brief")
+            _count_fake(record, tally, found)
         return tally.scan(found)
+
+    def turns(self, file: Path, state: str | None, day_of: Callable[[str], str]) -> TurnsScan:
+        # A turn opens at each thing it heard.
+        tally = Tally.parse(state)
+        return cut_turns(
+            tally,
+            tally.read(file),
+            lambda record, found: _count_fake(record, tally, found),
+            lambda record: record.get("kind") == "heard",
+            day_of,
+        )
+
+    def session_cwd(self, file: Path) -> Path | None:
+        return None  # its log names no folder
 
     def ledger(
         self, file: Path, *, since: datetime | None, until: datetime | None
@@ -362,6 +363,27 @@ class FakeTranscript:
             if kind == "said":
                 said.insert(0, str(record.get("text", "")))
         return None
+
+
+def _count_fake(record: Mapping[str, Any], tally: Tally, found: Usage) -> None:
+    """One record of its log into ``found``: a bill, a call, a result, a brief."""
+    kind = record.get("kind")
+    call = record.get("id") if isinstance(record.get("id"), str) else None
+    if kind == "billed":
+        tokens = RequestTokens(
+            input=_tokens(record, "fresh"),
+            cache_read=_tokens(record, "reused"),
+            output=_tokens(record, "out"),
+        )
+        tally.request(found, PRICES, str(record.get("model", "")), call, tokens)
+    elif kind in ("run", "pick"):
+        tool = str(record.get("tool", "tool")) if kind == "run" else "pick"
+        tally.tool(found, tool, call, edits=tool == EDIT_TOOL)
+    elif kind == "ran":
+        found.tool_result_chars += len(str(record.get("output", "")))
+    elif kind == "brief" and carries_context(text := str(record.get("text", ""))):
+        found.injected_chars += len(text)
+        trace(found, "aisquare context in its brief")
 
 
 def _fake_call(record: Mapping[str, Any], at: datetime | None) -> PendingTool:
@@ -503,6 +525,9 @@ class FakeAccounts:
 
     def config_dir(self, slot_dir: Path) -> Path:
         return slot_dir  # FAKE_AGENT_HOME names its config dir itself
+
+    def transcript_roots(self, config_dir: Path) -> tuple[TranscriptRoot, ...]:
+        return (TranscriptRoot(config_dir / "logs", 0, re.compile(r"^(?P<id>.+)\.log$")),)
 
     def _login(self, account: ClaudeAccount) -> dict[str, Any] | None:
         try:

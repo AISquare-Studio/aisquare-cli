@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -81,7 +81,13 @@ from aisquare.core.agent_adapters.transcripts import (
     speaker_line,
     wrap,
 )
-from aisquare.core.agent_adapters.types import AnswerKey, AnswerKind, CallAsk, UsageScan
+from aisquare.core.agent_adapters.types import (
+    AnswerKey,
+    AnswerKind,
+    CallAsk,
+    TurnsScan,
+    UsageScan,
+)
 from aisquare.core.ledger import SessionLedger
 
 SPEAKER = "codex"
@@ -241,6 +247,16 @@ class CodexTranscript:
     def activity_since(self, file: Path, offset: int) -> bool:
         """A turn opened or at work after ``offset`` (:func:`_turn_begun`)."""
         return _turn_begun(file, offset)
+
+    def turns(self, file: Path, state: str | None, day_of: Callable[[str], str]) -> TurnsScan:
+        """:meth:`usage`, cut at each prompt of the human's (:mod:`codex_usage`)."""
+        from aisquare.core.agent_adapters import codex_usage
+
+        return codex_usage.turns(file, state, day_of)
+
+    def session_cwd(self, file: Path) -> Path | None:
+        """The folder its ``session_meta`` names, else its first ``turn_context``'s."""
+        return _rollout_cwd(file)
 
 
 _ROLLOUT_NAME = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)\.jsonl$")
@@ -593,6 +609,31 @@ def _rollout_unparsed(
             own = words.startswith(_INSTRUCTIONS) or _OWN_TEXT.match(words) is not None
             return ("own" if own else "user_prompt"), None
     return None, None
+
+
+_CWD_HEAD = 1_048_576
+"""How much of a rollout's head :func:`_rollout_cwd` reads: its ``session_meta``, Codex's base
+instructions inside it, and the first turn's ``turn_context``."""
+
+
+def _rollout_cwd(file: Path) -> Path | None:
+    """``AgentTranscript.session_cwd`` for a rollout: the ``cwd`` of its ``session_meta`` (its
+    first line), else of the first ``turn_context`` in its head; ``None`` with neither."""
+    try:
+        with file.open("rb") as handle:
+            head = handle.read(_CWD_HEAD)
+    except OSError:
+        return None
+    for line in head.split(b"\n"):
+        if b'"cwd"' not in line:
+            continue
+        record = parse_line(line)
+        if record is None or record.get("type") not in ("session_meta", "turn_context"):
+            continue
+        cwd = _payload(record).get("cwd")
+        if isinstance(cwd, str) and cwd:
+            return Path(cwd)
+    return None
 
 
 # --- a turn end: the exec sessions it left running, and a turn begun since ------------------

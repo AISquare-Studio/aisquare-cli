@@ -29,6 +29,11 @@ a Codex that has run none holds none. So a record is a row's when the pane's pro
   unsent, and ``ps`` plus ``lsof`` cost 0.1 to 0.2 s on a loaded machine, so what the pane
   holds is kept for :data:`HELD_FOR` seconds (:func:`held_by_pane`). A rollout a prompt has
   just made is seen by the next listing after that.
+- **When a tool hangs** (a stale network mount stops ``lsof``) it runs to :data:`_TIMEOUT`
+  and costs that again for every pane with a row pending, on every listing, for as long as
+  it hangs: K panes, 5 K seconds a listing (r24 8). The first timeout makes every pane's
+  answer "cannot tell" for :data:`BACKOFF` seconds, and the next listing after that tries
+  once more.
 """
 
 from __future__ import annotations
@@ -46,9 +51,20 @@ PROC = Path("/proc")
 HELD_FOR = 2.0
 """Seconds what a pane holds is kept (:func:`held_by_pane`)."""
 _TIMEOUT = 5.0
+"""Seconds ``ps`` or ``lsof`` is given."""
+BACKOFF = 30.0
+"""Seconds after one of them timed out in which neither is run (:func:`held_by_pane`)."""
 _HELD: dict[int, tuple[float, frozenset[str] | None]] = {}
 _HELD_MAX = 256
 _LOCK = threading.Lock()
+_BLIND_UNTIL = [0.0]
+"""``time.monotonic`` until which nothing is asked of ``ps`` or ``lsof``: set by a timeout."""
+
+
+def _hung() -> None:
+    """A tool ran to its timeout: ask none of them for :data:`BACKOFF` seconds."""
+    with _LOCK:
+        _BLIND_UNTIL[0] = time.monotonic() + BACKOFF
 
 
 def descendants(root: int) -> frozenset[int] | None:
@@ -61,6 +77,9 @@ def descendants(root: int) -> frozenset[int] | None:
             timeout=_TIMEOUT,
             check=False,
         )
+    except subprocess.TimeoutExpired:
+        _hung()
+        return None
     except (OSError, subprocess.SubprocessError):
         return None
     if done.returncode != 0:
@@ -140,8 +159,11 @@ def _from_lsof(pids: list[int]) -> frozenset[str] | None:
             timeout=_TIMEOUT,
             check=False,
         )
+    except subprocess.TimeoutExpired:
+        _hung()
+        return None
     except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
-        return None  # no lsof, a timeout, or a name this locale cannot decode: not told
+        return None  # no lsof, or a name this locale cannot decode: not told
     found: set[str] = set()
     answered = False
     for line in done.stdout.splitlines():
@@ -154,12 +176,15 @@ def _from_lsof(pids: list[int]) -> frozenset[str] | None:
 
 def held_by_pane(root: int) -> frozenset[str] | None:
     """The files held open by ``root`` and everything below it, kept for :data:`HELD_FOR`
-    seconds; ``None`` when the processes or their files cannot be told."""
+    seconds; ``None`` when the processes or their files cannot be told, and for
+    :data:`BACKOFF` seconds after any read timed out."""
     now = time.monotonic()
     with _LOCK:
         kept = _HELD.get(root)
         if kept is not None and now - kept[0] < HELD_FOR:
             return kept[1]
+        if now < _BLIND_UNTIL[0]:
+            return None  # a tool hung a moment ago: not asked again yet, for any pane
     tree = descendants(root)
     held = None if tree is None else open_files(tree)
     with _LOCK:

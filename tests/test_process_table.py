@@ -27,8 +27,10 @@ from aisquare.core.process_table import PaneProcesses
 @pytest.fixture(autouse=True)
 def forgotten() -> Iterator[None]:
     process_table._HELD.clear()
+    process_table._BLIND_UNTIL[0] = 0.0
     yield
     process_table._HELD.clear()
+    process_table._BLIND_UNTIL[0] = 0.0
 
 
 #: The real-process tests need the tools the table reads: ``ps`` for the tree, and for the files
@@ -384,7 +386,8 @@ def test_a_hung_lsof_is_waited_for_once_a_moment_not_on_every_listing(
     """tester-24b: an ``lsof`` that hangs (a stale NFS mount does that) runs to its timeout, and
     the answer was stamped with the time the read began, so it was already older than
     :data:`HELD_FOR` and asked again by the next listing, for every row: K rows, 5 K seconds.
-    Stamped when the read ended, the next listing inside the moment makes no call."""
+    Stamped when the read ended, the next listing inside the moment makes no call, and after
+    it the back-off (r24 8) keeps the tool from being asked until :data:`BACKOFF` has passed."""
     now = [1000.0]
     calls: list[str] = []
 
@@ -408,9 +411,86 @@ def test_a_hung_lsof_is_waited_for_once_a_moment_not_on_every_listing(
     assert process_table.held_by_pane(7) is None
     assert calls == ["lsof"], "a hung lsof is paid for once, not on every listing"
 
-    now[0] += process_table.HELD_FOR  # the moment passes
+    now[0] += process_table.HELD_FOR  # the moment passes: the tool is still being left alone
+    assert process_table.held_by_pane(7) is None
+    assert calls == ["lsof"]
+
+    now[0] += process_table.BACKOFF  # and when the back-off is over, it is tried once more
     assert process_table.held_by_pane(7) is None
     assert calls == ["lsof", "lsof"]
+
+
+def _hanging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, tool: str
+) -> tuple[list[float], list[tuple[str, object]]]:
+    """``subprocess.run`` with ``tool`` ("ps" or "lsof") hanging to its timeout; the clock
+    moves by that wait. Returns the clock and each call (tool, the timeout it was given)."""
+    now = [1000.0]
+    calls: list[tuple[str, object]] = []
+
+    def run(argv: list[str], **kwargs: object) -> object:
+        calls.append((argv[0], kwargs.get("timeout")))
+        if argv[0] == tool:
+            now[0] += process_table._TIMEOUT
+            raise subprocess.TimeoutExpired(argv, process_table._TIMEOUT)
+        return subprocess.CompletedProcess(argv, 0, stdout="7 1\n8 7\n9 1\n", stderr="")
+
+    real_open_files = process_table.open_files
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(process_table, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(
+        process_table, "open_files", lambda pids: real_open_files(pids, proc=tmp_path / "no-proc")
+    )
+    return now, calls
+
+
+@pytest.mark.parametrize("tool", ["lsof", "ps"])
+def test_a_hung_tool_is_not_paid_for_by_every_pane_of_a_listing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tool: str
+) -> None:
+    """r24 8: the memory is per pane, so five panes with a row pending cost five timeouts on a
+    listing, 25 s, on every listing for as long as the tool hangs. The first timeout makes
+    every pane's answer "cannot tell" for the back-off, whichever tool it was."""
+    now, calls = _hanging(monkeypatch, tmp_path, tool=tool)
+
+    for _listing in range(3):
+        for pane in (7, 70, 71, 72, 73):
+            assert process_table.held_by_pane(pane) is None
+        now[0] += 3.0  # the next listing, past the moment a pane's answer is kept
+    assert [name for name, _ in calls].count(tool) == 1, calls
+
+    now[0] += process_table.BACKOFF  # the back-off is over: one pane tries, and is stopped
+    assert process_table.held_by_pane(7) is None
+    assert [name for name, _ in calls].count(tool) == 2
+    assert process_table.held_by_pane(70) is None
+    assert [name for name, _ in calls].count(tool) == 2, "and the others are left alone again"
+
+
+def test_the_tools_are_given_their_timeouts_and_the_back_off_is_half_a_minute(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The values themselves: a tool run with no timeout would hang a listing for good, and a
+    back-off of nothing is no back-off."""
+    _now, calls = _hanging(monkeypatch, tmp_path, tool="never")
+    process_table.descendants(7)
+    process_table._from_lsof([7])
+
+    assert calls == [("ps", 5.0), ("lsof", 5.0)]
+    assert (process_table._TIMEOUT, process_table.BACKOFF) == (5.0, 30.0)
+    assert process_table.HELD_FOR < process_table._TIMEOUT < process_table.BACKOFF
+
+
+def test_a_ps_line_that_is_not_a_pid_pair_is_left_out_of_the_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = "  PID PPID\n7 1\n8 7\nnine 7\n10 x\n11\n12 7 extra\n13 8\n-14 7\n"
+
+    def run(argv: list[str], **kwargs: object) -> object:
+        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    assert process_table.descendants(7) == frozenset({7, 8, 13})
 
 
 def test_the_kept_panes_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:

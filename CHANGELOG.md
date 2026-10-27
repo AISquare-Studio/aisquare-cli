@@ -317,7 +317,11 @@ runs in shards.**
   `aisquare accounts sessions [--since 15m] [--json]` and the Accounts page list
   every session that reported, hand-launched ones too, and the usage cache takes
   their readings (both windows, never one alone), so the usage endpoint is asked
-  less often.
+  less often. **`capture.enabled = false` does not stop these records:** it stops
+  prompt capture only, and `asq-statusline` reads no setting, so it writes a record
+  for every session it runs in while it is installed. A record older than a day is
+  deleted the next time it is read. To stop them, run `aisquare accounts statusline
+  --uninstall`; the files are `~/.aisquare/cache/statusline/<session id>.json`.
 - **A conversation started by hand can join the fleet** (#290). `aisquare fleet
   adopt <session-id|transcript>` resumes it as a fleet agent on the account its
   transcript lives in and in the directory it ran in, keeping its session id, so
@@ -407,7 +411,8 @@ runs in shards.**
   23:45 to midnight every Sunday in Toronto: they fired `resets Mon 12:00am`, which then
   lifts inside `wait_if_reset_within_minutes`, so the hook waited instead of switching;
   they fire a weekly limit that lifts three days out, whatever the clock says. The
-  timing tests no longer race the clock (#436): each holds or steps the clock it measures,
+  timing tests no longer race the clock (#436, and the Windows stop-toast and client-clock
+  tests before it): each holds or steps the clock it measures, or looks on the loop's own,
   and two tests pin the CI's shape (standard runners; every guard step runs). The one
   change outside the tests is a seam: `asq exec`'s output drain reads its clock through a
   name a test can replace.

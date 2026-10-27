@@ -45,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/i
 ```
 
 That installs the latest release. To pin one, every release from 0.9.0 on
-carries its own copy: `curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.0/install.sh | sh`.
+carries its own copy: `curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.1/install.sh | sh`.
 
 macOS, Linux and WSL2. It installs uv, a Python 3.13 for the CLI alone,
 `aisquare-cli`, tmux, gh, git and Claude Code, offers Node for browser tools,

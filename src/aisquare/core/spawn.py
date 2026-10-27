@@ -87,6 +87,10 @@ narrowing their environment would be change without a reason:
   * ``core/clipboard.py::_ask`` — ``tmux show-environment SSH_CONNECTION`` in the
     user's own tmux, and ``ps`` for this process's ancestors: whether the session
     is remote. Strings, no model.
+  * ``core/process_table.py::descendants`` — ``ps -A -o pid=,ppid=``: which processes
+    are below a fleet pane's. Numbers, no model.
+  * ``core/process_table.py::_from_lsof`` — ``lsof -p`` on those, where there is no
+    ``/proc``: which files they hold open (#24). Paths, no model.
   * ``cli/watch.py::action_open_transcript`` — a pager/viewer on a file.
   * ``core/paths.py::restrict_to_owner`` — ``icacls``, locking the
     credentials file to this account on Windows. A permissions tool, not a
@@ -366,6 +370,12 @@ SEAMS: dict[str, Seam] = {
     ),
     "aisquare/core/clipboard.py::_ask": Seam(
         EXCLUDED, "`tmux show-environment` and `ps`, asking whether the session is remote"
+    ),
+    "aisquare/core/process_table.py::descendants": Seam(
+        EXCLUDED, "`ps`, asking which processes are below a fleet pane's; no model"
+    ),
+    "aisquare/core/process_table.py::_from_lsof": Seam(
+        EXCLUDED, "`lsof -p`, asking which files a fleet pane's processes hold open; no model"
     ),
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"

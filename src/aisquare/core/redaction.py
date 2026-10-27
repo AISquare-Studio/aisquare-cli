@@ -83,13 +83,13 @@ _VALUE_END = r"(?=[\s,;}\])]|\Z)"
 #: before the quote. Each form reads the escapes first and the first quote after, which is what
 #: the rule did, for what is not well formed. Where the text is JSON inside a string its quotes
 #: are escaped (``\"…\"``) and the quote of a value that holds one is escaped again (three
-#: backslashes and a quote): that form closes at a quote with ONE backslash before it, and reads
-#: the runs of backslashes before a quote as an escaped quote (three), an escaped backslash
-#: (four) or a pair and a letter (``\\n``). The body of every form stops at the first quote it
-#: does not know as an escape, so no value reads the text of the next one: the cost stays linear.
+#: backslashes and a quote): that form closes at a quote with ONE backslash before it, which
+#: needs no look at what follows, and reads the runs of backslashes before a quote as an escaped
+#: quote (three), an escaped backslash (four) or a pair and a letter (``\\n``). The body of every
+#: form stops at the first quote it does not know as an escape, so no value reads the text of
+#: the next one: the cost stays linear.
 _QUOTED_VALUE = (
     r'\\"(?:[^"\\\n]|\\\\\\"|\\\\\\\\|\\\\[^"\\\n]){4,}+\\"'
-    + _VALUE_END
     + r'|\\++"[^"\n]{4,}+"'
     + r'|"(?:[^"\\\n]|\\[^\n]){4,}+"'
     + _VALUE_END

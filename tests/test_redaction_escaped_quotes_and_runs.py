@@ -45,10 +45,12 @@ HELD_QUOTES: list[tuple[str, str]] = [
     (r"{\"password\": \"abcd1234\"}", r"{\"password\": <R>}"),
     (r"{\"password\": \"abcd\\\"efgh1234\"}", r"{\"password\": <R>}"),
     (
-        r"{\"password\": \"abcd\\nefgh\\\\ijkl\", \"k\": 1}",
+        r"{\"password\": \"abcd\\nefgh\\\"ijkl\\\\mnop\", \"k\": 1}",
         r"{\"password\": <R>, \"k\": 1}",
     ),
     (r"PASSWORD=\"ab\\\"cd1234\" rest", "PASSWORD=<R> rest"),
+    # The closer needs no look at what follows: nothing else closes it but the quote.
+    (r"PASSWORD=\"ab\\\"cd1234\"zz rest", "PASSWORD=<R>zz rest"),
     # Each place the value may end: the end of the text, ``;``, ``)``, ``]``.
     (r'PASSWORD="ab\"cd1234"', "PASSWORD=<R>"),
     (r'PASSWORD="ab\"cd1234";', "PASSWORD=<R>;"),
@@ -75,6 +77,9 @@ def test_a_value_of_fewer_than_four_characters_is_left_alone_with_its_escapes_to
 #: A value that ends in a backslash does not close at the quote after it. These keep what the rule
 #: did, to the first quote: the value is not read into the text after it, whose own rules still run.
 UNCLOSED_ESCAPES: list[tuple[str, str]] = [
+    # An opening that is escaped and a closing that is not, or an opening of two backslashes.
+    (r'PASSWORD=\"abcdefgh1234" rest', "PASSWORD=<R> rest"),
+    (r'PASSWORD=\\"abcdefgh1234\\" rest', "PASSWORD=<R> rest"),
     (r'{"password": "C:\dir\", "other": "x"}', '{"password": <R>, "other": "x"}'),
     (r'password="abc\" api_key="sk_live_abcdefgh1234" ', "password=<R> api_key=<R> "),
     (r"password='abc\' token='tok_live_abcdefgh1234' ", "password=<R> token=<R> "),
@@ -163,6 +168,15 @@ def test_a_long_run_of_hyphens_or_dots_costs_per_character_what_letters_do(run: 
         f"{size:,} characters of {run!r} took {in_run:.3f} s, {in_run / letters:.1f} times the "
         f"{letters:.3f} s of the same many letters"
     )
+
+
+@pytest.mark.parametrize("run", [".", "-", ".-"])
+@pytest.mark.parametrize("length", [10, 47, 49, 70, 200])
+def test_a_name_far_into_a_run_of_hyphens_or_dots_is_still_found(run: str, length: int) -> None:
+    """r25 probed 10, 47, 49, 70 and 200 dots before a name: a start rule that skipped the middle
+    of a run would lose the name from 49 on, the 48 characters a name may have before its word."""
+    text = f"{(run * length)[:length]}api_key=hunter22 after"
+    assert _shown(text) == f"{(run * length)[:length]}api_key={MARKER} after"
 
 
 @pytest.mark.parametrize(

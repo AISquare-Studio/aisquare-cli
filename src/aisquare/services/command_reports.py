@@ -1021,7 +1021,8 @@ def _broker_command() -> tuple[Path, Path]:
 
     if not store_broker.brokered_call():
         raise SandboxReportError(
-            "only a command the agent's broker runs reads its sandbox's reports"
+            "a sandbox's reports are read by the agent's broker, which starts the command with "
+            "the launch's reports and seals named; this command was not started so"
         )
     reports, seals = (
         os.environ.get(store_broker.REPORTS_ENV),
@@ -1099,7 +1100,14 @@ def _read_sandboxed(reports: Path, report_id: str) -> dict[str, bytes]:
             ) from None
         try:
             _owner_only(os.fstat(dir_fd), uid, "the report's directory")
-            names = set(os.listdir(dir_fd))
+            # The directory is the sandbox's: read until it holds more names than a report
+            # has, since by then one is not a report's own, not all of a million entries.
+            names: set[str] = set()
+            with os.scandir(dir_fd) as entries:
+                for entry in entries:
+                    names.add(entry.name)
+                    if len(names) > len(_SANDBOX_FILES):
+                        break
             strange = sorted(names - set(_SANDBOX_FILES))
             if strange:
                 raise SandboxReportError(f"it holds {', '.join(strange)}, which no report does")
@@ -1249,6 +1257,10 @@ def _adopt(report_id: str) -> bool:
         )
     root = reports_dir()
     _private_directory(root)
+    # Retention as a run's own report has it (:func:`run_command`): a sandbox that saves and
+    # seals report after report, up to ~97 MiB each, filled the home until some later
+    # `exec` outside the sandbox pruned (review r24 of #113, nit 4).
+    prune_reports(keep=RETAIN_REPORTS - 1, protect=protected_report_ids())
     pending = root / f".pending-adopt-{uuid.uuid4().hex}"
     pending.mkdir(mode=0o700)
     try:

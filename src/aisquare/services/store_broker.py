@@ -269,7 +269,15 @@ class OutOfScope(PermissionError):
 
 
 def brokered_call(environ: Mapping[str, str] | None = None) -> bool:
-    """Whether this process is a command a sandboxed agent's broker runs for it."""
+    """Whether this process's environment says it is a command a sandboxed agent's broker
+    runs for it.
+
+    An environment variable the broker sets (:data:`CALLER_ENV`), not a proof of who is
+    asking: a process that sets it itself is taken for a brokered command. Nearly every guard
+    that reads it narrows what the process may do (the board, the tree, the paths it names), so
+    setting it widens nothing. The two that open a door, reading a sandbox's reports and
+    adopting one (``services.command_reports``), each end in a write the sandbox cannot make:
+    the launch's ``seals/``, and the home (review r24 of #113, nit 3)."""
     return (os.environ if environ is None else environ).get(CALLER_ENV) == "1"
 
 

@@ -681,7 +681,12 @@ adapter.**
   `source_root` is not an absolute path (`""`, `.`, `sub`) is refused at its seal: it was
   read from the broker's own directory, which is in the tree, and kept as the evidence's
   `source_root`. A hard link in the tree to a file outside it is still not told from a file
-  of the tree (`docs/coding-agents.md` says so).
+  of the tree (`docs/coding-agents.md` says so). Adopting a sandbox's report now applies the
+  retention a run's own report has (a sandbox that saved and sealed report after report filled
+  the home until a later `exec` pruned); a sandbox's report directory is read only as far as
+  a report can reach (not whole, however many names it holds); and the refusal for a command
+  the broker did not start no longer says only the broker's commands read a sandbox's
+  reports, which an environment flag cannot prove (r24 nits 3 to 5).
 - **Words and costs that named one agent or ignored another's rows** (r23 of the 0.9.0 merge).
   asq's one tmux process per tick holds once a project has a stopped worker: the windows of
   ended rows are read out of the tick's one answer (it asked tmux twice a project). The Spawn

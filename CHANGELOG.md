@@ -10,9 +10,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 **Usage & stats: what every Claude Code session on this machine spent, by day,
 repository, account and model, with anonymous sharing that is opt-in and off by default.
-Start fresh clears a project's board and fleet for a blank manager. A fleet agent moves
-to another account before its own runs out, and a spawn runs the model and effort you
-last chose. Claude Code's own Remote Control per role, its status line, `fleet adopt`,
+Start fresh clears a project's board and fleet for a blank manager. A fleet agent can
+move to another account before its own runs out (opt-in: `[accounts] before_limit`), and
+a spawn runs the model and effort you last chose. Claude Code's own Remote Control per role, its status line, `fleet adopt`,
 and the captain's owner gate. The project brain (gbrain) and `docs/` are gone, and CI
 runs in shards.**
 
@@ -64,7 +64,8 @@ runs in shards.**
   `explainability…` and `ci …` rows, and takes no `--target` or `--project`;
   `aisquare explainability doctor` runs the explainability checks. New doctor rows:
   `remote control` (only while a role has it on), `role bindings` (only with a bound
-  role) and `fleet model pick`.
+  role) and `fleet model pick` (only after a `/model` or `/effort` answer it could not
+  read).
 - **`docs/` is removed, except `docs/usage-telemetry.md`.** `aisquare --help` and each
   command's `--help` are the reference now.
 - **A task title with words outside ASCII now has a different key** (#270):

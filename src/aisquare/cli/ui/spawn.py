@@ -54,7 +54,7 @@ runs, the pick stays, and the blank says so (``(the reviewer's settings: haiku)`
 is the owner's: the dialog is asq's, run from the owner's shell.
 
 **Presets** — ``SpawnDialog(project, persona=, role=, binary=, account=, label=,
-task_id=, prompt=)`` — are applied at compose, never by poking widgets after mount:
+task_id=, prompt=, model=, effort=)`` — are applied at compose, never by poking widgets after mount:
 the persona-first flow (the target picker, P7) opens the dialog already filled in. A
 preset is a choice, and is sent. A preset role the list does not name (a numbered
 seat, ``coder2``) and a preset account the accounts read has not produced yet are
@@ -497,6 +497,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         label: str | None = None,
         task_id: str | None = None,
         prompt: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
         accounts: Callable[[], AccountsOverview] | None = accounts_service.overview,
         defaults: Callable[
             [ProjectInfo, str, list[str], str | None], accounts_service.LaunchDefault
@@ -543,6 +545,14 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._pick = self._shown_pick(self._role)
         """What the Model and Effort fields show for the current role (:meth:`_shown_pick`).
         A field still showing it is sent as ``None``."""
+        self._preset_model = None if self._captain else model
+        self._preset_effort = (
+            effort
+            if not self._captain and any(effort == value for _, value in EFFORT_OPTIONS)
+            else None
+        )
+        """The Model and Effort the owner chose before a sign-in (``form_state``), ``""``
+        cleared; ``None``: the form fills them in (:attr:`_pick`)."""
         self._preset_task: str = (
             task_id if task_id and any(t.id == task_id for t in self._tasks) else NO_TASK
         )
@@ -557,6 +567,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             or bool(self._preset_label)
             or self._preset_task != NO_TASK
             or bool(self._preset_prompt)
+            or self._preset_model is not None
+            or self._preset_effort is not None
         )
         """A preset fills an Advanced field, so the section opens with the form: a form
         reopened after a sign-in (#286) shows the label, task and prompt it kept. Not the
@@ -834,7 +846,11 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                     with Horizontal(classes="spawn-row"):
                         yield Label("Model")
                         yield Input(
-                            value=self._pick.model or ACCOUNT_DEFAULT,
+                            value=(
+                                self._preset_model
+                                if self._preset_model is not None
+                                else self._pick.model or ACCOUNT_DEFAULT
+                            ),
                             placeholder=self._blanks(self._role)[0],
                             disabled=self._captain,
                             id="spawn-model",
@@ -844,7 +860,11 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                         yield Label("Effort")
                         yield Select(
                             self._effort_options(self._role),
-                            value=self._pick.effort or ACCOUNT_DEFAULT,
+                            value=(
+                                self._preset_effort
+                                if self._preset_effort is not None
+                                else self._pick.effort or ACCOUNT_DEFAULT
+                            ),
                             allow_blank=False,
                             disabled=self._captain,
                             id="spawn-effort",
@@ -1566,7 +1586,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
         Only what the user chose: a field still showing what the form put there is left
         out, so the reopened dialog fills it the same way (the label for the role and
-        task, the persona for the role). Worktree, permission mode, extra args and a
+        task, the persona for the role, Model and Effort for the role and the pick; a
+        cleared one is carried as ``""``). Worktree, permission mode, extra args and a
         hand-off are not carried; they open at the role's defaults again.
 
         The projects the Project field offers are carried too, when it has them (*Spawn
@@ -1592,6 +1613,12 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         prompt = self.query_one("#spawn-prompt", TextArea).text
         if prompt.strip():
             state["prompt"] = prompt
+        model = self._model_kwarg()
+        if model is not None:
+            state["model"] = model
+        effort = self._effort_value()
+        if effort != (self._pick.effort or ACCOUNT_DEFAULT):
+            state["effort"] = effort
         return state
 
     def apply_target(

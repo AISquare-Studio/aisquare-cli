@@ -187,6 +187,9 @@ _COMMAND_NAME = re.compile(r"<command-name>/([^<\s]+)</command-name>")
 _COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 _COMMAND_STDOUT = re.compile(r"<local-command-stdout>(.*?)</local-command-stdout>", re.S)
 _CAVEAT = "<local-command-caveat>"
+#: How Claude Code's answer to a successful ``/model`` and ``/effort`` opens (2.1.310, 2.1.311):
+#: one no framed command owns is a frame this reader does not know (a renamed tag), said.
+_SETTING_ANSWERS = {"Set model to": "model", "Set effort level to": "effort"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -206,9 +209,10 @@ class SettingCommand:
 @dataclasses.dataclass(frozen=True)
 class UnframedCommand:
     """A record led by a ``/model`` or ``/effort`` tag outside Claude Code's frame (no caveat
-    its parent), or a framed one never answered though the transcript went on: text quoting
-    one, or a frame a later Claude Code shapes differently. Never a choice; said, so a
-    changed frame does not fail silently (review of #441, round 7)."""
+    its parent), a framed one never answered though the transcript went on, or a ``Set model
+    to`` / ``Set effort level to`` answer no framed command owns: text quoting one, or a
+    frame a later Claude Code shapes differently (a renamed tag). Never a choice; said, so a
+    changed frame does not fail silently (review of #441, round 7; seq 3759 (4))."""
 
     setting: str
     version: str | None = None
@@ -284,6 +288,8 @@ class _Frames:
     command's turn: ``opened``; seq 3697)."""
     opened: set[str] = dataclasses.field(default_factory=set)
     """The prompts that opened a custom command's or a skill's turn."""
+    said: set[str] = dataclasses.field(default_factory=set)
+    """The tag-led records said as :class:`UnframedCommand`: their answers are not said again."""
     framed: dict[str, tuple[str, str, str | None, int]] = dataclasses.field(default_factory=dict)
     """A framed command's uuid → its name, its args, its version, and how many records were
     parsed before it (one parsed after it, and it went unanswered)."""
@@ -343,10 +349,22 @@ def _frame_step(
                 frames.parsed,
             )
             return None
-        return UnframedCommand(named.group(1), version) if named.group(1) in SETTINGS else None
+        if named.group(1) not in SETTINGS:
+            return None
+        if isinstance(uuid, str):
+            frames.said.add(uuid)
+        return UnframedCommand(named.group(1), version)
     if (answer := _COMMAND_STDOUT.match(text)) is not None:
         command = frames.framed.pop(parent, None) if isinstance(parent, str) else None
-        if command is None or command[0] not in SETTINGS:
+        if command is None:
+            said = answer.group(1).strip()
+            setting = next(
+                (s for opens, s in _SETTING_ANSWERS.items() if said.startswith(opens)), None
+            )
+            if setting is None or parent in frames.said:
+                return None
+            return UnframedCommand(setting, version)
+        if command[0] not in SETTINGS:
             return None
         return SettingCommand(command[0], command[1], answer.group(1).strip(), version)
     if system:

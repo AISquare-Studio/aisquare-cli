@@ -152,17 +152,6 @@ def runs_under(alias: str | None, reading: str) -> bool:
     return families is not None and model_family(reading) in families
 
 
-def same_effort(one: str | None, other: str | None) -> bool:
-    """Whether ``one`` and ``other`` are one effort: ``ultracode`` is ``xhigh`` as Claude Code
-    reports it (``CLAUDE_EFFORT``)."""
-    if one is None or other is None:
-        return one is other
-    first, second = normalize_effort(one), normalize_effort(other)
-    if first is None or second is None:
-        return one.strip().lower() == other.strip().lower()
-    return first == second
-
-
 #: The effort scale, weakest first — the levels ``claude --effort`` accepts.
 #: (An unknown value is silently ignored by the CLI, so values are validated here.)
 EFFORT_SCALE: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")

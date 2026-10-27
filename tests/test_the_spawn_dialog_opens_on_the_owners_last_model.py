@@ -284,3 +284,37 @@ def test_a_hand_off_locks_the_fields_to_its_teammates_own(
         return [*free, model.disabled, effort.disabled]
 
     assert drive(git_project, scenario) == [False, False, True, True]
+
+
+@pytest.mark.parametrize(("model", "effort"), [("claude-opus-4-5", "max"), ("", "")])
+def test_a_chosen_model_and_effort_ride_the_sign_in_round_trip(
+    git_project: ProjectInfo, spawns: SpawnRecorder, model: str, effort: str
+) -> None:
+    """Review of #441 round 8, nit 1: *+ New account* reopens the form from ``form_state()``
+    (#286), which carried neither field, so a typed model came back as the pick. What the
+    owner chose rides along, a cleared field too; what the form filled in does not."""
+    model_memory.remember(model="opus", effort="xhigh")
+
+    async def chosen(
+        pilot: Pilot[None], host: Host, dialog: SpawnDialog
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        untouched = dialog.form_state()
+        dialog.query_one("#spawn-model", Input).value = model
+        select(dialog, "effort").value = effort
+        await pilot.pause()
+        return untouched, dialog.form_state()
+
+    untouched, state = drive(git_project, chosen)
+    assert untouched == {"role": "coder"}, "what the form filled in is filled in again"
+    assert state == {"role": "coder", "model": model, "effort": effort}
+
+    async def reopened(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> tuple[str, str]:
+        shown = dialog.query_one("#spawn-model", Input).value, str(select(dialog, "effort").value)
+        submit(dialog).press()
+        await settle(pilot)
+        return shown
+
+    assert drive(git_project, reopened, presets=state) == (model, effort)
+    assert spawns.calls == [
+        (git_project.id, "coder", {**UNTOUCHED, "model": model, "effort": effort})
+    ]

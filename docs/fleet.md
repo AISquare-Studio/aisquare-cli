@@ -285,8 +285,9 @@ from the last turn's, as a custom command's or a skill's `model:` or `effort:` f
 makes it for ONE turn, writes no pick and moves nothing, whoever typed it. The reader
 knows Claude Code 2.1.310's and 2.1.311's words and frames; an answer in other words, or a
 `/model` record outside the frame, writes nothing, says so on stderr once, and doctor
-shows it as `fleet model pick` until an answer reads again (text a teammate quotes can
-show there too, harmlessly). The captain writes the pick only from its own call path (the
+shows it as `fleet model pick` until an answer reads as a success again (text a
+teammate quotes can show there too, harmlessly). The captain writes the pick only from
+its own call path (the
 captain on, its own row; its spawns take no model), never from an `--as captain` an agent
 typed. These guards keep cooperating agents from writing your pick by mistake; they are
 no wall against a process that sets `AISQUARE_FLEET_AGENT` or the store itself. A spawn

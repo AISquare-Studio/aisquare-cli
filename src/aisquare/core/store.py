@@ -5749,10 +5749,11 @@ debounce, the solo session's not-yet-briefed mark (#346), and the quiet compacti
 its newest refusal and its latest arm (P1 WS-4)."""
 
 
-_FLEET_LABEL_STATE: tuple[str, ...] = ("before-limit:", "before-limit-warned:")
+_FLEET_LABEL_STATE: tuple[str, ...] = ("before-limit:", "before-limit-warned:", "fleet-launched:")
 """The ``ui_state`` keys kept per fleet label as ``<prefix><project id>:<label>``: the turn
-end that last started a before-limit move, and the crossing a ``warn`` has named
-(``services.hooks``). A reset clears a project's (:meth:`SqliteStore.reset_project`)."""
+end that last started a before-limit move, the crossing a ``warn`` has named
+(``services.hooks``), and the row's model record (``services.model_memory``, #16). A reset
+clears a project's (:meth:`SqliteStore.reset_project`)."""
 
 
 def _session_meta_terms(sessions: Sequence[str]) -> Iterator[tuple[str, tuple[str, ...]]]:

@@ -263,7 +263,9 @@ def test_an_alias_is_only_the_id_it_resolved_to() -> None:
     assert not harness.same_reading("claude-opus-5-5", "claude-opus-4-5")
     assert harness.runs_under("opusplan", "claude-sonnet-5-5")
     assert not harness.runs_under("opusplan", "claude-fable-5-1")
-    assert harness.same_effort("ultracode", "xhigh") and not harness.same_effort("high", "max")
+    # An effort is replayed verbatim (seq 3759 (1)): `ultracode` is not `xhigh`, though Claude
+    # Code reports it so (test_a_restart_keeps_the_owners_ultracode_toggle_either_way).
+    assert harness.clean_effort("ultracode") == "ultracode"
 
 
 def _hook(
@@ -728,6 +730,37 @@ def test_a_command_with_no_answer_yet_is_none_and_never_holds_the_read(tmp_path:
     )  # fmt: skip
     scan = transcripts.commands_since(path, 0)
     assert scan is not None and scan.events == () and scan.end == path.stat().st_size
+
+
+def test_a_setting_answer_no_framed_command_owns_is_said(tmp_path: Path) -> None:
+    """Seq 3759 (4): a later Claude Code that renames the tag (``<command>/model</command>``)
+    left a caveat, a command the reader cannot name and its ``Set model to …`` answer: no
+    write, and no canary either. A ``Set model to`` or ``Set effort level to`` answer whose
+    parent is no framed command is said too, once: a tag-led record already said is not
+    said again for its answer."""
+    path = tmp_path / "t.jsonl"
+    caveat = "<local-command-caveat>The command below was run directly in Claude Code…"
+    _framed(
+        path,
+        {"type": "user", "uuid": "c1", "isMeta": True,
+         "message": {"role": "user", "content": caveat}},
+        {"type": "user", "uuid": "m1", "parentUuid": "c1", "message": {"role": "user",
+         "content": "<command>/model</command><args>opus</args>"}},
+        {"type": "user", "uuid": "a1", "parentUuid": "m1", "message": {"role": "user",
+         "content": "<local-command-stdout>Set model to `Opus 5.5` and saved as your default"
+                    " for new sessions</local-command-stdout>"}},
+        {"type": "user", "uuid": "m2", "parentUuid": "a1", "message": {"role": "user",
+         "content": "<command-name>/effort</command-name><command-args>low</command-args>"}},
+        {"type": "user", "uuid": "a2", "parentUuid": "m2", "message": {"role": "user",
+         "content": "<local-command-stdout>Set effort level to low (saved as your default"
+                    " for new sessions): …</local-command-stdout>"}},
+    )  # fmt: skip
+    scan = transcripts.commands_since(path, 0)
+    assert scan is not None
+    assert scan.events == (
+        transcripts.UnframedCommand("model"),
+        transcripts.UnframedCommand("effort"),
+    )
 
 
 def test_a_caveat_is_one_only_as_the_commands_own_parent(tmp_path: Path) -> None:

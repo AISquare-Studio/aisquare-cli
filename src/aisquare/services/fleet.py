@@ -6587,13 +6587,16 @@ def _moved(name: str, now: str | None, launched: str | None, then: str | None) -
     whenever it is known: what the agent ran, the account's default it started on included,
     kept on any account it moves to (manager decision, seq 3428 a). With a flag, when a
     command moved it off what the launch ran (``launched``); else the flag stays, an alias
-    (``opus``) and a mode alias (``opusplan``) as written."""
+    (``opus``) and a mode alias (``opusplan``) as written. An effort is compared verbatim:
+    a live one comes from a recorded command alone, and ``ultracode`` is not ``xhigh``, as
+    Claude Code's own reading has it (seq 3759 (1): the owner's toggle, either way)."""
     if now is None:
         return False
     if then is None or launched is None:
         return True
-    same = harness.same_reading if name == "model" else harness.same_effort
-    return not same(now, launched)
+    if name == "model":
+        return not harness.same_reading(now, launched)
+    return harness.clean_effort(now) != harness.clean_effort(launched)
 
 
 def _the_owners_spawn(spawned_by: str) -> bool:

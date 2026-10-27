@@ -356,17 +356,22 @@ def observe(
             return None
         live_model = harness.clean_model_id(transcripts.latest_model(path))
         record = _record(agent, store)
-        if record is None:  # never seen: bound from the row's creation, read from now on
-            first = _Record(launch=Pick(None, _launch_flags(agent).effort))
-            _bind(store, agent, first, path, since=_created(agent))
-            _board(store, session, live_model, live_effort)
-            return None
+        if record is None:  # its session start unread: bound from the row's creation
+            record = _Record(launch=Pick(None, _launch_flags(agent).effort), since=_created(agent))
         if record.transcript != str(path):
-            # A file no session start bound it to (a switch's, seq 3693 c): what it holds is
-            # another conversation's, so it is bound from the moment it is seen (seq 3697).
-            _bind(store, agent, record, path, since=datetime.now(tz=UTC))
-            _board(store, session, live_model, live_effort)
-            return None
+            if record.since is not None and _read_nothing(record):
+                # A row that has read nothing (its session start unread, or bound to a file
+                # that never came: a switch's slot-2 path, seq 3693 c) reads the file it finds
+                # from 0, by its own stamp: what the owner typed since counts, the older
+                # conversation's commands do not (review of #441 round 8, minor 1).
+                record = dataclasses.replace(record, transcript=str(path), offset=0, turn=None)
+            else:
+                # Another file than the one it read (a `/branch` whose session start went
+                # unread): its copy holds this row's own past commands, stamped after its
+                # creation, so it is bound from the moment it is seen (seq 3697).
+                _bind(store, agent, record, path, since=datetime.now(tz=UTC))
+                _board(store, session, live_model, live_effort)
+                return None
         scan = transcripts.commands_since(path, record.offset, since=record.since)
         if scan is None:
             return None
@@ -389,7 +394,7 @@ def observe(
                 unread.append(
                     f"{_version(event.version)} answered {said} with {event.stdout[:120]!r}"
                 )
-            else:
+            elif values:  # a success read; a refusal or an Esc says nothing of those words
                 understood = True
             for found in values:
                 if found.value is None:
@@ -416,6 +421,14 @@ def observe(
         return written
 
 
+def _read_nothing(record: _Record) -> bool:
+    """Whether ``record`` has read nothing yet: bound to no file, or to one that never came
+    (``offset`` 0, nothing there now)."""
+    if record.transcript is None:
+        return True
+    return record.offset == 0 and record.turn is None and not Path(record.transcript).exists()
+
+
 def _board(
     store: ContextStore, session: TeamSession, model: str | None, effort: str | None
 ) -> None:
@@ -436,7 +449,9 @@ def _say_unread(store: ContextStore, unread: list[str]) -> None:
     """Say, once for the turn, what this reader could not read as a choice (an answer in
     other words, a ``/model`` or ``/effort`` record outside Claude Code's frame), and keep
     it for doctor (:func:`unread`): no pick was written from it, and a restart starts the
-    launch's values, the #338 symptom this reader exists to end."""
+    model the agent ran before it, the #338 symptom this reader exists to end. Doctor stands
+    down at the next answer read as a success (a refusal or an Esc says nothing of those
+    words)."""
     said = "; ".join(unread)
     store.set_ui_state(
         _UNREAD_KEY, json.dumps({"at": datetime.now(tz=UTC).isoformat(), "said": said})
@@ -463,7 +478,8 @@ def unread() -> dict[str, str] | None:
 
 _LAUNCHED_KEY = "fleet-launched:{project}:{label}"
 """A fleet row's own record (:class:`_Record`), per label (one row holds a label at a time),
-with the id of the row it is for. Never deleted: a follow-up of #441."""
+with the id of the row it is for. Kept when the row ends (a restart of it reads it); a
+project's go with Start fresh (``store._FLEET_LABEL_STATE``)."""
 
 
 def _record(agent: FleetAgent, store: ContextStore) -> _Record | None:

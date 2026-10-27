@@ -3148,9 +3148,9 @@ def _check_model_pick_reader() -> DoctorCheck | None:
     """Whether an owner's ``/model`` or ``/effort`` in a fleet agent went unread (#16, rounds
     6 and 7 of #441): Claude Code answered in words the fleet's pick reader does not know, or
     recorded one outside the frame it reads. No pick was written from it and a restart starts
-    the launch's values, so a newer Claude Code's change is said, not silent. ``None`` while
-    every one read (the row stays out of the way), and for a home not made yet, which doctor
-    never makes."""
+    the model the agent ran before it, so a newer Claude Code's change is said, not silent.
+    ``None`` until an answer reads as a success again (the row stays out of the way), and for
+    a home not made yet, which doctor never makes."""
     if _uncreated_home("fleet model pick") is not None:
         return None
     found = model_memory.unread()
@@ -3159,7 +3159,7 @@ def _check_model_pick_reader() -> DoctorCheck | None:
     return _warn(
         "fleet model pick",
         f"{found.get('said', '?')} ({found.get('at', '?')[:19]}): not read as a choice, so no "
-        "pick was written, and a restart starts the agent's launch model",
+        "pick was written, and a restart starts the model the agent ran before it",
         "if Claude Code was updated, update aisquare (`aisquare upgrade`); a teammate's message "
         "quoting a /model record also shows here, and is harmless. Meanwhile name the model on "
         "the spawn (`fleet spawn <role> --model …`) or the restart (`fleet restart <label> "

@@ -3296,6 +3296,87 @@ def test_a_switch_whose_transcript_the_stop_falls_back_to_never_rereads_it(
     assert model_memory.remembered() == model_memory.Pick("sonnet", "xhigh")
 
 
+def test_a_model_typed_after_a_switch_before_its_first_stop_counts(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #441 round 8, MINOR 1: the switched row's record was bound to the slot-2
+    path, which never exists, and its first Stop rebound the slot-1 file from that moment,
+    unread: a ``/model sonnet`` the owner typed between the switch and that Stop was lost,
+    and a restart undid it. A row that has read nothing reads the file it finds from 0, by
+    its own stamp, which still keeps the conversation's old ``/model haiku`` out."""
+    model_memory.remember(model="claude-opus-4-5", effort="xhigh")
+    agent = _coder(project, spawned_by="ses_mgr1")
+    slot2 = tmp_path / "slot2" / "s.jsonl"
+    _started(agent, "claude-opus-4-5", transcript=slot2)
+    slot1 = tmp_path / "slot1.jsonl"
+    _local_command(slot1, "model", "haiku", SET.format("Haiku 5.5"), at=OLD)
+    _with_transcript(agent, slot1)
+    _local_command(slot1, "model", "sonnet", SET.format("Sonnet 5.5"))
+    _write_records(slot1, _user("carry on"))
+    assert agent.session_id is not None
+    model_memory.observe(agent.session_id, str(slot2), effort="xhigh", agent_id=agent.id)
+    assert model_memory.remembered() == model_memory.Pick("sonnet", "xhigh")
+    assert _runs(agent).model == "sonnet"
+
+
+def test_a_saved_model_after_a_switch_whose_kickoff_was_escaped_is_what_a_restart_runs(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Seq 3759 (3), tester-r7's repro on real 2.1.311: ``fleet switch tester-s --to 2``, the
+    kickoff Escaped (no Stop), the owner's saved ``/model claude-haiku-4-5``, a plain turn.
+    The pick stayed claude-haiku-5-5 and ``fleet restart tester-s`` ran ``--model
+    claude-haiku-5-5`` while the session ran 4.5: the switched row's session start named
+    slot 2's path, which never exists, and its first Stop rebound the board session's file
+    from that moment, unread. It reads it from 0 by the row's own stamp."""
+    _two_slots_with_usage(monkeypatch, work=10, personal=10)
+    model_memory.remember(model="claude-haiku-5-5", effort="medium")
+    agent = fleet_service.spawn(project, "tester", worktree=False, account="2").agent
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-haiku-5-5")
+    _local_command(transcript, "model", "sonnet", SET.format("Sonnet 5.5"), at=OLD)
+    _turn(agent, transcript, "claude-haiku-5-5", "medium")
+
+    switched = fleet_service.switch(project, agent.label, to="3").started
+    assert switched.session_id is not None
+    slot2 = tmp_path / "slot2" / f"{switched.session_id}.jsonl"
+    _started(switched, None, transcript=slot2)  # the kickoff is Escaped: no Stop
+    saved = "Set model to `Haiku 4.5` and saved as your default for new sessions"
+    _local_command(transcript, "model", "claude-haiku-4-5", saved)
+    _write_records(
+        transcript,
+        _user("carry on"),
+        {"type": "assistant", "message": {"model": "claude-haiku-4-5-20251001", "content": []}},
+    )
+    model_memory.observe(
+        switched.session_id, str(slot2), effort="medium", agent_id=switched.id
+    )  # the hook names slot 2's path; the board session's file is the one there
+
+    assert model_memory.remembered() == model_memory.Pick("claude-haiku-4-5", "medium")
+    tmux.die(switched.pane_id, 0)
+    fleet_service.restart(project, switched.label)
+    assert _flag(_command(tmux), "--model") == "claude-haiku-4-5"
+
+
+def test_a_row_whose_session_start_went_unread_reads_its_file_by_its_creation(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #441 round 8, MINOR 1: with no record at all (its session start unread), the
+    first Stop read nothing and a ``/model`` typed before it was lost. The file is read from
+    0, by the row's creation: what the owner typed since counts, an older conversation's
+    commands (a resumed file) do not."""
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(project, spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _local_command(transcript, "model", "haiku", SET.format("Haiku 5.5"), at=OLD)
+    _local_command(transcript, "model", "sonnet", SET.format("Sonnet 5.5"))
+    _turn(agent, transcript, "claude-sonnet-5-5", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("sonnet", "xhigh")
+
+
 @pytest.mark.parametrize("bound", ["after the copy", "before the copy", "never"])
 def test_a_branch_never_rereads_the_history_it_copied(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path, bound: str
@@ -3337,6 +3418,47 @@ def test_an_opening_command_counts_from_the_rows_creation(
     assert model_memory.remembered() == model_memory.Pick("haiku", "xhigh")
 
 
+@pytest.mark.parametrize(
+    ("launched", "args", "answer", "replayed"),
+    [
+        ("ultracode", "ultracode off", "Ultracode off. Effort stays xhigh.", "xhigh"),
+        (
+            "xhigh",
+            "ultracode",
+            "Ultracode on (this session only): dynamic workflows on every task. Effort stays "
+            "xhigh.",
+            "ultracode",
+        ),
+    ],
+)
+def test_a_restart_keeps_the_owners_ultracode_toggle_either_way(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    launched: str,
+    args: str,
+    answer: str,
+    replayed: str,
+) -> None:
+    """Seq 3759 (1): a replay read ultracode as xhigh (``harness.same_effort``, as Claude Code
+    reports it), so a restart undid the owner's toggle both ways: launched at ultracode and
+    toggled off, it replayed ``--effort ultracode``; launched at xhigh and toggled on, it
+    replayed ``--effort xhigh``. A live effort comes from a recorded command, verbatim, and
+    is replayed as such."""
+    model_memory.remember(model="opus", effort="medium")
+    agent = _coder(project, agent_args=["--effort", launched], spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-5-5")
+    _local_command(transcript, "effort", args, answer)
+    _turn(agent, transcript, "claude-opus-5-5", "xhigh")
+    assert model_memory.remembered() == model_memory.Pick("opus", "medium"), "the session's"
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _model_flags(_command(tmux)).count("--effort") == 1
+    assert _flag(_command(tmux), "--effort") == replayed
+
+
 def test_the_effort_pickers_ultracode_with_a_saved_level_runs_ultracode(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
 ) -> None:
@@ -3358,6 +3480,33 @@ def test_the_effort_pickers_ultracode_with_a_saved_level_runs_ultracode(
     tmux.die(agent.pane_id, 0)
     fleet_service.restart(project, agent.label)
     assert _flag(_command(tmux), "--effort") == "ultracode"
+
+
+def test_the_canary_stands_down_only_on_an_answer_read_as_a_success(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Review of #441 round 8, MINOR 2: a refusal or a picker's Esc cleared doctor's canary
+    while Claude Code's success answers stayed unreadable. They say nothing about those
+    words: only an answer read as a success stands it down."""
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(project, spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-5-5")
+    _local_command(transcript, "model", "haiku", "Model switched to Haiku 5.5")
+    _turn(agent, transcript, "claude-haiku-5-5", "xhigh")
+    assert model_memory.unread() is not None
+    _local_command(transcript, "model", "sonet", "Model 'sonet' not found", system=True)
+    _local_command(transcript, "model", "", "Kept model as `Haiku 5.5`", system=True)
+    _turn(agent, transcript, "claude-haiku-5-5", "xhigh")
+    assert model_memory.unread() is not None, "no success read: the words are still unknown"
+    _local_command(transcript, "model", "sonnet", SET.format("Sonnet 5.5"))
+    _turn(agent, transcript, "claude-sonnet-5-5", "xhigh")
+    assert model_memory.unread() is None
+    capsys.readouterr()
 
 
 def test_a_setting_record_outside_the_frame_trips_the_canary(

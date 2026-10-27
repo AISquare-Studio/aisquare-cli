@@ -680,10 +680,14 @@ adapter.**
   to 50 ms, and nothing waits for the clock to hold it: an id that would run further stays in
   the millisecond of the one before it and takes a tail a random step (1 to 2^40) above that
   one's, as the ULID spec's monotonic form has it, so past the bound the order is kept by the
-  tail and not by the millisecond. A loop that mints faster than a millisecond an id, such as
+  tail and not by the millisecond. A tail that would overflow its 80 bits takes the next
+  millisecond with randomness of its own, so that one roll runs a millisecond past the bound,
+  51 ms ahead of the clock. A loop that mints faster than a millisecond an id, such as
   `aisquare context import` (a write of ~0.15 ms an entry), goes on at the speed of its writes.
-  The ids of a burst past the bound share their first 14 characters, so a short prefix of one
-  must reach into the tail to name it. An id another process makes inside a burst's lead can
+  The ids of a burst past the bound share their first 14 characters (the prefix and the
+  timestamp), so a prefix that tells them apart needs about 23: the 14, then the first nine of
+  the tail, where a step of up to 2^40 first shows; a long burst needs a character or two more.
+  An id another process makes inside a burst's lead can
   still sort before the burst's later ids, so across processes the order holds to within 50 ms;
   two processes' ids in one millisecond are ordered by their random bits, as before. The
   needs feed tells a turn's second permission prompt (or an MCP form) from its first by the

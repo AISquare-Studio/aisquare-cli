@@ -78,8 +78,11 @@ def _new_id(prefix: str) -> str:
     it, and its 80 random bits are that one's plus a random step of 1 to 2**40 (the spec's
     monotonic form again; the step is random so that the ids stay unguessable). Past the bound
     the order is kept by the tail and not by the millisecond, and the ids of a burst past it
-    share their first 14 characters, so a prefix of one must reach into the tail. A tail that
-    would overflow takes the next millisecond with randomness of its own. A clock that does not
+    share their first 14 characters (``ctx_`` and the timestamp), so a prefix that tells them
+    apart needs about 23: the 14, then the first nine of the tail, where a step of up to 2**40
+    first shows (a long burst needs a character or two more). A tail that would overflow takes
+    the next millisecond with randomness of its own, so that one roll runs a millisecond past
+    the bound, ``_MAX_LEAD_MS + 1`` ahead of the clock. A clock that does not
     move (a test's), one that stepped back, and a loop that mints faster than a millisecond an
     id (``context import``) go on at the speed of the loop. Ids of two processes are ordered to
     within ``_MAX_LEAD_MS`` milliseconds, and by dice in the same one.

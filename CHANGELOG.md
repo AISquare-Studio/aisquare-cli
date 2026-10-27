@@ -79,8 +79,12 @@ adapter.**
     tools, not an agent; a persona import runs the manager's own agent, Codex's `exec`
     included, under main's cancel loop; a Codex row with no login shows the one `!` and
     "login incomplete" on hover; the sidebar line and `accounts usage` give each agent its own
-    share left. A spawn's model and effort (#441) are Claude Code's: a remembered pick never
-    reaches Codex, and `[agents.models.<agent>]` pins win over the pick for either.
+    share left. A spawn's model and effort (#441) are each agent's own: the Spawn dialog's
+    Model and Effort follow its Agent, a Codex spawn passes them as Codex's `--model` and
+    `model_reasoning_effort` and remembers them for Codex alone (a pick never crosses
+    agents), and `[agents.models.<agent>]` pins win over the last pick for either. The Spawn
+    dialog's *+ New account* signs in its own agent and comes back on the new slot, and a
+    Codex row's `!` hover names Codex's sign-in (`aisquare accounts run <slot> login`).
     `fleet adopt` takes a hand-started Codex thread as it takes a Claude Code session: each
     agent's conversations, their folder and first prompt are read by its adapter
     (`AgentTranscript.conversations`, `opening`), a process's arguments by
@@ -91,15 +95,13 @@ adapter.**
     its rollout open (measured on 0.164.0), its hooks being handed no pid. `project fresh`
     removes the worktrees the launch records name, never a `cwd` rewritten in the store.
   - **Claude Code's alone** (N-A): Remote Control (`AgentCapabilities.remote_control`: a launch
-    that asks of Codex says so and starts it as it was) and `asq-statusline` (Claude Code's
-    `statusLine` setting; Codex's takes items, not a command).
+    that asks of Codex says so and starts it as it was, and the Spawn dialog shows the switch
+    for Claude Code alone) and `asq-statusline` (Claude Code's `statusLine` setting; Codex's
+    takes items, not a command).
   - **Gaps, each with a lane** (SCOPE #113 091): the move before the limit is Claude Code's
-    (the hook needs a background-work reader of the transcript); the Spawn dialog's Model,
-    Effort and Remote Control fields show for a Codex agent and do nothing; the usage sweep
-    reads Claude Code's transcripts, not Codex's rollouts; the doctor's `role bindings` row
-    checks `CLAUDE_CONFIG_DIR`, not `CODEX_HOME`; the picker's and the Spawn dialog's *+ New
-    account* signs Claude in whatever the agent; a Codex row's `!` hover ends with Claude's
-    remedy.
+    (the hook needs a background-work reader of the transcript); the usage sweep reads Claude
+    Code's transcripts, not Codex's rollouts; the doctor's `role bindings` row checks
+    `CLAUDE_CONFIG_DIR`, not `CODEX_HOME`.
     `tests/test_no_agent_literals.py`'s BASELINE counts the shared code behind them.
 - **No `docs/` pages for this line** (the owner, 2026-10-27, to match main's removal): the
   adapter contract (the protocol table and "Adding a terminal agent" with its file and fixture

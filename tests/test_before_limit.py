@@ -1634,25 +1634,50 @@ round 2 captured: the spinner above an empty box, ``esc to interrupt`` in the fo
 prompt is on neither the board nor the transcript yet."""
 
 
+def _as_captured(frame: list[str]) -> list[str]:
+    """``frame`` with its input line as Claude Code 2.1.309 draws it under ``capture-pane -e``
+    (W0's capture, ``tests/test_delivery_guards.py``'s ``_box``): ``\x1b[39m`` before the mark,
+    then a no-break space."""
+    box = max(i for i, row in enumerate(frame) if row.startswith(captain_screens.MARK))
+    row = frame[box]
+    styled = f"\x1b[39m{captain_screens.MARK}\xa0{row[len(captain_screens.MARK) + 1 :]}"
+    return [*frame[:box], styled, *frame[box + 1 :]]
+
+
 @pytest.mark.parametrize(
     ("frame", "shows"),
     [
         (captain_screens.REAL_IDLE, "idle"),
         (captain_screens.REAL_IDLE_AFTER_STOP, "idle"),
+        (_as_captured(captain_screens.REAL_IDLE), "idle"),
         (captain_screens.REAL_WORKING, "busy"),
+        (_as_captured(captain_screens.REAL_WORKING), "busy"),
         (_PROMPT_HOOK_RUNNING, "busy"),
         (captain_screens.REAL_CHOOSER, "unknown"),
         (captain_screens.REAL_TRUST, "unknown"),
         (None, "unknown"),
     ],
-    ids=["idle", "idle after a stop", "mid-turn", "prompt hook", "chooser", "trust", "no capture"],
+    ids=[
+        "idle",
+        "idle after a stop",
+        "idle as captured",
+        "mid-turn",
+        "mid-turn as captured",
+        "prompt hook",
+        "chooser",
+        "trust",
+        "no capture",
+    ],
 )
 def test_the_pane_is_read_from_real_frames(
     monkeypatch: pytest.MonkeyPatch, frame: list[str] | None, shows: str
 ) -> None:
     """R3-m2: ``_pane_shows`` on real captures — Claude Code idle at its prompt, mid-turn, its
     spinner while a prompt's hook runs, a dialog — and a capture that fails, which reads as
-    ``unknown``, never ``idle``."""
+    ``unknown``, never ``idle``. Its input line styled as the fleet's capture keeps it reads
+    the same: its box's reader takes plain rows, and handed the styled line it found no box
+    mid-turn, which read ``unknown`` (#39's reopen; Codex's own are
+    ``tests/test_codex_before_limit.py``'s)."""
     monkeypatch.setattr(fleet_service, "server_of", lambda agent, config=None: _Pane(frame))
     agent = SimpleNamespace(pane_id="%3", agent="claude-code")
 

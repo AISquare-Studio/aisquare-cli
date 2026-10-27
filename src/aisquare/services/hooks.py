@@ -1276,19 +1276,23 @@ def _pane_shows(agent: FleetAgent) -> str:
     """``idle``: the agent's prompt drawn and idle (``AgentScreen.ready``; Claude Code's input
     box with no spinner above it). ``busy``: the prompt drawn under a turn, a prompt's hook
     included (``AgentScreen.drawn``). ``unknown``: no capture, a dialog, no prompt; one look,
-    which fails closed to anything but ``idle``."""
-    from aisquare.core.agent_adapters import recorded_adapter
-    from aisquare.core.agent_adapters.types import screen_of
+    which fails closed to anything but ``idle``.
+
+    Read by the pane's own agent through ``captain.screen``, the escapes ``capture-pane -e``
+    keeps stripped first: Codex draws its composer and its footer styled (``\\x1b[1m?\\x1b[0m
+    for shortcuts``, measured on 0.164.0), and its readers, handed the rows as captured, read
+    its idle prompt as no prompt at all, so a Codex row was never moved before its limit
+    (#39's reopen, board seq 4202)."""
     from aisquare.services import fleet as fleet_service  # lazy, as in `hand_over`
+    from aisquare.services.captain import screen as pane_screen
 
     try:
         lines = fleet_service.server_of(agent).capture(agent.pane_id).lines
     except Exception:
         return "unknown"
-    screen = screen_of(recorded_adapter(agent.agent))
-    if screen.ready(lines):
+    if pane_screen.ready(agent, lines):
         return "idle"
-    return "busy" if screen.drawn(lines) else "unknown"
+    return "busy" if pane_screen.drawn(agent, lines) else "unknown"
 
 
 def hand_over(

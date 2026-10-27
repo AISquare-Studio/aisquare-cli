@@ -18,6 +18,7 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -28,6 +29,7 @@ from aisquare.core import claude_accounts as core
 from aisquare.core import paths, selfcli
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters.codex_transcript import CodexTranscript
+from aisquare.core.agent_adapters.types import screen_of
 from aisquare.core.config import AccountsSettings, AppConfig, load_config, save_config
 from aisquare.core.store import store_session
 from aisquare.models import ClaudeAccount, FleetAgent, ProjectInfo, TeamSession
@@ -35,6 +37,7 @@ from aisquare.services import agent_events
 from aisquare.services import claude_accounts as service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import hooks as hooks_service
+from aisquare.services.captain.screen import PANE_ESCAPES
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
 from tests.test_codex_accounts import _sign_in, _token_count, _window
 from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
@@ -44,6 +47,7 @@ from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     repo,
     tmux,
 )
+from tests.test_remote_needs_codex import QUESTION_SCREEN, WORKING_SCREEN
 from tests.test_usage_aware_accounts import _payload, _slot, _Usage
 
 ROLLOUT = (
@@ -62,12 +66,34 @@ NEXT_TURN = 21
 """Lines once the next prompt's turn started (``task_started``)."""
 
 
+IDLE_SCREEN: list[str] = json.loads(
+    (
+        Path(__file__).parent / "fixtures" / "agent_screens" / "codex-idle-sgr-0.164.0.json"
+    ).read_text(encoding="utf-8")
+)["rows"]
+"""Codex 0.164.0 at its empty prompt as the fleet's capture gives it (``capture-pane -e``), its
+composer and footer styled, from tester-39's live run (board seq 4202)."""
+PLAIN_IDLE_SCREEN = [PANE_ESCAPES.sub("", row) for row in IDLE_SCREEN]
+"""The same screen as its plain text gives it (``capture-pane -p``)."""
+
+
 @pytest.fixture(autouse=True)
 def unhurried(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The move's settle is not slept, and the pane reads idle at its prompt (what a capture
-    reads is ``tests/test_before_limit.py``'s)."""
+    """The move's settle is not slept. The pane is read as tmux shows it: a test whose row
+    moves draws Codex's screen on it (:func:`_at_its_prompt`)."""
     monkeypatch.setattr(hooks_service, "_sleep", lambda seconds: None)
-    monkeypatch.setattr(hooks_service, "_pane_shows", lambda agent: "idle")
+
+
+def _at_its_prompt(tmux: FakeTmux, pane_id: str, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
+    """``pane_id`` shows Codex at its empty prompt (:data:`IDLE_SCREEN`), as tmux gives it: its
+    escapes in a capture (``capture-pane -e``), none in its plain text (``capture-pane -p``)."""
+    tmux.screens[pane_id] = list(IDLE_SCREEN)
+    plain = FakeTmux.screen_text
+
+    def screen_text(pane_id: str) -> list[str]:
+        return [PANE_ESCAPES.sub("", row) for row in plain(tmux, pane_id)]
+
+    monkeypatch.setattr(tmux, "screen_text", screen_text)
 
 
 @pytest.fixture
@@ -122,6 +148,7 @@ class _Row:
         assert spawned.agent == "codex" and spawned.account_slot == on.slot
         assert spawned.launch_spec is not None and not spawned.launch_spec.account_pinned
         self.project, self.home, self.label = of, on.config_dir, spawned.label
+        self.pane = spawned.pane_id
         self.turns = 0
         self.rollout = (
             on.config_dir
@@ -225,15 +252,19 @@ def test_a_codex_row_over_the_line_at_its_turn_end_moves_to_a_codex_slot_under_i
     codex_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
     started: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The SCOPE's acceptance: a Codex coder at its turn end, its account over ``switch_at``
     and its exec ended (``/stop``), moves to the Codex slot under the line — never the Claude
     slot between them on the ladder — and the board's ``switched`` line says ``(before
     limit)``. Before 091's lane the gate read Claude Code's transcript alone, and a Codex row
-    was never moved early."""
+    was never moved early. Its pane is read as tmux captures it, escapes and all: read so by
+    Codex's own readers, its idle prompt was no prompt, and the move gave the row back
+    silently at its last check (#39's reopen, board seq 4202)."""
     _settings(before_limit="switch")
     full = _codex_slot("full@example.com", 92)
     row = _Row(project, full)
+    _at_its_prompt(tmux, row.pane, monkeypatch)
     core.create_account()  # a Claude slot on the ladder: never a Codex agent's target
     roomy = _codex_slot("roomy@example.com", 15)
     _on_record()
@@ -387,6 +418,54 @@ def test_warn_names_the_codex_slot_with_room_and_moves_nothing(
     [line] = [text for kind, text in row.events() if kind == "before_limit"]
     assert core.label(roomy) in line and "fleet switch" in line, line
     assert row.live().id == row.id and row.live().account_slot == full.slot
+
+
+# --- the pane: the move's last check, read as tmux captures it --------------------------------
+
+
+class _Captured:
+    """A tmux server whose one capture is ``rows``, as ``capture-pane -e`` gives them."""
+
+    def __init__(self, rows: list[str]) -> None:
+        self.rows = rows
+
+    def capture(self, pane_id: str) -> Any:
+        return SimpleNamespace(lines=list(self.rows))
+
+
+@pytest.mark.parametrize(
+    ("rows", "shows"),
+    [
+        (IDLE_SCREEN, "idle"),
+        (PLAIN_IDLE_SCREEN, "idle"),
+        (WORKING_SCREEN, "busy"),
+        (QUESTION_SCREEN, "unknown"),
+    ],
+    ids=["idle as captured", "idle as plain text", "a turn running", "its question view"],
+)
+def test_a_codex_pane_is_read_by_codex_as_tmux_captures_it(
+    monkeypatch: pytest.MonkeyPatch, rows: list[str], shows: str
+) -> None:
+    """``_pane_shows`` on Codex's own screens, its escapes kept as the fleet's capture keeps
+    them: its empty prompt (0.164.0, :data:`IDLE_SCREEN`) is ``idle``, a turn's status line
+    above its composer ``busy`` and its question view ``unknown`` (0.162.1,
+    ``tests/test_remote_needs_codex.py``'s). Codex's readers take the rows as ``capture-pane
+    -p`` gives them: handed the styled ones, they found no prompt on the idle screen, and
+    the move gave every Codex row back at this check (#39's reopen, board seq 4202)."""
+    monkeypatch.setattr(fleet_service, "server_of", lambda agent, config=None: _Captured(rows))
+    agent = SimpleNamespace(pane_id="%3", agent="codex")
+
+    assert hooks_service._pane_shows(agent) == shows  # type: ignore[arg-type]
+
+
+def test_the_idle_screen_is_one_codexs_readers_cannot_read_as_captured() -> None:
+    """What :data:`IDLE_SCREEN` holds the move to: Codex's own reader finds its empty prompt
+    only once the escapes are gone, so a ``_pane_shows`` that handed it the capture as it
+    came would read ``unknown`` on it."""
+    screen = screen_of(get_adapter("codex"))
+
+    assert not screen.ready(IDLE_SCREEN) and not screen.drawn(IDLE_SCREEN)
+    assert screen.ready(PLAIN_IDLE_SCREEN)
 
 
 # --- the reader: what a rollout says is still running ---------------------------------------

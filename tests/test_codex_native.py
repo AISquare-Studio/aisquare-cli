@@ -2194,6 +2194,15 @@ def test_real_codex_trust_one_slot_gave_reaches_another_and_its_spawn_asks_nothi
             )
             time.sleep(8)  # Codex draws its question after its prompt (measured on 0.162.1)
             assert "Trust this folder" not in screen(coder.pane_id), screen(coder.pane_id)
+            # On a loaded runner the pane is still settling (its hooks' warnings redraw it, and
+            # the row reads `working`), and a tell types only at a quiet prompt: wait for it
+            # again, the way the first wait did, before telling.
+            until(
+                lambda: quiet_at_its_prompt(coder),
+                40,
+                "B's prompt, quiet again",
+                lambda: screen(coder.pane_id),
+            )
             told = fleet.tell(project, coder.label, "reply ok")
             assert told.delivered and "typed" in told.how, told
             until(

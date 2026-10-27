@@ -111,10 +111,9 @@ def test_the_whitelist_holds_every_board_call_the_role_protocols_teach() -> None
 
 
 def test_the_whitelist_is_the_one_the_docs_list() -> None:
-    """The docs list exactly what the broker runs."""
-    docs = (ROOT / "docs" / "coding-agents.md").read_text(encoding="utf-8")
+    """The module docstring lists exactly what the broker runs."""
+    docs = store_broker.__doc__ or ""
     section = docs[docs.index("### The broker's whitelist") :]
-    section = section[: section.index("\n## ")]
     listed = {
         tuple(found.split()) for found in re.findall(r"^- `aisquare ([a-z ]+)`", section, re.M)
     }

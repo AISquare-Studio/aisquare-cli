@@ -7,8 +7,8 @@ special-cases either of them, or reads a payload or writes a flag itself instead
 adapter, fails here for the fake; the Gemini-shaped one has the shapes neither has (a home
 variable naming the folder its config dir is in, hook timeouts in milliseconds).
 
-What a new adapter must bring for this suite to pass (docs/coding-agents.md, "Adding a
-terminal agent"): a recorded-payload fixture for every hook event it installs
+What a new adapter must bring for this suite to pass (the ``core.agent_adapters`` package
+docstring, "Adding a terminal agent"): a recorded-payload fixture for every hook event it installs
 (``tests/fixtures/agent_events/<id>.json``, with its ``--version`` line and what switches
 its hooks off, and the files of a home that keeps aisquare's MCP server: ``lasting``), a row in
 :data:`EXPECTED_PERMISSIONS`, and its transcript at four moments
@@ -2326,16 +2326,19 @@ def test_an_agent_with_no_screen_still_runs_and_is_never_typed_into_on_its_scree
     assert screen.modal(rows) is None and not screen.reads_empty_prompt
 
 
-def test_the_guide_names_every_member_of_the_protocol() -> None:
-    """docs/coding-agents.md, "Adding a terminal agent", names every member of the adapter
-    protocol's classes (an inline code span holds it), so a slot added is a slot documented:
-    the guide-vs-code check the lanes ran by hand, kept."""
+def test_the_contract_names_every_member_of_the_protocol() -> None:
+    """The ``core.agent_adapters`` package docstring, "Adding a terminal agent", names every
+    member of the adapter protocol's classes (an inline code span holds it), so a slot added is
+    a slot documented: the contract-vs-code check the lanes ran by hand, kept."""
     import ast
     import re
 
+    from aisquare.core import agent_adapters
+
     root = Path(__file__).resolve().parents[1]
     tree = ast.parse((root / "src/aisquare/core/agent_adapters/types.py").read_text("utf-8"))
-    guide = (root / "docs/coding-agents.md").read_text("utf-8")
+    guide = agent_adapters.__doc__ or ""
+    assert "## Adding a terminal agent" in guide, "the contract is the package docstring"
     spans = re.findall(r"`([^`\n]+)`", guide)
     named = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", " ".join(spans)))
     classes = {
@@ -2368,4 +2371,4 @@ def test_the_guide_names_every_member_of_the_protocol() -> None:
             elif isinstance(item, ast.FunctionDef) and not item.name.startswith("_"):
                 members.append(item.name)
         missing += [member for member in members if member not in named]
-    assert not missing, f"name these in docs/coding-agents.md: {missing}"
+    assert not missing, f"name these in the core.agent_adapters package docstring: {missing}"

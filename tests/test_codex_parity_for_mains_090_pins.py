@@ -1,6 +1,7 @@
 """Codex pins for three of main's 0.9.0 rows that said PARITY by reading (review r23 of #113, 8).
 
-Each is a row of ``docs/coding-agents.md``'s parity table whose cited tests ran no Codex row
+Each is a row of the PR's parity table ("Parity with Claude Code", in the description of #113)
+whose cited tests ran no Codex row
 through the code the row names:
 
 - **W1b, auto-stop**: ``test_codex_parity_for_mains_090.py`` stubs ``autostop.arm``, so a Codex

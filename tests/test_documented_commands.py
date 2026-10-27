@@ -114,11 +114,9 @@ DOCUMENTED = (
     # belongs here. Trivially stable today; listed because the resolution rule
     # is the rule, not because this command is likely to drift.
     ".github/ISSUE_TEMPLATE/bug_report.md",
-    # The two pages of this line that `docs/` held back when main removed the rest
-    # (2026-10-26): their fate is the owner's, and while they stand their commands are
-    # steps a reader types.
-    "docs/coding-agents.md",
-    "docs/codex-plugin.md",
+    # The Codex plugin's own README (the owner's decision of 2026-10-27: the pages of this line
+    # that `docs/` held back move into code): its commands are steps a reader types.
+    "plugins/codex/README.md",
 )
 
 #: Directories the staleness sweep never enters. Everything else under the repo
@@ -783,7 +781,6 @@ _NOT_AN_INVOCATION = (
 #: raising each entry to an absurd value and reading the counts out of the
 #: failure message, which is the only way this file reports them.
 CENSUS = {
-    "docs/coding-agents.md": (12, 0),
     ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
     # Re-measured 2026-10-07 when the README became a front page (roadmap 9.5):
     # the two quickstarts and the plain-command block, with the `uv tool install`
@@ -793,7 +790,7 @@ CENSUS = {
     # (`remember`, `doctor`, `agents disconnect codex`) and six classified mentions
     # (`aisquare-cli` and `aisquare@aisquare-cli` in the `codex plugin` and `uv tool
     # install` lines).
-    "docs/codex-plugin.md": (3, 6),
+    "plugins/codex/README.md": (3, 6),
 }
 
 

@@ -3,8 +3,8 @@
 :class:`AgentAdapter` is everything AISquare knows about one terminal agent, and the
 shared services ask it rather than the agent's name: a new agent is a module that
 implements it and one :func:`aisquare.core.agent_adapters.register` line
-(docs/coding-agents.md, "Adding a terminal agent"; tests/test_adapter_contract.py
-holds every registered adapter to it).
+(the package docstring of ``core.agent_adapters``, "Adding a terminal agent";
+tests/test_adapter_contract.py holds every registered adapter to it).
 """
 
 from __future__ import annotations

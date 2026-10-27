@@ -12,8 +12,8 @@ L7 (board task #120) runs the Gemini-shaped one through the rest of the shared c
 shared file edited: a fleet spawn and its window's launch (its variables and one settings
 layer, S3; ``auto`` as ``ask``, S4), its transcript's tail and pages (a later patch line,
 S5), its usage and the info line (daily per-model windows, S6), and the telemetry receiver
-(its reader, B7); and asserts that the files naming it are its own of the nine the guide
-lists (``test_a_new_agent_touches_the_nine_files_the_guide_lists``).
+(its reader, B7); and asserts that the files naming it are its own of the eight the contract
+lists (``test_a_new_agent_touches_the_eight_files_the_contract_lists``).
 """
 
 from __future__ import annotations
@@ -881,7 +881,7 @@ def test_its_negative_plain_slot_is_named_by_its_number_wherever_a_slot_is(
 # --- the files a new agent touches ---------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parents[1]
-#: Each file the guide's "The files" table lists, and where the Gemini-shaped synthetic agent
+#: Each file the contract's "The files" table lists, and where the Gemini-shaped synthetic agent
 #: keeps its own of it: registered in tests alone, its adapter module is a test module and its
 #: registration the suites' that hold it; it declares no screen, so it has no screens fixture;
 #: and with no binary to run, this suite stands in for its native test and it has no runner.
@@ -896,12 +896,11 @@ COUNTERPARTS: dict[str, str | None] = {
     "tests/fixtures/agent_screens/<id>.json": None,
     "tests/test_<agent>_native.py": "tests/test_third_agent_seams.py",
     "tests/run_<agent>_native.py": None,
-    "docs/coding-agents.md": "docs/coding-agents.md",
 }
 NAMES_IT = re.compile(r"gemini[-_]shaped|GeminiShaped", re.IGNORECASE)
-#: The files of the guide's "Optional routes" table: an agent that takes a route (its live
+#: The files of the contract's "Optional routes" table: an agent that takes a route (its live
 #: suite in CI, a plugin, aisquare's shell installers, a mention in the prose) touches them
-#: besides the nine, and no other file may name it.
+#: besides the eight, and no other file may name it.
 OPTIONAL = (
     ".github/workflows/ci.yml",
     "plugins/<agent>/",
@@ -911,29 +910,36 @@ OPTIONAL = (
     ".github/workflows/install.yml",
     "tests/test_<agent>_plugin.py",
     "tests/test_<agent>_plugin_route.py",
-    "docs/<agent>-plugin.md",
     "install.sh",
     "install.ps1",
-    "docs/install.md",
     "README.md",
     "CHANGELOG.md",
 )
 #: Where a file naming an agent is looked for: beside these, every file at the top.
-SCANNED = ("src", "tests", "docs", ".github", "plugins", ".agents", ".claude-plugin")
+SCANNED = ("src", "tests", ".github", "plugins", ".agents", ".claude-plugin")
+
+
+def _contract() -> str:
+    """The contract: the ``core.agent_adapters`` package docstring, "Adding a terminal agent"."""
+    from aisquare.core import agent_adapters
+
+    text = agent_adapters.__doc__ or ""
+    assert "## Adding a terminal agent" in text, "the contract is the package docstring"
+    return text
 
 
 def _guide_files() -> list[str]:
-    """The files the guide's "Adding a terminal agent" table lists, in its order."""
-    guide = (ROOT / "docs" / "coding-agents.md").read_text("utf-8")
+    """The files the contract's "Adding a terminal agent" table lists, in its order."""
+    guide = _contract()
     table = guide.split("### The files", 1)[1].split("\n\n|", 1)[1].split("\n\n", 1)[0]
     rows = [row for row in ("|" + table).splitlines() if re.match(r"\| \d", row)]
     return [path for row in rows for path in re.findall(r"`([^`]+)`", row.split("|")[2])]
 
 
 def _guide_optional() -> list[str]:
-    """The files the guide's "Optional routes" table lists, in its order, each once: each path
-    in a code span of its Files column."""
-    guide = (ROOT / "docs" / "coding-agents.md").read_text("utf-8")
+    """The files the contract's "Optional routes" table lists, in its order, each once: each
+    path in a code span of its Files column."""
+    guide = _contract()
     table = guide.split("### Optional routes", 1)[1].split("\n\n|", 1)[1].split("\n\n", 1)[0]
     rows = [row for row in ("|" + table).splitlines()[2:] if row.startswith("| ")]
     spans = [span for row in rows for span in re.findall(r"`([^`]+)`", row.split("|")[2])]
@@ -967,14 +973,14 @@ def _files_naming_it(root: Path = ROOT) -> set[str]:
     return found
 
 
-def test_a_new_agent_touches_the_nine_files_the_guide_lists() -> None:
-    """Acceptance 3 of L7: the guide lists exactly the files a new terminal agent touches,
-    nine, and every file that names the Gemini-shaped synthetic agent, whose launch,
+def test_a_new_agent_touches_the_eight_files_the_contract_lists() -> None:
+    """Acceptance 3 of L7: the contract lists exactly the files a new terminal agent touches,
+    eight, and every file that names the Gemini-shaped synthetic agent, whose launch,
     transcript, usage and info line run through the shared code above, is its own of one of
     them: none under ``src``, nothing shared edited for it."""
     listed = _guide_files()
     assert listed == list(COUNTERPARTS), listed
-    assert len(listed) == 9
+    assert len(listed) == 8
     assert _guide_optional() == list(OPTIONAL), _guide_optional()
     named = _files_naming_it()
     assert not {path for path in named if path.startswith("src/")}, named
@@ -986,7 +992,7 @@ def test_a_new_agent_touches_the_nine_files_the_guide_lists() -> None:
 def test_the_files_that_name_it_are_looked_for_in_ci_the_plugins_and_the_top_too(
     tmp_path: Path,
 ) -> None:
-    """Review r18 of #113, findings 12 and 16: "touches these nine files, and no other" was
+    """Review r18 of #113, findings 12 and 16: "touches these files, and no other" was
     false for an agent with a plugin route or a CI job, and the check scanned only ``src``,
     ``tests``, ``docs`` and the top's ``.md`` and ``.toml``, never ``.github`` or
     ``plugins``. It finds the agent named there and in any file at the top, and of those only

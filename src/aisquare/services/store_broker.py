@@ -56,6 +56,79 @@ what the report held when the run ended, where the sandbox cannot write
 (``seals/``). ``brief evidence --report`` then adopts the report into the home's
 ``reports/`` (``services.command_reports.adopt_sandboxed``): only a sealed, unchanged,
 owner-only report of this launch's tree and board, copied from the bytes that were checked.
+
+### The broker's whitelist
+
+What a sandboxed agent's broker runs (`services.store_broker.WHITELIST`); a test holds
+this list to it, and every board call a role's cycle teaches to it:
+
+- `aisquare note`
+- `aisquare board` (not `--watch`)
+- `aisquare task add`
+- `aisquare task list`
+- `aisquare task show`
+- `aisquare task claim`
+- `aisquare task next`
+- `aisquare task review`
+- `aisquare task reopen`
+- `aisquare task done`
+- `aisquare task block`
+- `aisquare task drop`
+- `aisquare task release`
+- `aisquare team status`
+- `aisquare team focus`
+- `aisquare team log`
+- `aisquare team verify`
+- `aisquare team signal` (not the fleet's own)
+- `aisquare team signals`
+- `aisquare remember`
+- `aisquare inject`
+- `aisquare log`
+- `aisquare context list`
+- `aisquare context show`
+- `aisquare context search`
+- `aisquare context preview`
+- `aisquare context add`
+- `aisquare code find` (reads the symbol index; a first query builds it, outside the sandbox)
+- `aisquare code refs`
+- `aisquare code similar`
+- `aisquare brief create`
+- `aisquare brief list`
+- `aisquare brief show`
+- `aisquare brief update`
+- `aisquare brief link`
+- `aisquare brief evidence` (an `--artifact` only from the launch's own tree: the file is
+  opened below the tree's root with no link followed and read from that descriptor, so a
+  directory or the file swapped for a link after the path was checked is refused, and a FIFO
+  swapped in does not block the broker; a hard link in the tree to a file outside it is not
+  told from a file of the tree. A `--report` from the sandbox is adopted first, below)
+- `aisquare brief check`
+- `aisquare brief finding` (its `--artifact` as `evidence`'s)
+- `aisquare reports seal` (hidden: what `asq exec` asks of its broker when a run ends)
+
+Global output flags (`--json`, `-q`, `-v`, `--no-color`) and `--help` are fine; `aisquare
+--version` runs in the sandbox, reading nothing. Everything else is refused there,
+`aisquare fleet …` with the reason that the broker never runs a fleet operation, and
+`aisquare code index`, which writes the index.
+
+**`asq exec` and `asq reports` run in the sandbox, not through the broker.** The broker
+runs outside it, so `exec` on its whitelist would run the agent's argv unsandboxed. The
+CLI runs them itself (`store_broker.LOCAL`), `exec`'s command as sandboxed as the agent's
+own, and the report goes to the launch's own `reports/`, beside the broker's inbox and the
+only other place in the store its sandbox may write (`reports_dir()`; every seat's, a
+reviewer's too). With `--project` the report fingerprints the tree it ran in, which needs
+no store (read-only there). When the run ends `exec` has the broker seal the report
+(`reports seal`: its files' digest, recorded in the launch's `seals/`, which the sandbox
+cannot write, once). `brief evidence --report` then adopts it into the home's `reports/`,
+and the evidence cites the copy: the report must be sealed and unchanged since; owner-only,
+with its own files and nothing else, none a link or a pipe; its directory and checkout
+absolute paths inside the launch's tree (a relative one is refused: it would be read from
+the directory of whoever reads it) and its board the launch's. The copy is written from the
+bytes that were checked. A pass is judged as for any report, by the broker reading the source again
+(the same files before the run, after it and now), and `task done` is gated at the store.
+What this does not settle: that the command ran as the report says. An agent that writes
+a report by hand and seals it gets it adopted, as a Claude Code agent that writes one into
+`reports/` is trusted; the validator's check of the source is the second look.
 """
 
 from __future__ import annotations
@@ -382,7 +455,7 @@ def open_in_tree(path: Path, environ: Mapping[str, str] | None = None) -> int | 
     opened here by walking from the tree's root, one step at a time, with ``O_NOFOLLOW`` at
     each: the descriptor is a file of the tree, and the bytes are read from it. A file with
     a second name (a hard link in the tree to a file outside it) is not told from a file of
-    the tree: the docs say so (``docs/coding-agents.md``)."""
+    the tree: the module docstring says so."""
     roots = _tree_roots(os.environ if environ is None else environ)
     if roots is None:
         return None

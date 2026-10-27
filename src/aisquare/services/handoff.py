@@ -11,7 +11,8 @@ hand-over once the agent's own accounts are all limited (:func:`pick_across`) al
 one.
 
 Agent-neutral by construction, so a new adapter gets it by implementing what the adapter
-contract already asks (docs/coding-agents.md, "Adding a terminal agent"):
+contract already asks (the ``core.agent_adapters`` package docstring, "Adding a terminal
+agent"):
 
 - the conversation is read through the SOURCE adapter's transcript reader, as Remote's
   Transcript tab pages it (``services.transcript.read_page``: ``AgentTranscript.records``

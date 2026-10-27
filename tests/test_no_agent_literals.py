@@ -1,7 +1,7 @@
 """No shared code decides by an agent's name or spells an agent's vocabulary: that is the adapter's.
 
 ``core/agent_adapters/`` is the one place a terminal agent is implemented
-(docs/coding-agents.md, "Adding a terminal agent"); a service that compares an agent id
+(the package docstring, "Adding a terminal agent"); a service that compares an agent id
 with ``"codex"`` or ``"claude-code"`` is a branch the next agent would have to edit, and so
 is one that compares it with a constant naming one (``AGENT``, ``CODEX``…), asks
 ``harness.is_default_agent`` of a binary, or spells an agent's binary, variable, config

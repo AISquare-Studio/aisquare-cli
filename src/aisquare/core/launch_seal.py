@@ -1,6 +1,6 @@
 """A fleet row's launch, sealed where its sandboxed agent cannot write it.
 
-The boundary (docs/coding-agents.md, "The trust boundary"). A sandboxed agent is trusted
+The trust boundary. A sandboxed agent is trusted
 to the extent of the tree it may write, as a Claude Code agent (no OS sandbox) and a human
 contributor are: what the user's own tools later run from that tree is inside that trust,
 documented, not sealed (git hooks that live in it and git config its repository includes

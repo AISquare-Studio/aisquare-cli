@@ -1,4 +1,6 @@
-# The Codex plugin
+# The aisquare plugin for Codex
+
+This folder is the plugin (`.codex-plugin/plugin.json`, `hooks/hooks.json`, `scripts/aisquare-hook`); the marketplace that lists it is `.agents/plugins/marketplace.json` at the top of this repository.
 
 The aisquare plugin gives Codex the hooks that `aisquare agents connect codex` writes into `$CODEX_HOME/hooks.json`, without an installer and without writing hooks into that file. Installing it writes to Codex's `config.toml`: Codex records there the marketplace, that the plugin is enabled (`[plugins."aisquare@aisquare-cli"]`), and, once you trust them, its hooks (`[hooks.state]`). From a shell:
 
@@ -25,7 +27,7 @@ The hooks are SessionStart, UserPromptSubmit, Stop, SessionEnd, Interrupt, Permi
 
 A hook that fails never blocks a prompt or a session. Codex runs hooks from its background app server, in the session's folder, so the `PATH` they see is the one Codex was first started with.
 
-The plugin's launcher is the Claude Code plugin's, the same file in both plugins ([The Claude Code plugin](claude-code-plugin.md) has the details of the `uvx` route, including the answers about uv's Pythons it keeps in `~/.cache/aisquare`).
+The plugin's launcher is the Claude Code plugin's, the same file in both plugins (`scripts/aisquare-hook` here, `plugins/claude-code/scripts/aisquare-hook` there; its header has the details of the `uvx` route, including the answers about uv's Pythons it keeps in `~/.cache/aisquare`).
 
 ## Saving memory on purpose
 

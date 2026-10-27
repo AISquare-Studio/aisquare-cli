@@ -55,7 +55,7 @@ PLUGIN_JSON = PLUGIN / ".codex-plugin" / "plugin.json"
 HOOKS_JSON = PLUGIN / "hooks" / "hooks.json"
 LAUNCHER = PLUGIN / "scripts" / "aisquare-hook"
 PYPROJECT = REPO / "pyproject.toml"
-DOCS = REPO / "docs" / "codex-plugin.md"
+README = REPO / "plugins" / "codex" / "README.md"
 
 _COMMAND = 'sh "${{PLUGIN_ROOT}}/scripts/aisquare-hook" codex {event}'
 _SPECS = get_adapter("codex").capabilities.hooks
@@ -551,8 +551,8 @@ def test_an_event_it_does_not_know_runs_nothing(machine: Machine, argv: tuple[st
 # --------------------------------------------------------------------------- the docs
 
 
-def test_the_page_gives_the_two_commands_and_the_trust_step() -> None:
-    text = " ".join(DOCS.read_text(encoding="utf-8").split())
+def test_the_readme_gives_the_two_commands_and_the_trust_step() -> None:
+    text = " ".join(README.read_text(encoding="utf-8").split())
     market = _load(MARKETPLACE)["name"]
 
     assert "codex plugin marketplace add AISquare-Studio/aisquare-cli" in text
@@ -562,14 +562,15 @@ def test_the_page_gives_the_two_commands_and_the_trust_step() -> None:
     assert "/hooks" in text
 
 
-def test_the_readme_offers_the_codex_plugin() -> None:
+def test_the_front_page_offers_the_codex_plugin() -> None:
     """The README is a front page since 0.9.1 removed `docs/`: it names no Claude Code
-    plugin page (there is none), and points at the Codex plugin's, the one page of the route
-    that remains."""
+    plugin page (there is none), and points at the Codex plugin's own README, which sits with
+    the plugin."""
     readme = (REPO / "README.md").read_text(encoding="utf-8")
 
-    assert "docs/codex-plugin.md" in readme
-    assert "docs/claude-code-plugin.md" not in readme
+    assert "plugins/codex/README.md" in readme
+    assert README.is_file()
+    assert "blob/main/docs/" not in readme.replace("blob/main/docs/usage-telemetry.md", "")
 
 
 @posix_only

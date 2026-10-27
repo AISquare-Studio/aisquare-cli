@@ -2495,7 +2495,7 @@ init_home() {
         die "\`aisquare $*\` failed. Rerun with --verbose to see its output."
     fi
     # Codex alone: the agent launches use, which is Claude Code until told otherwise
-    # (docs/coding-agents.md, "Selection order"). With both, Claude Code stays it.
+    # (the account order, `core.agent_adapters`). With both, Claude Code stays it.
     if wants_codex && ! wants_claude; then
         run aisquare agents use codex || die "\`aisquare agents use codex\` failed. Rerun with --verbose to see its output."
     fi
@@ -2904,7 +2904,7 @@ _actionable_fix() {
         codex)
             # The one step this script leaves to the user on purpose: Codex runs hooks
             # only once they are trusted, and nothing here may trust them for anyone
-            # (docs/coding-agents.md). Only for rows that say exactly that ("unverified");
+            # (the doctor's wording). Only for rows that say exactly that ("unverified");
             # any other amber codex row is unexpected, and the doctor has its fix.
             if codex_awaits_trust_only; then
                 printf '%s' "run codex (sign in if it asks), open /hooks and trust aisquare's hooks"

@@ -34,7 +34,7 @@ aisquare remember --user "prefer pytest over unittest"
 `init` registers the repo you run it in and wires Claude Code's hooks, so every
 new session starts with what you told it to remember. `aisquare context list`
 shows what is in scope. To install from inside Codex instead, see
-[the Codex plugin](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/codex-plugin.md).
+[the Codex plugin](https://github.com/AISquare-Studio/aisquare-cli/blob/main/plugins/codex/README.md).
 
 ## Quickstart 2: the full fleet
 
@@ -135,7 +135,6 @@ short alias.
 
 | Page | What is in it |
 | --- | --- |
-| [Coding agents](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/coding-agents.md) | Claude Code (the compatibility default) or Codex: setup, mixed teams and the tested compatibility boundary |
 | [Usage sharing](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/usage-telemetry.md) | Optional and off by default: anonymous daily counts of how aisquare is used. What is collected, what never is, how to see exactly what would be sent and turn it off |
 
 ## Community

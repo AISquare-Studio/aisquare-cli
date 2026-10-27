@@ -219,7 +219,7 @@ def spawn(
         typer.Option(
             "--permission-mode",
             help="Permission as WRITE:APPROVALS, mapped to each agent's own flags "
-            "(workspace:auto, read_only:auto, workspace:ask, full:never…; docs/fleet.md), "
+            "(workspace:auto, read_only:auto, workspace:ask, full:never…), "
             "or in the agent's own words (Claude Code: auto, acceptEdits, …; Codex: a "
             "sandbox); default per role.",
         ),

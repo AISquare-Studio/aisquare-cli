@@ -1282,8 +1282,7 @@ def refresh_hooks_argv(agent: str = HOOK_AGENT) -> tuple[str, ...]:
 def _definition(site: HookSite) -> str | None:
     """The definition of ``site``'s hooks its agent trusts, for one that runs them only once
     trusted (Codex, ``requires_hook_trust``), else ``None``; ``None`` too when it cannot be
-    read. Changed by a refresh, Codex asks for the hooks to be reviewed again in ``/hooks``
-    (docs/coding-agents.md)."""
+    read. Changed by a refresh, Codex asks for the hooks to be reviewed again in ``/hooks``."""
     if not get_adapter(site.agent).capabilities.requires_hook_trust:
         return None
     try:

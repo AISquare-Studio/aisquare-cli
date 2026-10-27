@@ -1,6 +1,7 @@
 """A synthetic third terminal agent, registered only in tests (tests/test_adapter_contract.py).
 
-Written by following docs/coding-agents.md, "Adding a terminal agent", and nothing else:
+Written by following the ``core.agent_adapters`` package docstring, "Adding a terminal
+agent", and nothing else:
 its native vocabulary is deliberately unlike Claude Code's and Codex's (its own event
 names, payload keys, reply envelope and flags), so a shared service that special-cases
 either of them, or reads a payload or writes a flag itself, fails the conformance suite

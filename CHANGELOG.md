@@ -29,7 +29,7 @@ adapter.**
   `[accounts] cross_agent_handover`, on by default, *hand off across agents* in App
   settings. Any adapter gets it from what the adapter contract already asks (its
   transcript reader and its first-prompt path); the synthetic third agent proves it
-  both ways ([the parity row](docs/coding-agents.md#parity-with-claude-code)).
+  both ways (the parity row of #113's description).
   **The newest of the conversation goes to the other agent's vendor**, which the
   switch's tooltip says: it is scrubbed first as outgoing text is (`[redaction]
   level`), in the prompt and in the file, each record whole before its text is wrapped or
@@ -56,10 +56,10 @@ adapter.**
   tests (the last, SMOKE8, on 0.8.2's personas, captain, Spawn dialog, info line,
   hand-off and `--all` on Codex 0.164.0 and 0.162.1) and the live tests on the
   real Codex 0.164.0 and 0.162.1, is
-  [the parity matrix](docs/coding-agents.md#parity-with-claude-code).
+  the parity matrix (*Parity with Claude Code* in #113's description).
 - Main's 0.9.0 is merged (the P2 train, #401's release, the snapshot removal and the
   evidence gate), each of its features with a Codex status in
-  [the parity matrix](docs/coding-agents.md#parity-with-claude-code): through the adapter
+  the parity matrix: through the adapter
   for admission and auto-stop, `aisquare watch`, asq's one tmux read per tick, the symbol
   index's `code_lookup` tool and session-start refresh, a parent manager, Restart & update,
   the installer's hand-off, the role-less agent, rank 1 as the machine default and *Log in
@@ -94,6 +94,14 @@ adapter.**
     proof (no pid from its hooks); `project fresh` removes the worktrees the rows name, not
     where the launch record places them; a Codex row's `!` hover ends with Claude's remedy.
     `tests/test_no_agent_literals.py`'s BASELINE counts the shared code behind them.
+- **No `docs/` pages for this line** (the owner, 2026-10-27, to match main's removal): the
+  adapter contract (the protocol table and "Adding a terminal agent" with its file and fixture
+  list) is the docstring of `aisquare.core.agent_adapters`, held to `types.py` by
+  `tests/test_adapter_contract.py` and read by `tests/test_third_agent_seams.py`; the broker's
+  whitelist is the docstring of `services.store_broker`, held to `WHITELIST`; the Codex
+  plugin's page is `plugins/codex/README.md`; the parity matrix (with the 0.9.1 rows) is in
+  #113's description under *Parity with Claude Code*. `docs/` holds `usage-telemetry.md`
+  alone, as on main.
 - A sandboxed Codex reads the symbol index and records evidence. `aisquare code find`, `refs`
   and `similar` (the reads; `code index` writes and stays out) and `aisquare brief …` run
   through its launch's broker, with the paths they name held to the launch's tree. `asq exec`
@@ -105,7 +113,7 @@ adapter.**
   checkout inside the launch's tree and its board the launch's. `task done` is gated at the
   store as for any agent. A report is still the agent's word that the command ran as it says
   (a Claude Code agent writes its own into the home), and the source is read again by the
-  broker at every check ([the broker's whitelist](docs/coding-agents.md#the-brokers-whitelist)).
+  broker at every check (the whitelist in `services.store_broker`'s docstring).
 - **Accounts share what each agent declares** (0.9.0's `[accounts] share`,
   `aisquare accounts share`): an adapter's `AgentAccounts.share_parts` names the parts,
   their entry in its config dir and whether each is linked or merged, and a part
@@ -128,7 +136,7 @@ adapter.**
   a linked part can be linked: a merged one reaching the linking code is refused, never
   a slot's whole config dir renamed aside. A new agent declares its parts in its own
   adapter.
-- [Adding a terminal agent](docs/coding-agents.md#adding-a-terminal-agent):
+- Adding a terminal agent (the `core.agent_adapters` package docstring):
   one adapter file and one registration line, held to a conformance suite
   that a synthetic third agent passes. A new agent's adapter touches nine files
   (one with a plugin, a CI job of its own or a route in the shell installers
@@ -395,8 +403,7 @@ adapter.**
   native hooks, memory, board identity, fleet launches, permissions, optional
   MCP and native telemetry. User/project defaults and role bindings support
   mixed Claude Code/Codex teams; setup, status and the UI expose agent choice.
-  See [coding-agent support](docs/coding-agents.md) for native trust and the
-  tested compatibility boundary.
+  The tested compatibility boundary is the parity matrix in #113's description.
 - **Codex accounts.** `aisquare accounts add --agent codex` makes a numbered
   slot under `~/.aisquare/codex-accounts/` and runs `codex login` in it; slot 0
   is the plain `codex` of your shell. One ladder numbers both agents' slots,
@@ -551,7 +558,7 @@ adapter.**
   agent's own hook, which Codex runs outside the sandbox, sends it as the command
   ends.
   A `--sandbox` in a role's own native arguments replaces the profile. See
-  [the sandbox and the store](docs/coding-agents.md#the-sandbox-and-the-aisquare-store).
+  `core.launch_seal` for the sandbox and the store.
 - **One permission per role, for every agent.** `fleet.roles.<role>.permission`
   and `fleet spawn` / `fleet restart --permission-mode` take `WRITE:APPROVALS`
   (`workspace:auto`, `read_only:auto`, `full:never`, …), which each agent's
@@ -582,7 +589,7 @@ adapter.**
   then `codex plugin add aisquare@aisquare-cli`, then trust its hooks in
   `/hooks`. It stands down while `$CODEX_HOME/hooks.json` runs aisquare's own,
   and `agents status codex` names the route. See
-  [the Codex plugin](docs/codex-plugin.md).
+  [the Codex plugin](plugins/codex/README.md).
 - **Codex's own switches are read.** `[features] hooks = false` (or the
   `codex_hooks` alias) in a Codex home, a profile or a role's launch arguments
   is named by the doctor and `agents status` instead of reading as connected.
@@ -767,7 +774,7 @@ adapter.**
   `source_root` is not an absolute path (`""`, `.`, `sub`) is refused at its seal: it was
   read from the broker's own directory, which is in the tree, and kept as the evidence's
   `source_root`. A hard link in the tree to a file outside it is still not told from a file
-  of the tree (`docs/coding-agents.md` says so). Adopting a sandbox's report now applies the
+  of the tree (`services.store_broker` says so). Adopting a sandbox's report now applies the
   retention a run's own report has (a sandbox that saved and sealed report after report filled
   the home until a later `exec` pruned); a sandbox's report directory is read only as far as
   a report can reach (not whole, however many names it holds); and the refusal for a command

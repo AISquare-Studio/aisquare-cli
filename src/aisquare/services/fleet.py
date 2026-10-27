@@ -2936,21 +2936,33 @@ def fleet_trees(project: ProjectInfo, rows: Sequence[FleetAgent]) -> list[Path]:
     """The worktrees ``rows`` (the project's fleet rows) ran in that are on disk now, each
     once, in the order of their rows: never the project's root, the owner's checkout, and
     never a folder that is no git worktree. One that cannot be looked at is left out, as
-    reap leaves it (:func:`_remove_finished_worktrees`)."""
+    reap leaves it (:func:`_remove_finished_worktrees`).
+
+    Each row's tree is the one its launch record names (``cwd``, ``worktree``:
+    :func:`_in_its_recorded_tree`), as stop and reap ask git about it, never a path the row
+    was rewritten to name in the store, which a sandbox could write before its broker
+    (``core.launch_seal``): ``project fresh`` removes these, ``--force`` when told (SCOPE #113
+    091, item 6). A row no record places (:class:`Unplaced`) names none: its store columns
+    are all it has."""
     root = _tree_at(project.root)
+    config = settings()
     seen: set[Path] = set()
     trees: list[Path] = []
     for row in rows:
-        here = _tree_at(row.cwd) if row.worktree else None
+        placement = resolve_place(row, config=config)
+        if not isinstance(placement, Placed):
+            continue
+        recorded = _in_its_recorded_tree(placement)
+        here = _tree_at(recorded.cwd) if recorded.worktree else None
         if here is None or here == root or here in seen:
             continue
         try:
-            if not _present(row.cwd / ".git"):
+            if not _present(recorded.cwd / ".git"):
                 continue
         except OSError:
             continue
         seen.add(here)
-        trees.append(row.cwd)
+        trees.append(recorded.cwd)
     return trees
 
 

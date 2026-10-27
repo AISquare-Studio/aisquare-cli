@@ -6,7 +6,8 @@ through the adapter, on scratch accounts of both agents and the fleet's fake tmu
 - A Codex Stop records the rollout's tokens, and Usage & stats sums them with Claude Code's.
 - A Codex agent counts as its role in the anonymous counts, which name no agent.
 - The keys a Codex launch leaves on the board (its launch and fleet sightings, its agent events,
-  its continuation prompt) go with a project's reset (``project fresh``) and its purge.
+  its continuation prompt) go with a project's reset (``project fresh``) and its purge, and the
+  trees it removes are the ones the rows' launch records name (item 6's GAP, closed).
 - The label cap (24) is the fleet's, not an agent's.
 
 The rows that say GAP are in the SCOPE note, each with the lane that closes it; the others
@@ -17,6 +18,7 @@ cite the tests of the shared code they run through (``tests/test_project_fresh.p
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -25,7 +27,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core.store import store_session
+from aisquare.core.store import SqliteStore, store_session
 from aisquare.models import ProjectInfo, TeamSession
 from aisquare.services import agent_events, usage_stats
 from aisquare.services import claude_accounts as accounts_service
@@ -182,6 +184,36 @@ def test_the_keys_a_launch_leaves_go_with_a_projects_reset_and_purge(
         else:
             store.purge_project(project.id)
         assert [key for key in keys if store.get_meta(key) is not None] == []
+
+
+def test_a_codex_rows_tree_is_the_one_its_launch_record_names_not_its_rewritten_cwd(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """SCOPE #113 091, item 6: ``project fresh`` removes the trees ``fleet.fleet_trees`` names,
+    ``--force`` when told. A Codex row whose ``cwd`` was rewritten in the store (a sandbox can
+    write the store before its broker) to another worktree of the repository, the owner's own,
+    is not followed: the tree is the one its launch record names (``resolve_place``), as stop
+    and reap read it."""
+    receipt = fleet_service.spawn(project, "coder", agent="codex", worktree=True)
+    agent = receipt.agent
+    assert agent.agent == "codex" and agent.worktree, "the fixture: a Codex row with a tree"
+    owners = tmp_path / "owners-tree"
+    git = ["git", "-C", str(project.root)]
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "owners", str(owners)], check=True)
+
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        store._conn.execute("UPDATE fleet_agent SET cwd = ? WHERE id = ?", (str(owners), agent.id))
+        rows = store.fleet_agents(project.id, live_only=False)
+    assert [row.cwd for row in rows] == [owners], "the store names the owner's tree now"
+
+    trees = fleet_service.fleet_trees(project, rows)
+
+    assert [tree.resolve() for tree in trees] == [agent.cwd.resolve()]
+    assert owners.resolve() not in {tree.resolve() for tree in trees}
 
 
 # --- the label cap --------------------------------------------------------------------------

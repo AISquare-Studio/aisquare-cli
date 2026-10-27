@@ -396,6 +396,27 @@ def test_a_codex_process_names_the_thread_it_resumes_and_no_other() -> None:
     assert {args: codex.adoptable(args.split()) for args in named} == named
 
 
+def test_a_claude_process_names_the_session_its_flags_give_and_no_other_program_does() -> None:
+    """Claude Code's ``adoptable``: a word running ``claude`` and a session flag of its
+    ``session_flags`` with its value (``--flag value`` or ``--flag=value``, the id or the
+    transcript's path). Another program given the same flag, a bare ``--resume`` (its
+    picker) and a fresh start name none."""
+    claude = get_adapter("claude-code")
+    path = f"/home/dev/.claude/projects/-w/{SESSION}.jsonl"
+    named = {
+        f"claude --resume {SESSION}": SESSION,
+        f"/usr/local/bin/claude -r {SESSION}": SESSION,
+        f"node /opt/claude/cli.js claude --resume={path}": path,
+        f"claude --model opus --session-id {SESSION}": SESSION,
+        "claude": None,
+        "claude --resume": None,
+        "claude --resume --model opus": None,
+        f"aider --resume {SESSION}": None,
+        f"codex resume {SESSION}": None,
+    }
+    assert {args: claude.adoptable(args.split()) for args in named} == named
+
+
 # --------------------------------------------------------------------------- the picker
 
 

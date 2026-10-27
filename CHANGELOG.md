@@ -81,18 +81,25 @@ adapter.**
     "login incomplete" on hover; the sidebar line and `accounts usage` give each agent its own
     share left. A spawn's model and effort (#441) are Claude Code's: a remembered pick never
     reaches Codex, and `[agents.models.<agent>]` pins win over the pick for either.
+    `fleet adopt` takes a hand-started Codex thread as it takes a Claude Code session: each
+    agent's conversations, their folder and first prompt are read by its adapter
+    (`AgentTranscript.conversations`, `opening`), a process's arguments by
+    `AgentAdapter.adoptable` (`codex resume <id>`), and a `codex` started fresh holds the
+    rollout it has open (`core.process_table`); the thread resumes on its own Codex slot as
+    `codex resume <id>`, the picker naming each row's agent. A solo Codex session's own MCP
+    server writes as the session: its process is the one of the hook's ancestors that holds
+    its rollout open (measured on 0.164.0), its hooks being handed no pid. `project fresh`
+    removes the worktrees the launch records name, never a `cwd` rewritten in the store.
   - **Claude Code's alone** (N-A): Remote Control (`AgentCapabilities.remote_control`: a launch
     that asks of Codex says so and starts it as it was) and `asq-statusline` (Claude Code's
     `statusLine` setting; Codex's takes items, not a command).
   - **Gaps, each with a lane** (SCOPE #113 091): the move before the limit is Claude Code's
     (the hook needs a background-work reader of the transcript); the Spawn dialog's Model,
     Effort and Remote Control fields show for a Codex agent and do nothing; the usage sweep
-    reads Claude Code's transcripts, not Codex's rollouts; `fleet adopt` finds a hand-started
-    `claude --resume`, not a `codex resume`; the doctor's `role bindings` row checks
-    `CLAUDE_CONFIG_DIR`, not `CODEX_HOME`; the picker's and the Spawn dialog's *+ New account*
-    signs Claude in whatever the agent; a solo Codex session's own MCP server has no host
-    proof (no pid from its hooks); `project fresh` removes the worktrees the rows name, not
-    where the launch record places them; a Codex row's `!` hover ends with Claude's remedy.
+    reads Claude Code's transcripts, not Codex's rollouts; the doctor's `role bindings` row
+    checks `CLAUDE_CONFIG_DIR`, not `CODEX_HOME`; the picker's and the Spawn dialog's *+ New
+    account* signs Claude in whatever the agent; a Codex row's `!` hover ends with Claude's
+    remedy.
     `tests/test_no_agent_literals.py`'s BASELINE counts the shared code behind them.
 - **No `docs/` pages for this line** (the owner, 2026-10-27, to match main's removal): the
   adapter contract (the protocol table and "Adding a terminal agent" with its file and fixture

@@ -763,6 +763,35 @@ def test_a_setting_answer_no_framed_command_owns_is_said(tmp_path: Path) -> None
     )
 
 
+def test_a_model_set_in_config_is_read_off_2_1_311s_own_records() -> None:
+    """Seq 3828 (2): ``/config`` → Model is a second owner's route, framed as its own command:
+    ``<command-name>/config</command-name>``, then one answer line per change, the value in
+    bold: ``Set model to \\x1b[1mhaiku (claude-haiku-5-5)\\x1b[22m``, ``… Default (Opus 5.5 ·
+    …)``, beside ``Set verbose to …``. Its pick is saved as the default ("Your pick becomes
+    the default for new sessions"). Real 2.1.311 (``config_model_2.1.311.jsonl``): Haiku with
+    the effort moved, the effort alone moved, Haiku confirmed again, verbose alone three
+    times, Sonnet with verbose, Default. ``/config`` names no effort, though its Model panel
+    moves one: that is read nowhere (a documented limit)."""
+    scan = transcripts.commands_since(FIXTURES / "config_model_2.1.311.jsonl", 0)
+    assert scan is not None
+    commands = [e for e in scan.events if isinstance(e, transcripts.SettingCommand)]
+    assert not [e for e in scan.events if isinstance(e, transcripts.UnframedCommand)]
+    assert [(c.setting, c.via) for c in commands] == [("model", "config")] * 5
+    assert commands[3].stdout == "Set model to sonnet (claude-sonnet-5-5)", "ANSI stripped"
+    value = model_memory.CommandValue
+    assert [model_memory.command_values(c) for c in commands] == [
+        (value("model", "claude-haiku-5-5", True),),
+        (value("model", "claude-haiku-5-5", True),),
+        (value("model", "claude-haiku-5-5", True),),
+        (value("model", "claude-sonnet-5-5", True),),
+        (value("model", "", True),),  # Default (recommended): forget the pick
+    ]
+    bare = transcripts.SettingCommand(
+        "model", "", "Set model to claude-haiku-4-5-20251001", "2.1.311", via="config"
+    )  # tester-r9's: a model the list names by its id
+    assert model_memory.command_values(bare) == (value("model", "claude-haiku-4-5-20251001", True),)
+
+
 def test_a_setting_answer_to_a_command_of_another_name_is_said(tmp_path: Path) -> None:
     """Seq 3797 (4): a later Claude Code that renames the command (``/models``) frames it as
     ever, and its ``Set model to …`` answer read as nothing, silently. It is said; another

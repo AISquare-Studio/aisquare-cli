@@ -3056,21 +3056,30 @@ def test_the_2_1_311_picker_sets_the_model_and_the_effort_together(
     assert _model_flags(_command(tmux)) == ["--model", "claude-opus-5-5", "--effort", "xhigh"]
 
 
-def test_ultracode_for_the_session_moves_the_agent_and_never_the_pick(
+@pytest.mark.parametrize("level", ["high", "max"])
+def test_the_last_effort_change_replays_ultracode_turned_on_over_a_level(
     tmux: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    level: str,
 ) -> None:
-    """Seq 3654 (4): ``/effort ultracode`` answers ``Ultracode on (this session only): … Effort
-    stays high.``, which was dropped in silence: the restart lost ultracode. It is the
-    agent's for the session, read as such, and no pick."""
+    """A replay keeps the owner's LAST effort change (manager decision, seq 3829, narrowing
+    3798): ``claude --effort`` takes one value, so Claude Code's ``L · ultracode`` cannot be
+    replayed as such. A level set last replays that level; ultracode turned on last
+    (``/effort ultracode``, the picker's ``· Ultracode on``) replays ``--effort ultracode``
+    (xhigh plus workflows) whatever level it sits on: ``low``/``medium``/``high · ultracode``
+    at xhigh, ``max · ultracode`` at xhigh, the level dropping.
+
+    Ultracode turned on last, over ``high`` (``high · ultracode``: the toggle-on order, seq
+    3828) and over ``max`` (the level drops): ``--effort ultracode``. It is the agent's for
+    the session and no pick (seq 3654 (4): the answer was once dropped in silence)."""
     model_memory.remember(model="opus", effort="xhigh")
-    agent = _coder(project, agent_args=["--effort", "high"], spawned_by="ses_mgr1")
+    agent = _coder(project, agent_args=["--effort", level], spawned_by="ses_mgr1")
     transcript = _on_disk(agent, tmp_path)
     _started(agent, "claude-opus-5-5")
-    on = "Ultracode on (this session only): dynamic workflows on every task. Effort stays high."
+    on = f"Ultracode on (this session only): dynamic workflows on every task. Effort stays {level}."
     _local_command(transcript, "effort", "ultracode", on)
     _turn(agent, transcript, "claude-opus-5-5", "xhigh")
     assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
@@ -3549,13 +3558,19 @@ def test_a_command_typed_after_the_last_turn_is_kept_by_a_replay_before_any_turn
     assert model_memory.remembered() == model_memory.Pick("sonnet", "low")
 
 
-def test_a_level_set_over_ultracode_is_replayed_as_that_level(
+def test_the_last_effort_change_replays_a_level_set_over_ultracode(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
 ) -> None:
-    """Seq 3797 (3), the owner's decision: launched ``--effort ultracode``, ``/effort high``
-    answers "Set effort level to high (saved …)" while Claude Code shows ``high ·
-    ultracode``. ``claude --effort`` takes one value, so no replay is exact: it keeps the
-    level the owner set last, ``--effort high``, and never raises the cost above it."""
+    """A replay keeps the owner's LAST effort change (manager decision, seq 3829, narrowing
+    3798): ``claude --effort`` takes one value, so Claude Code's ``L · ultracode`` cannot be
+    replayed as such. A level set last replays that level; ultracode turned on last
+    (``/effort ultracode``, the picker's ``· Ultracode on``) replays ``--effort ultracode``
+    (xhigh plus workflows) whatever level it sits on: ``low``/``medium``/``high · ultracode``
+    at xhigh, ``max · ultracode`` at xhigh, the level dropping.
+
+    A level set last, over ultracode (seq 3797 (3)): launched ``--effort ultracode``,
+    ``/effort high`` answers "Set effort level to high (saved …)" while Claude Code shows
+    ``high · ultracode``: ``--effort high``, the pick high."""
     model_memory.remember(model="opus", effort="medium")
     agent = _coder(project, agent_args=["--effort", "ultracode"], spawned_by="ses_mgr1")
     transcript = _on_disk(agent, tmp_path)
@@ -3569,13 +3584,20 @@ def test_a_level_set_over_ultracode_is_replayed_as_that_level(
     assert model_memory.remembered() == model_memory.Pick("opus", "high")
 
 
-def test_the_effort_pickers_ultracode_with_a_saved_level_runs_ultracode(
+def test_the_last_effort_change_replays_the_pickers_level_with_ultracode_on(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
 ) -> None:
-    """Seq 3693 (3): the /effort picker's Tab-on, Left, Enter answers ``Set effort level to
-    high (saved as your default for new sessions): … · Ultracode on``. High is the pick, as
-    Claude Code saved it; the session runs ultracode, and a restart must not undo it with a
-    plain ``--effort high``."""
+    """A replay keeps the owner's LAST effort change (manager decision, seq 3829, narrowing
+    3798): ``claude --effort`` takes one value, so Claude Code's ``L · ultracode`` cannot be
+    replayed as such. A level set last replays that level; ultracode turned on last
+    (``/effort ultracode``, the picker's ``· Ultracode on``) replays ``--effort ultracode``
+    (xhigh plus workflows) whatever level it sits on: ``low``/``medium``/``high · ultracode``
+    at xhigh, ``max · ultracode`` at xhigh, the level dropping.
+
+    The picker's level with ultracode turned on (seq 3693 (3)): Tab-on, Left, Enter answers
+    ``Set effort level to high (saved as your default for new sessions): … · Ultracode on``.
+    High is the pick, as Claude Code saved it; ultracode was turned on last, so a restart
+    passes ``--effort ultracode``, not a plain ``--effort high``."""
     model_memory.remember(model="opus", effort="low")
     agent = _coder(project, agent_args=["--effort", "low"], spawned_by="ses_mgr1")
     transcript = _on_disk(agent, tmp_path)
@@ -3617,6 +3639,45 @@ def test_the_canary_stands_down_only_on_an_answer_read_as_a_success(
     _turn(agent, transcript, "claude-sonnet-5-5", "xhigh")
     assert model_memory.unread() is None
     capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    ("answer", "model"),
+    [
+        (
+            "Set model to \x1b[1msonnet (claude-sonnet-5-5)\x1b[22m\n"
+            "Set verbose to \x1b[1mfalse\x1b[22m",
+            "claude-sonnet-5-5",
+        ),
+        ("Set model to \x1b[1mclaude-haiku-4-5-20251001\x1b[22m", "claude-haiku-4-5-20251001"),
+    ],
+)
+def test_a_model_set_in_config_is_the_pick_and_what_a_restart_runs(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    answer: str,
+    model: str,
+) -> None:
+    """Seq 3828 (2), tester-r9 on real 2.1.311: reviewer-u, spawned ``--model haiku``, then the
+    owner's ``/config`` → Model → Haiku 4.5. Round 9 said "recorded a /model outside its
+    frame" (doctor: "update aisquare"), wrote no pick, and ``fleet restart`` passed ``--model
+    haiku``, undoing the owner's choice. A framed ``/config`` whose answer sets the model is
+    a ``/model``: the pick, what the agent runs, and no canary."""
+    model_memory.remember(model="opus", effort="xhigh")
+    agent = _coder(project, agent_args=["--model", "haiku"], spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-haiku-5-5")
+    _local_command(transcript, "config", "", answer)
+    _turn(agent, transcript, model, "xhigh")
+    assert model_memory.remembered() == model_memory.Pick(model, "xhigh")
+    assert "aisquare:" not in capsys.readouterr().err
+    assert model_memory.unread() is None
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _flag(_command(tmux), "--model") == model
 
 
 def test_a_setting_record_outside_the_frame_trips_the_canary(

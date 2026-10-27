@@ -16,9 +16,10 @@ the owner's choices write the pick (manager decision, board seq 3428):
   (:func:`remember`, from ``fleet.spawn``; ``fleet._the_owners_spawn``); a cleared field
   forgets it, unless the role's settings pin that flag. A spawn an agent makes, and every
   restart, switch, hand-over and fork, runs its flags for that agent alone;
-- the built-in ``/model`` or ``/effort`` the owner runs inside any fleet agent, which its
-  next turn end finds in Claude Code's own record of the command (:func:`observe`, from the
-  Stop hook; :func:`command_values`). A model or effort that merely differs from the last
+- the built-in ``/model`` or ``/effort`` the owner runs inside any fleet agent (or
+  ``/config`` → Model, seq 3828), which its next turn end, or a replay before it, finds in
+  Claude Code's own record of the command (:func:`observe`, from the Stop hook;
+  :func:`caught_up`; :func:`command_values`). A model or effort that merely differs from the last
   turn's is no evidence: a custom command's or a skill's ``model:``/``effort:`` frontmatter
   changes one turn (seq 3609). An agent cannot hand another a ``/model`` or ``/effort``
   (``fleet.setting_command``: ``fleet.tell`` refuses it, and so does the spawn whose first
@@ -157,6 +158,8 @@ def command_values(command: transcripts.SettingCommand) -> tuple[CommandValue, .
     words is not understood: it writes nothing, args or not (they cannot tell a success from
     a refusal), and is said (the canary)."""
     answer, args = command.stdout, command.args.strip()
+    if command.via == "config":
+        return _config_values(answer)
     if _NO_CHOICE.match(answer):
         return ()
     if command.setting == "model":
@@ -197,6 +200,37 @@ def command_values(command: transcripts.SettingCommand) -> tuple[CommandValue, .
     if _ULTRACODE_TOO.search(rest):  # the picker's Tab-on with a level: the session's own
         return (chosen, CommandValue("effort", harness.ULTRACODE, False))
     return (chosen,)
+
+
+#: A ``/config`` answer's model line, its value as the Model panel names it (2.1.311): an alias
+#: with its id (``haiku (claude-haiku-5-5)``), an id alone (``claude-haiku-4-5-20251001``), or
+#: ``Default (Opus 5.5 · …)``, the account's default.
+_CONFIG_MODEL = re.compile(r"^Set model to\s+(.+?)\s*$")
+_ALIAS_AND_ID = re.compile(r"^\S+\s+\(([^()\s]+)\)$")
+
+
+def _config_values(answer: str) -> tuple[CommandValue, ...]:
+    """What a ``/config`` set (seq 3828 (2)): its answer's line per setting changed. The Model
+    panel's pick "becomes the default for new sessions": a pick, the account's default
+    (``""``) for ``Default``. A model line in other words is not understood (the canary)."""
+    found: list[CommandValue] = []
+    for line in answer.splitlines():
+        if (model := _CONFIG_MODEL.match(line)) is not None:
+            named = model.group(1)
+            paired = _ALIAS_AND_ID.match(named)
+            value = (
+                ""
+                if named.lower().startswith("default")
+                else harness.clean_model_id(paired.group(1) if paired else named)
+                if paired or " " not in named
+                else None
+            )
+            found.append(CommandValue("model", value, True, value is not None))
+        elif (effort := _EFFORT_ANSWER.match(line)) is not None:
+            level = harness.clean_effort(effort.group(1))
+            pick = "this session only" not in effort.group(2)
+            found.append(CommandValue("effort", level, pick, level is not None))
+    return tuple(found)
 
 
 def _model_id(display: str) -> str | None:
@@ -424,7 +458,7 @@ def _read(
             continue
         values = command_values(event)
         if any(not found.understood for found in values):
-            said = f"/{event.setting} {event.args}".rstrip()
+            said = f"/{event.via or event.setting} {event.args}".rstrip()
             unread.append(f"{_version(event.version)} answered {said} with {event.stdout[:120]!r}")
         elif values:  # a success read; a refusal or an Esc says nothing of those words
             understood = True

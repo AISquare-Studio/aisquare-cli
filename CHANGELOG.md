@@ -342,7 +342,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   home's store, and only your choices write it: a spawn of yours that names one (asq's
   dialog or your shell; a cleared dialog field forgets it, and over a role's own pin runs
   the pin; an empty `--model ""` is refused), and the built-in `/model` or `/effort` you run
-  in any fleet agent, which its Stop hook finds in Claude Code's own frame for the command
+  in any fleet agent (or `/config` → Model), which its Stop hook finds in Claude Code's
+  own frame for the command
   (caveat, command, answer, each the last one's child: no quoted text, board note or
   summary can make it, and an unanswered command is none). Only an answer that says it
   succeeded is a choice (`Set model to …`, `Set effort level to …`), its value the args,
@@ -356,9 +357,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a `/branch` does not re-read the history it copied, nor a `/resume` or a `fleet switch`
   the conversation it took up. Known limit: a `/model` typed mid-turn is recorded nowhere
   by Claude Code 2.1.311, so it is no pick and a restart starts the agent's previous model;
-  change the model at the prompt. Another known limit: ultracode on top of another level
-  (`high · ultracode`) replays as that level, as `claude --effort` takes one value, never
-  raising the cost above the level you set. A command run after an agent's last turn
+  change the model at the prompt. As `claude --effort` takes one value, a replay keeps your
+  last effort change: a level set last replays as that level, ultracode turned on last
+  replays as `--effort ultracode` (xhigh plus workflows) whatever level it sat on, so `low`,
+  `medium` or `high · ultracode` replay at xhigh, and `max · ultracode` at xhigh, the level
+  dropping. The effort `/config`'s Model panel moves is recorded nowhere by Claude Code
+  2.1.311: set it with `/effort`. A command run after an agent's last turn
   counts at a replay before its next one, and an effort a role's binding gives (`team bind
   --arg`) is what the agent runs, a toggle over it kept. Read as Claude Code 2.1.310 and
   2.1.311 word and frame it: an answer in other words, or a record outside the

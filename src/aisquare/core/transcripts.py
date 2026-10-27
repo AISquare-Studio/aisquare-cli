@@ -187,23 +187,33 @@ _COMMAND_NAME = re.compile(r"<command-name>/([^<\s]+)</command-name>")
 _COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 _COMMAND_STDOUT = re.compile(r"<local-command-stdout>(.*?)</local-command-stdout>", re.S)
 _CAVEAT = "<local-command-caveat>"
-#: How Claude Code's answer to a successful ``/model`` and ``/effort`` opens (2.1.310, 2.1.311):
-#: one no framed command owns is a frame this reader does not know (a renamed tag), said.
+#: How Claude Code's answer to a successful ``/model`` and ``/effort`` opens (2.1.310, 2.1.311),
+#: and a ``/config`` answer's line for each setting it changed: one no framed command owns is
+#: a frame this reader does not know (a renamed tag or command), said.
 _SETTING_ANSWERS = {"Set model to": "model", "Set effort level to": "effort"}
+#: The command that also sets the model, as its own frame (2.1.311: ``/config`` → Model):
+#: ``Set model to \x1b[1mhaiku (claude-haiku-5-5)\x1b[22m``, one line per setting changed.
+_SETS_TOO = "config"
+#: Terminal styling in an answer (``/config`` bolds the value).
+_STYLE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 @dataclasses.dataclass(frozen=True)
 class SettingCommand:
-    """A built-in ``/model`` or ``/effort`` run in the session, framed and answered."""
+    """A built-in ``/model`` or ``/effort`` run in the session, framed and answered; or a
+    ``/config`` whose answer sets one (``via``)."""
 
     setting: str
     """``model`` or ``effort``."""
     args: str
     """What was typed after it (``""`` for the picker)."""
     stdout: str
-    """What Claude Code answered (``Set model to …``, ``Cancelled``)."""
+    """What Claude Code answered (``Set model to …``, ``Cancelled``), its styling stripped;
+    for a ``/config``, its lines that set a model or an effort."""
     version: str | None = None
     """The Claude Code version that recorded it, for a reader that cannot read the answer."""
+    via: str | None = None
+    """The command that set it when not the setting's own: ``config`` (seq 3828 (2))."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -356,17 +366,25 @@ def _frame_step(
         return UnframedCommand(named.group(1), version)
     if (answer := _COMMAND_STDOUT.match(text)) is not None:
         command = frames.framed.pop(parent, None) if isinstance(parent, str) else None
+        said = _STYLE.sub("", answer.group(1)).strip()
+        settings = [
+            (line, setting)
+            for line in said.splitlines()
+            for opens, setting in _SETTING_ANSWERS.items()
+            if line.startswith(opens)
+        ]
+        if command is not None and command[0] == _SETS_TOO:
+            if not settings:
+                return None  # a theme, a toggle: no setting of ours
+            lines = "\n".join(line for line, _ in settings)
+            return SettingCommand(settings[0][1], "", lines, version, via=_SETS_TOO)
         if command is None or command[0] not in SETTINGS:
             # A setting's answer no `/model` or `/effort` frame owns: a renamed tag or a
             # renamed command (`/models`, seq 3797 (4)), said once per record.
-            said = answer.group(1).strip()
-            setting = next(
-                (s for opens, s in _SETTING_ANSWERS.items() if said.startswith(opens)), None
-            )
-            if setting is None or parent in frames.said:
+            if not settings or not said.startswith(settings[0][0]) or parent in frames.said:
                 return None
-            return UnframedCommand(setting, version)
-        return SettingCommand(command[0], command[1], answer.group(1).strip(), version)
+            return UnframedCommand(settings[0][1], version)
+        return SettingCommand(command[0], command[1], said, version)
     if system:
         return None
     stripped = text.strip()

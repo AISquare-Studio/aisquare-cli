@@ -259,8 +259,9 @@ forget your pick.
 **Your last pick is one per home**, for every role and persona alike. Only your own choices
 write it: a spawn of yours that names one (from asq's dialog or your own shell; a cleared
 dialog field forgets it, unless the role's settings pin that flag, whose pin then runs and
-whose blank says so), and the built-in `/model` or `/effort` you run inside any fleet agent,
-which its next turn end finds in Claude Code's own record of the command: the frame Claude
+whose blank says so), and the built-in `/model` or `/effort` you run inside any fleet agent
+(or `/config` → Model, which sets the model the same way), which its next turn end finds
+in Claude Code's own record of the command: the frame Claude
 Code writes for a local command (its caveat, the command, its answer, each the last one's
 child), which no text can make, so a typed prompt, a board note or a compaction summary
 that quotes one counts for nothing, and a command Claude Code never answered for nothing
@@ -280,10 +281,15 @@ conversation it took up.
 **Change the model at the prompt, not mid-turn**: a `/model` typed while a turn runs
 switches the agent but Claude Code 2.1.311 writes no record of it, so it is no pick and a
 restart starts the model the agent had before (a known limit; aisquare guesses nothing
-from the replies). **Ultracode on top of another level replays as that level**: launched
-at ultracode, `/effort high` runs `high · ultracode`, but `claude --effort` takes one
-value, so a restart passes the level you set last (`--effort high`) and never raises the
-cost above what you chose (a known limit, as decided). A `/model` or `/effort` you run
+from the replies). **A replay keeps your last effort change**: `claude --effort` takes one
+value, so Claude Code's `high · ultracode` cannot be replayed as such (a known limit, as
+decided). If your last change set a level (`/effort high` while on ultracode), a restart
+passes that level; if it turned ultracode on (`/effort ultracode`, or the picker's `·
+Ultracode on`), it passes `--effort ultracode`, xhigh plus workflows, whatever level it sat
+on: `low`, `medium` or `high · ultracode` replay at xhigh, and `max · ultracode` at xhigh,
+the level dropping. The effort `/config`'s Model panel moves is recorded nowhere by Claude
+Code 2.1.311, so it is no pick and a restart starts the effort before it: set the effort
+with `/effort` or `/model`'s picker. A `/model` or `/effort` you run
 after an agent's last turn counts at a restart, a switch, a hand-over or a fork before its
 next one, which read it first. **Nothing else is evidence**: a model or an effort that
 merely differs

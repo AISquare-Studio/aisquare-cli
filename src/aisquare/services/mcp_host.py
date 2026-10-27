@@ -15,7 +15,13 @@ The proof is two records meeting:
    and records, per board, "process P (pid and start token) runs session X"
    (:func:`register`). A ``/clear`` or a fork starts a new session id inside the same
    process, and a ``--resume`` starts the same id in a new one: each start overwrites what
-   P runs, so the record always names the session P serves *now*.
+   P runs, so the record always names the session P serves *now*. An agent whose hooks are
+   handed no pid (``AgentCapabilities.pid_env`` unset: Codex's) is found as ``fleet`` finds
+   the process that writes a row's rollout (``core.process_table``): P is the nearest of
+   the hook's ancestors that holds the session's transcript open (:func:`holder_process`).
+   Measured on Codex 0.164.0 (macOS, ``exec`` and the TUI, a loopback provider): at its
+   SessionStart, its UserPromptSubmit and its Stop the hook's parent is the native binary,
+   which holds the rollout the payload names, and which is the stdio server's parent too.
 2. **The server proves it is P's own.** Claude Code starts a stdio server as its direct
    child: measured for ``uv tool install``, ``pipx``, ``pip`` in a venv and ``python -m``;
    a launcher that stays in between (``uvx`` runs ``uv``, a Windows ``aisquare.exe``
@@ -26,8 +32,9 @@ A shell the Bash tool started is also a child of P, so a ``serve`` run from it h
 shell as its parent, not P: no proof, a teammate. That is why the proof is "my parent is P"
 and not "P is an ancestor of mine" (#49 MAJOR-1).
 
-Everything that cannot be completed is "no proof": no ``CLAUDE_PID``, no hook record, a
-process that cannot be read, a record on another board (the lookup is this board's, by exact
+Everything that cannot be completed is "no proof": no ``CLAUDE_PID`` (for Codex: no ancestor
+seen to hold its rollout, a process table that cannot be read), no hook record, a process
+that cannot be read, a record on another board (the lookup is this board's, by exact
 id: #49 m1), a host whose row has ended, a server older than this code, a row written by
 older code. Those are the cases that stay teammates, until their rows go stale.
 """
@@ -41,7 +48,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping
 
-from aisquare.core import procs
+from aisquare.core import process_table, procs
 from aisquare.core.store import ContextStore
 from aisquare.models import TeamSession
 
@@ -92,14 +99,17 @@ def claude_process(
     *,
     parent: int | None = None,
     look: procs.Inspect | None = None,
+    names: tuple[str, ...] | None = None,
 ) -> procs.ProcessRef | None:
     """The Claude Code process this hook runs under, or ``None``.
 
-    ``CLAUDE_PID`` names it, and it must be one of this process's own ancestors (the hook's
-    parent, or the ``sh -c`` between them): a value copied into some other shell names a
-    process that is not above this one, and registers nothing."""
+    ``CLAUDE_PID`` names it (``names``: the variables read, every adapter's ``pid_env`` by
+    default), and it must be one of this process's own ancestors (the hook's parent, or the
+    ``sh -c`` between them): a value copied into some other shell names a process that is
+    not above this one, and registers nothing."""
     env = os.environ if environ is None else environ
-    raw = next((value for name in process_envs() if (value := env.get(name, "").strip())), "")
+    wanted_in = process_envs() if names is None else names
+    raw = next((value for name in wanted_in if (value := env.get(name, "").strip())), "")
     if not raw.isdigit() or int(raw) <= 1:
         return None
     wanted = int(raw)
@@ -117,22 +127,80 @@ def claude_process(
     return None
 
 
+def holder_process(
+    transcript: str | None,
+    *,
+    parent: int | None = None,
+    look: procs.Inspect | None = None,
+) -> procs.ProcessRef | None:
+    """The nearest of this hook's ancestors that holds ``transcript`` open, or ``None``: the
+    process of an agent whose hooks are handed no pid of its own, which holds its session's
+    transcript for as long as the session lives (Codex's native binary and its rollout,
+    measured on 0.164.0; ``AgentTranscript.held_open``). Asked one process at a time from the
+    hook's parent up (``process_table.open_files``), so the usual answer, the parent, costs
+    one read; a process whose files cannot be read ends the walk with no proof."""
+    if not transcript:
+        return None
+    real = os.path.realpath(transcript)
+    inspect = look or procs.inspect
+    pid = parent_pid() if parent is None else parent
+    for _ in range(procs.MAX_DEPTH):
+        if pid <= 1:
+            return None
+        info = inspect(pid)
+        held = process_table.open_files([pid]) if info is not None else None
+        if info is None or held is None:
+            return None
+        if real in held:
+            return procs.ProcessRef(pid, info.started)
+        pid = info.ppid
+    return None
+
+
+def session_process(
+    environ: Mapping[str, str] | None = None,
+    *,
+    agent: str | None = None,
+    transcript: str | None = None,
+    parent: int | None = None,
+    look: procs.Inspect | None = None,
+) -> procs.ProcessRef | None:
+    """The process of ``agent``'s that this hook runs under, or ``None``: the one its
+    ``pid_env`` names (:func:`claude_process`, that variable alone), else, for an agent with
+    none, the ancestor that holds the session's ``transcript`` open (:func:`holder_process`).
+    With no ``agent`` named, every adapter's ``pid_env`` is read, as before adapters."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(agent) if agent is not None else None
+    if adapter is None:
+        return claude_process(environ, parent=parent, look=look)
+    variable = adapter.capabilities.pid_env
+    if variable is not None:
+        return claude_process(environ, parent=parent, look=look, names=(variable,))
+    return holder_process(transcript, parent=parent, look=look)
+
+
 def register(
     store: ContextStore,
     project_id: str,
     session_id: str,
     *,
+    agent: str | None = None,
+    transcript: str | None = None,
     environ: Mapping[str, str] | None = None,
     parent: int | None = None,
     look: procs.Inspect | None = None,
 ) -> bool:
-    """Record that the Claude Code process this hook runs under serves ``session_id`` on this
-    board, replacing what it served before. ``False``: nothing recorded (no ``CLAUDE_PID``,
-    or a process that is not above this hook), which only costs this session its own row.
+    """Record that the process of ``agent``'s this hook runs under (:func:`session_process`)
+    serves ``session_id`` on this board, replacing what it served before. ``False``: nothing
+    recorded (no ``CLAUDE_PID``, a process that is not above this hook, no ancestor holding
+    ``transcript``), which only costs this session its own row.
 
     Never raises: a session start must not fail for a proof it can do without."""
     try:
-        process = claude_process(environ, parent=parent, look=look)
+        process = session_process(
+            environ, agent=agent, transcript=transcript, parent=parent, look=look
+        )
         if process is None:
             return False
         now = time.time()

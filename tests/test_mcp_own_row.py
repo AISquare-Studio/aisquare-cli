@@ -831,6 +831,124 @@ def test_a_session_that_joins_at_its_first_prompt_registers_too(
     assert _rows() == [SOLO]
 
 
+# --- a solo Codex session (SCOPE #113 091, item 19) -------------------------------------------
+
+#: What ``ps`` shows above a Codex session started from npm, measured on 0.164.0 (macOS): the
+#: node wrapper, then the native binary, the parent of its hooks and of its stdio servers.
+NODE = "/opt/homebrew/Cellar/node/24.1.0/bin/node"
+CODEX_NATIVE = (
+    "/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64"
+    "/vendor/aarch64-apple-darwin/bin/codex"
+)
+THREAD = "01a17f38-501d-7430-8138-d4166dfa09cb"
+
+
+def _codex_session(
+    runner: CliRunner,
+    tree: Tree,
+    monkeypatch: pytest.MonkeyPatch,
+    work: Path,
+    *,
+    holds: bool = True,
+    event: str = "SessionStart",
+    above: int = 1,
+    env: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """A Codex process (its native binary under its node wrapper, in a shell under ``above``)
+    holding its rollout open (``holds``) as the process table reads it, and its hook for
+    ``event``, a child of that binary, with ``env`` and nothing else that names a pid. The
+    process, and the board id of its session."""
+    from aisquare.core import process_table
+    from aisquare.core.agent_adapters import get_adapter
+    from aisquare.services import agent_events
+
+    home = work.parent / "codex-home"
+    rollout = home / "sessions" / "2026" / "10" / "27"
+    rollout = rollout / f"rollout-2026-10-27T17-15-59-{THREAD}.jsonl"
+    rollout.parent.mkdir(parents=True, exist_ok=True)
+    meta = {"type": "session_meta", "payload": {"id": THREAD, "cwd": str(work)}}
+    rollout.write_text(json.dumps(meta) + "\n", encoding="utf-8")
+    codex = tree.spawn(CODEX_NATIVE, tree.spawn(NODE, tree.spawn(SHELL, above)))
+    held = {codex: frozenset({os.path.realpath(rollout)})} if holds else {}
+    asked: list[list[int]] = []
+
+    def open_files(pids: list[int]) -> frozenset[str] | None:
+        asked.append(list(pids))
+        return frozenset().union(*(held.get(pid, frozenset()) for pid in pids))
+
+    monkeypatch.setattr(process_table, "open_files", open_files)
+    payload = {
+        "session_id": THREAD,
+        "hook_event_name": event,
+        "cwd": str(work),
+        "transcript_path": str(rollout),
+        **({"source": "startup"} if event == "SessionStart" else {"prompt": "go"}),
+    }
+    with tree.child_of(codex, monkeypatch):
+        result = runner.invoke(
+            app, ["hook", "codex", "--config-dir", str(home)], input=json.dumps(payload), env=env
+        )
+    assert result.exit_code == 0, result.output
+    assert asked[:1] == [[codex]], "its parent asked first, one process at a time"
+    return codex, agent_events.session_key(get_adapter("codex"), home, THREAD)
+
+
+def test_a_codex_hook_and_its_stdio_server_register_one_session(
+    runner: CliRunner, work_dir: Path, tree: Tree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SCOPE #113 091, item 19: Codex hands its hooks no pid of its own (``pid_env`` unset),
+    so the process its hook registers is the ancestor that holds the session's rollout open,
+    as the fleet ties a rollout to a row's pane (``core.process_table``). Its own ``aisquare
+    serve --stdio``, the native binary's child, proves itself against it: a board tool's note
+    is the Codex session's, and no ``mcp:`` row appears."""
+    _team_on(runner)
+    codex, session = _codex_session(runner, tree, monkeypatch, work_dir)
+    with store_session() as store:
+        records = store.list_meta(f"host/{current_project().id}/")
+    assert list(records) == [f"host/{current_project().id}/{codex}"]
+    assert json.loads(next(iter(records.values())))["session"] == session
+
+    with tree.child_of(codex, monkeypatch):
+        mcp_server.team_board()
+        mcp_server.note_add("tidying the parser")
+    assert _rows() == [session], "one session: no mcp: row"
+    assert _notes() == {"tidying the parser": session}, "written as the Codex session itself"
+    assert _instructions(tree, monkeypatch, codex) == mcp_server.SOLO_INSTRUCTIONS
+
+
+@pytest.mark.parametrize("why", ["holds no rollout", "a CLAUDE_PID leaked in"])
+def test_a_codex_hook_whose_process_holds_no_rollout_registers_nothing(
+    runner: CliRunner,
+    work_dir: Path,
+    tree: Tree,
+    monkeypatch: pytest.MonkeyPatch,
+    why: str,
+) -> None:
+    """No ancestor seen to hold the rollout is no proof, and its server stays a teammate. A
+    ``CLAUDE_PID`` in the hook's environment (Codex run from a Claude Code shell) names the
+    Claude Code process, which is no Codex session's: only the agent's own ``pid_env`` is
+    read."""
+    _team_on(runner)
+    if why == "a CLAUDE_PID leaked in":
+        claude = tree.spawn(CLAUDE)
+        codex, session = _codex_session(
+            runner,
+            tree,
+            monkeypatch,
+            work_dir,
+            holds=False,
+            above=claude,
+            env={"CLAUDE_PID": str(claude)},
+        )
+    else:
+        codex, session = _codex_session(runner, tree, monkeypatch, work_dir, holds=False)
+    with store_session() as store:
+        assert store.list_meta("host/") == {}
+        assert store.get_session(session) is not None, "and the session started all the same"
+    _own_server_of(tree, monkeypatch, codex, "a teammate's")
+    assert _notes()["a teammate's"].startswith("mcp:")
+
+
 def test_records_are_kept_per_board_and_purged_with_the_project(
     runner: CliRunner, work_dir: Path, tree: Tree, monkeypatch: pytest.MonkeyPatch
 ) -> None:

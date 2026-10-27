@@ -2476,7 +2476,7 @@ def hook_session_start(
         # Which process runs this session: its own MCP server proves itself against it
         # (``mcp_host``), and writes as this row. Every start records it, a /clear's and a
         # fork's new id included, so the record follows the session the process serves now.
-        mcp_host.register(store, project.id, session.id)
+        mcp_host.register(store, project.id, session.id, agent=agent, transcript=transcript_path)
         # A session that just started, cleared or resumed sits at its prompt until something
         # is typed (#32, L1): an agent at its prompt (`at_its_prompt`, Claude Code's) reads
         # `waiting` from the upsert itself, the statement the fleet types a spawn's prompt on
@@ -2737,7 +2737,9 @@ def hook_prompt_heartbeat(
                 )
             )
             session = agent_sessions.adopt_local_session(store, session)
-            mcp_host.register(store, project.id, session.id)  # as at session start
+            mcp_host.register(  # as at session start
+                store, project.id, session.id, agent=agent, transcript=transcript_path
+            )
             if solo:
                 store.set_meta(_unbriefed(session.id), "1")
                 return ""

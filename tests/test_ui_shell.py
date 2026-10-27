@@ -5145,6 +5145,10 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         pilot: Pilot[None],
     ) -> tuple[str | None, str | None, list[str], list[str], bool]:
         app = fleet_app(pilot)
+        # Recorded as raised, not read off the screen: the restart's toast lives six seconds
+        # (``timeout=6``), and on windows-latest this test took ten (run 40496703168), so the
+        # rack was empty by the time it looked (``tests/toast_log.py``).
+        told = toast_log.record(app)
         await pilot.click(row_for(app, "agt_a_manager"))
         await settle(app)
         view = app.current_view()
@@ -5157,7 +5161,7 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         await pilot.pause()
         current = app.current_view()
         # The pane's own "(pane gone)" toast is there too: read them all.
-        toasts = await _toast_list(app)
+        toasts = list(told)
         rows = [shown(row) for row in card_for(app, "prj_a").query(AgentRow)]
         typing_reaches = isinstance(current, AgentView) and app.focused is current.pane
         assert stop_shown is True  # the 💤 row's Stop removes its dead window

@@ -198,7 +198,8 @@ FOOTER = "-----END RSA PRIVATE KEY-----"
 
 
 def test_a_header_with_no_footer_costs_no_more_than_reading_the_text() -> None:
-    """The tester's case: 7,000 headers and no footer in 2 MB took minutes (16 s in 400 KB)."""
+    """The tester's case: 7,000 headers and no footer in 2 MB took minutes (16 s in 400 KB).
+    A header with no footer is a key cut short, and is removed to the end of the text (r24 3a)."""
     pad = "x" * 250
     text = "".join(f"{HEADER}\n{pad}\n" for _ in range(7_000))
     assert len(text) > 1_900_000
@@ -208,7 +209,7 @@ def test_a_header_with_no_footer_costs_no_more_than_reading_the_text() -> None:
 
     elapsed = time.perf_counter() - started
     assert elapsed < budget(5.0), f"{elapsed:.2f} s"
-    assert shown.count(HEADER) == 7_000, "a header with no footer is not a block"
+    assert shown == MARKER, "the first header takes the text, and no later one has a footer"
 
 
 def test_headers_after_a_block_whose_footer_is_the_last_cost_no_more_either() -> None:
@@ -219,7 +220,7 @@ def test_headers_after_a_block_whose_footer_is_the_last_cost_no_more_either() ->
     shown = redact(text, RedactionLevel.standard)
 
     assert time.perf_counter() - started < budget(5.0)
-    assert shown.startswith(MARKER + "\n") and shown.count(HEADER) == 7_000
+    assert shown == f"{MARKER}\n{MARKER}", "the block, then the first header that has no footer"
 
 
 def test_many_headers_and_one_footer_are_one_block() -> None:
@@ -238,10 +239,19 @@ def test_a_block_is_one_marker_whatever_it_holds_inside() -> None:
     assert redact(text, RedactionLevel.standard) == f"a {MARKER} b {FOOTER} c"
 
 
+def _as_the_regular_expression_would(text: str) -> str:
+    """``PEM_BLOCK.sub`` over ``text``, and then from the first header it left (one with no
+    footer after it) to the end: the rule as it was, with a block cut short taken whole."""
+    removed = PEM_BLOCK.sub(MARKER, text)
+    cut = redaction._PEM_BEGIN.search(removed)
+    return removed if cut is None else removed[: cut.start()] + MARKER
+
+
 @pytest.mark.parametrize("seed", range(300))
 def test_the_linear_pass_removes_what_the_regular_expression_did(seed: int) -> None:
     """The rule was ``PEM_BLOCK.sub``; its replacement must give the same text for any text
-    made of headers, footers, other lines and unrelated dashes."""
+    made of headers, footers, other lines and unrelated dashes, and take the rest of the text
+    from a header that has no footer."""
     rng = random.Random(seed)
     pieces = [
         HEADER,
@@ -263,11 +273,33 @@ def test_the_linear_pass_removes_what_the_regular_expression_did(seed: int) -> N
         rng.choice(pieces) + rng.choice(["", "\n", " "]) for _ in range(rng.randrange(0, 40))
     )
 
-    assert redaction._without_pem_blocks(text) == PEM_BLOCK.sub(MARKER, text), text
+    assert redaction._without_pem_blocks(text) == _as_the_regular_expression_would(text), text
 
 
-def test_text_with_no_header_or_no_footer_is_returned_as_it_is() -> None:
-    for text in ("", "nothing here", HEADER, f"x {FOOTER}", f"{FOOTER} then {HEADER}"):
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [
+        (HEADER, MARKER),
+        (f"{HEADER}\nMIIEowIBAAKCAQEA", MARKER),
+        (f"head -3 id_rsa\n{HEADER}\nMIIEowIBAAKCAQEA\nQ29kZSBpcw==", f"head -3 id_rsa\n{MARKER}"),
+        (f"{FOOTER} then {HEADER}\nMIIE", f"{FOOTER} then {MARKER}"),
+        (f"{HEADER}\na\n{FOOTER}\nkeep {HEADER}\nb\nand this", f"{MARKER}\nkeep {MARKER}"),
+        (f"{HEADER}\n{HEADER}\nMIIE", MARKER),
+        ("-----BEGIN PRIVATE KEY-----\nMIIE", MARKER),
+        ("-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIE", MARKER),
+    ],
+)
+def test_a_header_with_no_footer_is_removed_to_the_end_of_the_text(text: str, shown: str) -> None:
+    """``head -3 id_rsa``, a paste or a tool result clipped, a prompt cut at the contract's
+    bound: the header and the first lines of the key. Removing the header alone ships the body
+    (r24 3a)."""
+    assert redaction._without_pem_blocks(text) == shown
+    assert redact(text, RedactionLevel.standard) == shown
+    assert redact(text, RedactionLevel.strict) == shown
+
+
+def test_text_with_no_header_is_returned_as_it_is() -> None:
+    for text in ("", "nothing here", f"x {FOOTER}", "-----BEGIN CERTIFICATE-----\nMIIE"):
         assert (
             redaction._without_pem_blocks(text) is text
             or redaction._without_pem_blocks(text) == text
@@ -281,9 +313,19 @@ HOSTILE: dict[str, Callable[[int], str]] = {
     "jwt-starts-inside-a-run": lambda size: "eyJ-" * (size // 4),
     "jwt-starts-no-dots": lambda size: ("eyJ" + "a" * 20 + " ") * (size // 24),
     "jwt-one-dot": lambda size: "eyJ" + "a" * 20 + "." + "b" * (size - 24),
+    "jwt-after-hyphens": lambda size: ("a-" * 24 + "eyJ" + "b" * 10 + " ") * (size // 62),
+    "jwt-hyphen-pieces": lambda size: "ab-" * (size // 3),
+    "jwt-hyphen-pieces-then-a-start": lambda size: "ab-" * (size // 3 - 1) + "eyJ" + "a" * 20,
+    "jwt-chain-of-segments": lambda size: ("eyJaaaaaaaa." * (size // 12))[:-1],
     "assignment-unclosed-quote": lambda size: 'token="' * (size // 7),
     "assignment-unclosed-single": lambda size: "secret='" * (size // 8),
     "assignment-long-prefix": lambda size: ("a" * 48 + "token ") * (size // 54),
+    "assignment-quoted-names": lambda size: '"token":' * (size // 8),
+    "assignment-quoted-names-unclosed": lambda size: '"token": "' * (size // 10),
+    "assignment-quoted-name-long-prefix": lambda size: ("a" * 48 + 'token" ') * (size // 55),
+    "assignment-name-then-backslashes": lambda size: "token" + "\\" * (size - 5),
+    "assignment-escaped-quotes": lambda size: 'token=\\"' * (size // 8),
+    "assignment-escaped-quotes-unclosed": lambda size: 'token="' + '\\"' * (size // 2),
     "assignment-equals": lambda size: "api_key=" * (size // 8),
     "bearer-words": lambda size: "bearer " * (size // 7),
     "basic-words": lambda size: "basic ab " * (size // 9),
@@ -291,6 +333,7 @@ HOSTILE: dict[str, Callable[[int], str]] = {
     "url-colons": lambda size: "://a:b" * (size // 6),
     "url-userinfo": lambda size: "://" + "u" * (size // 2) + ":" + "p" * (size // 2),
     "prefixes": lambda size: "sk-ghp_xoxb-AKIAglpat-aisq_AIzawk_live_" * (size // 40),
+    "non-ascii-before-prefixes": lambda size: "日sk-ghp_AKIAxoxb-" * (size // 14),
     "dashes": lambda size: "-" * size,
     "alnum": lambda size: "a" * size,
     "headers-only": lambda size: (HEADER + "\n") * (size // (len(HEADER) + 1)),

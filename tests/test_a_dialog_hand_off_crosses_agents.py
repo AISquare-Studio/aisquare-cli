@@ -440,6 +440,121 @@ def test_credentials_the_reader_wraps_or_the_window_cuts_reach_neither_the_messa
     assert "ANTHROPIC_API_KEY=[redacted]" in file_text
 
 
+#: The shapes review r24 found going through the scrub (task #30), each as the human pastes it.
+R24_JWT = ".".join(
+    [
+        "eyJ" + "hbGciOiJIUzI1NiJ9",
+        "eyJ" + "zdWIiOiIxMjM0NTY3ODkwIn0",
+        "dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+    ]
+)
+R24_KEY = "sk-ant-api03-" + "Zq9xW3mK" * 6
+R24_PEM = [
+    "-----BEGIN RSA PRIVATE KEY-----",
+    *(f"MIIEowIBAAKCAQEA{n:02d}" + "q9ZxK" * 12 for n in range(3)),
+]
+R24_PASSWORD = "hunter2" + "hunter2"
+#: What no part of either text may hold, and what each must say instead.
+R24_GONE = [
+    R24_JWT.split(".")[1][5:30],
+    R24_JWT.split(".")[2][:30],
+    R24_KEY[-24:],
+    R24_KEY[20:60],
+    R24_PASSWORD,
+    "q9ZxK",
+    "MIIEowIBAAKCAQEA",
+    "BEGIN RSA",
+]
+
+
+def test_a_jwt_after_a_hyphen_a_key_cut_short_a_quoted_name_and_a_key_after_other_script_are_gone(
+    tmux: FakeTmux,  # noqa: F811 - pytest resolves fixtures by NAME
+    codex_on_path: Path,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review r24's findings 2 and 3, through the whole hand-off: the first message and the
+    brief file are the same text, scrubbed before the reader wraps a line or the window cuts
+    the conversation. A JWT after a hyphen (``token-eyJ``), a private key cut short (``head``
+    of ``id_rsa``: a header and no footer), a JSON-quoted name, and a key straight after text
+    in another script, which ``\\b`` does not see a boundary in."""
+    leg = _spans(monkeypatch, tmp_path, project, tmux, "claude-code")
+    records = [
+        _talk("user", 1, f"my session is token-{R24_JWT} and it is rejected"),
+        _talk("assistant", 2, "that one is expired"),
+        _talk("user", 3, "my deploy key, cut short:\n" + "\n".join(R24_PEM)),
+        _talk("assistant", 4, "I cannot use half a key"),
+        _talk("user", 5, f"""then it is {{"password": "{R24_PASSWORD}"}} in the body"""),
+        _talk("assistant", 6, "send it as a header"),
+        _talk("user", 7, f"我的密钥{R24_KEY}"),
+        *(
+            _talk("user" if n % 2 else "assistant", 10 + n, f"exchange {n}: " + "word " * 70)
+            for n in range(40)
+        ),
+    ]
+    leg.transcript.write_text("\n".join(records) + "\n", encoding="utf-8")
+
+    receipt = fleet_service.hand_off(
+        project, leg.agent.label, mode="take_over", fresh=True, to_agent="codex"
+    )
+
+    [prompt] = _first_lines(tmux, receipt.started.agent.pane_id)
+    [note] = [n for n in receipt.notes if n.startswith("hand-off brief: ")]
+    file_text = Path(note.removeprefix("hand-off brief: ")).read_text(encoding="utf-8")
+    assert "exchange 39" in prompt and "exchange 39" in file_text, "the newest is carried"
+    for where, text in (("the first message", prompt), ("the brief file", file_text)):
+        for fragment in R24_GONE:
+            assert fragment not in text, (where, fragment)
+    for expected in (
+        "my session is token-[redacted] and it is rejected",
+        "my deploy key, cut short:",
+        '"password": [redacted]}',
+        "我的密钥[redacted]",
+    ):
+        assert expected in file_text, expected
+
+
+def test_a_codex_tool_call_whose_arguments_hold_json_with_a_password_is_gone(
+    tmux: FakeTmux,  # noqa: F811 - pytest resolves fixtures by NAME
+    codex_on_path: Path,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A Codex rollout's ``arguments`` are a JSON string, so the ``{"password": "…"}`` a command
+    posts is in it with its quotes escaped: ``{\\"password\\": \\"…\\"}`` (review r24, 3b)."""
+    leg = _spans(monkeypatch, tmp_path, project, tmux, "codex")
+    command = f"""curl -d '{{"password": "{R24_PASSWORD}"}}' https://api.example/login"""
+    call = {
+        "timestamp": "2026-10-19T18:50:00.000Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "id": "call_r24",
+            "name": "exec_command",
+            "arguments": json.dumps({"cmd": command}),
+            "call_id": "call_r24",
+        },
+    }
+    with leg.transcript.open("a", encoding="utf-8") as rollout:
+        rollout.write(json.dumps(call) + "\n")
+
+    receipt = fleet_service.hand_off(
+        project, leg.agent.label, mode="take_over", fresh=True, to_agent="claude-code"
+    )
+
+    [prompt] = _first_lines(tmux, receipt.started.agent.pane_id)
+    [note] = [n for n in receipt.notes if n.startswith("hand-off brief: ")]
+    file_text = Path(note.removeprefix("hand-off brief: ")).read_text(encoding="utf-8")
+    assert "exec_command(curl -d" in file_text, "the call is in the brief"
+    for where, text in (("the first message", prompt), ("the brief file", file_text)):
+        assert R24_PASSWORD not in text, where
+        assert '"password": [redacted]' in text, where
+
+
 @pytest.mark.parametrize(("level", "kept"), [("off", True), ("standard", False), ("strict", False)])
 def test_the_redaction_level_the_config_holds_is_the_one_a_hand_off_sends_at(
     level: str,

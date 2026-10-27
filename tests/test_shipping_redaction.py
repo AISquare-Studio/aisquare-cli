@@ -74,6 +74,7 @@ SECRETS = {
     ),
     "bearer header": _shaped("Authorization: Bearer ", "abcdef1234567890abcdef1234567890"),
     "assigned secret": _shaped('EXPLAINABILITY_API_KEY="wk_', 'live_9f8e7d6c5b4a3210"'),
+    "json quoted secret": _shaped('{"password": "', 'hunter2hunter2hunter2"}'),
     "url with credentials": _shaped("https://deploy:", "hunter2@internal.example.com/repo.git"),
     "pem private key": _shaped(
         "-----BEGIN RSA PRIVATE KEY",

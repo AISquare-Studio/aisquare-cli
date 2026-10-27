@@ -33,9 +33,9 @@ sentence the collective-intelligence dataset cannot learn from. The patterns are
 therefore keyed to credential SHAPES that do not occur in prose, and
 ``test_ordinary_prose_is_returned_unchanged`` is the guard against creep.
 
-Every pattern is linear-time by construction — bounded character classes, no
-nested quantifiers — because this runs on the primary path and a hook that hangs
-is a session that hangs.
+Every pattern is linear-time by construction — possessive runs, no nested quantifiers,
+and a start only where its token could start (see :data:`_CREDENTIAL_RULES`) — because this
+runs on the primary path and a hook that hangs is a session that hangs.
 """
 
 from __future__ import annotations
@@ -50,6 +50,19 @@ from aisquare.models import RedactionLevel
 #: needs to know a value WAS here before deciding the span is uninteresting.
 MARKER = "[redacted]"
 
+#: Where a token may start: after anything but an ASCII letter, digit or underscore. NOT
+#: ``\b``, which is Unicode-aware and so needs a non-word character before a key and finds
+#: none after text in another script (``我的密钥sk-ant-…``, ``clésk-…``: ``é`` and ``钥`` are
+#: word characters), leaving the whole key in the text it was written to remove it from.
+_START = r"(?<![A-Za-z0-9_])"
+
+#: What names a secret in an assignment: a keyword, with the rest of the name (up to 48 characters
+#: before it and 24 after) kept in the output.
+_SECRET_NAME = (
+    r"[A-Z0-9_.-]{0,48}?(?:api[_-]?key|secret|token|password|passwd|pwd"
+    r"|credential|private[_-]?key|access[_-]?key)[A-Z0-9_.-]{0,24}"
+)
+
 #: Credential shapes, matched on shape rather than on context. Order matters
 #: only in that the structured forms (assignment, header, URL) run first so
 #: their key name survives into the output.
@@ -62,61 +75,84 @@ MARKER = "[redacted]"
 #: a leak. What keeps the cost linear instead is the match itself: every run of a token's
 #: characters is a POSSESSIVE quantifier (``{n,}+``: it takes the whole run and never gives
 #: a character back), so an attempt that fails costs the run it read and no more, and a
-#: rule starts only where its token could start (a prefix after ``\b``, a JWT after a
-#: character outside its alphabet), so two attempts never read the same run. The PEM
-#: rule is not a regular expression for this reason: see :func:`_without_pem_blocks`.
+#: rule starts only where its token could start (a prefix after :data:`_START`, a JWT at the
+#: start of a run of its alphabet), so two attempts never read the same run. The PEM rule
+#: is not a regular expression for this reason: see :func:`_without_pem_blocks`.
 _CREDENTIAL_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     # NAME=value / NAME: value where the name says "secret". The name is kept —
     # "EXPLAINABILITY_API_KEY=[redacted]" still tells a reader a key was in play,
-    # which a bare marker does not.
+    # which a bare marker does not. A value in quotes is removed to the quote that closes it,
+    # and where the text is JSON inside a string (a tool call's arguments are one) the quotes
+    # are escaped: ``PASSWORD=\"…\"``.
     (
         re.compile(
-            r"(?i)\b([A-Z0-9_.-]{0,48}?(?:api[_-]?key|secret|token|password|passwd|pwd"
-            r"|credential|private[_-]?key|access[_-]?key)[A-Z0-9_.-]{0,24})"
+            r"(?i)" + _START + "(" + _SECRET_NAME + ")"
             r"(\s*[:=]\s*)"
-            r"(\"[^\"\n]{4,}+\"|'[^'\n]{4,}+'|[^\s\"'\n]{4,}+)"
+            r"""(\\++"[^"\n]{4,}+"|"[^"\n]{4,}+"|'[^'\n]{4,}+'|[^\s"'\n]{4,}+)"""
+        ),
+        r"\1\2" + MARKER,
+    ),
+    # The same with the NAME QUOTED, as in JSON (``{"password": "…"}``, ``"api_key":"…"``): the
+    # quote that closes the name is part of the separator, and a backslash before it where the
+    # JSON sits inside a string (``{\"password\": \"…\"}``). Only a QUOTED value is taken, on
+    # the same line: in JSON a secret is a string, and ``"input_tokens": 12`` is not one, nor
+    # is the next line after ``== "token":`` in code.
+    (
+        re.compile(
+            r"(?i)" + _START + "(" + _SECRET_NAME + ")"
+            r"""(\\*+["'][ \t]*[:=][ \t]*)"""
+            r"""(\\++"[^"\n]{4,}+"|"[^"\n]{4,}+"|'[^'\n]{4,}+')"""
         ),
         r"\1\2" + MARKER,
     ),
     # Authorization: Bearer <token> / Authorization: Basic <blob>
     (
-        re.compile(r"(?i)\b(authorization\s*:\s*|bearer\s+|basic\s+)([A-Za-z0-9_.+/=~-]{12,}+)"),
+        re.compile(
+            r"(?i)" + _START + r"(authorization\s*:\s*|bearer\s+|basic\s+)"
+            r"([A-Za-z0-9_.+/=~-]{12,}+)"
+        ),
         r"\1" + MARKER,
     ),
     # user:password@host in a URL — the password is the point, but the whole
     # pair identifies the account, so both go.
     (re.compile(r"(?<=://)[^/\s:@]++:[^/\s:@]++@"), MARKER + "@"),
-    # JWT: three base64url segments. Distinctive enough to match on shape. Starts only
-    # where the character before is outside the alphabet, so a run read once is not read
-    # again from a later `eyJ` inside it.
+    # JWT: three base64url segments. Distinctive enough to match on shape. It starts at the
+    # start of a run of its alphabet (the character before is outside it), or after a hyphen
+    # inside one: ``token-eyJ…`` and ``Bearer-eyJ…`` are a prefix and a JWT, and are kept as
+    # the first and removed as the second. The hyphens are walked, not tried: a start at every
+    # ``eyJ`` after a hyphen would read the rest of its run each time (``eyJ-eyJ-eyJ-…`` is
+    # quadratic, which a ``\b`` start was), so the run is entered once, its prefix is skipped
+    # piece by piece without giving anything back, and what is read once is not read again.
     (
         re.compile(
-            r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}+"
+            r"(?<![A-Za-z0-9_-])((?:(?!eyJ)[A-Za-z0-9_]*+-)*+)"
+            r"eyJ[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}+"
         ),
-        MARKER,
+        r"\1" + MARKER,
     ),
     # Vendor-prefixed tokens. Prefixes chosen because they are issued, not
     # written: none of them occur in English or in code identifiers.
-    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}+"), MARKER),
-    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}+"), MARKER),
-    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{16,}+"), MARKER),
-    (re.compile(r"\bglpat-[A-Za-z0-9_-]{16,}+"), MARKER),
-    (re.compile(r"\bxox[baprse]-[A-Za-z0-9-]{10,}+"), MARKER),
-    (re.compile(r"\bxapp-[A-Za-z0-9-]{10,}+"), MARKER),
-    (re.compile(r"\bAKIA[0-9A-Z]{16,}+"), MARKER),
+    (re.compile(_START + r"sk-[A-Za-z0-9_-]{16,}+"), MARKER),
+    (re.compile(_START + r"gh[pousr]_[A-Za-z0-9]{16,}+"), MARKER),
+    (re.compile(_START + r"github_pat_[A-Za-z0-9_]{16,}+"), MARKER),
+    (re.compile(_START + r"glpat-[A-Za-z0-9_-]{16,}+"), MARKER),
+    (re.compile(_START + r"xox[baprse]-[A-Za-z0-9-]{10,}+"), MARKER),
+    (re.compile(_START + r"xapp-[A-Za-z0-9-]{10,}+"), MARKER),
+    (re.compile(_START + r"AKIA[0-9A-Z]{16,}+"), MARKER),
     # Our own sign-in tokens (services/iam.py). Issued, never typed by hand.
-    (re.compile(r"\baisqr?_[A-Za-z0-9_-]{16,}+"), MARKER),
+    (re.compile(_START + r"aisqr?_[A-Za-z0-9_-]{16,}+"), MARKER),
     # A RANGE, not the documented exact length. The published Google key shape
     # is AIza + 35, and a pattern pinned to 35 misses a key that is 36 long —
     # which is exactly how a scrubber passes its tests and leaks in the field.
     # The prefix is what makes this specific; the length is only a floor.
-    (re.compile(r"\bAIza[0-9A-Za-z_-]{30,}+"), MARKER),
-    (re.compile(r"\bwk_(?:live|test)_[A-Za-z0-9]{8,}+"), MARKER),
+    (re.compile(_START + r"AIza[0-9A-Za-z_-]{30,}+"), MARKER),
+    (re.compile(_START + r"wk_(?:live|test)_[A-Za-z0-9]{8,}+"), MARKER),
 )
 
 #: A private-key block, the shape of one: ``-----BEGIN … PRIVATE KEY-----`` to the
 #: ``-----END … PRIVATE KEY-----`` that follows. Not applied with ``sub``: see
-#: :func:`_without_pem_blocks`. Kept as one pattern for whoever asks whether text holds one.
+#: :func:`_without_pem_blocks`, which also takes a header with no footer after it to the end
+#: of the text. Kept as one pattern for whoever asks whether text holds a whole block.
 PEM_BLOCK = re.compile(
     r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----.*?-----END [A-Z ]{0,32}PRIVATE KEY-----",
     re.DOTALL,
@@ -162,19 +198,23 @@ def redact(text: str, level: RedactionLevel) -> str:
 
 
 def _without_pem_blocks(text: str) -> str:
-    """``text`` with each private-key block (:data:`PEM_BLOCK`) replaced by :data:`MARKER`.
+    """``text`` with each private-key block (:data:`PEM_BLOCK`) replaced by :data:`MARKER`,
+    and a header with no footer after it replaced, and everything after it, by one.
 
     Done in one pass over the BEGIN lines and the END lines, each found once, so the cost is
     linear in the text: ``BEGIN .*? END`` as a regular expression reads to the end of the
     text from every BEGIN that has no END after it, and a paste of 7,000 headers and no
-    footer took 16 s in 400 KB (tester on #15), on the hook path. A BEGIN with no END after
-    it removes nothing (a block cut short is only a header), and no later BEGIN has one
-    either, so the pass ends there."""
+    footer took 16 s in 400 KB (tester on #15), on the hook path.
+
+    A BEGIN with no END after it is a block cut short, and what follows it is the key:
+    ``head -3 id_rsa``, a paste clipped, a tool result cut at the transcript's bound, or a
+    prompt cut at the contract's (:func:`aisquare.services.ci_augment.outbound_prompt`) all
+    leave a header and the first lines of a body. Taking only the header out would ship the
+    body, so the text goes from the header to its end: more than the key when prose follows
+    it, and never less. No later BEGIN has an END either, so the pass ends there."""
     if "-----BEGIN " not in text:
         return text
     ends = [found.span() for found in _PEM_END.finditer(text)]
-    if not ends:
-        return text
     kept: list[str] = []
     at = 0
     nearest = 0
@@ -186,9 +226,10 @@ def _without_pem_blocks(text: str) -> str:
         if opens < at:
             continue  # inside a block already taken out
         nearest = bisect_left(ends, (closes, 0), nearest)
-        if nearest == len(ends):
-            break
         kept += [text[at:opens], MARKER]
+        if nearest == len(ends):
+            at = len(text)  # a header and no footer after it: the rest of the text is its body
+            break
         at = ends[nearest][1]
     kept.append(text[at:])
     return "".join(kept)

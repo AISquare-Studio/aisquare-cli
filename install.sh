@@ -2843,9 +2843,8 @@ Exit codes
      or an optional extra you chose did not install: Node or npx for
      --with chrome-devtools. Its Claude Code registration only warns.
 
-Not installed, on purpose: explainability tracing (off
-unless asked for), and any credential — `claude` and `gh auth login` do their
-own.
+Not installed, on purpose: explainability tracing (off unless asked for), and
+any credential — `claude` and `gh auth login` do their own.
 USAGE
 }
 

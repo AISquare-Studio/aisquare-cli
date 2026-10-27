@@ -53,6 +53,10 @@ then registers the git repo you ran it from and wires Claude Code's hooks. Runni
 it again is a no-op. To read it before you run it, it is `install.sh` at the root
 of this repository.
 
+On Windows, run `irm https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.ps1 | iex`
+in PowerShell: it runs that installer inside your WSL2 distribution, or prints the
+one command that installs WSL2 if there is none.
+
 Then `asq` opens on Welcome, three steps to a running fleet:
 
 1. **Project:** use the folder you are in, or choose another.

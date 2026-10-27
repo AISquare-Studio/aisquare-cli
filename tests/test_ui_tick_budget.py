@@ -17,6 +17,7 @@ import sys
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -305,6 +306,54 @@ def test_the_tick_finds_the_window_of_an_ended_row_where_the_single_read_does(
     assert lingering.state == "exited"
     [running] = [s for s in many.agents[projects[0].id] if s.agent.id == runs.id]
     assert running.agent.ended_at is None, "listed and acted on as running, whatever ended_at"
+
+
+@TMUX_ONLY
+def test_the_tick_answers_what_tmux_answers_one_question_at_a_time(
+    fleet: tuple[list[ProjectInfo], Panes], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """r24 4: the tick's tests priced the read and compared its listing, and six mutants of
+    what it replaced lived (no live pane, no windows, no server start, panes under the wrong
+    id, ``every_window`` without the session id, ``_running_ids`` answering nothing). So each
+    answer is held to the question it stands in for, over the same fake server: the start and
+    the live panes (:meth:`TmuxServer.started_at`, ``live_panes_or_raise``), a session's
+    windows (``windows_or_raise``), and ``_running_ids`` itself, which says a row ended in the
+    store runs when its window does, a lingering dead one and a killed one not."""
+    projects, panes = fleet
+    monkeypatch.setattr(fleet_service, "_now", lambda: STARTED + timedelta(hours=1))
+    fleet_service.take_census()
+    project = projects[0]
+    runs = end_a_worker(panes, project, 0, spawned=True, label="runs", window="runs")
+    lingers = end_a_worker(panes, project, 1, spawned=True, label="lingers", window="lingers")
+    killed = end_a_worker(panes, project, 2, spawned=True)
+    config = fleet_service.settings()
+    ended = {runs.id, lingers.id, killed.id}
+    [placed] = fleet_service._indexed_sessions(project.id, config)
+    srv = placed.server()
+    name = fleet_service.session_name(project.codename or "")
+
+    tick = fleet_service._Tick()
+
+    started, live = srv.started_at(), srv.live_panes_or_raise()
+    assert started is not None and live, "the fake server has a start and live panes"
+    assert tick.live_panes(srv) == (started, live), "the start and every live pane, by tmux's id"
+    assert live[panes.session_ids[name]] >= {runs.pane_id}, "the session is keyed by tmux's id"
+    assert lingers.pane_id not in live[panes.session_ids[name]], "a dead pane is no live pane"
+    windows = srv.windows_or_raise(name)
+    assert windows, "the project's session has windows"
+    # The per-session listing leaves the session's id unset, which the server-wide one fills.
+    listed_start, listed = tick.listed(srv, name)
+    assert listed_start == started, "the server's start, out of the one answer"
+    assert [replace(w, session_id=None) for w in listed] == windows, "the session's windows"
+    assert tick.listed(srv, "no-such-session") == (started, []), "a session it has not: none"
+    every, _ = tick.every_window(srv)
+    assert {w.session_id for found in every.values() for w in found} == set(
+        panes.session_ids.values()
+    )
+
+    alone = fleet_service._running_ids(project.id, ended, config)
+    under_a_tick = fleet_service._running_ids(project.id, ended, config, fleet_service._Tick())
+    assert alone == {runs.id} == under_a_tick
 
 
 @TMUX_ONLY

@@ -3314,6 +3314,9 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
             out["open"] = _columns_at(view)
             out["field"] = (field(view, 2).region, name_box)
             await pilot.press("escape")
+            # The key is handled when the app gets to it, which under load is after `press`
+            # returns: the marks are read once the field has closed and given its mark back.
+            await settle_until(app, lambda: not row(view, 2).renaming)
             out["marks"] = [row(view, slot).cell("agent").display for slot in (1, 2, 3, 4)]
             table = view.query_one("#accounts-table")
             out["scrolls"] = table.max_scroll_x

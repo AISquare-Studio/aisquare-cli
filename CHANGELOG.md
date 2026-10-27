@@ -676,12 +676,48 @@ adapter.**
   burst of rows read the same millisecond (a Windows clock reads the same one for ~15 ms),
   and 80 random bits chose the order `ORDER BY id` listed them in: a board's tasks came
   back as #1, #3, #2. An id issued in the millisecond of the one before it now takes the
-  next one, so a burst of `n` ids runs `n` ms ahead of the clock, which then catches up;
-  ids made by two processes in the same millisecond are ordered as before. The needs feed
-  tells a turn's second permission prompt (or an MCP form) from its first by the session's
-  `last_seen_at` being past the first notice's event; two notices in one tick tied, and a
-  third wrote the tick back, so the card named the first call's prompt. The stamp now
-  goes one microsecond past the event and stays there.
+  next one, so a burst of ids runs ahead of the clock, which then catches up. The lead is held
+  to 50 ms: an id that would run further waits for the clock (a loop that mints and does
+  nothing else makes about a thousand a second from there on; the product's ids each come
+  with a database write, 13 ms for a `task add`, and build no lead). An id another process
+  makes inside a burst's lead can still sort before the burst's later ids, so across processes
+  the order holds to within 50 ms; two processes' ids in one millisecond are ordered by their
+  random bits, as before. The needs feed tells a turn's second permission prompt (or an MCP
+  form) from its first by the session's `last_seen_at` being past the first notice's event;
+  two notices in one tick tied, and a third, or a heartbeat, wrote the tick back, so the card
+  named the first call's prompt. The stamp now goes one microsecond past the event and stays
+  there.
+
+- **`redact` removes more of what it used to ship** (#30 of #113). A hand-off brief, a CI
+  prompt or an insights spool loses text it kept before: a private-key header with no footer
+  after it takes the rest of the text with it (a paste clipped, a result cut at the
+  transcript's bound: the body shipped); a value is removed when its name is quoted, as in JSON
+  (`{"password": "…"}`, `"api_key":"…"`, and the JSON a tool call's arguments hold inside a
+  string, where the quotes are escaped); a key right after text in another script
+  (`我的密钥sk-ant-…`) and a JWT after a hyphen (`token-eyJ…`) are removed. A quoted value that
+  holds an escaped quote (`{"password": "ab\"cd1234"}`, `PASSWORD='it\'s…'`, and the same
+  inside a string) is removed to the quote that closes it: its tail shipped, or all of it when
+  fewer than four characters came before the quote; a value that ends in a backslash still
+  closes at the first quote, so the text after it is read on its own. A secret's name is found
+  far into a run of dots or hyphens, and 500 KB of them costs what 500 KB of letters does.
+  Still shipped: a lone private-key footer line, a PGP private-key header, an
+  `Authorization` header with a scheme other than Bearer or Basic (`Token …`), and a quoted
+  value that is never closed.
+
+- **One ask per Keychain item, and the process table left alone while a tool hangs** (#31 of
+  #113). A user with a locked login Keychain got its unlock dialog twice at startup: the
+  shell's frame and the headroom it triggers read the same cold item on two threads, and both
+  asked. Reads of an item are one ask in flight now: the second reader waits for the first's
+  answer and takes it from the memo (a refusal stands, a login lasts its few seconds), a
+  forced read still asks, after the one in flight, and the reads of other items do not wait.
+  After one `ps` or `lsof` runs out its 5 s, no pane's tool is run for 30 s (K panes with a row
+  pending paid K timeouts a listing), and a tool that cannot be killed (an `lsof` stuck on a
+  dead mount ignores `SIGKILL`, and `subprocess.run` waits for it for good) is left behind after
+  2 s more, four at most, instead of holding the listing. The installer's check for the Chrome
+  DevTools MCP on Codex reads `[mcp_servers…]` tables only: Codex's config also holds
+  `[projects."/path"]` trust tables, and a checkout of the package's own repository read as
+  already registered, so nothing was registered. asq's tick, which asks tmux about the whole
+  fleet once, is held to the answers of the separate questions it replaced.
 
 - **A sandboxed agent's `--artifact` is read from the file that was checked, and a report's
   relative paths are refused** (r24 of #113, findings 6 and 7). `brief evidence|finding

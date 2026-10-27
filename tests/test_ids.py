@@ -5,13 +5,27 @@ from __future__ import annotations
 import re
 import threading
 import time
+from collections.abc import Iterator
 
 import pytest
 
+from aisquare.core import ids
 from aisquare.core.ids import ENTRY_PREFIX, TASK_PREFIX, new_entry_id, new_task_id
 
 _ID_PATTERN = re.compile(r"^ctx_[0-9abcdefghjkmnpqrstvwxyz]{26}$")
 _ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
+
+
+@pytest.fixture(autouse=True)
+def _each_test_starts_from_a_clock_that_no_burst_ran_ahead_of() -> Iterator[None]:
+    """The millisecond of the last id is process state. A test that freezes ``time.time`` in
+    2096 leaves it there, and every id the worker makes after is stamped in 2096, one
+    millisecond apart; ``test_the_clock_catches_up...`` read it as its own burst and failed
+    when it ran after one. Each test here starts from none and the worker gets its own back."""
+    ran_ahead_to = ids._LAST_MS[0]
+    ids._LAST_MS[0] = 0
+    yield
+    ids._LAST_MS[0] = ran_ahead_to
 
 
 def _stamp(entry_id: str, prefix: str = ENTRY_PREFIX) -> int:
@@ -90,25 +104,35 @@ def test_a_clock_that_steps_back_does_not_reorder_ids(monkeypatch: pytest.Monkey
 
 
 def test_threads_never_take_one_millisecond_twice(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The clock is frozen and yields to the other threads as it is read, which is where two
-    unlocked threads would both see the same last millisecond and take the same next one."""
-    real_sleep = time.sleep
-
-    def reads_the_frozen_clock() -> float:
-        real_sleep(0)
-        return 4_200_000_000.0
-
-    monkeypatch.setattr(time, "time", reads_the_frozen_clock)
-    made: list[list[str]] = [[] for _ in range(8)]
+    """The clock is frozen, and the first time each thread reads it, outside the lock, it waits
+    for the other seven to be there too: all of them have then read the same last millisecond
+    and none has written, which is where unlocked threads take the same next one. Inside the
+    lock the others cannot be at the clock, so nobody waits; no timing decides either way."""
+    threads_count = 8
+    rendezvous = threading.Barrier(threads_count)
+    waited: set[threading.Thread] = set()
+    made: list[list[str]] = [[] for _ in range(threads_count)]
 
     def make(into: list[str]) -> None:
         into.extend(new_task_id() for _ in range(300))
 
     threads = [threading.Thread(target=make, args=(into,)) for into in made]
+
+    def reads_the_frozen_clock() -> float:
+        me = threading.current_thread()
+        # Only these eight: any other thread that reads the clock while it is frozen (a worker's
+        # own, a daemon an earlier test left) is not a party to the rendezvous.
+        if me in threads and me not in waited and not ids._LAST_LOCK.locked():
+            waited.add(me)
+            rendezvous.wait(timeout=30)
+        return 4_200_000_000.0
+
+    monkeypatch.setattr(time, "time", reads_the_frozen_clock)
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
     everything = [entry_id for into in made for entry_id in into]
+    assert len(everything) == threads_count * 300
     assert len({_stamp(entry_id, TASK_PREFIX) for entry_id in everything}) == 2_400
     assert all(into == sorted(into) for into in made), "each thread's own ids are in its order"

@@ -15,6 +15,7 @@ import shlex
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -2048,6 +2049,222 @@ def test_real_codex_at_its_switch_dialog_is_handed_over_and_the_session_it_leave
             for thread in threads:
                 thread.join(timeout=2)
             _stop_app_servers(full.config_dir, roomy.config_dir)
+
+
+class _Background(BaseHTTPRequestHandler):
+    """A loopback Responses provider for one Codex slot whose five-hour window reads
+    ``server.percent`` in every answer's headers. ``BG <seconds>`` is answered with an
+    ``exec_command`` of ``sleep <seconds>`` that outlives its 300 ms yield, so the turn ends
+    with it running (Codex's background terminal: ``Process running with session ID …``,
+    no ``CommandExecution`` yet), and that output with ``turn over``; any other line with
+    ``ok``. Measured on 0.164.0 by tester-39 (board seq 4202)."""
+
+    def do_POST(self) -> None:
+        raw = self.rfile.read(int(self.headers["Content-Length"]))
+        if not self.path.endswith("/responses"):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
+        request = json.loads(raw)
+        said = _user_texts(request)
+        window = {
+            "x-codex-primary-used-percent": str(self.server.percent),  # type: ignore[attr-defined]
+            "x-codex-primary-window-minutes": "300",
+            "x-codex-primary-reset-at": str(self.server.resets_at),  # type: ignore[attr-defined]
+        }
+        items = request.get("input", [])
+        if items and items[-1].get("type") == "function_call_output":
+            _answer(self, _message("turn over"), window)
+            return
+        if said and said[-1].startswith("BG "):
+            call = f"call_bg_{said[-1].split()[1]}"
+            command = {"cmd": f"sleep {said[-1].split()[1]}; echo bg-done", "yield_time_ms": 300}
+            item = {
+                "id": call,
+                "type": "function_call",
+                "call_id": call,
+                "name": "exec_command",
+                "namespace": "functions",
+                "arguments": json.dumps(command),
+            }
+            _answer(self, item, window)
+            return
+        _answer(self, _message("ok"), window)
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_over_the_line_moves_before_its_limit_once_no_exec_is_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#39 (SCOPE #113 091, item 1), on two loopback Codex slots: ``[accounts] before_limit =
+    "switch"`` moves a fleet Codex coder whose slot reads over ``switch_at`` (92 %) to the
+    Codex slot under it (15 %) at a turn end, through Codex's own ``Stop`` hook, the worker
+    it starts and the real ``fleet switch``, never at a turn that left an exec running.
+
+    Its turn ``BG 20`` ends with ``sleep 20`` still running (``Process running with session
+    ID …``): its ``Stop`` starts no worker, and the row stays on its slot, for a move's
+    ``/exit`` would kill it. Once the exec's ``CommandExecution`` is recorded, the next turn
+    end moves it, and the board's ``switched`` line says ``(before limit)``. The move's last
+    check reads the pane: Codex draws its composer and footer styled, and read as captured,
+    its idle prompt was no prompt, and every row was given back there (#39's reopen, board
+    seq 4202). The exec runs outside Codex's sandbox (``--dangerously-bypass-approvals-and-
+    sandbox``): what is measured is its process, which a runner's bwrap would refuse."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.core import codex_sharing, paths
+    from aisquare.services import hooks
+    from tests.test_codex_accounts import _rollout, _token_count, _window
+
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with (
+        ThreadingHTTPServer(("127.0.0.1", 0), _Background) as over,
+        ThreadingHTTPServer(("127.0.0.1", 0), _Background) as under,
+    ):
+        resets_at = int(time.time()) + 3 * 3600
+        for server, percent in ((over, 92), (under, 15)):
+            server.percent = percent  # type: ignore[attr-defined]
+            server.resets_at = resets_at  # type: ignore[attr-defined]
+        threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in (over, under)]
+        for thread in threads:
+            thread.start()
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
+        config = load_config()
+        config.fleet.tmux_socket = f"asq-codex-before-limit-{os.getpid()}"
+        config.accounts.before_limit = "switch"
+        save_config(config)
+        project = team.activate(workspace)
+        srv = fleet.server(config.fleet)
+        homes: list[Path] = []
+
+        def slot(server: ThreadingHTTPServer) -> Any:
+            """A Codex slot on ``server``, its last reading the provider's (planted, as a turn
+            there leaves it: the move takes only an account it can read)."""
+            account = accounts_core.create_account("codex")
+            homes.append(account.config_dir)
+            codex_sharing.config_path(account.config_dir).write_text(
+                'model = "local-fixture"\nmodel_provider = "local"\n'
+                '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+                f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+                "requires_openai_auth = false\n"
+                f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n',
+                encoding="utf-8",
+            )
+            (account.config_dir / "auth.json").write_text(
+                json.dumps({"OPENAI_API_KEY": "sk-local-dummy-not-a-key"}), encoding="utf-8"
+            )
+            agents.install_hooks("codex", account.config_dir)
+            now = datetime.now(tz=UTC)
+            percent: float = server.percent  # type: ignore[attr-defined]
+            reading = _token_count(now, _window(percent, 300, now + timedelta(hours=3)))
+            _rollout(account.config_dir, [reading], name=f"planted-{account.slot}")
+            return account
+
+        def screen(pane: str) -> str:
+            return srv.run("capture-pane", "-p", "-t", pane)
+
+        def until(check: Any, seconds: float, what: str, pane: str) -> Any:
+            deadline = time.monotonic() + seconds
+            while not (got := check()):
+                if time.monotonic() >= deadline:
+                    raise AssertionError(f"{what}:\n{screen(pane)}")
+                time.sleep(0.25)
+            return got
+
+        def live() -> Any:
+            """The live row under its label; ``None`` between a move's two rows."""
+            with store_session() as store:
+                rows = [
+                    agent
+                    for agent in store.fleet_agents(project.id, live_only=True)
+                    if agent.label == coder.label
+                ]
+            assert len(rows) <= 1, rows
+            return rows[0] if rows else None
+
+        def rollout() -> Path | None:
+            with store_session() as store:
+                row = store.get_fleet_agent(coder.id)
+                session = store.get_session(row.session_id) if row and row.session_id else None
+            path = session.transcript_path if session is not None else None
+            return Path(path) if path else None
+
+        def records(of: Path, kind: str) -> int:
+            return sum(1 for line in of.read_text(encoding="utf-8").splitlines() if kind in line)
+
+        def turn(of: Path, line: str) -> None:
+            ended = records(of, '"task_complete"')
+            srv.run("send-keys", "-t", coder.pane_id, "-l", line)
+            time.sleep(0.6)  # Codex's paste-burst guard eats an Enter sent with the text
+            srv.run("send-keys", "-t", coder.pane_id, "Enter")
+            until(lambda: records(of, '"task_complete"') > ended, 60, line, coder.pane_id)
+
+        def looked() -> str | None:
+            with store_session() as store:
+                return store.ui_state(hooks._key(hooks._BEFORE_LIMIT_KEY, coder))
+
+        try:
+            full = slot(over)
+            coder = fleet.spawn(
+                project,
+                "coder",
+                agent="codex",
+                worktree=False,
+                prompt="hi",
+                agent_args=[
+                    "--dangerously-bypass-hook-trust",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                ],
+            ).agent
+            # Its agent's one account then: the spawn's own pick, not one put by hand.
+            assert coder.account_slot == full.slot, coder
+            path = until(rollout, 30, "its rollout", coder.pane_id)
+            until(lambda: records(path, '"task_complete"'), 60, "its first turn", coder.pane_id)
+            roomy = slot(under)
+            # Past the cool-down its spawn started: an hour old.
+            with contextlib.closing(sqlite3.connect(str(paths.db_path()))) as handle:
+                handle.execute(
+                    "UPDATE fleet_agent SET created_at = ? WHERE id = ?",
+                    ((datetime.now(tz=UTC) - timedelta(hours=1)).isoformat(), coder.id),
+                )
+                handle.commit()
+
+            turn(path, "BG 20")
+            assert records(path, '"CommandExecution"') == 0, "the exec runs on past its turn"
+            time.sleep(hooks.BEFORE_LIMIT_SETTLE_SECONDS + 3)
+            assert looked() is None, "a turn end with an exec open started the move's worker"
+            assert live().id == coder.id and live().account_slot == full.slot
+
+            until(lambda: records(path, '"CommandExecution"'), 40, "its exec's end", coder.pane_id)
+            turn(path, "hi again")
+            moved = until(
+                lambda: (row := live()) is not None and row.id != coder.id and row,
+                120,
+                "the move",
+                coder.pane_id,
+            )
+            assert moved.agent == "codex" and moved.account_slot == roomy.slot, moved
+            with store_session() as store:
+                said = [e.text for e in store.recent_events(project.id, limit=40)]
+            assert any("(before limit)" in text for text in said), said
+        finally:
+            if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
+                srv.run("kill-server")
+            for server in (over, under):
+                server.shutdown()
+            for thread in threads:
+                thread.join(timeout=2)
+            _stop_app_servers(*homes)
 
 
 @pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")

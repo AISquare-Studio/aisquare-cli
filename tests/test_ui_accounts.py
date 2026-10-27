@@ -3443,6 +3443,53 @@ def test_every_button_of_a_row_is_on_screen_at_200_columns_unscrolled(
     assert out["marks"] == {1: "Cl", 4: "Co"} and out["tip"] == "Codex"
 
 
+def test_a_name_past_the_cells_it_has_ends_in_an_ellipsis_and_is_whole_in_its_tooltip(
+    no_network: dict[str, Any],
+) -> None:
+    """The ui-tester on 874aeff6 (r23 of #113): a Claude-only machine's names fell from 16
+    cells to 13 (the agent's mark and its space share the column), so a 16-character alias
+    that 0.9.0 showed whole read ``Cl abcdefghijkl…`` and the CHANGELOG said nothing of it.
+    It says it now (the cells it names are measured here, not copied), and the cut name's
+    whole text is its tooltip, with the rename hint after it."""
+    no_network["usage"] = _table_usage
+    sixteen, fourteen, thirteen = "abcdefghijklmnop", "abcdefghijklmn", "abcdefghijklm"
+    frame = _overview(
+        _arranged(_status(1, "me@example.com"), alias=sixteen, position=1),
+        _arranged(_status(2, "two@example.com"), alias=fourteen, position=2),
+        _arranged(_status(3, "three@example.com"), alias=thirteen, position=3),
+    )
+
+    async def run() -> dict[str, Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: frame)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 3))
+            return {
+                "cells": row(view, 1).cell("name").region.width,
+                "marks": {slot: shown(row(view, slot).cell("agent")) for slot in (1, 2, 3)},
+                "drawn": {
+                    slot: row(view, slot).cell("name").render_line(0).text.rstrip()
+                    for slot in (1, 2, 3)
+                },
+                "tips": {slot: str(row(view, slot).cell("name").tooltip) for slot in (1, 2, 3)},
+            }
+
+    out = asyncio.run(run())
+    name_column = next(column for column in accounts_view.COLUMNS if column.key == "name")
+    assert out["marks"] == {1: "Cl", 2: "Cl", 3: "Cl"}  # a Claude-only table has the mark too
+    assert out["cells"] == 13 == name_column.width - len("Cl") - 1
+    assert out["drawn"][1] == sixteen[:12] + "…" and out["drawn"][2] == fourteen[:12] + "…"
+    assert out["drawn"][3] == thirteen  # a name of exactly the cells it has is whole
+    for slot, alias in ((1, sixteen), (2, fourteen), (3, thirteen)):
+        assert out["tips"][slot].startswith(f"{alias} — "), out["tips"][slot]
+        assert "double-click" in out["tips"][slot]
+    changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
+    unreleased = changelog.split("\n## [0.9.0]", 1)[0]
+    flat = " ".join(unreleased.split())
+    assert f"The name has {out['cells']} cells, not {name_column.width}" in flat.replace("**", "")
+
+
 def test_an_agents_mark_is_the_shortest_start_of_its_label_no_other_agent_shares() -> None:
     """The first word of the name's column: two letters, more only for agents that share
     them, and never a name taken from the agent's id."""

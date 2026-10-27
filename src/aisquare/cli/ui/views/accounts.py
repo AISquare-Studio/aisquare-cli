@@ -352,10 +352,11 @@ COLUMNS: tuple[Column, ...] = (
 """The table's data columns, left to right; the header and every row are cut from them.
 
 The ``agent`` cell is not a column of its own: it is the first word of the name's column
-(:func:`agent_marks`, two letters), whose 16 cells it shares with the name. As a column of
-11 it took the table to 179 cells, past the 163 a 200-column screen shows, and the buttons
-at the end of a line were cut (the ui-tester at 200x50, r23 of #113). The ``email`` column
-gave up four cells to fit.
+(:func:`agent_marks`, two letters), whose 16 cells it shares with the name: the name has 13
+(the mark takes two and a space), and one longer ends in ``…`` with the whole in its
+tooltip, which the CHANGELOG says. As a column of 11 it took the table to 179 cells, past
+the 163 a 200-column screen shows, and the buttons at the end of a line were cut (the
+ui-tester at 200x50, r23 of #113). The ``email`` column gave up four cells to fit.
 
 Fixed widths, so a column starts at the same x on every row whatever its values:
 a value too long for its cell ends in ``…`` and never wraps (the whole text is the

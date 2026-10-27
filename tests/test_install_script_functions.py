@@ -2529,6 +2529,54 @@ _CODEX_DOTTED = """model = "gpt-6"
 mcp_servers.devtools.command = "npx"
 mcp_servers.devtools.args = ["chrome-devtools-mcp@latest"]
 """
+#: What the survey does line by line, one layout for each thing it does (r24 5; none of them
+#: carries the package, so only the rule under test can answer). Where an [mcp_servers] table
+#: ends: Codex holds its tables in either order, and a trust table AFTER the servers is not one.
+_CODEX_TRUST_AFTER_SERVERS = """[mcp_servers.github]
+url = "https://example.invalid/mcp"
+
+[projects."/Users/dev/src/chrome-devtools-mcp"]
+trust_level = "trusted"
+"""
+#: A server named by its dotted key alone, and by a quoted table name alone: no package.
+_CODEX_DOTTED_BY_NAME = """model = "gpt-6"
+mcp_servers.chrome-devtools.command = "my-wrapper"
+"""
+_CODEX_QUOTED_BY_NAME = """[mcp_servers."chrome-devtools"]
+command = "my-wrapper"
+"""
+#: A comment INSIDE a server's table: the package it names is not run.
+_CODEX_COMMENT_IN_TABLE = """[mcp_servers.other]
+command = "x"
+# args = ["chrome-devtools-mcp@latest"]
+"""
+#: A table header as the file's last line, with no newline after it (an editor that does not
+#: add one), and one that is indented (TOML allows it).
+_CODEX_NO_FINAL_NEWLINE = 'model = "gpt-6"\n\n[mcp_servers.chrome-devtools]'
+_CODEX_INDENTED_HEADER = """model = "gpt-6"
+
+  [mcp_servers.chrome-devtools]
+  command = "my-wrapper"
+"""
+#: The other spellings of a name by its key alone (a quoted sub-table, a quoted dotted key), and
+#: the package run from an inline table, under a bare [mcp_servers] or as a top-level key.
+_CODEX_QUOTED_SUBTABLE = """[mcp_servers."chrome-devtools".env]
+CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS = "1"
+"""
+_CODEX_DOTTED_QUOTED_BY_NAME = """mcp_servers."chrome-devtools".command = "my-wrapper"
+"""
+_CODEX_INLINE_UNDER_BARE_TABLE = """[mcp_servers]
+devtools = { command = "npx", args = ["-y", "chrome-devtools-mcp@latest"] }
+"""
+_CODEX_INLINE_TOP_LEVEL = (
+    'mcp_servers = { devtools = { command = "npx", args = ["chrome-devtools-mcp@latest"] } }\n'
+)
+#: Not it: a package whose name merely ENDS in the package's (the other lookalike is
+#: `chrome-devtools-mcp-docs`, which merely starts with it).
+_CODEX_LOOKALIKE_PREFIX = """[mcp_servers.docs]
+command = "npx"
+args = ["not-chrome-devtools-mcp@1.0.0"]
+"""
 
 #: The layouts both the survey (shell) and the adapter (Python) read as registered, and as not.
 CODEX_REGISTERED = {
@@ -2541,6 +2589,14 @@ CODEX_REGISTERED = {
     "by-path": _CODEX_BY_PATH,
     "multiline-args": _CODEX_MULTILINE_ARGS,
     "dotted-keys": _CODEX_DOTTED,
+    "dotted-by-name": _CODEX_DOTTED_BY_NAME,
+    "quoted-by-name": _CODEX_QUOTED_BY_NAME,
+    "no-final-newline": _CODEX_NO_FINAL_NEWLINE,
+    "indented-header": _CODEX_INDENTED_HEADER,
+    "quoted-subtable": _CODEX_QUOTED_SUBTABLE,
+    "dotted-quoted-by-name": _CODEX_DOTTED_QUOTED_BY_NAME,
+    "inline-under-bare-table": _CODEX_INLINE_UNDER_BARE_TABLE,
+    "inline-top-level": _CODEX_INLINE_TOP_LEVEL,
 }
 CODEX_NOT_REGISTERED = {
     "lookalike-package": _CODEX_LOOKALIKE,
@@ -2548,6 +2604,9 @@ CODEX_NOT_REGISTERED = {
     "another-server": _CODEX_ANOTHER_SERVER,
     "trusted-checkout": _CODEX_TRUSTED_CHECKOUT,
     "named-elsewhere": _CODEX_NAMED_ELSEWHERE,
+    "trust-after-servers": _CODEX_TRUST_AFTER_SERVERS,
+    "comment-in-table": _CODEX_COMMENT_IN_TABLE,
+    "lookalike-prefix": _CODEX_LOOKALIKE_PREFIX,
 }
 
 
@@ -2687,6 +2746,21 @@ def test_what_codex_would_not_start_reads_as_not_registered(tmp_path: Path, conf
     )
 
     assert result.stdout.splitlines()[-1] == "ABSENT", result.stdout
+
+
+def test_a_codex_that_has_written_no_config_reads_as_not_registered_without_a_word(
+    tmp_path: Path,
+) -> None:
+    """A Codex that has not written its config.toml yet is a first run's commonest case: the
+    survey answers "absent" and the shell says nothing of the file it could not open."""
+    result = sh(
+        "if devtools_mcp_codex_registered; then echo REGISTERED; else echo ABSENT; fi",
+        env={"HOME": str(tmp_path / "home"), "CODEX_HOME": ""},
+        path=base_path(tmp_path),
+    )
+
+    assert result.stdout.strip() == "ABSENT"
+    assert result.stderr == ""
 
 
 def test_without_codex_the_mcp_is_skipped_in_one_line(tmp_path: Path) -> None:

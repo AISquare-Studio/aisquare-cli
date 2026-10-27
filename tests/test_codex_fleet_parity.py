@@ -2708,28 +2708,107 @@ def test_a_codex_pick_runs_through_its_own_model_slot_and_is_the_next_codex_spaw
     assert _pair(replayed, "--model") == "gpt-y", "a restart starts the model it was given"
 
 
+def _not_passed(name: str, named: str) -> str:
+    return (
+        f"the {name} picked for this spawn is not passed: the coder's settings name {named} "
+        "for Codex"
+    )
+
+
+@pytest.mark.parametrize(
+    ("role_args", "pick", "runs", "said"),
+    [
+        pytest.param(
+            ["-c", 'model_reasoning_effort="medium"'],
+            ("gpt-x", "high"),
+            ("gpt-x", "medium"),
+            [_not_passed("effort", "the effort medium")],
+            id="the-effort-alone",
+        ),
+        pytest.param(
+            ["--model", "gpt-role"],
+            ("gpt-x", None),
+            ("gpt-role", None),
+            [_not_passed("model", "the model gpt-role")],
+            id="the-model-alone",
+        ),
+        pytest.param(
+            ["--model", "gpt-role", "-c", 'model_reasoning_effort="medium"'],
+            ("gpt-x", "high"),
+            ("gpt-role", "medium"),
+            [
+                _not_passed("model", "the model gpt-role"),
+                _not_passed("effort", "the effort medium"),
+            ],
+            id="both",
+        ),
+        pytest.param(
+            ["--model", "gpt-role"],
+            ("gpt-x", "high"),
+            ("gpt-role", None),
+            [
+                _not_passed("model", "the model gpt-role"),
+                _not_passed("effort", "the model gpt-role"),
+            ],
+            id="both-the-model-taking-the-effort",
+        ),
+        pytest.param(
+            ["-c", 'model_reasoning_effort="medium"'],
+            ("gpt-x", None),
+            ("gpt-x", "medium"),
+            [],
+            id="neither",
+        ),
+    ],
+)
 def test_a_codex_pick_the_roles_own_arguments_overrule_is_said_on_the_receipt(
     tmux: FakeTmux,  # noqa: F811
     claude_on_path: Path,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
+    role_args: list[str],
+    pick: tuple[str, str | None],
+    runs: tuple[str, str | None],
+    said: list[str],
 ) -> None:
-    """A Codex role's own arguments (``agent_args``) that name the model are not edited for a
-    pick, as Claude Code's ``--model`` is: the model they name runs, once, and the receipt
-    says the pick was not passed rather than dropping it without a word."""
+    """A Codex role's own arguments (``agent_args``) are not edited for a pick, as Claude
+    Code's ``--model`` and ``--effort`` are: what they name runs, once, and the receipt says
+    each of the pick's model and effort they overrule, on its own, rather than dropping it
+    without a word (seq 4185: an effort they alone overruled was dropped silently). Arguments
+    that name the model take the effort too (#129 b); a pick they leave alone is passed and
+    nothing is said, nor for no pick."""
     config = load_config()
-    config.fleet.roles["coder"] = FleetRoleSettings(
-        worktree=False, agent_args={"codex": ["--model", "gpt-role"]}
-    )
+    config.fleet.roles["coder"] = FleetRoleSettings(worktree=False, agent_args={"codex": role_args})
     save_config(config)
-    receipt = fleet_service.spawn(project, "coder", agent="codex", model="gpt-x")
+    receipt = fleet_service.spawn(project, "coder", agent="codex", model=pick[0], effort=pick[1])
     native = _spawn_native(tmux)
-    assert native.count("--model") == 1 and _pair(native, "--model") == "gpt-role"
-    assert any(
-        "not passed" in note and "gpt-role" in note and "Codex" in note for note in receipt.notes
-    ), receipt.notes
+    efforts = [arg for arg in native if arg.startswith("model_reasoning_effort=")]
+    assert native.count("--model") == 1 and _pair(native, "--model") == runs[0]
+    assert efforts == ([f'model_reasoning_effort="{runs[1]}"'] if runs[1] else []), native
+    assert [note for note in receipt.notes if "not passed" in note] == said, receipt.notes
     plain = fleet_service.spawn(project, "coder", agent="codex")
     assert not any("not passed" in note for note in plain.notes), "no pick, nothing to say"
+
+
+def test_a_claude_code_pick_replaces_its_roles_flags_and_nothing_is_said(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """Claude Code's pick is never overruled by its role's ``extra_args`` (seq 4185): the
+    flag the pick names replaces the role's (#441), so the pick runs and the receipt has no
+    word for it."""
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(
+        worktree=False, extra_args=["--model", "sonnet", "--effort", "medium"]
+    )
+    save_config(config)
+    receipt = fleet_service.spawn(project, "coder", agent="claude-code", effort="high")
+    native = _spawn_native(tmux)
+    assert native.count("--effort") == 1 and _pair(native, "--effort") == "high", native
+    assert native.count("--model") == 1 and _pair(native, "--model") == "sonnet", native
+    assert not any("not passed" in note for note in receipt.notes), receipt.notes
 
 
 def test_a_hand_launch_keeps_claude_codes_argv_and_gives_codex_its_pins(

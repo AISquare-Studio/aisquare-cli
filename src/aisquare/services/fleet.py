@@ -4985,19 +4985,8 @@ def spawn(
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
     notes.extend(model_resolution.notes if model_resolution else [])
-    if (
-        spec is None
-        and not selected.adapter.capabilities.model_ladders
-        and arguments.model is not None
-        and selected.adapter.native_choice(extra).model is None
-        and (models.picked.model or models.picked.effort)
-    ):
-        # Its role's own arguments name the model, and they are not edited for a pick
-        # (`_own_pick`): said, never dropped without a word (SCOPE #113 091, item 2).
-        notes.append(
-            f"the model and effort picked for this spawn are not passed: the {role}'s settings "
-            f"name the model {arguments.model} for {selected.adapter.label}"
-        )
+    if spec is None and not selected.adapter.capabilities.model_ladders:
+        notes.extend(_overruled_picks(role, selected.adapter, arguments, extra, models.picked))
     # Not for the role's built-in arguments (the reviewer's `--disallowedTools`), which
     # `init` writes and nobody chose: every Codex reviewer spawn on a fresh config said it,
     # in a Codex manager's tool output too, with nothing for anyone to change.
@@ -9138,6 +9127,39 @@ def _own_pick(resolution: harness.ModelResolution, models: _ModelChoice) -> harn
         elif chose is None and kept and getattr(resolution, source) == "native-default":
             update[name], update[source] = kept, "remembered"
     return resolution.model_copy(update=update) if update else resolution
+
+
+def _overruled_picks(
+    role: str,
+    adapter: AgentAdapter,
+    arguments: agent_launch.NativeArguments,
+    extra: Sequence[str],
+    picked: model_memory.Pick,
+) -> list[str]:
+    """What a new spawn of an agent that keeps its own models says of each of its pick's model
+    and effort that its role's own arguments overrule: they are not edited for a pick
+    (:func:`_own_pick`), so what they name runs and the pick is said, never dropped without a
+    word (SCOPE #113 091, item 2). Arguments that name the model take the effort too (#129 b).
+    Nothing for what the spawn's own arguments (``extra``) name: those are the pick."""
+    own = adapter.native_choice(extra)
+    model = arguments.model if own.model is None else None
+    notes: list[str] = []
+    if picked.model and model is not None:
+        notes.append(_not_passed("model", role, f"the model {model}", adapter))
+    if picked.effort and own.effort is None:
+        if arguments.original_effort is not None:
+            named = f"the effort {arguments.original_effort}"
+            notes.append(_not_passed("effort", role, named, adapter))
+        elif model is not None:
+            notes.append(_not_passed("effort", role, f"the model {model}", adapter))
+    return notes
+
+
+def _not_passed(name: str, role: str, named: str, adapter: AgentAdapter) -> str:
+    return (
+        f"the {name} picked for this spawn is not passed: the {role}'s settings name {named} "
+        f"for {adapter.label}"
+    )
 
 
 def _moved(name: str, now: str | None, launched: str | None, then: str | None) -> bool:

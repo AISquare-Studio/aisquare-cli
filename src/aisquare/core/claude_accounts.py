@@ -377,6 +377,11 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
+def claude_json(account: ClaudeAccount) -> dict[str, Any] | None:
+    """The account's ``.claude.json`` as a dict; ``None`` when it is missing or not an object."""
+    return _read_json(claude_json_path(account))
+
+
 def identity(account: ClaudeAccount) -> ClaudeIdentity | None:
     """The signed-in account, or ``None`` when the directory has no login recorded."""
     return identity_in(_read_json(claude_json_path(account)))

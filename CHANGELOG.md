@@ -47,6 +47,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   honouring a back-off; a kept reading moves nobody. The spawn records whether its account
   was named (`account_pinned` in the row's launch spec), which a restart, a switch and a fork
   keep; rows spawned before this read as not pinned.
+- **Settings ▸ Usage & stats, and `aisquare metrics stats`: what every Claude Code session on
+  this machine spent, by day, repository, account and model.** A new page under Settings
+  (Today / 7 days / 30 days / Lifetime, keys `1`-`4`) with tiles for tokens, input + output,
+  cost at list prices, sessions, turns, active days and repositories; a bar per day (per hour
+  for Today); the weekdays and hours you work; your ten biggest repositories; your accounts
+  and their plans, with the top one starred; the busiest days; the model mix; and the features
+  you use most. It loads off the UI thread and says so when there is nothing yet. The same
+  figures print as text or `--json`. **Every session counts, whether or not aisquare launched
+  it:** a sweep reads Claude Code's transcripts under `~/.claude` and every registered
+  account, when the page opens and from the TUI every ten minutes, and as
+  `aisquare metrics backfill` - the first run records the history Claude Code has not yet
+  deleted. A session the Stop hook counted is never counted again (one scan position per
+  session; a compare-and-set on write), and a turn that crosses local midnight is cut in two.
+  Totals equal `aisquare metrics tokens` for the same sessions. Sessions now record their
+  account (slot and subscription) and repository; repositories get a cached profile (host,
+  main language, size, monorepo); commands and TUI pages are counted by name per day, an
+  appended line, never an argument. A repository is its normalised git remote (else its
+  root), so the clones of one project count once. Schema v40. Everything stays on this
+  machine (`docs/usage-stats.md`).
+- **Usage is counted for every repository you run Claude Code in, including ones you have not
+  added to aisquare**, whatever `[projects] capture` says (the sweep reads every transcript on
+  the machine) - said in the question, in the Settings switch's description and by
+  `aisquare metrics share on`; `project forget --purge` now leaves a tombstone so a forgotten
+  project is not read back from the transcripts Claude Code keeps (by the sweep or the Stop
+  hook), until it is added back on purpose (`docs/usage-stats.md`). The sweep no longer fails
+  on a session that only has aisquare's start hook in it; `ctx`/`workspace` count as
+  `context`/`project`, `project reset` as `project fresh`, and `--help` is not a use;
+  `metrics stats` shows progress on its first sweep.
+- **Optional, off-by-default anonymous usage sharing** (`docs/usage-telemetry.md`). A one-time
+  question in the UI after you have set up a project (*Share anonymous usage* / *No thanks* /
+  *See what would be sent*), a one-click button at the top of Settings ▸ Usage & stats, and
+  `aisquare metrics share on|off|status|preview|reset-id` send AISquare **daily counts** of how
+  aisquare is used - tokens, sessions, which commands and pages, agents started, and a salted
+  hash with four coarse traits per repository - and **never** names, paths, remotes, prompts,
+  emails, aliases or command arguments. `preview` prints the body the next shipment posts (with
+  sharing off, a labelled sample of the last 31 days with placeholder ids).
+  Sharing starts from the day it is turned on; a signed-in user's counts carry their AISquare
+  token so the server links them (a refused token is retried without it). A shipment never runs
+  on a command or hook's path (a detached `aisquare metrics ship`, at most every 6 h, 5 s
+  timeouts), and **a failed one is silent**: no message and no change to any output, tried again
+  after a backoff that stops at 6 h, the days rebuilt from the local record and sent oldest
+  first in batches of 31, so a server that is not deployed yet loses nothing. `DO_NOT_TRACK=1`,
+  `AISQUARE_NO_TELEMETRY=1` and any `CI` run force it off and skip the question; turning it off
+  stops a shipment under way, purges what was kept and sends one opt-out notice. Only the
+  contract's reply (`{accepted_days, linked}`) counts as delivered, and a redirect is never
+  followed, so the token goes to one origin only. `share on` while it is on keeps the first day and the
+  days still waiting; `preview --json` says whether it is a sample. A day on which sharing was forced off is never
+  sent later; a batch the server refuses for good does not hold the newer ones back. The server end is a separate
+  change.
 - **Start fresh: `aisquare project fresh`** (alias `project reset`) clears an onboarded
   project's board and fleet and starts a blank manager, without onboarding it again.
   Every live agent is stopped as `fleet shutdown` stops it, and the project's tmux

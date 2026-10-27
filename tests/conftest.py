@@ -34,6 +34,7 @@ from aisquare.services import ci_client
 from aisquare.services import hooks as hooks_service
 from aisquare.services import project as project_service
 from tests import private_fleets, shards
+from tests.usage_stats_support import Machine, pin_hook_clock
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -517,6 +518,11 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # exits through its `unreachable` message and never leaves the machine. Tests
     # that exercise sign-in point --api-url at their own stub server.
     monkeypatch.setenv("AISQUARE_API_URL", "http://127.0.0.1:9")
+    # Usage sharing is forced off for the whole suite: nothing a test does may send a body to
+    # the real server (or ask the TUI's consent question in tests that never meant to). The
+    # tests of sharing take it off with the ``sharing_allowed`` fixture and give it a fake
+    # transport; DO_NOT_TRACK and CI are cleared there too, as GitHub's runners set CI.
+    monkeypatch.setenv("AISQUARE_NO_TELEMETRY", "1")
     # The experiment settings are read once per process (ci_client._settings is
     # lru_cached, like core.insights._config), so a cached read from the previous
     # test's HOME would outlive the home it came from. So is the insights config,
@@ -854,6 +860,42 @@ CLAUDE_ACCOUNTS_NOW = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
 Tests that write credentials against it import it (``NOW`` in
 test_claude_accounts.py), so a token they mint and the clock that grades it agree.
 """
+
+
+@pytest.fixture(autouse=True)
+def no_background_shipper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test starts the REAL detached ``aisquare metrics ship``.
+
+    Any command a test runs through the CLI starts one when sharing is on and a shipment is due
+    (``core.sharing.start_background_ship`` from the root callback); a real one is a process that
+    outlives the test, minds the test's home and, under load, mints an identity mid-test (a test
+    of "no identity yet" failed once in the full run, never alone). A test of the spawn itself
+    replaces ``_spawn`` with its own recorder."""
+    from aisquare.core import sharing
+
+    monkeypatch.setattr(sharing, "_spawn", lambda: None)
+
+
+@pytest.fixture
+def sharing_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Usage sharing may be turned on: none of the three things that force it off is set
+    (``core.sharing.forced_off_reason``). The suite forces it off for every test otherwise."""
+    for name in ("AISQUARE_NO_TELEMETRY", "DO_NOT_TRACK", "CI"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def machine(tmp_path: Path, fake_home: Path, monkeypatch: pytest.MonkeyPatch) -> Machine:
+    """A machine with Claude Code accounts, repositories and transcripts to build
+    (``tests/usage_stats_support.py``). Its repositories are repositories: the scratch
+    directories the usage stats count as one "temporary directories" are none here, the
+    suite's own living in a temporary directory. The Stop hook's clock is pinned to the stats
+    tests' ``NOW``: stamped by the wall clock, its turns fell out of the range they read."""
+    from aisquare.services import usage_stats
+
+    monkeypatch.setattr(usage_stats, "_ephemeral_roots", lambda: ())
+    pin_hook_clock(monkeypatch)  # a hook's turn is stamped NOW, not whenever the suite runs
+    return Machine(root=tmp_path, home=fake_home)
 
 
 @pytest.fixture

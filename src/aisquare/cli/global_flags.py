@@ -49,6 +49,9 @@ from aisquare.core.store import (
     is_corrupt_error,
 )
 
+DISPATCHED_WORDS = "aisquare.dispatched_words"
+"""``ctx.meta`` key under which the root group leaves the words after its own options."""
+
 INJECTED_MARK = "aisquare_injected_global_flag"
 """Attribute stamped on injected params so tests can tell them from locals."""
 
@@ -269,6 +272,16 @@ class GlobalFlagsGroup(TyperGroup):
     def __init__(self, **attrs: Any) -> None:
         super().__init__(**attrs)
         _inject_tree(self)
+
+    def resolve_command(self, ctx: Any, args: list[str]) -> Any:
+        """Resolve as click does, having noted the words that follow the root's options.
+
+        Click empties ``ctx.args`` before the root callback runs, so the callback cannot see
+        which command it is dispatching: the feature counters (``core.feature_use``) read the
+        words from here, and walk them against the command tree by NAME — see
+        ``aisquare.cli.app.command_path``, which uses nothing else of them."""
+        ctx.meta[DISPATCHED_WORDS] = list(args)
+        return super().resolve_command(ctx, args)
 
     def invoke(self, ctx: Any) -> Any:
         """Dispatch, translating usage errors per the #21 contract.

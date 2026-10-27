@@ -171,6 +171,10 @@ class AccountsSelected(Message):
         super().__init__()
 
 
+class UsageStatsSelected(Message):
+    """The Usage & stats page: what this machine's Claude Code sessions spent, by range."""
+
+
 class SettingsSelected(Message):
     """*⚙ Settings*: the Settings hub, with its links to App settings, Accounts and Doctor."""
 

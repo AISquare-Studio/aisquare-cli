@@ -160,7 +160,7 @@ BASELINE: dict[str, dict[Shape, int]] = {
     "core/config.py": {"flag": 3},
     "core/harness.py": {"env": 30, "dir": 1, "flag": 6},  # + MODEL_FLAG and EFFORT_FLAG
     "core/spawn.py": {"env": 1},
-    "services/diagnostics.py": {"env": 6, "dir": 4},  # + the remote control row (#289)
+    "services/diagnostics.py": {"env": 5, "dir": 4},  # + the remote control row (#289)
     "services/explainability.py": {"env": 4},
     "services/explainability_ops.py": {"env": 1, "dir": 4},
     "services/first_run.py": {"dir": 1},

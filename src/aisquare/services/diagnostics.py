@@ -32,7 +32,7 @@ from aisquare.core import (
 )
 from aisquare.core import ignore as ignore_core
 from aisquare.core import tmux as tmux_core
-from aisquare.core.agent_adapters import adapter_for_binary, get_adapter
+from aisquare.core.agent_adapters import adapter_for_binary, adapters, get_adapter
 from aisquare.core.agent_adapters.mcp_servers import DEVTOOLS_COMMAND, DEVTOOLS_NAME
 from aisquare.core.agent_adapters.types import AgentAdapter, PluginInstall
 from aisquare.core.config import RETIRED_SECTIONS, load_config, retired_sections
@@ -2588,22 +2588,22 @@ def _account_default_checks(agent: str) -> list[DoctorCheck]:
 
 #: A binding's variables that point Claude Code at a directory: its config directory,
 #: whose ``settings.json`` must carry aisquare's hooks, and its temp directory.
-_BOUND_CONFIG_DIR, _BOUND_TMPDIR = "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_TMPDIR"
-
-
 def _check_role_bindings() -> list[DoctorCheck]:
-    """``role bindings``: each role a binding points at another Claude Code directory runs
-    one that works (#98).
+    """``role bindings``: each role a binding points at another agent home runs one that
+    works (#98; SCOPE #113 091, item 14).
 
     Only bindings that name an account were checked (:func:`_claude_account_default_checks`).
-    One whose ``env`` sets ``CLAUDE_CONFIG_DIR`` to a directory without aisquare's hooks
-    runs sessions the board never hears of, and one whose ``CLAUDE_CODE_TMPDIR`` cannot be
-    written starts a Claude Code that cannot keep its temp files. Each value is expanded as
-    a launch expands it (``harness.expand_value``), and "has the hooks" is the one shared
-    answer (``agents.claude_code_connected``), so this row and Welcome never disagree. A
-    variable bound to a file (``env_files``) holds a secret, not a path, and is not read.
-    No row at all when no binding sets either variable: a machine that never bound one
-    keeps the doctor output it had.
+    Every agent with account slots is asked, by its own variables (``AgentAccounts.home_env``,
+    ``extra_env``): one whose ``env`` sets an agent's home (Claude Code's
+    ``CLAUDE_CONFIG_DIR``, Codex's ``CODEX_HOME``) to a directory without aisquare's hooks runs
+    sessions the board never hears of, and one whose further per-slot directory (Claude Code's
+    ``CLAUDE_CODE_TMPDIR``) cannot be written starts an agent that cannot keep its files there.
+    Each value is expanded as a launch expands it (``harness.expand_value``), and "has the
+    hooks" is the one shared answer for that agent (``agents.connected``, of the config dir it
+    reads there, ``AgentAccounts.config_dir``), so this row, Welcome and ``agents connect``
+    never disagree; the fix connects that agent there. A variable bound to a file
+    (``env_files``) holds a secret, not a path, and is not read. No row at all when no binding
+    sets one: a machine that never bound one keeps the doctor output it had.
     """
     try:
         bindings = settings_service.role_bindings()
@@ -2613,34 +2613,40 @@ def _check_role_bindings() -> list[DoctorCheck]:
     problems: list[str] = []
     fixes: list[str] = []
     line = install_route.command_line  # a fix is pasted: quoted for this shell, Windows too
+    with_slots = [(adapter, adapter.accounts) for adapter in adapters() if adapter.accounts]
     for role, profile in sorted(bindings.items()):
 
         def unset(key: str, role: str = role) -> str:
             return line(["aisquare", "team", "bind", role, "--unset", key])
 
-        raw = profile.env.get(_BOUND_CONFIG_DIR)
-        if raw is not None:
-            path = Path(harness.expand_value(raw))
-            if not path.is_dir():
-                problems.append(f"{role}: {_BOUND_CONFIG_DIR} {path} is not a directory")
-                fixes.append(unset(_BOUND_CONFIG_DIR))
-            elif not agents_service.claude_code_connected(path):
-                problems.append(
-                    f"{role}: {_BOUND_CONFIG_DIR} {path} has no aisquare hooks, so its "
-                    "sessions never reach the board"
-                )
-                connect = ["aisquare", "agents", "connect", "claude-code", "--config-dir"]
-                fixes.append(f"{line([*connect, str(path)])} (or {unset(_BOUND_CONFIG_DIR)})")
-            else:
-                fine.append(f"{role} → {path}")
-        raw = profile.env.get(_BOUND_TMPDIR)
-        if raw is not None:
-            path = Path(harness.expand_value(raw))
-            if path.is_dir() and os.access(path, os.W_OK | os.X_OK):
-                fine.append(f"{role} temp → {path}")
-            else:
-                problems.append(f"{role}: {_BOUND_TMPDIR} {path} is not writable")
-                fixes.append(f"{line(['mkdir', '-p', str(path)])} (or {unset(_BOUND_TMPDIR)})")
+        for adapter, accounts in with_slots:
+            variable = accounts.home_env
+            raw = profile.env.get(variable)
+            if raw is not None:
+                path = Path(harness.expand_value(raw))
+                config_dir = accounts.config_dir(path)
+                if not path.is_dir():
+                    problems.append(f"{role}: {variable} {path} is not a directory")
+                    fixes.append(unset(variable))
+                elif not agent_core.connected(adapter.id, config_dir):
+                    problems.append(
+                        f"{role}: {variable} {path} has no aisquare hooks, so its "
+                        "sessions never reach the board"
+                    )
+                    connect = ["aisquare", "agents", "connect", adapter.id, "--config-dir"]
+                    fixes.append(f"{line([*connect, str(config_dir)])} (or {unset(variable)})")
+                else:
+                    fine.append(f"{role} → {path}")
+            for variable in accounts.extra_env:
+                raw = profile.env.get(variable)
+                if raw is None:
+                    continue
+                path = Path(harness.expand_value(raw))
+                if path.is_dir() and os.access(path, os.W_OK | os.X_OK):
+                    fine.append(f"{role} temp → {path}")
+                else:
+                    problems.append(f"{role}: {variable} {path} is not writable")
+                    fixes.append(f"{line(['mkdir', '-p', str(path)])} (or {unset(variable)})")
     if problems:
         return [_warn("role bindings", "; ".join(problems), "; ".join(dict.fromkeys(fixes)))]
     if fine:

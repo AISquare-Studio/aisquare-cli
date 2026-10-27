@@ -1686,6 +1686,35 @@ def test_doctor_warns_on_a_binding_whose_tmpdir_cannot_be_written(tmp_path: Path
     assert str(missing) in row.detail and "not writable" in row.detail
 
 
+def test_doctor_warns_on_a_binding_whose_codex_home_has_no_hooks(tmp_path: Path) -> None:
+    """SCOPE #113 091, item 14: every agent's home is asked, by its own variable and its own
+    "connected" answer. A role bound with ``CODEX_HOME`` at a home without aisquare's hooks
+    runs Codex sessions the board never hears of: a warning whose fix connects Codex there;
+    a connected one is fine. Only ``CLAUDE_CONFIG_DIR`` was read before."""
+    from aisquare.core import agents as agent_core
+
+    bare, hooked = tmp_path / "codex-bare", tmp_path / "codex-hooked"
+    bare.mkdir()
+    hooked.mkdir()
+    agent_core.install_hooks("codex", hooked)
+    _bound("coder", CODEX_HOME=str(bare))
+    _bound("reviewer", CODEX_HOME=str(hooked))
+
+    (row,) = diagnostics._check_role_bindings()
+    assert row.status == CheckStatus.warn
+    assert "coder: CODEX_HOME" in row.detail and str(bare) in row.detail
+    assert "no aisquare hooks" in row.detail and "reviewer" not in row.detail
+    connect = ["aisquare", "agents", "connect", "codex", "--config-dir", str(bare)]
+    assert row.fix is not None and install_route.command_line(connect) in row.fix
+    assert "aisquare team bind coder --unset CODEX_HOME" in row.fix
+    assert "claude-code" not in row.fix, "Codex's home is connected as Codex's"
+
+    _bound("coder", CODEX_HOME=str(hooked))
+    (row,) = diagnostics._check_role_bindings()
+    assert row.status == CheckStatus.ok, row.detail
+    assert f"coder → {hooked}" in row.detail and f"reviewer → {hooked}" in row.detail
+
+
 def test_doctor_reads_a_binding_as_a_launch_expands_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

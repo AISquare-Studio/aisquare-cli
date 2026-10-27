@@ -72,8 +72,15 @@ _PROMPT_TRUNCATION_MARK = "… [clipped by aisquare-cli]"
 _REDACTION_SLACK = 4_096
 """How far past the contract's cut the scrubber looks before the cut is made.
 A credential straddling the cut used to ship in the clear: clipped first, its
-leading half no longer matched the pattern. No secret shape is this long, so
-scrubbing this much more than the cap means nothing can straddle it."""
+leading half no longer matched the pattern. A token is removed whole at any
+length, and a private-key block whose footer is past what is scrubbed is removed
+from its header to the end of it (``core.redaction``: 6.5 KB of an RSA-8192 key
+is longer than this, and its footer is not in the window). So what starts before
+the cap and runs past it is matched by the part that is in the window, which is
+longer than any shape needs to be recognised. The exception is a value that is
+recognised by what CLOSES it: a quoted value's quote, the ``@`` after a URL's
+password. One longer than this has no end in the window and is not removed; none
+is that long."""
 
 MAX_CLIENT_SAFETY_MS = CONTEXT_HOOK_TIMEOUT_SECONDS * 1000 - 5_000
 """The client's own ceiling, whatever the descriptor asks for.

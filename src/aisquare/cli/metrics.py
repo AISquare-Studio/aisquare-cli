@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Annotated
+from pathlib import Path
+from typing import Annotated, NoReturn
 
 import typer
 
@@ -27,7 +28,7 @@ from aisquare.cli.usage_render import (
     emit_ship_report,
     emit_usage_stats,
 )
-from aisquare.core import sharing
+from aisquare.core import paths, sharing
 from aisquare.core.state import get_state
 from aisquare.models import USAGE_RANGES
 from aisquare.services import metrics as metrics_service
@@ -156,7 +157,12 @@ def stats(
             f"{range_!r} is not one of {', '.join(USAGE_RANGES)}", param_hint="--range"
         )
     if sweep:
-        report = usage_stats.maybe_sweep()
+        # The first sweep on a machine reads every transcript Claude Code kept (about thirty
+        # seconds for a few hundred): say so on the terminal, as `backfill` does.
+        showing = _shows_progress()
+        report = usage_stats.maybe_sweep(progress=_progress_line if showing else None)
+        if showing and report.transcripts:
+            typer.echo("", err=True)  # the progress line's end
         if report.sessions_new and not get_state().json_output:
             typer.echo(
                 f"read {report.sessions_new} new session(s) from Claude Code's transcripts",
@@ -169,6 +175,16 @@ def stats(
     emit_usage_stats(result)
 
 
+def _shows_progress() -> bool:
+    """Whether a sweep's progress line is shown: on a terminal, never under ``--json``."""
+    return not get_state().json_output and sys.stderr.isatty()
+
+
+def _progress_line(done: int, total: int) -> None:
+    if total:
+        typer.echo(f"\rreading Claude Code's transcripts {done}/{total}", nl=False, err=True)
+
+
 @app.command("backfill")
 def backfill() -> None:
     """Read Claude Code's transcripts for every session on this machine — every repository,
@@ -178,13 +194,8 @@ def backfill() -> None:
     backfill) is read only from where it was left. Claude Code deletes transcripts after
     30 days by default, so this keeps history that would otherwise go.
     """
-    quiet = get_state().json_output or not sys.stderr.isatty()
-
-    def progress(done: int, total: int) -> None:
-        if not quiet and total:
-            typer.echo(f"\rreading transcripts {done}/{total}", nl=False, err=True)
-
-    report = usage_stats.sweep(progress=progress)
+    quiet = not _shows_progress()
+    report = usage_stats.sweep(progress=None if quiet else _progress_line)
     if not quiet:
         typer.echo("", err=True)
     if get_state().json_output:
@@ -208,6 +219,27 @@ def _json(payload: object) -> None:
     typer.echo(json.dumps(payload, default=str))
 
 
+def _state_file() -> str:
+    """Where the sharing's state lives, as a person would type it (``~/.aisquare/state.json``)."""
+    path = paths.state_path()
+    try:
+        return "~/" + path.relative_to(Path.home()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _state_unwritable(what: str, exc: Exception) -> NoReturn:
+    """Fail ``what`` because the sharing's state cannot be updated, naming the file and the way
+    out in the message itself (the human surface prints the message and nothing else)."""
+    detail = f"{type(exc).__name__}: {exc}"[:200]
+    fail(
+        f"{what}: {_state_file()} cannot be updated ({detail}); repair or remove it and try again",
+        error="sharing_state_unwritable",
+        detail=detail,
+        hint=f"repair or remove {_state_file()} and try again",
+    )
+
+
 @share_app.command("on")
 def share_on() -> None:
     """Share anonymous daily usage counts with AISquare (off by default).
@@ -220,17 +252,13 @@ def share_on() -> None:
         status = usage_share.enable()
     except usage_share.SharingForcedOff as forced:
         fail(
-            f"sharing cannot be turned on: {forced.reason}",
+            f"sharing cannot be turned on: {forced.reason}; unset it to share, "
+            "or leave sharing off",
             error="sharing_forced_off",
             hint="unset it to share, or leave sharing off",
         )
     except Exception as exc:  # state.json that cannot be updated (damaged, unreadable)
-        fail(
-            "sharing could not be turned on: its state file cannot be updated",
-            error="sharing_state_unwritable",
-            detail=f"{type(exc).__name__}: {exc}"[:200],
-            hint="repair or remove ~/.aisquare/state.json and try again",
-        )
+        _state_unwritable("sharing could not be turned on", exc)
     sharing.start_background_ship()
     if get_state().json_output:
         _json(status.model_dump(mode="json"))
@@ -274,10 +302,11 @@ def share_preview() -> None:
         reason = usage_share.sample_reason()
         body = usage_share.preview()
     except Exception as exc:  # the state file is damaged, or the store would not open
+        detail = f"{type(exc).__name__}: {exc}"[:200]
         fail(
-            "the preview could not be built",
+            f"the preview could not be built ({detail}); nothing was sent",
             error="preview_unavailable",
-            detail=f"{type(exc).__name__}: {exc}"[:200],
+            detail=detail,
         )
     if get_state().json_output:
         _json({"sample": reason is not None, "sample_reason": reason, "body": json.loads(body)})
@@ -298,12 +327,7 @@ def share_reset_id() -> None:
     try:
         install_id, _salt = usage_share.reset_identity()
     except Exception as exc:  # state.json that cannot be updated
-        fail(
-            "the installation id could not be changed: the state file cannot be updated",
-            error="sharing_state_unwritable",
-            detail=f"{type(exc).__name__}: {exc}"[:200],
-            hint="repair or remove ~/.aisquare/state.json and try again",
-        )
+        _state_unwritable("the installation id could not be changed", exc)
     if get_state().json_output:
         _json({"install_id": install_id})
         return

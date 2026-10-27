@@ -720,7 +720,14 @@ def test_purge_copes_with_hundreds_of_recorded_sessions(
     report = _json(result.stdout)
     assert report["removed"]["team_session"] == 501
     assert report["removed"]["team_meta"] == 502
-    assert _raw("SELECT key FROM team_meta") == [("nudge:sess-elsewhere",)]
+    assert _raw("SELECT key FROM team_meta WHERE key NOT GLOB 'usage/purged/*'") == [
+        ("nudge:sess-elsewhere",)
+    ]
+    # the one row a purge leaves: the tombstone that keeps the usage sweep from reading the
+    # project's transcripts back (not a row of the project's, so not in ``removed``)
+    assert _raw("SELECT key FROM team_meta WHERE key GLOB 'usage/purged/*'") == [
+        (f"usage/purged/{alpha}",)
+    ]
     assert _raw("SELECT COUNT(*) FROM project WHERE id = ?", (alpha,)) == [(0,)]
 
 

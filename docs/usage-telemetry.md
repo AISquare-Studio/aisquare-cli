@@ -40,6 +40,16 @@ Counts, per local calendar day, and nothing else:
   `script`, `unknown`), and a **random id** made the first time you turn sharing on (a UUID that
   is not derived from you or your machine).
 
+### Every repository you run Claude Code in
+
+Usage is counted for **every repository you run Claude Code in, including ones you have not
+added to aisquare**: the local sweep reads the transcripts of every session on the machine, and
+`[projects] capture` (which decides whether a hook records rows for a directory nobody added)
+does not change that. When you turn sharing on, those repositories are part of the repository
+counts that are sent, each as a salted hash with four coarse traits, like any other. A project
+you forgot with `project forget --purge` is not counted, shown or sent again (see
+[Usage & stats](usage-stats.md)).
+
 ## What we never collect
 
 Repository **names**, **paths** and **remotes**; **prompts**, replies, file names or any text you
@@ -57,18 +67,29 @@ sent anonymously, and is only tied to the random installation id.
 
 ## When it is sent
 
-Never while you are waiting: a command you run starts at most one background shipment every 6
-hours, and the UI sends from a background thread; a shipment has 5-second timeouts and does not
+Never while you are waiting: once a shipment has gone through, the next is due 6 hours later, and
+after a failure it is tried again after 5 minutes, doubling up to 6 hours (a command starts at
+most one background shipment in half an hour either way); the UI sends from a background
+thread; a shipment has 5-second timeouts and does not
 touch the command or hook that started it. Sharing starts from the day you turn it on: the days
 before it were not agreed to and are never sent. Turning it on *again* while it is on changes
 nothing (the first day, what was sent and the schedule stay): only a change from off to on starts
 afresh. Each day is sent again whenever its counts
-change, and today's every time.
+change, and today's every time. A day on which sharing was forced off (`DO_NOT_TRACK`,
+`AISQUARE_NO_TELEMETRY` or `CI`) while it was on is **never** sent, even if the force is lifted
+the same day: it is marked as soon as any command runs under it. Three figures of a day are
+today's whatever the day: the number of registered accounts, the plan of each account, and a
+repository's coarse traits (language, size bucket). Adding an account, or a repository crossing a
+size bucket, therefore changes the figures of the days still being tracked (the last 60) and
+resends them once; the server's upsert takes them as it takes any resend.
 
 A shipment that cannot be delivered (offline, a server that is not there yet, a refusal)
 **says nothing**: no message, no error and no change to a command's output. The days stay unsent
 and go the next time the server answers, oldest first, in batches of at most 31 days, however
-long that takes; nothing is lost and nothing is given up on.
+long that takes; nothing is lost and nothing is given up on. A batch the server refuses for good
+(a 4xx other than a throttle or a timeout) does not hold the newer ones back: they, and today,
+go on, and the refused days are asked again at every shipment (after three refusals in a row the
+shipment stops for now and is retried after the backoff).
 
 ## Switching it off
 
@@ -206,6 +227,14 @@ Field rules:
 - Unknown extra keys inside a day are ignored (forward-compatible), not 400.
 
 ## What the client does that the contract leaves open
+- `features` keys are free-form names (`cli.<group>.<verb>`, `tui.view.<name>`, `tui.launch`),
+  matched `^[a-z0-9_.-]{1,64}$`; the BE must not pattern-check them beyond that. The CLI counts
+  a hidden alias of a group (`ctx`, `workspace`) under the group's name, and a request for a
+  command's `--help` is not a use of it.
+- `client` fields are shapes: `os_version` is `\d+(\.\d+)?` (else `unknown`), `os`/`arch` are
+  `[a-z0-9_]{1,16}`, `python` is `x.y.z`, and `traits.language` is one of the languages the CLI can
+  name (`python`, `typescript`, …) or `unknown`: a kernel release such as `6.8-alice-laptop` is not
+  sent.
 - A shipment is acknowledged **only** by a 200 whose body is the contract's reply: an object with
   `accepted_days` an integer of at least 1 and `linked` a boolean (extra keys are ignored). An
   empty object, an error with a 200, a gateway's page, a string or 0 for `accepted_days`, a missing

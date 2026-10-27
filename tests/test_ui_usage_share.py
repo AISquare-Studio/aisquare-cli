@@ -367,6 +367,7 @@ def test_the_consent_text_says_only_days_from_yes_on_are_sent() -> None:
     from aisquare.cli.ui.views.usage_sharing import CONSENT_TEXT
 
     assert "Only days from the moment you say yes are sent" in CONSENT_TEXT
+    assert "every repo you run Claude Code in, including ones you haven't added" in CONSENT_TEXT
     assert "exactly what's sent" not in CONSENT_TEXT.lower()
 
 

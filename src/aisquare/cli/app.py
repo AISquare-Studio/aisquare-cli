@@ -124,16 +124,35 @@ _NOT_FEATURES = frozenset({"hook", "serve", "inject", "uninstall"})
 _SHIPPER = "cli.metrics.ship"
 
 
+#: The hidden aliases of a group (registered below with the group's own app): counted under the
+#: name of the group, so ``ctx list`` and ``context list`` are one feature.
+_GROUP_ALIASES = {"ctx": "context", "workspace": "project"}
+
+
+def _asks_for_help(words: list[str]) -> bool:
+    """Whether the words after the command ask for its help page (``--help`` / ``-h`` before any
+    ``--``): the page is read, nothing is run, and the root callback has already run."""
+    for word in words:
+        if word == "--":
+            return False
+        if word in ("--help", "-h"):
+            return True
+    return False
+
+
 def command_path(ctx: typer.Context) -> str | None:
     """The command being run as ``cli.<group>.<verb>``, built from the NAMES of the commands
     it resolves to and nothing the user typed: a word counts only when it names a subcommand
     of the group before it, and the walk stops at the first one that does not (an argument,
-    or an option's value). ``None`` for a command that is not a feature (:data:`_NOT_FEATURES`).
+    or an option's value). A group's hidden alias counts as the group. ``None`` for a command
+    that is not a feature (:data:`_NOT_FEATURES`), or for a request for its help page.
     """
     name = ctx.invoked_subcommand
     if name is None or name in _NOT_FEATURES:
         return None
-    names = [name]
+    if _asks_for_help(list(ctx.meta.get(DISPATCHED_WORDS, []))):
+        return None
+    names = [_GROUP_ALIASES.get(name, name)]
     # Duck-typed: Typer 0.27's groups are not click's ``Group``.
     command: Any = (
         ctx.command.get_command(ctx, name) if hasattr(ctx.command, "get_command") else None

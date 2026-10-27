@@ -20,6 +20,12 @@ Everything here is recorded and shown **on this machine only**. Nothing is sent 
   both keep one scan position per session (see `core/usage.py`). Claude Code deletes a transcript
   after `cleanupPeriodDays` (30 by default), so the first sweep records the history that still
   exists and later ones keep it.
+- **Every repository you run Claude Code in, including ones you have not added to aisquare.**
+  The sweep counts them regardless of `[projects] capture` (which only decides whether a hook
+  writes rows for a directory nobody added); capture settings do not change this. A repository
+  you never added has no project, but it has a usage profile (its root, remote and coarse
+  traits) like any other. With [usage sharing](usage-telemetry.md) on, those repositories are
+  part of the counts that are sent, as a salted hash and four coarse traits each, like the rest.
 - **Which account** each session ran under (its slot, and the subscription type — `pro`, `max`,
   `team`, … — read from the login) and **which repository** (the git root of the directory it ran
   in; worktrees count as their repository; scratch repositories in temporary directories are
@@ -32,6 +38,15 @@ Everything here is recorded and shown **on this machine only**. Nothing is sent 
   each TUI page (`tui.view.usage_stats`) — names only, never arguments. Hook, MCP-server and
   `uninstall` runs are not counted. Counting is one appended line to `~/.aisquare/feature-use.log`
   (microseconds, no database, failing silent) that the next read folds into the store.
+
+## Forgetting a project
+
+`aisquare project forget --purge` (and `prune --purge`) deletes a project's usage rows and its
+repository profile for good, and **leaves a tombstone** so that the sweep does not read the same
+transcripts again (Claude Code keeps them for about a month): the repository is not counted,
+shown or shared again. The tombstone ends when the project is added back on purpose
+(`project onboard` / `team on`); from then on its usage is counted again, from whatever
+transcripts Claude Code still has. A directory merely captured by a hook does not end it.
 
 ## Repositories
 

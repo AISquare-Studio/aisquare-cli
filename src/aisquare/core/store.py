@@ -2252,6 +2252,12 @@ _VISIBLE_PROJECTS = "(SELECT id FROM project WHERE forgotten_at IS NULL)"
 #: chain of them into a tree as deep as it is long, refusing one past 1000
 #: levels (``Expression tree is too large``): 500 recorded sessions made 1,002
 #: terms and the purge rolled back. Session keys go in statements of this many.
+USAGE_PURGED_PREFIX = "usage/purged/"
+"""``team_meta`` keys ``usage/purged/<project id>`` (value: when): a project whose usage was
+purged (:meth:`SqliteStore.purge_project`). The transcript sweep (``services.usage_stats``)
+skips a repository with one, so a forgotten project's usage does not come back from the
+transcripts Claude Code still keeps; it is cleared once the project is added back on purpose."""
+
 _META_BATCH = 100
 
 
@@ -2722,6 +2728,13 @@ class SqliteStore:
             # in ``removed``, which names the tables a purge reports.
             self._conn.execute("DELETE FROM repo_profile WHERE repo_id = ?", (project_id,))
             removed["team_meta"] = self._purge_team_meta(project_id, sessions)
+            # The tombstone: the transcripts outlive the rows, and the next sweep would read them
+            # again. Written last, so the purge above does not delete it.
+            self._conn.execute(
+                "INSERT INTO team_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (f"{USAGE_PURGED_PREFIX}{project_id}", datetime.now(UTC).isoformat()),
+            )
             cursor = self._conn.execute("DELETE FROM project WHERE id = ?", (project_id,))
             removed["project"] = cursor.rowcount
         if removed["project"] != 1:
@@ -3874,7 +3887,7 @@ class SqliteStore:
         where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         rows = self._conn.execute(
             "SELECT t.session_id, COALESCE(s.repo_id, t.project_id) AS repo_id, t.recorded_at, "
-            "t.usage, t.total_tokens, t.cost_usd, s.account_slot, s.account_type "
+            "t.usage, s.account_slot, s.account_type "
             "FROM usage_turn t LEFT JOIN usage_session s ON s.session_id = t.session_id "
             f"{where}ORDER BY t.recorded_at, t.id",
             tuple(params),
@@ -3885,8 +3898,6 @@ class SqliteStore:
                 repo_id=row["repo_id"],
                 recorded_at=datetime.fromisoformat(row["recorded_at"]),
                 usage=_json_object(row["usage"]),
-                total_tokens=row["total_tokens"],
-                cost_usd=row["cost_usd"],
                 account_slot=row["account_slot"],
                 account_type=row["account_type"],
             )

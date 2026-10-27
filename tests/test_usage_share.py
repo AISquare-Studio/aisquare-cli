@@ -923,7 +923,7 @@ def test_a_later_200_delivers_the_whole_backlog_oldest_first_in_batches_of_31(
     machine: Machine,
 ) -> None:
     _backlog(machine)
-    server = Server(status(404), unreachable(), status(503))
+    server = Server(status(502), unreachable(), status(503))
     moment = NOW
     for _ in range(3):
         usage_share.ship(now=moment, tz=IST, transport=server)  # the endpoint is not there yet
@@ -970,7 +970,7 @@ def test_a_month_of_downtime_loses_no_day_even_beyond_the_old_31_day_window(
 ) -> None:
     _backlog(machine)  # 70 days of activity, shared since 80 days ago
     moment = NOW
-    outage = Server(*([status(404)] * 30))
+    outage = Server(*([status(503)] * 30))
     for _ in range(30):
         usage_share.ship(now=moment, tz=IST, transport=outage)
         moment = sharing.parse_time(sharing.read().next_due_at)  # type: ignore[assignment]
@@ -1069,7 +1069,7 @@ def test_turning_it_off_while_a_shipment_is_in_flight_stops_it_and_it_leaves_no_
     def slow(url: str, body: dict[str, Any], token: str | None, timeout: float) -> iam.HttpResult:
         order.append(f"batch:{len(body['days'])}")
         in_post.set()
-        release.wait(timeout=10)  # the POST is out: the user turns sharing off now
+        release.wait(timeout=60)  # the POST is out: the user turns sharing off now
         return ok(len(body["days"]))
 
     def ping(url: str, body: dict[str, Any], token: str | None, timeout: float) -> iam.HttpResult:
@@ -1576,7 +1576,229 @@ def test_share_on_with_a_state_file_that_is_not_json_exits_cleanly_and_stays_off
         assert result.exit_code == 1, result.output
         assert "Traceback" not in result.output + result.stderr
         assert result.exception is None or isinstance(result.exception, SystemExit)
-    assert "state file" in human.stderr
+    assert f"{paths.state_path().name} cannot be updated" in human.stderr
+    assert "repair or remove" in human.stderr  # the way out is in the message, not only the hint
     assert json.loads(machine_readable.stdout)["error"] == "sharing_state_unwritable"
     assert sharing.switch_on() is False  # failed closed: it did not turn on
     assert state.read_text(encoding="utf-8") == "{not json"  # and the file was left as it was
+
+
+# --- defence in depth: a field that could carry text is a shape or a closed set (review of #444) --
+
+
+def test_a_language_a_profile_cannot_name_is_not_sent(machine: Machine) -> None:
+    from aisquare.models import DayRepo, RepoTraits
+
+    rollup = DailyRollup(
+        date="2026-10-26",
+        tz_offset_minutes=330,
+        repos=[
+            DayRepo(
+                repo_id="r1", key="github.com/acme/hush", tokens_total=1, sessions=1, turns=1,
+                traits=RepoTraits(host="github", language="alice-secret-lang", size_bucket="s"),
+            ),
+            DayRepo(
+                repo_id="r2", key="github.com/acme/ok", tokens_total=1, sessions=1, turns=1,
+                traits=RepoTraits(host="github", language="python", size_bucket="s"),
+            ),
+            DayRepo(
+                repo_id="r3", key="github.com/acme/none", tokens_total=1, sessions=1, turns=1,
+                traits=RepoTraits(host="github", language=None, size_bucket="s"),
+            ),
+        ],
+    )  # fmt: skip
+
+    day = usage_share.day_body(rollup, "ab" * 32, signed_in=False)
+
+    assert sorted(r["traits"]["language"] for r in day["repos"]) == ["python", "unknown", "unknown"]
+    assert "alice" not in json.dumps(day)
+
+
+@pytest.mark.parametrize(
+    ("release", "sent"),
+    [
+        ("27.0.0", "27.0"),
+        ("6.8.0-45-generic", "6.8"),
+        ("6.8-alice-laptop", "unknown"),
+        ("10", "10"),
+        ("5.15.alice-pc.x", "5.15"),  # only the first two fields are kept
+        ("", "unknown"),
+    ],
+)
+def test_the_os_version_is_a_version_or_unknown(
+    monkeypatch: pytest.MonkeyPatch, release: str, sent: str
+) -> None:
+    import platform
+
+    monkeypatch.setattr(platform, "release", lambda: release)
+
+    assert usage_share.client_info()["os_version"] == sent
+
+
+def test_the_platform_names_in_client_are_shapes_or_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import platform
+
+    monkeypatch.setattr(platform, "system", lambda: "Alice's OS")
+    monkeypatch.setattr(platform, "machine", lambda: "arm64 (alice)")
+    monkeypatch.setattr(platform, "python_version", lambda: "alice-fork")
+
+    client = usage_share.client_info()
+
+    assert (client["os"], client["arch"], client["python"]) == ("unknown",) * 3
+
+
+def test_a_feature_name_outside_the_contracts_shape_is_not_sent(machine: Machine) -> None:
+    rollup = DailyRollup(
+        date="2026-10-26",
+        tz_offset_minutes=0,
+        features={"cli.fleet.spawn": 3, "tui.launch": 2, "x" * 65: 1, "Has Space": 1, "a/b": 1},
+    )
+
+    day = usage_share.day_body(rollup, "ab" * 32, signed_in=False)
+
+    assert day["features"] == {"cli.fleet.spawn": 3, "tui.launch": 2}
+
+
+# --- a batch the server refuses for good does not block the newer ones (review of #444, 3) ----
+
+
+def test_a_refused_batch_does_not_starve_the_newer_batches_and_today(machine: Machine) -> None:
+    _backlog(machine)  # 70 days: batches of 31, 31 and 8
+    server = Server(status(400, {"errors": {"days": ["no"]}}))
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=server)
+
+    sent = _dates(server)
+    assert [len(batch) for batch in sent] == [31, 31, 8]  # all three were asked
+    assert report.sent and report.error is None and report.rejected_days == 31
+    assert report.days == 39
+    state = sharing.read()
+    assert set(state.acked) == set(sent[1]) | set(sent[2])  # the refused days are not acked
+    assert state.failures == 0 and "refused" in (state.last_error or "")
+    # and they are asked again, with today, at the next shipment
+    again = Server()
+    usage_share.ship(now=NOW + timedelta(hours=7), tz=IST, transport=again)
+    assert _dates(again)[0] == sent[0] and len(again.calls) == 2  # the oldest 31, then today
+    after = sharing.read()
+    assert all(day in after.acked or day <= (after.settled_through or "") for day in sent[0])
+
+
+@pytest.mark.parametrize("code", [400, 404, 409, 413, 422])
+def test_every_4xx_that_is_about_the_batch_is_skipped_ahead_of(machine: Machine, code: int) -> None:
+    _backlog(machine)
+    server = Server(status(code, "no"))
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=server)
+
+    assert len(server.calls) == 3 and report.sent and report.rejected_days == 31
+
+
+@pytest.mark.parametrize("code", [429, 408, 500, 502, 503])
+def test_a_throttle_a_timeout_or_a_server_error_still_stops_the_shipment(
+    machine: Machine, code: int
+) -> None:
+    _backlog(machine)
+    server = Server(status(code, "later"))
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=server)
+
+    assert len(server.calls) == 1 and not report.sent and report.error == f"HTTP {code}"
+    assert sharing.read().failures == 1
+
+
+def test_a_server_that_refuses_everything_is_asked_a_few_times_not_fourteen(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _backlog(machine)
+    monkeypatch.setattr(usage_share, "REJECTED_IN_A_ROW", 2)
+    server = Server(*[status(404, "not found")] * 5)
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=server)
+
+    assert len(server.calls) == 2  # not three: it gave up for now after two in a row
+    assert not report.sent and report.error == "HTTP 404" and report.rejected_days == 62
+    state = sharing.read()
+    assert state.failures == 1 and state.acked == {} and state.next_due_at is not None
+
+
+def test_a_day_the_server_refused_is_never_settled_past(machine: Machine) -> None:
+    """Days older than the keep window are forgotten into `settled_through` once the server has
+    them; one it has refused must stay to be asked again."""
+    old = "2026-01-15"
+    _on()
+    sharing.update(lambda s: s.acked.update({old: "abc123abc123"}))
+    batch = usage_share.Batch({}, {"2026-01-20": "d" * 64})
+
+    usage_share._acknowledge(NOW, batch, False, held_from="2026-01-10")
+    kept = sharing.read()
+    usage_share._acknowledge(NOW, batch, False, held_from=None)
+    settled = sharing.read()
+
+    assert old in kept.acked and kept.settled_through is None
+    assert old not in settled.acked and settled.settled_through == "2026-01-20"
+
+
+# --- days on which sharing was forced off are never sent (review of #444, 4) ------------------
+
+
+def test_a_day_spent_forced_off_is_never_sent_when_the_force_is_lifted(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _history(machine)
+    _on()
+    monkeypatch.setenv("DO_NOT_TRACK", "1")
+
+    forced = usage_share.ship(now=NOW, tz=IST, transport=Server())
+    monkeypatch.delenv("DO_NOT_TRACK")
+    server = Server()
+    usage_share.ship(now=NOW + timedelta(days=1), tz=IST, transport=server, force=True)
+
+    assert forced.skipped == "sharing is off: DO_NOT_TRACK is set"
+    withheld = sharing.read().withheld
+    assert withheld == [NOW.astimezone(IST).date().isoformat()]
+    sent = [day for batch in _dates(server) for day in batch]
+    assert withheld[0] not in sent  # that day never goes
+    assert sent == ["2026-10-24", "2026-10-25"]  # the other two days of the history
+
+
+@pytest.mark.parametrize("variable", ["DO_NOT_TRACK", "AISQUARE_NO_TELEMETRY", "CI"])
+def test_every_command_under_a_forced_off_run_withholds_its_day_once(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, variable: str
+) -> None:
+    _history(machine)
+    _on()
+    monkeypatch.setenv(variable, "1")
+
+    first = sharing.start_background_ship(NOW)
+    second = sharing.start_background_ship(NOW + timedelta(hours=1))
+
+    assert first is False and second is False
+    assert sharing.read().withheld == [NOW.astimezone().date().isoformat()]
+
+
+def test_only_someone_who_turned_sharing_on_has_days_withheld(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DO_NOT_TRACK", "1")
+
+    sharing.start_background_ship(NOW)
+    usage_share.ship(now=NOW, tz=IST, transport=Server())
+
+    assert sharing.read().withheld == []
+    assert state_core.read_state().get(sharing.STATE_KEY) is None  # nothing was written at all
+
+
+def test_turning_sharing_off_forgets_the_withheld_days(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _history(machine)
+    _on()
+    monkeypatch.setenv("DO_NOT_TRACK", "1")
+    sharing.start_background_ship(NOW)
+    monkeypatch.delenv("DO_NOT_TRACK")
+
+    usage_share.disable(now=NOW, transport=Server())
+
+    assert sharing.read().withheld == []

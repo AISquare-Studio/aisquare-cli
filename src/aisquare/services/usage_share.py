@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from typing import Any
 
-from aisquare.core import locking, sharing
+from aisquare.core import locking, repo_profile, sharing
 from aisquare.core.sharing import SharingState
 from aisquare.core.store import ContextStore
 from aisquare.core.version import __version__
@@ -51,6 +51,9 @@ log = logging.getLogger("aisquare.usage_share")
 ENDPOINT_PATH = "/api/v1/cli/metrics/"
 WINDOW_DAYS = 31
 """A batch holds at most this many days: today and the 30 before."""
+REJECTED_IN_A_ROW = 3
+"""A shipment goes on past a batch the server refused (a 4xx that is not a throttle), but gives up
+for now after this many in a row: a server that refuses everything is not asked 14 times."""
 MAX_BATCHES = 14
 """Batches one shipment sends: 14 of 31 days reach back the 400 days the server takes."""
 MAX_FEATURES = 200
@@ -68,6 +71,10 @@ PLACEHOLDER_SALT = "00" * 32
 """A sample is hashed with this, so that two previews of one history agree."""
 
 _MODEL_ID = re.compile(r"^claude-[a-z0-9.-]{1,60}$")
+_FEATURE = re.compile(r"^[a-z0-9_.-]{1,64}$")
+_OS_VERSION = re.compile(r"^\d+(\.\d+)?$")
+_WORD = re.compile(r"^[a-z0-9_]{1,16}$")
+_PYTHON = re.compile(r"^\d+\.\d+\.\d+")
 _SALT = re.compile(r"^[0-9a-f]{64}$")
 
 Transport = Callable[[str, dict[str, Any], str | None, float], iam.HttpResult]
@@ -128,16 +135,25 @@ def install_method() -> str:
 
 
 def client_info() -> dict[str, str]:
-    """The installation's make and model: version, platform, architecture, interpreter."""
+    """The installation's make and model: version, platform, architecture, interpreter. Each is
+    matched against the shape it has: a kernel release that carries a host or a person's name
+    (``6.8-alice-laptop``) is ``unknown``, not sent."""
     release = ".".join(platform.release().split(".")[:2])
+    system, machine = platform.system().lower(), platform.machine().lower()
+    python = _PYTHON.match(platform.python_version())
     return {
         "cli_version": __version__,
-        "os": platform.system().lower() or "unknown",
-        "os_version": release or "unknown",
-        "arch": platform.machine().lower() or "unknown",
-        "python": platform.python_version(),
+        "os": system if _WORD.match(system) else "unknown",
+        "os_version": release if _OS_VERSION.match(release) else "unknown",
+        "arch": machine if _WORD.match(machine) else "unknown",
+        "python": python.group(0) if python else "unknown",
         "install_method": install_method(),
     }
+
+
+def _language(name: str | None) -> str:
+    """A repository's main language if it is one the profile can name, else ``unknown``."""
+    return name if name in repo_profile.KNOWN_LANGUAGES else "unknown"
 
 
 def _tally(counts: dict[str, int]) -> dict[str, int]:
@@ -165,7 +181,10 @@ def _models(models: dict[str, Any]) -> dict[str, dict[str, int]]:
 def day_body(rollup: DailyRollup, salt: str, *, signed_in: bool) -> dict[str, Any]:
     """One local day in the contract's shape. Repositories become hashes; of everything the
     rollup holds that names something of the user's, nothing remains."""
-    features = sorted(rollup.features.items(), key=lambda item: (-item[1], item[0]))
+    features = sorted(
+        ((name, n) for name, n in rollup.features.items() if _FEATURE.match(name)),
+        key=lambda item: (-item[1], item[0]),
+    )
     kept = dict(sorted(features[:MAX_FEATURES]))
     return {
         "date": rollup.date,
@@ -192,7 +211,7 @@ def day_body(rollup: DailyRollup, salt: str, *, signed_in: bool) -> dict[str, An
                 "turns": repo.turns,
                 "traits": {
                     "host": repo.traits.host,
-                    "language": repo.traits.language or "unknown",
+                    "language": _language(repo.traits.language),
                     "size_bucket": repo.traits.size_bucket,
                     "monorepo": repo.traits.monorepo,
                 },
@@ -251,11 +270,12 @@ def build_batches(
     today = _local_today(moment, tz)
     first = _first_day(held, today, sample=sample)
     settled = held.settled_through or ""
+    withheld = frozenset(held.withheld)
     rollups = usage_stats.daily_rollups(first, today, now=moment, tz=tz, store=store)
     signed_in = iam.signed_in_quietly() is not None
     wanted: list[tuple[str, dict[str, Any], str]] = []
     for rollup in rollups:
-        if rollup.date <= settled:
+        if rollup.date <= settled or rollup.date in withheld:
             continue
         body = day_body(rollup, salt, signed_in=signed_in)
         digest = _digest(body)
@@ -408,6 +428,7 @@ def reset_identity() -> tuple[str, str]:
         state.since = datetime.now().astimezone().date().isoformat()  # not what went before
         state.linked = None
         state.last_sent_at = None
+        state.withheld = []
 
     state = sharing.update(fresh)
     assert state.install_id is not None and state.salt is not None
@@ -465,6 +486,8 @@ def ship(
     :func:`preview` does."""
     reason = sharing.forced_off_reason()
     if reason is not None:
+        if sharing.switch_on():  # opted in, and forced off today: this day is never sent
+            sharing.withhold_today(now, tz)
         return ShipReport(skipped=f"sharing is off: {reason}")
     if not sharing.switch_on():
         return ShipReport(skipped="sharing is off")
@@ -519,6 +542,9 @@ def _ship(
         return _failed(moment, str(exc))
     token = _bearer(iam.resolve_api_url())
     report = ShipReport()
+    refused_in_a_row = 0
+    held_from: str | None = None  # the oldest day the server refused: nothing from it is settled
+    first_refusal: str | None = None
     for batch in batches[:MAX_BATCHES]:
         if not _still_on():  # turned off since the last POST: nothing more goes
             report.skipped = "sharing was turned off"
@@ -539,18 +565,50 @@ def _ship(
                 report.skipped = "sharing was turned off"
                 return report
             accepted, linked = answer
-            _acknowledge(moment, batch, linked)
+            _acknowledge(moment, batch, linked, held_from)
             report.sent, report.linked = True, linked
             report.days += accepted
+            refused_in_a_row = 0
             continue
-        wait = result.retry_after() if result.status == 429 else None
         what = (
             "HTTP 200: not the contract's reply"
             if result.status == 200
             else f"HTTP {result.status}"
         )
+        if _refused(result):
+            # The server looked at this batch and said no, for good: that is about these days,
+            # not about the server. The newer batches (and today) still go; these stay unsent
+            # and are asked again next time.
+            first_refusal = first_refusal or f"{what}{_detail(result)}"
+            report.rejected_days += len(batch.digests)
+            oldest = min(batch.digests)
+            held_from = oldest if held_from is None else min(held_from, oldest)
+            refused_in_a_row += 1
+            if refused_in_a_row >= REJECTED_IN_A_ROW:
+                break
+            continue
+        wait = result.retry_after() if result.status == 429 else None
         return _failed(moment, f"{what}{_detail(result)}", retry_after=wait, report=report)
+    if first_refusal is not None:
+        if not report.sent:
+            return _failed(moment, first_refusal, report=report)
+        _note_refusal(first_refusal)  # a debug line in the state; the shipment itself went
     return report
+
+
+def _refused(result: iam.HttpResult) -> bool:
+    """Whether the server answered a batch with a refusal that is about the batch: a 4xx that is
+    not a throttle (429) or a timeout (408, 425), which are the server's moment, not the days'."""
+    return 400 <= result.status < 500 and result.status not in (408, 425, 429)
+
+
+def _note_refusal(error: str) -> None:
+    def record(state: SharingState) -> None:
+        state.last_error = f"{error} (some days refused, sent again next time)"[:200]
+
+    if _still_on():
+        with contextlib.suppress(Exception):
+            sharing.update(record)
 
 
 def _begin(moment: datetime, tz: tzinfo | None) -> SharingState:
@@ -573,13 +631,21 @@ def _detail(result: iam.HttpResult) -> str:
     return ""
 
 
-def _acknowledge(moment: datetime, batch: Batch, linked: bool) -> None:
+def _acknowledge(
+    moment: datetime, batch: Batch, linked: bool, held_from: str | None = None
+) -> None:
+    """Record that the server has ``batch``. Days older than the keep window are settled (and
+    forgotten), except from ``held_from`` on, the oldest day this shipment's server refused: a
+    day it has not taken is never settled."""
+
     def record(state: SharingState) -> None:
         state.acked.update({day: digest[:12] for day, digest in batch.digests.items()})
         cutoff = (
             moment.astimezone(UTC).date() - timedelta(days=sharing.KEEP_ACKED_DAYS)
         ).isoformat()
-        old = [day for day in state.acked if day < cutoff]
+        old = [
+            day for day in state.acked if day < cutoff and (held_from is None or day < held_from)
+        ]
         if old:  # settled: the server has them, and nothing looks at them again
             state.settled_through = max([state.settled_through or "", *old])
             for day in old:
@@ -703,6 +769,7 @@ def disable(*, now: datetime | None = None, transport: Transport | None = None) 
             old.last_error = None
             old.linked = None
             old.last_sent_at = None
+            old.withheld = []
             if old.consent_answer is None:
                 old.consent_asked_at = moment.isoformat(timespec="seconds")
                 old.consent_answer = "declined"

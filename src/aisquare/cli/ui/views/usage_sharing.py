@@ -69,6 +69,8 @@ CONSENT_TEXT = (
     "It tells us how aisquare is used, so we can make it better: daily counts of tokens, "
     "sessions, turns and agents, which commands and pages get used, and a salted hash and a few "
     "coarse traits per repository (its host, main language, size).\n\n"
+    "Usage is counted for every repo you run Claude Code in, including ones you haven't added to "
+    "aisquare; capture settings don't change this.\n\n"
     "We never collect repository names, paths or remotes, prompts, file names, emails, account "
     "aliases or command arguments. If you are signed in to AISquare, it is linked to your "
     "account; if not, it is anonymous. Only days from the moment you say yes are sent, nothing "

@@ -229,7 +229,7 @@ def record_usage(
             session_id, Path(transcript_path), cwd, trigger=trigger, trace_id=trace_id, ended=ended
         )
     except Exception as exc:  # never disrupt the session for a metrics write
-        _log_failure(f"usage not recorded for {session_id} ({trigger})", exc)
+        log_failure(f"usage not recorded for {session_id} ({trigger})", exc)
         return None
 
 
@@ -336,11 +336,11 @@ def _attribution(
         repo = project if pinned_project_id() is None else None
         return usage_stats.hook_attribution(store, transcript, cwd, repo=repo)
     except Exception as exc:
-        _log_failure("usage attribution failed", exc)
+        log_failure("usage attribution failed", exc)
         return None, None, None
 
 
-def _log_failure(what: str, exc: BaseException) -> None:
+def log_failure(what: str, exc: BaseException) -> None:
     """Append one line to ``log/metrics.log``; silent if even that fails.
 
     Not stderr: a Stop hook's stderr reaches the operator's screen in verbose

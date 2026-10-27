@@ -15,6 +15,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from aisquare.core import repo_profile
 from aisquare.services import iam
 
 
@@ -79,6 +80,11 @@ def check_contract(body: dict[str, Any]) -> None:
     assert set(client) == {"cli_version", "os", "os_version", "arch", "python", "install_method"}
     assert all(isinstance(value, str) and value for value in client.values())
     assert client["install_method"] in _METHODS
+    assert client["os_version"] == "unknown" or re.fullmatch(r"\d+(\.\d+)?", client["os_version"])
+    assert re.fullmatch(r"[a-z0-9_]{1,16}", client["os"]) and re.fullmatch(
+        r"[a-z0-9_]{1,16}", client["arch"]
+    )
+    assert client["python"] == "unknown" or re.match(r"\d+\.\d+\.\d+", client["python"])
     days = body["days"]
     assert isinstance(days, list) and len(days) <= 31
     assert [day["date"] for day in days] == sorted(day["date"] for day in days)
@@ -114,10 +120,11 @@ def _check_day(day: dict[str, Any]) -> None:
         traits = repo["traits"]
         assert set(traits) == {"host", "language", "size_bucket", "monorepo"}
         assert traits["host"] in _HOSTS and traits["size_bucket"] in _SIZES
-        assert isinstance(traits["monorepo"], bool) and isinstance(traits["language"], str)
+        assert isinstance(traits["monorepo"], bool)
+        assert traits["language"] == "unknown" or traits["language"] in repo_profile.KNOWN_LANGUAGES
     assert len(day["features"]) <= 200
     for name, count in day["features"].items():
-        assert re.fullmatch(r"[a-z0-9][a-z0-9_-]*(\.[a-z0-9][a-z0-9_-]*){0,6}", name)
+        assert re.fullmatch(r"[a-z0-9_.-]{1,64}", name), name  # contract: free-form, this shape
         assert isinstance(count, int) and count > 0
     fleet = day["fleet"]
     assert set(fleet) == {"agents_spawned", "tasks_done"} and fleet["tasks_done"] >= 0

@@ -904,8 +904,6 @@ class UsageTurnRow(BaseModel):
     repo_id: str
     recorded_at: datetime
     usage: dict[str, Any] = Field(default_factory=dict)
-    total_tokens: int = 0
-    cost_usd: float = 0.0
     account_slot: int | None = None
     account_type: str | None = None
 
@@ -917,14 +915,6 @@ class TokenCounts(BaseModel):
     cache_write: int = 0
     cache_read: int = 0
     output: int = 0
-
-    def plus(self, other: TokenCounts) -> TokenCounts:
-        return type(self)(
-            input=self.input + other.input,
-            cache_write=self.cache_write + other.cache_write,
-            cache_read=self.cache_read + other.cache_read,
-            output=self.output + other.output,
-        )
 
     def sum(self) -> int:
         return self.input + self.cache_write + self.cache_read + self.output
@@ -1879,6 +1869,9 @@ class ShipReport(BaseModel):
     """Why the send failed (it is tried again after a backoff)."""
     retried_anonymously: bool = False
     """The server refused the sign-in (401), and the batch was sent again without it."""
+    rejected_days: int = 0
+    """Days in batches the server refused for good (a 4xx that is not a throttle): not
+    acknowledged, asked again next time; the newer batches went on."""
     opt_out: bool = False
 
 

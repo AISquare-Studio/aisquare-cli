@@ -53,7 +53,7 @@ from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import feature_use, locking, paths, pricing, repo_profile
 from aisquare.core import usage as usage_core
 from aisquare.core.ids import new_usage_id
-from aisquare.core.store import ContextStore, store_session
+from aisquare.core.store import USAGE_PURGED_PREFIX, ContextStore, store_session
 from aisquare.core.workspace import current_project
 from aisquare.models import (
     USAGE_RANGES,
@@ -311,7 +311,7 @@ def _subscription_of(account: ClaudeAccount) -> str:
     creds = accounts_core.credentials(account)
     if creds is not None and creds.subscription_type:
         return creds.subscription_type.strip().lower()
-    data = accounts_core._read_json(accounts_core.claude_json_path(account))
+    data = accounts_core.claude_json(account)
     if data is not None:
         oauth = data.get("oauthAccount")
         if isinstance(oauth, dict):
@@ -466,6 +466,7 @@ def _sweep(
     found = discover(roots if roots is not None else transcript_roots())
     report.transcripts = len(found)
     known = store.usage_transcripts()
+    purged = purged_repos(store)
     repos: dict[Path, tuple[str, Path] | None] = {}
     seen_repos: dict[str, Path] = {}
     types = account_types(store)
@@ -473,9 +474,9 @@ def _sweep(
         if progress is not None:
             progress(index, len(found))
         try:
-            outcome = _sweep_one(store, transcript, known, repos, types, tz, now)
+            outcome = _sweep_one(store, transcript, known, repos, types, tz, now, purged)
         except Exception as exc:  # one unreadable transcript costs that one
-            metrics_service._log_failure(f"usage sweep failed for {transcript.path}", exc)
+            metrics_service.log_failure(f"usage sweep failed for {transcript.path}", exc)
             report.failed += 1
             continue
         report.turns += outcome.turns
@@ -518,8 +519,10 @@ def _sweep_one(
     types: dict[int, str],
     tz: tzinfo | None,
     now: datetime | None,
+    purged: frozenset[str] = frozenset(),
 ) -> _Outcome:
-    """Record what one transcript added since the session's row was last written."""
+    """Record what one transcript added since the session's row was last written. A session of a
+    repository whose usage was purged (``purged``) is not read at all."""
     outcome = _Outcome()
     session_id = known.get(str(found.path), found.session_id)
     existing = store.session_usage(session_id)
@@ -530,19 +533,25 @@ def _sweep_one(
             if not recorded.exists():
                 return outcome  # the file moved: its offsets name one that is gone
             transcript = recorded  # the offsets are keyed by this spelling of the path
-    state = usage_core.ScanState.parse(existing.state if existing else None)
-    scanned, state = usage_core.scan_turns(
-        transcript, state, day_of=lambda stamp: _day_key(stamp, tz)
-    )
-    delta = scanned.total()
-    if not scanned.chunks and (existing is not None or delta.is_empty()):
-        outcome.unchanged = 1
-        return outcome
-    recorded_at = now or datetime.now(UTC)  # no turn is recorded as later than this
     cwd = session_cwd(transcript) if existing is None or not existing.repo_id else None
     if cwd is not None and cwd not in repos:
         repos[cwd] = repo_of(cwd)
     repo = repos.get(cwd) if cwd is not None else None
+    if repo is not None and repo[0] in purged:
+        outcome.unchanged = 1  # forgotten on purpose: its usage does not come back from here
+        return outcome
+    state = usage_core.ScanState.parse(existing.state if existing else None)
+    scanned, state = usage_core.scan_turns(
+        transcript, state, day_of=lambda stamp: _day_key(stamp, tz)
+    )
+    if not scanned.chunks:
+        # Nothing that is a turn: no row to write, and none whose state is worth saving. (A
+        # transcript of only a session-start hook's attachment has a non-empty delta, no turn,
+        # and nothing to take the first turn's time from.)
+        outcome.unchanged = 1
+        return outcome
+    delta = scanned.total()
+    recorded_at = now or datetime.now(UTC)  # no turn is recorded as later than this
     outcome.repo = repo
     total = usage_core.Usage.from_dict(existing.usage) if existing else usage_core.Usage()
     total.add(delta)
@@ -604,6 +613,24 @@ def _sweep_one(
     else:
         outcome.updated = 1
     return outcome
+
+
+def purged_repos(store: ContextStore) -> frozenset[str]:
+    """The repositories whose usage was purged and that the sweep must leave alone: a project
+    forgotten with its data (``project forget --purge``) must not come back from the transcripts
+    Claude Code keeps for a month. A tombstone ends when the project is added back on purpose
+    (it has a row and is onboarded): from then on its usage is counted again, from whatever
+    transcripts remain."""
+    marks = store.list_meta(USAGE_PURGED_PREFIX)
+    held: set[str] = set()
+    for key in marks:
+        project_id = key.removeprefix(USAGE_PURGED_PREFIX)
+        project = store.get_project(project_id)
+        if project is not None and project.onboarded_at is not None:
+            store.delete_meta(key)  # added back
+        else:
+            held.add(project_id)
+    return frozenset(held)
 
 
 def _day_key(stamp: str, tz: tzinfo | None) -> str:

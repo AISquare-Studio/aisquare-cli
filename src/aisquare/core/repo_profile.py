@@ -55,6 +55,9 @@ _LANGUAGES = {
 """Extension → language. What is not here (``.md``, ``.json``, ``.yaml``, images, lock files)
 is documentation, data or an asset, and says nothing of what the code is written in."""
 
+KNOWN_LANGUAGES = frozenset(_LANGUAGES.values())
+"""The names a profile's ``language`` can have: what the sharing path allows through."""
+
 _WORKSPACE_FILES = frozenset(
     {"pnpm-workspace.yaml", "lerna.json", "nx.json", "turbo.json", "rush.json"}
 )

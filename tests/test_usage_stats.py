@@ -893,6 +893,64 @@ def test_hooks_and_the_mcp_server_are_not_features_the_user_used() -> None:
     assert not paths.feature_use_path().exists()
 
 
+def _recorded() -> list[str]:
+    """The feature names the spool holds, in order."""
+    spool = paths.feature_use_path()
+    if not spool.exists():
+        return []
+    return [line.partition("\t")[2] for line in spool.read_text(encoding="utf-8").splitlines()]
+
+
+def test_a_groups_alias_is_counted_as_the_group(machine: Machine) -> None:
+    """Review of #444 (5): `ctx list` and `context list` were two features, `workspace` and
+    `project` too, because the path began from the name that was typed."""
+    paths.ensure_home()  # a home that does not exist yet records nothing (the counter fails open)
+    runner = CliRunner()
+    runner.invoke(app, ["context", "list", "--help"])  # help: not counted either way
+    runner.invoke(app, ["project", "list"])
+    runner.invoke(app, ["workspace", "list"])
+    runner.invoke(app, ["context", "list"])
+    runner.invoke(app, ["ctx", "list"])
+
+    names = _recorded()
+
+    assert names.count("cli.project.list") == 2 and names.count("cli.context.list") == 2
+    assert not [n for n in names if n.startswith(("cli.workspace", "cli.ctx"))]
+
+
+def test_every_hidden_alias_of_a_group_is_counted_under_the_group() -> None:
+    """A new `app.add_typer(group.app, name="alias", hidden=True)` must be put in
+    `_GROUP_ALIASES`, or its uses are counted as a feature of their own."""
+    from aisquare.cli.app import _GROUP_ALIASES
+
+    by_typer: dict[int, list[Any]] = {}
+    for info in app.registered_groups:
+        by_typer.setdefault(id(info.typer_instance), []).append(info)
+    aliases = {
+        info.name: next(i.name for i in group if not i.hidden)
+        for group in by_typer.values()
+        if len(group) > 1
+        for info in group
+        if info.hidden
+    }
+
+    assert aliases == _GROUP_ALIASES
+
+
+def test_asking_for_help_is_not_using_the_command(machine: Machine) -> None:
+    paths.ensure_home()
+    runner = CliRunner()
+    for words in (
+        ["fleet", "spawn", "--help"],
+        ["fleet", "spawn", "-h"],
+        ["config", "--help"],
+        ["project", "list", "--help"],
+    ):
+        runner.invoke(app, words)
+
+    assert _recorded() == []
+
+
 def test_counting_fails_open_and_a_command_never_notices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -916,13 +974,23 @@ def test_counting_fails_open_and_a_command_never_notices(
     assert result.exit_code == 0, result.output
 
 
+def _dead_pid() -> int:
+    """The pid of a process that has exited (one that was just run and waited for)."""
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
 def test_a_full_spool_stops_growing_and_a_dead_folds_leftovers_are_still_read() -> None:
     paths.ensure_home()
     spool = paths.feature_use_path()
     spool.write_bytes(b"x" * (feature_use.MAX_SPOOL_BYTES + 1))
     assert feature_use.record("cli.config.set") is False
     spool.unlink()
-    leftover = spool.with_name(f"{spool.name}.99999.folding")  # a fold that died after its rename
+    # a fold that died after its rename
+    leftover = spool.with_name(f"{spool.name}.{_dead_pid()}.folding")
     leftover.write_text("2026-10-25\tcli.config.set\n2026-10-25\tnot a name\n", encoding="utf-8")
 
     with store_session() as store:
@@ -931,6 +999,22 @@ def test_a_full_spool_stops_growing_and_a_dead_folds_leftovers_are_still_read() 
 
     assert folded == 1 and rows == [("2026-10-25", "cli.config.set", 1)]
     assert not leftover.exists()
+
+
+def test_a_fold_another_process_is_working_on_is_not_taken_from_it() -> None:
+    """Review of #444 (nit): a live fold's file was adopted by a second fold, and both counted
+    it. A file whose process is alive (the test's parent stands for one) is left alone."""
+    paths.ensure_home()
+    spool = paths.feature_use_path()
+    live = spool.with_name(f"{spool.name}.{os.getppid()}.folding")
+    live.write_text("2026-10-25\tcli.config.set\n", encoding="utf-8")
+
+    with store_session() as store:
+        folded = feature_use.fold(store)
+        rows = store.feature_uses(None, None)
+
+    assert folded == 0 and rows == []
+    assert live.exists()  # still the other fold's to read and remove
 
 
 def test_recording_a_use_is_a_few_microseconds_not_a_database_open() -> None:
@@ -1011,6 +1095,26 @@ def test_metrics_stats_reads_the_transcripts_first_unless_told_not_to(machine: M
     assert json.loads(swept.output)["turns"] == 1
 
 
+def test_the_first_stats_sweep_says_it_is_reading_the_transcripts_on_a_terminal(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #444 (nit): the first `metrics stats` read every transcript in silence for up
+    to half a minute; only `backfill` showed progress."""
+    from aisquare.cli import metrics as metrics_cli
+
+    _one_turn(machine, machine.repo("auto"), SESSION, _day(0, 9))
+    runner = CliRunner()
+
+    piped = runner.invoke(app, ["metrics", "stats", "--range", "lifetime"])
+    monkeypatch.setattr(metrics_cli, "_shows_progress", lambda: True)
+    with store_session() as store:
+        store.delete_meta("usage.sweep.at")  # the throttle is open again
+    shown = runner.invoke(app, ["metrics", "stats", "--range", "lifetime"])
+
+    assert "reading Claude Code's transcripts" not in piped.stderr  # not a terminal: silent
+    assert "reading Claude Code's transcripts 1/1" in shown.stderr
+
+
 def test_the_utc_stamp_the_sweep_writes_sorts_with_the_hooks() -> None:
     """Both write ``usage_turn.recorded_at`` as an ISO string; the range read compares them as
     strings, so the sweep's stamp (from the transcript) must be the same shape as a hook's."""
@@ -1032,6 +1136,115 @@ def test_forgetting_a_project_for_good_removes_its_repository_profile(
         store.purge_project(profile.repo_id)
         assert store.repo_profiles() == {}
         assert store.usage_turn_rows(None, None) == []
+
+
+def _forget_for_good(repo: Path) -> str:
+    """The project's usage purged, as ``project forget --purge`` does; its id."""
+    with store_session() as store:
+        profile = next(
+            p for p in store.repo_profiles().values() if Path(p.root).resolve() == repo.resolve()
+        )
+        store.purge_project(profile.repo_id)
+        return profile.repo_id
+
+
+def test_a_forgotten_project_does_not_come_back_from_the_transcripts(machine: Machine) -> None:
+    """Review of #444 (1b): the transcripts outlive the rows, so the next sweep read them again
+    and the tokens were back within ten minutes. A purge leaves a tombstone the sweep honours."""
+    repo = machine.repo("purged")
+    other = machine.repo("kept")
+    add_project(repo)
+    _one_turn(machine, repo, SESSION, _day(0, 9))
+    _one_turn(machine, other, "99999999-2222-3333-4444-555555555555", _day(0, 9))
+    usage_stats.sweep(tz=IST)
+    gone = _forget_for_good(repo)
+    # a session that began after the purge, in a worktree-like second session of the same repo
+    _one_turn(machine, repo, "88888888-2222-3333-4444-555555555555", _day(0, 11))
+
+    again = usage_stats.sweep(tz=IST)
+    later = usage_stats.sweep(tz=IST)
+
+    assert again.sessions_new == 0 and again.turns == 0 and later.sessions_new == 0
+    with store_session() as store:
+        rows = store.usage_turn_rows(None, None)
+        assert len(rows) == 1 and rows[0].repo_id != gone  # the other repository is untouched
+        assert gone not in store.repo_profiles()
+        assert store.get_meta(f"usage/purged/{gone}") is not None
+    stats = usage_stats.stats("lifetime", tz=IST)
+    assert stats.turns == 1 and all(r.name != "purged" for r in stats.repos.rows)
+
+
+def test_adding_the_project_back_ends_the_tombstone_and_its_usage_counts_again(
+    machine: Machine,
+) -> None:
+    repo = machine.repo("purged")
+    add_project(repo)
+    _one_turn(machine, repo, SESSION, _day(0, 9))
+    usage_stats.sweep(tz=IST)
+    gone = _forget_for_good(repo)
+    usage_stats.sweep(tz=IST)
+
+    add_project(repo)  # added back on purpose
+    report = usage_stats.sweep(tz=IST)
+
+    assert report.sessions_new == 1
+    with store_session() as store:
+        assert store.get_meta(f"usage/purged/{gone}") is None
+        assert len(store.usage_turn_rows(None, None)) == 1
+
+
+def test_a_directory_merely_captured_does_not_end_the_tombstone(machine: Machine) -> None:
+    from aisquare.core.workspace import current_project
+
+    repo = machine.repo("purged")
+    add_project(repo)
+    _one_turn(machine, repo, SESSION, _day(0, 9))
+    usage_stats.sweep(tz=IST)
+    gone = _forget_for_good(repo)
+    with store_session() as store:
+        store.ensure_project(current_project(repo))  # what a hook with capture on leaves
+
+    report = usage_stats.sweep(tz=IST)
+
+    assert report.sessions_new == 0
+    with store_session() as store:
+        assert store.get_meta(f"usage/purged/{gone}") is not None
+        assert store.usage_turn_rows(None, None) == []
+
+
+def test_a_session_with_only_the_start_hook_in_it_is_no_failure_and_counts_when_it_starts(
+    machine: Machine,
+) -> None:
+    """Review of #444 (2): a transcript with nothing but aisquare's SessionStart hook has an
+    empty turn list and a non-empty delta; it made `min()` of no rows throw on every sweep."""
+    repo = machine.repo("idle")
+    hook = {
+        "type": "attachment",
+        "timestamp": stamp(_day(0, 9)),
+        "cwd": str(repo),
+        "attachment": {
+            "type": "hook_success",
+            "hookEvent": "SessionStart",
+            "command": "aisquare hook session-start",
+            "content": "briefing",
+        },
+    }
+    path = machine.session(1, repo, SESSION, hook)
+
+    first = usage_stats.sweep(tz=IST)
+    second = usage_stats.sweep(tz=IST)
+
+    assert (first.failed, second.failed) == (0, 0) and first.sessions_new == 0
+    log = paths.log_dir() / "metrics.log"
+    assert not log.exists() or "ValueError" not in log.read_text(encoding="utf-8")
+    with path.open("a", encoding="utf-8") as handle:  # the person types, and the model answers
+        for entry in (
+            prompt(_day(0, 10), cwd=repo),
+            request(_day(0, 10, 1), "m1", cwd=repo),
+        ):
+            handle.write(json.dumps(entry) + "\n")
+    third = usage_stats.sweep(tz=IST)
+    assert third.failed == 0 and third.sessions_new == 1 and third.turns == 1
 
 
 # --- lifetime is everything recorded -----------------------------------------------------------

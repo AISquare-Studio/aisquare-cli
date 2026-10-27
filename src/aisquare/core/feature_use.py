@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -81,18 +82,26 @@ def record(name: str, *, now: datetime | None = None, spool: Path | None = None)
 def fold(store: ContextStore, *, spool: Path | None = None) -> int:
     """Move the spool (and any left by a fold that died) into ``store``; the uses folded.
 
-    Never raises: a fold that cannot finish leaves its file where the next one reads it.
+    A file another fold is working on is never taken: it is adopted only when the process that
+    renamed it is gone (or, where that cannot be told, when it is old). Never raises: a fold
+    that cannot finish leaves its file where the next one reads it.
     """
     source = spool if spool is not None else paths.feature_use_path()
     folded = 0
     try:
-        candidates = [source, *sorted(source.parent.glob(f"{source.name}.*{_FOLDING}"))]
-        for path in candidates:
-            mine = source.with_name(f"{source.name}.{os.getpid()}{_FOLDING}")
+        mine = source.with_name(f"{source.name}.{os.getpid()}{_FOLDING}")
+        leftovers = [
+            path
+            for path in sorted(source.parent.glob(f"{source.name}.*{_FOLDING}"))
+            if path == mine or _abandoned(path)
+        ]
+        for path in [source, *leftovers]:
             try:
                 os.replace(path, mine)  # atomic: a concurrent fold finds nothing to take
             except OSError:
                 continue
+            with contextlib.suppress(OSError):
+                os.utime(mine)  # taken just now: its age is from here, not from the last use
             counts = _read(mine)
             store.add_feature_uses(counts)
             with contextlib.suppress(OSError):
@@ -101,6 +110,31 @@ def fold(store: ContextStore, *, spool: Path | None = None) -> int:
     except Exception:  # fail open; the spool stays for the next fold
         return folded
     return folded
+
+
+STALE_FOLD_S = 600
+"""A fold's file older than this, whose process cannot be looked up, is a dead fold's."""
+
+
+def _abandoned(path: Path) -> bool:
+    """Whether the fold that renamed ``path`` (its pid is in the name) is gone, so its file is a
+    leftover to adopt and not one being read right now."""
+    pid_text = path.name.removesuffix(_FOLDING).rpartition(".")[2]
+    if pid_text.isdigit():
+        try:
+            os.kill(int(pid_text), 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False  # alive, another user's
+        except OSError:
+            pass  # no such check here (Windows): fall back on the age
+        else:
+            return False
+    try:
+        return time.time() - path.stat().st_mtime > STALE_FOLD_S
+    except OSError:
+        return False
 
 
 def _read(path: Path) -> Counter[tuple[str, str]]:

@@ -66,6 +66,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   appended line, never an argument. A repository is its normalised git remote (else its
   root), so the clones of one project count once. Schema v40. Everything stays on this
   machine (`docs/usage-stats.md`).
+- **Usage is counted for every repository you run Claude Code in, including ones you have not
+  added to aisquare**, whatever `[projects] capture` says (the sweep reads every transcript on
+  the machine); `project forget --purge` now leaves a tombstone so a forgotten project is not
+  read back from the transcripts Claude Code keeps, until it is added back on purpose
+  (`docs/usage-stats.md`). The sweep no longer fails on a session that only has aisquare's start
+  hook in it; `ctx`/`workspace` count as `context`/`project` and `--help` is not a use;
+  `metrics stats` shows progress on its first sweep.
 - **Optional, off-by-default anonymous usage sharing** (`docs/usage-telemetry.md`). A one-time
   question in the UI after you have set up a project (*Share anonymous usage* / *No thanks* /
   *See what would be sent*), a one-click button at the top of Settings ▸ Usage & stats, and
@@ -84,7 +91,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stops a shipment under way, purges what was kept and sends one opt-out notice. Only the
   contract's reply (`{accepted_days, linked}`) counts as delivered, and a redirect is never
   followed, so the token goes to one origin only. `share on` while it is on keeps the first day and the
-  days still waiting; `preview --json` says whether it is a sample. The server end is a separate
+  days still waiting; `preview --json` says whether it is a sample. A day on which sharing was forced off is never
+  sent later; a batch the server refuses for good does not hold the newer ones back. The server end is a separate
   change.
 - **Start fresh: `aisquare project fresh`** (alias `project reset`) clears an onboarded
   project's board and fleet and starts a blank manager, without onboarding it again.

@@ -344,7 +344,12 @@ SIZES = (31_250, 125_000, 500_000, 2_000_000)
 #: What a size four times as long may cost, as a multiple of the one before: linear is 4, a
 #: quadratic rule 16. Not 4 itself, because the cost per character differs a little by size
 #: and a shared runner adds noise; not 16, which would pass a rule that is nearly quadratic.
-GROWTH = 6.0
+#: 8 is the middle of the two on a log scale (4 x 2 = 16 / 2), and the runner has shown the
+#: noise: 6.3 times on ``jwt-one-dot`` (py3.13, run 40428675826), and 6.1 on
+#: ``jwt-hyphen-pieces-then-a-start`` (py3.12 captain off, run 40458712660: 2.2 s for 500 KB, 13.3
+#: for 2 MB, the least of three runs; 3.3 s and exactly 4.0 times here). The two rules this must
+#: fail run at 12 times and more (below).
+GROWTH = 8.0
 #: Seconds added to that bar. A run of 30 ms is mostly what is around it: CI's py3.13 leg took
 #: 0.03 s for 125 KB of ``jwt-one-dot`` and 0.18 s for 500 KB, 6.3 times where linear is 4
 #: (run 40428675826). A tenth of a second is nothing beside what a quadratic rule costs from

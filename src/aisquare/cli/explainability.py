@@ -760,7 +760,7 @@ def status(
     a red lane (review of #170's follow-ups, round 1, F6).
 
     Honours ``--json``, because this is the command a cutover gets scripted
-    against: without it every check in the runbook is a grep against prose,
+    against: without it every check a script makes is a grep against prose,
     and prose is the part most likely to be reworded.
     """
     config = load_config()

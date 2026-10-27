@@ -1156,8 +1156,8 @@ def _verify(plan: UpgradePlan, ran: install_route.InstallRoute) -> tuple[str | N
         # it back: what uv picks, said with those settings named (upgrade()'s note).
         return found, None
     return found, (
-        f"uv reported success but aisquare still reports {found}, not {latest} — the "
-        "silent no-op docs/plans/one-line-install.md §3.9.1 describes"
+        f"uv reported success but aisquare still reports {found}, not {latest} — "
+        "the upgrade did not take effect"
     )
 
 

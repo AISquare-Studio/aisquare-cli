@@ -438,7 +438,7 @@ def test_doctor_has_no_captain_row_when_on() -> None:
 REPO = Path(__file__).resolve().parent.parent
 
 
-@pytest.mark.parametrize("page", ["CHANGELOG.md", "docs/captain.md", "README.md"])
+@pytest.mark.parametrize("page", ["CHANGELOG.md", "README.md"])
 def test_the_docs_say_it_is_experimental_and_how_to_turn_it_on(page: str) -> None:
     text = (REPO / page).read_text(encoding="utf-8")
     assert "experimental" in text

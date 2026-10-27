@@ -3164,8 +3164,8 @@ def test_a_slot_linked_where_this_user_cannot_enter_costs_no_other_slot(
 
 _REPO = Path(__file__).resolve().parents[1]
 
-#: When `aisquare uninstall` removes the package itself, as CHANGELOG.md and docs/install.md
-#: say it, and as install_route.not_removable decides it.
+#: When `aisquare uninstall` removes the package itself, as CHANGELOG.md says it, and as
+#: install_route.not_removable decides it.
 _REMOVAL_RULE = (
     "removes the package of a uv tool install, whatever it was installed from; any other "
     "install, and any install on native Windows, is shown the command that removes it"
@@ -3198,14 +3198,14 @@ def _route_at(
     return install_route.classify(Facts(prefix=prefix, platform=platform, **values))
 
 
-@pytest.mark.parametrize("doc", ["CHANGELOG.md", "docs/install.md"])
+@pytest.mark.parametrize("doc", ["CHANGELOG.md"])
 def test_the_docs_say_when_uninstall_removes_the_package_as_the_code_decides(
     doc: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The 0.8.0 CHANGELOG said uninstall removes the package, with no condition, and
-    docs/install.md said only the one-liner's uv tool install is: the code removes every uv
-    tool install, from a checkout or a git URL too, and shows any other install its command
-    (sweep of #257). The rule is asked of install_route itself, so neither can drift."""
+    """The 0.8.0 CHANGELOG said uninstall removes the package, with no condition: the code
+    removes every uv tool install, from a checkout or a git URL too, and shows any other
+    install its command (sweep of #257). The rule is asked of install_route itself, so the
+    CHANGELOG cannot drift."""
     monkeypatch.setattr(install_route, "find_uv", lambda: "/usr/bin/uv")
     uv_tools = {
         "PyPI": '{ name = "aisquare-cli" }',

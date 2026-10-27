@@ -202,18 +202,16 @@ def test_refusals_are_counted_from_an_offset_the_transcript_had_earlier(tmp_path
 def test_a_tool_output_that_quotes_the_refusal_is_not_one(tmp_path: Path) -> None:
     """An agent working on this repository reads the files that name the signature.
 
-    A successful Read of this module or of the docs, a grep that exits non-zero
-    over them, and a failing test run that prints the sentence all CONTAIN the
-    marker; none of them is Claude Code refusing a tool call.
+    A successful Read of this module or of a page that quotes it, a grep that exits
+    non-zero over them, and a failing test run that prints the sentence all CONTAIN
+    the marker; none of them is Claude Code refusing a tool call.
     """
-    sources = [
-        Path(transcripts.__file__),
-        REPO / "docs" / "fleet.md",
-        REPO / "docs" / "connecting-your-agents-to-explainability.md",
-    ]
+    page = tmp_path / "notes.md"
+    page.write_text(f"Claude Code's refusal reads:\n\n{REFUSAL}\n", encoding="utf-8")
+    sources = [Path(transcripts.__file__), page]
     reads = [source.read_text(encoding="utf-8") for source in sources]
     assert all(transcripts.REFUSAL_MARKER in text for text in reads), "the premise"
-    grep_hit = f"docs/fleet.md:1:{REFUSAL}"
+    grep_hit = f"notes.md:1:{REFUSAL}"
     quoted = [
         *[_plain_result(text) for text in reads],  # successful Reads
         _plain_result(grep_hit),  # a grep that matched: exit 0

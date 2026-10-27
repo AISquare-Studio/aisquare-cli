@@ -183,7 +183,7 @@ def stop() -> None:
 
     stdout is JSON or nothing. It is nothing for every role but ``manager``, and
     for a manager it is the Stop decision that keeps the turn going when
-    teammates put decisions on the board (docs/plans/fleet-tui.md §7.3):
+    teammates put decisions on the board:
     ``{"decision": "block", "reason": "<the delta>"}``. ``stop_hook_active`` is
     Claude Code saying it is already continuing on a stop hook; it is honoured
     as the loop guard the reference asks for.

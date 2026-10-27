@@ -376,7 +376,7 @@ def done(
     """Mark a task done (optionally sharing the outcome).
 
     A task linked to a brief's requirements needs a fresh pass from it for each
-    (docs/work-briefs.md); without one, it stays as it is and each one is named."""
+    (see `aisquare brief --help`); without one, it stays as it is and each one is named."""
     try:
         task = team_service.finish_task(ref, note=note, session_ref=as_session)
     except briefs_service.TaskNotProven as exc:

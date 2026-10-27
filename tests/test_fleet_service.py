@@ -11248,7 +11248,7 @@ def test_where_a_pause_goes_is_said_with_the_live_rows_boards_wherever_it_is_sai
     two store reads it asks still said the old rule: a coder's board is not one, the live
     rows' boards only while the project has no manager row, a pause besides its homes on the
     manager's board alone. Someone who trusted them expected ``fleet pause`` to leave a live
-    coder's hub alone. Each says the live rows' boards, as docs/fleet.md does."""
+    coder's hub alone. Each says the live rows' boards."""
     said = {
         name: " ".join((doc or "").split())
         for name, doc in (
@@ -11264,10 +11264,6 @@ def test_where_a_pause_goes_is_said_with_the_live_rows_boards_wherever_it_is_sai
     assert "while the project has no manager row" not in said["fleet_agent_boards"]
     assert "besides its manager's and its homes" in said["fleet_agent_boards"]
     assert "besides its homes and the boards its live rows recorded" in said["fleet_manager_board"]
-    docs = " ".join(
-        (Path(__file__).parents[1] / "docs" / "fleet.md").read_text(encoding="utf-8").split()
-    )
-    assert "running or not, the boards its running agents recorded, and the ones a spawn" in docs
 
 
 def test_shutdown_reports_a_pause_signal_it_could_not_read_or_clear(

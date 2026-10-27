@@ -104,7 +104,7 @@ def ledger(
     ] = None,
 ) -> None:
     """What each agent session spent in tokens, counted from its transcript: one row per
-    session and a total. Counts only, never text (docs/plans/handoff-p1-token-diet.md §1.7)."""
+    session and a total. Counts only, never text."""
     project_id = _scope(project, all_projects, session)
     rows = token_ledger.ledger(
         token_ledger.sessions(project_id, session=session, role=role),

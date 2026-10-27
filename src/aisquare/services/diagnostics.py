@@ -1803,7 +1803,7 @@ def _claude_account_backoff_checks() -> list[DoctorCheck]:
             + " · ".join(parts),
             "Nothing to do — reads resume by themselves when the wait ends, and the last good "
             "reading is shown meanwhile. Logging in again does not clear a rate limit; poll "
-            "usage less often (see docs/fleet.md)",
+            "usage no more often than the cache's five minutes",
         )
     ]
 

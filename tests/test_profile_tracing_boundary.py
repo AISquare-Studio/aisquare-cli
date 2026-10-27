@@ -24,15 +24,11 @@ drift from what the wiring actually reserves.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from aisquare.core import harness
 from aisquare.core.config import load_config
 from aisquare.services import explainability as svc
 from aisquare.services import explainability_ops as ops
 from aisquare.services import settings as settings_service
-
-_BOUNDARY = Path(__file__).resolve().parents[1] / "docs" / "explainability-tracing-boundary.md"
 
 
 def _configure_tracing() -> None:
@@ -102,15 +98,3 @@ def test_binding_a_reserved_var_in_a_profile_switches_tracing_off_for_that_role(
     assert not wiring.traced
     assert reserved in wiring.reason and "not overriding your routing" in wiring.reason
     assert wiring.env == {}, "a stood-down launch must carry no routing of ours"
-
-
-def test_the_boundary_page_warns_that_a_profile_can_switch_tracing_off() -> None:
-    """The hazard is only discoverable from a dim stderr line otherwise.
-
-    Named from the code so the page cannot drift from what is reserved.
-    """
-    page = _BOUNDARY.read_text(encoding="utf-8")
-
-    assert "team bind" in page, "the page must name the command that can do this"
-    for reserved in svc.RESERVED_ENV_VARS:
-        assert reserved in page, f"the page must name {reserved} as reserved"

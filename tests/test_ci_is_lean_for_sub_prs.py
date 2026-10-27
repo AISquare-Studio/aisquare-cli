@@ -137,9 +137,3 @@ def test_ci_still_runs_on_every_event_it_did() -> None:
     assert triggers["pull_request"]["branches"] == ["main", "rc/**"]
     assert triggers["push"]["branches"] == ["main", "rc/**"]
     assert "schedule" in triggers and "workflow_dispatch" in triggers
-
-
-def test_the_demo_renders_on_trains_and_pushes_not_sub_prs() -> None:
-    triggers = workflow("demo.yml")[True]
-    assert triggers["pull_request"]["branches"] == ["main"]
-    assert triggers["push"]["branches"] == ["main", "rc/**"]

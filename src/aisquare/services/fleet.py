@@ -1354,7 +1354,7 @@ def _exclude_worktrees(common: Path, worktree_dir: str, notes: list[str]) -> Non
         with exclude.open("a", encoding="utf-8") as handle:
             if existing and not existing.endswith("\n"):
                 handle.write("\n")
-            handle.write(f"# aisquare fleet worktrees (docs/plans/fleet-tui.md §3.5)\n{line}\n")
+            handle.write(f"# aisquare fleet worktrees\n{line}\n")
     except OSError as exc:
         notes.append(
             f"could not add {line} to .git/info/exclude ({exc}) — "

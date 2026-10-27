@@ -791,16 +791,13 @@ def test_the_key_pad_fits_a_360_px_phone_and_every_label_its_key() -> None:
     assert _css_value(css, ".pad .key", "min-width") == "max-content", "so theirs widen"
 
 
-DOCS = Path(__file__).resolve().parents[1] / "docs" / "remote.md"
-
-
-def test_the_pad_is_one_row_where_eight_keys_fit_and_the_docs_say_where_they_do_not() -> None:
-    """SPEC §6.3 has the pad as one row, ``Esc 1 2 3 ⏎ ↑ ↓ More``, and so did the docs. Eight
+def test_the_pad_is_one_row_where_eight_keys_fit_and_not_where_they_do_not() -> None:
+    """SPEC §6.3 has the pad as one row, ``Esc 1 2 3 ⏎ ↑ ↓ More``. Eight
     44 px keys and their gaps need 380 px, more than a 390 px phone's row: there More went
     to a line of its own, and at 320 px ↓ with it (r2 smoke of #243). More joins the row
     where the eight fit, as headless Chromium measured at 412 and 430 px, and takes the
     line under the seven where they do not; under 360 px, where not even seven fit, the
-    eight are two rows of four. The docs say which phone gets which."""
+    eight are two rows of four."""
     script, css = _text("app.js"), _text("app.css")
     row = _pad_labels(script, "PAD_ROW")
     (gap,) = _css_px(css, ".pad", "gap")
@@ -817,12 +814,6 @@ def test_the_pad_is_one_row_where_eight_keys_fit_and_the_docs_say_where_they_do_
     assert narrow is not None, "under 360 px, four to a row"
     assert 4 * int(narrow.group(1)) == 3 * gap, "four keys and their three gaps fill the row"
     assert (320 - 2 * 12 - 3 * gap) / 4 >= KEY_PX
-    prose = " ".join(DOCS.read_text("utf-8").split())
-    wide = "On a phone wide enough for eight keys (412 px is, 390 px is not) the key pad is"
-    described = re.search(re.escape(wide) + r" one row, `([^`]+)`", prose)
-    assert described is not None and described.group(1).split() == [*row, "More"]
-    assert "with the rest under More. On a narrower phone More takes the line under the" in prose
-    assert "below 360 px the eight are two rows of four, More last" in prose
 
 
 def test_the_status_strip_and_the_bottom_nav_keep_to_one_line_on_a_phone() -> None:

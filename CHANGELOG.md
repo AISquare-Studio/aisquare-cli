@@ -479,6 +479,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `~/.aisquare/projects/<id>/brain` stays where it is, and the store's schema is
   untouched. `install.sh` still expects the `brain` row from a release that has it
   (`--version 0.9.0` and older), alongside the codebase-snapshot rows.
+- **The `docs/` directory** (the owner's decision of 2026-10-26). The guides, plans,
+  runbooks and deck are gone, with the demo GIF and tape, `make demo` and the demo
+  workflow. The README no longer links them, the tests that read them are gone too,
+  and nothing a command prints or `--help` shows names one of those pages. Run
+  `aisquare --help` for the commands.
 
 ## [0.9.0] - 2026-10-25
 

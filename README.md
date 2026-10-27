@@ -8,8 +8,6 @@
 **One terminal over your projects and your coding agents: task a manager in
 plain words, and it runs the coders, testers and reviewers for you.**
 
-![The Welcome walkthrough in asq: from an empty home to a project, Claude Code connected, then a manager and two coders (the agent is a stand-in)](https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/docs/demo.gif)
-
 Type `asq` and you get a full-screen, mouse-driven view: your projects on the
 left, and on the right a **manager** agent you task in prose — it plans, spawns
 coders, testers and reviewers, and loops until the goal is met. Click any of
@@ -35,10 +33,7 @@ aisquare remember --user "prefer pytest over unittest"
 
 `init` registers the repo you run it in and wires Claude Code's hooks, so every
 new session starts with what you told it to remember. `aisquare context list`
-shows what is in scope;
-[Memory](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/memory.md)
-has the rest. To install from inside Claude Code instead, see
-[the Claude Code plugin](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/claude-code-plugin.md).
+shows what is in scope.
 
 ## Quickstart 2: the full fleet
 
@@ -54,10 +49,9 @@ carries its own copy: `curl -fsSL https://github.com/AISquare-Studio/aisquare-cl
 
 macOS, Linux and WSL2. It installs uv, a Python 3.13 for the CLI alone,
 `aisquare-cli`, tmux, gh, git and Claude Code, offers Node for browser tools,
-then registers the git repo you ran it from and wires Claude Code's hooks. Running it again is a no-op.
-[Install](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/install.md)
-has the PowerShell line that sets up WSL2 on Windows, how to read the script
-before you run it, and how to install by hand.
+then registers the git repo you ran it from and wires Claude Code's hooks. Running
+it again is a no-op. To read it before you run it, it is `install.sh` at the root
+of this repository.
 
 Then `asq` opens on Welcome, three steps to a running fleet:
 
@@ -77,7 +71,8 @@ The manager never writes code and never merges — a human does that.
 
 ## Everything is also a command
 
-Everything the UI does is also a plain command, and every one takes `--json`:
+Everything the UI does is also a plain command, and every one takes `--json`;
+`aisquare --help` lists them:
 
 ```sh
 aisquare fleet ls                      # this project's agents and their live state
@@ -125,22 +120,6 @@ backed by one SQLite file: no daemon, no cloud dependency. Sign in with
 
 The package is `aisquare-cli`; the command is `aisquare`, with `asq` as the
 short alias.
-
-## Documentation
-
-| Page | What is in it |
-| --- | --- |
-| [Install](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/install.md) | The one-liner's flags and exit codes, reading it before you run it, installing by hand, Windows, starting the UI, updating and removing it |
-| [Memory](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/memory.md) | Your agent remembers preferences and project conventions, and starts every session oriented. For everyone; nothing to run after setup |
-| [The fleet](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/fleet.md) | The UI, the roles, `aisquare fleet …`, Claude accounts, and every default you can change |
-| [Orchestration](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/orchestration.md) | Several agent sessions work one problem as a team, with a shared task board. Opt-in, per repo |
-| [Which instructions an agent follows](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/instructions.md) | Your CLAUDE.md, the role cycle, the persona and memory: where each lands, and how to settle a conflict between them |
-| [Work briefs](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/work-briefs.md) | A request as numbered requirements linked to board tasks, with the checks, findings and corrections recorded against them |
-| [Phone control](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/remote.md) | Optional: the fleet on your phone through your own ngrok tunnel. What needs you across every project, each agent's screen, the board, and once you allow writes, the keys to answer |
-| [Command reports](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/command-reports.md) | `asq exec` runs a command once and saves how it ended and on which source, so a later step can cite it without running it again |
-| [Reference](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/reference.md) | The hooks, the `~/.aisquare` layout, the main command tree and the global flags |
-| [The AISquare platform](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/platform.md) | Optional: signing in, Explainability, the Collective Intelligence test bed |
-| [The captain](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/captain.md) | Experimental, off by default: one agent above every project that you talk to, typed or spoken. Turning it on, its tools, the voice page and the queue of what needs you |
 
 ## Community
 

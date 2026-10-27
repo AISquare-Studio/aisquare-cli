@@ -396,7 +396,7 @@ _RELEASE_URL = re.compile(
     r"https://github\.com/AISquare-Studio/aisquare-cli/releases/"
     r"(latest/download|download/v[^/\s]+)/([^\s)`'\"|]+)"
 )
-_DOCUMENTED = (REPO / "README.md", REPO / "docs" / "install.md")
+_DOCUMENTED = (REPO / "README.md",)
 
 
 @pytest.mark.parametrize("page", _DOCUMENTED, ids=lambda page: page.name)
@@ -418,12 +418,6 @@ def test_the_docs_lead_with_main_and_show_a_pin(page: Path) -> None:
     # The default comes first: before any release URL on the page.
     first_release = min(text.index(m.group(0)) for m in _RELEASE_URL.finditer(text))
     assert text.index(default) < first_release, f"{page.name} leads with a release URL"
-
-
-def test_the_latest_url_is_offered_with_its_caveat() -> None:
-    text = (REPO / "docs" / "install.md").read_text(encoding="utf-8")
-    assert "releases/latest/download/install.sh" in text
-    assert "404" in text, "the latest URL must say it can briefly 404 after a release"
 
 
 def test_the_repair_command_is_mains_one_liner() -> None:

@@ -577,7 +577,7 @@ def test_the_redaction_level_the_config_holds_is_the_one_a_hand_off_sends_at(
     leg = _spans(monkeypatch, tmp_path, project, tmux, "claude-code")
     secret = "API_KEY=abcdef0123456789abcdef"
     leg.transcript.write_text(
-        _talk("user", 1, f"mail me@example.com from /Users/anmol/Work/x {secret}") + "\n",
+        _talk("user", 1, f"mail me@example.com from /Users/dev/Work/x {secret}") + "\n",
         encoding="utf-8",
     )
 
@@ -588,7 +588,7 @@ def test_the_redaction_level_the_config_holds_is_the_one_a_hand_off_sends_at(
     [prompt] = _first_lines(tmux, receipt.started.agent.pane_id)
     assert (secret in prompt) is kept
     assert ("me@example.com" in prompt) is (level != "strict")
-    assert ("/Users/anmol/Work/x" in prompt) is (level != "strict")
+    assert ("/Users/dev/Work/x" in prompt) is (level != "strict")
 
 
 @pytest.mark.parametrize(

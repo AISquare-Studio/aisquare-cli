@@ -325,13 +325,13 @@ def test_the_last_two_lines_are_ours_and_are_not_scrubbed() -> None:
 
 
 def test_strict_takes_who_and_where_out_as_well_and_off_sends_as_typed() -> None:
-    conversation = ("> mail me@example.com about /Users/anmol/Work/x", f"  KEY={KEY}")
+    conversation = ("> mail me@example.com about /Users/dev/Work/x", f"  KEY={KEY}")
     standard = _brief(0, conversation=conversation).text()
     strict = _brief(0, conversation=conversation, redaction=RedactionLevel.strict).text()
     off = _brief(0, conversation=conversation, redaction=RedactionLevel.off).text()
 
     assert "me@example.com" in standard and f"KEY={KEY}" not in standard
-    assert "me@example.com" not in strict and "/Users/anmol" not in strict and KEY not in strict
+    assert "me@example.com" not in strict and "/Users/dev" not in strict and KEY not in strict
     assert "[redacted] about ~/Work/x" in strict
     assert f"KEY={KEY}" in off
 
@@ -540,16 +540,16 @@ def test_a_key_on_the_edge_of_a_clip_in_an_entry_or_a_claim_is_scrubbed_first() 
 def test_the_head_is_scrubbed_at_the_level_the_brief_holds() -> None:
     """The task, the claims, the board entries and the tree: strict takes who and where out of
     them as it does from the conversation; off sends them as typed (tester's pin gap)."""
-    detail = f"mail me@example.com about /Users/anmol/Work/x with API_KEY={KEY}"
+    detail = f"mail me@example.com about /Users/dev/Work/x with API_KEY={KEY}"
     brief = replace(
         _brief(0),
-        task=_task(7, "Fix /Users/anmol/Work/y", detail=detail),
+        task=_task(7, "Fix /Users/dev/Work/y", detail=detail),
         claims=(_task(9, "ask me@example.com"),),
-        entries=(_event(1, "from /Users/anmol/Work/z"),),
+        entries=(_event(1, "from /Users/dev/Work/z"),),
         git=handoff.GitState(
-            tree=Path("/Users/anmol/Work/proj"),
+            tree=Path("/Users/dev/Work/proj"),
             branch="fix/me@example.com",
-            changed=(" M /Users/anmol/Work/a.py",),
+            changed=(" M /Users/dev/Work/a.py",),
             commits=("abc1234 thanks me@example.com",),
         ),
     )
@@ -557,12 +557,12 @@ def test_the_head_is_scrubbed_at_the_level_the_brief_holds() -> None:
     standard = replace(brief, redaction=RedactionLevel.standard).text()
     off = replace(brief, redaction=RedactionLevel.off).text()
 
-    for gone in ("me@example.com", "/Users/anmol", KEY):
+    for gone in ("me@example.com", "/Users/dev", KEY):
         assert gone not in strict, gone
     assert "mail [redacted] about ~/Work/x" in strict and "Fix ~/Work/y" in strict
-    assert "me@example.com" in standard and "/Users/anmol/Work/x" in standard
+    assert "me@example.com" in standard and "/Users/dev/Work/x" in standard
     assert KEY not in standard and "API_KEY=[redacted]" in standard
-    assert f"API_KEY={KEY}" in off and "/Users/anmol/Work/z" in off
+    assert f"API_KEY={KEY}" in off and "/Users/dev/Work/z" in off
 
 
 @pytest.mark.parametrize("fork", [False, True])

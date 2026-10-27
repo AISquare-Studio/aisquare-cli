@@ -875,6 +875,9 @@ _KEYCHAIN_READS_LOCK = threading.Lock()
 _KEYCHAIN_GENERATION = [0]
 """Bumped by each :func:`forget_keychain_reads`: a read that began before one is not kept,
 or a refusal from before an unlock would stand after the refresh that asked again."""
+_KEYCHAIN_ASKING: dict[tuple[str, str], threading.Lock] = {}
+"""One lock per (service, account), held from the look at the memo to the keeping of the
+answer (:func:`read_keychain`); made under ``_KEYCHAIN_READS_LOCK``."""
 
 
 def _monotonic() -> float:
@@ -901,20 +904,30 @@ def read_keychain(service: str, account: str, *, fresh: bool = False) -> Keychai
 
     No item (exit 44), or no login Keychain at all (37, 50), is ``found=False``; a locked
     Keychain, one that refused, a timeout and anything else is ``unreadable``, in words.
+
+    One ask per item is in flight at a time: the look at the memo, the ask and the keeping
+    of what it answered are under the item's own lock, so a second reader of a cold item
+    (the shell's frame and the headroom it triggers are threads) waits for the first's
+    answer and takes it from the memo. Without that, each looked, found nothing, and asked,
+    and a user with a locked login Keychain got its unlock dialog twice at startup (r24 1).
+    A ``fresh`` read still asks, after the one in flight; the reads of other items go on.
     """
     key = (service, account)
     with _KEYCHAIN_READS_LOCK:
-        remembered = None if fresh else _KEYCHAIN_READS.get(key)
-        generation = _KEYCHAIN_GENERATION[0]
-    if remembered is not None:
-        taken, read = remembered
-        if read.unreadable is not None or 0 <= _monotonic() - taken < KEYCHAIN_MEMO_SECONDS:
-            return read
-    read = _ask_keychain(service, account)
-    with _KEYCHAIN_READS_LOCK:
-        if _KEYCHAIN_GENERATION[0] == generation:
-            _KEYCHAIN_READS[key] = (_monotonic(), read)
-    return read
+        asking = _KEYCHAIN_ASKING.setdefault(key, threading.Lock())
+    with asking:
+        with _KEYCHAIN_READS_LOCK:
+            remembered = None if fresh else _KEYCHAIN_READS.get(key)
+            generation = _KEYCHAIN_GENERATION[0]
+        if remembered is not None:
+            taken, read = remembered
+            if read.unreadable is not None or 0 <= _monotonic() - taken < KEYCHAIN_MEMO_SECONDS:
+                return read
+        read = _ask_keychain(service, account)
+        with _KEYCHAIN_READS_LOCK:
+            if _KEYCHAIN_GENERATION[0] == generation:
+                _KEYCHAIN_READS[key] = (_monotonic(), read)
+        return read
 
 
 def _ask_keychain(service: str, account: str) -> KeychainRead:

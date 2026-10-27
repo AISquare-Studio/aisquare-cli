@@ -99,7 +99,10 @@ class TotpVerifier:
         try:
             import pyotp  # noqa: F401 — the gate extra; imported only to ask
         except ImportError:
-            return f"the owner gate needs pyotp: {EXTRA} (or set [captain] gate = false)"
+            return (
+                f"the owner gate needs pyotp: {EXTRA} (or add `gate = false` under [captain] in "
+                "~/.aisquare/config.toml by hand: `config set` does not take it)"
+            )
         if not secret_path().is_file():
             return f"the owner gate is not enrolled yet: {ENROLL}"
         return None

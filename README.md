@@ -93,7 +93,8 @@ board. Every effect is one of its 26 tools, each leaving one audit event with
 your words; `stop`, `spawn` and `restart` happen only when your words name what
 they act on, and a refusal is said, never faked. The owner gate is on by default
 while the captain is: its acting tools refuse until you run `aisquare captain gate
-enroll` (it needs the `gate` extra), or set `[captain] gate = false`.
+enroll` (it needs the `gate` extra), or you add `gate = false` under `[captain]` in
+`~/.aisquare/config.toml` by hand (`config set` does not take it).
 
 It ships **off**. Turn it on in `asq` under *⚙ Settings ▸ Captain*, at once and
 with no restart, or once from a shell, or for one shell with

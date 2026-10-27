@@ -37,7 +37,8 @@ runs in shards.**
 - **The captain's owner gate is on by default, which matters only with the experimental
   captain on.** Its acting tools (`press`, `paste`, `stop`, `spawn`, `restart`, `wololo`,
   `attach_persona`, `act`) refuse until you install the `gate` extra and run `aisquare
-  captain gate enroll`, or set `[captain] gate = false`. Reads, `tell`, notes and tasks
+  captain gate enroll`, or add `gate = false` under `[captain]` in `~/.aisquare/config.toml`
+  by hand (`aisquare config set` does not take it). Reads, `tell`, notes and tasks
   never need a code.
 - **A spawn runs the model and effort you last chose** (#441), not the ladder's top rung
   0.9.0 passed to every spawn: a manager no longer starts on `--model fable --effort
@@ -236,7 +237,9 @@ runs in shards.**
   - pyotp comes with the new `gate` extra (`pip install 'aisquare-cli[gate]'`),
     never core. Without it, or before enrolment, the gate stays shut and says how
     to fix it.
-  - `[captain] gate = false` turns the gate off. A spoken code can be overheard.
+  - `gate = false` under `[captain]` in `~/.aisquare/config.toml` turns the gate off; it is
+    a hand edit, since `aisquare config set` does not take the key. A spoken code can be
+    overheard.
 - **A fleet role can start its agents with Claude Code's own Remote Control** (#289).
   `[fleet.roles.<role>] remote_control = true`, or `fleet spawn --remote-control` /
   `--no-remote-control` for one agent, starts Claude Code with `--remote-control

@@ -3459,6 +3459,116 @@ def test_a_restart_keeps_the_owners_ultracode_toggle_either_way(
     assert _flag(_command(tmux), "--effort") == replayed
 
 
+def _bind_role(role: str, *args: str) -> None:
+    """``team bind <role> --arg=… …``: arguments ``aisquare launch`` adds to every window."""
+    from aisquare.core.config import RoleLaunchProfile, load_config
+
+    config = load_config()
+    config.team.profiles[role] = RoleLaunchProfile(args=list(args))
+    save_config(config)
+
+
+@pytest.mark.parametrize(
+    ("bound", "args", "answer", "replayed"),
+    [
+        ("ultracode", "ultracode off", "Ultracode off. Effort stays xhigh.", "xhigh"),
+        (
+            "xhigh",
+            "ultracode",
+            "Ultracode on (this session only): dynamic workflows on every task. Effort stays "
+            "xhigh.",
+            "ultracode",
+        ),
+    ],
+)
+def test_a_restart_keeps_the_owners_ultracode_toggle_over_the_roles_binding(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    bound: str,
+    args: str,
+    answer: str,
+    replayed: str,
+) -> None:
+    """Seq 3797 (1): with ``team bind coder --arg=--effort --arg=ultracode`` the launch's
+    effort is the binding's, which ``aisquare launch`` adds and no spec records; the
+    baseline read the first Stop's ``xhigh`` (Claude Code reports ultracode so) instead, so
+    ``/effort ultracode off`` moved nothing, the restart passed no ``--effort``, and the
+    binding's ultracode came back. The baseline follows launch's rule: the window's own
+    flags, else the binding's."""
+    _bind_role("coder", "--effort", bound)
+    model_memory.remember(model="opus", effort="medium")
+    agent = _coder(project, agent_args=["--model", "haiku"], spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-haiku-5-5")
+    _turn(agent, transcript, "claude-haiku-5-5", "xhigh")
+    _local_command(transcript, "effort", args, answer)
+    _turn(agent, transcript, "claude-haiku-5-5", "xhigh")
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _model_flags(_command(tmux)).count("--effort") == 1
+    assert _flag(_command(tmux), "--effort") == replayed, "it beats the binding's in launch"
+    assert model_memory.remembered() == model_memory.Pick("opus", "medium")
+
+
+@pytest.mark.parametrize("replay", ["restart", "switch"])
+def test_a_command_typed_after_the_last_turn_is_kept_by_a_replay_before_any_turn(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    replay: str,
+) -> None:
+    """Seq 3797 (2), tester-r8's repro on real 2.1.311: the owner's ``/model sonnet`` ("Set
+    model to `Sonnet 5.5` and saved as your default…") after tester-s's last Stop, then
+    ``fleet restart tester-s`` before any turn: the restart ran ``--model claude-haiku-4-5``
+    and the pick stayed claude-haiku-4-5, as only a Stop read the transcript. A replay reads
+    what the row's transcript holds since then first."""
+    _two_slots_with_usage(monkeypatch, work=10, personal=10)
+    model_memory.remember(model="claude-haiku-4-5", effort="low")
+    agent = fleet_service.spawn(
+        project,
+        "tester",
+        worktree=False,
+        account="2",
+        agent_args=["--model", "claude-haiku-4-5", "--effort", "low"],
+        spawned_by="ses_mgr1",
+    ).agent
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-haiku-4-5")
+    _turn(agent, transcript, "claude-haiku-4-5", "low")
+    _local_command(transcript, "model", "sonnet", SET.format("Sonnet 5.5"))
+    if replay == "restart":
+        tmux.die(agent.pane_id, 0)
+        fleet_service.restart(project, agent.label)
+    else:
+        fleet_service.switch(project, agent.label, to="3")
+    assert _flag(_command(tmux), "--model") == "sonnet"
+    assert model_memory.remembered() == model_memory.Pick("sonnet", "low")
+
+
+def test_a_level_set_over_ultracode_is_replayed_as_that_level(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Seq 3797 (3), the owner's decision: launched ``--effort ultracode``, ``/effort high``
+    answers "Set effort level to high (saved …)" while Claude Code shows ``high ·
+    ultracode``. ``claude --effort`` takes one value, so no replay is exact: it keeps the
+    level the owner set last, ``--effort high``, and never raises the cost above it."""
+    model_memory.remember(model="opus", effort="medium")
+    agent = _coder(project, agent_args=["--effort", "ultracode"], spawned_by="ses_mgr1")
+    transcript = _on_disk(agent, tmp_path)
+    _started(agent, "claude-opus-5-5")
+    saved = "Set effort level to high (saved as your default for new sessions): Comprehensive …"
+    _local_command(transcript, "effort", "high", saved)
+    _turn(agent, transcript, "claude-opus-5-5", "high")
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    assert _flag(_command(tmux), "--effort") == "high"
+    assert model_memory.remembered() == model_memory.Pick("opus", "high")
+
+
 def test_the_effort_pickers_ultracode_with_a_saved_level_runs_ultracode(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
 ) -> None:

@@ -354,10 +354,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   command Claude Code refused (`Model 'sonet' not found`, `Invalid argument`) set nothing.
   Only commands stamped after the agent's row was bound to its transcript count: a fork or
   a `/branch` does not re-read the history it copied, nor a `/resume` or a `fleet switch`
-  the conversation it took up. Known limit: a `/model` typed
-  mid-turn is recorded nowhere by Claude Code 2.1.311, so it is no pick and a restart
-  starts the agent's previous model; change the model at the prompt. Read as Claude Code
-  2.1.310 and 2.1.311 word and frame it: an answer in other words, or a record outside the
+  the conversation it took up. Known limit: a `/model` typed mid-turn is recorded nowhere
+  by Claude Code 2.1.311, so it is no pick and a restart starts the agent's previous model;
+  change the model at the prompt. Another known limit: ultracode on top of another level
+  (`high · ultracode`) replays as that level, as `claude --effort` takes one value, never
+  raising the cost above the level you set. A command run after an agent's last turn
+  counts at a replay before its next one, and an effort a role's binding gives (`team bind
+  --arg`) is what the agent runs, a toggle over it kept. Read as Claude Code 2.1.310 and
+  2.1.311 word and frame it: an answer in other words, or a record outside the
   frame, writes nothing, says so once on stderr, and doctor shows it (`fleet model pick`).
   Nothing else is evidence: a model or effort that merely differs from the last turn's, as
   a custom command's or a skill's `model:`/`effort:` frontmatter makes it for one turn,

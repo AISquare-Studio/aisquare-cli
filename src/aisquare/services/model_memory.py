@@ -341,84 +341,116 @@ def observe(
     A transcript that cannot be read changes nothing. Raises on a store that cannot be read:
     the caller fails open.
     """
-    live_effort = harness.clean_effort(effort)
     with store_session() as store:
         session = store.get_session(session_id)
         agent = _own_row(store, session_id, agent_id)
         if session is None or agent is None:
             return None
-        path = next(
-            (Path(given) for given in (transcript_path, session.transcript_path)
-             if given and Path(given).is_file()),
-            None,
-        )  # fmt: skip
-        if path is None:
+        return _read(store, agent, session, transcript_path, effort=harness.clean_effort(effort))
+
+
+def caught_up(agent: FleetAgent, session: TeamSession | None) -> None:
+    """Before a replay of ``agent`` (a restart, a switch, a hand-over, a fork:
+    ``fleet._running``): read what its transcript holds since the last read, as its Stop
+    would, so a ``/model`` or ``/effort`` the owner ran after its last turn and before the
+    replay is kept (seq 3797 (2)): only a Stop read it, and the replacement's record begins
+    after it. ``agent`` is the row fleet replays (stopped by then, for all but a fork's
+    source), not a session's say. No turn ended, so nothing of a turn's readings fills the
+    launch or the board. Fail-open: a store or a transcript that cannot be read leaves the
+    replay as it was."""
+    if session is None:
+        return
+    try:
+        with store_session() as store:
+            record = _record(agent, store)
+            if record is not None:
+                _read(store, agent, session, record.transcript, effort=None, turn_end=False)
+    except Exception:  # a replay is never refused for this
+        return
+
+
+def _read(
+    store: ContextStore,
+    agent: FleetAgent,
+    session: TeamSession,
+    transcript_path: str | None,
+    *,
+    effort: str | None,
+    turn_end: bool = True,
+) -> Pick | None:
+    """:func:`observe`'s read of ``agent``'s commands, for a turn end (``effort`` the Stop's,
+    the turn's readings fill the launch and the board) or a replay (:func:`caught_up`)."""
+    live_effort = effort
+    path = next(
+        (Path(given) for given in (transcript_path, session.transcript_path)
+         if given and Path(given).is_file()),
+        None,
+    )  # fmt: skip
+    if path is None:
+        return None
+    live_model = harness.clean_model_id(transcripts.latest_model(path)) if turn_end else None
+    record = _record(agent, store)
+    if record is None:  # its session start unread: bound from the row's creation
+        record = _Record(launch=Pick(None, _launch_flags(agent).effort), since=_created(agent))
+    if record.transcript != str(path):
+        if record.since is not None and _read_nothing(record):
+            # A row that has read nothing (its session start unread, or bound to a file
+            # that never came: a switch's slot-2 path, seq 3693 c) reads the file it finds
+            # from 0, by its own stamp: what the owner typed since counts, the older
+            # conversation's commands do not (review of #441 round 8, minor 1).
+            record = dataclasses.replace(record, transcript=str(path), offset=0, turn=None)
+        else:
+            # Another file than the one it read (a `/branch` whose session start went
+            # unread): its copy holds this row's own past commands, stamped after its
+            # creation, so it is bound from the moment it is seen (seq 3697).
+            _bind(store, agent, record, path, since=datetime.now(tz=UTC))
+            _board(store, session, live_model, live_effort)
             return None
-        live_model = harness.clean_model_id(transcripts.latest_model(path))
-        record = _record(agent, store)
-        if record is None:  # its session start unread: bound from the row's creation
-            record = _Record(launch=Pick(None, _launch_flags(agent).effort), since=_created(agent))
-        if record.transcript != str(path):
-            if record.since is not None and _read_nothing(record):
-                # A row that has read nothing (its session start unread, or bound to a file
-                # that never came: a switch's slot-2 path, seq 3693 c) reads the file it finds
-                # from 0, by its own stamp: what the owner typed since counts, the older
-                # conversation's commands do not (review of #441 round 8, minor 1).
-                record = dataclasses.replace(record, transcript=str(path), offset=0, turn=None)
-            else:
-                # Another file than the one it read (a `/branch` whose session start went
-                # unread): its copy holds this row's own past commands, stamped after its
-                # creation, so it is bound from the moment it is seen (seq 3697).
-                _bind(store, agent, record, path, since=datetime.now(tz=UTC))
-                _board(store, session, live_model, live_effort)
-                return None
-        scan = transcripts.commands_since(path, record.offset, since=record.since)
-        if scan is None:
-            return None
-        live, turn = record.live, record.turn
-        picks: dict[str, str] = {}
-        unread: list[str] = []
-        understood = False
-        for event in scan.events:
-            if isinstance(event, str):
-                turn = event
-                continue
-            if isinstance(event, transcripts.UnframedCommand):
-                unread.append(
-                    f"{_version(event.version)} recorded a /{event.setting} outside its frame"
-                )
-                continue
-            values = command_values(event)
-            if any(not found.understood for found in values):
-                said = f"/{event.setting} {event.args}".rstrip()
-                unread.append(
-                    f"{_version(event.version)} answered {said} with {event.stdout[:120]!r}"
-                )
-            elif values:  # a success read; a refusal or an Esc says nothing of those words
-                understood = True
-            for found in values:
-                if found.value is None:
-                    continue
-                live = dataclasses.replace(live, **{found.setting: found.value})
-                if found.pick:
-                    picks[found.setting] = found.value
-        launch = record.launch
-        if turn == "plain":
-            launch = Pick(
-                launch.model or (live_model if live.model is None else None),
-                launch.effort or (live_effort if live.effort is None else None),
+    scan = transcripts.commands_since(path, record.offset, since=record.since)
+    if scan is None:
+        return None
+    live, turn = record.live, record.turn
+    picks: dict[str, str] = {}
+    unread: list[str] = []
+    understood = False
+    for event in scan.events:
+        if isinstance(event, str):
+            turn = event
+            continue
+        if isinstance(event, transcripts.UnframedCommand):
+            unread.append(
+                f"{_version(event.version)} recorded a /{event.setting} outside its frame"
             )
-        _keep(store, agent, _Record(launch, live, str(path), scan.end, turn, record.since))
-        if unread:
-            _say_unread(store, unread)
-        elif understood and store.ui_state(_UNREAD_KEY) is not None:
-            store.set_ui_state(_UNREAD_KEY, None)  # the answers read again: doctor stands down
-        _board(store, session, live_model, live_effort)
-        if not picks:
-            return None
-        written = Pick(picks.get("model"), picks.get("effort"))
-        remember(model=written.model, effort=written.effort, store=store)
-        return written
+            continue
+        values = command_values(event)
+        if any(not found.understood for found in values):
+            said = f"/{event.setting} {event.args}".rstrip()
+            unread.append(f"{_version(event.version)} answered {said} with {event.stdout[:120]!r}")
+        elif values:  # a success read; a refusal or an Esc says nothing of those words
+            understood = True
+        for found in values:
+            if found.value is None:
+                continue
+            live = dataclasses.replace(live, **{found.setting: found.value})
+            if found.pick:
+                picks[found.setting] = found.value
+    launch = record.launch
+    if turn == "plain" and turn_end:
+        launch = Pick(
+            launch.model or (live_model if live.model is None else None),
+            launch.effort or (live_effort if live.effort is None else None),
+        )
+    _keep(store, agent, _Record(launch, live, str(path), scan.end, turn, record.since))
+    if unread:
+        _say_unread(store, unread)
+    elif understood and store.ui_state(_UNREAD_KEY) is not None:
+        store.set_ui_state(_UNREAD_KEY, None)  # the answers read again: doctor stands down
+    _board(store, session, live_model, live_effort)
+    if not picks:
+        return None
+    written = Pick(picks.get("model"), picks.get("effort"))
+    remember(model=written.model, effort=written.effort, store=store)
+    return written
 
 
 def _read_nothing(record: _Record) -> bool:
@@ -577,12 +609,17 @@ def chosen_models(session: TeamSession) -> list[str]:
 
 
 def _launch_flags(agent: FleetAgent) -> Pick:
-    """The ``--model`` and ``--effort`` the agent was launched with: its arguments', else what
-    the spawn added beside them."""
+    """The ``--model`` and ``--effort`` the agent was launched with, by the rule ``aisquare
+    launch`` applies: its window's own (its arguments', else what the spawn added beside
+    them), else its role's binding's (``team bind --arg``), which launch adds to every window
+    and no spec records (seq 3797 (1): a bound ultracode read as the Stop's ``xhigh``)."""
     spec = agent.launch_spec
     if spec is None:
         return Pick()
+    bound = harness.binding_args(agent.role)
     return Pick(
-        harness.model_arg(spec.extra_args) or spec.model,
-        harness.flag_arg(spec.extra_args, "--effort") or spec.effort,
+        harness.model_arg(spec.extra_args) or spec.model or harness.model_arg(bound),
+        harness.flag_arg(spec.extra_args, "--effort")
+        or spec.effort
+        or harness.flag_arg(bound, "--effort"),
     )

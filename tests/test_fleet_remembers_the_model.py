@@ -763,6 +763,32 @@ def test_a_setting_answer_no_framed_command_owns_is_said(tmp_path: Path) -> None
     )
 
 
+def test_a_setting_answer_to_a_command_of_another_name_is_said(tmp_path: Path) -> None:
+    """Seq 3797 (4): a later Claude Code that renames the command (``/models``) frames it as
+    ever, and its ``Set model to …`` answer read as nothing, silently. It is said; another
+    command's own answer (``/compact``'s) stays nothing."""
+    path = tmp_path / "t.jsonl"
+    caveat = "<local-command-caveat>The command below was run directly in Claude Code…"
+    _framed(
+        path,
+        {"type": "user", "uuid": "c1", "isMeta": True,
+         "message": {"role": "user", "content": caveat}},
+        {"type": "user", "uuid": "m1", "parentUuid": "c1", "message": {"role": "user",
+         "content": "<command-name>/models</command-name><command-args>opus</command-args>"}},
+        {"type": "user", "uuid": "a1", "parentUuid": "m1", "message": {"role": "user",
+         "content": "<local-command-stdout>Set model to `Opus 5.5` and saved as your default"
+                    " for new sessions</local-command-stdout>"}},
+        {"type": "user", "uuid": "c2", "parentUuid": "a1", "isMeta": True,
+         "message": {"role": "user", "content": caveat}},
+        {"type": "user", "uuid": "m2", "parentUuid": "c2", "message": {"role": "user",
+         "content": "<command-name>/compact</command-name><command-args></command-args>"}},
+        {"type": "user", "uuid": "a2", "parentUuid": "m2", "message": {"role": "user",
+         "content": "<local-command-stdout>Compacted</local-command-stdout>"}},
+    )  # fmt: skip
+    scan = transcripts.commands_since(path, 0)
+    assert scan is not None and scan.events == (transcripts.UnframedCommand("model"),)
+
+
 def test_a_caveat_is_one_only_as_the_commands_own_parent(tmp_path: Path) -> None:
     """Seq 3697 hardening: an agent can write a custom command whose body is the caveat, and
     its expansion is a meta record that opens with ``<local-command-caveat>``. It is no

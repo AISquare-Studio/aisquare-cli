@@ -356,7 +356,9 @@ def _frame_step(
         return UnframedCommand(named.group(1), version)
     if (answer := _COMMAND_STDOUT.match(text)) is not None:
         command = frames.framed.pop(parent, None) if isinstance(parent, str) else None
-        if command is None:
+        if command is None or command[0] not in SETTINGS:
+            # A setting's answer no `/model` or `/effort` frame owns: a renamed tag or a
+            # renamed command (`/models`, seq 3797 (4)), said once per record.
             said = answer.group(1).strip()
             setting = next(
                 (s for opens, s in _SETTING_ANSWERS.items() if said.startswith(opens)), None
@@ -364,8 +366,6 @@ def _frame_step(
             if setting is None or parent in frames.said:
                 return None
             return UnframedCommand(setting, version)
-        if command[0] not in SETTINGS:
-            return None
         return SettingCommand(command[0], command[1], answer.group(1).strip(), version)
     if system:
         return None

@@ -6628,7 +6628,10 @@ def _the_captains_row(agent_id: str) -> bool:
 
 def _running(agent: FleetAgent, session: TeamSession | None) -> model_memory.Running | None:
     """What a replay of ``agent`` starts from: what its session runs now and what its launch
-    ran (``model_memory.replay_from``)."""
+    ran (``model_memory.replay_from``), with what its transcript holds since its last turn
+    end read first (``model_memory.caught_up``): a ``/model`` the owner ran after it and
+    before this replay is kept (seq 3797 (2))."""
+    model_memory.caught_up(agent, session)
     return model_memory.replay_from(agent, session)
 
 

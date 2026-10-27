@@ -280,7 +280,13 @@ conversation it took up.
 **Change the model at the prompt, not mid-turn**: a `/model` typed while a turn runs
 switches the agent but Claude Code 2.1.311 writes no record of it, so it is no pick and a
 restart starts the model the agent had before (a known limit; aisquare guesses nothing
-from the replies). **Nothing else is evidence**: a model or an effort that merely differs
+from the replies). **Ultracode on top of another level replays as that level**: launched
+at ultracode, `/effort high` runs `high · ultracode`, but `claude --effort` takes one
+value, so a restart passes the level you set last (`--effort high`) and never raises the
+cost above what you chose (a known limit, as decided). A `/model` or `/effort` you run
+after an agent's last turn counts at a restart, a switch, a hand-over or a fork before its
+next one, which read it first. **Nothing else is evidence**: a model or an effort that
+merely differs
 from the last turn's, as a custom command's or a skill's `model:` or `effort:` frontmatter
 makes it for ONE turn, writes no pick and moves nothing, whoever typed it. The reader
 knows Claude Code 2.1.310's and 2.1.311's words and frames; an answer in other words, or a

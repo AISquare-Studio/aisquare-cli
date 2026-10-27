@@ -18,6 +18,10 @@ a Codex that has run none holds none. So a record is a row's when the pane's pro
   (:func:`open_files`). The kernel shows a process's descriptors only to a reader who may
   ptrace it, so a process that marks itself non-dumpable answers ``EACCES``: that is "cannot
   tell" (``None``), never "holds nothing". No Linux Codex was at hand to measure which it is.
+  The names ``lsof`` prints are read back from its escapes (:func:`_unescaped`): under
+  ``LC_ALL=C`` it writes ``/Users/Émile`` as ``/Users/\\xc3\\x89mile``.
+- **Whose.** Held is held: a reader below the pane that has another rollout open (a ``tail -f``
+  in the pane's shell) is taken for the pane's own. Inherent to asking who holds a file.
 - **When it cannot be told** (no ``ps`` or ``lsof``, a process that hides its descriptors, a
   timeout) every answer here is ``None``, and the caller does not guess: it takes the
   stricter rule (``services.fleet._first_prompt_off_its_transcript``).
@@ -30,6 +34,7 @@ a Codex that has run none holds none. So a record is a row's when the pane's pro
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import threading
 import time
@@ -106,6 +111,26 @@ def _from_proc(pids: list[int], proc: Path) -> frozenset[str] | None:
     return frozenset(found)
 
 
+_ESCAPE = re.compile(r"((?:\\x[0-9a-fA-F]{2})+)|\\([\\bfnrt])")
+_PLAIN = {"\\": "\\", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+
+
+def _unescaped(name: str) -> str:
+    """``name`` as ``lsof`` printed it, read back: in a locale that is not UTF-8 (``LC_ALL=C``)
+    it writes a byte it cannot print as ``\\xc3\\x89``, a backslash as ``\\\\`` and a tab as
+    ``\\t``, so a home such as ``/Users/Émile`` would match no real path (tester-24b). Bytes
+    that are not UTF-8 are kept as ``os.fsdecode`` keeps them, which is how a file opened
+    under such a name is named by a real path."""
+
+    def one(found: re.Match[str]) -> str:
+        if found.group(1) is not None:
+            raw = bytes.fromhex(found.group(1).replace("\\x", ""))
+            return raw.decode("utf-8", "surrogateescape")
+        return _PLAIN[found.group(2)]
+
+    return _ESCAPE.sub(one, name)
+
+
 def _from_lsof(pids: list[int]) -> frozenset[str] | None:
     try:
         done = subprocess.run(
@@ -115,15 +140,15 @@ def _from_lsof(pids: list[int]) -> frozenset[str] | None:
             timeout=_TIMEOUT,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+        return None  # no lsof, a timeout, or a name this locale cannot decode: not told
     found: set[str] = set()
     answered = False
     for line in done.stdout.splitlines():
         if line.startswith("p"):
             answered = True  # a process it could see
         elif line.startswith("n/"):
-            found.add(line[1:])
+            found.add(_unescaped(line[1:]))
     return frozenset(found) if answered else None
 
 
@@ -139,7 +164,10 @@ def held_by_pane(root: int) -> frozenset[str] | None:
     held = None if tree is None else open_files(tree)
     with _LOCK:
         _HELD.pop(root, None)  # to the end: the oldest read goes first
-        _HELD[root] = (now, held)
+        # Stamped when the read ended, not when it began: a hung ``lsof`` runs to its timeout
+        # (5 s), and an answer already older than :data:`HELD_FOR` would be asked again by the
+        # next listing, and the next, for every row, for as long as it hangs (tester-24b).
+        _HELD[root] = (time.monotonic(), held)
         while len(_HELD) > _HELD_MAX:
             _HELD.pop(next(iter(_HELD)))
     return held

@@ -2913,8 +2913,10 @@ never started a turn: nothing acknowledged it within `[fleet] prompt_ack_seconds
 and its input box is idle. Look at its window (`aisquare fleet attach`): text
 still in the box goes with an Enter there; an empty box takes the message again
 with `aisquare fleet tell <label> "…"`, or `aisquare fleet restart <label>`
-starts it over. Either one clears the `attention`. See [the first
-message](#the-first-message).
+starts it over. Either one clears the `attention`; for a Codex agent, where
+the detail adds that aisquare cannot tell which process holds a rollout (no
+`lsof`, a hidden `/proc`), only the message itself told again does, or the
+restart. See [the first message](#the-first-message).
 
 **An agent reads `attention`: "Claude Code's first-run Security notes screen —
 press Enter in its window".** A new account's first run shows those notes, and a

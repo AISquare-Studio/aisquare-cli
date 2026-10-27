@@ -207,9 +207,12 @@ adapter.**
   `unsent` (a `fleet tell` of other words) takes the row too, as a hook's own prompt does for
   Claude Code. A prompt another Codex agent runs in the same folder on the same home does
   not: a rollout is the row's when the processes below its pane hold it open (measured on
-  0.164.0), and where the process table cannot be read only the message's own words take
-  the row, and any other prompt only when it is the row alone in its folder (a Codex session
-  outside the fleet there can still clear it). The read is bounded for a listing: the day directories from the spawn on, the
+  0.164.0), and where the process table cannot be read (no `lsof`, an `lsof` that hangs, a
+  hidden `/proc`) only the message's own words take the row, and the detail says so: another
+  agent may have run its task there and ended since, so a row alone in its folder is not
+  taken by a prompt of other words either. A hung `lsof` is waited for once a moment, not on
+  every listing, and a home with a non-ASCII name under `LC_ALL=C` is read back from
+  `lsof`'s escapes. The read is bounded for a listing: the day directories from the spawn on, the
   rollouts begun after it, a megabyte at each end of one in this folder, kept against its
   size and modification time, and the folder each rollout began in read once, so a busy
   home costs a lookup per rollout (`AgentAdapter.first_prompts_since`).

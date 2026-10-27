@@ -16,6 +16,7 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -173,6 +174,90 @@ def test_lsof_that_sees_no_process_or_cannot_run_is_not_told(
     )
 
 
+def test_lsof_output_this_locale_cannot_decode_is_not_told(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A name that is not valid in the reader's encoding fails the decode of the whole output:
+    that is "cannot tell" as any other failure of ``lsof`` is, never an error out of a listing."""
+
+    def undecodable(*args: object, **kwargs: object) -> object:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(subprocess, "run", undecodable)
+
+    assert process_table.open_files([os.getpid()], proc=tmp_path / "no-proc") is None
+
+
+def test_lsofs_escaped_names_are_read_back_to_the_paths_they_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Under ``LC_ALL=C`` ``lsof`` writes a byte it cannot print as ``\\xNN`` (``/Users/Émile``
+    is ``/Users/\\xc3\\x89mile``), a backslash as ``\\\\`` and a tab as ``\\t`` (measured on
+    macOS), so the pane's own rollout, held by that name, matched no real path: its message
+    read as not taken (tester-24b)."""
+
+    def answering(*args: object, **kwargs: object) -> object:
+        out = (
+            "p10\n"
+            "n/Users/\\xc3\\x89mile/.codex/sessions/rollout-a.jsonl\n"
+            "n/Users/Jos\\xc3\\xa9/\\xe2\\x82\\xac/b\n"
+            "n/a/back\\\\slash/c\n"
+            "n/a/lit\\\\x41/d\n"  # an escaped backslash, then a plain ``x41``
+            "n/a/tab\\tx/e\n"
+            "n/a/lone\\xffbyte/f\n"
+        )
+        return subprocess.CompletedProcess(["lsof"], 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", answering)
+
+    held = process_table.open_files([10], proc=tmp_path / "no-proc")
+
+    assert held == frozenset(
+        {
+            "/Users/Émile/.codex/sessions/rollout-a.jsonl",
+            "/Users/José/€/b",
+            "/a/back\\slash/c",
+            "/a/lit\\x41/d",
+            "/a/tab\tx/e",
+            "/a/lone\udcffbyte/f",  # as ``os.fsdecode`` keeps a byte that is not UTF-8
+        }
+    )
+
+
+@pytest.mark.skipif(shutil.which("lsof") is None, reason="no lsof")
+@pytest.mark.parametrize("locale", ["C", "en_US.UTF-8"])
+def test_a_file_under_a_non_ascii_folder_is_found_whatever_the_locale_of_lsof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, locale: str
+) -> None:
+    """Real ``lsof`` on a real process: the folder ``Émile`` is named, under ``LC_ALL=C``
+    (which escapes it) and under a UTF-8 locale (which prints it), by the path the file has."""
+    monkeypatch.setenv("LC_ALL", locale)
+    folder = tmp_path / "Émile"
+    folder.mkdir()
+    path = folder / "held.txt"
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            f"import time; f = open({str(path)!r}, 'w'); print('ready', flush=True); "
+            "time.sleep(60)",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+
+        held = process_table.open_files([child.pid], proc=tmp_path / "no-proc")
+
+        assert held is not None and os.path.realpath(path) in held
+    finally:
+        child.kill()
+        child.wait()
+        if child.stdout is not None:
+            child.stdout.close()
+
+
 def test_no_process_is_no_files() -> None:
     assert process_table.open_files([]) == frozenset()
 
@@ -273,6 +358,41 @@ def test_a_pane_that_could_not_be_read_is_not_told_and_asked_again_after_the_mom
     assert process_table.held_by_pane(7) is None
     assert process_table.held_by_pane(7) is None
     assert asked == [7], "a refusal is kept too: a timeout is not paid for on every listing"
+
+
+def test_a_hung_lsof_is_waited_for_once_a_moment_not_on_every_listing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """tester-24b: an ``lsof`` that hangs (a stale NFS mount does that) runs to its timeout, and
+    the answer was stamped with the time the read began, so it was already older than
+    :data:`HELD_FOR` and asked again by the next listing, for every row: K rows, 5 K seconds.
+    Stamped when the read ended, the next listing inside the moment makes no call."""
+    now = [1000.0]
+    calls: list[str] = []
+
+    def run(argv: list[str], **kwargs: object) -> object:
+        if argv[0] == "ps":
+            return subprocess.CompletedProcess(argv, 0, stdout="7 1\n8 7\n", stderr="")
+        calls.append(argv[0])
+        now[0] += process_table._TIMEOUT  # the wait runs out
+        raise subprocess.TimeoutExpired(argv, process_table._TIMEOUT)
+
+    real_open_files = process_table.open_files
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(process_table, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(
+        process_table, "open_files", lambda pids: real_open_files(pids, proc=tmp_path / "no-proc")
+    )
+    assert process_table._TIMEOUT > process_table.HELD_FOR, "the case this is about"
+
+    assert process_table.held_by_pane(7) is None
+    assert process_table.held_by_pane(7) is None
+    assert process_table.held_by_pane(7) is None
+    assert calls == ["lsof"], "a hung lsof is paid for once, not on every listing"
+
+    now[0] += process_table.HELD_FOR  # the moment passes
+    assert process_table.held_by_pane(7) is None
+    assert calls == ["lsof", "lsof"]
 
 
 def test_the_kept_panes_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1415,8 +1415,8 @@ uv puts it in ~/.local/bin; add that to your PATH and rerun:
     # a successful exit code over an unchanged version.
     if [ "$CLI_ACTION" = upgrade ] && [ -n "$LATEST_VERSION" ] && [ "$_now" != "$LATEST_VERSION" ]; then
         die "the upgrade reported success but \`aisquare --version\` still says
-$_now, not $LATEST_VERSION. That is the silent no-op described in
-docs/plans/one-line-install.md §3.9.1 — please report it."
+$_now, not $LATEST_VERSION. That is a silent no-op (a success code over an
+unchanged version) — please report it."
     fi
     CLI_VERSION=$_now
     good "aisquare $CLI_VERSION"
@@ -2845,7 +2845,7 @@ Exit codes
 
 Not installed, on purpose: explainability tracing (off
 unless asked for), and any credential — `claude` and `gh auth login` do their
-own. Full design and measurements: docs/plans/one-line-install.md
+own.
 USAGE
 }
 

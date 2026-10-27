@@ -96,19 +96,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refused plan says why and cannot be confirmed; one run a project at a time, off the
   UI thread, ending in a toast of what was cleared, with the project's open boards read
   again from their start.
-- **A fleet across two machines, the interim way**
-  (`docs/runbooks/multi-machine-ssh.md`). A multi-machine fleet is postponed (#293;
-  the design is in `docs/plans/multi-machine-fleet.md`). Until it ships, a manager
-  on one box drives another box's fleet over SSH: setting up box B, an
-  `~/.ssh/config` that shares one connection and drops a dead link in about 45
-  seconds, the four commands to brief the manager with, watching B's `asq` in
-  tmux, and the trust model. B trusts A's key completely, so the runbook
-  recommends a dedicated user and a key whose forced command runs `aisquare` and
-  nothing else. (#293)
-- **Which instructions an agent follows** (`docs/instructions.md`, linked from the
-  README, Orchestration and Personas). Your `CLAUDE.md` files, the role cycle, the
-  persona and aisquare's memory all reach a fleet agent, and nothing ranks them:
-  the page says where each lands, that a conflict is removed rather than ranked
+- **A fleet across two machines, the interim way.** A multi-machine fleet is postponed
+  (#293). Until it ships, a manager on one box drives another box's fleet over SSH:
+  setting up box B, an `~/.ssh/config` that shares one connection and drops a dead
+  link in about 45 seconds, the four commands to brief the manager with, watching B's
+  `asq` in tmux, and the trust model. B trusts A's key completely, so the advice is a
+  dedicated user and a key whose forced command runs `aisquare` and nothing else.
+  (#293)
+- **Which instructions an agent follows.** Your `CLAUDE.md` files, the role cycle, the
+  persona and aisquare's memory all reach a fleet agent, and nothing ranks them.
+  Here is where each lands, that a conflict is removed rather than ranked
   (with a `CLAUDE.md` snippet that keeps *use subagents* out of fleet agents), what
   a subagent does and does not see, how to clear a stale `CLAUDE.md` section out of
   aisquare's memory, and the 10,000-character cap on a hook's output. (#292)
@@ -143,8 +140,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - pyotp comes with the new `gate` extra (`pip install 'aisquare-cli[gate]'`),
     never core. Without it, or before enrolment, the gate stays shut and says how
     to fix it.
-  - `[captain] gate = false` turns the gate off. `docs/captain.md` says why a
-    spoken code can be overheard.
+  - `[captain] gate = false` turns the gate off. A spoken code can be overheard.
 - **A fleet role can start its agents with Claude Code's own Remote Control** (#289).
   `[fleet.roles.<role>] remote_control = true`, or `fleet spawn --remote-control` /
   `--no-remote-control` for one agent, starts Claude Code with `--remote-control
@@ -161,10 +157,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   get: the running fleet server's environment, or the one the fleet would start it
   with, saying where each blocker is (its fix says `aisquare explainability
   disable` turns tracing off for every launch on the machine). The Spawn dialog's
-  note wraps at 80 columns. Off for every role by default. `docs/remote.md`
-  compares it with `aisquare remote`, and says a remote-controlled agent keeps its
-  role's permission mode and that anyone signed in to its Claude account can drive
-  it.
+  note wraps at 80 columns. Off for every role by default. It is separate
+  from `aisquare remote`: a remote-controlled agent keeps its role's permission mode,
+  and anyone signed in to its Claude account can drive it.
 - **A file dropped on `asq` reaches the agent on screen** (#288). A terminal hands
   a drop to `asq` as a paste, and a paste went only to the widget with the keyboard,
   so a screenshot dropped while the sidebar had it reached no agent. A paste no
@@ -175,8 +170,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Windows path of an existing file becomes its Linux path (`wslpath -u`, off the UI
   thread).
   `AISQUARE_PASTE_LOG=<file>` records each paste's length, first 80 characters and
-  focused widget, for checking what a terminal sends. `docs/fleet.md` has an
-  "Images" paragraph on the three ways an image reaches Claude Code.
+  focused widget, for checking what a terminal sends.
 - **A sign-in comes back to where you started it, and the board says what needs
   you** (#286, #215). Welcome's *Sign in*, the persona picker's *+ New account*
   and the Spawn dialog's *Pick… ▸ + New account* each left for the Accounts page
@@ -240,7 +234,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   *Adopt a conversation…* shows the same list; one a `claude` still runs, or whose
   directory is no onboarded project, says why and cannot be picked. Only the CLI's
   own accounts are searched: a Claude directory it did not create is still never
-  adopted. `docs/fleet.md` adds a "fresh start without losing accounts" recipe.
+  adopted.
 
 - **Role bindings in App settings, and a doctor line for each** (#98). *⚙ Settings ▸
   App settings*, under *Agent settings ▸ Advanced*, lists every role `aisquare team
@@ -374,8 +368,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from older code, which count until they go stale. Not closed: at a fresh start the hook
   registers 1 to 3 s after the server has read the board (measured), so a server for a
   restarted session whose own row survived a crash still gets the team's instructions; a server
-  that starts later, such as an MCP reconnect, proves its host and does not. The plan, with the
-  measurements and the process trees, is docs/plans/mcp-own-row.md.
+  that starts later, such as an MCP reconnect, proves its host and does not.
 
 - **`aisquare serve --stdio` keeps its protocol pipe to itself.** Its stdin is the pipe the client
   writes requests into, and its tools started `git` (every call, twice) with that

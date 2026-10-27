@@ -628,6 +628,14 @@ runs in shards.**
   Binary"), and *Claude Remote Control* wrapped onto two lines at every width. The
   label column now fits its longest label, and a note beside a field wraps in what
   the row leaves.
+- **A Windows drive-letter git remote is a local path, not a host** (#451). `C:/git/x.git`
+  and `D:\repos\x` were read as the scp form with a host `C` or `D` (`c/git/x`), so
+  Usage & stats counted a repository whose remote is such a path under a remote that
+  does not exist, with its host trait `other`, and every checkout of the same path
+  together. `core/repo_profile.normalise_remote` now reads a drive path as a local path
+  on every OS, as it already read `/srv/x.git`: the repository is identified by its
+  root and its host trait is `none`. `x:org/repo`, a one-letter scp host with a
+  relative path, is still a host.
 
 ### Removed
 

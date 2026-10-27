@@ -1529,6 +1529,9 @@ class ContextStore(Protocol):
     def mark_attention(self, session_id: str) -> bool: ...
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None: ...
     def set_transcript_path(self, session_id: str, transcript_path: str) -> None: ...
+    def set_session_model(
+        self, session_id: str, *, model: str | None, effort: str | None
+    ) -> None: ...
     def unmark_handover(self, session_id: str, state: str) -> None: ...
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
     def release_claims(self, session_id: str) -> list[TeamTask]: ...
@@ -3153,6 +3156,18 @@ class SqliteStore:
         self._conn.execute(
             "UPDATE team_session SET transcript_path = ? WHERE id = ?",
             (transcript_path, session_id),
+        )
+        self._conn.commit()
+
+    def set_session_model(self, session_id: str, *, model: str | None, effort: str | None) -> None:
+        """The model and effort the session runs now, as a turn end read them
+        (``services.model_memory.observe``); ``None`` keeps what the row holds. Touches nothing
+        else, as :meth:`set_transcript_path`: ``upsert_session`` would set the row ``working``.
+        """
+        self._conn.execute(
+            "UPDATE team_session SET model = COALESCE(?, model), effort = COALESCE(?, effort) "
+            "WHERE id = ?",
+            (model, effort, session_id),
         )
         self._conn.commit()
 
@@ -5734,10 +5749,11 @@ debounce, the solo session's not-yet-briefed mark (#346), and the quiet compacti
 its newest refusal and its latest arm (P1 WS-4)."""
 
 
-_FLEET_LABEL_STATE: tuple[str, ...] = ("before-limit:", "before-limit-warned:")
+_FLEET_LABEL_STATE: tuple[str, ...] = ("before-limit:", "before-limit-warned:", "fleet-launched:")
 """The ``ui_state`` keys kept per fleet label as ``<prefix><project id>:<label>``: the turn
-end that last started a before-limit move, and the crossing a ``warn`` has named
-(``services.hooks``). A reset clears a project's (:meth:`SqliteStore.reset_project`)."""
+end that last started a before-limit move, the crossing a ``warn`` has named
+(``services.hooks``), and the row's model record (``services.model_memory``, #16). A reset
+clears a project's (:meth:`SqliteStore.reset_project`)."""
 
 
 def _session_meta_terms(sessions: Sequence[str]) -> Iterator[tuple[str, tuple[str, ...]]]:

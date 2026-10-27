@@ -1471,10 +1471,13 @@ class LaunchSpec(BaseModel):
     ``[fleet.roles.<role>] remote_control``. A restart and a switch replay it; ``False`` on a
     spec recorded before it existed."""
     model: str | None = None
-    """The ``--model`` the spawn resolved down the role's ladder (#129 b), ``None`` when it
-    passed none: another binary, a model already in the arguments, or an untiered role."""
+    """The ``--model`` the spawn added beside the arguments: the owner's last pick
+    (``services.model_memory``), the Spawn dialog's field, or on a replay what the agent ran
+    by then. ``None`` when it added none: nothing chosen (the account's default), a model
+    already in the arguments, another binary. A spec recorded by 0.9.0 holds the role
+    ladder's rung (#129 b), which a replay still starts unless the agent ran another."""
     effort: str | None = None
-    """The ``--effort`` passed beside ``model``."""
+    """The ``--effort`` added beside the arguments, as ``model``; each is decided on its own."""
     board_context: str | None = None
     """What of the board the agent reads (``all``, ``relevant``, ``none``; P1 WS-2, #279),
     as its spawn resolved it, so a restart or switch keeps it. ``None`` on a spec recorded

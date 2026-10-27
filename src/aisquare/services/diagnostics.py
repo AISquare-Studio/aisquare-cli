@@ -57,6 +57,7 @@ from aisquare.services import (
     explainability_ops,
     iam,
     install_route,
+    model_memory,
 )
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
@@ -149,6 +150,7 @@ def doctor(*, live: bool = False, cwd: Path | None = None) -> list[DoctorCheck]:
         # Never warns, so it moves no actionable row out of the sidebar's first three.
         _check_code_index(cwd),
         _check_harness(cwd),
+        *_optional(_check_model_pick_reader()),
         _check_self_invocation(cwd),
         _check_fleet(),
         *_check_dead_managers(),
@@ -3106,6 +3108,13 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
             # every seat was silently exempt from the board's only tiering signal.
             complaint = harness.model_mismatch(team_service.base_role(session.role), session.model)
             if complaint:
+                # A model the owner chose for it is off no ladder (#16, review of #441).
+                complaint = harness.model_mismatch(
+                    team_service.base_role(session.role),
+                    session.model,
+                    chosen=model_memory.chosen_models(session),
+                )
+            if complaint:
                 mismatches.append(f"{session.id[:8]} ({session.role}): {complaint}")
         problems: list[str] = []
         if interference:
@@ -3133,6 +3142,29 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
         return _ok(name, detail)
     except Exception:  # diagnostics must never crash
         return _ok(name, "not evaluated")
+
+
+def _check_model_pick_reader() -> DoctorCheck | None:
+    """Whether an owner's ``/model`` or ``/effort`` in a fleet agent went unread (#16, rounds
+    6 and 7 of #441): Claude Code answered in words the fleet's pick reader does not know, or
+    recorded one outside the frame it reads. No pick was written from it and a restart starts
+    the model the agent ran before it, so a newer Claude Code's change is said, not silent.
+    ``None`` until an answer reads as a success again (the row stays out of the way), and for
+    a home not made yet, which doctor never makes."""
+    if _uncreated_home("fleet model pick") is not None:
+        return None
+    found = model_memory.unread()
+    if found is None:
+        return None
+    return _warn(
+        "fleet model pick",
+        f"{found.get('said', '?')} ({found.get('at', '?')[:19]}): not read as a choice, so no "
+        "pick was written, and a restart starts the model the agent ran before it",
+        "if Claude Code was updated, update aisquare (`aisquare upgrade`); a teammate's message "
+        "quoting a /model record also shows here, and is harmless. Meanwhile name the model on "
+        "the spawn (`fleet spawn <role> --model …`) or the restart (`fleet restart <label> "
+        "--model …`)",
+    )
 
 
 def _check_self_invocation(cwd: Path | None = None) -> DoctorCheck:

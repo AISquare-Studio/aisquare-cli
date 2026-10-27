@@ -168,9 +168,9 @@ tmux can see and its row says so (`no hooks`).
    spawn's own default, and says what that runs on and why: `(default: rank 1 ·
    work)`, `(default: headroom · work)`, `(default: bound to tester · account
    2)` or `(default: project default · work)`, what `accounts order`, `team
-   bind` and `accounts default --project` decide for the role picked and a
-   `--model` in Extra agent args (read again when either changes; the captain's
-   dialog the same for the captain). It
+   bind` and `accounts default --project` decide for the role picked and the
+   model it runs (a `--model` in Extra agent args, else the Model field; read
+   again when either changes; the captain's dialog the same for the captain). It
    reads `(this shell's)` only when no account is signed in, so the spawn leaves
    this shell's `CLAUDE_CONFIG_DIR` as it is. A headroom pick is shown from the
    readings the status line already has; the spawn picks again when it runs.
@@ -188,7 +188,10 @@ tmux can see and its row says so (`no hooks`).
    disables *Spawn* and shows the rule), task (the project's open tasks),
    worktree (disabled with "not a git repository" outside one), *Claude Remote
    Control* (Claude Code's own, at the role's `remote_control`; it follows the role
-   until you touch it), permission mode,
+   until you touch it), permission mode, **model** and **effort** (opened on your
+   last pick, whatever the role, or on what a role's settings pin for that role;
+   blank is the account's own default, and clearing a field makes that your pick
+   too: [The roles](#the-roles)),
    extra agent args (split like a shell would; a quoting error is shown inline)
    and a first prompt. A field left as it opened means the role's default,
    exactly as an omitted `fleet spawn` flag does; picking `(none)` over a role
@@ -240,12 +243,97 @@ manager's loop. Model ladders and effort come from the existing harness
 (`aisquare team harness` shows the matrix): the manager rides the planner's
 ladder (`fable → opus → sonnet`); coder, tester, ui-tester and reviewer start on `sonnet`
 with `opus` as the fallback rung; the validator runs `fable → opus`, one effort
-tier above the work it gates. `fleet spawn` passes the role's rung and effort to the
-agent (`--model`, `--effort`) from the cached probe only — never a probe at spawn — and
-records both, so a restart or switch starts the same model; arguments that already name
-a model or an effort (the binding's `--arg`, the role's `extra_args`, yours) are left as
-they are, and another binary gets neither. `fleet ls --json` shows them in each agent's
-`launch_spec`.
+tier above the work it gates. Those ladders are what `team spawn` prints; **`fleet spawn`
+runs the model and effort you last chose** (0.9.1; 0.9.0 passed the ladder's top rung, so
+a manager always started on Fable at high effort over the default you saved with
+`/model`). Each of the two is decided on its own, in this order: a `--model` or
+`--effort` in the spawn's own arguments (`fleet spawn manager --model opus --effort
+xhigh`, or the Spawn dialog's Model and Effort fields and Extra agent args); then the
+role's settings, its `[fleet.roles.<role>] extra_args` or its binding's `--arg`, which is
+where a role is customised; then your last pick; and with none, no flag at all, so Claude
+Code runs the account's own saved default, as before 0.9.0. A flag the spawn names
+replaces the role's, the binding's included, so Claude Code is never given two. An empty
+one (`--model ""`) is refused: leave it out instead, and clear the dialog's field to
+forget your pick.
+
+**Your last pick is one per home**, for every role and persona alike. Only your own choices
+write it: a spawn of yours that names one (from asq's dialog or your own shell; a cleared
+dialog field forgets it, unless the role's settings pin that flag, whose pin then runs and
+whose blank says so), and the built-in `/model` or `/effort` you run inside any fleet agent
+(or `/config` → Model, which sets the model the same way), which its next turn end finds
+in Claude Code's own record of the command: the frame Claude
+Code writes for a local command (its caveat, the command, its answer, each the last one's
+child), which no text can make, so a typed prompt, a board note or a compaction summary
+that quotes one counts for nothing, and a command Claude Code never answered for nothing
+either. Only an answer that says the command succeeded is a choice: `Set model to `Opus
+5.5`` (`claude-opus-5-5`, or what you typed after `/model`), the 2.1.311 picker's `… with
+`xhigh` effort`, which sets the effort too, and `Set effort level to high`. The picker's
+`Default (recommended)` forgets the model pick and `/effort auto` the effort pick: the
+account's default from then on. A choice "for this session only" runs on in that agent
+and is no pick, and so does ultracode switched on or off for the session (`Ultracode on
+(this session only)`; the `/effort` picker's Tab with a saved level saves the level and
+runs ultracode). Leaving a picker (`Kept model as …`, `Cancelled`) sets nothing, and
+neither does a command Claude Code refused (`Model 'sonet' not found`, `Invalid argument`):
+a typo never becomes your pick. Only commands stamped after the agent's row was bound to
+its transcript count (its creation, or the moment it moved to another file): a fork or a
+`/branch` does not re-read the history it copied, nor a `/resume` or a `fleet switch` the
+conversation it took up.
+**Change the model at the prompt, not mid-turn**: a `/model` typed while a turn runs
+switches the agent but Claude Code 2.1.311 writes no record of it, so it is no pick and a
+restart starts the model the agent had before (a known limit; aisquare guesses nothing
+from the replies). Three more save a default that Claude Code 2.1.311 records nowhere
+(known limits): **alt+p**'s model picker is no pick, so a restart, a switch or a hand-over
+starts the previous model (use `/model` or `/config` → Model), and its ←/→ effort is
+unrecorded the same way; the effort "medium nudge" dialog ("Effort set to medium and saved
+as your default") records nothing either; and the Fable usage-credits fallback ("Switched
+to X — now your default model", a `model_consent_fallback` record) is a fallback, not a
+preference, so it is deliberately no pick.
+**A replay keeps your last effort change**: `claude --effort` takes one
+value, so Claude Code's `high · ultracode` cannot be replayed as such (a known limit, as
+decided). If your last change set a level (`/effort high` while on ultracode), a restart
+passes that level; if it turned ultracode on (`/effort ultracode`, or the picker's `·
+Ultracode on`), it passes `--effort ultracode`, xhigh plus workflows, whatever level it sat
+on: `low`, `medium` or `high · ultracode` replay at xhigh, and `max · ultracode` at xhigh,
+the level dropping. The effort `/config`'s Model panel moves is recorded nowhere by Claude
+Code 2.1.311, so it is no pick and a restart starts the effort before it: set the effort
+with `/effort` or `/model`'s picker. A `/model` or `/effort` you run
+after an agent's last turn counts at a restart, a switch, a hand-over or a fork before its
+next one, which read it first. **Nothing else is evidence**: a model or an effort that
+merely differs
+from the last turn's, as a custom command's or a skill's `model:` or `effort:` frontmatter
+makes it for ONE turn, writes no pick and moves nothing, whoever typed it. The reader
+knows Claude Code 2.1.310's and 2.1.311's words and frames; an answer in other words, or a
+`/model` record outside the frame, writes nothing, says so on stderr once, and doctor
+shows it as `fleet model pick` until an answer reads as a success again (text a
+teammate quotes can show there too, harmlessly). The captain writes the pick only from
+its own call path (the
+captain on, its own row; its spawns take no model), never from an `--as captain` an agent
+typed. These guards keep cooperating agents from writing your pick by mistake; they are
+no wall against a process that sets `AISQUARE_FLEET_AGENT` or the store itself. A spawn
+an agent makes (`fleet spawn … --as <session>`, or from a fleet agent's own shell, such
+as a manager's) runs its flags for that one agent and leaves your pick alone. Nor may an
+agent hand another a `/model` or `/effort` as a message (one
+that opens with it, after spaces, line breaks or invisible format characters): its `fleet
+tell` is refused and pointed at `fleet restart <label> --model/--effort`, which runs that
+agent alone on it and is no pick either, and its spawn whose first message would open with
+one is refused before anything starts and pointed at the spawn's own `--model`/`--effort`
+(with a task, the first message opens with its kickoff, and goes through). Yours and the
+captain's go through. Only the agent's own session counts: a `claude -p` run from its shell
+is not the agent. A role's settings are that role's alone and never write the pick.
+
+A restart, a `fleet switch`, a hand-over and a fork as the same role start what the agent
+runs: its launch's model and effort (what its session start reported, its own `--effort`,
+else its first plain turn's), as a recorded `/model` or `/effort` alone moved them, the
+account default it started on included, on whatever account it moves to. That wins over
+the recorded flag and over a binding's pin too (`aisquare launch` drops the binding's flag
+beside it), and the recorded flag stays where nothing moved it (an alias like `opus` and a
+mode alias like `opusplan` as written). A fork as another role is a new spawn of that role:
+its settings, else your pick. None of them changes your pick. Any model or effort Claude
+Code takes is kept as written (`fable`, `claude-opus-5-5`, `opus[1m]`, `opusplan`; `low` to
+`max`, `ultracode`); another binary gets neither flag. `fleet ls --json` shows the flags a
+spawn added in each agent's `launch_spec` (`model`, `effort`) and its `command`. The board's
+`⚠ off-ladder` chip stands down for a session on a model you chose for it: your pick, its
+spawn's args or its role's settings.
 
 **One tester per task.** The manager spawns a tester for each task that reaches review:
 `fleet spawn tester --task <id>` (a ui-tester for a task titled "UI: …"). Its cycle takes
@@ -265,8 +353,7 @@ final gate over the assembled deliverable.
 No role at all is `agent`: `aisquare fleet spawn agent` (the Spawn dialog's
 *(none) — general-purpose Claude*) starts a plain Claude Code session, labelled
 `agent-1` and on, that joins the board like any agent but is briefed with no
-standing cycle and no mission, and runs on the session's own model rather than a
-role's ladder. `aisquare launch agent` is the same outside the fleet.
+standing cycle and no mission, and runs on your last pick like every other spawn. `aisquare launch agent` is the same outside the fleet.
 
 The manager talks to its agents only through the board — tasks, notes, signals
 — and `fleet tell` nudges. When a sub-agent writes a result to the board, the
@@ -1155,8 +1242,9 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   per-family weeks count too, for an agent of that family: Claude Code's Opus
   and Sonnet limits apply only to requests to that model family, so an account
   whose Opus week is spent is no room for an Opus agent and still is for a
-  Sonnet one (the family is the session's model, or for a spawn its `--model`
-  or the role's ladder). A spent family week is no answer at all for that
+  Sonnet one (the family is the session's model, or for a spawn the `--model`
+  it runs: its own, its role's, or your last pick; with none, the account's own
+  default, no family). A spent family week is no answer at all for that
   family, not even the least bad one a switch by hand would take. A window the
   endpoint marks locked reads 100 % used.
   `[accounts] prefer = "reset-soonest"` (*under the line, prefer* in App
@@ -2259,7 +2347,8 @@ hatch (`F12`), the scroll keys below, ctrl+c while text is highlighted in that
 pane (it copies) and cmd+c, which is only ever the copy. Printable characters
 travel as typed —
 except with alt held on an ASCII letter, where the chord is the meaning (`M-p`,
-so Claude Code's alt+p switches the model; alt+shift+a is `M-A`). Special keys
+so Claude Code's alt+p opens its model picker, though what it saves is recorded nowhere
+and is no fleet pick: see [The roles](#the-roles); alt+shift+a is `M-A`). Special keys
 are translated into tmux's names (Enter, BSpace, ctrl+c → `C-c` when nothing is
 selected, shift+tab → `BTab`, …), and so are alt+digit and alt+space when the
 terminal reports them as chords rather than as text (`M-1`, `M-Space` — the
@@ -2708,7 +2797,8 @@ set stays as it was. New keys follow their defaults until you set them:
 - `task add` warns on stderr when a contract lacks `objective:`, `acceptance:` or
   `boundaries:`.
 - `fleet spawn` passes the role's model ladder (`--model`, `--effort`), and a tester
-  spawned for a task verifies that one task and stops.
+  spawned for a task verifies that one task and stops. (0.9.1 runs your last pick
+  instead, or the account's default: [The roles](#the-roles).)
 
 **Moving back** with `aisquare upgrade --version <v>` is safe for the store: an older build
 opens a v37 store as it is, without migrating it down, and never reads the two columns.

@@ -592,6 +592,11 @@ def launch(
         _check_persona(persona, persona_root)
 
     env = {**os.environ, "AISQUARE_ROLE": role}
+    if orchestrator.env_fleet_agent() is not None:
+        # A fleet window inherits the tmux server's environment, whoever started it: from a
+        # Claude Code session, its CLAUDE_EFFORT. The agent runs its own `--effort`, or the
+        # account's default, and its Stop hook reads the effort it runs (#16, seq 3513).
+        env.pop("CLAUDE_EFFORT", None)
     if persona is not None:
         # The name travels, never the body: argv is visible in `ps` and a body
         # can be thousands of characters. The session-start hook resolves it and
@@ -685,6 +690,12 @@ def launch(
     )
     role_args = [*defaults.args, *policy.args]
     binding_args, agent_args = policy.strip(profile.args), policy.strip(ctx.args)
+    # A model or an effort this line names replaces the binding's: a fleet window's own
+    # (the spawn's `--model`, the Spawn dialog's field, a restart of what the agent runs
+    # now) wins over the role's settings, and Claude Code was given both (#16).
+    for flag in ("--model", "--effort"):
+        if harness.flag_arg(agent_args, flag) is not None:
+            binding_args = harness.without_flag(binding_args, flag)
     for note in [*defaults.notes, *policy.notes]:
         # A withheld flag is otherwise invisible: the launch succeeds and the
         # role degrades silently (a ui-tester with no browser reopens every UI

@@ -37,6 +37,7 @@ import shutil
 import sqlite3
 import subprocess
 import time
+import unicodedata
 import uuid
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import suppress
@@ -113,6 +114,7 @@ from aisquare.services import (
     delivery,
     explainability_ops,
     install_route,
+    model_memory,
     pane_idle,
 )
 from aisquare.services import claude_accounts as claude_accounts_service
@@ -3362,6 +3364,10 @@ def spawn(
     board_context: str | None = None,
     replaces: str | None = None,
     account_pinned: bool | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+    running: model_memory.Running | None = None,
+    picks: bool = True,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -3382,6 +3388,18 @@ def spawn(
 
     ``board_context`` (``--board-context``) is what of the board it reads: the flag, else
     the replayed spec's, else ``[fleet.roles.<role>] board_context`` (P1 WS-2, #279).
+
+    ``model`` and ``effort`` are the Spawn dialog's fields, or a restart's own (``fleet
+    restart … --model``): ``None`` unsaid, ``""`` the account's own default (the role's pin,
+    over a role whose settings pin it), a value a choice as a ``--model`` in ``agent_args``
+    is. What the agent runs is :func:`_model_choice`'s: the spawn's own choice, the role's
+    settings, then the owner's last pick (``services.model_memory``); nothing at all is the
+    account's default. Only an OWNER's new spawn (:func:`_the_owners_spawn`: asq, the
+    owner's shell) makes its own choice the next pick, once its agent is up; an agent's
+    spawn runs it for that agent alone, and ``picks=False`` is a restart's, a switch's and a
+    hand-off's, which never write it (3386), whatever role they run. ``running`` is a
+    replay's: what the replaced agent runs now and what its launch ran (:func:`_running`),
+    kept in place of the recorded flag.
 
     ``spec`` REPLAYS a recorded launch (#144): the binary, permission mode,
     worktree choice and arguments come from what the agent was started with,
@@ -3499,6 +3517,11 @@ def spawn(
     """
     config = settings()
     _require_role(role)
+    # Before anything starts: an agent's spawn may not hand its agent a /model or /effort
+    # as its first message (#16, seq 3581). A replay's and a hand-off's open with our own words.
+    _refuse_an_agents_opening_command(
+        project, role, prompt, spawned_by, kickoff_first=task_id is not None and kickoff
+    )
     if experimental.captain_role(role) and not _is_home_project(project):
         raise FleetError(
             "the captain lives on the home board, one per home — `aisquare captain` starts "
@@ -3650,6 +3673,23 @@ def spawn(
         refuse_if_taken()
 
     mode = role_config.permission_mode if permission_mode is None else permission_mode
+    # A replayed spec already holds the role's arguments as they were at spawn;
+    # adding today's would double them (or add ones the agent never had).
+    role_args = [] if spec is not None else list(role_config.extra_args)
+    # The model and the effort: what this spawn chose, else the role's settings, else the
+    # owner's last pick, else nothing (the account's own default); a replay starts what the
+    # agent runs now. Asked before the account, whose pick reads the model's family (#277).
+    models = _model_choice(
+        role,
+        resolution.binary,
+        role_args,
+        agent_args,
+        spec=spec,
+        running=running,
+        model=model,
+        effort=effort,
+    )
+    role_args = models.role_args
     # WHICH ACCOUNT, decided here and carried into the window as an explicit
     # `--account <slot>` (#145). The one resolver `launch` itself uses — flag,
     # role binding, project default, machine default — runs HERE rather than
@@ -3661,8 +3701,9 @@ def spawn(
     # ladder names and the machine does not have refuses the spawn now, with
     # the rung named, rather than starting a window that dies on its first line.
     try:
-        # The family the agent will run, for the pick's per-family weeks (#277).
-        family = harness.launch_family(role, [*role_config.extra_args, *agent_args])
+        # The family the agent will run, for the pick's per-family weeks (#277): the one
+        # answer the dialog's label reads too (`spawn_runs`).
+        family = harness.model_family(models.runs.model)
         choice = claude_accounts_service.choose(account, role=role, project=project, family=family)
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc
@@ -3682,16 +3723,10 @@ def spawn(
         # tombstone kept, which the caller's registration did not carry.
         views = _observe_sockets(rows, session_name(codename), config)
     notes.extend(f"accounts: {note}" for note in choice.notes)
-    # A replayed spec already holds the role's arguments as they were at spawn;
-    # adding today's would double them (or add ones the agent never had).
-    role_args = [] if spec is not None else list(role_config.extra_args)
-    extra = list(agent_args)
-    # The role's model and effort down its ladder (#129 b), as `team spawn` launches them:
-    # the fleet path never asked, so every agent ran on the account's default model.
-    # Recorded in the spec's own fields, not its arguments (the role's and the caller's),
-    # so a restart or switch starts the model it recorded.
-    ladder = _ladder(role, resolution.binary, [*role_args, *extra], spec)
-    model_flags = [] if ladder is None else ["--model", ladder[0], "--effort", ladder[1]]
+    extra = models.extra
+    # Recorded in the spec's own fields, not its arguments (the role's and the caller's), so
+    # a restart or switch starts them.
+    model_flags = models.flags
     if replayed_args:
         # Filtered on the way OUT as well as on the way in: a spec written before
         # session choices were left out of it still holds them, and a board
@@ -3998,8 +4033,8 @@ def spawn(
                 recorded_by=__version__,
                 hub=hub,
                 remote_control=asked_remote,
-                model=ladder[0] if ladder is not None else None,
-                effort=ladder[1] if ladder is not None else None,
+                model=models.added.model,
+                effort=models.added.effort,
                 board_context=reads,
             ),
             socket_path=socket_path,
@@ -4024,6 +4059,12 @@ def spawn(
             codename=codename,
             replaces=replaces,
         )
+    if picks and spec is None and _the_owners_spawn(spawned_by):
+        # The next spawn's pick, once this agent is up: a spawn refused on its way chose nothing.
+        try:
+            model_memory.remember(model=models.picked.model, effort=models.picked.effort)
+        except Exception as exc:  # the agent runs all the same
+            notes.append(f"the model and effort it was given are not remembered ({exc})")
     # The auto-mode note (#150), from the evidence read before the window: on the
     # receipt when this machine's transcripts say so, a warning, never a reason
     # not to spawn. Worded once the row is written, so the restart it names is
@@ -6075,6 +6116,10 @@ def tell(
     agent it showed, and a replacement that took the label since (a manager's
     restart or switch, in another process) is refused, not typed into.
 
+    An agent's tell may not open with ``/model`` or ``/effort``
+    (:func:`_refuse_an_agents_setting_command`): typed into an agent it becomes the owner's
+    pick for every spawn (#16).
+
     And the pane must be the row's own (:func:`_its_agent`): on the server that took a row's
     socket, its pane id is another agent's. A held row read its board's ``waiting`` while
     that was fresh, and pasted into, that agent got the text and an Enter (review of #259,
@@ -6099,6 +6144,7 @@ def tell(
     there, the agent's ``UserPromptSubmit`` its acknowledgement. A busy agent gets the note
     at the end of its turn (``team.hook_stop``, ``[fleet] deliver_notes_at_turn_end``).
     """
+    _refuse_an_agents_setting_command(project, label, text, sender)
 
     def noted(why: str) -> str:
         """``why``, and the board note filed in the message's place, when there is one."""
@@ -6332,6 +6378,71 @@ def attach_persona(
     )
 
 
+#: A ``/model`` or ``/effort`` command at the start of a message, after any spaces and line
+#: breaks: Claude Code runs it as typed (``claude '/model sonnet'`` saves it as the account's
+#: default), and the agent's next Stop reads it as the owner's choice (#16). Case counts:
+#: Claude Code answers ``/MODEL`` with "Unknown command".
+_SETTING_COMMAND = re.compile(r"^\s*/(model|effort)(\s|$)")
+
+
+def setting_command(text: str | None) -> str | None:
+    """The setting command ``text`` opens with (``/model`` or ``/effort``), else ``None``.
+    Unicode format characters (category Cf: a BOM, a zero-width space…) are no text to
+    Claude Code, which ran a BOM-led ``/effort low`` (2.1.311, seq 3609): they are dropped
+    first."""
+    if not text:
+        return None
+    visible = "".join(char for char in text if unicodedata.category(char) != "Cf")
+    found = _SETTING_COMMAND.match(visible)
+    return f"/{found.group(1)}" if found is not None else None
+
+
+def _refuse_an_agents_setting_command(
+    project: ProjectInfo, label: str, text: str, sender: str | None
+) -> None:
+    """Refuse a ``/model`` or ``/effort`` an agent would type into another (manager decision,
+    seq 3428 b; seq 3581, 1): typed into an agent it is read as the owner's, and becomes the
+    pick every later spawn runs. An agent's tell is one with ``sender`` (``--as``) or from a
+    fleet agent's own environment; the owner's (neither, from a shell or asq, or the phone)
+    and the captain's, which types what the owner said, go through. The way out is ``fleet
+    restart <label> --model/--effort``, for that agent alone."""
+    command = setting_command(text)
+    if command is None:
+        return
+    own = orchestrator.env_fleet_agent()
+    if sender is None and own is None:
+        return
+    if own is not None and _the_captains_row(own):
+        return  # the captain types what the owner said; never trusted from `--as` (seq 3609)
+    flag = command.replace("/", "--")
+    raise FleetError(
+        f"an agent cannot type {command} into {label}: there it becomes the owner's pick, which "
+        "every later spawn runs (#16) — restart it on what it should run, for that agent "
+        f"alone: `{project_service.fleet_command('restart', project, label)} {flag} <value>`"
+    )
+
+
+def _refuse_an_agents_opening_command(
+    project: ProjectInfo, role: str, prompt: str | None, spawned_by: str, *, kickoff_first: bool
+) -> None:
+    """Refuse an agent's spawn whose first message opens with ``/model`` or ``/effort`` (seq
+    3581, 2): Claude Code runs it, and the new agent's next Stop reads it as the owner's.
+    The first message is the prompt as given, unless a task's kickoff comes first
+    (``kickoff_first``), when no command opens it (seq 3609, minor). Asked before anything
+    starts. The owner's spawn (:func:`_the_owners_spawn`) goes through; an agent's is
+    pointed at its own ``--model`` / ``--effort``, which run for that agent alone."""
+    command = None if kickoff_first else setting_command(prompt)
+    if command is None or _the_owners_spawn(spawned_by):
+        return
+    flag = command.replace("/", "--")
+    raise FleetError(
+        f"a spawn an agent makes cannot open with {command}: its first message would run it in "
+        "the new agent, where it becomes the owner's pick, which every later spawn runs (#16) — "
+        f"give the spawn its own flag, for that agent alone: "
+        f"`{project_service.fleet_command('spawn', project, role)} {flag} <value>`"
+    )
+
+
 def _note_board(store: ContextStore, project: ProjectInfo, label: str) -> str | None:
     """The board a note to ``label`` in ``project`` goes to, through ``store``: the one the
     live row ``label`` names recorded (:func:`_board_of_row`); ``None`` with no live row of
@@ -6343,30 +6454,223 @@ def _note_board(store: ContextStore, project: ProjectInfo, label: str) -> str | 
     return None if agent is None else _board_of_row(agent)
 
 
-#: The agent flags that choose a model or an effort; one already in a spawn's arguments
-#: (the binding's, the role's ``extra_args``, the caller's) is the caller's choice.
-_MODEL_FLAGS = ("--model", "--effort")
+@dataclass(frozen=True)
+class _ModelChoice:
+    """What a spawn passes for the model and the effort (:func:`_model_choice`)."""
+
+    role_args: list[str]
+    """The role's arguments, less a flag this spawn chose itself."""
+    extra: list[str]
+    """The spawn's own arguments (a replay's recorded ones), less a flag the agent's live
+    value replaces."""
+    added: model_memory.Pick
+    """The ``--model`` and ``--effort`` added beside the arguments, recorded in the spec's
+    own fields (``LaunchSpec.model``, ``effort``) so a restart or switch starts them."""
+    runs: model_memory.Pick
+    """What the agent runs as far as this spawn can say (``None`` is the account's default):
+    its model is the family the account pick reads (#277)."""
+    picked: model_memory.Pick
+    """This spawn's own pick, to remember once the agent is up: ``None`` leaves the memory,
+    ``""`` forgets it (``model_memory.remember``)."""
+
+    @property
+    def flags(self) -> list[str]:
+        return [
+            *(["--model", self.added.model] if self.added.model else []),
+            *(["--effort", self.added.effort] if self.added.effort else []),
+        ]
 
 
-def _ladder(
-    role: str, binary: str, args: Sequence[str], spec: LaunchSpec | None
-) -> tuple[str, str] | None:
-    """``(model, effort)`` a spawn passes (#129 b), when the binary is the default agent
-    and no ``--model`` or ``--effort`` is in the binding's arguments, the role's
-    ``extra_args`` or the caller's: what ``spec`` recorded on a replay, else ``role``'s
-    ladder resolved with the cached probe only (``probe=False``: never the 150 s probe at
-    spawn). ``None`` otherwise, and for an untiered role.
+def _model_choice(
+    role: str,
+    binary: str,
+    role_args: Sequence[str],
+    extra: Sequence[str],
+    *,
+    spec: LaunchSpec | None,
+    running: model_memory.Running | None,
+    model: str | None,
+    effort: str | None,
+) -> _ModelChoice:
+    """The model and the effort a spawn of ``role`` runs, each decided on its own.
+
+    A new agent (#16 on the board; #338 passed the role ladder's top rung here, which
+    overrode the default the owner saved with ``/model``): ``extra``'s own flag, else
+    ``model`` / ``effort`` (the Spawn dialog's fields: a value is a pick, ``""`` the
+    account's default), then the role's settings (its ``extra_args``, ``role_args``, or its
+    binding's arguments), then the owner's last pick (``model_memory.remembered``), whatever
+    the role. With none, no flag: Claude Code runs the account's own default. A flag this
+    spawn chose replaces the role's, and ``aisquare launch`` drops the binding's beside it
+    (no flag is passed twice); it is the next pick. The role's settings are that role's
+    alone, and never the pick. An empty ``--model`` or ``--effort`` in ``extra`` is refused:
+    only the dialog's cleared field asks for the account's default (seq 3424, b).
+
+    A cleared field (``""``) over a role whose settings pin that flag is no choice at all:
+    the pin runs. A replay given ``model`` / ``effort`` (``fleet restart … --model``) runs
+    it, for that agent alone. Otherwise a replay of ``spec`` (restart, switch, hand-over,
+    and a fork as the same role; a fork as another role is a new spawn of that role) keeps
+    what the agent was actually running (``running.now``, its hooks' last reading,
+    ``model_memory.observe``), the account's default included, on any account
+    (:func:`_moved`), in place of the recorded flag and the binding's; the recorded flag
+    stays where it already runs that (an alias and the id its session reported for it, a
+    mode alias and its models). A replay remembers
+    nothing. Another binary than Claude Code gets nothing added.
     """
+    role_args, extra = list(role_args), list(extra)
     if not harness.is_default_agent(binary):
-        return None
-    bound = harness.resolve_profile(role).args
-    if any(arg in _MODEL_FLAGS or arg.startswith(tuple(f"{f}=" for f in _MODEL_FLAGS))
-           for arg in [*bound, *args]):  # fmt: skip
-        return None
-    if spec is not None and spec.model is not None and spec.effort is not None:
-        return spec.model, spec.effort
-    resolved = harness.resolve_model(role, probe=False)
-    return None if resolved is None else (resolved.model, resolved.effort)
+        named = [*role_args, *extra]
+        ran = model_memory.Pick(harness.model_arg(named), harness.flag_arg(named, "--effort"))
+        return _ModelChoice(role_args, extra, model_memory.Pick(), ran, model_memory.Pick())
+    bound = harness.binding_args(role)
+    remembered = model_memory.remembered() if spec is None else model_memory.Pick()
+    added: dict[str, str | None] = {}
+    runs: dict[str, str | None] = {}
+    picked: dict[str, str | None] = {}
+    for flag, name in (("--model", "model"), ("--effort", "effort")):
+        of_binding = harness.flag_arg(bound, flag)
+        given = model if name == "model" else effort
+        if spec is not None:
+            recorded = harness.flag_arg(extra, flag)
+            then = recorded or getattr(spec, name) or of_binding
+            if given == "":
+                raise FleetError(f"{flag} needs a value for a replay: name one, or leave it out")
+            if given is not None:
+                # `fleet restart … --model`: that agent's, over all it ran and recorded.
+                extra = harness.without_flag(extra, flag)
+                added[name] = runs[name] = given
+            elif running is not None and _moved(
+                name, getattr(running.now, name), getattr(running.launched, name), then
+            ):
+                extra = harness.without_flag(extra, flag)
+                added[name] = runs[name] = getattr(running.now, name)
+            else:
+                added[name] = None if recorded is not None else getattr(spec, name)
+                runs[name] = then
+            continue
+        typed = harness.flag_arg(extra, flag)
+        if (typed is None and flag in extra) or typed == "":
+            raise FleetError(
+                f"{flag} needs a value: name one ({flag} "
+                f"{'opus' if name == 'model' else 'xhigh'}), or leave it out to run your last "
+                "pick, or the account's own default with none; the Spawn dialog's cleared "
+                f"{name.capitalize()} field is what forgets the pick"
+            )
+        asked = typed if typed is not None else given
+        of_role = harness.flag_arg(role_args, flag)
+        if asked == "" and (of_role is not None or of_binding is not None):
+            # A cleared field is no pick, and the role's settings win over the pick: over a
+            # pin, of either kind, the pin runs and the pick is left alone (review of #441,
+            # round 2, minor 2).
+            asked = None
+        if asked is not None:
+            role_args = harness.without_flag(role_args, flag)
+            added[name] = asked if typed is None and asked else None
+            runs[name] = asked or None
+            picked[name] = asked
+        elif of_role is not None or of_binding is not None:
+            runs[name] = of_role or of_binding
+        else:
+            added[name] = runs[name] = getattr(remembered, name)
+    return _ModelChoice(
+        role_args,
+        extra,
+        model_memory.Pick(added.get("model"), added.get("effort")),
+        model_memory.Pick(runs.get("model"), runs.get("effort")),
+        model_memory.Pick(picked.get("model"), picked.get("effort")),
+    )
+
+
+def _moved(name: str, now: str | None, launched: str | None, then: str | None) -> bool:
+    """Whether a replay starts ``now``, what the agent runs (its ``name``, model or effort:
+    its launch's, as a recorded ``/model`` or ``/effort`` alone moved it,
+    ``model_memory.replay_from``), in place of the recorded flag ``then``. With no flag,
+    whenever it is known: what the agent ran, the account's default it started on included,
+    kept on any account it moves to (manager decision, seq 3428 a). With a flag, when a
+    command moved it off what the launch ran (``launched``); else the flag stays, an alias
+    (``opus``) and a mode alias (``opusplan``) as written. An effort is compared verbatim:
+    a live one comes from a recorded command alone, and ``ultracode`` is not ``xhigh``, as
+    Claude Code's own reading has it (seq 3759 (1): the owner's toggle, either way)."""
+    if now is None:
+        return False
+    if then is None or launched is None:
+        return True
+    if name == "model":
+        return not harness.same_reading(now, launched)
+    return harness.clean_effort(now) != harness.clean_effort(launched)
+
+
+def _the_owners_spawn(spawned_by: str) -> bool:
+    """Whether a spawn is the owner's choice, whose model and effort are the next pick
+    (manager decision, seq 3428 b): the owner's shell or asq (``user``, from no fleet agent's
+    environment), or the captain acting on the owner's words, from its own call path alone
+    (:func:`_the_captains_row`; its spawn takes no model today, ``captain.actions.spawn``).
+    A spawn an agent makes (``fleet spawn … --as <session>``, ``--as captain`` included, or
+    run from a fleet agent's own shell, which inherits its ``AISQUARE_FLEET_AGENT``) runs its
+    flags for that one agent."""
+    own = orchestrator.env_fleet_agent()
+    if own is None:
+        return spawned_by == "user"
+    # In a fleet agent's environment the captain's own call path alone is the owner's: never
+    # an `--as captain` any agent can type (seq 3609, 2).
+    return _the_captains_row(own)
+
+
+def _the_captains_row(agent_id: str) -> bool:
+    """Whether ``agent_id`` (a process's ``AISQUARE_FLEET_AGENT``) is the live captain's own row,
+    with the captain on: the one caller in a fleet agent's environment that acts on the
+    owner's words (seq 3609, 2). Never decided by a name a caller passes."""
+    if not experimental.captain_enabled():
+        return False
+    with store_session() as store:
+        row = store.get_fleet_agent(agent_id)
+    return row is not None and row.ended_at is None and row.role == CAPTAIN_ROLE
+
+
+def _running(agent: FleetAgent, session: TeamSession | None) -> model_memory.Running | None:
+    """What a replay of ``agent`` starts from: what its session runs now and what its launch
+    ran (``model_memory.replay_from``), with what its transcript holds since its last turn
+    end read first (``model_memory.caught_up``): a ``/model`` the owner ran after it and
+    before this replay is kept (seq 3797 (2))."""
+    model_memory.caught_up(agent, session)
+    return model_memory.replay_from(agent, session)
+
+
+def spawn_runs(
+    role: str,
+    agent_args: Sequence[str] = (),
+    *,
+    model: str | None = None,
+    effort: str | None = None,
+    binary: str | None = None,
+    config: FleetSettings | None = None,
+) -> model_memory.Pick:
+    """The model and effort a new spawn of ``role`` runs (``None`` each: the account's own
+    default), worked out by the spawn's own rule (:func:`_model_choice`), with ``agent_args``
+    and the Spawn dialog's ``model`` / ``effort`` as :func:`spawn` takes them. The ONE
+    answer the dialog's account label reads, for the family a headroom pick reads (#277),
+    so the two never disagree (review of #441, round 2, minor 1). An empty flag in
+    ``agent_args``, which the spawn refuses, runs nothing."""
+    try:
+        return _model_choice(
+            role,
+            binary or harness.resolve_binary(role).binary,
+            role_settings(role, config).extra_args,
+            agent_args,
+            spec=None,
+            running=None,
+            model=model,
+            effort=effort,
+        ).runs
+    except FleetError:
+        return model_memory.Pick()
+
+
+def role_pin(role: str, config: FleetSettings | None = None) -> model_memory.Pick:
+    """The model and effort ``role``'s settings pin (``[fleet.roles.<role>] extra_args``, else
+    its binding's ``--arg``), which a spawn of it runs over the owner's last pick; ``None``
+    each for none. The Spawn dialog shows them for that role."""
+    args = [*role_settings(role, config).extra_args, *harness.binding_args(role)]
+    return model_memory.Pick(harness.model_arg(args), harness.flag_arg(args, "--effort"))
 
 
 def _board_context(
@@ -8517,8 +8821,13 @@ def _respawn(
     team_line: str | None = None,
     replaces: str | None = None,
     account_pinned: bool = False,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> tuple[SpawnReceipt, bool, list[str]]:
     """Start ``agent`` again — same label, role, task and worktree — resuming when it can.
+
+    ``model`` and ``effort`` are a restart's own (``fleet restart … --model``): the
+    replacement's, over what the agent ran; never the pick.
 
     ``team_line`` is a restarted manager's (:func:`_dead_team_line`, #38): its dead team and
     their restart commands, ending the first message resumed or fresh.
@@ -8624,6 +8933,11 @@ def _respawn(
         ack_wait=ack_wait,
         account_pinned=account_pinned,
         replaces=replaces,
+        # What it runs now, over the recorded launch: a `/model` made since is kept.
+        running=_running(agent, session),
+        model=model,
+        effort=effort,
+        picks=False,  # a replacement is no new choice of the owner's (3386)
     )
     if agent.launch_spec is not None and replay:
         # Said once the replacement is up, for what it really took from the row: a
@@ -8895,8 +9209,13 @@ def restart(
     before_stop: Callable[[], None] | None = None,
     ack_wait: float = 0.0,
     team: Sequence[FleetAgentStatus] | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> RestartReceipt:
     """Start an agent again under its own label — the **Restart** of #138.
+
+    ``model`` and ``effort`` (``fleet restart … --model``) are the replacement's, over the
+    recorded launch and what the agent ran, for that agent alone: never the pick (#16).
 
     Works on the row the label names whatever its state: an agent that exited
     (the 💤 row — its dead window goes once the replacement is up, see
@@ -8959,6 +9278,10 @@ def restart(
     that brings it back (:func:`_dead_team_line`, #38). ``team`` is that team as the caller
     read it already (:func:`bulk`); ``None`` lists the project for it.
     """
+    for flag, value in (("--model", model), ("--effort", effort)):
+        if value is not None and not value.strip():
+            # Before anything is stopped: an empty flag would refuse the replacement.
+            raise FleetError(f"{flag} needs a value: name one, or leave it out")
     if permission_mode is not None and permission_mode not in ("", *CLAUDE_PERMISSION_MODES):
         raise FleetError(
             f"cannot restart {label!r}: {permission_mode!r} is not a Claude Code permission "
@@ -9144,6 +9467,8 @@ def restart(
             # a row stopped already, which this restart was asked to bring back.
             replaces=agent.id if handed_over is None and agent.ended_by != "stopped" else None,
             account_pinned=pinned and account is not None,
+            model=model,
+            effort=effort,
         )
     except Exception:
         if handed_over is not None and handed_over.withheld:
@@ -9368,6 +9693,8 @@ def hand_off(
         start_point=_fork_point(project, agent, notes) if own else None,
         fork=True,
         kickoff=False,  # its own first line names the source and the task
+        running=_running(agent, session),  # the model and effort its source runs now
+        picks=False,  # a fork is no new choice of the owner's (3386)
     )
     resumed = resume is not None
     how = "resumed its session as a fork" if resumed else "started fresh"

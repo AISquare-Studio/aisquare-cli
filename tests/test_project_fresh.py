@@ -1780,31 +1780,37 @@ def test_the_before_limit_rows_of_the_project_go_with_its_signals_and_marks_and_
 ) -> None:
     """rc/0.9.1 keeps two ``ui_state`` rows per fleet label, ``before-limit:<project>:<label>``
     and ``before-limit-warned:<project>:<label>``. The next fleet reuses ``coder-1``, and a
-    stale warned row would hide its first warning. They are cleared, counted with the signals
-    and marks in the plan and the report, and another project's rows (and the unrelated ones)
-    are left as they were."""
+    stale warned row would hide its first warning. #16's ``fleet-launched:<project>:<label>``
+    (a row's model record, ``services.model_memory``) is the same kind of row. They are
+    cleared, counted with the signals and marks in the plan and the report, and another
+    project's rows (and the unrelated ones) are left as they were."""
     alpha, beta, _, _ = two
     own = {
         f"{prefix}:{alpha.id}:{label}": f"{prefix} {label}"
-        for prefix in ("before-limit", "before-limit-warned")
+        for prefix in ("before-limit", "before-limit-warned", "fleet-launched")
         for label in ("coder-1", "tester-2")
     }
     others = {
         f"{prefix}:{beta.id}:coder-1": "beta's"
-        for prefix in ("before-limit", "before-limit-warned")
+        for prefix in ("before-limit", "before-limit-warned", "fleet-launched")
     } | {"sidebar_width": "30"}
     with store_session() as store:
         for key, value in {**own, **others}.items():
             store.set_ui_state(key, value)
     marks = fresh_service.plan(alpha).counts.meta
-    others_before = _raw("SELECT * FROM ui_state WHERE key IN (?, ?, ?)", tuple(others))
+    others_before = _raw(
+        f"SELECT * FROM ui_state WHERE key IN ({', '.join('?' * len(others))})", tuple(others)
+    )
 
     planned = fresh_service.plan(alpha)
     report = fresh_service.start_fresh(alpha)
 
     assert marks == 3 + len(own) == planned.counts.meta == report.cleared.meta
     assert _raw("SELECT key FROM ui_state WHERE key GLOB ?", (f"*{alpha.id}*",)) == []
-    assert _raw("SELECT * FROM ui_state WHERE key IN (?, ?, ?)", tuple(others)) == others_before
+    assert (
+        _raw(f"SELECT * FROM ui_state WHERE key IN ({', '.join('?' * len(others))})", tuple(others))
+        == others_before
+    )
     assert len(others_before) == len(others)
 
 

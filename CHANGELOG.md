@@ -329,6 +329,69 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A fleet spawn runs the model and effort you last chose, not the ladder's top rung.**
+  0.9.0 made `fleet spawn` pass the role ladder's head (#338, #129), so every manager
+  started on `--model fable --effort high` (high because asq runs with no `CLAUDE_EFFORT`)
+  over the default you saved with `/model`, and a restart or a usage-limit switch replayed
+  that pick over a `/model` made since. Each of the two is now decided on its own: a
+  `--model` or `--effort` in the spawn's own arguments (or the Spawn dialog's new Model and
+  Effort fields, under Advanced), then the role's settings (`[fleet.roles.<role>]
+  extra_args`, a binding's `--arg`), then your last pick, and with none no flag at all, so
+  Claude Code runs the account's own default, as before 0.9.0. Fable or `max` run only when
+  you chose them. Your last pick is one per home, for every role and persona, kept in the
+  home's store, and only your choices write it: a spawn of yours that names one (asq's
+  dialog or your shell; a cleared dialog field forgets it, and over a role's own pin runs
+  the pin; an empty `--model ""` is refused), and the built-in `/model` or `/effort` you run
+  in any fleet agent (or `/config` → Model), which its Stop hook finds in Claude Code's
+  own frame for the command
+  (caveat, command, answer, each the last one's child: no quoted text, board note or
+  summary can make it, and an unanswered command is none). Only an answer that says it
+  succeeded is a choice (`Set model to …`, `Set effort level to …`), its value the args,
+  else the answer's; the 2.1.311 picker's `… with `xhigh` effort` sets the effort too; the
+  picker's `Default (recommended)` forgets the model pick and `/effort auto` the effort
+  pick; a choice "for this session only", ultracode for the session included (the
+  `/effort` picker's Tab with a saved level saves the level and runs ultracode), runs on
+  in that agent and is no pick; leaving a picker (`Kept model as …`, `Cancelled`) and a
+  command Claude Code refused (`Model 'sonet' not found`, `Invalid argument`) set nothing.
+  Only commands stamped after the agent's row was bound to its transcript count: a fork or
+  a `/branch` does not re-read the history it copied, nor a `/resume` or a `fleet switch`
+  the conversation it took up. Known limit: a `/model` typed mid-turn is recorded nowhere
+  by Claude Code 2.1.311, so it is no pick and a restart starts the agent's previous model;
+  change the model at the prompt. Likewise recorded nowhere, so no pick: alt+p's model
+  picker and its ←/→ effort (a replay starts the previous model; use `/model` or `/config`
+  → Model), and the effort "medium nudge" dialog. The Fable usage-credits fallback
+  (`model_consent_fallback`, "now your default model") is a fallback, not a preference,
+  and deliberately no pick. As `claude --effort` takes one value, a replay keeps your
+  last effort change: a level set last replays as that level, ultracode turned on last
+  replays as `--effort ultracode` (xhigh plus workflows) whatever level it sat on, so `low`,
+  `medium` or `high · ultracode` replay at xhigh, and `max · ultracode` at xhigh, the level
+  dropping. The effort `/config`'s Model panel moves is recorded nowhere by Claude Code
+  2.1.311: set it with `/effort`. A command run after an agent's last turn
+  counts at a replay before its next one, and an effort a role's binding gives (`team bind
+  --arg`) is what the agent runs, a toggle over it kept. Read as Claude Code 2.1.310 and
+  2.1.311 word and frame it: an answer in other words, or a record outside the
+  frame, writes nothing, says so once on stderr, and doctor shows it (`fleet model pick`).
+  Nothing else is evidence: a model or effort that merely differs from the last turn's, as
+  a custom command's or a skill's `model:`/`effort:` frontmatter makes it for one turn,
+  writes no pick and is never replayed. Only the agent's own session counts, never a
+  `claude -p` run from its shell, and a fleet window starts its agent without the
+  `CLAUDE_EFFORT` the tmux server inherited.
+  A spawn an agent makes (`--as`, or from its shell, `--as captain`
+  included: the captain is trusted from its own call path alone) runs its flags for that
+  agent alone. An agent may not hand another a `/model` or `/effort` (a message that opens
+  with one, after spaces, line breaks or invisible format characters): its `fleet tell` is
+  refused in favour of the new `fleet restart <label> --model … --effort …`, which runs that
+  agent alone on them, and its spawn whose first message would open with one is refused
+  before anything starts, in favour of the spawn's own flags. A role's settings win for that
+  role and never write the pick. A restart, a switch, a hand-over and a fork as the same
+  role start what the agent runs: its launch's values as a recorded `/model` or `/effort`
+  alone moved them, the account default included, on any account, over the recorded flag
+  and a binding's pin (a fork as another role runs that role's settings, else the pick);
+  none changes the pick. A spawn's own `--model` or `--effort` replaces the same flag in the
+  role's `extra_args` and binding instead of passing it twice, and `aisquare launch` drops a
+  binding's flag that its own line names. The `⚠ off-ladder` chip stands down for a session
+  on a model you chose for it (the pick, its spawn's args, its role's settings). Agents
+  spawned by 0.9.0 keep the rung they recorded until a `/model` moves them.
 - **The Spawn dialog's Account field says what a spawn with no account runs on**
   (#12 on the board). With rank 1 the default (#406), the field still opened on
   `(this shell's)`, which read as if the spawn skipped the accounts while it ran

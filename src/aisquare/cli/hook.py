@@ -7,6 +7,7 @@ failure is swallowed and the command exits 0, never disrupting the agent.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -117,6 +118,14 @@ def _effort_level(payload: dict[str, Any]) -> str | None:
     return level if isinstance(level, str) and level else None
 
 
+def _effort_now(payload: dict[str, Any]) -> str | None:
+    """The effort the session runs, at a turn's end: the payload's ``effort.level``, else
+    the ``CLAUDE_EFFORT`` Claude Code gives its Stop hook (#16). Never at a session start:
+    Claude Code 2.1.310's SessionStart carries no effort, and its hooks there see only the
+    process's inherited environment, a fleet window's being the tmux server's (seq 3513)."""
+    return _effort_level(payload) or os.environ.get("CLAUDE_EFFORT", "").strip() or None
+
+
 @app.command("session-start")
 def session_start() -> None:
     """Emit aisquare context for a starting session (stdout becomes context)."""
@@ -197,6 +206,7 @@ def stop() -> None:
             last_message=_str(payload, "last_assistant_message"),
             permission_mode=_str(payload, "permission_mode"),
             transcript_path=_str(payload, "transcript_path"),
+            effort=_effort_now(payload),
         )
     except ManagerWakeupError as exc:  # the row is right; only the wake-up was lost
         _cost_of_failing_open("stop", exc.cause, cost=_COST["manager-wakeup"])

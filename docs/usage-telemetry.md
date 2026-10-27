@@ -56,7 +56,9 @@ hook (see [Usage & stats](usage-stats.md)).
 
 Repository **names**, **paths** and **remotes**; **prompts**, replies, file names or any text you
 or an agent wrote; **emails**, account aliases or any name of a person; **command arguments**
-or their values; your machine's name or IP address (the server does not store it).
+or their values; your machine's name or IP address. The telemetry tables never store an IP
+address. If you are signed in, the request also goes through AISquare's normal sign-in token
+check, which records the token's last-used IP address, as it does for any signed-in API call.
 A repository is sent only as `HMAC-SHA256(a random salt kept on your machine, its normalised git
 remote or its path)`, cut to 16 characters: the salt is yours alone, so nobody can check a guess
 against it and the same repository looks different to every user.
@@ -65,7 +67,9 @@ against it and the same repository looks different to every user.
 
 If you are signed in to AISquare, a shipment carries your sign-in token and the server links the
 counts to your AISquare account. If you are not (or the server does not accept the token) it is
-sent anonymously, and is only tied to the random installation id.
+sent anonymously, and is only tied to the random installation id. (A signed-in request also goes
+through AISquare's normal sign-in token check, which records the token's last-used IP address, as
+it does for any signed-in API call; the telemetry tables themselves never store an IP.)
 
 ## When it is sent
 
@@ -220,7 +224,8 @@ Field rules:
 - Installation row keeps latest `client` fields, first_seen/last_seen, and a
   nullable user FK (latest linked user); each daily row also snapshots the
   nullable user FK at receipt time. `on_delete=SET_NULL`.
-- Do not store the client IP.
+- The telemetry tables do not store the client IP. (A signed-in request also passes the normal
+  sign-in token check, which records the token's last-used IP, as for any signed-in API call.)
 - Responses: `200 {"accepted_days": <int>, "linked": <bool>}`;
   `400 {"errors": …}` on validation (unknown schema_version, caps exceeded,
   date outside [today−400d, today+1d], negative numbers); `429` throttled.

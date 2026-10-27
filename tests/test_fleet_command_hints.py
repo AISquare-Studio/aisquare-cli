@@ -20,9 +20,12 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "aisquare"
 
-_HAND_BUILT = re.compile(r"\baisquare fleet (?!(?:reap|shutdown) --all\b|(?:gate|capacity)\b)[a-z]")
+_HAND_BUILT = re.compile(
+    r"\baisquare fleet (?!(?:reap|shutdown) --all\b|(?:gate|capacity)\b|adopt\b)[a-z]"
+)
 """``aisquare fleet`` and a word: any verb, except those that walk every project: ``reap
---all``, ``shutdown --all``, and ``gate`` and ``capacity``, which take no ``--project`` (#283)."""
+--all``, ``shutdown --all``, ``gate`` and ``capacity``, which take no ``--project`` (#283),
+and ``adopt``, which finds the project from the conversation's directory (#290)."""
 
 _NO_PROJECT_IN_QUESTION = (
     "the fleet UI's refusal: it covers every project, and the listing it points to is the "
@@ -31,7 +34,7 @@ _NO_PROJECT_IN_QUESTION = (
 EXEMPT: dict[tuple[str, str], str] = {
     (
         "services/fleet.py",
-        "# aisquare fleet worktrees (docs/plans/fleet-tui.md §3.5)\n{…}\n",
+        "# aisquare fleet worktrees\n{…}\n",
     ): "the comment written above the worktree root's line in .git/info/exclude",
     (
         "cli/fleet.py",
@@ -141,6 +144,26 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ),
     ("cli/fleet.py", "_emit_shutdown"): _TARGET,
     ("cli/fleet.py", "attach"): _TARGET,
+    ("cli/project.py", "_emit_fresh"): _TARGET,
+    ("services/fresh.py", "start_fresh"): (
+        "the project being started fresh, as its plan read it from the store"
+    ),
+    ("services/fresh.py", "_stop"): (
+        "the project being started fresh, whose fleet the stop left standing"
+    ),
+    ("services/fresh.py", "_held_now"): (
+        "the project being started fresh, whose agents started again after its stop"
+    ),
+    ("services/fresh.py", "_confirm_down"): (
+        "the project being started fresh, whose tmux session still stands, or cannot be asked"
+    ),
+    ("services/fresh.py", "found_after_stop"): (
+        "the project whose plan found the work, the one being started fresh, whose fleet the "
+        "stop left stopped"
+    ),
+    ("cli/ui/app.py", "FleetApp._project_freshened"): (
+        "the project the Start fresh report is about, the one its dialog was opened on"
+    ),
     ("cli/ui/views/project.py", "no_manager_text"): _SHOWN,
     ("cli/ui/views/welcome.py", "WelcomeView._paint_fleet"): _SHOWN,
     ("services/auto_mode.py", "_restart_off_auto"): (
@@ -152,6 +175,8 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/diagnostics.py", "_account_limit_checks"): _ROW_OF_SESSION,
     ("services/fleet.py", "_replaced"): _FLEET_OP,
     ("services/fleet.py", "_in_hand_over"): _FLEET_OP,
+    ("services/fleet.py", "_refuse_an_agents_setting_command"): _FLEET_OP,
+    ("services/fleet.py", "_refuse_an_agents_opening_command"): _FLEET_OP,
     ("services/fleet.py", "spawn"): _FLEET_OP,
     ("services/fleet.py", "_refuse_by_group"): _FLEET_OP,
     ("services/fleet.py", "_in_place_of_recorded"): _FLEET_OP,
@@ -178,6 +203,10 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/hooks.py", "hand_over"): (
         "the limited agent's own row's project (``agent.project_id``), which the "
         "hand-over moves it in (#277)"
+    ),
+    ("services/hooks.py", "_warn"): (
+        "the agent's own row's project (``agent.project_id``), which ``before_limit = "
+        '"warn"`` names the switch in (F2 of #400)'
     ),
     ("services/project.py", "BoardReader.frees"): (
         "each project whose fleet agents read a hub's board (``ProjectBusyError``, and doctor's "

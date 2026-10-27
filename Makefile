@@ -1,4 +1,4 @@
-.PHONY: install test lint typecheck lockcheck fmt check demo
+.PHONY: install test lint typecheck lockcheck fmt check
 
 # Every tool runs through the project venv's interpreter when .venv exists —
 # a bare tool name resolves through PATH and can land in a sibling env whose
@@ -26,7 +26,7 @@ typecheck:
 	$(PYTHON) -m mypy
 
 ## lockcheck: uv.lock still matches pyproject.toml (`uv lock --check`); skipped,
-## and said so, where uv is not on PATH — CI's lock job always runs it (#278)
+## and said so, where uv is not on PATH — CI's lint job always runs it (#278)
 lockcheck:
 	@if command -v uv >/dev/null 2>&1; then uv lock --check; \
 	else echo "lockcheck: uv not on PATH, skipped (CI runs it)"; fi
@@ -38,7 +38,3 @@ fmt:
 
 ## check: everything CI would run
 check: lint typecheck lockcheck test
-
-## demo: render docs/demo.tape into out/ (demo.gif, demo.txt, welcome.png); needs docker
-demo:
-	sh docs/demo/render.sh

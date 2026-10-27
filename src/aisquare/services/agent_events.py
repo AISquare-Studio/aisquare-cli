@@ -243,6 +243,7 @@ def _dispatch(
             session_id=session_id,
             message=event.message,
             notification_type=event.notification_type,
+            transcript_path=usage,
         )
     elif event.kind == "interrupt" and session_id:
         with store_session() as store:

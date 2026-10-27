@@ -614,7 +614,7 @@ repomix`, run in the project's directory, reads its config and `node_modules` th
 `CLAUDE.md` and `AGENTS.md`, which agents read (a prompt-injection path, as on Claude
 Code). So is the launch's `PATH`, the user's shell's: Codex itself runs the `git` it finds
 there outside its sandbox (for its git info), as aisquare's hooks and broker run the
-`git`, `gbrain` and `tmux` they find there. A launch whose `PATH` names a directory its
+`git` and `tmux` they find there. A launch whose `PATH` names a directory its
 sandbox may write (an activated project virtualenv, direnv's `PATH_add`, an empty or a
 relative entry, which is the directory a process runs in) is warned of it, and `aisquare
 doctor` run in a project whose tree `PATH` names warns (`sandbox-path`): launch from a
@@ -688,21 +688,15 @@ tree by these means, and only these:
   `PYTHONPATH=$PWD/src`), and every Python aisquare starts for it ignores them (`-E`,
   `selfcli.isolated_argv_for`): its hooks as `aisquare agents connect codex` writes them
   (`<python> -E -P -m aisquare hook codex`), the plugin's launcher, which unsets them, its
-  broker and the commands it runs, the fleet window's `aisquare launch`, the hand-over and
-  the distiller. Hooks connected by an older aisquare read them: a launch warns where one
+  broker and the commands it runs, the fleet window's `aisquare launch` and the hand-over.
+  Hooks connected by an older aisquare read them: a launch warns where one
   names a directory the sandbox may write, `aisquare doctor` warns of such a hooks file
   (`sandbox-hooks`: an agent that sandboxes its tools whose hooks run the console script),
   and `agents connect codex`, or an upgrade's refresh, writes the `-E` form;
 - every git aisquare runs (`core.workspace.git_argv`: the fleet's worktrees, the CI turn
   snapshot's `stash create`, which the agent's own hooks run, the project root's lookup):
   no hook and no fsmonitor of the repository's (`core.hooksPath` at the null device,
-  `core.fsmonitor=false`);
-- gbrain, which a brokered `recall` and a note's distill run: it starts in its brain's
-  home, never in the tree, as a runtime may read its configuration from the directory it
-  starts in (Bun, gbrain's, reads `bunfig.toml` and `.env` there). Recall passes its query
-  as gbrain's positional, as gbrain's source parses one; that is unmeasured live: no host
-  this was built on, nor any CI job, has gbrain (`tests/test_brain.py`'s real-gbrain test
-  runs where one is installed).
+  `core.fsmonitor=false`).
 
 The aisquare store (the aisquare home: `context.db`, the launch records, the config,
 the account homes, the caches) is **read-only in a Codex agent's sandbox, all of it**
@@ -998,7 +992,6 @@ this list to it, and every board call a role's cycle teaches to it:
 
 - `aisquare note`
 - `aisquare board` (not `--watch`)
-- `aisquare recall`
 - `aisquare task add`
 - `aisquare task list`
 - `aisquare task show`
@@ -1389,7 +1382,9 @@ ignores a new one, Codex's: a restart's receipt says a persona changed since rea
 through the briefing alone), `exports_home_env`, `own_doctor_check` (the doctor has a dedicated check for it, Claude Code's, which Welcome's step 2 probes it with too; the per-adapter row and the generic probe skip it), `model_ladders`,
 `model_proxy` (its traffic goes through the explainability proxy, the lane the doctor and
 Remote's card judge it by; with `native_telemetry` instead, the card judges its own
-telemetry's lane, and with neither it reads untraced), `positional_prompt` (its first
+telemetry's lane, and with neither it reads untraced), `remote_control` (it can be started so
+that another client continues the session, titled: Claude Code's `--remote-control`, #289; a
+launch that asks of an agent without says so and starts it as it was), `positional_prompt` (its first
 message on its command line, after `--`), `compact` (a `CompactCommand(line, instructions)`:
 the command that compacts the session at its idle prompt, which the quiet-point compaction types, bare
 where text after it would run as a prompt; its acknowledgement is the compaction's `SessionStart`

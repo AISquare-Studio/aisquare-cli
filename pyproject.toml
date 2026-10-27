@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aisquare-cli"
-version = "0.9.0"
+version = "0.9.1"
 description = "One terminal over your projects and your coding agents: task a manager in plain words, and it runs the coders, testers and reviewers for you."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -164,6 +164,16 @@ voice = [
   "faster-whisper>=1.0",
   "segno>=1.6",
 ]
+gate = [
+  # The captain's owner gate (#216, services/captain/gate.py): RFC 6238 TOTP codes from the
+  # owner's authenticator open a 15-minute act-as-owner window. An extra, never core: the
+  # captain is experimental and off by default, and the gate imports pyotp only where it
+  # verifies or enrols. Without it the gate fails closed and names this extra. 2.9 is the
+  # release whose TOTP takes the interval and digits used here and whose provisioning_uri
+  # takes issuer_name. segno, a core dependency since #34 (the Remote QR), draws the QR
+  # `gate enroll` prints for the authenticator to scan.
+  "pyotp>=2.9",
+]
 remote = [
   # Kept as a no-op alias for one release, as `tui` is: Remote's dependencies
   # are core since #34, and `pipx install 'aisquare-cli[remote]'` was the
@@ -208,6 +218,10 @@ dev = [
   # a tmux folder and a `claude` stand-in of its own (tests/conftest.py), so workers
   # share nothing a test writes.
   "pytest-xdist>=3.6",
+  # CI splits each leg's suite across runners (`--splits N --group k`), by the per-test
+  # times in .test_durations; tests/shards.py proves the shards ran it exactly once.
+  # A run without --splits is untouched, so `make test` is the whole suite as before.
+  "pytest-split>=0.11",
   "mypy>=1.10",
   "ruff>=0.5",
   # Both bounds are load-bearing, not caution. mcp 2.0.0 renamed FastMCP to
@@ -239,6 +253,9 @@ dev = [
   # against the real `messages.parse` signature (the `mcp`/`serve` precedent).
   # Tests never call it: they install a fake `anthropic` module.
   "anthropic>=1",
+  # The gate extra's TOTP, so tests/test_captain_gate.py verifies real codes and mypy
+  # --strict checks the verifier against pyotp's own hints.
+  "pyotp>=2.9",
   # starlette's TestClient, which the remote server tests drive; mcp 2.x no
   # longer brings it. (Remote's own dependencies are core since #34.)
   "httpx>=0.27",
@@ -252,6 +269,7 @@ dev = [
 [project.scripts]
 aisquare = "aisquare.cli.app:main"
 asq = "aisquare.cli.app:main"
+asq-statusline = "aisquare.statusline:main"
 
 [project.urls]
 Homepage = "https://aisquare.studio"
@@ -263,15 +281,14 @@ Changelog = "https://github.com/AISquare-Studio/aisquare-cli/blob/main/CHANGELOG
 packages = ["src/aisquare"]
 
 [tool.hatch.build.targets.sdist]
-# The demo's renders (docs/demo.tape) are pictures for the README and the
-# release notes, re-rendered rather than built from; no build reads them.
-exclude = ["/docs/demo.gif", "/docs/demo/*.png"]
+# No build reads .test_durations: it is how CI splits the suite into shards.
+exclude = ["/.test_durations"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
 # A test still running after 5 minutes dumps every thread's stack to stderr (it is not
-# failed: CI's step timeout does that), so a hang names itself in the log.
+# failed: CI's job timeout does that), so a hang names itself in the log.
 faulthandler_timeout = 300
 
 [tool.ruff]

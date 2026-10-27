@@ -75,6 +75,12 @@ MADE: dict[str, dict[str, str]] = {
         "_check_fleet": "today's socket, and each address a launch record places",
     },
     f"{UI}/terminal.py": {"TerminalPane.attach": "today's socket, when a view gave none"},
+    f"{UI}/persona_dialogs.py": {
+        "EditorPaneScreen._open_editor": (
+            "today's socket (the config's), where the persona editor opens its own window: a "
+            "window of no row, which nothing records a place for (#212)"
+        )
+    },
     f"{UI}/views/accounts.py": {"AccountsView.server": "today's socket: its own sign-in windows"},
     f"{UI}/views/agent.py": {
         "AgentView.__init__": "a listed status's socket and path: placed by the resolver"
@@ -156,6 +162,12 @@ ACTS: dict[str, dict[str, str]] = {
             "resolver, or a sign-in window the Accounts view made itself; its keys and frames "
             "go down that pane's server's control client (`core.tmux_control`, 0.8.2's #272) "
             "or are polled, for that pane alone"
+        )
+    },
+    f"{UI}/persona_dialogs.py": {
+        "EditorPaneScreen": (
+            "the editor window this screen opened (`_open_editor`), by the pane tmux answered "
+            "for it: watched while the editor runs and closed with the screen (#212)"
         )
     },
     f"{UI}/views/accounts.py": {

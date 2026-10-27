@@ -286,8 +286,11 @@ def test_the_boards_cycles_name_their_project_in_every_fleet_command() -> None:
         "`aisquare fleet reap --project calm-otter`"
     ) in manager
     verbs = re.findall(r"aisquare fleet (\S+)( --project calm-otter)?", manager)
-    assert {verb for verb, _named in verbs} == {"spawn", "tell", "switch", "stop", "reap"}
-    assert all(named for _verb, named in verbs), verbs
+    # `fleet adopt` (#290) takes no --project: the conversation's own directory names it.
+    scoped = [(verb, named) for verb, named in verbs if verb != "adopt"]
+    assert {verb for verb, _named in scoped} == {"spawn", "tell", "switch", "stop", "reap"}
+    assert all(named for _verb, named in scoped), verbs
+    assert "`aisquare fleet adopt --list`" in manager
     assert "`aisquare fleet spawn --project calm-otter tester --task <id> --as abcd1234`" in manager
     assert "`fleet spawn " not in manager, "the short forms name it too"
     coder = cycle("coder")
@@ -310,6 +313,15 @@ def test_the_lane_rules_substitute_commands_run_as_written() -> None:
     assert '--detail "<contract>" --as abcd1234' in planner
     manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
     assert "aisquare fleet spawn coder --task <id> --as abcd1234" in manager
+
+
+def test_the_manager_cycle_names_the_label_limit() -> None:
+    """#291: the manager adds a task, then spawns for it, so a label it learns is too long
+    only from the spawn's refusal leaves that task without an agent. The cycle says so first."""
+    manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
+    assert (
+        "Labels are unique, descriptive and at most 24 characters (coder-auth, not coder-2)."
+    ) in manager
 
 
 def test_no_role_reads_never_merge_twice() -> None:
@@ -423,6 +435,30 @@ def test_board_flags_an_off_ladder_session(
 
     board = team_service.hook_session_start(
         "sess-model-2", work, "startup", model="claude-haiku-4-5", effort="low"
+    )
+    assert "⚠ off-ladder" in board
+
+
+def test_the_owners_own_pick_is_no_off_ladder_session(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #441 (6): a fleet spawn runs the owner's last pick whatever the role, so a
+    coder on the fable the owner chose was flagged off its ladder on every teammate's
+    board. A session on the pick is not; one on another model still is."""
+    from aisquare.services import model_memory
+    from aisquare.services import team as team_service
+
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    work = tmp_path / "repo"
+    work.mkdir()
+    add_project(work)
+    model_memory.remember(model="fable")
+    board = team_service.hook_session_start(
+        "sess-model-3", work, "startup", model="claude-fable-5-1", effort="high"
+    )
+    assert "[claude-fable-5-1]" in board and "off-ladder" not in board
+    board = team_service.hook_session_start(
+        "sess-model-4", work, "startup", model="claude-haiku-4-5", effort="low"
     )
     assert "⚠ off-ladder" in board
 

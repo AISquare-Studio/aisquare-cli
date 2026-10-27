@@ -143,21 +143,29 @@ OPTION_CALLS = frozenset({"Option", "Argument"})
 #: (:func:`test_the_baseline_is_what_the_tree_holds`): lower it in the change that removes one.
 #: Read off the adapters, the words now include Claude Code's ``settings.json`` (its
 #: ``settings_name``), which six of these lines already spelled (review r18 of #113, 6).
+#:
+#: 0.9.1's Claude-Code-only features carry the rows marked below (SCOPE #113 091, each a GAP
+#: with a lane in its note): Remote Control's launch line and doctor row (#289), the status
+#: line (#287), ``fleet adopt`` (#290) and before-limit's gate on the transcript reader (F2).
 BASELINE: dict[str, dict[Shape, int]] = {
     "cli/fleet.py": {"flag": 1},
     "cli/hook.py": {"binary": 3},
-    "core/agents.py": {"env": 2, "dir": 12},
+    "cli/launch.py": {"env": 3, "flag": 2},  # Remote Control (#289), the effort scrub (#16)
+    "core/agents.py": {"env": 2, "dir": 13},  # + the status line's entry in settings.json
     "core/claude_accounts.py": {"binary": 1, "env": 3, "dir": 4},
     "core/claude_sharing.py": {"env": 7, "dir": 1},
     "core/codex_accounts.py": {"binary": 1, "env": 1, "dir": 3},
     "core/config.py": {"flag": 3},
-    "core/harness.py": {"env": 30, "dir": 1, "flag": 5},
+    "core/harness.py": {"env": 30, "dir": 1, "flag": 6},  # + MODEL_FLAG and EFFORT_FLAG
     "core/spawn.py": {"env": 1},
-    "services/diagnostics.py": {"env": 1, "dir": 4},
+    "services/adopt.py": {"binary": 1, "flag": 1},  # fleet adopt reads a `claude --resume` (#290)
+    "services/diagnostics.py": {"env": 6, "dir": 4},  # + the remote control row (#289)
     "services/explainability.py": {"env": 4},
     "services/explainability_ops.py": {"env": 1, "dir": 4},
     "services/first_run.py": {"dir": 1},
+    "services/hooks.py": {"decide_named": 1},  # before-limit: the transcript reader is Claude's
     "services/store_broker.py": {"flag": 1},
+    "statusline.py": {"binary": 1, "env": 1, "dir": 1},  # asq-statusline wraps Claude Code's (#287)
 }
 
 

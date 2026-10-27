@@ -17,11 +17,10 @@ import pytest
 from aisquare.core import insights, outbox, paths
 from aisquare.core.config import AppConfig, ExperimentSettings, save_config
 from aisquare.models import CheckStatus, ClientReason, DoctorCheck, TurnMetric
-from aisquare.services import ci_augment, ci_override, ci_recall
+from aisquare.services import ci_augment, ci_doctor, ci_override, ci_recall
 from aisquare.services import hooks as hooks_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services.ci_contract import RECALL_TOOL, DeliveryDescriptor, wire_session_id
-from aisquare.services.diagnostics import doctor
 from tests.ci_schemas import assert_valid
 from tests.ci_support import RUN, SESSION, wire
 from tests.stub_ci_server import StubCI, live_descriptor, serve
@@ -60,7 +59,7 @@ def _turns() -> dict[str, TurnMetric]:
 
 
 def _ci_checks() -> dict[str, DoctorCheck]:
-    return {c.name: c for c in doctor() if c.name.startswith("ci ")}
+    return {c.name: c for c in ci_doctor.checks()}
 
 
 # --- the descriptor rules unless told otherwise --------------------------------------

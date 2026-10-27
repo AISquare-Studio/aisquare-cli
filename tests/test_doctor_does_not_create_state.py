@@ -101,7 +101,7 @@ def test_the_store_backed_checks_report_rather_than_repeat_the_failure(
     result = runner.invoke(app, ["doctor"], catch_exceptions=False)
 
     assert "unreadable" not in result.output, result.output
-    for check in ("database", "brain", "harness"):
+    for check in ("database", "harness"):
         line = next(row for row in result.output.splitlines() if f"{check}:" in row)
         assert "not created yet" in line, f"{check} check opened the store anyway: {line}"
 

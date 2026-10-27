@@ -562,10 +562,14 @@ def test_the_page_gives_the_two_commands_and_the_trust_step() -> None:
     assert "/hooks" in text
 
 
-def test_the_readme_offers_both_plugins() -> None:
+def test_the_readme_offers_the_codex_plugin() -> None:
+    """The README is a front page since 0.9.1 removed `docs/`: it names no Claude Code
+    plugin page (there is none), and points at the Codex plugin's, the one page of the route
+    that remains."""
     readme = (REPO / "README.md").read_text(encoding="utf-8")
 
-    assert "docs/claude-code-plugin.md" in readme and "docs/codex-plugin.md" in readme
+    assert "docs/codex-plugin.md" in readme
+    assert "docs/claude-code-plugin.md" not in readme
 
 
 @posix_only

@@ -9,6 +9,14 @@ fixes. The output is STRUCTURED
 (:class:`PersonaDraft`) and never scraped out of prose; the caller validates it with
 the same rules as a copied skill.
 
+A running import can be cancelled (#211): each engine takes a ``cancel`` event. The
+manager engine's headless agent runs in a session of its own and is waited on in short
+steps; once ``cancel`` is set, it and everything it started are ended (``SIGTERM``, two
+seconds, then ``SIGKILL``) and :class:`ImportCancelled` is raised, so a Cancel or a
+Ctrl-C is over in about two seconds rather than at the 180-second timeout. The api
+engine is asked before and after its one request and drops an answer that arrives
+after the cancel.
+
 Nothing imports this module at import time: ``services.personas`` imports it inside
 the LLM branch of ``import_source``, and ``anthropic`` is imported inside
 :func:`draft_with_api`, so a base install, the CLI's startup and every hook pay
@@ -17,11 +25,16 @@ nothing for it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -39,6 +52,11 @@ Engine = Literal["auto", "manager", "api", "off"]
 RanEngine = Literal["manager", "api"]
 
 MANAGER_TIMEOUT_SECONDS = 180.0
+"""How long the manager engine waits for its answer; read at each call."""
+POLL_SECONDS = 0.2
+"""How often the manager engine looks at the cancel event while the agent runs."""
+STOP_GRACE_SECONDS = 2.0
+"""How long a cancelled agent gets to end on ``SIGTERM`` before ``SIGKILL``."""
 MANAGER_SOURCE_MAX_BYTES = 200_000
 """The largest source fed to the manager's headless turn on stdin."""
 API_MAX_TOKENS = 16_000
@@ -75,6 +93,11 @@ class PersonaDraft(BaseModel):
 
 class EngineUnavailable(RuntimeError):
     """One line on why an engine could not run; the ladder continues."""
+
+
+class ImportCancelled(RuntimeError):
+    """The import was cancelled while an engine ran: its process is gone, and nothing was
+    drafted (#211)."""
 
 
 class ImportRefused(RuntimeError):
@@ -181,9 +204,10 @@ def draft_with_manager(
     source_text: str,
     *,
     condense: bool,
-    timeout: float = MANAGER_TIMEOUT_SECONDS,
+    timeout: float | None = None,
     feedback: str | None = None,
     selected: ResolvedAgent | None = None,
+    cancel: threading.Event | None = None,
 ) -> PersonaDraft:
     """One headless turn of the manager role's coding agent (§3.9), its argv the
     adapter's ``headless_call`` and its answer the adapter's ``headless_answer``: Claude
@@ -195,7 +219,12 @@ def draft_with_manager(
     untrusted), the agent's hooks off where a launch argument can say so, and a stripped
     environment on the manager's account. The instructions and the source go on stdin.
     Anything short of a structured draft is :class:`EngineUnavailable`.
+
+    It is waited on in :data:`POLL_SECONDS` steps, so ``cancel`` (and a Ctrl-C, a
+    ``KeyboardInterrupt`` in this thread) ends it, and the processes it started, within
+    :data:`STOP_GRACE_SECONDS` (#211): it ran on to the 180-second timeout before.
     """
+    limit = MANAGER_TIMEOUT_SECONDS if timeout is None else timeout
     size = len(source_text.encode("utf-8"))
     if size > MANAGER_SOURCE_MAX_BYTES:
         raise EngineUnavailable(
@@ -236,40 +265,91 @@ def draft_with_manager(
         # an agent that its name in a shell runs as not on PATH (review of #240, "also
         # confirmed").
         argv = [shutil.which(binary) or binary, *call]
+        if cancel is not None and cancel.is_set():
+            raise ImportCancelled("the import was cancelled before the manager engine started")
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 argv,
-                input=stdin,
-                capture_output=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
-                check=False,
                 cwd=str(home),
                 env=env,
+                # Its own session: a cancel ends the agent and whatever it started, and the
+                # terminal's Ctrl-C reaches this process, which ends it, not the child directly.
+                start_new_session=os.name != "nt",
             )
         except FileNotFoundError:
             raise EngineUnavailable(f"manager engine: {binary!r} is not on PATH") from None
-        except subprocess.TimeoutExpired:
-            raise EngineUnavailable(f"manager engine: no answer within {timeout:.0f} s") from None
         except OSError as exc:
             raise EngineUnavailable(
                 f"manager engine: {binary!r} could not start ({exc.strerror or exc})"
             ) from None
-        if completed.returncode != 0:
-            detail = _first_line(completed.stderr) or _envelope_result(completed.stdout)
+        deadline = time.monotonic() + limit
+        pending: str | None = stdin
+        try:
+            while True:
+                if cancel is not None and cancel.is_set():
+                    raise ImportCancelled("the import was cancelled while the manager engine ran")
+                try:
+                    stdout, stderr = process.communicate(input=pending, timeout=POLL_SECONDS)
+                    break
+                except subprocess.TimeoutExpired:
+                    pending = None  # sent once: a retried communicate carries on with it
+                if time.monotonic() >= deadline:
+                    raise EngineUnavailable(f"manager engine: no answer within {limit:.0f} s")
+        except BaseException:
+            _stop(process)
+            raise
+        if process.returncode != 0:
+            detail = _first_line(stderr) or _envelope_result(stdout)
             tail = f" — {detail}" if detail else ""
-            raise EngineUnavailable(f"manager engine: {binary} exited {completed.returncode}{tail}")
-        answer = adapter.headless_answer(completed.stdout, out)
+            raise EngineUnavailable(f"manager engine: {binary} exited {process.returncode}{tail}")
+        answer = adapter.headless_answer(stdout, out)
     if answer is None:
-        detail = _envelope_result(completed.stdout)
+        detail = _envelope_result(stdout)
         tail = f" — {detail}" if detail else ""
         raise EngineUnavailable(f"manager engine: {adapter.label} gave no JSON answer{tail}")
     try:
         return PersonaDraft.model_validate(answer)
     except ValidationError:
         raise EngineUnavailable("manager engine: the answer carried no persona draft") from None
+
+
+def _stop(process: subprocess.Popen[str]) -> None:
+    """End the engine's agent and what it started: ``SIGTERM`` to the process group it
+    leads (it was started in a session of its own), :data:`STOP_GRACE_SECONDS`, then
+    ``SIGKILL``; its pipes closed. On Windows, the process alone."""
+    _signal(process, kill=False)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(STOP_GRACE_SECONDS)
+    # Whatever is left of the group, the leader included, is killed: one that ended on
+    # SIGTERM may have left a child behind, which the group still names.
+    _signal(process, kill=True)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(STOP_GRACE_SECONDS)
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is not None:
+            with contextlib.suppress(OSError, ValueError):
+                pipe.close()
+
+
+def _signal(process: subprocess.Popen[str], *, kill: bool) -> None:
+    # sys.platform, not os.name: it is the check mypy's Windows leg reads past killpg on.
+    if sys.platform != "win32":
+        sig = signal.SIGKILL if kill else signal.SIGTERM
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, sig)  # its group: pgid == pid (start_new_session)
+        return
+    if process.poll() is None:
+        with contextlib.suppress(OSError):
+            if kill:
+                process.kill()
+            else:
+                process.terminate()
 
 
 def draft_with_api(
@@ -279,6 +359,7 @@ def draft_with_api(
     model: str,
     feedback: str | None = None,
     progress: Callable[[str], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> PersonaDraft:
     """The Anthropic API through the official SDK (the ``llm`` extra), §3.9.
 
@@ -293,6 +374,9 @@ def draft_with_api(
         raise EngineUnavailable(
             "api engine: the anthropic SDK is not installed — pip install 'aisquare-cli[llm]'"
         ) from None
+    if cancel is not None and cancel.is_set():
+        raise ImportCancelled("the import was cancelled before the api engine started")
+    client: anthropic.Anthropic | None = None
     try:
         client = anthropic.Anthropic()
         message = client.messages.parse(
@@ -328,6 +412,13 @@ def draft_with_api(
         raise EngineUnavailable(
             f"api engine: no structured draft — the answer did not parse ({_first_line(str(exc))})"
         ) from None
+    finally:
+        if client is not None:
+            with contextlib.suppress(Exception):  # closing is tidying, never a reason
+                client.close()
+    if cancel is not None and cancel.is_set():
+        # The request cannot be taken back, but its answer can be dropped (#211).
+        raise ImportCancelled("the import was cancelled while the api engine ran")
     if progress is not None:
         progress(
             f"api engine: {model} — {message.usage.input_tokens:,} input + "
@@ -349,9 +440,11 @@ def draft(
     model: str,
     feedback: str | None = None,
     progress: Callable[[str], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> tuple[PersonaDraft, RanEngine, str | None]:
     """The ladder: ``(draft, engine that ran, model)``, or :class:`ImportRefused`
-    carrying every reason collected. ``model`` is the api engine's."""
+    carrying every reason collected. ``model`` is the api engine's. ``cancel`` is
+    passed to each engine; once set, :class:`ImportCancelled` ends the ladder."""
     if engine == "off":
         raise ImportRefused(
             'the LLM import path is off — [persona.import] engine = "off" in config.toml',
@@ -371,7 +464,11 @@ def draft(
                 )
             return (
                 draft_with_manager(
-                    source_text, condense=condense, feedback=feedback, selected=selected
+                    source_text,
+                    condense=condense,
+                    feedback=feedback,
+                    selected=selected,
+                    cancel=cancel,
                 ),
                 "manager",
                 chosen,
@@ -380,12 +477,19 @@ def draft(
             reasons.append(str(exc))
             if progress is not None:
                 progress(str(exc))
+    if cancel is not None and cancel.is_set():
+        raise ImportCancelled("the import was cancelled")
     if engine in ("auto", "api"):
         if progress is not None:
             progress(f"api engine: {model}")
         try:
             drafted = draft_with_api(
-                source_text, condense=condense, model=model, feedback=feedback, progress=progress
+                source_text,
+                condense=condense,
+                model=model,
+                feedback=feedback,
+                progress=progress,
+                cancel=cancel,
             )
             return drafted, "api", model
         except EngineUnavailable as exc:

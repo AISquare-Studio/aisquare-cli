@@ -55,14 +55,15 @@ from textual.notifications import SeverityLevel
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
 from textual.widget import Widget
-from textual.widgets import ContentSwitcher, Footer, Static
+from textual.widgets import ContentSwitcher, Footer, Static, TextArea
 from textual.worker import Worker, WorkerState, WorkType
 from textual.worker_manager import WorkerManager
 
-from aisquare.cli.ui.attach import NewAccountRequested
+from aisquare.cli.ui.attach import NewAccountRequested, ReturnTo
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.board import BoardPanel, board_help
 from aisquare.cli.ui.divider import Divider, floor_of
+from aisquare.cli.ui.fresh import ConfirmFresh, FreshChoice, StartFresh
 from aisquare.cli.ui.groups import (
     DropGroup,
     DropProject,
@@ -73,7 +74,15 @@ from aisquare.cli.ui.groups import (
     TogglePin,
     UndoLayout,
 )
-from aisquare.cli.ui.project_menu import PIN, REMOVE, RENAME, SETTINGS, ConfirmRemove, ProjectMenu
+from aisquare.cli.ui.project_menu import (
+    FRESH,
+    PIN,
+    REMOVE,
+    RENAME,
+    SETTINGS,
+    ConfirmRemove,
+    ProjectMenu,
+)
 from aisquare.cli.ui.receiver import listen_for_ui, stop_listening_for_ui
 from aisquare.cli.ui.remote_control import SWITCHES, RemoteController, ngrok_ends_with
 from aisquare.cli.ui.sidebar import (
@@ -103,11 +112,12 @@ from aisquare.cli.ui.sidebar import (
     SpawnAgent,
     StopAgent,
     UpdateSelected,
+    UsageStatsSelected,
     agent_name,
 )
 from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
 from aisquare.cli.ui.stop import StopAgentScreen
-from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
+from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane, log_paste
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.update import (
@@ -119,21 +129,35 @@ from aisquare.cli.ui.update import (
     REFRESH_WORKER,
     UpdateScreen,
 )
-from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, UsageRead, read_session
+from aisquare.cli.ui.views import usage_sharing
+from aisquare.cli.ui.views.accounts import (
+    AccountsChanged,
+    AccountsView,
+    SignInAbandoned,
+    SignInLanded,
+    UsageRead,
+    WelcomeRequested,
+    next_step,
+    read_session,
+)
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.app_settings import AppSettingsView, UiSettingsChanged
 from aisquare.cli.ui.views.captain import CaptainView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
+from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.remote import RemotePanel
 from aisquare.cli.ui.views.settings_captain import CaptainSwitched
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
 from aisquare.cli.ui.views.settings_remote import RemoteChip
+from aisquare.cli.ui.views.usage_stats import UsageStatsView
 from aisquare.cli.ui.views.welcome import WelcomeView
-from aisquare.core import clipboard, experimental, paths
+from aisquare.core import clipboard, experimental, feature_use, paths
+from aisquare.core import sharing as usage_share_core
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.console import stderr_console
+from aisquare.core.feature_use import view_feature
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.terminal import mac_keyboard
 from aisquare.core.workspace import project_id_for
@@ -145,18 +169,23 @@ from aisquare.models import (
     DoctorCheck,
     FleetAgent,
     FleetAgentStatus,
+    FreshPlan,
+    FreshReport,
     HeadroomSummary,
     ProjectForgetReport,
     ProjectGroup,
     ProjectInfo,
+    ShipReport,
 )
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import diagnostics, install_route, project_groups
 from aisquare.services import fleet as fleet_service
+from aisquare.services import fresh as fresh_service
 from aisquare.services import lifecycle as lifecycle_service
 from aisquare.services import project as project_service
 from aisquare.services import settings as settings_service
 from aisquare.services import updates as updates_service
+from aisquare.services import usage_stats as usage_service
 
 DoctorRunner = Callable[[], list[DoctorCheck]]
 """What the Doctor page runs: ``diagnostics.doctor`` in production, a stub in tests."""
@@ -210,12 +239,41 @@ HEADROOM_WORKER = "sidebar-headroom"
 """The thread worker that reads the status line's headroom (``FleetApp.refresh_headroom``)."""
 HOUSEKEEPING_SECONDS = 30.0
 """How often asq's housekeeping tick runs (:meth:`FleetApp._housekeeping`): Remote's auto-off,
-and the release check's hourly ask, which has no timer of its own."""
+the release check's hourly ask and the usage sweep, none of which has a timer of its own."""
+USAGE_SWEEP_WORKER = "usage-sweep"
+"""The worker that reads Claude Code's transcripts for the Usage & stats page's numbers
+(``services.usage_stats.maybe_sweep``), off the UI thread, at most every ten minutes."""
+USAGE_SWEEP_FIRST_SECONDS = 45.0
+"""How long after start the first sweep waits: the first frame and the first reads go first."""
+SHIP_FIRST_SECONDS = 60.0
+"""How long after start the usage shipper first looks at whether a shipment is due."""
+SHIP_CHECK_SECONDS = 300.0
+"""How often after that: the shipment itself is due only every 6 h (``core.sharing``)."""
+CONSENT_WORKER = "usage-share-consent"
+"""The worker that records the answer to the sharing question (and ships, on a yes)."""
+CONSENT_DUE_WORKER = "usage-share-consent-due"
+"""The worker that reads whether the sharing question is still to be asked."""
 HEADROOM_SECONDS = 60.0
 """How often the status line's headroom is re-read — never on the two-second tick. A read
 goes to the network only for an account whose cached usage is over five minutes old."""
 PROJECT_REMOVE_WORKER = "project-remove"
 """The thread worker a card's *Remove from fleet…* forgets its project on (``project forget``)."""
+PROJECT_FRESH_WORKER = "project-fresh"
+"""The thread worker *Start fresh…* clears a project's board and fleet on (``project fresh``),
+one a project at a time (:func:`_fresh_group`)."""
+TOAST_PLACES = 3
+"""The places a refusal's toast names before it counts the rest: at 80x24 a longer list
+pushed the toast's title and what to do off the screen."""
+UNPUSHED_IN_THE_UI = "confirm the discard in Start fresh…, open again on it"
+"""How the UI lets work found nowhere else go, where the CLI's refusal names its flag: the
+dialog opens again on what the run found (``FleetApp._project_freshened``)."""
+
+
+def _fresh_group(project_id: str) -> str:
+    """The worker group of a project's Start fresh: one run of it at a time."""
+    return f"{PROJECT_FRESH_WORKER}:{project_id}"
+
+
 _QUIT_POLL = 0.1
 """Seconds between the looks a hand-over takes at the reads it waits out (``_exit_when_read``)."""
 _HAND_OFF_PATIENCE = 10.0
@@ -275,6 +333,20 @@ def _remember_ui_state(key: str, value: str | None) -> None:
             store.set_ui_state(key, value)
     except Exception:
         return
+
+
+def _live_manager(status: FleetAgentStatus) -> bool:
+    """A manager row that is running: neither ended nor exited, nor its pane lost."""
+    agent = status.agent
+    return (
+        agent.role == "manager"
+        and agent.ended_at is None
+        and status.state
+        not in (
+            "exited",
+            "lost",
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -528,7 +600,10 @@ class HelpScreen(ModalScreen[None]):
             ("shift+g", "group the marked cards; Esc clears the marks"),
             ("drag title", "move a card or a group header to a new place"),
             ("F2 dblclick", "rename the card in place: Enter or a click away saves, Esc cancels"),
-            (". ⋯ r-click", "the card's menu: rename, pin, settings, remove from the fleet"),
+            (
+                ". ⋯ r-click",
+                "the card's menu: rename, pin, settings, start fresh, remove from the fleet",
+            ),
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
             ("drag", "select text in a pane (double-click: a word) — copied on release"),
@@ -907,8 +982,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         release_check: ReleaseCheck | None = None,
         after_update: bool = False,
         scope: Collection[str] | None = None,
+        sharing: usage_sharing.Sharing | None = None,
     ) -> None:
         super().__init__()
+        self._sharing = sharing
+        """How the sharing switch, its dialogs and the shipper reach ``services.usage_share``
+        (``None``: the real service); a test hands in a fake."""
+        self._sharing_asked = False
+        """The consent question was put (or found already answered) in this run."""
+        self._ship_at = time.monotonic() + SHIP_FIRST_SECONDS
+        """When the housekeeping tick next lets the usage shipper try (``time.monotonic``)."""
         self.scope = None if scope is None else frozenset(scope)
         """The projects ``aisquare ui --project/--group`` listed; ``None`` lists every one."""
         self._workers = self._worker_threads = _WorkerThreads(self)
@@ -940,6 +1023,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._release_asked_at = 0.0
         """When the release check was last asked (``time.monotonic``): the housekeeping tick
         asks again once ``updates.ASK_EVERY_SECONDS`` have passed (:meth:`_housekeeping`)."""
+        self._usage_sweep_at = time.monotonic() + USAGE_SWEEP_FIRST_SECONDS
+        """When the housekeeping tick next sweeps Claude Code's transcripts for the Usage & stats
+        page (``time.monotonic``): soon after start, then every ``SWEEP_EVERY``."""
         self._release_off = release_check is not None and not updates_service.check_enabled()
         """``[updates] check`` as App settings last read it, off: the row is taken away at once
         (:meth:`on_ui_settings_changed`); a check asked after reads the setting itself. Seeded
@@ -996,6 +1082,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         which would read ``config.toml`` every two seconds for a value only that page sets."""
         self.snapshot: FleetSnapshot | None = None
         """The last frame that was read successfully; ``None`` before the first."""
+        self.after_sign_in: ReturnTo | None = None
+        """Where a sign-in started from Welcome, the picker or the Spawn dialog goes back to
+        once it lands (#286, #215): at most one, used once, and dropped when the sign-in
+        does not land or the Accounts page is left first (:meth:`_content_switched`)."""
         self.store_error: str | None = None
         """Why the newest refresh kept the previous frame, or ``None`` when it did not."""
         self._fleet_worker: Worker[_FleetRead] | None = None
@@ -1040,8 +1130,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         are never listed, whatever ``show_captured`` says, and ``a`` is no key."""
         self._undo: list[project_groups.UndoEntry] = []
         """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
+        self._fresh_choices: dict[str, FreshChoice] = {}
+        """Each project's last confirmed Start fresh, by id: what a reopened dialog ticks."""
+        self._fresh_asked: dict[str, FreshChoice] = {}
+        """The Start fresh dialogs to open with a run's extras ticked, by project id, once."""
         self.captain_on = experimental.captain_enabled()
-        """The experimental captain, read at the start: off, there is no insignia, captain
+        """The experimental captain, read at the start: off, there is no Start captain, captain
         row or captain view, and no ui receiver is started (:meth:`on_mount`). Settings'
         *Captain* box switches it while asq runs (:meth:`on_captain_switched`)."""
 
@@ -1064,8 +1158,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         yield Footer()
 
     def on_mount(self) -> None:
+        feature_use.record("tui.launch")
         restore_theme(self)
         self._theme_restored = True
+        self.watch(self.content, "current", self._content_switched, init=False)
         self.show_captured = _ui_state(SHOW_CAPTURED_KEY) == "1"
         # The first frame is read here, on the UI thread, before anything is drawn: there
         # is nothing on screen yet for the read to hold up, and what was open last time is
@@ -1106,7 +1202,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     async def on_captain_switched(self, event: CaptainSwitched) -> None:
         """Settings' *Captain* box (#33): all that :attr:`captain_on` gates, at once, with no
-        restart: the insignia and the Captain section, the captain's part of the fleet read
+        restart: Start captain and the captain's row, the captain's part of the fleet read
         (read as each read runs) and the ui receiver."""
         if event.on == self.captain_on:
             return
@@ -1162,6 +1258,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return False
         elif kind == "accounts":
             self.post_message(AccountsSelected())
+            return False
+        elif kind == "usage-stats":
+            self.post_message(UsageStatsSelected())
             return False
         elif kind == "doctor":
             self.post_message(DoctorSelected(ident or None))
@@ -1258,10 +1357,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.notify(news.text, title="Remote", severity=severity, timeout=10, markup=False)
 
     def _housekeeping(self) -> None:
-        """Every :data:`HOUSEKEEPING_SECONDS`: Remote's auto-off, and the release check's ask
-        once :data:`~aisquare.services.updates.ASK_EVERY_SECONDS` have passed since the last.
+        """Every :data:`HOUSEKEEPING_SECONDS`: Remote's auto-off, the release check's ask
+        once :data:`~aisquare.services.updates.ASK_EVERY_SECONDS` have passed since the last,
+        the usage sweep (:meth:`_sweep_usage`) once :data:`USAGE_SWEEP_FIRST_SECONDS` after
+        start and every ``SWEEP_EVERY`` after that, and the usage shipper's look
+        (:meth:`_ship_usage`) once :data:`SHIP_FIRST_SECONDS` after start and every
+        :data:`SHIP_CHECK_SECONDS`.
 
-        One tick for both, not a timer each: on Windows every pending Textual timer holds a
+        One tick for all, not a timer each: on Windows every pending Textual timer holds a
         thread of asyncio's default executor for as long as it sleeps (``textual._win_sleep``),
         and a runner has eight. An hourly interval of the release check's own took one for
         the app's whole life, and the UI tests whose thread workers then queued behind the
@@ -1272,6 +1375,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             and time.monotonic() - self._release_asked_at >= updates_service.ASK_EVERY_SECONDS
         ):
             self.check_release()
+        if time.monotonic() >= self._usage_sweep_at:
+            self._usage_sweep_at = time.monotonic() + usage_service.SWEEP_EVERY.total_seconds()
+            self._sweep_usage()
+        if time.monotonic() >= self._ship_at:
+            self._ship_at = time.monotonic() + SHIP_CHECK_SECONDS
+            self._ship_usage()
 
     def _remote_auto_off(self) -> None:
         """The 30 s auto-off check; a Remote whose timer ran out stops without this thread."""
@@ -1833,6 +1942,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.worker.name == PROJECT_REMOVE_WORKER:
             self._project_removal(event)
             return
+        if event.worker.name == PROJECT_FRESH_WORKER:
+            self._project_freshened(event)
+            return
         if event.worker.name == FLEET_WORKER:
             self._fleet_read(event)
             return
@@ -1846,6 +1958,15 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         if event.worker.name == HEADROOM_WORKER:
             self._headroom_read(event)
+            return
+        if event.worker.name == USAGE_SWEEP_WORKER:
+            self._usage_swept(event)
+            return
+        if event.worker.name == CONSENT_DUE_WORKER:
+            self._consent_due(event)
+            return
+        if event.worker.name == CONSENT_WORKER:
+            self._consent_saved(event)
             return
         if event.worker.name == CHECK_WORKER:
             self._release_checked(event)
@@ -1942,6 +2063,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             await switcher.add_content(factory(), set_current=True)
         else:
             switcher.current = view_id
+        feature_use.record(view_feature(view_id))
+        self.call_after_refresh(self._maybe_ask_sharing)  # once, after onboarding: see there
 
     async def on_add_project(self, event: AddProject) -> None:
         await self._show("onboard", lambda: OnboardView(id="onboard"))
@@ -2007,14 +2130,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         return AgentView(status, usage=self.session_usage, id=view_id)
 
     def on_captain_requested(self, event: CaptainRequested) -> None:
-        """The insignia: the captain's view when it is live, else the Spawn dialog preset to it.
+        """*▶ Start captain*: the captain's view when live, else the Spawn dialog preset to it.
 
-        Decided from the frame the insignia was painted from, so the click does what
-        the star showed: lit is a live row (``ALIVE_STATES``), dim is none — or one
-        that is gone, which a start replaces (``brain.find`` reaps it first).
+        Decided from the frame the row was painted from, so the click does what the sidebar
+        showed: a live row (``ALIVE_STATES``) opens its view, none — or one that is gone, which
+        a start replaces (``brain.find`` reaps it first) — starts one.
         """
         if not self.captain_on:
-            return  # the insignia is not there to click; nothing else may start one
+            return  # the row is not there to click; nothing else may start one
         # Imported here, not at the top: the shell starts without the captain's modules.
         from aisquare.services.captain import brain
         from aisquare.services.captain import state as captain_state
@@ -2295,10 +2418,143 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 self.on_toggle_pin(TogglePin("project", project_id))
             elif choice == SETTINGS:
                 self.call_later(self._open_settings, project_id)
+            elif choice == FRESH:
+                self.post_message(StartFresh(project_id))
             elif choice == REMOVE:
                 self.push_screen(ConfirmRemove(project), confirmed)
 
         self.push_screen(ProjectMenu(project, event.anchor), chosen)
+
+    def on_start_fresh(self, event: StartFresh) -> None:
+        """*Start fresh…*, from a card's menu or a Settings tab: ask (:class:`ConfirmFresh`,
+        which reads the plan), then :meth:`_start_fresh` with what was chosen."""
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        if self._fresh_running(project):
+            return
+
+        def chosen(choice: FreshChoice | None) -> None:
+            if choice is not None:
+                self._start_fresh(choice)
+
+        self.push_screen(ConfirmFresh(project, self._fresh_asked.pop(project.id, None)), chosen)
+
+    def _start_fresh(self, choice: FreshChoice) -> None:
+        """*Start fresh…*, confirmed: ``services.fresh.start_fresh``, off the UI thread. It
+        plans again before it acts, so a refusal found since (a hub's reader started, work
+        nobody agreed to discard) is a toast, with nothing cleared."""
+        project = self.snapshot.project(choice.project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        if self._fresh_running(project):
+            return
+        target = project
+        self._fresh_choices[target.id] = choice
+        self.run_worker(
+            lambda: fresh_service.start_fresh(
+                target,
+                memory=choice.memory,
+                prompts=choice.prompts,
+                branches=choice.branches,
+                discard=choice.discard,
+            ),
+            name=PROJECT_FRESH_WORKER,
+            group=_fresh_group(target.id),
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _fresh_running(self, project: ProjectInfo) -> bool:
+        """Whether a Start fresh of ``project`` is still running, said when it is: a second
+        run beside it would stop what the first just spawned, and both would start a manager.
+        Refused here, at the menu, the Settings button and the confirmation alike: this is
+        the guard. The worker is not ``exclusive``, which guards nothing: it cancels the run
+        in flight, whose thread goes on regardless, and drops its report (review of #429,
+        round 2)."""
+        group = _fresh_group(project.id)
+        if not any(worker.group == group and not worker.is_finished for worker in self.workers):
+            return False
+        self.notify(
+            f"{project_service.display_name(project)} is starting fresh already — wait for it "
+            "to finish",
+            severity="warning",
+            timeout=6,
+            markup=False,
+        )
+        return True
+
+    def _project_freshened(self, event: Worker.StateChanged) -> None:
+        """What a Start fresh did: a toast of what was cleared and the new manager, a warning
+        for what was kept or refused; then the sidebar, and the project's board, read again."""
+        result = event.worker.result
+        if event.state is WorkerState.SUCCESS and isinstance(result, FreshReport):
+            name = project_service.display_name(result.project)
+            cleared = ", ".join(fresh_service.cleared_words(result))
+            session = (result.manager.session_id or "")[:8] if result.manager else ""
+            manager = f"; a new manager started (session {session})" if result.manager else ""
+            if result.sessions_killed or result.sessions_gone:
+                manager = f"; its tmux session ended{manager}"
+            self.notify(
+                f"✓ {name} started fresh — cleared {cleared}{manager}", timeout=10, markup=False
+            )
+            for kept in result.kept:
+                where = str(kept.path) if kept.path is not None else f"branch {kept.branch}"
+                self.notify(
+                    f"kept {where}: {kept.reason}", severity="warning", timeout=10, markup=False
+                )
+            if result.manager_error is not None:
+                spawn = project_service.fleet_command("spawn", result.project, "manager")
+                self.notify(
+                    f"no manager started: {result.manager_error} — start one: {spawn}",
+                    severity="error",
+                    timeout=12,
+                    markup=False,
+                )
+            self._read_boards(result.project.id)
+            self.refresh_data()
+        elif event.state is WorkerState.ERROR:
+            error = event.worker.error
+            known = (fresh_service.FreshRefused, fresh_service.FreshIncomplete)
+            found = getattr(error, "plan", None) if isinstance(error, known) else None
+            if isinstance(found, FreshPlan):
+                # Work found since the dialog read its plan, which nobody agreed to discard:
+                # the CLI's flag means nothing here (tester-fresh-ui at 8b66e535), and the
+                # dialog opens again on it (review of #429, M1).
+                if isinstance(error, fresh_service.FreshIncomplete):
+                    said = fresh_service.found_after_stop(
+                        found, way=UNPUSHED_IN_THE_UI, limit=TOAST_PLACES, brief=True
+                    )
+                else:
+                    said = fresh_service.unpushed_refusal(
+                        found, way=UNPUSHED_IN_THE_UI, limit=TOAST_PLACES, brief=True
+                    )
+                self._ask_again(found.project.id)
+            elif isinstance(error, known):
+                said = str(error)
+            else:
+                said = f"could not start it fresh: {type(error).__name__}: {error}"
+            self.notify(said, title="not started fresh", severity="error", timeout=12, markup=False)
+            if isinstance(error, fresh_service.FreshIncomplete):
+                self.refresh_data()  # its agents were stopped: the sidebar says so
+
+    def _ask_again(self, project_id: str) -> None:
+        """Open Start fresh… again for ``project_id``, its extras ticked as the run's were,
+        once the run that found work nobody agreed to discard has ended."""
+        choice = self._fresh_choices.get(project_id)
+        if choice is not None:
+            self._fresh_asked[project_id] = choice
+        self.call_after_refresh(self.post_message, StartFresh(project_id))
+
+    def _read_boards(self, project_id: str) -> None:
+        """Every open board of the project, hidden ones too, starts over
+        (``BoardPanel.start_over``): its feed forgets the events the reset deleted and reads
+        the board from its start. Read again only past its cursor, it kept listing them."""
+        for panel in self.query(BoardPanel):
+            if panel.project is not None and panel.project.id == project_id:
+                panel.start_over()
 
     async def _open_settings(self, project_id: str) -> None:
         """The menu's *Open settings*: the project's page, on its Settings tab."""
@@ -2382,14 +2638,58 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         for view in views:
             await view.remove()
 
+    def on_paste(self, event: events.Paste) -> None:
+        """A paste no focused widget took (#288): into the one live pane on screen.
+
+        Textual hands a paste to the focused widget alone, and a terminal hands a dropped
+        file over as a paste, so a file dropped while the sidebar had the keyboard reached
+        no agent. Here, on the main screen, it goes to the one live ``TerminalPane`` on
+        screen (an agent, the manager, a sign-in), which takes the keyboard too; with none,
+        or more than one, it goes nowhere and one toast says which. An input or a dialog
+        keeps its own paste: it stops the event, or is a screen of its own; a text area
+        takes it without stopping it, so it is named here.
+        """
+        log_paste(event.text, self.focused)
+        if self.screen is not self.screen_stack[0]:
+            return  # a dialog is open: what it did not take is not the pane's behind it
+        if isinstance(self.focused, TextArea):
+            return  # it took the paste; the event bubbled on all the same
+        live = [
+            pane
+            for pane in self.screen.query(TerminalPane)
+            if pane.pane_id is not None and pane.is_on_screen
+        ]
+        if not live:
+            self.notify("nothing to paste into — open an agent first", timeout=4)
+            return
+        if len(live) > 1:  # which one is the user's to say, not the router's to guess
+            self.notify(
+                f"{len(live)} panes on screen — click the one to paste into, then paste again",
+                timeout=4,
+            )
+            return
+        (pane,) = live
+        pane.focus()
+        pane.paste_text(event.text)
+
     def on_spawn_agent(self, event: SpawnAgent) -> None:
-        """The sidebar's spawn-agent row: the Spawn dialog for THAT row's project."""
-        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        """*Spawn agent*: the Spawn dialog, on the project asked for — else the first listed —
+        with every listed project in its Project field, in the sidebar's order."""
+        snapshot = self.snapshot
+        listed = self.sidebar.ordered_projects() or (snapshot.projects if snapshot else [])
+        if event.project_id is None:
+            if not listed:
+                self.notify("No projects yet — press + to onboard one", timeout=4)
+                return
+            project: ProjectInfo | None = listed[0]
+        else:
+            project = snapshot.project(event.project_id) if snapshot else None
         if project is None:
             self.notify("that project is no longer listed", severity="warning", timeout=4)
             return
         self.push_screen(
-            SpawnDialog(project, accounts=self._accounts), callback=self.spawn_finished
+            SpawnDialog(project, projects=listed, accounts=self._accounts),
+            callback=self.spawn_finished,
         )
 
     def spawn_finished(self, receipt: fleet_service.SpawnReceipt | None) -> None:
@@ -2494,9 +2794,88 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.spawn_finished(event.receipt)
 
     async def on_new_account_requested(self, event: NewAccountRequested) -> None:
-        """The picker's *+ New account*: the Accounts page, its add-account flow started."""
-        await self.on_accounts_selected(AccountsSelected())
+        """The picker's *+ New account*: the Accounts page, its add-account flow started,
+        and the way back once it lands (``event.return_to``)."""
+        await self.on_accounts_selected(AccountsSelected(return_to=event.return_to))
         self.query_one("#accounts", AccountsView).begin_claude_sign_in(None)
+
+    def _content_switched(self, current: str | None) -> None:
+        """Any other page than Accounts drops the way back: the user went elsewhere first."""
+        if current != "accounts":
+            self.after_sign_in = None
+
+    async def on_sign_in_landed(self, event: SignInLanded) -> None:
+        """A sign-in landed: back to where it was started from, used once — or, from
+        nowhere in particular, the one step after it on the Accounts page (#286)."""
+        back, self.after_sign_in = self.after_sign_in, None
+        if back is None:
+            self._say_next_step()
+        elif back.kind == "welcome":
+            await self.action_welcome()
+            self.query_one(WelcomeView).back_from_sign_in()
+        elif back.kind == "picker":
+            self._reopen_picker(back, event.slot)
+        else:
+            self._reopen_spawn(back, event.slot)
+
+    def on_sign_in_abandoned(self, event: SignInAbandoned) -> None:
+        """No login landed: nothing is reopened, and the one toast says so."""
+        back, self.after_sign_in = self.after_sign_in, None
+        if back is not None:
+            where = {"welcome": "Welcome", "picker": "the picker", "spawn": "the Spawn dialog"}
+            self.notify(f"no sign-in landed — {where[back.kind]} was not reopened", timeout=6)
+
+    async def on_welcome_requested(self, event: WelcomeRequested) -> None:
+        await self.action_welcome()
+
+    def on_board_panel_agent_wanted(self, event: BoardPanel.AgentWanted) -> None:
+        """The board's 🔔 or ❓ count: the live agent it names, selected in the sidebar."""
+        rows = self.snapshot.agents.get(event.project_id, []) if self.snapshot else []
+        agent = next(
+            (s.agent for s in rows if s.agent.label == event.label and s.agent.ended_at is None),
+            None,
+        )
+        if agent is None:
+            self.notify(f"no live agent is labelled {event.label}", timeout=4, markup=False)
+            return
+        self.post_message(AgentSelected(agent.project_id, agent.id))
+
+    def _say_next_step(self) -> None:
+        snapshot = self.snapshot
+        projects = snapshot.projects if snapshot is not None else []
+        managed = {
+            project_id
+            for project_id, rows in (snapshot.agents.items() if snapshot is not None else ())
+            if any(_live_manager(status) for status in rows)
+        }
+        self.query_one("#accounts", AccountsView).show_next_step(next_step(projects, managed))
+
+    def _reopen_picker(self, back: ReturnTo, slot: int) -> None:
+        """The persona picker again, from the Personas tab that opened it, the new slot
+        highlighted (#215): what it is chosen for stays that tab's."""
+        try:
+            tab = self.query_one(f"#project-{back.project_id}").query_one(PersonasTab)
+        except NoMatches:
+            self.notify("the picker's project is no longer open", severity="warning", timeout=6)
+            return
+        form = back.form
+        tab.open_picker(
+            str(form.get("persona", "")),
+            "existing" if form.get("intent") == "existing" else "new",
+            select=f"account:{slot}",
+            filter_text=str(form.get("filter", "")),
+        )
+
+    def _reopen_spawn(self, back: ReturnTo, slot: int) -> None:
+        """The Spawn dialog again, as it was typed, on the new account (#286)."""
+        project = self.snapshot.project(back.project_id or "") if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=6)
+            return
+        dialog = SpawnDialog(
+            project, accounts=self._accounts, **{**back.form, "account": str(slot)}
+        )
+        self.push_screen(dialog, callback=self.spawn_finished)
 
     async def on_settings_selected(self, event: SettingsSelected) -> None:
         """*⚙ Settings*: the hub, with the keyboard on its first link when it came from the
@@ -2857,10 +3236,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     async def on_accounts_selected(self, event: AccountsSelected) -> None:
         """The Accounts page — from the hub or the status line; *⚙ Settings* stays the
-        highlighted row either way, the page being one of Settings' own."""
+        highlighted row either way, the page being one of Settings' own. One asked for with
+        a way back keeps it for the sign-in started there (:attr:`after_sign_in`)."""
         await self._show(
             "accounts", lambda: AccountsView(escape_key=self.escape_key, id="accounts")
         )
+        if event.return_to is not None:
+            self.after_sign_in = event.return_to
         self.sidebar.select(SETTINGS_KEY)
         self._remember_selection("accounts")
         view = self.query_one("#accounts", AccountsView)
@@ -2869,6 +3251,119 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.sign_in is not None:
             # Welcome's step 2 or a Doctor fix: that slot's sign-in, open in the page's pane.
             view.begin_claude_sign_in(event.sign_in)
+
+    def _sweep_usage(self) -> None:
+        """Sweep the transcripts, unless a sweep is already running (and it throttles itself)."""
+        if any(
+            worker.name == USAGE_SWEEP_WORKER and not worker.is_finished for worker in self.workers
+        ):
+            return
+        self.run_worker(
+            usage_service.maybe_sweep,
+            name=USAGE_SWEEP_WORKER,
+            group=USAGE_SWEEP_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _ship_usage(self) -> None:
+        """Send the usage shipment if sharing is on and one is due: off the UI thread, nothing
+        at all when it is off or forced off (the first thing the worker looks at, and the tick
+        does not even start it then)."""
+        if not usage_share_core.enabled():
+            return
+        if any(
+            worker.name == usage_sharing.SHIP_WORKER and not worker.is_finished
+            for worker in self.workers
+        ):
+            return
+        ship = (self._sharing or usage_sharing.Sharing()).ship_due
+        self.run_worker(
+            ship,
+            name=usage_sharing.SHIP_WORKER,
+            group=usage_sharing.SHIP_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _maybe_ask_sharing(self) -> None:
+        """Ask once whether to share anonymous usage: after onboarding (there is a project to
+        be working in), where nothing forces sharing off, if it was not answered before, and
+        never over another dialog."""
+        if self._sharing_asked or len(self.screen_stack) > 1:
+            return
+        snapshot = self.snapshot
+        if snapshot is None or not snapshot.projects or self.content.current == "welcome":
+            return
+        self._sharing_asked = True
+        if usage_share_core.forced_off_reason() is not None:
+            return
+        self.run_worker(
+            (self._sharing or usage_sharing.Sharing()).consent_due,
+            name=CONSENT_DUE_WORKER,
+            group=CONSENT_DUE_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _consent_due(self, event: Worker.StateChanged) -> None:
+        """The read of whether the question is still due came back: ask it, if so."""
+        asked = event.state is WorkerState.SUCCESS and event.worker.result is True
+        if asked and len(self.screen_stack) == 1:
+            self.push_screen(usage_sharing.ConsentDialog(self._sharing), self._consent_answered)
+
+    def _consent_answered(self, answer: str | None) -> None:
+        """Record the answer (``None`` is a dialog closed some other way: *No thanks*) and, on a
+        yes, send the first shipment."""
+        yes = answer == "share"
+        sharing = self._sharing or usage_sharing.Sharing()
+        self.run_worker(
+            lambda: sharing.answer(yes),
+            name=CONSENT_WORKER,
+            group=CONSENT_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _consent_saved(self, event: Worker.StateChanged) -> None:
+        if event.state is WorkerState.ERROR:
+            self.notify(
+                f"could not record the answer: {event.worker.error}",
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
+            return
+        if event.state is not WorkerState.SUCCESS:
+            return
+        for box in self.query(usage_sharing.SharingBox):
+            box.refresh_status()
+        # The answer is all this says. Whether the first shipment went is nothing a person is
+        # told: sharing fails silently, and the days go whenever the server answers.
+        if isinstance(event.worker.result, ShipReport):  # a yes: a no returns nothing
+            self.notify("sharing is on: thank you", timeout=5, markup=False)
+
+    def _usage_swept(self, event: Worker.StateChanged) -> None:
+        """A sweep recorded sessions: the Usage & stats page, if it is the one showing, reads
+        again so that its figures follow."""
+        report = event.worker.result
+        if event.state is not WorkerState.SUCCESS or not isinstance(
+            report, usage_service.SweepReport
+        ):
+            return
+        if report.skipped or not (report.sessions_new or report.sessions_updated):
+            return
+        if self.content.current == "usage-stats":
+            self.query_one("#usage-stats", UsageStatsView).reload()
+
+    async def on_usage_stats_selected(self, event: UsageStatsSelected) -> None:
+        """The hub's *Usage & stats*: the page of what the Claude Code sessions on this machine
+        spent; *⚙ Settings* stays the highlighted row, the page being one of Settings' own."""
+        await self._show(
+            "usage-stats", lambda: UsageStatsView(sharing=self._sharing, id="usage-stats")
+        )
+        self.sidebar.select(SETTINGS_KEY)
+        self._remember_selection("usage-stats")
 
     def on_accounts_changed(self, event: AccountsChanged) -> None:
         """The page added, removed or signed in something: the status line follows once the
@@ -3164,9 +3659,10 @@ def _writing_workers() -> dict[str, str]:
 
     One rule on the app's worker manager, where views kept a flag each (a bool, a set, a
     property) and the next writer was missed: the Project tab's Start manager, an agent's
-    Stop and Restart, and Explainability's writes all quit under an Update (round 16 of
-    #257). The views' own name constants, imported here so the import block stays as it
-    is. The AISquare sign-in is left out (:func:`_cut_off_workers`).
+    Stop and Restart all quit under an Update (round 16 of #257; Explainability's writes
+    were on the list until its view went dormant). The views' own name constants, imported
+    here so the import block stays as it is. The AISquare sign-in is left out
+    (:func:`_cut_off_workers`).
 
     Every other thread worker is waited out rather than refused
     (``FleetApp._holding_the_quit``), so a writer missing here is still never cut off;
@@ -3178,7 +3674,6 @@ def _writing_workers() -> dict[str, str]:
         agent,
         captain,
         doctor,
-        explainability,
         fleet_bulk,
         onboard,
         personas_tab,
@@ -3208,17 +3703,17 @@ def _writing_workers() -> dict[str, str]:
         settings_remote.TOKEN_WORKER: "Settings ▸ Remote's save of the ngrok token",
         agent.RESTART_WORKER: "an agent's restart",
         fleet_bulk.BULK_WORKER: "Settings ▸ Fleet's restart or stop of every agent",
-        explainability.SAVE_WORKER: "Explainability's setup",
-        explainability.REGISTER_WORKER: "Explainability's registration",
-        explainability.SHIP_WORKER: "Explainability's ship",
-        explainability.RESET_WORKER: "Explainability's routing reset",
         accounts.SIGN_OUT_WORKER: "an AISquare sign-out",
         accounts.COMPLETE_WORKER: "a Claude sign-in",
         accounts.ABANDON_WORKER: "a Claude sign-in's discard",
         accounts.REMOVE_WORKER: "an account's removal",
         accounts.ARRANGE_WORKER: "an account change",
         accounts.RENAME_WORKER: "an account's rename",
+        accounts.ADOPT_WORKER: "a conversation's adoption",
+        usage_sharing.SHARE_WORKER: "the usage-sharing switch",
+        CONSENT_WORKER: "the answer to the usage-sharing question",
         PROJECT_REMOVE_WORKER: "a project's removal",
+        PROJECT_FRESH_WORKER: "a project's fresh start",
         REATTACH_WORKER: "the update's restart of the agents it kept",
         PRESS_WORKER: "the update's record of the running agents",
     }
@@ -3232,14 +3727,13 @@ def _waited_reads() -> dict[str, str]:
     ``shell-accounts``, ``welcome-validate`` (round 24 of #257). tests/test_ui_writing_workers.py
     checks that every read the UI starts is here.
     """
-    from aisquare.cli.ui import attach, board, persona_dialogs, spawn
+    from aisquare.cli.ui import attach, board, fresh, persona_dialogs, spawn, terminal
     from aisquare.cli.ui.views import (
         accounts,
         agent,
         app_settings,
         captain,
         doctor,
-        explainability,
         fleet_bulk,
         settings_remote,
         welcome,
@@ -3256,12 +3750,12 @@ def _waited_reads() -> dict[str, str]:
         doctor.ROUTE_WORKER: "how aisquare was installed",
         accounts.USAGE_WORKER: "the accounts' usage",
         accounts.CREDITS_WORKER: "the workspaces' credits",
+        accounts.SESSIONS_WORKER: "the sessions on this machine",
+        accounts.ADOPT_LIST_WORKER: "the conversations to adopt",
         accounts.LOGIN_OPEN_WORKER: "a Claude log-in's stored login",
         accounts.LOGIN_POLL_WORKER: "a Claude sign-in's check",
         agent.LABELS_WORKER: "an agent's account names",
         board.LABELS_WORKER: "a board's account names",
-        explainability.STATUS_WORKER: "Explainability's status",
-        explainability.LEFTOVERS_WORKER: "Explainability's check for leftover routing",
         fleet_bulk.PLAN_WORKER: "Settings ▸ Fleet's read of the running agents",
         app_settings.ACCOUNTS_WORKER: "App settings' accounts",
         welcome.worker_name("look"): "Welcome's checks",
@@ -3269,11 +3763,14 @@ def _waited_reads() -> dict[str, str]:
         welcome.worker_name("validate"): "Welcome's folder check",
         spawn.ACCOUNTS_WORKER: "the Spawn dialog's accounts",
         spawn.ROLE_AGENT_WORKER: "the Spawn dialog's agent for its Binary",
+        spawn.DEFAULT_WORKER: "the Spawn dialog's default account",
         attach.TARGETS_WORKER: "the persona target picker's list",
         persona_dialogs.SKILLS_WORKER: "the Import dialog's skill list",
         captain.BAR_WORKER: "the captain's bar",
         captain.MIC_WORKER: "the captain's microphone check",
         settings_remote.CHECK_WORKER: "what Remote needs",
+        terminal.WSLPATH_WORKER: "a pasted Windows path's conversion",
+        fresh.PLAN_WORKER: "Start fresh's read of the project",
     }
 
 
@@ -3288,14 +3785,28 @@ def _in_words(names: list[str]) -> str:
 def _cut_off_workers() -> frozenset[str]:
     """The workers a hand-over leaves to the quit, which loses nothing of theirs.
 
-    The AISquare sign-in alone: it waits for the browser until a token arrives, a quit
+    The AISquare sign-in: it waits for the browser until a token arrives, a quit
     cancels that wait (``AccountsView.on_unmount``) and nothing is stored past a cancel.
     Waited for, it held Update and Uninstall for the device code's lifetime, 10 to 15
-    minutes (round 16 of #257). Every other thread worker is waited for, a new one too.
+    minutes (round 16 of #257). And the usage sweep and the Usage & stats page's read:
+    the sweep records each session in a transaction of its own and resumes from where
+    the record stopped, so a quit mid-way costs the sessions not yet read and nothing
+    else, while a first sweep over a long history can take half a minute. Every other
+    thread worker is waited for, a new one too.
     """
-    from aisquare.cli.ui.views import accounts
+    from aisquare.cli.ui.views import accounts, usage_stats
 
-    return frozenset({accounts.SIGN_IN_WORKER})
+    return frozenset(
+        {
+            accounts.SIGN_IN_WORKER,
+            USAGE_SWEEP_WORKER,
+            usage_stats.LOAD_WORKER,
+            usage_stats.SWEEP_WORKER,
+            usage_sharing.SHIP_WORKER,
+            usage_sharing.PREVIEW_WORKER,
+            CONSENT_DUE_WORKER,
+        }
+    )
 
 
 REMOTE_QUIT_QUIET_SECONDS = 0.5

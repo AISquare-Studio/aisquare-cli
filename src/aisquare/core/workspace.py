@@ -242,6 +242,7 @@ def git_common_root(start: Path) -> Path | None:
     try:
         result = subprocess.run(
             git_argv("-C", str(start), "rev-parse", "--git-common-dir", "--show-cdup"),
+            stdin=subprocess.DEVNULL,  # an MCP server's stdin is its protocol pipe: not git's
             capture_output=True,
             text=True,
             encoding="utf-8",

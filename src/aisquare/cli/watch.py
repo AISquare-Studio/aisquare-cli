@@ -38,6 +38,7 @@ from aisquare.core.state_file import read_state
 from aisquare.core.store import unmet_needs
 from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import claude_accounts as accounts_service
+from aisquare.services import model_memory
 from aisquare.services import team as team_service
 
 if TYPE_CHECKING:
@@ -205,7 +206,17 @@ def _session_lines(
             text.append(f"  {label}", style="cyan dim")
         if session.model:
             text.append(f"  {session.model}", style="dim cyan")
-            if harness.model_mismatch(session.role, session.model, agent=session.agent):
+            off = harness.model_mismatch(session.role, session.model, agent=session.agent)
+            if off:
+                # A model the owner chose for it is off no ladder (#16): asked only for a
+                # session off its ladder, never on every tick.
+                off = harness.model_mismatch(
+                    session.role,
+                    session.model,
+                    agent=session.agent,
+                    chosen=model_memory.chosen_models(session),
+                )
+            if off:
                 text.append("  ⚠ off-ladder", style="bold yellow")
         text.append(f"  {minutes}m", style="dim")
         if minutes > 30:

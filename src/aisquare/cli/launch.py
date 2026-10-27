@@ -25,8 +25,9 @@ project's default and the machine's default are consulted in that order
 the first enabled, signed-in one in the priority order (#406), so with an account
 signed in a launch runs on one. The exception is a role whose binding sets its
 agent's directory itself (``team bind --env``/``--env-file``): it keeps that directory
-unless a flag, an account binding, a project default or a headroom pick names an
-account. With no account signed in, the environment is exactly what it always was.
+unless a flag, an account binding or a project default names an account (neither
+rank 1 nor a headroom pick overrides it, #9). With no account signed in, the
+environment is exactly what it always was.
 One resolver, ``services.claude_accounts.choose``, answers for ``launch`` and
 ``fleet spawn`` alike — for a Codex role too, where the account is a Codex slot and
 the launch sets ``CODEX_HOME`` to it.
@@ -43,6 +44,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse
 
 import typer
 from rich.text import Text
@@ -164,6 +166,64 @@ def _check_persona(name: str, root: Path | None) -> None:
         fail(str(exc), error="unknown_persona", ref=name)
 
 
+REMOTE_CONTROL_FLAG = "--remote-control"
+"""Claude Code's Remote Control: the session, titled, can be continued from claude.ai/code
+and the Claude app (#289)."""
+_REMOTE_CONTROL_FLAGS = (REMOTE_CONTROL_FLAG, "--rc")
+ANTHROPIC_HOST = "api.anthropic.com"
+
+
+def _remote_control_args(
+    title: str, binary: str, args: Sequence[str], env: dict[str, str]
+) -> list[str]:
+    """``--remote-control <title>`` for Claude Code, where Claude Code would take it (#289).
+
+    Nothing, with one dim line naming why, when the binary is not Claude Code (no other
+    agent has it); when the launch line already carries ``--remote-control`` or ``--rc``,
+    the operator's own, which wins; when ``ANTHROPIC_BASE_URL`` names another host than
+    the Anthropic API, as the explainability proxy's does; or when
+    ``CLAUDE_CODE_OAUTH_TOKEN`` is set, a ``claude setup-token`` token that "can only make
+    model requests". Claude Code refuses Remote Control in the last two cases. ``env`` is
+    the agent's own, read after the tracing wiring, which may have set the base URL.
+    """
+
+    def stand_aside(why: str) -> list[str]:
+        stderr_console().print(f"remote control: {why} — not turned on", style="dim", markup=False)
+        return []
+
+    if any(
+        arg == flag or arg.startswith(f"{flag}=") for arg in args for flag in _REMOTE_CONTROL_FLAGS
+    ):
+        return stand_aside("the launch line already carries it, as given")
+    runs = adapter_for_binary(binary)
+    if runs is None or not runs.capabilities.remote_control:
+        return stand_aside(f"{os.path.basename(binary)!r} is not Claude Code")
+    base_url = env.get("ANTHROPIC_BASE_URL", "").strip()
+    host = urlparse(base_url).hostname if base_url else None
+    if base_url and host != ANTHROPIC_HOST:
+        # The host only: a base URL can carry credentials in its user part or query.
+        return stand_aside(
+            f"ANTHROPIC_BASE_URL points at {host or 'another host'}, and Claude Code refuses "
+            "Remote Control behind any host but the Anthropic API"
+        )
+    if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return stand_aside(
+            "CLAUDE_CODE_OAUTH_TOKEN is set, and that token can make model requests only, "
+            "not Remote Control sessions"
+        )
+    return [REMOTE_CONTROL_FLAG, title]
+
+
+def _named(args: Sequence[str]) -> str | None:
+    """The ``--name`` a fleet spawn passes its window: the agent's label."""
+    for index, arg in enumerate(args):
+        if arg.startswith("--name="):
+            return arg.split("=", 1)[1] or None
+        if arg == "--name" and index + 1 < len(args):
+            return args[index + 1]
+    return None
+
+
 def _with_shared_memory(
     binary: str, role_args: Sequence[str], operator_args: Sequence[str]
 ) -> list[str]:
@@ -273,6 +333,16 @@ def _persona_system_prompt(
         )
         return []
     return seam
+
+
+def _role_remote_control(role: str) -> bool:
+    """The role's ``[fleet.roles.<role>] remote_control``; off when the config is unreadable,
+    which a line above has already said."""
+    try:
+        settings = load_config().fleet.roles.get(role)
+    except Exception:
+        return False
+    return settings is not None and settings.remote_control
 
 
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
@@ -454,6 +524,16 @@ def launch(
             metavar="NAME",
         ),
     ] = None,
+    remote_control: Annotated[
+        bool | None,
+        typer.Option(
+            "--remote-control/--no-remote-control",
+            help="Start Claude Code with its Remote Control, titled '<project> · <label>', "
+            "so claude.ai/code and the Claude app can continue the session (default: the "
+            "role's \\[fleet.roles.<role>] remote_control).",
+            show_default=False,
+        ),
+    ] = None,
     first_prompt_file: Annotated[
         Path | None,
         typer.Option(
@@ -547,6 +627,11 @@ def launch(
         _check_persona(persona, persona_root)
 
     env = {**os.environ, "AISQUARE_ROLE": role}
+    if orchestrator.env_fleet_agent() is not None:
+        # A fleet window inherits the tmux server's environment, whoever started it: from a
+        # Claude Code session, its CLAUDE_EFFORT. The agent runs its own `--effort`, or the
+        # account's default, and its Stop hook reads the effort it runs (#16, seq 3513).
+        env.pop("CLAUDE_EFFORT", None)
     if persona is not None:
         # The name travels, never the body: argv is visible in `ps` and a body
         # can be thousands of characters. The session-start hook resolves it and
@@ -582,8 +667,9 @@ def launch(
     # login. The machine's default is the first enabled, signed-in account
     # (#406), so something chooses whenever one is signed in. Nothing chooses
     # when none is, or when the role's binding sets its agent's directory
-    # itself and no flag, account binding, project default or headroom pick
-    # names an account: then the environment is left as the binding made it.
+    # itself and no flag, account binding or project default names an account
+    # (rank 1 and a headroom pick are silent defaults, #9): then the
+    # environment is left as the binding made it.
     # Every rung answers with an account of the role's agent: a Codex role runs on a
     # Codex slot (`CODEX_HOME`), and another agent's account is refused, naming both.
     choice = claude_accounts_service.AccountChoice(account=None, source=None)
@@ -656,6 +742,12 @@ def launch(
     )
     role_args = [*defaults.args, *policy.args]
     binding_args, agent_args = policy.strip(profile.args), policy.strip(ctx.args)
+    # A model or an effort this line names replaces the binding's: a fleet window's own
+    # (the spawn's `--model`, the Spawn dialog's field, a restart of what the agent runs
+    # now) wins over the role's settings, and Claude Code was given both (#16).
+    for flag in (harness.MODEL_FLAG, harness.EFFORT_FLAG):
+        if harness.flag_arg(agent_args, flag) is not None:
+            binding_args = harness.without_flag(binding_args, flag)
     role_args = _with_shared_memory(resolution.binary, role_args, [*binding_args, *agent_args])
     for note in [*defaults.notes, *policy.notes]:
         # A withheld flag is otherwise invisible: the launch succeeds and the
@@ -766,6 +858,20 @@ def launch(
         if persona is not None
         else []
     )
+    # Claude Code's own Remote Control (#289): decided here, after the tracing wiring,
+    # whose proxy base URL Claude Code would refuse it behind.
+    wanted = remote_control if remote_control is not None else _role_remote_control(role)
+    board = (project.root.name or project.id) if project is not None else "no board"
+    remote_args = (
+        _remote_control_args(
+            f"{board} · {_named(ctx.args) or role}",
+            resolution.binary,
+            [*profile.args, *role_args, *ctx.args],
+            env,
+        )
+        if wanted
+        else []
+    )
     # The captain's one server is its own (`tools_only_args`, from the fleet): the
     # aisquare server `[agents] mcp` adds to every other launch would sit beside it, a
     # second --mcp-config its --strict-mcp-config loads, a Codex server its off-list
@@ -788,13 +894,20 @@ def launch(
         fail(str(exc), error="agent_configuration")
     for note in launch_notes:  # what a part left as the operator's administrator set it
         stderr_console().print(note, markup=False)
+    # Remote Control's flag sits between the role's and binding's arguments and the ones this
+    # line was given (the operator's own win, as for every flag), where the two can be told
+    # apart: the agent's reading of the first is a prefix of its reading of the whole.
+    owned = selected.adapter.native_args([*role_args, *binding_args])
+    held = len(owned) if arguments.argv[: len(owned)] == owned else len(arguments.argv)
     argv = [
         resolution.binary,
         *model_args,
         *pinned_id,
         *launched,
         *persona_args,
-        *arguments.argv,
+        *arguments.argv[:held],
+        *remote_args,
+        *arguments.argv[held:],
     ]
     # The first message (P0-W1a, #122), last: the agent's positional prompt, after `--`
     # (`capabilities.positional_prompt`).

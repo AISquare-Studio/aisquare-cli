@@ -16,14 +16,15 @@ from pathlib import Path
 import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Static
-from textual.widgets._toast import Toast
 
 from aisquare.cli.ui import autosave as autosave_mod
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.core import state_file
 from aisquare.core.atomic import write_replacing
 from aisquare.core.state_file import StateUnwritableError, read_state, update_state
+from tests import toast_log
 from tests.budgets import budget
+from tests.ui_workers import settle_page
 
 
 class _Host(App[None]):
@@ -43,9 +44,13 @@ class _Writer:
         *,
         delay: Callable[[object], float] = lambda value: 0.0,
         fail: Callable[[object, int], BaseException | None] = lambda value, attempt: None,
+        hold: Callable[[object], threading.Event | None] = lambda value: None,
     ) -> None:
         self.delay = delay
         self.fail = fail
+        self.hold = hold
+        """The event a value's write waits to be set before it goes on, if it has one: a write
+        that outlasts every deadline until the test lets it go, whatever the runner's speed."""
         self.calls: list[object] = []
         """Every value handed over, in order — landed or not."""
         self.started = threading.Event()
@@ -61,6 +66,9 @@ class _Writer:
             attempt = self.calls.count(value)
         try:
             self.started.set()
+            held = self.hold(value)
+            if held is not None:
+                assert held.wait(30), "the test never let the write go"
             time.sleep(self.delay(value))
             exc = self.fail(value, attempt)
             if exc is not None:
@@ -264,10 +272,11 @@ def test_an_unexpected_error_is_a_toast_that_names_it(
     seen: list[str] = []
 
     async def go(saver: Autosave, app: App[None]) -> None:
+        told = toast_log.record(app)  # as it is raised: the saver's thread tells the loop of it
         saver.remember(34)
         await _settled(saver)
-        await asyncio.sleep(0.05)  # the toast is posted to the loop after the refusal
-        seen.extend(toast.render().plain for toast in app.screen.query(Toast))
+        await settle_page(app)
+        seen.extend(told)
 
     _run(go, notifications=True)
     assert len(seen) == 1
@@ -292,11 +301,12 @@ def test_a_refusal_after_a_save_that_landed_is_said_again(
     seen: list[str] = []
 
     async def go(saver: Autosave, app: App[None]) -> None:
+        told = toast_log.record(app)
         for value in (1, 2, 3, 4):  # refused, refused, landed, refused
             saver.remember(value)
             await _settled(saver)
-        await asyncio.sleep(0.05)  # the toast is posted to the loop after the refusal
-        seen.extend(toast.render().plain for toast in app.screen.query(Toast))
+        await settle_page(app)
+        seen.extend(told)
 
     _run(go, notifications=True)
     assert writer.calls == [1, 2, 3, 4]
@@ -362,19 +372,15 @@ def test_flush_all_joins_every_saver_against_one_deadline(
 def test_flush_all_closes_a_saver_that_misses_the_deadline_and_names_what_was_cut_off(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The width's write is held until ``flush_all`` has returned, so it misses the deadline
-    whatever the clock does. The theme's write is real and must land inside the deadline: the
-    deadline is quit's own (``JOIN_S``), not one cut to fit under a width that slept 0.8 s.
-    Under 0.2 s, a real locked and fsynced write on a loaded runner outlasted it (CI's
-    proxy-down leg; on a laptop, 1 in 300 writes took 565 ms beside a disk being fsynced)."""
-    cut = threading.Event()
+    """The theme's write is real and must land inside the deadline, and an fsynced write
+    is slow on the Windows leg: there the deadline is scaled (``budget``, tests/budgets.py).
 
-    def held(value: object) -> float:
-        if value == 34:
-            cut.wait(30.0)
-        return 0.0
-
-    writer = _Writer(delay=held)
+    The width's write is held until the test lets it go, not slept for a little longer than
+    the deadline: it misses ANY deadline, so the one thing left to the clock is how long
+    the theme has to land, and that is long (the deadline of 0.2 s was missed by the
+    theme's own write on a loaded runner: ubuntu py3.12, CI run 40251283541)."""
+    width_may_finish = threading.Event()
+    writer = _Writer(hold=lambda value: width_may_finish if value == 34 else None)
     monkeypatch.setattr(autosave_mod, "update_state", writer)
     monkeypatch.setattr(Autosave, "DEBOUNCE", 5.0)
     savers: list[Autosave] = []
@@ -388,14 +394,14 @@ def test_flush_all_closes_a_saver_that_misses_the_deadline_and_names_what_was_cu
             width.remember(34)
             theme.remember("nord")
             try:
-                unsaved = Autosave.flush_all(pilot.app)
+                unsaved = Autosave.flush_all(pilot.app, timeout=budget(2.0))
+                assert unsaved == [
+                    "the width was not saved: the write of 34 did not finish before the app closed"
+                ]
+                width.remember(38)
+                width.wake()  # closed: nothing more may start
             finally:
-                cut.set()
-            assert unsaved == [
-                "the width was not saved: the write of 34 did not finish before the app closed"
-            ]
-            width.remember(38)
-            width.wake()  # closed: nothing more may start
+                width_may_finish.set()
             await asyncio.to_thread(width.join, 10.0)
 
     asyncio.run(go())

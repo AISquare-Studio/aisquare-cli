@@ -46,6 +46,8 @@ SHLEX_KEPT: dict[tuple[str, str], tuple[int, str]] = {
     ("cli/team.py", "harness_status"): (1, "a role's agent arguments as shown, not a command"),
     ("cli/ui/views/app_settings.py", "_append_flags"): (1, "a role's flags as shown, not run"),
     ("services/diagnostics.py", "_trust_fix"): (1, "its POSIX branch; Windows its own"),
+    ("cli/ui/attach.py", "compose"): (1, "a binding's args put in the bind form to edit"),
+    ("cli/ui/views/app_settings.py", "binding_text"): (1, "a binding's args as shown"),
 }
 
 

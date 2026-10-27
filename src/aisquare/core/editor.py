@@ -14,7 +14,9 @@ import tempfile
 from pathlib import Path
 
 
-def _editor_command() -> list[str]:
+def editor_command() -> list[str]:
+    """``$VISUAL``, else ``$EDITOR``, else ``vi``, split as a shell would: what the CLI's
+    ``edit_text`` runs and what the fleet UI's editor pane opens (#212)."""
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
     return shlex.split(editor)
 
@@ -31,7 +33,7 @@ def edit_text(text: str, *, suffix: str = ".md") -> str | None:
         handle.write(text)
         tmp_path = Path(handle.name)
     try:
-        completed = subprocess.run([*_editor_command(), str(tmp_path)], check=False)
+        completed = subprocess.run([*editor_command(), str(tmp_path)], check=False)
         if completed.returncode != 0:
             return None
         return tmp_path.read_text(encoding="utf-8")

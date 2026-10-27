@@ -178,6 +178,25 @@ def is_https(request: Any) -> bool:
     return str(url).lower().startswith("https:")
 
 
+def urlopen_without_redirects(request: Any, *, timeout: float) -> Any:
+    """:func:`urlopen` that follows NO redirect: a 3xx comes back as the ``HTTPError`` it is.
+
+    For a request that carries a credential (the usage shipper's bearer token): urllib follows
+    a redirect by default, as a GET, to any origin, with the request's headers, and so would
+    hand the token to wherever a gateway or a hijacked name pointed it. The caller treats a
+    3xx as the failure it is."""
+    import urllib.request
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(
+            self, req: Any, fp: Any, code: Any, msg: Any, headers: Any, newurl: Any
+        ) -> None:
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirect(), https_handler())
+    return opener.open(request, timeout=timeout)
+
+
 def urlopen(request: Any, *, timeout: float) -> Any:
     """``urllib.request.urlopen`` with :func:`ssl_context`: the way this package opens a URL.
 

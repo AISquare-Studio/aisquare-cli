@@ -126,7 +126,6 @@ NOTED = frozenset({"identity", "board", "pool", "fleet", "signature"})
 READS: frozenset[tuple[str, ...]] = frozenset(
     {
         ("board",),
-        ("recall",),
         ("log",),
         ("inject",),
         ("task", "list"),
@@ -171,7 +170,6 @@ _RID = re.compile(r"[0-9a-f]{32}")
 WHITELIST: dict[tuple[str, ...], str] = {
     ("note",): "share a note, decision, question or result",
     ("board",): "read the board (not --watch)",
-    ("recall",): "ask the project brain",
     ("task", "add"): "add a task",
     ("task", "list"): "list tasks",
     ("task", "show"): "show a task",
@@ -1679,7 +1677,7 @@ def sandbox_environment(
     and ``PYTHONHOME`` (``-E``: ``selfcli.isolated_argv_for``). Warned of, in ``cwd``'s
     terms (an empty entry is the directory a process runs in): a ``PATH`` entry the
     sandbox may write, as Codex itself, and aisquare's hooks and broker, run the ``git``
-    (and ``gbrain``, ``tmux``) found there outside the sandbox; and, where the agent's
+    (and ``tmux``) found there outside the sandbox; and, where the agent's
     hooks were connected by an older aisquare and so read them (``hooks_isolated``
     false), a ``PYTHONPATH`` or ``PYTHONHOME`` entry the sandbox may write. Nothing for an
     unsandboxed agent."""
@@ -1690,7 +1688,7 @@ def sandbox_environment(
     if named:
         said.append(
             f"PATH names {', '.join(named)}, which this agent's sandbox may write: Codex "
-            "itself, and aisquare's hooks and store broker, run the git (and gbrain, tmux) "
+            "itself, and aisquare's hooks and store broker, run the git (and tmux) "
             "found there outside the sandbox. Launch from a shell whose PATH names none of "
             "them (deactivate the project's virtualenv)"
         )

@@ -25,6 +25,7 @@ from textual.widgets import Button, Static
 from aisquare.cli.ui.views.accounts import (
     account_cells,
     agent_section_shown,
+    problem_tooltip,
     reading_age,
 )
 from aisquare.core import claude_accounts as core
@@ -256,7 +257,10 @@ def test_a_codex_row_says_how_old_its_reading_is_and_never_asks_to_open_a_sessio
     assert (shown_row["session"], shown_row["week"]) == ("▮▮▯▯▯ 42% · 3h", "▯▯▯▯▯ 7%")
     unfinished = account_cells(_codex_status(0, "me@example.com", signed_in=False), None, now=NOW)
     assert unfinished["name"].plain == "plain codex"
-    assert unfinished["session"].plain == "⚠ login incomplete"  # never "token missing": Claude's
+    assert unfinished["session"].plain == "!"  # one mark across the usage, why on hover
+    tip = problem_tooltip(_codex_status(0, "me@example.com", signed_in=False), None, now=NOW)
+    assert tip is not None
+    assert tip.splitlines()[0] == "login incomplete"  # never "token missing": Claude's
     # A Claude row never carries an age: its reading is taken now, over the network.
     claude = ClaudeAccountStatus(
         account=ClaudeAccount(slot=1, config_dir=Path("/h/.claude")),

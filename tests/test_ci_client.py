@@ -8,10 +8,12 @@ transport behaviour, and a mock only proves what the mock believes urllib does.
 
 from __future__ import annotations
 
+import itertools
 import json
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -209,24 +211,34 @@ def test_a_served_response_comes_back_intact(wired: StubCI) -> None:
     assert result.error_codes == []
 
 
-def test_network_cost_stays_separable_from_server_cost(wired: StubCI) -> None:
+@pytest.mark.parametrize(
+    "round_trip_ms", [4, 900], ids=["faster-than-the-claim", "slower-than-the-claim"]
+)
+def test_network_cost_stays_separable_from_server_cost(
+    wired: StubCI, monkeypatch: pytest.MonkeyPatch, round_trip_ms: int
+) -> None:
     """Folded together, a slow link is indistinguishable from a slow server, so
     both halves are recorded as columns and the difference is a subtraction over
     the rows — not a third derived property nothing writes down.
 
-    The two are INDEPENDENTLY sourced, which is the property that matters and
-    which this stub demonstrates by disagreeing with itself: ``server_ms`` is
-    whatever the response body claimed, ``round_trip_ms`` is the client's own
-    clock, and a local stub answers in under a millisecond while reporting 63.
-    A single folded number could not represent that, and a client that derived
-    one from the other would have hidden it.
+    The two are INDEPENDENTLY sourced: ``server_ms`` is whatever the response
+    body claimed (63), ``round_trip_ms`` is the client's own clock. The clock is
+    the test's, read either side of the claim, because a stub that answers in
+    under 10 ms here took 295 ms on a loaded windows-latest runner (shard 1/10 of
+    run 40296457841), and "smaller than the claim" was a fact about the machine,
+    not about the client. A client that derived one number from the other could
+    not give both readings.
     """
+    reads = itertools.count()
+
+    def clock() -> float:
+        # The first read is the exchange's start; every later one is the elapsed time.
+        return 0.0 if next(reads) == 0 else round_trip_ms / 1000
+
+    monkeypatch.setattr(ci_client, "time", SimpleNamespace(monotonic=clock))
     result = _call(wired)
     assert result.server_ms == 63, "the server's own number, straight from the body"
-    assert result.round_trip_ms < result.server_ms, (
-        "the client clock is measured, not derived — here it is smaller than the "
-        "server's claim, which is only visible because both are kept"
-    )
+    assert result.round_trip_ms == round_trip_ms, "the client's own clock, not the body's claim"
 
 
 def test_a_degraded_response_records_its_error_codes(wired: StubCI) -> None:
@@ -294,14 +306,26 @@ def test_a_refused_connection_is_a_transport_error(monkeypatch: pytest.MonkeyPat
     assert result.reason is ClientReason.transport_error
 
 
+#: How long the stub stalls where the test is about the ceiling cutting a stall off: a minute,
+#: so that "cut off at the ceiling" and "waited for the server" are a minute apart and a
+#: runner's stalls are no part of it (it stalled 2 s against a bound of 1.2 s, and the hook
+#: was seen to take 1.42 s on windows-latest, CI run 40291352194). The handler is a daemon
+#: thread asleep, and ends when its client has gone.
+_STALL_S = 60.0
+#: What a hook may take to return from such a stall: half of it. The ceiling is what is asked.
+_CUT_OFF_BY_S = _STALL_S / 2
+
+
 def test_a_stalled_server_is_cut_off_at_the_ceiling(wired: StubCI) -> None:
-    wired.respond(status=200, body=fixture_text("hook-response.experimental-v2.valid"), delay_s=2.0)
+    wired.respond(
+        status=200, body=fixture_text("hook-response.experimental-v2.valid"), delay_s=_STALL_S
+    )
     started = time.monotonic()
     result = _call(wired, client_safety_ms=300)
     elapsed = time.monotonic() - started
     assert result.reason is ClientReason.deadline_exceeded
     assert result.deadline_breached is True
-    assert elapsed < 1.2, f"the hook waited {elapsed:.2f}s for a 0.3s ceiling"
+    assert elapsed < _CUT_OFF_BY_S, f"the hook waited {elapsed:.2f}s for a 0.3s ceiling"
 
 
 def test_a_dripping_body_cannot_hold_the_hook_past_the_ceiling(wired: StubCI) -> None:
@@ -309,16 +333,20 @@ def test_a_dripping_body_cannot_hold_the_hook_past_the_ceiling(wired: StubCI) ->
     chunk every half-ceiling never trips it and holds the hook indefinitely.
     The wall clock does not care how the bytes arrive."""
     ceiling_ms = 600
+    interval_s = ceiling_ms / 1000 * 0.5
+    # A drip that outlasts the ceiling by a minute, not by two seconds: a chunk every half
+    # ceiling all the same, so no read ever times out, and what ends the call is the clock.
+    chunks = int(_STALL_S / interval_s)
     wired.respond(
         status=200,
         body=fixture_text("hook-response.experimental-v2.valid"),
-        drip=(8, ceiling_ms / 1000 * 0.5),
+        drip=(chunks, interval_s),
     )
     started = time.monotonic()
     result = _call(wired, client_safety_ms=ceiling_ms)
-    elapsed_ms = (time.monotonic() - started) * 1000
+    elapsed_s = time.monotonic() - started
     assert result.reason is ClientReason.deadline_exceeded
-    assert elapsed_ms < ceiling_ms + 600, f"returned after {elapsed_ms:.0f} ms"
+    assert elapsed_s < _CUT_OFF_BY_S, f"returned after {elapsed_s * 1000:.0f} ms"
     assert wired.call_count == 1
 
 
@@ -436,14 +464,14 @@ def test_a_refused_pull_is_an_http_error_with_the_servers_code(wired: StubCI) ->
 
 
 def test_a_stalled_pull_is_cut_off_at_the_ceiling_it_was_given(wired: StubCI) -> None:
-    wired.respond_recall(body=wired.recall_behaviour.body, delay_s=1.5)
+    wired.respond_recall(body=wired.recall_behaviour.body, delay_s=_STALL_S)
     started = time.monotonic()
     result = ci_client.recall(
         RecallInput(prompt="q", session_id="ses_test"),
         url=wired.url + "/v1/mcp/collective_intelligence_recall",
         deadline_ms=200,
     )
-    assert time.monotonic() - started < 1.0
+    assert time.monotonic() - started < _CUT_OFF_BY_S
     assert result.reason is ClientReason.deadline_exceeded
     assert result.deadline_breached is True
     time.sleep(1.5)  # the abandoned worker's request lands on the stub …

@@ -20,14 +20,12 @@ from aisquare.cli.common import (
     emit_status,
     expected_config_write_errors,
     fail,
-    project_for_ref,
     resolve_pool,
 )
 from aisquare.models import CheckStatus
 from aisquare.services import context as context_service
 from aisquare.services import diagnostics as diagnostics_service
 from aisquare.services import explainability as explainability_service
-from aisquare.services import explainability_ops
 from aisquare.services import lifecycle as lifecycle_service
 from aisquare.services import project as project_service
 from aisquare.services import sync as sync_service
@@ -139,52 +137,28 @@ def doctor(
         bool,
         typer.Option(
             "--live",
-            help="Also run the checks that leave this machine (explainability "
-            "gateway reachability, key acceptance, a real span round-trip).",
+            help="Also run the checks that leave this machine (the TLS handshake, each "
+            "account's usage, each workspace's balance, a key owed a revocation).",
         ),
     ] = False,
     fix: Annotated[
         bool,
         typer.Option("--fix", help="Repair what can be repaired, then re-check."),
     ] = False,
-    target: Annotated[
-        str | None,
-        typer.Option(
-            "--target",
-            help="Explainability deployment to check, e.g. stg or prod; with --fix, the "
-            "one tracing is turned on for (without it, --fix leaves tracing off).",
-        ),
-    ] = None,
     yes: Annotated[
-        bool, typer.Option("--yes", "-y", help="Answer yes to every --fix prompt.")
+        bool,
+        typer.Option("--yes", "-y", help="Accepted and ignored: --fix asks nothing."),
     ] = False,
-    project: Annotated[
-        str | None,
-        typer.Option(
-            "--project",
-            "-P",
-            help="Check the explainability key this project's launches use, by codename, "
-            "name or id prefix (default: the machine's key).",
-        ),
-    ] = None,
 ) -> None:
-    """Run diagnostics and suggest fixes for common problems.
-
-    ``--project`` resolves the explainability section's key for one project,
-    its own key (#141) first, as ``launch`` does. Without it the section reads
-    the machine's key and opens no store. With ``--live`` that is the check that
-    puts a project's key to the gateway: ``use`` names it once tracing is on,
-    and ``explainability status``, which it used to name, only probes the
-    proxy, so a revoked or wrong-workspace key passed it (review of #172, D2
-    round 2).
-    """
-    project_id = project_for_ref(project).id if project is not None else None
+    """Run diagnostics and suggest fixes for common problems."""
+    # --fix creates the aisquare home when it is missing (looking never does), then checks
+    # again. It asks nothing, so --yes changes nothing; it stays because the fleet UI's
+    # one-click fix (services.onboarding.KNOWN_FIXES), scripts and the runbooks pass it.
+    del yes
     if fix:
-        for action in explainability_ops.apply_fixes(
-            target=target, assume_yes=yes, confirm=typer.confirm
-        ):
+        for action in diagnostics_service.apply_fixes():
             typer.echo(f"fix: {action}")
-    checks = diagnostics_service.doctor(live=live, target=target, project_id=project_id)
+    checks = diagnostics_service.doctor(live=live)
     emit_doctor(checks)
     if any(check.status is CheckStatus.fail for check in checks):
         raise typer.Exit(1)

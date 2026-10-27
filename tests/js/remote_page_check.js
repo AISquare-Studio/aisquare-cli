@@ -234,13 +234,13 @@ else process.env.TZ = zone;
 
 for (const hash of [
   "", "#/", "#/unlock", "#/projects", "#/n/ny_0123456789abcdef", "#/n/ny_0123456789abcdef/p/prj_x/a/coder-1",
-  "#/p/prj_x/a/coder-1/transcript", "#/p/prj_x/board", "#/n/javascript:alert(1)", "#/p/../fleet",
+  "#/p/prj_x/a/coder-1/transcript", "#/p/prj_x/a/coder-1/card", "#/p/prj_x/board", "#/n/javascript:alert(1)", "#/p/../fleet",
   "#/p/prj_x/a/%3Cimg%3E/live", "#/n/ny_0123456789ABCDEF", "#/p/prj_x/a/coder-1/evil", "#/%E0%A4%A", "#/settings/extra",
 ]) report.routes[hash] = page.parseRoute(hash);
 for (const [name, route] of Object.entries({
   card: { name: "card", id: "ny_0123456789abcdef", pid: "prj_x", label: "coder-1" },
   badCard: { name: "card", id: "javascript:alert(1)" },
-  agent: { name: "agent", pid: "prj_x", label: "coder-1", tab: "card" },
+  agent: { name: "agent", pid: "prj_x", label: "coder-1", tab: "transcript" },
   badAgent: { name: "agent", pid: "prj_x", label: "<img>", tab: "live" },
   badTab: { name: "project", pid: "prj_x", tab: "javascript:" },
   nothing: null,

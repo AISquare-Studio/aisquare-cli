@@ -1,5 +1,6 @@
 """Claude Code's native integration vocabulary."""
 
+import os
 import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -85,6 +86,14 @@ def _effort_level(payload: Mapping[str, Any]) -> str | None:
         return None
     level = effort.get("level")
     return level if isinstance(level, str) and level else None
+
+
+def _effort_now(payload: Mapping[str, Any]) -> str | None:
+    """The effort the session runs, at a turn's end: the payload's ``effort.level``, else
+    the ``CLAUDE_EFFORT`` Claude Code gives its Stop hook (#16). Never at a session start:
+    Claude Code 2.1.310's SessionStart carries no effort, and its hooks there see only the
+    process's inherited environment, a fleet window's being the tmux server's (seq 3513)."""
+    return _effort_level(payload) or os.environ.get("CLAUDE_EFFORT", "").strip() or None
 
 
 class ClaudeCodePlugin:
@@ -241,6 +250,7 @@ class ClaudeCodeAdapter:
         own_doctor_check=True,
         model_proxy=True,
         model_ladders=True,
+        remote_control=True,
         legacy_fleet_args=True,
         value_options=frozenset(
             {
@@ -385,6 +395,7 @@ class ClaudeCodeAdapter:
                 message=payload_text(payload, "last_assistant_message"),
                 permission_mode=payload_text(payload, "permission_mode"),
                 transcript_path=transcript,
+                effort=_effort_now(payload),
                 **common,
             )
         if event == "StopFailure":
@@ -401,6 +412,7 @@ class ClaudeCodeAdapter:
                 "notification",
                 message=payload_text(payload, "message"),
                 notification_type=payload_text(payload, "notification_type"),
+                transcript_path=transcript,
                 **common,
             )
         return None

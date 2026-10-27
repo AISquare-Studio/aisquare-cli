@@ -176,6 +176,44 @@ def bind_role(
     return profile
 
 
+def replace_role_binding(
+    role: str,
+    *,
+    agent_bin: str | None,
+    env: dict[str, str],
+    args: Sequence[str],
+    agent: str | None = None,
+) -> RoleLaunchProfile:
+    """``role``'s binary, environment and args as an edit form shows them, written whole.
+
+    What ``team bind <role> --clear`` followed by ``team bind <role> --bin … --env …
+    --arg …`` leaves: App settings' *Edit* (#98). Through :func:`bind_role`, which merges
+    env per key and APPENDS args, an edit that kept an argument wrote it twice. The
+    variables bound to a file (``env_files``, secrets the form never shows) and the
+    account (which has its own select) stay as they were. ``agent`` is the form's Agent
+    field, written whole as the others are: ``None`` (the binary's) clears a pick.
+    """
+    if agent is not None:
+        from aisquare.core.agent_adapters import get_adapter
+
+        get_adapter(agent)  # an unknown agent is refused here, as `bind_role` refuses it
+    config = load_config()
+    kept = config.team.profiles.get(role, RoleLaunchProfile())
+    # A copy, not a new profile: whatever else a binding holds stays, a field added later too.
+    profile = kept.model_copy(
+        update={
+            "bin": agent_bin,
+            "agent": agent,
+            "env": {key: value for key, value in env.items() if key not in kept.env_files},
+            "args": list(args),
+        },
+        deep=True,
+    )
+    config.team.profiles[role] = profile
+    save_config(config)
+    return profile
+
+
 def role_account_bindings(config: AppConfig | None = None) -> dict[str, str]:
     """Role → the account reference its binding names, for every role that names one.
 

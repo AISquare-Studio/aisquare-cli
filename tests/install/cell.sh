@@ -7,7 +7,7 @@
 # The acceptance criterion of the whole feature is one line, and it is asserted
 # here rather than described:
 #
-#     aisquare --json doctor  ->  every check ok EXCEPT brain
+#     aisquare --json doctor  ->  every check ok
 #
 # THREE RUNS, and the sequence is the test rather than an accident:
 #
@@ -35,7 +35,7 @@
 #                             `--agent codex` on a machine with no Claude Code. The
 #                             doctor's codex row stays amber for the one step no
 #                             script may take, trusting the hooks in Codex's /hooks,
-#                             so that row is expected beside brain.
+#                             so that row is the one amber check expected.
 
 set -eu
 
@@ -119,12 +119,12 @@ fi
 
 AGENT_FLAG=""
 [ "$SKIP_AGENT" = 1 ] && AGENT_FLAG="--no-agent"
-# What run 2 accepts as the whole amber set: brain alone, and for the Codex cell the
-# codex row too, whose detail is then checked to be the trust step and nothing else.
-EXPECTED="brain"
+# What run 2 accepts as the whole amber set: nothing, and for the Codex cell the codex
+# row, whose detail is then checked to be the trust step and nothing else.
+EXPECTED=""
 if [ "$AGENT" = codex ]; then
     AGENT_FLAG="--agent codex"
-    EXPECTED="brain codex"
+    EXPECTED="codex"
 fi
 
 # ---------------------------------------------------------------------------
@@ -151,8 +151,8 @@ amber_checks() {
         sed 's/  */ /g; s/^ //; s/ $//'
 }
 
-# Total checks in the payload, so "all ok except brain" cannot be satisfied by a
-# doctor that answered with two checks.
+# Total checks in the payload, so "all ok" cannot be satisfied by a doctor that
+# answered with two checks.
 total_checks() {
     aisquare --json doctor 2>/dev/null | tr '{' '\n' | grep -c '"name": *"' || true
 }
@@ -195,7 +195,7 @@ head1 "installed: $(aisquare --version)"
 aisquare --version >/dev/null || fail "aisquare --version does not run"
 
 # Node, which run 1 chose with --with chrome-devtools. It is optional, so no
-# doctor row goes amber without it and run 2's "exactly [brain]" gate could not
+# doctor row goes amber without it and run 2's "nothing amber" gate could not
 # see a failed install. Checked by name.
 command -v node >/dev/null 2>&1 ||
     fail "node absent after run 1 — the installer's Chrome DevTools extra failed (no doctor row names Node)"
@@ -293,7 +293,7 @@ amber=$(amber_checks)
 head1 "doctor: $total checks, not-ok = [$amber]"
 
 # A doctor that answered with a handful of checks must not be able to satisfy
-# "all ok except brain".
+# "all ok".
 [ "$total" -ge 15 ] || fail "doctor reported only $total checks — expected the full set (17+)"
 
 # THE ACCEPTANCE CRITERION OF THE WHOLE FEATURE (§0.3, §0.4, §8.3).
@@ -312,7 +312,7 @@ if [ "$AGENT" = codex ]; then
     grep -q "codex — run codex (sign in if it asks), open /hooks and trust aisquare's hooks" \
         "${TMPDIR:-/tmp}/run2.log" || fail "run 2's summary did not name the /hooks step"
 fi
-head1 "ACCEPTANCE: 	 every check ok except $EXPECTED"
+head1 "ACCEPTANCE: 	 every check ok${EXPECTED:+ except $EXPECTED}"
 
 [ "$run2" = 0 ] || fail "with only [$EXPECTED] amber the installer must exit 0, got $run2"
 

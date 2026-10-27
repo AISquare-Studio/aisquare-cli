@@ -176,23 +176,17 @@ def test_payload_keys_stay_inside_the_contract() -> None:
         assert set(card) <= CARD_KEYS, card
 
 
-def test_the_changelog_and_the_page_name_only_keys_a_card_has() -> None:
-    """The CHANGELOG gave the card a ``cost_estimate_usd?``, and the page kept a line to
-    draw it, but nothing sets it: the CLI carries no price table, and a user with a green
-    doctor looked for a cost the release notes listed. Each key the CHANGELOG names is one
-    a card has, every key a card can have is named, and the Card tab reads no other."""
+def test_the_changelog_names_only_keys_a_card_has() -> None:
+    """The CHANGELOG gave the card a ``cost_estimate_usd?`` that nothing sets: the CLI
+    carries no price table, and a user with a green doctor looked for a cost the release
+    notes listed. Each key the CHANGELOG names is one a card has, and every key a card can
+    have is named. (The page no longer draws the card: the route is dormant.)"""
     produced = set().union(*(set(card) for card in _cards()))
     assert produced == CARD_KEYS
     changelog = " ".join((ROOT / "CHANGELOG.md").read_text(encoding="utf-8").split())
     shape = re.search(r"\*\*`GET api/explainability/<agent>`\*\*: `\{([^}]*)\}`", changelog)
     assert shape is not None
     assert {key.strip().rstrip("?") for key in shape.group(1).split(",")} == CARD_KEYS
-    page = (ROOT / "src/aisquare/web/remote/app.js").read_text(encoding="utf-8")
-    drawn = re.search(r"\nfunction drawExplainability\(body, card\) \{\n(.*?)\n\}\n", page, re.S)
-    assert drawn is not None
-    read = set(re.findall(r"\bcard\.([a-z_]+)", drawn.group(1)))
-    assert "tokens_in" in read, "the control: the reads are seen"
-    assert read <= CARD_KEYS, read - CARD_KEYS
 
 
 # --- the endpoint ----------------------------------------------------------------------

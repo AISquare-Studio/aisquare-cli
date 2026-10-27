@@ -30,6 +30,7 @@ import pytest
 
 from aisquare.core import claude_accounts as core
 from aisquare.core import tls
+from aisquare.models import UsageCause
 from aisquare.services import claude_accounts as service
 from tests.test_claude_accounts import LIVE_USAGE, NOW, _sign_in
 
@@ -266,7 +267,12 @@ def test_a_certificate_that_does_not_verify_is_named_as_tls_not_urlerror(
     usage = service.usage(account, now=NOW)
 
     assert not usage.available and usage.reason is not None
-    assert usage.reason.startswith("TLS certificate could not be verified — ")
+    # Its fix beside it (#13's causes), not in it: the '!' tooltip and `accounts usage`.
+    assert (usage.cause, usage.reason, usage.fix) == (
+        UsageCause.tls_cert,
+        "TLS certificate could not be verified",
+        tls.CERT_HINT,
+    )
     assert "URLError" not in usage.reason and "sk-ant" not in usage.reason
     assert not usage.needs_login  # a log-in would not fix a trust store
 
@@ -873,6 +879,11 @@ def connect_proxy() -> Iterator[tuple[str, list[str]]]:
             seen.append(line)
             host, port = line.split()[1].rsplit(":", 1)
             upstream = socket.create_connection((host, int(port)), timeout=5)
+            # The 5 s was for the connect: left on the socket it also ended the tunnel at the
+            # first read that waited that long, and a loaded windows-latest runner left the
+            # client reading the end of a tunnel in the middle of its handshake
+            # (SSLEOFError, CI run 40269567279).
+            upstream.settimeout(None)
             self.request.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
 
             def pump(src: socket.socket, dst: socket.socket) -> None:
@@ -959,7 +970,11 @@ def test_a_bundle_that_will_not_load_is_named_on_the_usage_row(
     usage = service.usage(account, now=NOW)
 
     assert not usage.available and usage.reason is not None
-    assert usage.reason.startswith("TLS: the CA bundle could not be loaded — ")
+    assert (usage.cause, usage.reason, usage.fix) == (
+        UsageCause.tls_bundle,
+        "TLS: the CA bundle could not be loaded",
+        tls.BUNDLE_FIX,
+    )
     assert "could not reach" not in usage.reason and "Error" not in usage.reason
     assert not usage.needs_login
     with pytest.raises(tls.CABundleError, match="SSL_CERT_FILE="):

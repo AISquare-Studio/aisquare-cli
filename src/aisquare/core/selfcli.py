@@ -7,7 +7,7 @@ that is process-wide and a race with every worker — so it runs them here, as
 call (~350 ms); the gain is crash isolation and a cwd that is exactly right.
 
 This is a registered spawn seam (``core.spawn.SEAMS``), ruled EXCLUDED and not
-stripped: it starts no model process, and ``doctor --live`` needs the
+stripped: it starts no model process, and ``explainability doctor --live`` needs the
 ``EXPLAINABILITY_*`` environment to diagnose the machine it is on.
 """
 
@@ -57,8 +57,8 @@ def argv_for(args: Sequence[str], *, module: str = "aisquare") -> list[str]:
     window inherits regardless of what the spawner had set.
 
     Every self-invocation in the package builds its argv here — ``run`` below,
-    the fleet's window command, the detached distiller and the hook fallback —
-    so the flag has exactly one home.
+    the fleet's window command and the hook fallback — so the flag has
+    exactly one home.
     """
     # Internal worker modules use the same safe interpreter invocation.
     return [sys.executable, "-P", "-m", module, *args]
@@ -71,7 +71,7 @@ def isolated_argv_for(args: Sequence[str], *, module: str = "aisquare") -> list[
 
     For what aisquare runs outside a sandboxed agent's sandbox on its behalf, and for
     the launches the fleet makes: the broker and the commands it runs, the fleet
-    window's ``aisquare launch``, the hand-over, the distiller, the telemetry receiver,
+    window's ``aisquare launch``, the hand-over, the telemetry receiver,
     and the hooks a sandboxed agent's own hooks file runs (``agents.install_hooks``).
     A ``PYTHONPATH`` there may name a directory the agent's sandbox writes (direnv's
     ``PYTHONPATH=$PWD/src``; an empty entry, which is the directory the process runs

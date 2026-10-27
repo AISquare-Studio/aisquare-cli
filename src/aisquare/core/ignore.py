@@ -43,6 +43,7 @@ def head_sha(root: Path) -> str | None:
         result = subprocess.run(
             git_argv("rev-parse", "HEAD"),
             cwd=root,
+            stdin=subprocess.DEVNULL,  # not the MCP protocol pipe a server's tool may run under
             capture_output=True,
             text=True,
             encoding="utf-8",

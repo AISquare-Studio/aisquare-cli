@@ -85,6 +85,109 @@ def test_task_add_is_idempotent_on_key(work_dir: Path) -> None:
     assert again.id == first.id
 
 
+# --- task keys in any script (#270) --------------------------------------------
+
+
+def test_two_titles_in_another_script_are_two_tasks(work_dir: Path) -> None:
+    """#270: the key kept `[a-z0-9]` only, so every title with no ASCII letter keyed `task`:
+    the second Cyrillic title answered "already tracked" with the first task."""
+    first, made_first = team_service.add_task("Исправить вход")
+    second, made_second = team_service.add_task("Добавить тесты")
+    login, made_login = team_service.add_task("修复登录")
+    tests, made_tests = team_service.add_task("添加测试")
+
+    assert made_first and made_second and made_login and made_tests
+    assert (first.number, second.number, login.number, tests.number) == (1, 2, 3, 4)
+    again, made_again = team_service.add_task("Исправить вход")
+    assert not made_again and again.id == first.id, "the same title is still the same task"
+
+
+def test_a_title_in_any_script_keys_by_its_own_words() -> None:
+    assert team_service.task_key("Исправить вход") == "исправить-вход"
+    assert team_service.task_key("修复登录") == "修复登录"
+    assert team_service.task_key("Fix вход") == "fix-вход"
+    # Marks are kept, so a Devanagari word is not split at its virama or vowel signs.
+    assert team_service.task_key("हिन्दी परीक्षण") == "हिन्दी-परीक्षण"
+    assert (
+        team_service.task_key("\uff26\uff55\uff4c\uff4c\u3000\uff57\uff49\uff44\uff54\uff48")
+        == "full-width"
+    ), "NFKC"
+    assert team_service.task_key("Straße") == "strasse", "casefolded"
+    # Nothing left to slug: a hash of the title, never one shared constant.
+    rocket, party = team_service.task_key("🚀🔥"), team_service.task_key("🎉")
+    assert rocket.startswith("t-") and len(rocket) == 14 and rocket != party
+
+
+def test_an_emoji_with_a_variation_selector_is_hashed_not_keyed_by_the_selector(
+    work_dir: Path,
+) -> None:
+    """Review of #314: U+FE0F, the selector after most text-default emoji, is a mark, and
+    every mark was kept, so `⚠️`, `✔️` and `❤️` all keyed the invisible selector alone and
+    the second `task add` answered with the first. A mark is kept only after a letter, a
+    digit or a mark it belongs to, as a Devanagari vowel sign or virama is."""
+    keys = [team_service.task_key(title) for title in ("⚠️", "✔️", "❤️", "☀️", "#️⃣")]
+    assert all(key.startswith("t-") and len(key) == 14 for key in keys), keys
+    assert len(set(keys)) == len(keys), keys
+    for title in ("Ship it ✔️", "Ship it ❤️", "Fix ☀️ mode"):
+        key = team_service.task_key(title)
+        assert "\ufe0f" not in key and key.isprintable(), (title, key)
+    assert team_service.task_key("Ship it ✔️") == "ship-it", "the emoji is not a word of it"
+
+    warned, made_warned = team_service.add_task("⚠️")
+    checked, made_checked = team_service.add_task("✔️")
+    assert made_warned and made_checked and warned.id != checked.id
+
+
+@pytest.mark.parametrize(
+    ("title", "key"),
+    [
+        ("wire auth", "wire-auth"),
+        ("Wire the auth flow!", "wire-the-auth-flow"),
+        ("  P3-W6c: tasks -- keys  ", "p3-w6c-tasks-keys"),
+        ("snake_case_name", "snake-case-name"),
+        ("tabs\tand\nnewlines", "tabs-and-newlines"),
+        ("x" * 70, "x" * 64),
+        ("a" * 63 + " b", "a" * 63 + "-"),  # clipped after the strip, as it always was
+        ("???", "task"),
+        ("", "task"),
+    ],
+)
+def test_an_ascii_title_keeps_the_key_it_always_had(title: str, key: str) -> None:
+    """Every task on a board today keyed by an ASCII title is found again by the same key."""
+    assert team_service.task_key(title) == key
+
+
+def test_every_ascii_title_keys_as_the_legacy_slug_did() -> None:
+    import random
+    import string
+
+    pick = random.Random(270)
+    titles = [
+        *string.printable,
+        *("".join(pick.choices(string.printable, k=pick.randint(0, 90))) for _ in range(3000)),
+    ]
+    for title in titles:
+        assert team_service.task_key(title) == team_service._legacy_task_key(title), repr(title)
+
+
+def test_re_adding_a_mixed_title_from_before_the_upgrade_is_still_idempotent(
+    work_dir: Path,
+) -> None:
+    """A mixed title's key changed with #270 (`Fix вход` keyed `fix`, now `fix-вход`). A task
+    stored under the old key is found by its identical title, so a manager re-emitting its
+    plan after the upgrade gets "already tracked", not a second task."""
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        old, _ = store.upsert_task(_task(project.id, "Fix вход", "fix"))
+
+    again, created = team_service.add_task("Fix вход")
+    other, created_other = team_service.add_task("Fix тесты")
+
+    assert not created and again.id == old.id
+    assert created_other and other.key == "fix-тесты", "the old key alone is not the same task"
+
+
 def test_concurrent_claims_have_exactly_one_winner(work_dir: Path) -> None:
     project = team_project(work_dir)
     with store_session() as store:

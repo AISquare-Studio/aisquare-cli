@@ -24,8 +24,11 @@ an entry of its own in place of the reply — ``"model": "<synthetic>"``,
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import re
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -132,6 +135,278 @@ def latest_in_tail(
         if latest is not None or window >= size_now:
             return latest
         window *= 4
+
+
+def latest_model(path: Path, *, tail_bytes: int = _TAIL_BYTES) -> str | None:
+    """The model the session's LAST reply came from (``message.model`` of its last
+    ``assistant`` entry in the tail), which a ``/model`` since the launch has changed.
+    ``None`` when the tail holds none, or the file cannot be read.
+
+    One bounded read of the tail, never grown: at a Stop hook the turn's last reply is
+    already on disk, followed only by the hook's own summary lines. Claude Code's synthetic
+    entries (an API error in place of a reply) name no model, and a subagent's turns
+    (``isSidechain``) run on a model of their own.
+    """
+    latest: str | None = None
+    for entry in tail_entries(path, tail_bytes):
+        if entry.get("type") != "assistant" or entry.get("isSidechain") is True:
+            continue
+        message = entry.get("message")
+        model = message.get("model") if isinstance(message, dict) else None
+        if isinstance(model, str) and model and model != _SYNTHETIC_MODEL:
+            latest = model
+    return latest
+
+
+# --- the owner's /model and /effort, as Claude Code records them (#16) ------------------
+#
+# What Claude Code 2.1.310 and 2.1.311 write (``tests/fixtures/claude_code/
+# model_commands_2.1.31*.jsonl``, probed on a scratch config dir):
+#
+# - a built-in ``/model`` or ``/effort`` runs locally and starts no turn. It is a FRAME of
+#   three ``user`` records: its caveat (``isMeta``, ``<local-command-caveat>…``), the command
+#   (the caveat's child: ``<command-name>/model</command-name> <command-message>model
+#   </command-message> <command-args>haiku</command-args>``) and its answer (the command's
+#   child: ``<local-command-stdout>Set model to `Haiku 5.5` and saved as your default for new
+#   sessions</local-command-stdout>``); the picker's Esc as two ``system`` records of subtype
+#   ``local_command``, the answer the command's child;
+# - a custom command or a skill opens a turn: ``<command-message>quick</command-message>
+#   <command-name>/quick</command-name> …``, then its expansion (``isMeta``);
+# - a typed prompt is the text itself, a long paste in it ``<pasted_content id=…>…
+#   </pasted_content id=…>`` (2.1.311);
+# - a ``/model`` typed while a turn runs switches the model and writes NO record (2.1.311):
+#   a known limit, no pick (seq 3654 (5));
+# - a fork (``--resume <t> --fork-session``) has no file at its session start; its first
+#   write copies the source's history in, frames included, with their uuids and their
+#   timestamps under the fork's ``sessionId`` (``fork_2.1.311.jsonl``): only the timestamps
+#   tell that history from the fork's own (``since``).
+#
+# Text can quote all of this (a typed prompt, a Stop hook's feedback, which is how a board
+# note reaches an agent, a compaction summary) but cannot make the frame: no typed text is
+# ``isMeta`` or a ``system`` record, nor the child of a caveat (review of #441, round 6).
+
+#: The settings a built-in command changes and the pick keeps.
+SETTINGS = ("model", "effort")
+
+_COMMAND_NAME = re.compile(r"<command-name>/([^<\s]+)</command-name>")
+_COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
+_COMMAND_STDOUT = re.compile(r"<local-command-stdout>(.*?)</local-command-stdout>", re.S)
+_CAVEAT = "<local-command-caveat>"
+#: How Claude Code's answer to a successful ``/model`` and ``/effort`` opens (2.1.310, 2.1.311),
+#: and a ``/config`` answer's line for each setting it changed: one no framed command owns is
+#: a frame this reader does not know (a renamed tag or command), said.
+_SETTING_ANSWERS = {"Set model to": "model", "Set effort level to": "effort"}
+#: The command that also sets the model, as its own frame (2.1.311: ``/config`` → Model):
+#: ``Set model to \x1b[1mhaiku (claude-haiku-5-5)\x1b[22m``, one line per setting changed.
+_SETS_TOO = "config"
+#: A ``/config`` answer's Fast mode line: that row closes on ``Set model to opus`` beside it
+#: while it saves only ``fastMode`` (read off the 2.1.311 binary, unprobed), no model choice.
+_FAST_MODE = "Set Fast mode to"
+#: Terminal styling in an answer (``/config`` bolds the value).
+_STYLE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+@dataclasses.dataclass(frozen=True)
+class SettingCommand:
+    """A built-in ``/model`` or ``/effort`` run in the session, framed and answered; or a
+    ``/config`` whose answer sets one (``via``)."""
+
+    setting: str
+    """``model`` or ``effort``."""
+    args: str
+    """What was typed after it (``""`` for the picker)."""
+    stdout: str
+    """What Claude Code answered (``Set model to …``, ``Cancelled``), its styling stripped;
+    for a ``/config``, its lines that set a model or an effort."""
+    version: str | None = None
+    """The Claude Code version that recorded it, for a reader that cannot read the answer."""
+    via: str | None = None
+    """The command that set it when not the setting's own: ``config`` (seq 3828 (2))."""
+
+
+@dataclasses.dataclass(frozen=True)
+class UnframedCommand:
+    """A record led by a ``/model`` or ``/effort`` tag outside Claude Code's frame (no caveat
+    its parent), a framed one never answered though the transcript went on, or a ``Set model
+    to`` / ``Set effort level to`` answer no framed command owns: text quoting one, or a
+    frame a later Claude Code shapes differently (a renamed tag). Never a choice; said, so a
+    changed frame does not fail silently (review of #441, round 7; seq 3759 (4))."""
+
+    setting: str
+    version: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class CommandScan:
+    """What :func:`commands_since` read: each built-in ``/model`` and ``/effort``, each record
+    of one outside the frame, and each turn's prompt as ``"plain"`` or ``"command"`` (a
+    custom command, a skill or a typed ``/…`` opened it), in the order written, and the
+    offset the next read starts at."""
+
+    events: tuple[SettingCommand | UnframedCommand | str, ...]
+    end: int
+
+
+def commands_since(path: Path, offset: int, *, since: datetime | None = None) -> CommandScan | None:
+    """The built-in ``/model`` and ``/effort`` commands and the turn prompts written to
+    ``path`` since ``offset`` (a file shorter than that is read from its start), and only
+    those stamped ``since`` or later when given (a fork's copied history is older); ``None``
+    when it cannot be read.
+
+    A command counts only in Claude Code's own frame, answered: the command the child of a
+    caveat (or a ``system`` ``local_command`` record), its answer the command's child. Read
+    once, forward, to the last complete line, whatever is pending there: a frame cut by the
+    read is lost, never held (a held one pinned every later read to it), and its command may
+    read as :class:`UnframedCommand`. Only lines that can be a prompt or a frame are parsed:
+    no tool result, no reply.
+    """
+    events: list[SettingCommand | UnframedCommand | str] = []
+    frames = _Frames()
+    try:
+        with path.open("rb") as handle:
+            size = handle.seek(0, 2)
+            end = offset if 0 <= offset <= size else 0
+            handle.seek(end)
+            for raw in handle:
+                if not raw.endswith(b"\n"):
+                    break  # still being written: the next read takes it whole
+                end += len(raw)
+                # A quoted `"tool_use_id"` in typed text is escaped: only a real result has it.
+                if b'"tool_use_id"' in raw or (
+                    b'"user"' not in raw and b"local_command" not in raw
+                ):
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(entry, dict) or _written_before(entry, since):
+                    continue
+                event = _frame_step(entry, frames)
+                frames.parsed += 1
+                if event is not None:
+                    events.append(event)
+    except OSError:
+        return None
+    events.extend(
+        UnframedCommand(name, version)
+        for name, _, version, before in frames.framed.values()
+        if name in SETTINGS and before < frames.parsed - 1
+    )
+    return CommandScan(tuple(events), end)
+
+
+@dataclasses.dataclass
+class _Frames:
+    """What one read of :func:`commands_since` carries from a record to the next."""
+
+    caveats: set[str] = dataclasses.field(default_factory=set)
+    """Claude Code's caveats: meta, opening with ``<local-command-caveat>``, and none the
+    expansion of a custom command, which an agent can write (its parent opened that
+    command's turn: ``opened``; seq 3697)."""
+    opened: set[str] = dataclasses.field(default_factory=set)
+    """The prompts that opened a custom command's or a skill's turn."""
+    said: set[str] = dataclasses.field(default_factory=set)
+    """The tag-led records said as :class:`UnframedCommand`: their answers are not said again."""
+    framed: dict[str, tuple[str, str, str | None, int]] = dataclasses.field(default_factory=dict)
+    """A framed command's uuid → its name, its args, its version, and how many records were
+    parsed before it (one parsed after it, and it went unanswered)."""
+    parsed: int = 0
+
+
+def _written_before(entry: dict[str, Any], since: datetime | None) -> bool:
+    """Whether ``entry`` is stamped before ``since`` (``"timestamp"``, as Claude Code writes
+    it: ``2026-10-26T22:45:21.475Z``). A record with no stamp to read is not."""
+    stamp = entry.get("timestamp")
+    if since is None or not isinstance(stamp, str):
+        return False
+    try:
+        written = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if written.tzinfo is None:
+        written = written.replace(tzinfo=UTC)
+    return written < since
+
+
+def _frame_step(
+    entry: dict[str, Any], frames: _Frames
+) -> SettingCommand | UnframedCommand | str | None:
+    """One record's part in :func:`commands_since`: a turn's prompt kind, an answered setting
+    command, one outside the frame, or nothing (keeping ``frames`` for the records after
+    it)."""
+    if entry.get("isSidechain") is True or entry.get("isCompactSummary") is True:
+        return None
+    system = entry.get("type") == "system"
+    if system:
+        text = entry.get("content") if entry.get("subtype") == "local_command" else None
+    elif entry.get("type") == "user":
+        message = entry.get("message")
+        text = message.get("content") if isinstance(message, dict) else None
+        if isinstance(text, list) and all(
+            isinstance(block, dict) and block.get("type") == "text" for block in text
+        ):
+            text = "".join(block.get("text", "") for block in text)
+    else:
+        text = None
+    if not isinstance(text, str):
+        return None
+    uuid, parent = entry.get("uuid"), entry.get("parentUuid")
+    version = entry.get("version") if isinstance(entry.get("version"), str) else None
+    if entry.get("isMeta") is True:
+        if text.startswith(_CAVEAT) and isinstance(uuid, str) and parent not in frames.opened:
+            frames.caveats.add(uuid)
+        return None  # a command's expansion, a hook's feedback: never a frame, never a prompt
+    if (named := _COMMAND_NAME.match(text)) is not None:
+        if isinstance(uuid, str) and (system or parent in frames.caveats):
+            args = _COMMAND_ARGS.search(text)
+            frames.framed[uuid] = (
+                named.group(1),
+                args.group(1).strip() if args else "",
+                version,
+                frames.parsed,
+            )
+            return None
+        if named.group(1) not in SETTINGS:
+            return None
+        if isinstance(uuid, str):
+            frames.said.add(uuid)
+        return UnframedCommand(named.group(1), version)
+    if (answer := _COMMAND_STDOUT.match(text)) is not None:
+        command = frames.framed.pop(parent, None) if isinstance(parent, str) else None
+        said = _STYLE.sub("", answer.group(1)).strip()
+        settings = [
+            (line, setting)
+            for line in said.splitlines()
+            for opens, setting in _SETTING_ANSWERS.items()
+            if line.startswith(opens)
+        ]
+        if command is not None and command[0] == _SETS_TOO:
+            if any(line.startswith(_FAST_MODE) for line in said.splitlines()):
+                settings = [(line, setting) for line, setting in settings if setting != "model"]
+            if not settings:
+                return None  # a theme, a toggle: no setting of ours
+            lines = "\n".join(line for line, _ in settings)
+            return SettingCommand(settings[0][1], "", lines, version, via=_SETS_TOO)
+        if command is None or command[0] not in SETTINGS:
+            # A setting's answer no `/model` or `/effort` frame owns: a renamed tag or a
+            # renamed command (`/models`, seq 3797 (4)), said once per record.
+            if not settings or not said.startswith(settings[0][0]) or parent in frames.said:
+                return None
+            return UnframedCommand(settings[0][1], version)
+        return SettingCommand(command[0], command[1], said, version)
+    if system:
+        return None
+    stripped = text.strip()
+    if stripped.startswith(("<command-message>", "/")):
+        if isinstance(uuid, str):
+            frames.opened.add(uuid)
+        return "command"
+    if stripped.startswith("<pasted_content") or (
+        stripped and not stripped.startswith(("[Request interrupted", "<"))
+    ):
+        return "plain"  # a typed prompt, one opening with a paste (2.1.311) included
+    return None
 
 
 def refusal_count(path: Path, *, tail_bytes: int = _TAIL_BYTES, since: int = 0) -> int:
@@ -241,3 +516,269 @@ def _entries(lines: list[bytes]) -> Iterator[dict[str, Any]]:
             continue
         if isinstance(entry, dict):
             yield entry
+
+
+# --- background work and activity: is a turn end a safe point (F2 of #400) ------------
+#
+# The background work a turn can leave running, every kind this machine's 563 transcripts
+# hold (Claude Code 2.1.304 to 2.1.310; review of #423, round 2), as ``toolUseResult``:
+#
+# - a background Bash, ``run_in_background`` or moved there at its timeout:
+#   ``{"backgroundTaskId": "b8y4zgj98", ...}``;
+# - a ``Monitor`` (an agent's wait on CI or a condition): ``{"taskId": "brlrwkgkh",
+#   "timeoutMs": 1800000, "persistent": false}``;
+# - a background subagent: ``{"isAsync": true, "status": "async_launched", "agentId": …}``;
+# - a background forked skill: ``{"status": "forked", "background": true, "agentId": …}``.
+#
+# Each reports in a ``<task-notification>`` naming it — queued, then taken — and its FINAL one
+# carries a ``<status>`` (completed, failed, killed, stopped). A Monitor first sends events
+# with no ``<status>``, one or many, so only a notice with a status ends a task. ``TaskStop``
+# ends one too, its call and its result (``{"task_id": …}``), and so does a Monitor's own
+# ``timeoutMs`` (unless ``persistent``). A shape with an id this list does not know is counted
+# as running until it reports, fails closed; the two foreground shapes that carry an id are
+# not: a subagent that answered inline (``"status": "completed"``) and a skill forked in the
+# foreground (``"status": "forked"`` without ``"background": true``).
+
+_LAUNCH_MARKS = (
+    b'"backgroundTaskId"',
+    b'"taskId"',
+    b'"agentId"',
+    b'"shellId"',
+    b"<task-id>",
+    b'"TaskStop"',
+    b'"task_id"',
+)
+"""What a line must hold to say anything of background work: a launch, a notice, a stop. Every
+other line is skipped unparsed, so a scan of an 18 MB transcript parses a handful of them."""
+_NOTICE = re.compile(rb"<task-notification>(.*?)(?=<task-notification>|</task-notification>|$)")
+_NOTICE_ID = re.compile(rb"<task-id>\s*([^<\s]+)\s*</task-id>")
+_NOTICE_STATUS = re.compile(rb"<status>\s*([^<\s]+)\s*</status>")
+_RAW_IDS = re.compile(rb'"(?:backgroundTaskId|taskId|agentId|shellId)"\s*:\s*"([^"]+)"')
+_FOREGROUND = frozenset({"completed", "failed", "error", "cancelled", "canceled", "interrupted"})
+"""A subagent result's ``status`` when it answered inline: it runs no more."""
+_LAUNCH_ID_KEYS = ("backgroundTaskId", "taskId", "agentId", "shellId")
+
+
+def background_running(
+    path: Path, *, since: datetime | None = None, now: datetime | None = None
+) -> list[str]:
+    """The ids of the background work the transcript at ``path`` started and has not seen end
+    (the kinds above): a Bash in the background, a ``Monitor``, a background subagent or forked
+    skill, or a shape not known that carries an id — with no notice with a ``<status>`` naming
+    it after the launch, no ``TaskStop`` of it, and for a Monitor, its ``timeoutMs`` not past
+    at ``now``.
+
+    A turn can end with such work still running, and the agent's own process runs it: an
+    ``/exit`` then kills it, and a resumed conversation waits for a notice that never comes.
+    ``[accounts] before_limit`` moves nobody while it runs (``services.hooks``).
+
+    Work a SUBAGENT launched is the session's too: its launch is in the subagent's own
+    transcript, ``<session>/subagents/agent-<id>.jsonl`` beside ``path``, and its notice lands
+    in the main one (review of #423, round 3: 19 on this machine, 6 of 10 traced still running
+    at a main turn end). Those files are read for launches and stops first, then ``path``,
+    whose notices end them.
+
+    ``since`` leaves out launches written before it — the start of the process that runs the
+    agent now (its fleet row's): a restart or a switch resumes the conversation, not the work,
+    and its launches would otherwise read as running for good. A launch on a line too long to
+    parse (:data:`_LINE_MAX_BYTES`) is read by its id alone and counted. Read whole, line by
+    line; ``OSError`` when a file cannot be read.
+    """
+    running: dict[str, datetime | None] = {}
+    for transcript in (*_subagent_transcripts(path), path):
+        _read_background(transcript, running, since)
+    moment = now or datetime.now(tz=UTC)
+    return [task for task, until in running.items() if until is None or until > moment]
+
+
+def _timestamp(entry: dict[str, Any]) -> datetime | None:
+    """An entry's ``timestamp`` (``2026-09-25T10:00:00.412Z``), aware; ``None`` if unreadable."""
+    raw = entry.get("timestamp")
+    if not isinstance(raw, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
+
+
+def _subagent_transcripts(path: Path) -> list[Path]:
+    """The transcripts of the subagents the session at ``path`` ran: ``<session>/subagents``."""
+    folder = path.with_suffix("") / "subagents"
+    return sorted(folder.glob("*.jsonl")) if folder.is_dir() else []
+
+
+def _read_background(
+    path: Path, running: dict[str, datetime | None], since: datetime | None
+) -> None:
+    """Add the launches of ``path`` to ``running`` and take out what ended there."""
+    with path.open("rb") as handle:
+        for raw in handle:
+            if not any(mark in raw for mark in _LAUNCH_MARKS):
+                continue
+            for task in _notices_with_a_status(raw):
+                running.pop(task, None)
+            record = _parsed(raw)
+            if record is None:
+                if len(raw) > _LINE_MAX_BYTES:
+                    for match in _RAW_IDS.findall(raw):
+                        running[match.decode(errors="replace")] = None
+                continue
+            for stopped in _stopped_ids(record):
+                running.pop(stopped, None)
+            when = _timestamp(record)
+            if since is not None and when is not None and when < since:
+                continue
+            for task, until in _launches(record, when):
+                running[task] = until
+
+
+def _notices_with_a_status(raw: bytes) -> list[str]:
+    """The ids of the ``<task-notification>`` blocks in ``raw`` that carry a ``<status>``: a
+    task's final notice. A Monitor's events carry none, and end nothing."""
+    ended: list[str] = []
+    for block in _NOTICE.findall(raw):
+        found = _NOTICE_ID.search(block)
+        if found is not None and _NOTICE_STATUS.search(block) is not None:
+            ended.append(found.group(1).decode(errors="replace"))
+    return ended
+
+
+def _launches(record: dict[str, Any], when: datetime | None) -> list[tuple[str, datetime | None]]:
+    """The background work ``record``'s tool result started, each with when it ends of itself
+    (a Monitor's timeout), else ``None``: until it reports."""
+    result = record.get("toolUseResult")
+    if not isinstance(result, dict):
+        return []
+    task = result.get("taskId")
+    if isinstance(task, str) and task:
+        timeout = result.get("timeoutMs")
+        until = None
+        if (
+            result.get("persistent") is not True
+            and isinstance(timeout, int | float)
+            and timeout > 0
+            and when is not None
+        ):
+            until = when + timedelta(milliseconds=timeout)
+        return [(task, until)]
+    status = result.get("status")
+    agent = result.get("agentId")
+    if isinstance(agent, str) and agent:
+        inline = status in _FOREGROUND or (
+            status == "forked" and result.get("background") is not True
+        )
+        return [] if inline else [(agent, None)]
+    return [
+        (value, None)
+        for key in _LAUNCH_ID_KEYS
+        if isinstance(value := result.get(key), str) and value
+    ]
+
+
+def _stopped_ids(record: dict[str, Any]) -> list[str]:
+    """The ids ``record``'s ``TaskStop`` names: the agent's call (``input.task_id``, or an older
+    ``shell_id``) or its result (``toolUseResult.task_id``)."""
+    found: list[str] = []
+    result = record.get("toolUseResult")
+    if isinstance(result, dict) and not any(key in result for key in _LAUNCH_ID_KEYS):
+        stopped = result.get("task_id")
+        if isinstance(stopped, str) and stopped:
+            found.append(stopped)
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return found
+    for block in _content_blocks(message.get("content")):
+        tool_input = block.get("input")
+        if block.get("type") != "tool_use" or block.get("name") != "TaskStop":
+            continue
+        if isinstance(tool_input, dict):
+            found.extend(
+                value
+                for key in ("task_id", "shell_id")
+                if isinstance(value := tool_input.get(key), str) and value
+            )
+    return found
+
+
+_ACTIVITY_MARKS = (
+    b'"type":"user"',
+    b'"type":"assistant"',
+    b'"queue-operation"',
+    b'"stop_hook_summary"',
+    b'"type": "user"',
+    b'"type": "assistant"',
+)
+
+
+def activity_since(path: Path, offset: int) -> bool:
+    """Whether the transcript at ``path`` shows a turn begun after byte ``offset`` — a turn
+    end's size — or one about to begin.
+
+    Begun: a ``user`` record (a prompt, a task's notice, a tool's result), an ``assistant`` one,
+    or a queued message taken (``queue-operation`` ``dequeue``) after ``offset``. A prompt's own
+    record is written once its ``UserPromptSubmit`` hook has passed (a prompt that hook blocks
+    gets none), so this sees a typed prompt no sooner than its board stamp does; it is a
+    queued message or a task's notice, whose ``enqueue`` and ``dequeue`` are on disk at once,
+    that it sees first. What Claude Code writes at an idle prompt (``system`` records, titles,
+    modes, attachments) is no turn.
+
+    About to begin: a message queued during the turn and not yet taken — an ``enqueue`` since
+    the last turn end the queue lived through (a ``stop_hook_summary``, written after the Stop
+    hooks have run) with no ``dequeue`` or ``remove`` after it — which Claude Code submits as
+    the turn ends. Counted from the last turn end only: over the whole file, one enqueue never
+    matched (the same notice queued twice, taken once) read as busy at every turn end after
+    it, and the agent was never moved (review of #423, round 2). A file shorter than
+    ``offset`` (rewritten) counts as activity. ``OSError`` when it cannot be read.
+    """
+    queued = 0
+    with path.open("rb") as handle:
+        if handle.seek(0, 2) < offset:
+            return True
+        handle.seek(0)
+        position = 0
+        for raw in handle:
+            start, position = position, position + len(raw)
+            if not any(mark in raw for mark in _ACTIVITY_MARKS):
+                continue
+            record = _parsed(raw)
+            if record is None:
+                if start >= offset and len(raw) > _LINE_MAX_BYTES:
+                    return True  # too long to read: a pasted prompt as like as anything
+                continue
+            kind = record.get("type")
+            if kind == "system" and record.get("subtype") == "stop_hook_summary":
+                queued = 0
+            elif kind == "queue-operation":
+                operation = record.get("operation")
+                if operation == "enqueue":
+                    queued += 1
+                elif operation in ("dequeue", "remove"):
+                    queued = max(0, queued - 1)
+                    if operation == "dequeue" and start >= offset:
+                        return True
+            elif start >= offset and kind in ("user", "assistant"):
+                return True
+    return queued > 0
+
+
+_LINE_MAX_BYTES = 262_144
+"""Longest line the background and activity scans parse (a pasted attachment can be megabytes
+on one line); a longer one is read by its ids alone, or counted as activity."""
+
+
+def _parsed(raw: bytes) -> dict[str, Any] | None:
+    if len(raw) > _LINE_MAX_BYTES:
+        return None
+    try:
+        record = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _content_blocks(content: object) -> list[dict[str, Any]]:
+    if isinstance(content, list):
+        return [block for block in content if isinstance(block, dict)]
+    return []

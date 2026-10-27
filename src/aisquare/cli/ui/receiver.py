@@ -327,7 +327,7 @@ def _open_spawn(app: FleetApp, arg: str | None) -> str:
     snapshot = _frame(app)
     _no_dialog_open(app)
     project = find_project(snapshot, arg) if arg is not None else _selected_project(app, snapshot)
-    # The sidebar's spawn row posts exactly this, and the shell answers it with the dialog.
+    # The sidebar's Spawn agent posts exactly this, and the shell answers it with the dialog.
     app.post_message(SpawnAgent(project.id))
     return f"spawn dialog open for {project_name(project)}"
 

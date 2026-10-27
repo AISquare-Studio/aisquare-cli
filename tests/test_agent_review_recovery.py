@@ -298,7 +298,9 @@ def test_harness_reads_one_config_and_project_choice_per_matrix(
     monkeypatch.setattr(agent_launch, "store_session", store_reader)
     first = runner.invoke(app, ["--json", "team", "harness"])
     assert first.exit_code == 0, first.output
-    assert reader.call_count == 1 and store_reader.call_count == 1
+    # One read for the harness matrix, and the command's own at its start: the sharing switch
+    # (`core.sharing.switch_on`, which counts a command's use) is read before any of it.
+    assert reader.call_count == 2 and store_reader.call_count == 1
     config = load_config()
     config.agents.models["codex"] = AgentModelSettings(model="changed-model")
     save_config(config)

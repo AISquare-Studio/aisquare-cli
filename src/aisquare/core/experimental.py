@@ -10,7 +10,7 @@ set turns it off (``0``, and a typo), and unset or empty defers to the config.
 
 Off: ``aisquare captain`` and every subcommand exit 2 with :data:`CAPTAIN_OFF`, and so
 does the server's lean entry (``python -m aisquare.services.captain``); only the group's
-own ``--help`` prints. The fleet UI shows no insignia, captain row or captain view and
+own ``--help`` prints. The fleet UI shows no Start captain, captain row or captain view and
 starts no ui receiver, ``captain`` is an unknown role to ``launch`` and ``fleet spawn``
 unless the owner declared it, the bundled ``captain`` persona is absent, the voice page
 does not serve (it is a subcommand), ``fleet restart`` and ``fleet switch`` refuse the

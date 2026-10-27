@@ -352,6 +352,11 @@ class AgentCapabilities:
     model_ladders: bool = False
     """AISquare's role model ladder and its probe choose the model (Claude Code); an
     agent without keeps its native default unless a model is pinned."""
+    remote_control: bool = False
+    """It can be started so that another client continues the session, titled (Claude Code's
+    ``--remote-control``, #289): ``cli.launch`` adds the flag where ``[fleet.roles.<role>]
+    remote_control`` or the spawn asks for it. A launch that asks of an agent without says
+    so and starts it as it was."""
     compact: CompactCommand | None = None
     """The command that compacts the session when typed at its idle prompt
     (:class:`CompactCommand`): what P1 WS-4's quiet-point compaction of a manager types

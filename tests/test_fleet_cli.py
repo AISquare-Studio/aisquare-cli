@@ -344,6 +344,7 @@ def test_spawn_consumes_its_own_options_and_forwards_nothing_else(
         "spawned_by": "mgr-session",
         "account": None,
         "persona": None,
+        "remote_control": None,
         "ack_wait": 45.0,  # [fleet] prompt_ack_seconds: the CLI waits for the first turn
         "board_context": None,
     }
@@ -599,7 +600,7 @@ def test_ls_json_names_where_each_agents_server_is_asked(
     it): the path its tmux server is asked at (`tmux -S`), or null where it is asked by
     its socket's name (`tmux -L`). The keys each agent has are pinned with it, so one
     added or dropped is a change the CHANGELOG has to name: `held` since (review of #259,
-    round 1)."""
+    round 1), and `remote_control` (#289)."""
     at = Path("/tmp/tmux-1000/asq")
     agents = [
         _status(_agent("coder-auth"), "working").model_copy(update={"socket_at": at}),
@@ -613,7 +614,17 @@ def test_ls_json_names_where_each_agents_server_is_asked(
     listed = json.loads(result.stdout)["agents"]
     assert [agent["socket_at"] for agent in listed] == [str(at), None]
     assert all(
-        set(agent) == {"agent", "state", "detail", "session", "tmux_session", "socket_at", "held"}
+        set(agent)
+        == {
+            "agent",
+            "state",
+            "detail",
+            "session",
+            "tmux_session",
+            "socket_at",
+            "held",
+            "remote_control",
+        }
         for agent in listed
     ), listed
 
@@ -1356,12 +1367,19 @@ def test_restart_and_stop_of_one_label_are_as_they_were(
 
     assert runner.invoke(app, ["fleet", "restart", "coder-auth"]).exit_code == 0
     assert runner.invoke(app, ["fleet", "stop", "coder-auth"]).exit_code == 0
+    # #16: a model and an effort for that agent alone.
+    picked = ["fleet", "restart", "coder-auth", "--model", "haiku", "--effort", "max"]
+    assert runner.invoke(app, picked).exit_code == 0
+    every = runner.invoke(app, ["fleet", "restart", "--all", "--model", "haiku"])
+    # As CI renders it too: Rich colours the option's dashes apart and wraps the panel
+    # (seq 3759 (2)); a wrap breaks between words, never inside `--model`.
+    said = _plain(every.output)
+    assert every.exit_code == 2 and "--model" in said and "--all" in said
 
+    asked = {"fresh": False, "spawned_by": "user", "permission_mode": None, "ack_wait": 45.0}
     assert restart.calls == [
-        (
-            (PROJECT, "coder-auth"),
-            {"fresh": False, "spawned_by": "user", "permission_mode": None, "ack_wait": 45.0},
-        )
+        ((PROJECT, "coder-auth"), {**asked, "model": None, "effort": None}),
+        ((PROJECT, "coder-auth"), {**asked, "model": "haiku", "effort": "max"}),
     ]
     assert stop.calls == [((PROJECT, "coder-auth"), {"force": False, "actor": "user"})]
     assert bulk.calls == []

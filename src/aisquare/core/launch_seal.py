@@ -7,7 +7,7 @@ documented, not sealed (git hooks that live in it and git config its repository 
 from it, a project's own venv, a subdirectory's settings, what the user's own ``aisquare
 project onboard`` packs it with, ``CLAUDE.md``/``AGENTS.md``), and so is the launch
 environment's ``PATH``: the ``git`` Codex itself runs outside its sandbox, and the
-``git``, ``gbrain`` and ``tmux`` aisquare's hooks and broker run there, are the first
+``git`` and ``tmux`` aisquare's hooks and broker run there, are the first
 ``PATH`` names, and a launch whose ``PATH`` names a directory its sandbox may write (an
 empty or relative entry is the directory a process runs in) is warned of it
 (``store_broker.sandbox_environment``), as is a doctor run in a project whose tree ``PATH``
@@ -37,9 +37,8 @@ profile, its arguments:
 ``agents.install_hooks`` writes for an agent that sandboxes its tools, and the plugin's
 launcher, which unsets them), while the agent keeps them as the operator set them for its
 own tools (r14, finding 1, by the manager's decision); every git aisquare runs runs no hook and no
-fsmonitor of the repository's (``core.workspace.git_argv``); gbrain starts in its brain's
-home, never in the tree (``core.brain``); and the agent's board calls go through its
-launch's broker (``services.store_broker``).
+fsmonitor of the repository's (``core.workspace.git_argv``); and the agent's board calls go
+through its launch's broker (``services.store_broker``).
 
 Before the broker every board call opened the store for writing, and a prompt-injected
 Codex coder could rewrite any row in it, its own and every other agent's; what follows

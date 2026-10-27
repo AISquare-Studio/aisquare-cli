@@ -1624,7 +1624,7 @@ def test_the_next_step_for_the_projects_key_puts_that_key_to_the_gateway(
 ) -> None:
     """`use` named `explainability status`, which resolves the project's key and only
     probes the proxy: a revoked key or another workspace's passed it (review of #172,
-    D2 round 2). `doctor --live --project` posts a span with the key the project's
+    D2 round 2). `explainability doctor --live --project` posts a span with the key the project's
     launches take. The project is named by id whether `use` was given one or not (D7)."""
     _trace_on(monkeypatch)
     posted = _gateway_posts(monkeypatch)
@@ -1633,7 +1633,7 @@ def test_the_next_step_for_the_projects_key_puts_that_key_to_the_gateway(
     result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
     assert result.exit_code == 0, result.output
     step = _next_step(result.output)
-    assert step == ["doctor", "--live", "--project", web.id]
+    assert step == ["explainability", "doctor", "--live", "--project", web.id]
     runner.invoke(app, step)
     minted = service.project_key_path(web.id).read_text(encoding="utf-8")
     assert posted == [(web.id, minted)], "the span went out with the project's own key"
@@ -1642,7 +1642,7 @@ def test_the_next_step_for_the_projects_key_puts_that_key_to_the_gateway(
     other = runner.invoke(app, ["explainability", "use", "--project", "lib", "acme/API"])
     assert other.exit_code == 0, other.output
     step = _next_step(other.output)
-    assert step == ["doctor", "--live", "--project", lib.id]
+    assert step == ["explainability", "doctor", "--live", "--project", lib.id]
     posted.clear()
     runner.invoke(app, step)
     assert posted == [(lib.id, service.project_key_path(lib.id).read_text(encoding="utf-8"))]
@@ -1655,7 +1655,7 @@ def test_the_live_rows_name_the_check_they_are_part_of_when_they_say_re_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`use` names `doctor --live --project <id>`, and the live rows' remedies said
+    """`use` names `explainability doctor --live --project <id>`, and the live rows' remedies said
     "re-run: aisquare doctor --live". That re-run checks the machine's target and key,
     which for a project whose destination is elsewhere is another gateway and another key
     (review of #170's follow-ups, round 1, F7). The re-run names what this one checked."""
@@ -1666,12 +1666,17 @@ def test_the_live_rows_name_the_check_they_are_part_of_when_they_say_re_run(
 
     rows = {check.name: check for check in ops.checks(project_id=web.id, live=True)}
     governance = rows["explainability governance"].fix or ""
-    assert governance.endswith(shlex.join(["aisquare", "doctor", "--live", "--project", web.id]))
+    assert governance.endswith(
+        shlex.join(["aisquare", "explainability", "doctor", "--live", "--project", web.id])
+    )
 
     unready = ops.HttpVerdict(False, 503, "unavailable")
     monkeypatch.setattr(ops, "probe_ready", lambda *_a, **_k: unready)
     rows = {c.name: c for c in ops.checks(target_name="local", project_id=web.id, live=True)}
-    rerun = ["aisquare", "doctor", "--live", "--target", "local", "--project", web.id]
+    rerun = [
+        *("aisquare", "explainability", "doctor", "--live"),
+        *("--target", "local", "--project", web.id),
+    ]
     assert rows["explainability ingest"].fix == (
         f"Fix the gateway row above, then re-run: {shlex.join(rerun)}"
     )
@@ -1684,7 +1689,8 @@ def test_the_live_rows_name_the_check_they_are_part_of_when_they_say_re_run(
     monkeypatch.setenv("EXPLAINABILITY_LOCAL_API_KEY", "AIS_machine_local_key")
     machine = {check.name: check for check in ops.checks(target_name="local", live=True)}
     assert machine["explainability ingest"].fix == (
-        "Fix the gateway row above, then re-run: aisquare doctor --live --target local"
+        "Fix the gateway row above, then re-run: "
+        "aisquare explainability doctor --live --target local"
     ), "without --project, none is named"
 
 
@@ -1710,7 +1716,13 @@ def test_with_no_key_the_next_step_attaches_one_to_the_destination(
     resolved = ops.resolve_target(load_config().explainability, None, project_id=project.id)
     assert (resolved.name, resolved.key_source) == ("local", "project")
     again = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
-    assert _next_step(again.output) == ["doctor", "--live", "--project", project.id]
+    assert _next_step(again.output) == [
+        "explainability",
+        "doctor",
+        "--live",
+        "--project",
+        project.id,
+    ]
 
 
 def test_the_next_step_for_a_machine_key_is_doctor_and_doctor_resolves_it(
@@ -1728,7 +1740,7 @@ def test_the_next_step_for_a_machine_key_is_doctor_and_doctor_resolves_it(
     result = runner.invoke(app, ["explainability", "use", "acme/Frontend"])
     assert result.exit_code == 0, result.output
     step = _next_step(result.output)
-    assert step == ["doctor", "--live", "--project", web.id]
+    assert step == ["explainability", "doctor", "--live", "--project", web.id]
     # Offline: the rows --live adds dial the gateway. The config row is the one
     # that failed when this line named doctor for a project's key.
     rows = {check.name: check for check in ops.checks(project_id=step[-1])}

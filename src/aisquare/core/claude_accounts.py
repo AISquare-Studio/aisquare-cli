@@ -84,14 +84,20 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aisquare.core import claude_sharing, paths, tls
 from aisquare.core.harness import MODEL_FAMILIES, model_family
 from aisquare.core.names import name_flaw, name_key
 from aisquare.core.version import __version__
-from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage, session_and_week
+from aisquare.models import (
+    ClaudeAccount,
+    ClaudeIdentity,
+    ClaudeUsage,
+    UsageCause,
+    session_and_week,
+)
 
 if TYPE_CHECKING:
     from aisquare.core.agent_adapters.types import (
@@ -556,6 +562,11 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
+def claude_json(account: ClaudeAccount) -> dict[str, Any] | None:
+    """The account's ``.claude.json`` as a dict; ``None`` when it is missing or not an object."""
+    return _read_json(claude_json_path(account))
+
+
 def identity(
     account: ClaudeAccount,
     *,
@@ -671,6 +682,8 @@ class StoredLogin:
 
     credentials: ClaudeCredentials | None
     unreadable: str | None = None
+    problem: KeychainProblem | None = None
+    """The kind of :attr:`unreadable`, when it is set."""
 
 
 class LoginUnreadable(Exception):
@@ -704,7 +717,7 @@ def stored_login(account: ClaudeAccount, *, fresh: bool = False) -> StoredLogin:
     if keychain_platform():
         read = read_keychain(keychain_service(account), keychain_account(), fresh=fresh)
         if read.found or read.unreadable is not None:
-            return StoredLogin(read.credentials, read.unreadable)
+            return StoredLogin(read.credentials, read.unreadable, read.problem)
         return StoredLogin(credentials_in(_read_json(plaintext_credentials_path(account))))
     return StoredLogin(credentials_in(_read_json(credentials_path(account))))
 
@@ -776,11 +789,15 @@ puts its unlock dialog up for every read, which every tick of asq's would repeat
 SECURE_STORAGE_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
 """Claude Code's override of the directory its secure storage is keyed on: it wins."""
 KEYCHAIN_ACCOUNT_FALLBACK = "claude-code-user"
-KEYCHAIN_LOCKED = "the login Keychain is locked — unlock it (or log in to the Mac) and refresh"
-KEYCHAIN_REFUSED = (
-    "macOS refused aisquare access to the Claude Code item — allow it in Keychain Access"
-)
+KEYCHAIN_LOCKED_REASON = "the login Keychain is locked"
+KEYCHAIN_LOCKED = f"{KEYCHAIN_LOCKED_REASON} — unlock it (or log in to the Mac) and refresh"
+KEYCHAIN_REFUSED_REASON = "macOS refused aisquare access to the Claude Code item"
+KEYCHAIN_REFUSED = f"{KEYCHAIN_REFUSED_REASON} — allow it in Keychain Access"
 """Said for errSecAuthFailed (51): the Deny button on the item's access prompt."""
+KeychainProblem = Literal["locked", "refused", "timeout", "failed"]
+"""The kind of a Keychain that would not say (:attr:`KeychainRead.problem`), beside its words:
+a usage reading's cause is read from it, never from the words (``services.claude_accounts``).
+``*_REASON`` is what is wrong alone, for a reading whose fix is said apart from it."""
 
 _KEYCHAIN_SERVICE = "Claude Code"
 _KEYCHAIN_OAUTH_SUFFIX = ""
@@ -867,6 +884,8 @@ class KeychainRead:
     credentials: ClaudeCredentials | None = None
     unreadable: str | None = None
     """Why the Keychain would not say: locked, refused, timed out (:func:`read_keychain`)."""
+    problem: KeychainProblem | None = None
+    """The kind of :attr:`unreadable`, when it is set."""
 
 
 _KEYCHAIN_READS: dict[tuple[str, str], tuple[float, KeychainRead]] = {}
@@ -945,11 +964,14 @@ def _ask_keychain(service: str, account: str) -> KeychainRead:
         return KeychainRead(
             found=False,
             unreadable=f"could not read the Keychain (no answer in {KEYCHAIN_TIMEOUT_SECONDS:g} s)",
+            problem="timeout",
         )
     except OSError as exc:
         why = exc.strerror or "not run"
         return KeychainRead(
-            found=False, unreadable=f"could not read the Keychain ({KEYCHAIN_TOOL}: {why})"
+            found=False,
+            unreadable=f"could not read the Keychain ({KEYCHAIN_TOOL}: {why})",
+            problem="failed",
         )
     if done.returncode == 0:
         text = done.stdout.decode("utf-8", "replace").strip()
@@ -958,7 +980,8 @@ def _ask_keychain(service: str, account: str) -> KeychainRead:
         return KeychainRead(found=True, credentials=credentials_in(_item_json(text)))
     if done.returncode == _ITEM_NOT_FOUND or done.returncode in _NO_KEYCHAIN:
         return KeychainRead(found=False)
-    return KeychainRead(found=False, unreadable=_keychain_problem(done.returncode, done.stderr))
+    problem, said = _keychain_problem(done.returncode, done.stderr)
+    return KeychainRead(found=False, unreadable=said, problem=problem)
 
 
 def _item_json(text: str) -> dict[str, Any] | None:
@@ -984,20 +1007,21 @@ def _unhex(text: str) -> str | None:
         return None
 
 
-def _keychain_problem(code: int, stderr: bytes) -> str:
-    """Why ``security`` exited ``code``, in the row's words. By the exit code first, which
-    is the OSStatus's low byte, then by what it said, as Claude Code classifies it."""
+def _keychain_problem(code: int, stderr: bytes) -> tuple[KeychainProblem, str]:
+    """Why ``security`` exited ``code``: its kind, and the row's words. By the exit code
+    first, which is the OSStatus's low byte, then by what it said, as Claude Code
+    classifies it."""
     said = stderr.decode("utf-8", "replace").lower()
     if code in _LOCKED or any(
         words in said
         for words in ("interaction is not allowed", "interactionnotallowed", "canceled")
     ):
-        return KEYCHAIN_LOCKED
+        return "locked", KEYCHAIN_LOCKED
     if code in _REFUSED or any(words in said for words in ("name or passphrase", "authfailed")):
-        return KEYCHAIN_REFUSED
+        return "refused", KEYCHAIN_REFUSED
     if "locked" in said or "unlock" in said:
-        return KEYCHAIN_LOCKED
-    return f"could not read the Keychain (security exited {code})"
+        return "locked", KEYCHAIN_LOCKED
+    return "failed", f"could not read the Keychain (security exited {code})"
 
 
 def token_state(creds: ClaudeCredentials | None, now: datetime | None = None) -> str:
@@ -1040,6 +1064,11 @@ def subscription_label(creds: ClaudeCredentials | None) -> str | None:
 
 
 # --- what a usage-limit error says (#146) ----------------------------------------------------
+
+BEFORE_LIMIT_REASON = "before limit"
+"""The reason of a hand-over ``[accounts] before_limit = "switch"`` makes (F2 of #400): the
+agent's account read over ``switch_at`` at a turn end, and no limit was hit. The ``switched``
+line says it, ``(before limit)``, and the replacement is told it moved before its limit."""
 
 # The time is matched by a BOUNDED pattern (an optional weekday, a clock time,
 # am/pm — the shape ``_RESET_TIME`` reads) and nothing anchors the end: the
@@ -1512,6 +1541,35 @@ def _limit_of(payload: Mapping[str, Any], kinds: frozenset[str]) -> float | None
     return max((limit.percent for limit in _limits(payload) if limit.kind in kinds), default=None)
 
 
+TOKEN_EXPIRED_REASON = "the stored token has expired"
+TOKEN_REJECTED_REASON = "the token was rejected (HTTP 401)"
+TLS_BUNDLE_REASON = "TLS: the CA bundle could not be loaded"
+"""Why there is no reading when ``SSL_CERT_FILE`` / ``SSL_CERT_DIR`` will not load (#403)."""
+TLS_CERT_REASON = "TLS certificate could not be verified"
+"""Why there is no reading when the endpoint's certificate did not verify (#403)."""
+KEYCHAIN_CAUSES: dict[KeychainProblem, tuple[UsageCause, str | None]] = {
+    "locked": (UsageCause.keychain_locked, KEYCHAIN_LOCKED_REASON),
+    "refused": (UsageCause.keychain_refused, KEYCHAIN_REFUSED_REASON),
+    "timeout": (UsageCause.keychain_timeout, None),
+    "failed": (UsageCause.keychain_failed, None),
+}
+"""A Keychain's kind of refusal as a reading's cause, and its reason when the words of
+:func:`stored_login` carry a fix of their own (``None``: its words stand)."""
+
+
+def no_login_reason() -> str:
+    """Why an account with no stored login has no reading."""
+    if keychain_platform():
+        return "no login in the Keychain or a credentials file — not signed in"
+    return "no credentials file — not signed in"
+
+
+def _unread(cause: UsageCause, reason: str, **fields: Any) -> ClaudeUsage:
+    """A reading with nothing to show, its ``cause`` set: the service stamps the fix
+    (``services.claude_accounts.usage``), the one place it is."""
+    return ClaudeUsage(available=False, reason=reason, cause=cause, **fields)
+
+
 def endpoint_usage(
     account: ClaudeAccount, *, now: datetime | None, fetch: UsageFetch
 ) -> ClaudeUsage:
@@ -1535,19 +1593,12 @@ def endpoint_usage(
     login = stored_login(account)
     creds = login.credentials
     if creds is None:
-        if login.unreadable is not None:
-            reason = login.unreadable
-        elif keychain_platform():
-            reason = "no login in the Keychain or a credentials file — not signed in"
-        else:
-            reason = "no credentials file — not signed in"
-        return ClaudeUsage(available=False, reason=reason)
+        if login.unreadable is None:
+            return _unread(UsageCause.token_missing, no_login_reason())
+        cause, said = KEYCHAIN_CAUSES[login.problem or "failed"]
+        return _unread(cause, said or login.unreadable)
     if creds.expired(now):
-        return ClaudeUsage(
-            available=False,
-            reason="the stored token has expired — open a session on this account to refresh it",
-            needs_login=True,
-        )
+        return _unread(UsageCause.token_expired, TOKEN_EXPIRED_REASON, needs_login=True)
     headers = {
         "Authorization": f"Bearer {creds.access_token}",
         "anthropic-beta": OAUTH_BETA,
@@ -1557,18 +1608,14 @@ def endpoint_usage(
     try:
         answer = fetch(USAGE_URL, headers, USAGE_TIMEOUT_SECONDS)
     except OSError as exc:  # URLError, a refused connection, a timeout
+        # #403's two TLS failures, each with its own cause: the fix is tls.BUNDLE_FIX /
+        # tls.CERT_HINT (the service's USAGE_FIXES), shown beside the reason, not inside it.
         if isinstance(exc, tls.CABundleError):
-            return ClaudeUsage(
-                available=False,
-                reason=f"TLS: the CA bundle could not be loaded — {tls.BUNDLE_FIX}",
-            )
+            return _unread(UsageCause.tls_bundle, TLS_BUNDLE_REASON)
         if tls.cert_failure(exc):
-            return ClaudeUsage(
-                available=False,
-                reason=f"TLS certificate could not be verified — {tls.CERT_HINT}",
-            )
-        return ClaudeUsage(
-            available=False, reason=f"could not reach the usage endpoint ({type(exc).__name__})"
+            return _unread(UsageCause.tls_cert, TLS_CERT_REASON)
+        return _unread(
+            UsageCause.unreachable, f"could not reach the usage endpoint ({type(exc).__name__})"
         )
     status, body = answer[0], answer[1]
     answered: Mapping[str, str] = answer[2] if len(answer) == 3 else {}
@@ -1576,34 +1623,26 @@ def endpoint_usage(
     if status == 429 or (status == 503 and wait is not None):
         # Not a login problem: the wait is recorded by the service's ``read_usage`` (F1 of #400).
         moment = now or datetime.now(tz=UTC)
-        return ClaudeUsage(
-            available=False,
-            reason=f"HTTP {status} from the usage endpoint — rate-limited",
+        return _unread(
+            UsageCause.rate_limited,
+            f"HTTP {status} from the usage endpoint — rate-limited",
             rate_limited=True,
             rate_limited_until=moment + timedelta(seconds=wait) if wait is not None else None,
         )
     if status == 401:
-        return ClaudeUsage(
-            available=False,
-            reason="the token was rejected — open a session on this account to refresh it",
-            needs_login=True,
-        )
+        return _unread(UsageCause.token_rejected, TOKEN_REJECTED_REASON, needs_login=True)
     if status != 200:
-        return ClaudeUsage(available=False, reason=f"HTTP {status} from the usage endpoint")
+        return _unread(UsageCause.http_error, f"HTTP {status} from the usage endpoint")
     try:
         payload: Any = json.loads(body)
     except ValueError:
-        return ClaudeUsage(available=False, reason="the usage endpoint did not answer with JSON")
+        return _unread(UsageCause.bad_answer, "the usage endpoint did not answer with JSON")
     if not isinstance(payload, dict):
-        return ClaudeUsage(
-            available=False, reason="the usage endpoint answered in an unknown shape"
-        )
+        return _unread(UsageCause.bad_answer, "the usage endpoint answered in an unknown shape")
     session_percent, session_resets = _window(payload.get("five_hour"))
     week_percent, week_resets = _window(payload.get("seven_day"))
     if session_percent is None and week_percent is None:
-        return ClaudeUsage(
-            available=False, reason="the usage endpoint answered without the two windows"
-        )
+        return _unread(UsageCause.bad_answer, "the usage endpoint answered without the two windows")
     family_percent, family_resets = _family_weeks(payload)
     return ClaudeUsage(
         available=True,

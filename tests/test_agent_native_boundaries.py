@@ -553,7 +553,6 @@ def test_doctor_uses_the_selected_project_and_one_preference_read(
             )
     monkeypatch.setattr(diagnostics, "_check_other_agents", lambda *args: [])
     monkeypatch.setattr(diagnostics, "_claude_accounts_checks", lambda: [])
-    monkeypatch.setattr(diagnostics, "_experiment_checks", lambda: [])
     monkeypatch.setattr("aisquare.services.explainability_ops.checks", lambda **kwargs: [])
     checks = diagnostics.doctor(cwd=selected_project)
     claude = next(check for check in checks if check.name == "claude-code")

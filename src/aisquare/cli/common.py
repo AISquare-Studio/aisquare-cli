@@ -357,27 +357,22 @@ def emit_project_action(message: str, project: ProjectInfo) -> None:
         stdout_console().print(message, markup=False)  # a nickname is text, not markup
 
 
-def _active_note(
-    active: ProjectInfo | None, *, changed: bool, pin_error: str | None = None
-) -> str | None:
-    """One line saying where the active project went, or None when it did not move.
+def _pin_note(unpinned: ProjectInfo | None, pin_error: str | None = None) -> str | None:
+    """One line saying the pin on a project that went was cleared, or None when no pin named
+    one: a forget or a prune writes no pin of its own (#271).
 
     A pin the state file refused is said here rather than as a failure: the
-    forget (or the sweep) is complete, and only where the pin landed is in doubt.
+    forget (or the sweep) is complete, and only the pin is in doubt.
     """
-    if not changed:
+    if unpinned is None:
         return None
+    name = _project_name(unpinned)
     if pin_error is not None:
         return (
-            f"⚠ the pin could not be moved — {pin_error}; the active project follows your "
-            "working directory until `project switch` succeeds"
+            f"⚠ the pin on {name} could not be cleared — {pin_error}; the active project "
+            "follows your working directory until `project switch` succeeds"
         )
-    if active is None:
-        return "no projects remain — the active project follows your working directory again"
-    return (
-        f"active project is now {_project_name(active)} ({active.id}), "
-        "the most recently touched one left"
-    )
+    return f"the pin on {name} was cleared — the active project follows your working directory"
 
 
 def emit_project_forget(report: ProjectForgetReport) -> None:
@@ -401,7 +396,7 @@ def emit_project_forget(report: ProjectForgetReport) -> None:
             "— --purge deletes them; registering the root again brings them back"
         )
     _say_keys_still_live(report.keys_still_live)
-    note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
+    note = _pin_note(report.unpinned, pin_error=report.pin_error)
     if note is not None:
         console.print(f"  {note}", markup=False)
 
@@ -527,7 +522,7 @@ def emit_prune(report: ProjectPruneReport) -> None:
             "— --purge deletes them"
         )
     _say_keys_still_live(report.keys_still_live)
-    note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
+    note = _pin_note(report.unpinned, pin_error=report.pin_error)
     if note is not None:
         console.print(f"  {note}", markup=False)
 

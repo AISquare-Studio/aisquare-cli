@@ -52,11 +52,18 @@ def test_xdist_is_a_dev_dependency_and_locked() -> None:
     assert '\nname = "pytest-xdist"\n' in lock, "uv.lock does not pin pytest-xdist"
 
 
-def test_the_ci_check_job_runs_pytest_on_every_core() -> None:
+def test_every_ci_test_step_runs_pytest_on_every_core() -> None:
+    """Each shard of every leg, the two ambient legs' included (owner decision 2026-10-25)."""
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    check = workflow[workflow.index("\n  check:\n") : workflow.index("\n  ambient:\n")]
-    step = check[check.index("- name: Test (pytest)") :]
-    assert re.search(r"run: pytest -n auto\b", step), step[:200]
+    test = workflow[workflow.index("\n  test:\n") : workflow.index("\n  shards:\n")]
+    commands = [
+        line.strip().removeprefix("run: ")
+        for line in test.splitlines()
+        if re.match(r"\s*(run: )?pytest\b", line)
+    ]
+    assert len(commands) == 2, f"expected the plain and the ambient step's pytest: {commands}"
+    for command in commands:
+        assert re.match(r"pytest -n auto\b", command), command
 
 
 def test_probe_writes_outside_its_own_home(home_outside_a_test: Path, isolated_home: Path) -> None:

@@ -597,7 +597,7 @@ def test_a_grandchild_holding_the_pipe_does_not_hang_the_wrapper() -> None:
     after the command exited."""
     holder = (
         "import subprocess, sys;"
-        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'],"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],"
         " stdout=sys.stdout, start_new_session=(sys.platform != 'win32'));"
         "print('started', p.pid, flush=True)"
     )
@@ -611,7 +611,7 @@ def test_a_grandchild_holding_the_pipe_does_not_hang_the_wrapper() -> None:
         assert stdout.startswith(b"started ")
         assert report.output_pipes_held_open and not report.output_complete
         assert reports.load_report(report.id).output_pipes_held_open
-        assert elapsed < 12, f"capture waited {elapsed:.1f}s for the held-open pipe"
+        assert elapsed < 60, f"capture waited {elapsed:.1f}s for the held-open pipe"
         shown = CliRunner().invoke(cli(), ["reports", "show", report.id])
         assert "held the output open" in shown.stderr
     finally:
@@ -893,32 +893,100 @@ def test_the_pipe_reader_shares_no_attribute_with_threading_thread(tmp_path: Pat
         assert not set(vars(reader)) & set(vars(threading.Thread())), "a shadowed attribute"
 
 
+class _DrainClock:
+    """The drain's clock (``reports._now``), held still and moved only by the test.
+
+    The drain reads it on its own thread (the window's two readings) and its reader threads
+    read it to stamp the bytes they receive, so ``recorded`` (reads made off the test's thread)
+    is a count of the output the drain has seen, and ``looked`` (reads on the test's thread)
+    of the drain's own looks."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.owner = threading.get_ident()
+        self.looked = 0
+        self.recorded = 0
+        self.finished = False
+        """The test is over: whoever is waiting for the drain gives up."""
+
+    def __call__(self) -> float:
+        if threading.get_ident() == self.owner:
+            self.looked += 1
+        else:
+            self.recorded += 1
+        return self.now
+
+    def looks_past(self, mark: int) -> None:
+        """Wait until the drain has looked more than ``mark`` times."""
+        deadline = time.monotonic() + 60  # a hang guard: nothing here is measured by it
+        while self.looked <= mark and not self.finished:
+            assert time.monotonic() < deadline, "the drain never looked"
+            time.sleep(0.005)
+
+    def records_past(self, mark: int) -> None:
+        """Wait until output has been recorded more than ``mark`` times."""
+        deadline = time.monotonic() + 60
+        while self.recorded <= mark and not self.finished:
+            assert time.monotonic() < deadline, "no output was ever recorded"
+            time.sleep(0.005)
+
+
 def test_a_chatty_grandchild_holds_the_wrapper_no_longer_than_the_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Review of #300, 2: the silence window is renewed by every byte, so a leftover
-    process that writes every second held ``asq exec`` for its whole life."""
+    process that writes every second held ``asq exec`` for its whole life.
+
+    On a clock of the test's own, so that no runner's speed is in it (it was 10.5 s against a
+    bound of 9, on windows-latest, CI run 40369756836). The clock is held still after the
+    command has exited and moved by half the silence window at a time, each move only after a
+    tick has been recorded at the time before it: the silence never reaches its window, so
+    when the drain ends it is the cap that ended it, at the third move (the cap is three
+    times the move), with the grandchild still writing. Without the cap the drain goes on
+    for as long as the grandchild does (it ticks for a minute, and the test is red then).
+    The pid is read from the line that says it: the grandchild's first tick can come before
+    it, and was read as the pid."""
     monkeypatch.setattr(reports, "_DRAIN_MAX", 3.0)
+    monkeypatch.setattr(reports, "_DRAIN_AFTER_EXIT", 2.0)
+    clock = _DrainClock()
+    monkeypatch.setattr(reports, "_now", clock)
+    move = reports._DRAIN_AFTER_EXIT / 2
+    moves = round(reports._DRAIN_MAX / move)
+    exited_at: list[float] = []
+    readers = 2
+    """Stdout's and stderr's, made, and so reading the clock, before the command is waited for."""
+
+    def stepper() -> None:
+        clock.looks_past(readers)  # the drain's reading of the time the command exited
+        exited_at.append(clock.now)
+        for _ in range(moves):
+            clock.records_past(clock.recorded)  # a tick, at the time before this move
+            clock.now += move
+
+    mover = threading.Thread(target=stepper, daemon=True)
     chatty = (
         "import subprocess, sys;"
         "p = subprocess.Popen([sys.executable, '-c',"
-        " 'import time\\nfor _ in range(100):\\n print(\"tick\", flush=True); time.sleep(0.3)'],"
+        " 'import time\\nfor _ in range(1200):\\n print(\"tick\", flush=True); time.sleep(0.05)'],"
         " stdout=sys.stdout, start_new_session=(sys.platform != 'win32'));"
         "print('started', p.pid, flush=True)"
     )
-    started = time.monotonic()
+    mover.start()
     report = reports.run_command(python(chatty))
-    elapsed = time.monotonic() - started
+    ended_at = clock.now
     stdout = reports.read_stream(report.id, "stdout", raw=True)
-    grandchild = int(stdout.split()[1])
+    said = next(line for line in stdout.splitlines() if line.startswith(b"started "))
+    grandchild = int(said.split()[1])
     try:
         assert report.returncode == 0
         assert b"tick" in stdout, "output inside the cap is kept"
-        assert report.output_pipes_held_open
-        assert elapsed < 9, f"capture waited {elapsed:.1f}s for a grandchild that never goes quiet"
+        assert report.output_pipes_held_open, "the grandchild was still writing"
+        assert ended_at - exited_at[0] == moves * move, "the drain ended before the cap"
     finally:
+        clock.finished = True
         with suppress(OSError):
             os.kill(grandchild, getattr(signal, "SIGKILL", signal.SIGTERM))
+        mover.join(60)
 
 
 @POSIX_ONLY

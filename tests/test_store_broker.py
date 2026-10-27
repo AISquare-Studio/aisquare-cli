@@ -30,19 +30,18 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import brain, paths, selfcli
+from aisquare.core import paths, selfcli, spawn
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters.types import WriteScope, store_dir
 from aisquare.core.store import store_session
 from aisquare.models import TeamSession
-from aisquare.services import agent_launch, distill, store_broker
+from aisquare.services import agent_launch, store_broker
 from aisquare.services import team as team_service
 from tests.conftest import _PRIVATE_FLEETS
 
 #: The real process start, before the suite's ``no_store_broker`` stands it in.
 REAL_RUN_BROKER = store_broker.run_broker
 REAL_INSTALL_PATHS = store_broker.install_paths
-REAL_SPAWN_DRAIN = distill.spawn_drain  # the autouse fixture stubs it
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="the broker is POSIX's (FIFOs)")
 
 MINE = "aaaa1111-0000-0000-0000-000000000000"
@@ -62,7 +61,6 @@ def work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("AISQUARE_LAUNCH_ID", LAUNCH)
     monkeypatch.delenv("AISQUARE_FLEET_AGENT", raising=False)
     monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
-    monkeypatch.setenv("AISQUARE_BRAIN", "0")
     project = team_service.activate(work)
     now = datetime.now(UTC)
     with store_session() as store:
@@ -1256,21 +1254,16 @@ def test_the_sandbox_probe_runs_once_per_process_and_a_full_disk_is_no_sandbox(
 
 
 def test_a_brokered_commands_own_child_carries_no_brokered_scope(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Review r12 of #113, finding 5: the ``team distill`` a brokered note starts kept the
-    brokered scope, so its own cwd check refused it (the board's directory is outside the
-    launch's tree under a hub), and a false refusal was noted under no launch id."""
+    """Review r12 of #113, finding 5: a child a brokered note starts kept the brokered
+    scope, so its own cwd check refused it (the board's directory is outside the launch's tree
+    under a hub), and a false refusal was noted under no launch id."""
 
     monkeypatch.setenv(store_broker.CALLER_ENV, "1")
     monkeypatch.setenv(store_broker.BOARD_ENV, "prj_x")
     monkeypatch.setenv(store_broker.ROOTS_ENV, "/somewhere")
-    started: list[dict[str, str]] = []
-    monkeypatch.setattr(brain, "brain_enabled", lambda: True)
-    monkeypatch.setattr(shutil, "which", lambda name: "/bin/gbrain")
-    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: started.append(kwargs["env"]))
-    REAL_SPAWN_DRAIN(root=tmp_path / "hub")
-    assert started and not any(key.startswith("AISQUARE_BROKERED") for key in started[0])
+    assert not any(key.startswith("AISQUARE_BROKERED") for key in spawn.untraced_env())
 
 
 def test_a_refusal_with_no_launch_to_name_is_logged_and_never_noted(
@@ -1518,8 +1511,8 @@ def test_aisquares_own_interpreters_ignore_a_pythonpath_into_the_tree(tmp_path: 
 def test_every_interpreter_aisquare_starts_for_a_sandboxed_agent_is_isolated(
     work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review r14 of #113, findings 1 and 4: the broker's commands, the broker itself, the
-    distiller and the hand-over run with ``-E``; so do a Codex agent's hooks as this version
+    """Review r14 of #113, findings 1 and 4: the broker's commands, the broker itself
+    and the hand-over run with ``-E``; so do a Codex agent's hooks as this version
     connects them, which :func:`agents.hook_runs_isolated` reads; Claude Code's keep the
     console script its own tools' environment runs."""
     from aisquare.core import agents
@@ -1539,11 +1532,8 @@ def test_every_interpreter_aisquare_starts_for_a_sandboxed_agent_is_isolated(
     broker.answer(_request(["board"], work), RID)
     with pytest.raises(OSError):
         REAL_RUN_BROKER(tmp_path / "b", {})
-    monkeypatch.setattr(brain, "brain_enabled", lambda: True)
-    monkeypatch.setattr(shutil, "which", lambda name: "/bin/gbrain")
-    REAL_SPAWN_DRAIN(root=tmp_path)
     ours = [argv for argv in started if "-m" in argv]
-    assert len(ours) == 3 and all(argv[1:3] == ["-E", "-P"] for argv in ours), started
+    assert len(ours) == 2 and all(argv[1:3] == ["-E", "-P"] for argv in ours), started
     # The hand-over the agent's own hook starts (its argv is built inline there).
     source = (ROOT / "src" / "aisquare" / "services" / "hooks.py").read_text(encoding="utf-8")
     assert re.search(r"isolated_argv_for\(\s*\[\s*\"--quiet\", \"hook\", \"hand-over\"", source)

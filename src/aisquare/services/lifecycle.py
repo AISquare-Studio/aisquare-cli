@@ -1257,8 +1257,8 @@ def _verify(plan: UpgradePlan, ran: install_route.InstallRoute) -> tuple[str | N
         # it back: what uv picks, said with those settings named (upgrade()'s note).
         return found, None
     return found, (
-        f"uv reported success but aisquare still reports {found}, not {latest} — the "
-        "silent no-op docs/plans/one-line-install.md §3.9.1 describes"
+        f"uv reported success but aisquare still reports {found}, not {latest} — "
+        "the upgrade did not take effect"
     )
 
 
@@ -1443,6 +1443,10 @@ class UninstallPlan:
     remote: str | None = None
     """The Remote that is on for this home in another process, named (:func:`running_remote`);
     ``None`` when none is. It refuses the run, as a running fleet agent does."""
+    statuslines: tuple[Path, ...] = ()
+    """The config directories whose ``statusLine`` aisquare set (``accounts statusline``,
+    #287): removed with the hooks, a wrapped one put back as the user had it, so no status
+    line is left naming ``asq-statusline`` once the package is gone."""
 
     @property
     def package_command(self) -> str:
@@ -2187,6 +2191,7 @@ def _uninstall_plan(purge: bool) -> UninstallPlan:
     ]
     hooks: list[HookSite] = []
     unreadable: list[HookSite] = []
+    statuslines: list[Path] = []
     seen: set[tuple[str, Path]] = set()
     for agent, directory in sites:
         key = (agent, agent_core.dir_identity(directory))
@@ -2202,6 +2207,11 @@ def _uninstall_plan(purge: bool) -> UninstallPlan:
         elif binaries:
             programs = tuple(str(b.program) for b in binaries)
             hooks.append(HookSite(directory, programs, agent=agent))
+        if (
+            agent_core.statusline_entry(directory).kind in {"ours", "wrapped"}
+            and directory not in statuslines
+        ):
+            statuslines.append(directory)
     home = paths.aisquare_home()
     try:
         entries = tuple(sorted(c.name for c in home.iterdir())) if home.is_dir() else ()
@@ -2225,6 +2235,7 @@ def _uninstall_plan(purge: bool) -> UninstallPlan:
         route=route,
         hooks=tuple(hooks),
         unreadable=tuple(unreadable),
+        statuslines=tuple(statuslines),
         mcp=mcp,
         package_argv=tuple(install_route.remove_argv(route)),
         package_env=install_route.installer_env(route),
@@ -2276,6 +2287,17 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
             removals.append(HookRemoval(site.config_dir, False, why, agent=site.agent))
         else:
             removals.append(HookRemoval(site.config_dir, True, agent=site.agent))
+    for directory in plan.statuslines:
+        # Ours names asq-statusline, which goes with the package: a status line left on it
+        # would fail on every message. Failed like a hook, so the package stays to try again.
+        try:
+            agent_core.remove_statusline(directory)
+            still = agent_core.statusline_entry(directory).kind in {"ours", "wrapped"}
+        except Exception as exc:
+            removals.append(HookRemoval(directory, False, f"status line: {exc}"))
+            continue
+        if still:
+            removals.append(HookRemoval(directory, False, "status line: still asq-statusline"))
     # A site that could not be read may still hold our hooks, and nothing here can
     # take them out: a failure like any other, so the package stays and the
     # command is still there to run again (review of #253). One inside the home

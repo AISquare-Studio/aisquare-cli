@@ -37,7 +37,7 @@ from aisquare.cli.app import app
 from aisquare.cli.ui.views.agent import key_spellings
 from aisquare.cli.ui.views.app_settings import launch_line
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core import harness, launch_seal
+from aisquare.core import launch_seal
 from aisquare.core.agent_adapters import codex_config, get_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, prepare_store, screen_of, store_dir
 from aisquare.core.config import (
@@ -61,7 +61,14 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import agent_events, agent_launch, auto_mode, delivery, diagnostics
+from aisquare.services import (
+    agent_events,
+    agent_launch,
+    auto_mode,
+    delivery,
+    diagnostics,
+    model_memory,
+)
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
 from aisquare.services import team as team_service
@@ -2602,21 +2609,19 @@ def test_fleet_spawn_passes_the_roles_model_and_effort_for_both_agents(
     codex_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
 ) -> None:
-    """Claude Code on its role's ladder, as ``team spawn`` resolves it (no paid probe at a
-    spawn: the first rung), and Codex on ``[agents.models.codex]``; then
-    ``[agents.models.claude-code]`` over the ladder."""
+    """Claude Code with no pick made runs the account's own default (#441: no flag), and Codex
+    its ``[agents.models.codex]``; then ``[agents.models.claude-code]`` pins Claude Code's."""
     config = load_config()
     config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
     config.agents.models["codex"] = AgentModelSettings(model="gpt-test", effort="high")
     save_config(config)
-    level, _source = harness.resolve_effort("coder")
 
     fleet_service.spawn(project, "coder", agent="claude-code")
     claude = _spawn_native(tmux)
     fleet_service.spawn(project, "coder", agent="codex")
     codex = _spawn_native(tmux)
 
-    assert (_pair(claude, "--model"), _pair(claude, "--effort")) == ("sonnet", level)
+    assert (_pair(claude, "--model"), _pair(claude, "--effort")) == (None, None)
     assert _pair(codex, "--model") == "gpt-test"
     assert 'model_reasoning_effort="high"' in codex and "--effort" not in codex
 
@@ -2628,6 +2633,27 @@ def test_fleet_spawn_passes_the_roles_model_and_effort_for_both_agents(
     fleet_service.spawn(project, "coder", agent="claude-code")
     pinned = _spawn_native(tmux)
     assert (_pair(pinned, "--model"), _pair(pinned, "--effort")) == ("opus", "xhigh")
+
+
+def test_a_remembered_pick_is_claude_codes_alone_and_a_codex_spawn_gets_no_flag_of_it(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """#441: the owner's last ``--model`` is the next spawn's for an agent whose models are
+    AISquare's to choose (``capabilities.model_ladders``, Claude Code's), and no flag of it
+    reaches another agent: Codex keeps its own pins (``[agents.models.codex]``) or its default."""
+    fleet_service.spawn(
+        project, "coder", agent="claude-code", agent_args=["--model", "opus"], worktree=False
+    )
+    assert model_memory.remembered().model == "opus"
+
+    receipt = fleet_service.spawn(project, "coder", agent="codex", worktree=False)
+    codex = _spawn_native(tmux)
+
+    assert "--model" not in codex and "opus" not in codex
+    assert receipt.agent.launch_spec is not None and receipt.agent.launch_spec.model is None
 
 
 def test_a_hand_launch_keeps_claude_codes_argv_and_gives_codex_its_pins(

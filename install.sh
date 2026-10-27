@@ -2006,7 +2006,7 @@ devtools_mcp_codex_registered() {
         _dc_here=$_dc_in
         case $_dc_text in
             '#'*) continue ;;
-            '[mcp_servers]'* | '[mcp_servers.'* | '[[mcp_servers'*) _dc_in=1 _dc_here=1 ;;
+            '[mcp_servers]'* | '[mcp_servers.'*) _dc_in=1 _dc_here=1 ;;
             '['*) _dc_in=0 _dc_here=0 ;;
             mcp_servers.* | mcp_servers[\ =]*) _dc_here=1 ;;
         esac

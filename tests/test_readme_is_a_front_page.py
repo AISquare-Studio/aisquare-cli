@@ -8,9 +8,8 @@ at pypi.org and 404s; the 0.7.0 page carried eleven of them (README lines 6, 21,
 on that version's page for good.
 
 It is also the page a stranger reads first, so roadmap 9.5 holds it to 250
-lines and moves the long form into ``docs/``. Five rules, each a callable that
-the controls below reach with known input (CONTRIBUTING, "Writing a guard that
-still guards"):
+lines. Five rules, each a callable that the controls below reach with known
+input (CONTRIBUTING, "Writing a guard that still guards"):
 
 - ``_too_long`` — more than 250 lines.
 - ``_relative_targets`` — every link and image target, markdown or HTML, must
@@ -18,13 +17,12 @@ still guards"):
 - ``_unresolved_repo_links`` — every URL into this repository's ``main`` must
   name a file in this checkout, and a ``#fragment`` on a Markdown page one of
   that page's headings. Absolute links are what PyPI needs and what nothing
-  else checks: without this, renaming a docs page leaves the README on ``main``
-  pointing at a 404. Fenced code is read here, because the one-liner's URL
-  lives in a fence and is the most-copied line on the page.
+  else checks: without this, renaming a page the README links leaves the README
+  on ``main`` pointing at a 404. Fenced code is read here, because the one-liner's
+  URL lives in a fence and is the most-copied line on the page.
 - ``_stale_pending`` — every excused file is still linked (below).
-- ``_unresolved_relative_links`` — the pages the README's long form moved into,
-  and every other page under ``docs/`` and CONTRIBUTING, link each other
-  relatively; every such link must name a file, and an anchor a heading.
+- ``_unresolved_relative_links`` — CONTRIBUTING links relatively; every such link
+  must name a file, and an anchor a heading.
 
 CommonMark IS A PARSER'S JOB, NOT THIS FILE'S. What is code, what is a link,
 and where a block ends are read from markdown-it-py's CommonMark rendering, the
@@ -185,9 +183,9 @@ def _stale_pending(text: str, pending: Mapping[str, str]) -> list[str]:
     return sorted(path for path in pending if path not in linked)
 
 
-#: Every page under docs/, and CONTRIBUTING: a glob rather than a list, so a page
-#: another lane adds is read the day it lands.
-_LINKING_PAGES = sorted([*REPO.glob("docs/**/*.md"), REPO / "CONTRIBUTING.md"])
+#: The pages that link each other relatively. docs/ is gone, and CONTRIBUTING links
+#: nothing relatively today; the controls below prove the reader for the day it does.
+_LINKING_PAGES = [REPO / "CONTRIBUTING.md"]
 
 
 def _unresolved_relative_links(text: str, page: Path) -> list[str]:
@@ -219,7 +217,7 @@ def test_the_readme_fits_on_a_front_page() -> None:
 
     assert not _too_long(text), (
         f"README.md is {len(text.splitlines())} lines; the front page holds {MAX_LINES}. "
-        "Move the long form into a docs/ page and link it with an absolute URL."
+        "Cut it back; the front page is not the place for the long form."
     )
 
 
@@ -280,16 +278,13 @@ def test_each_pending_file_is_still_linked_from_the_readme() -> None:
     assert not stale, f"_PENDING excuses files the README no longer links: {stale}"
 
 
-def test_every_relative_link_in_the_docs_resolves() -> None:
-    """The long form links itself relatively; a renamed page or heading must not dangle."""
-    read = 0
+def test_every_relative_link_in_contributing_resolves() -> None:
+    """A renamed page or heading must not dangle in a page that links relatively."""
     unresolved: list[str] = []
     for page in _LINKING_PAGES:
         text = page.read_text(encoding="utf-8")
-        read += len(_relative_targets(text))
         name = page.relative_to(REPO).as_posix()
         unresolved += [f"{name}: {item}" for item in _unresolved_relative_links(text, page)]
-    assert read, "no relative link read under docs/ or in CONTRIBUTING — the reader went blind"
 
     assert not unresolved, "relative links that resolve to nothing:\n  " + "\n  ".join(unresolved)
 

@@ -17,7 +17,6 @@ import inspect
 import io
 import json
 import os
-import re
 import signal
 import socket
 import subprocess
@@ -214,23 +213,11 @@ def test_ngrok_forwards_to_the_one_address_remote_listens_on_never_localhost() -
     """``ngrok http 8750`` forwards to ``localhost:8750``, which resolves to ``::1`` first, and
     ngrok's dialer tries that first: any account on the machine could listen on
     ``[::1]:8750``, beside Remote on ``127.0.0.1:8750``, and be handed every phone's request,
-    the token, an unlock's passphrase and the cookies (sweep 4 of #243). The panel's ngrok,
-    the command ``serve`` prints and the docs' all name ``127.0.0.1``."""
+    the token, an unlock's passphrase and the cookies (sweep 4 of #243). The panel's ngrok
+    and the command ``serve`` prints both name ``127.0.0.1``."""
     assert ngrok_tunnel.UPSTREAM_HOST == remote_server.BIND == "127.0.0.1"
     assert ngrok_command(8750)[1:3] == ["http", "127.0.0.1:8750"]
     assert ngrok_command(18750, url="a.ngrok-free.app")[1:3] == ["http", "127.0.0.1:18750"]
-    root = Path(__file__).resolve().parents[1]
-    told = [
-        line
-        # The quickstart was the README's until 0.8.0 made the README a front page.
-        for doc in ("docs/orchestration.md", "docs/remote.md")
-        for line in (root / doc).read_text(encoding="utf-8").splitlines()
-        if re.match(r"\s*ngrok http\b", line)
-    ]
-    assert len(told) >= 2, told
-    for line in told:
-        assert re.search(r"\s127\.0\.0\.1:8750(\s|$)", line), line
-        assert not re.search(r"\s8750(\s|$)", line), line
 
 
 # --- the missing binary -------------------------------------------------------------------

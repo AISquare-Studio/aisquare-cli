@@ -2509,22 +2509,10 @@ def test_a_question_offers_digits_only_for_one_simple_choice(
         assert answer.keys == (str(number),)
 
 
-def test_the_guide_gives_quick_answers_only_to_the_cards_that_carry_them() -> None:
-    """docs/remote.md gave ``1``, ``2`` and No to every permission and a button an option to
-    every single question: one of Claude Code's own dialogs carries none, nor does a question
-    with several answers to pick, or more than nine options. Each is the key pad's."""
-    guide = Path(__file__).resolve().parents[1] / "docs" / "remote.md"
-    prose = " ".join(guide.read_text(encoding="utf-8").split())
-    assert "`1`, `2` and No for a tool's permission" in prose
-    assert "for a single question with one answer to pick from at most nine" in prose
-    assert (
-        "(one of Claude Code's own dialogs, a form an MCP server asks you to fill in, a"
-        " question of several answers)"
-    ) in prose
-    assert (
-        "When the agent already went on past an earlier prompt in the same turn, the form"
-        " reads as its tool's permission card"
-    ) in prose
+def test_quick_answers_go_only_to_the_cards_that_carry_them() -> None:
+    """``1``, ``2`` and No went to every permission and a button an option to every single
+    question: one of Claude Code's own dialogs carries none, nor does a question with
+    several answers to pick, or more than nine options. Each is the key pad's."""
     row = _row()
     dialog = _one(_classify(_status(row, "attention", _session(row, state="attention")), None))
     assert (dialog.kind, dialog.answers) == ("permission", ())
@@ -2779,28 +2767,6 @@ def test_a_closing_question_is_pushed_at_once_since_no_manager_hears_of_it(
     tail = _tail(newest="assistant_text", text="Want me to commit this?")
     item = _one(_classify(_status(row, "waiting", _session(row)), tail, manager_live=manager_live))
     assert item.push_after == item.since
-
-
-def test_the_guide_says_when_each_kind_is_pushed_as_the_scan_decides_it() -> None:
-    """docs/remote.md gave the delays of a crash and a lost pane only, and said every other
-    item went out after two scans: a usage limit near its reset never does, an interruption
-    waits ten minutes. Each delay the guide gives is the scan's own."""
-    guide = Path(__file__).resolve().parents[1] / "docs" / "remote.md"
-    prose = " ".join(guide.read_text(encoding="utf-8").split())
-    delays = remote_needs._NEEDS_PUSH_DELAY
-    said: list[tuple[str, object, object]] = [
-        ("a crash: after 30 seconds", delays["crashed"], timedelta(seconds=30)),
-        ("a lost pane, a stopped manager, or tmux not answering: after a minute",
-         {delays["lost"], delays["manager_down"], delays["fleet_down"]}, {timedelta(minutes=1)}),
-        ("a usage limit: never when it lifts within `[accounts] wait_if_reset_within_minutes`"
-         " (15 by default)", AccountsSettings().wait_if_reset_within_minutes, 15),
-        ('after 90 seconds when `on_limit = "switch"` and another account can take the agent,'
-         " or a live manager is on it",
-         remote_needs._LIMITED_PUSH_DELAY, timedelta(seconds=90)),
-        ("an interruption: after 10 minutes", delays["interrupted"], timedelta(minutes=10)),
-    ]  # fmt: skip
-    assert [sentence for sentence, _code, _guide in said if sentence not in prose] == []
-    assert [sentence for sentence, code, guide in said if code != guide] == []
 
 
 @pytest.mark.parametrize(

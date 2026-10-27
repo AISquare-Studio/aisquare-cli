@@ -16,8 +16,8 @@ project and contributions are welcome.
 - **Find your way around.** `src/aisquare/cli/` parses the command line and
   holds the full-screen UI (`src/aisquare/cli/ui/`), `src/aisquare/services/`
   does the work, and `src/aisquare/core/` is shared plumbing. `tests/` is
-  hermetic: it never touches your real `~/.aisquare`. User docs live under
-  `docs/`; the README is the front page.
+  hermetic: it never touches your real `~/.aisquare`. The README is the front
+  page.
 - **Keep a PR to one change**, with a test that fails without it. The rest of
   this page says how this suite likes its tests.
 
@@ -100,12 +100,12 @@ port free or answering); `ci.yml` says why. A new test gets the average time unt
 
 **A pull request into a release train (`rc/**`) runs lean CI**: lint, the suite on
 one Linux leg (Python 3.12, captain on) in its shards, the shard check, the Linux
-package job and `ci-ok`; the demo does not render. The full matrix (3.11–3.13,
-captain off, Windows, both ambient legs, the demo) runs on every push to `rc/**` and
-`main`, so on each sub-PR's merge, and again on the train's PR into `main`, nightly
-and by hand. A sub-PR that may break only on Windows or another
-Python is caught on its merge to the train, before anything reaches `main`;
-`gh workflow run ci.yml --ref <branch>` runs the full matrix on a branch first.
+package job and `ci-ok`. The full matrix (3.11–3.13, captain off, Windows, both
+ambient legs) runs on every push to `rc/**` and `main`, so on each sub-PR's merge,
+and again on the train's PR into `main`, nightly and by hand. A sub-PR that may
+break only on Windows or another Python is caught on its merge to the train,
+before anything reaches `main`; `gh workflow run ci.yml --ref <branch>` runs the
+full matrix on a branch first.
 
 ### Proving a test can fail
 
@@ -160,9 +160,6 @@ signatures already exist. The flow is:
    Shared rendering helpers live in `cli/common.py`.
 3. **Add the command to `IMPLEMENTED`** in `tests/test_stubs.py` (the stub
    test's skip-list) in the same commit, and add real tests for the new behaviour.
-
-See [Architecture](docs/reference.md#architecture) in the reference for the full
-layout and the thin-CLI / service / core split.
 
 ## Writing a guard that still guards
 

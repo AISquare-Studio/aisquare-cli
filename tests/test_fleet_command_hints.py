@@ -34,7 +34,7 @@ _NO_PROJECT_IN_QUESTION = (
 EXEMPT: dict[tuple[str, str], str] = {
     (
         "services/fleet.py",
-        "# aisquare fleet worktrees (docs/plans/fleet-tui.md §3.5)\n{…}\n",
+        "# aisquare fleet worktrees\n{…}\n",
     ): "the comment written above the worktree root's line in .git/info/exclude",
     (
         "cli/fleet.py",

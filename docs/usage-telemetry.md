@@ -50,7 +50,7 @@ counts that are sent, each as a salted hash with four coarse traits, like any ot
 said wherever sharing is switched on: in the question, in the description of the switch in
 Settings ▸ Usage & stats, and when `aisquare metrics share on` turns it on. A project you forgot
 with `project forget --purge` is not counted, shown or sent again, by the sweep or by the Stop
-hook (see [Usage & stats](usage-stats.md)).
+hook.
 
 ## What we never collect
 
@@ -114,7 +114,7 @@ suppress the question: `DO_NOT_TRACK=1`, `AISQUARE_NO_TELEMETRY=1`, and any `CI`
 
 `src/aisquare/services/usage_share.py` builds and sends the batch, `src/aisquare/core/sharing.py`
 holds the rules (forced off, the state, the backoff), and the local figures it is made of are
-`src/aisquare/services/usage_stats.py` (see [Usage & stats](usage-stats.md)).
+`src/aisquare/services/usage_stats.py`.
 
 ---
 

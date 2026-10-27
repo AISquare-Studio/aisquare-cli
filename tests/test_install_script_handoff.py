@@ -1214,28 +1214,3 @@ def test_install_ps1_leaves_the_hand_off_to_install_sh() -> None:
     ]
     for second in ("AISQUARE_INSTALL_NO_HANDOFF", "pypi.org", "releases/latest"):
         assert second not in text, f"install.ps1 has a hand-off of its own again ({second})"
-
-
-# ---------------------------------------------------------------------------
-# The docs
-# ---------------------------------------------------------------------------
-
-
-def _page(name: str) -> str:
-    return " ".join((REPO / name).read_text(encoding="utf-8").split())
-
-
-def test_the_install_page_says_main_runs_the_releases_installer() -> None:
-    page = _page("docs/install.md")
-    assert "The copy on `main` runs that release's own installer for you." in page
-    assert "`--no-handoff`" in page
-    assert "It runs main's `install.sh` inside WSL, so the hand-off above happens there" in page, (
-        "the Windows path is not described"
-    )
-
-
-def test_the_runbook_says_main_hands_off_and_falls_back() -> None:
-    page = _page("docs/runbooks/release.md")
-    assert "hand off to the latest release's own installer once it is attached" in page
-    assert "main's `install.ps1` runs main's `install.sh` inside WSL" in page
-    assert "the main one-liner falls back to main's own script" in page

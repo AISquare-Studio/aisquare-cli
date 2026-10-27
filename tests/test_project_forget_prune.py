@@ -435,11 +435,11 @@ def test_forget_of_a_hub_a_running_reader_holds_gives_its_stop_and_then_its_forg
     assert runner.invoke(app, ["project", "forget", "tools"]).exit_code == 0
 
 
-def test_forgets_help_and_docs_say_a_stopped_reader_holds_a_hub_too() -> None:
+def test_forgets_help_and_docstring_say_a_stopped_reader_holds_a_hub_too() -> None:
     """Review of #259, round 34, 8/10: since round 33 (3/10) the refusal covers the stopped
-    rows a restart would start under the hub, but ``project forget``'s help, its service's
-    docstring and docs/fleet.md said "live" alone: someone with no live agents anywhere did
-    not expect the refusal they got. Each says live or stopped, as the CHANGELOG does."""
+    rows a restart would start under the hub, but ``project forget``'s help and its service's
+    docstring said "live" alone: someone with no live agents anywhere did not expect the
+    refusal they got. Each says live or stopped, as the CHANGELOG does."""
     from aisquare.services import project as project_service
 
     shown = CliRunner().invoke(app, ["project", "forget", "--help"], env={"COLUMNS": "200"})
@@ -447,16 +447,12 @@ def test_forgets_help_and_docs_say_a_stopped_reader_holds_a_hub_too() -> None:
     said = {
         "help": " ".join(shown.stdout.replace("│", " ").split()),
         "docstring": " ".join((project_service.forget_project.__doc__ or "").split()),
-        "docs": " ".join(
-            (Path(__file__).parents[1] / "docs" / "fleet.md").read_text(encoding="utf-8").split()
-        ),
     }
     assert (
         "another project's fleet agents read its board (a hub's), live or stopped" in said["help"]
     ), said["help"]
     assert "another project's fleet agents read its board, as a hub's" in said["docstring"]
     assert "live or stopped" in said["docstring"]
-    assert "a hub whose board another project's agents read, live or stopped" in said["docs"]
     for where, text in said.items():
         assert "project's live fleet agents read" not in text, where
         assert "project's live agents read" not in text, where

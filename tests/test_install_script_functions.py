@@ -1659,7 +1659,6 @@ def test_exit_2_is_documented_for_an_extra_that_did_not_install(tmp_path: Path) 
     Claude Code warns and exits 0, the owner's call (review of #399, n7)."""
     usage = sh("usage", path=base_path(tmp_path)).stdout
     exit_codes = " ".join(usage.split("Exit codes", 1)[1].split("\n\n", 1)[0].split())
-    page = " ".join((REPO / "docs" / "install.md").read_text(encoding="utf-8").split())
 
     assert "a fatal step failed" in exit_codes, "control: this is the exit-code section"
     said = (
@@ -1667,7 +1666,6 @@ def test_exit_2_is_documented_for_an_extra_that_did_not_install(tmp_path: Path) 
         "chrome-devtools{}. Its Claude Code registration only warns."
     )
     assert said.format("", "") in exit_codes, exit_codes
-    assert "unexpectedly amber, " + said.format("`", "`") in page
 
 
 # ---------------------------------------------------------------------------
@@ -1702,15 +1700,13 @@ def test_an_extra_is_installed_only_when_chosen(
 def test_no_system_deps_says_a_named_extra_still_installs(tmp_path: Path) -> None:
     """For provisioning scripts: --no-system-deps asks about no extra, but one named with
     --with wins (the `with-no-system-deps` case above), and that one still uses the
-    package manager and sudo. The help and the page say so (review of #399, n13)."""
+    package manager and sudo. The help says so (review of #399, n13)."""
     usage = " ".join(sh("usage", path=base_path(tmp_path)).stdout.split())
-    page = " ".join((REPO / "docs" / "install.md").read_text(encoding="utf-8").split())
 
     said = (
         "An extra named with {0}--with{0} still installs, with the package manager and {0}sudo{0}."
     )
     assert "ask about no optional extra. " + said.format("") in usage, usage
-    assert "ask about no optional extra. " + said.format("`") in page
 
 
 @pytest.mark.parametrize(

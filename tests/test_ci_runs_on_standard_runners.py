@@ -101,7 +101,6 @@ def test_the_scan_reads_every_workflow_and_the_jobs_that_gate_a_merge() -> None:
     """A rule over no job passes for any label: the files and jobs it must see are named."""
     assert {path.name for path in _workflow_files()} >= {
         "ci.yml",
-        "demo.yml",
         "install.yml",
         "installers-check.yml",
         "installers.yml",

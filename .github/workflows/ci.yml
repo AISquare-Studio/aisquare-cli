@@ -73,11 +73,11 @@ permissions:
 # LEAN CI FOR A TRAIN'S SUB-PRS (owner decision 2026-10-23). A pull request into
 # rc/** — one workstream of a release train — runs lint, the py3.12 leg (captain
 # on, no ambient) in its 4 shards, the shard check, the Linux package job and
-# ci-ok; demo.yml does not render for it at all. Shared runners give about 21
-# concurrent jobs, and ten-job runs of 45-minute legs per sub-PR queued for hours.
-# Everything else keeps the FULL matrix: a push to rc/** or main (every sub-PR's
-# merge, so the full matrix runs on the train branch as each lands), a PR into main
-# (the train itself), the nightly, and a run by hand.
+# ci-ok. Shared runners give about 21 concurrent jobs, and ten-job runs of
+# 45-minute legs per sub-PR queued for hours. Everything else keeps the FULL
+# matrix: a push to rc/** or main (every sub-PR's merge, so the full matrix runs on
+# the train branch as each lands), a PR into main (the train itself), the nightly,
+# and a run by hand.
 #
 # The test is spelled the same in every job, as `LEAN` in
 # tests/test_ci_is_lean_for_sub_prs.py, which pins the split:

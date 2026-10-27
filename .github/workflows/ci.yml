@@ -122,9 +122,12 @@ jobs:
       # 6-hour default: ubuntu legs take 13-25 min, windows ~45 (measured 2026-10-24). A
       # test past pyproject's faulthandler_timeout prints every thread's stack first, and
       # --durations names the slowest tests on every run.
+      # -v on Windows only: its ceiling kills pytest before the summary, and the log's own
+      # timestamps then still name every test that failed and every test that took long
+      # (run 40428675826 stopped at 58% of 16,358 tests with six failures it could not name).
       - name: Test (pytest)
         timeout-minutes: ${{ runner.os == 'Windows' && 75 || 45 }}
-        run: pytest -n auto -ra --durations=20
+        run: pytest -n auto -ra --durations=20 ${{ runner.os == 'Windows' && '-v' || '' }}
         env:
           AISQUARE_SUITE_CAPTAIN: ${{ matrix.captain }}
 

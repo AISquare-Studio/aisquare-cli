@@ -357,7 +357,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a `/branch` does not re-read the history it copied, nor a `/resume` or a `fleet switch`
   the conversation it took up. Known limit: a `/model` typed mid-turn is recorded nowhere
   by Claude Code 2.1.311, so it is no pick and a restart starts the agent's previous model;
-  change the model at the prompt. As `claude --effort` takes one value, a replay keeps your
+  change the model at the prompt. Likewise recorded nowhere, so no pick: alt+p's model
+  picker and its ←/→ effort (a replay starts the previous model; use `/model` or `/config`
+  → Model), and the effort "medium nudge" dialog. The Fable usage-credits fallback
+  (`model_consent_fallback`, "now your default model") is a fallback, not a preference,
+  and deliberately no pick. As `claude --effort` takes one value, a replay keeps your
   last effort change: a level set last replays as that level, ultracode turned on last
   replays as `--effort ultracode` (xhigh plus workflows) whatever level it sat on, so `low`,
   `medium` or `high · ultracode` replay at xhigh, and `max · ultracode` at xhigh, the level

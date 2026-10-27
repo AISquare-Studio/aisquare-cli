@@ -194,6 +194,9 @@ _SETTING_ANSWERS = {"Set model to": "model", "Set effort level to": "effort"}
 #: The command that also sets the model, as its own frame (2.1.311: ``/config`` → Model):
 #: ``Set model to \x1b[1mhaiku (claude-haiku-5-5)\x1b[22m``, one line per setting changed.
 _SETS_TOO = "config"
+#: A ``/config`` answer's Fast mode line: that row closes on ``Set model to opus`` beside it
+#: while it saves only ``fastMode`` (read off the 2.1.311 binary, unprobed), no model choice.
+_FAST_MODE = "Set Fast mode to"
 #: Terminal styling in an answer (``/config`` bolds the value).
 _STYLE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -374,6 +377,8 @@ def _frame_step(
             if line.startswith(opens)
         ]
         if command is not None and command[0] == _SETS_TOO:
+            if any(line.startswith(_FAST_MODE) for line in said.splitlines()):
+                settings = [(line, setting) for line, setting in settings if setting != "model"]
             if not settings:
                 return None  # a theme, a toggle: no setting of ours
             lines = "\n".join(line for line, _ in settings)

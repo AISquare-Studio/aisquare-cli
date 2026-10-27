@@ -792,6 +792,31 @@ def test_a_model_set_in_config_is_read_off_2_1_311s_own_records() -> None:
     assert model_memory.command_values(bare) == (value("model", "claude-haiku-4-5-20251001", True),)
 
 
+def test_a_config_that_sets_fast_mode_sets_no_model(tmp_path: Path) -> None:
+    """Seq 3865 (c), UNPROBED: this account has no Fast mode, so the shape is read off the
+    2.1.311 binary, not a transcript. ``/config``'s "Fast mode" row closes on ``Set model to
+    opus`` beside ``Set Fast mode to ON`` while it saves only ``fastMode``: its model line is
+    no choice. And seq 3865 (b): the Fable usage-credits fallback's ``model_consent_fallback``
+    system record ("Switched to X — now your default model") is a fallback, not a
+    preference: deliberately no pick, nor a canary."""
+    path = tmp_path / "t.jsonl"
+    caveat = "<local-command-caveat>The command below was run directly in Claude Code…"
+    _framed(
+        path,
+        {"type": "user", "uuid": "c1", "isMeta": True,
+         "message": {"role": "user", "content": caveat}},
+        {"type": "user", "uuid": "m1", "parentUuid": "c1", "message": {"role": "user",
+         "content": "<command-name>/config</command-name><command-args></command-args>"}},
+        {"type": "user", "uuid": "a1", "parentUuid": "m1", "message": {"role": "user",
+         "content": "<local-command-stdout>Set model to \x1b[1mopus\x1b[22m\n"
+                    "Set Fast mode to \x1b[1mON\x1b[22m</local-command-stdout>"}},
+        {"type": "system", "subtype": "model_consent_fallback", "uuid": "f1",
+         "content": "Switched to Sonnet 5.5 \u2014 now your default model"},
+    )  # fmt: skip
+    scan = transcripts.commands_since(path, 0)
+    assert scan is not None and scan.events == ()
+
+
 def test_a_setting_answer_to_a_command_of_another_name_is_said(tmp_path: Path) -> None:
     """Seq 3797 (4): a later Claude Code that renames the command (``/models``) frames it as
     ever, and its ``Set model to …`` answer read as nothing, silently. It is said; another

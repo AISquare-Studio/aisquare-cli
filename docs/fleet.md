@@ -281,7 +281,14 @@ conversation it took up.
 **Change the model at the prompt, not mid-turn**: a `/model` typed while a turn runs
 switches the agent but Claude Code 2.1.311 writes no record of it, so it is no pick and a
 restart starts the model the agent had before (a known limit; aisquare guesses nothing
-from the replies). **A replay keeps your last effort change**: `claude --effort` takes one
+from the replies). Three more save a default that Claude Code 2.1.311 records nowhere
+(known limits): **alt+p**'s model picker is no pick, so a restart, a switch or a hand-over
+starts the previous model (use `/model` or `/config` → Model), and its ←/→ effort is
+unrecorded the same way; the effort "medium nudge" dialog ("Effort set to medium and saved
+as your default") records nothing either; and the Fable usage-credits fallback ("Switched
+to X — now your default model", a `model_consent_fallback` record) is a fallback, not a
+preference, so it is deliberately no pick.
+**A replay keeps your last effort change**: `claude --effort` takes one
 value, so Claude Code's `high · ultracode` cannot be replayed as such (a known limit, as
 decided). If your last change set a level (`/effort high` while on ultracode), a restart
 passes that level; if it turned ultracode on (`/effort ultracode`, or the picker's `·
@@ -2340,7 +2347,8 @@ hatch (`F12`), the scroll keys below, ctrl+c while text is highlighted in that
 pane (it copies) and cmd+c, which is only ever the copy. Printable characters
 travel as typed —
 except with alt held on an ASCII letter, where the chord is the meaning (`M-p`,
-so Claude Code's alt+p switches the model; alt+shift+a is `M-A`). Special keys
+so Claude Code's alt+p opens its model picker, though what it saves is recorded nowhere
+and is no fleet pick: see [The roles](#the-roles); alt+shift+a is `M-A`). Special keys
 are translated into tmux's names (Enter, BSpace, ctrl+c → `C-c` when nothing is
 selected, shift+tab → `BTab`, …), and so are alt+digit and alt+space when the
 terminal reports them as chords rather than as text (`M-1`, `M-Space` — the

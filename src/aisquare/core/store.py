@@ -3452,6 +3452,10 @@ class SqliteStore:
 
         Never over a hand-over's mark (:meth:`touch_session`): no transition, so
         no bell either, for an agent ``fleet switch`` is exiting.
+
+        The second statement stamps ``last_seen_at`` AFTER the session's newest
+        ``attention`` event (:meth:`_seen_after_its_attention_event`): the needs feed
+        reads "a later notice came" as ``last_seen_at > event.created_at``.
         """
         session_id = self._canonical_session_id(session_id)
         cursor = self._conn.execute(
@@ -3461,10 +3465,36 @@ class SqliteStore:
         )
         self._conn.execute(
             "UPDATE team_session SET last_seen_at = ?, ended_at = NULL WHERE id = ?",
-            (_now_iso(), session_id),
+            (self._seen_after_its_attention_event(session_id), session_id),
         )
         self._commit()
         return cursor.rowcount == 1
+
+    def _seen_after_its_attention_event(self, session_id: str) -> str:
+        """Now, and never the instant of the session's newest ``attention`` event since it was
+        last seen.
+
+        A turn's first notice leaves the event, and each later one moves ``last_seen_at`` past
+        it: that order is what tells the second of two parallel permission prompts, or an MCP
+        server's form, from the first (``remote_needs._needs_later_notice``). Two notices that
+        read the same tick of the clock (Windows' ticks every 15 ms) tied, and the second was
+        taken for the first, its card naming the first call's prompt. One microsecond past the
+        event keeps the order the clock could not. Only the events at or after the session's
+        last stamp are asked for: a range of the ``(project_id, created_at)`` index, a few
+        rows, on the hook's path."""
+        stamp = datetime.now(tz=UTC)
+        seen = self._conn.execute(
+            "SELECT project_id, last_seen_at FROM team_session WHERE id = ?", (session_id,)
+        ).fetchone()
+        if seen is not None:
+            newest = self._conn.execute(
+                "SELECT MAX(created_at) FROM team_event WHERE project_id = ? AND session_id = ? "
+                "AND kind = 'attention' AND created_at >= ?",
+                (seen["project_id"], session_id, seen["last_seen_at"]),
+            ).fetchone()[0]
+            if newest is not None:
+                stamp = max(stamp, datetime.fromisoformat(newest) + timedelta(microseconds=1))
+        return stamp.isoformat()
 
     def set_transcript_path(self, session_id: str, transcript_path: str) -> None:
         """Point the row at the transcript its agent writes, and touch nothing else (P0-W3b).

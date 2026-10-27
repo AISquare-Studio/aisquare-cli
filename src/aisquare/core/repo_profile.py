@@ -69,6 +69,8 @@ _MANIFESTS = frozenset(
 _VENDORED = frozenset({"node_modules", "vendor", "third_party", "third-party", "examples", "docs"})
 
 _REMOTE_SCP = re.compile(r"^(?:[^@/\s]+@)?(?P<host>[^:/\s]+):(?P<path>(?!//).+)$")
+#: A Windows path (``C:\git\x``, ``D:/x``): read as scp it is host ``C``, path ``\git\x``.
+_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 
 
 def normalise_remote(url: str | None) -> str | None:
@@ -76,10 +78,10 @@ def normalise_remote(url: str | None) -> str | None:
 
     Handles ``https://[user[:token]@]host[:port]/org/repo[.git]``, ``ssh://git@host/org/repo``
     and the scp form ``git@host:org/repo.git``; a local path (``/srv/repo.git``,
-    ``file://…``) names no host and reads as ``None``.
+    ``C:\\git\\repo.git``, ``file://…``) names no host and reads as ``None``.
     """
     text = (url or "").strip()
-    if not text:
+    if not text or _DRIVE_PATH.match(text):
         return None
     if "://" in text:
         scheme, _, rest = text.partition("://")

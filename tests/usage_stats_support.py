@@ -10,10 +10,11 @@ prompt, a ``cwd`` on every entry. The tests then sweep or hook-record them and r
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 import pytest
@@ -26,6 +27,15 @@ NOW = datetime(2026, 10, 26, 12, 0, tzinfo=IST)
 """The clock the stats tests read with: noon on Monday 26 Oct 2026, IST."""
 
 MODEL = "claude-opus-5-5"
+
+
+def project_folder(directory: PurePath) -> str:
+    """The folder under ``projects`` Claude Code keeps ``directory``'s sessions in: its path with
+    every character that is not a letter or a digit turned into a ``-`` (``/a/b`` is ``-a-b``,
+    ``C:\\Users\\me\\repo`` is ``C--Users-me-repo``). A path joined as it is would, on Windows,
+    replace everything before it (one with a drive is absolute), and every transcript landed inside
+    its repository, where no sweep looks."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(directory))
 
 
 def stamp(moment: datetime) -> str:
@@ -166,9 +176,7 @@ class Machine:
 
     def transcript(self, slot: int, repo: Path, session_id: str) -> Path:
         """Where Claude Code, run in ``repo`` under account ``slot``, writes ``session_id``."""
-        directory = self.account(slot)
-        folder = str(repo).replace("/", "-")
-        return directory / "projects" / folder / f"{session_id}.jsonl"
+        return self.account(slot) / "projects" / project_folder(repo) / f"{session_id}.jsonl"
 
     def session(self, slot: int, repo: Path, session_id: str, *entries: dict[str, Any]) -> Path:
         return write(self.transcript(slot, repo, session_id), *entries)

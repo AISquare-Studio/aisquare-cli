@@ -31,11 +31,18 @@ def forgotten() -> Iterator[None]:
     process_table._HELD.clear()
 
 
-#: The real-process tests need ``ps`` and ``lsof`` or ``/proc``; Windows has none of them, and
-#: the table tells nothing there (``None``), which ``test_a_tree_ps_cannot_give_is_not_told``
-#: and the mocked tests below pin on every platform.
-posix_processes = pytest.mark.skipif(
-    sys.platform == "win32", reason="no ps, lsof or /proc on Windows: the table tells nothing"
+#: The real-process tests need the tools the table reads: ``ps`` for the tree, and for the files
+#: ``/proc`` where there is one, else ``lsof``. Windows has none of them, and a machine with a
+#: PATH that lacks one (macOS without /usr/sbin has no ``lsof``) skips what asks for it: the
+#: table tells nothing there (``None``), which ``test_a_tree_ps_cannot_give_is_not_told`` and
+#: the mocked tests below pin on every platform.
+needs_ps = pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("ps") is None,
+    reason="no ps on this machine: the tree is not told",
+)
+needs_a_file_table = pytest.mark.skipif(
+    sys.platform == "win32" or not (process_table.PROC.is_dir() or shutil.which("lsof")),
+    reason="no /proc and no lsof on this machine: the files are not told",
 )
 
 
@@ -73,7 +80,7 @@ def holder(tmp_path: Path) -> Iterator[tuple[subprocess.Popen[str], Path]]:
 # --- the tree
 
 
-@posix_processes
+@needs_ps
 def test_a_panes_tree_is_its_pid_and_everything_below_it_and_nothing_beside_it() -> None:
     """The pane's pid, its child, and that child's own, as Codex's is (the pane's pid is its
     node wrapper's, the native binary that holds the rollout is a child of that, measured on
@@ -111,7 +118,7 @@ def test_a_tree_ps_cannot_give_is_not_told(monkeypatch: pytest.MonkeyPatch) -> N
 # --- the files, on this platform
 
 
-@posix_processes
+@needs_a_file_table
 def test_a_file_a_process_holds_is_among_its_open_files_and_one_it_closed_is_not(
     holder: tuple[subprocess.Popen[str], Path],
 ) -> None:
@@ -124,7 +131,7 @@ def test_a_file_a_process_holds_is_among_its_open_files_and_one_it_closed_is_not
     assert os.path.realpath(path) not in (process_table.open_files([os.getpid()]) or ())
 
 
-@posix_processes
+@needs_a_file_table
 def test_a_file_opened_through_a_link_is_named_by_where_it_is(tmp_path: Path) -> None:
     """The home a row records may reach its rollouts through a link (``/var`` on macOS); the
     system names the file by its real path, so that is what the pane's files are compared by."""

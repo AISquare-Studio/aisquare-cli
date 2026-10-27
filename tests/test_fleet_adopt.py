@@ -375,6 +375,23 @@ def test_the_list_holds_both_agents_conversations_and_the_picker_names_each(
     assert row.startswith(f"{THREAD[:8]}  Codex  ") and "tidy the parser" in row
 
 
+def test_a_codex_thread_the_fleet_owns_is_left_out_of_the_list(
+    tmux: FakeTmux,
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,
+) -> None:
+    """The list leaves out a Codex thread a fleet row owns by the board id the row holds
+    (``agent_events.session_key``), never by the thread's own id, which no row names: read by
+    that, an adopted thread was offered to adopt again (seq 4186, M5)."""
+    slot = core.create_account("codex")
+    _rollout(slot, THREAD, project.root)
+    assert [c.session_id for c in adopt_service.recent()] == [THREAD], "the fixture"
+
+    adopt_service.adopt(THREAD)
+
+    assert adopt_service.recent() == [], "owned by the fleet now"
+
+
 def test_a_codex_process_names_the_thread_it_resumes_and_no_other() -> None:
     """``AgentAdapter.adoptable``: the thread after ``resume`` past the options and their
     values, ``exec resume`` too; a fresh start, ``resume --last``, a ``fork``, a prompt after
@@ -462,3 +479,22 @@ def test_the_cli_lists_as_json_and_adopts(
     again = runner.invoke(app, ["--json", "fleet", "adopt", SESSION])
     assert again.exit_code == 1
     assert json.loads(again.stdout)["error"] == "owned_by_the_fleet"
+
+
+def test_the_cli_list_names_each_conversations_agent(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,
+    runner: CliRunner,
+) -> None:
+    """``fleet adopt --list`` names the agent of each row, as the picker does: a Codex thread
+    beside a Claude Code session (seq 4186, M14)."""
+    _transcript(core.create_account(), SESSION, project.root, age=20)
+    _rollout(core.create_account("codex"), THREAD, project.root, age=10)
+
+    listed = runner.invoke(app, ["fleet", "adopt", "--list"])
+
+    assert listed.exit_code == 0, listed.output
+    assert f"{THREAD[:8]}  codex  " in listed.stdout, listed.stdout
+    assert f"{SESSION[:8]}  claude-code  " in listed.stdout, listed.stdout

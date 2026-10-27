@@ -31,6 +31,14 @@ def forgotten() -> Iterator[None]:
     process_table._HELD.clear()
 
 
+#: The real-process tests need ``ps`` and ``lsof`` or ``/proc``; Windows has none of them, and
+#: the table tells nothing there (``None``), which ``test_a_tree_ps_cannot_give_is_not_told``
+#: and the mocked tests below pin on every platform.
+posix_processes = pytest.mark.skipif(
+    sys.platform == "win32", reason="no ps, lsof or /proc on Windows: the table tells nothing"
+)
+
+
 def _until(check: object, what: str, seconds: float = 10.0) -> None:
     deadline = time.monotonic() + seconds
     while not check():  # type: ignore[operator]
@@ -65,6 +73,7 @@ def holder(tmp_path: Path) -> Iterator[tuple[subprocess.Popen[str], Path]]:
 # --- the tree
 
 
+@posix_processes
 def test_a_panes_tree_is_its_pid_and_everything_below_it_and_nothing_beside_it() -> None:
     """The pane's pid, its child, and that child's own, as Codex's is (the pane's pid is its
     node wrapper's, the native binary that holds the rollout is a child of that, measured on
@@ -102,6 +111,7 @@ def test_a_tree_ps_cannot_give_is_not_told(monkeypatch: pytest.MonkeyPatch) -> N
 # --- the files, on this platform
 
 
+@posix_processes
 def test_a_file_a_process_holds_is_among_its_open_files_and_one_it_closed_is_not(
     holder: tuple[subprocess.Popen[str], Path],
 ) -> None:
@@ -114,6 +124,7 @@ def test_a_file_a_process_holds_is_among_its_open_files_and_one_it_closed_is_not
     assert os.path.realpath(path) not in (process_table.open_files([os.getpid()]) or ())
 
 
+@posix_processes
 def test_a_file_opened_through_a_link_is_named_by_where_it_is(tmp_path: Path) -> None:
     """The home a row records may reach its rollouts through a link (``/var`` on macOS); the
     system names the file by its real path, so that is what the pane's files are compared by."""
@@ -420,8 +431,10 @@ def test_a_pane_gives_the_files_it_holds_below_the_folder_asked_about(
 ) -> None:
     home = tmp_path / "home"
     (home / "sessions").mkdir(parents=True)
-    mine = os.path.realpath(home / "sessions") + "/rollout-a.jsonl"
-    elsewhere = os.path.realpath(tmp_path) + "/sessions-and-more/rollout-b.jsonl"
+    mine = os.path.realpath(home / "sessions") + os.sep + "rollout-a.jsonl"
+    elsewhere = (
+        os.path.realpath(tmp_path) + os.sep + "sessions-and-more" + os.sep + "rollout-b.jsonl"
+    )
     _fake_table(monkeypatch, files=frozenset({mine, elsewhere, "/dev/null"}))
 
     pane = PaneProcesses(lambda: 42)
@@ -434,7 +447,7 @@ def test_a_folder_is_met_by_its_real_path(tmp_path: Path, monkeypatch: pytest.Mo
     (real / "sessions").mkdir(parents=True)
     link = tmp_path / "link"
     link.symlink_to(real)
-    held = os.path.realpath(real / "sessions") + "/rollout-a.jsonl"
+    held = os.path.realpath(real / "sessions") + os.sep + "rollout-a.jsonl"
     _fake_table(monkeypatch, files=frozenset({held}))
 
     assert PaneProcesses(lambda: 42).held_below(link / "sessions") == frozenset({held})

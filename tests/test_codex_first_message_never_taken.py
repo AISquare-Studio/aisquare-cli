@@ -562,7 +562,8 @@ def test_a_huge_rollout_beside_the_row_is_read_at_its_ends_and_in_time(
     assert spawned.row().first_prompt == "acked", "the message is in its head"
     today = datetime.now().astimezone()
     days = [f for f in listed if f.count(os.sep) > str(spawned.home).count(os.sep) + 3]
-    assert all(f.endswith(f"{today:%Y}/{today:%m}/{today:%d}") for f in days), (
+    today_parts = (f"{today:%Y}", f"{today:%m}", f"{today:%d}")  # by parts: \ on Windows
+    assert all(Path(f).parts[-3:] == today_parts for f in days), (
         "a day before the spawn was listed",
         days,
     )

@@ -110,7 +110,7 @@ from aisquare.services.captain import state as captain_state
 from tests import guard_clock, toast_log
 from tests.fleet_fakes import list_agents_as
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
-from tests.ui_workers import settle_page, settle_until, settle_until_held
+from tests.ui_workers import settle_page, settle_until_held
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -3650,8 +3650,20 @@ def test_a_successful_stop_toasts_the_ended_row_re_reads_and_leaves_its_view(
             # raises its own "(pane gone)" here, which is the harness, not the claim.
             return [toast.render().plain for toast in app.screen.query(Toast)]
 
-        await settle_until(app, lambda: wanted in toasts())
-        return toasts(), len(reads) - before, app.content.current
+        # Polled on a short sleep, not through ``settle_until``: a settle waits out every
+        # worker of the shell, and the toast lives six seconds (``stop_finished``). On
+        # windows-latest (run 40438522876 at 7bcaaa01) the wait outlasted the toast, so the
+        # rack was empty when it looked, ten seconds on. The toast is read when it is there;
+        # the re-read and the view's leaving are settled after.
+        seen: list[str] = []
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            seen = toasts()
+            if wanted in seen:
+                break
+            await asyncio.sleep(0.02)
+        await settle(app)
+        return seen, len(reads) - before, app.content.current
 
     toasts, re_reads, current = drive(go, notifications=True)
     assert f"✓ stopped coder-auth ({live.agent.id})" in toasts

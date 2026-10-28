@@ -122,6 +122,29 @@ def test_a_codex_model_the_spawn_names_keeps_it_on_codex_with_a_claude_account_f
     assert (plain.agent.agent, plain.agent.account_slot) == ("claude-code", home["work"].slot)
 
 
+@pytest.mark.parametrize("model", ["GPT-5.4", "GPT-X", "O3", "OpenAI/GPT-5.4-2026-03-05"])
+def test_a_codex_model_written_in_capitals_is_codexs_as_in_lower_case(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+) -> None:
+    """tester-43c on #43, (C), mutant M8 (a price table's model claimed in lower case only):
+    ``--model GPT-5.4`` is Codex's as ``gpt-5.4`` is, priced or not (``GPT-X``, a family
+    alone), dated and with its provider. With work first and room on it, the spawn runs Codex
+    with the model as written."""
+    home = _claude_first_with_room(monkeypatch)
+
+    assert agent_launch.model_owner(model) == "codex"
+    receipt = fleet_service.spawn(project, "coder", agent_args=["--model", model])
+
+    assert (receipt.agent.agent, receipt.agent.account_slot) == ("codex", home["codex-a"].slot)
+    command = tmux.spawned[-1]["command"]
+    assert isinstance(command, list) and model in command
+
+
 def test_a_third_agents_own_model_keeps_the_spawn_on_it(
     claude_on_path: Path,  # noqa: F811
     codex_on_path: Path,  # noqa: F811

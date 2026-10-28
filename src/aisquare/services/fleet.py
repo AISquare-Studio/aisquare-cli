@@ -5025,9 +5025,7 @@ def spawn(
         # passes them, no model its arguments name holding them back (#129 b).
         restart_pick = model_memory.Pick() if spec is None else models.picked
         if spec is not None and not selected.adapter.capabilities.model_ladders:
-            slot_args = selected.adapter.model_args(
-                restart_pick.model or spec.model, restart_pick.effort or spec.effort
-            )
+            slot_args = _replay_slot(selected.adapter, spec, restart_pick)
             unbound = selected.adapter.merged_args(bound, slot_args)
             beside = [*defaults.args, *unbound, *role_args, *extra]
             if slot_args and selected.adapter.native_choice(beside).model is None:
@@ -9271,6 +9269,15 @@ def _own_replay(
     return _ModelChoice(role_args, extra, model_memory.Pick(), runs, picked, why=why)
 
 
+def _replay_slot(adapter: AgentAdapter, spec: LaunchSpec, pick: model_memory.Pick) -> list[str]:
+    """What a replay of ``spec`` gives the model slot (``AgentAdapter.model_args``) of an agent
+    that keeps its own models: a restart's own ``pick`` over what its spawn recorded, each on
+    its own. :func:`spawn` passes it, and :func:`_refuse_a_replay_that_cannot_start` asks it
+    first, BEFORE the agent is stopped: a value the slot refuses raises ``ValueError`` here as
+    there, and refused after the stop it left the agent lost (tester-43d on #43 reopen 3)."""
+    return adapter.model_args(pick.model or spec.model, pick.effort or spec.effort)
+
+
 def _configured(adapter: AgentAdapter, role: str) -> model_memory.Pick:
     """The model and effort ``[agents.models.<agent>]`` names for ``role`` (its seat, its base
     role, the agent's own: ``native_models.configured``), each ``None`` for none: a new
@@ -12989,6 +12996,7 @@ def _refuse_a_replay_that_cannot_start(
     home: Path | None = None,
     permission_mode: str | None = None,
     branch: str | None = None,
+    pick: model_memory.Pick | None = None,
 ) -> None:
     """Raise now what replaying ``record`` would refuse — BEFORE its agent is stopped.
 
@@ -13014,7 +13022,11 @@ def _refuse_a_replay_that_cannot_start(
     (review r13 of #113, finding 7). With ``permission_mode`` (``fleet restart
     --permission-mode``), the replacement's sandbox is that mode's, not the recorded one:
     a read-only seat restarted as a workspace one was let through, then refused after the
-    stop, and ``full``, which no launch refuses, was refused (r14, finding 5).
+    stop, and ``full``, which no launch refuses, was refused (r14, finding 5). So is the model
+    slot of an agent that keeps its own models (:func:`_replay_slot`): a restart's own
+    ``pick`` (``fleet restart --model`` / ``--effort``) over what its spawn recorded, as
+    :func:`spawn` passes them; a Codex effort that is no level name was refused there, after
+    the stop, and the agent lost (tester-43d on #43 reopen 3).
 
     And every other refusal :func:`spawn` gives before a window opens: a bound file it
     cannot read, and a socket path a running server lost (:func:`_refuse_a_freed_socket`).
@@ -13041,6 +13053,11 @@ def _refuse_a_replay_that_cannot_start(
         )
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
+    if not selected.adapter.capabilities.model_ladders:
+        try:
+            _replay_slot(selected.adapter, record.spec, pick or model_memory.Pick())
+        except ValueError as exc:
+            raise FleetError(f"{exc} — nothing was stopped") from exc
     if selected.adapter.capabilities.sandboxes_tools:
         # The agent's arguments as its window's `launch` passes them: after the `--` of
         # the recorded command line (the extra ones, for a record from before there was one);
@@ -13341,6 +13358,7 @@ def restart(
 
     Every refusal that does not depend on the stop — the role, the task, the
     binary (the one the replay starts: :func:`_refuse_a_replay_that_cannot_start`),
+    the ``model`` and ``effort`` its model slot is given there (:func:`_replay_slot`),
     the account — is given BEFORE anything is stopped or recorded: a running
     agent stopped for a restart that is then refused is an agent lost for
     nothing, and a refused restart leaves the 💤 row and its last screen as
@@ -13444,7 +13462,11 @@ def restart(
         elif runs_as == record.role:
             _refuse_a_replay_spawn_refuses(project, agent, record.role)
             _refuse_a_replay_that_cannot_start(
-                current, record, permission_mode=permission_mode, branch=agent.branch
+                current,
+                record,
+                permission_mode=permission_mode,
+                branch=agent.branch,
+                pick=model_memory.Pick(model, effort),
             )
         else:
             # What else `spawn` asks of another role, and the take-over's own rule: it

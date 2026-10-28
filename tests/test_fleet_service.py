@@ -21514,7 +21514,7 @@ def test_a_replay_refused_inside_the_replacements_spawn_names_no_bin_either(
     monkeypatch.setattr(
         fleet_service,
         "_refuse_a_replay_that_cannot_start",
-        lambda project, record, home=None, permission_mode=None, branch=None: None,
+        lambda project, record, home=None, permission_mode=None, branch=None, pick=None: None,
     )
     claude_on_path.unlink()
     # And the suite's stand-in `claude` (conftest's `no_real_fleet`, 0.8.2) off PATH too: on

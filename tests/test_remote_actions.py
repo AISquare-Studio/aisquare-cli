@@ -3705,7 +3705,7 @@ def _fleet_switch_itself(
     monkeypatch.setattr(
         fleet_service,
         "_refuse_a_replay_that_cannot_start",
-        lambda project, record, home=None, permission_mode=None, branch=None: None,
+        lambda project, record, home=None, permission_mode=None, branch=None, pick=None: None,
     )
     if choice is not None:
         monkeypatch.setattr(

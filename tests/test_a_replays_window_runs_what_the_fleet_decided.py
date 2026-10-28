@@ -280,3 +280,126 @@ def test_a_codex_replay_keeps_its_bindings_effort_where_the_bindings_model_holds
 
     argv = _window_launched(tmux, CliRunner(), monkeypatch)
     assert _ran("codex", argv) == ("gpt-bind", "low"), argv
+
+
+#: Efforts Codex's model slot refuses (``CodexAdapter.reasoning_effort``): no level name.
+UNTAKEN = ["x y", "extra high", "med.", "hi!"]
+
+
+#: What a refused restart leaves as it was: the windows opened, the panes killed, the keys typed.
+World = tuple[int, list[str], list[tuple[str, str, str]]]
+
+
+def _the_world(tmux: FakeTmux) -> World:  # noqa: F811
+    return len(tmux.spawned), list(tmux.killed), list(tmux.typed)
+
+
+def _as_it_was(
+    tmux: FakeTmux,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    row: FleetAgent,
+    before: World,
+) -> None:
+    """``row``'s agent runs on as it did: no ``/exit`` typed, no window killed or opened, and
+    its row is still the live one under its label."""
+    assert (len(tmux.spawned), tmux.killed, tmux.typed) == before
+    live = fleet_service.list_agents(project, live_only=True)
+    assert [(status.agent.id, status.agent.label) for status in live] == [(row.id, row.label)]
+
+
+@pytest.mark.parametrize("effort", UNTAKEN)
+@pytest.mark.parametrize("how", ["cli", "service"])
+def test_a_codex_restart_given_an_effort_its_slot_refuses_stops_nothing(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    how: str,
+    effort: str,
+) -> None:
+    """tester-43d on #43 reopen 3; mutant: the check back after the stop. ``fleet restart
+    coder-1 --effort "x y"`` of a running Codex coder typed its ``/exit``, ended its row and
+    killed its window, and only then refused the effort, which its model slot cannot take
+    (``model_args``, in the replay's spawn): the agent was lost, and nothing started. Asked
+    before the stop now, as every refusal that does not depend on it is: the agent runs on,
+    and the refusal says nothing was stopped."""
+    row = _spawn_with(project, "codex", "nothing")
+    before = _the_world(tmux)
+
+    if how == "cli":
+        monkeypatch.chdir(project.root)
+        result = CliRunner().invoke(app, ["fleet", "restart", row.label, "--effort", effort])
+        assert result.exit_code == 1, result.output
+        said = " ".join(result.output.split())
+    else:
+        with pytest.raises(fleet_service.FleetError) as refused:
+            fleet_service.restart(project, row.label, effort=effort)
+        said = str(refused.value)
+
+    assert f"cannot restart {row.label!r}: Codex reasoning effort must be a level name" in said
+    assert said.endswith(f"not {effort!r} — nothing was stopped"), said
+    _as_it_was(tmux, project, row, before)
+
+
+@pytest.mark.parametrize(("effort", "native"), [("High", "high"), ("ultracode", "max")])
+def test_a_codex_restart_given_an_effort_its_slot_takes_runs_it(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    effort: str,
+    native: str,
+) -> None:
+    """The check before the stop refuses what the model slot refuses, and no more: an effort
+    in another case, or AISquare's alias for one of Codex's, restarts the agent at that level."""
+    row = _spawn_with(project, "codex", "nothing")
+
+    receipt = fleet_service.restart(project, row.label, effort=effort)
+
+    assert receipt.was_running
+    argv = _window_launched(tmux, CliRunner(), monkeypatch)
+    assert _ran("codex", argv) == (None, native), argv
+
+
+@pytest.mark.parametrize("replay", ["restart", "switch"])
+def test_a_codex_replay_of_an_effort_its_slot_refuses_stops_nothing(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    replay: str,
+) -> None:
+    """#43 reopen 4, item 2; mutant: the record's effort left out of the check. A Codex spawn
+    whose own arguments name the model passes no effort beside them (that model takes the
+    effort with it, #129 b), and records the one it was given unasked; a plain restart, or a
+    switch, gives that effort to the model slot, and refused it after the stop. Before it now,
+    for both; and a restart given an effort the slot takes replaces it, and runs."""
+    first, second = _two_slots("codex", monkeypatch)
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
+    save_config(config)
+    row = fleet_service.spawn(
+        project,
+        "coder",
+        agent="codex",
+        account=str(first.slot),
+        effort="x y",
+        agent_args=["--model", GIVEN["codex"]],
+    ).agent
+    assert row.launch_spec is not None and row.launch_spec.effort == "x y", row.launch_spec
+    _window_launched(tmux, CliRunner(), monkeypatch)
+    before = _the_world(tmux)
+
+    with pytest.raises(fleet_service.FleetError, match=r"not 'x y' — nothing was stopped$"):
+        if replay == "restart":
+            fleet_service.restart(project, row.label)
+        else:
+            fleet_service.switch(project, row.label, to=str(second.slot))
+
+    _as_it_was(tmux, project, row, before)
+    fleet_service.restart(project, row.label, effort="high")
+    argv = _window_launched(tmux, CliRunner(), monkeypatch)
+    assert _ran("codex", argv) == (GIVEN["codex"], "high"), argv

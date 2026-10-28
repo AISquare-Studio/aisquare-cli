@@ -285,6 +285,45 @@ def test_reap_keeps_a_tree_a_live_rows_store_names_whatever_the_records_say(
     assert report.worktrees_removed == [] and ended.cwd.is_dir()
 
 
+def test_reap_keeps_a_tree_a_live_rows_launch_record_names_though_its_store_cwd_moved(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """The other half of what a tree is in use by (seq 4207, MI): the tree a LIVE row's
+    launch record names. A respawn of the label reuses the ended row's tree, and the live
+    row's store ``cwd`` is then rewritten away: the tree is still the live agent's, never
+    reaped for the ended row its record names too."""
+    ended = fleet_service.spawn(project, "coder", agent="codex", worktree=True, label="cx").agent
+    fleet_service.stop(project, ended.label, force=True)
+    live = fleet_service.spawn(project, "coder", agent="codex", worktree=True, label="cx").agent
+    assert live.cwd.resolve() == ended.cwd.resolve(), "the fixture: the respawn reused the tree"
+    _rewrite_cwd(live.id, tmp_path)
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [] and live.cwd.is_dir(), "a live agent's tree stays"
+
+
+def test_reap_removes_an_ended_rows_recorded_tree_though_its_store_cwd_names_the_root(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """And the tree an ENDED row's launch record names is the one reap asks about whatever
+    its store ``cwd`` says (seq 4207, MI): rewritten to the project's root, which is always in
+    use, the row's own clean, ended tree still goes."""
+    ended = fleet_service.spawn(project, "coder", agent="codex", worktree=True).agent
+    fleet_service.stop(project, ended.label, force=True)
+    _rewrite_cwd(ended.id, project.root)
+
+    report = fleet_service.reap(project)
+
+    assert [tree.resolve() for tree in report.worktrees_removed] == [ended.cwd.resolve()]
+    assert project.root.is_dir() and not ended.cwd.exists()
+
+
 # --- the label cap --------------------------------------------------------------------------
 
 

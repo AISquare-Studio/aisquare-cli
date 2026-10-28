@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,10 +24,11 @@ from aisquare.cli.ui.adopt_picker import adoptable, conversation_text
 from aisquare.core import claude_accounts as core
 from aisquare.core import launch_seal, process_table
 from aisquare.core.agent_adapters import get_adapter
-from aisquare.core.store import store_session
+from aisquare.core.store import SqliteStore, store_session
 from aisquare.models import ClaudeAccount, ProjectInfo
 from aisquare.services import adopt as adopt_service
 from aisquare.services import agent_events
+from aisquare.services import fleet as fleet_service
 from tests import test_fleet_service as fleet_suite
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
 from tests.test_fleet_service import FakeTmux, _command, _flag
@@ -255,6 +257,30 @@ def test_only_the_known_accounts_are_searched(
         adopt_service.adopt(str(path))
     assert by_id.value.code == "no_such_conversation"
     assert by_path.value.code == "not_on_a_known_account"
+
+
+def test_reap_leaves_the_owners_tree_an_adopted_row_ran_in_though_its_store_says_tree(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """An adopted conversation resumes in its own directory, here the owner's worktree, and
+    its row has no tree of its own: its launch record says ``worktree`` False. Whether a row
+    has a tree is its record's to say, as where it is (seq 4207, MD): with the store's
+    ``worktree`` column rewritten to 1, the ended row's reap leaves the owner's tree."""
+    owners = project.root / "owners-tree"
+    git = ["git", "-C", str(project.root)]
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "owners", str(owners)], check=True)
+    _transcript(core.create_account(), SESSION, owners, age=5)
+    agent = adopt_service.adopt(SESSION).agent
+    assert not agent.worktree and agent.cwd.resolve() == owners.resolve(), "the fixture"
+    fleet_service.stop(project, agent.label, force=True)
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        store._conn.execute("UPDATE fleet_agent SET worktree = 1 WHERE id = ?", (agent.id,))
+        store._conn.commit()
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [] and owners.is_dir(), "the owner's tree is no row's"
 
 
 # ------------------------------------------------------------- Codex (SCOPE #113 091, 13)

@@ -571,6 +571,17 @@ def fleet_settings(
     return selected.adapter.fleet_settings(_launch_home(selected, env), raw_args)
 
 
+MODELS_DECIDED_FLAG = "--models-decided"
+"""What a fleet spawn's window passes its ``aisquare launch``: the model and effort on its line
+are the fleet's one decision (``fleet._model_choice``, as ``fleet.spawn_runs`` and
+``fleet.role_pin`` say it), and the launch passes them as they are, resolving none again
+(:func:`launch_model_for`). A launch that did applied the ``AISQUARE_MODEL_<ROLE>`` pins of the
+fleet's tmux server and an ``[agents.models.<agent>]`` effort the spawn had left out (#129 b)
+to a Codex agent, so its argv was not what ``team harness`` and the Spawn dialog said
+(tester-43b on #43, (2) and (3)). A flag, not a variable: a launch by hand inside such a
+window's agent resolves its own, as ``team spawn`` and any hand launch do."""
+
+
 LAUNCH_SETTINGS_ENV = "AISQUARE_LAUNCH_SETTINGS"
 """Where a fleet spawn hands its window's ``aisquare launch`` the settings its slots answered
 (``LaunchPart.settings``: the label's, the teams'), as JSON, for the one settings layer that

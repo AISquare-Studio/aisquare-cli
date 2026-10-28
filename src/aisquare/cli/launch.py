@@ -534,6 +534,15 @@ def launch(
             show_default=False,
         ),
     ] = None,
+    models_decided: Annotated[
+        bool,
+        typer.Option(
+            agent_launch.MODELS_DECIDED_FLAG,
+            help="The model and effort on this line are the fleet spawn's: passed as they are, "
+            "resolved no further (what `fleet spawn` gives its window).",
+            hidden=True,
+        ),
+    ] = False,
     first_prompt_file: Annotated[
         Path | None,
         typer.Option(
@@ -760,7 +769,12 @@ def launch(
         arguments = agent_launch.prepare_arguments(
             selected, [*role_args, *binding_args], agent_args
         )
-        native_model = agent_launch.launch_model_for(selected, role, arguments)
+        # A fleet window's model and effort are the fleet's one decision, on this line
+        # already: no pin of the tmux server's environment, no configured effort the spawn
+        # left out, is added to them here (`agent_launch.MODELS_DECIDED_FLAG`).
+        native_model = (
+            None if models_decided else agent_launch.launch_model_for(selected, role, arguments)
+        )
         for message in native_model.notes if native_model else []:
             stderr_console().print(message, markup=False)
         model_args = agent_launch.resolved_model_args(selected, native_model, arguments)

@@ -681,6 +681,27 @@ def spawn(
         stdout_console().print(f"  run it in the role's terminal:\n  {command}", markup=False)
 
 
+def _fleet_line_says_more(row: Mapping[str, Any], fleet_row: Mapping[str, Any]) -> bool:
+    """Whether ``team harness`` prints a role's ``fleet:`` line: a fleet spawn of it passes
+    arguments of its own, or another model or effort than its team row says, by another rung.
+    Not where that is only #441's rule on an agent whose ladder the team row walks
+    (``capabilities.model_ladders``): a fleet spawn passes nothing there until something picks,
+    as on main, which printed no such line, and the line was on every role of a default home
+    (tester-43b on #43). An environment pin the team row takes, which no fleet spawn does, is
+    still said."""
+    if fleet_row["agent_args"]:
+        return True
+    if all(
+        fleet_row[key] == row[key] for key in ("resolves_to", "source", "effort", "effort_source")
+    ):
+        return False
+    adapter = recorded_adapter(row["agent"])  # one this install does not know: said in full
+    ladders = adapter is not None and adapter.capabilities.model_ladders
+    passes_nothing = not fleet_row["resolves_to"] and not fleet_row["effort"]
+    pinned = "pinned" in (row["source"], row["effort_source"])
+    return not (ladders and passes_nothing and not pinned)
+
+
 def _fleet_model_status(selected: agent_launch.ResolvedAgent, role: str) -> dict[str, Any]:
     """What a ``fleet spawn`` of ``role`` given no model runs, apart from ``team spawn``'s row:
     the fleet's own rule (``fleet.spawn_choice``, the spawn's ``_model_choice``: the role's
@@ -882,14 +903,12 @@ def harness_status() -> None:
         fleet_row = row["fleet"]
         if "error" in fleet_row:
             console.print(f"  fleet: {fleet_row['error']}", markup=False)
-        elif fleet_row["agent_args"] or any(
-            fleet_row[key] != row[key]
-            for key in ("resolves_to", "source", "effort", "effort_source")
-        ):
+        elif _fleet_line_says_more(row, fleet_row):
+            args = fleet_row["agent_args"]
             console.print(
                 f"  fleet: {fleet_row['resolves_to'] or 'native default'} "
-                f"[{fleet_row['source']}] effort={fleet_row['effort'] or 'native'} "
-                f"args={shlex.join(fleet_row['agent_args'])}",
+                f"[{fleet_row['source']}] effort={fleet_row['effort'] or 'native'}"
+                + (f" args={shlex.join(args)}" if args else ""),
                 markup=False,
             )
     if interference:

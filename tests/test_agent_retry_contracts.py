@@ -385,7 +385,9 @@ def test_harness_shows_differing_fleet_defaults_and_stable_error_shape(
 ) -> None:
     # `team spawn` walks Claude Code's ladder; a fleet spawn given no model runs the owner's
     # last pick, else the account's own default (#441), so its row is shown apart (#43 reopen,
-    # tester-43 (2)); and so are arguments of its own.
+    # tester-43 (2)); and so are arguments of its own. A fleet spawn that passes nothing
+    # beside a ladder is #441's rule on every role, and its text line is left out, as on main
+    # (tester-43b on #43).
     result = runner.invoke(app, ["--json", "team", "harness"])
     assert result.exit_code == 0, result.output
     coder = next(row for row in json.loads(result.stdout)["roles"] if row["role"] == "coder")
@@ -394,7 +396,7 @@ def test_harness_shows_differing_fleet_defaults_and_stable_error_shape(
     assert (fleet_row["resolves_to"], fleet_row["source"]) == ("", "native-default")
     assert (fleet_row["effort"], fleet_row["effort_source"]) == ("", "native-default")
     result = runner.invoke(app, ["team", "harness"])
-    assert "fleet: native default [native-default] effort=native" in result.output
+    assert "fleet: native default" not in result.output, result.output
     config = load_config()
     config.fleet.roles["coder"] = FleetRoleSettings(extra_args=["--model", "opus"])
     save_config(config)

@@ -5355,6 +5355,9 @@ def spawn(
     # The parent already resolved this family. Carry that decision through
     # tmux so a legacy wrapper is not reclassified against inherited defaults.
     flags += ["--agent", selected.adapter.id, "--no-bound-args"]
+    # Its model and effort are this spawn's one decision (`models` and `model_args`, below):
+    # the window's `launch` passes them as they are (`agent_launch.MODELS_DECIDED_FLAG`).
+    flags += [agent_launch.MODELS_DECIDED_FLAG]
     native += list(identity.inject_args)
     if choice.account is not None:
         # Carried to `launch` as the RESOLVED slot, so the window's own pass

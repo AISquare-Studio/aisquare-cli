@@ -2802,6 +2802,85 @@ def test_the_roles_settings_run_over_its_agents_models_pin_and_the_dialog_says_s
     assert ran.effort == runs.effort == shown.effort == effort, argv
 
 
+def _window_launched(
+    server: FakeTmux, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> list[str]:
+    """The argv the last window's own ``aisquare launch`` execs, run as tmux runs it: its
+    command, in the window's own environment over this process's, which stands for the fleet
+    server's global one (an ``AISQUARE_MODEL_<ROLE>`` exported where the server started)."""
+    spawned = server.spawned[-1]
+    command, env = spawned["command"], spawned["env"]
+    assert isinstance(command, list) and isinstance(env, dict)
+    execute = Mock()
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    result = runner.invoke(app, command[command.index("launch") :], env=env)
+    assert result.exit_code == 0, result.output
+    argv: list[str] = execute.call_args.args[1]
+    return argv
+
+
+@pytest.mark.parametrize("case", ["env-pin", "role-model-and-configured", "configured"])
+@pytest.mark.parametrize("agent", ["claude-code", "codex"])
+def test_the_windows_own_launch_runs_the_model_and_effort_the_fleet_decided(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    agent: str,
+    case: str,
+) -> None:
+    """tester-43b on #43, (2) and (3); manager decision: a fleet agent's model and effort are
+    decided ONCE, by the fleet. The window's ``aisquare launch`` decided them again for Codex
+    (``launch_model_for`` with the env pins on, ``resolved_model_args`` with no #129 b
+    guard): the fleet server's ``AISQUARE_MODEL_CODER`` reached the argv, and with a role's
+    own ``--model`` a configured effort the spawn left out on purpose. Run through the real
+    window launch to the exec'd argv, both agents: the argv is what ``spawn_runs`` and
+    ``role_pin`` say, and ``team harness``'s fleet row, and no env pin is in it."""
+    config = load_config()
+    config.team.profiles["coder"] = RoleLaunchProfile(agent=agent)
+    role_model = {"claude-code": "sonnet", "codex": "gpt-role"}[agent]
+    config.fleet.roles["coder"] = (
+        FleetRoleSettings(worktree=False)
+        if case != "role-model-and-configured"
+        else FleetRoleSettings(worktree=False, extra_args=["--model", role_model])
+        if agent == "claude-code"
+        else FleetRoleSettings(worktree=False, agent_args={agent: ["--model", role_model]})
+    )
+    if case != "env-pin":
+        config.agents.models[agent] = AgentModelSettings(
+            roles={"coder": AgentModelDefault(model=_CONFIGURED[agent], effort="high")}
+        )
+    save_config(config)
+    monkeypatch.setenv("AISQUARE_MODEL_CODER", "gpt-env")
+    monkeypatch.setenv("AISQUARE_EFFORT_CODER", "low")
+
+    runs = fleet_service.spawn_runs("coder", agent=agent)
+    shown = fleet_service.role_pin("coder", agent=agent)
+    harness_row = json.loads(CliRunner().invoke(app, ["--json", "team", "harness"]).stdout)
+    [fleet_row] = [row["fleet"] for row in harness_row["roles"] if row["role"] == "coder"]
+    fleet_service.spawn(project, "coder")
+    argv = _window_launched(tmux, CliRunner(), monkeypatch)
+
+    ran = get_adapter(agent).native_choice(argv)
+    expected = {
+        "env-pin": (None, None),
+        # Claude Code's flags are each its own; a Codex role's own model is the caller's
+        # choice of both (#129 b): no configured effort beside it.
+        "role-model-and-configured": (role_model, "high" if agent == "claude-code" else None),
+        "configured": (_CONFIGURED[agent], "high"),
+    }[case]
+    assert (ran.model, ran.effort) == expected, argv
+    assert (runs.model, runs.effort) == expected, "the label reads what the window runs"
+    assert (fleet_row["resolves_to"] or None, fleet_row["effort"] or None) == expected
+    if case == "env-pin":
+        assert fleet_row["source"] == "native-default", fleet_row
+    else:
+        assert (shown.model, shown.effort) == expected, "the dialog shows what the window runs"
+    assert not {"gpt-env", "low"} & {arg.strip('"') for arg in argv}, argv
+    assert not any("gpt-env" in arg or '"low"' in arg for arg in argv), argv
+
+
 @pytest.mark.parametrize("pin", ["configured", "last-pick", "none"])
 @pytest.mark.parametrize("agent", ["claude-code", "codex"])
 def test_team_harness_says_what_a_fleet_spawn_runs_under_an_env_pin_for_both_agents(
@@ -2849,8 +2928,51 @@ def test_team_harness_says_what_a_fleet_spawn_runs_under_an_env_pin_for_both_age
         "env-model",
         "pinned",
     ), "team spawn takes the env pin"
-    line = f"  fleet: {ran.model or 'native default'} [{source}] effort={ran.effort or 'native'} "
-    assert line in text.stdout, text.stdout
+    line = f"  fleet: {ran.model or 'native default'} [{source}] effort={ran.effort or 'native'}"
+    assert f"{line}\n" in text.stdout, "said, with no empty args=: " + text.stdout
+
+
+@pytest.mark.parametrize("probe", ["effort-only-env-pin", "configured-model-remembered-effort"])
+def test_team_harness_says_the_fleets_model_and_effort_each_by_its_own_rung(
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    probe: str,
+) -> None:
+    """tester-43b on #43, (4), mutants ME and MI. ME: an effort-only env pin over a Codex
+    ``[agents.models.codex]`` pin leaves the team row's model and source as the fleet's, its
+    effort apart: the text says the fleet line, by the effort too. MI: a configured model and a
+    remembered effort are each said by their own rung."""
+    monkeypatch.chdir(project.root)
+    agent = "codex" if probe == "effort-only-env-pin" else "claude-code"
+    config = load_config()
+    config.team.profiles["coder"] = RoleLaunchProfile(agent=agent)
+    if probe == "effort-only-env-pin":
+        config.agents.models["codex"] = AgentModelSettings(
+            roles={"coder": AgentModelDefault(model="gpt-5.5", effort="high")}
+        )
+        monkeypatch.setenv("AISQUARE_EFFORT_CODER", "low")
+    else:
+        config.agents.models["claude-code"] = AgentModelSettings(
+            roles={"coder": AgentModelDefault(model="fable")}
+        )
+    save_config(config)
+    if probe != "effort-only-env-pin":
+        model_memory.remember(model="opus", effort="medium")
+
+    shown = CliRunner().invoke(app, ["--json", "team", "harness"])
+    text = CliRunner().invoke(app, ["team", "harness"])
+
+    coder = next(row for row in json.loads(shown.stdout)["roles"] if row["role"] == "coder")
+    row = coder["fleet"]
+    if probe == "effort-only-env-pin":
+        assert (coder["resolves_to"], coder["effort"]) == ("gpt-5.5", "low"), coder
+        assert (row["resolves_to"], row["effort"]) == ("gpt-5.5", "high"), row
+        assert "  fleet: gpt-5.5 [configured] effort=high\n" in text.stdout, text.stdout
+    else:
+        assert (row["resolves_to"], row["source"]) == ("fable", "configured"), row
+        assert (row["effort"], row["effort_source"]) == ("medium", "remembered"), row
 
 
 def test_a_remembered_pick_is_claude_codes_alone_and_a_codex_spawn_gets_no_flag_of_it(

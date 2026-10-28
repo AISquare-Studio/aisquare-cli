@@ -89,7 +89,8 @@ adapter.**
     receipt says each pick they overrule. A Codex spawn's own arguments win over its role's
     and its binding's, and each option is passed once, restarts included: before, a role's
     `--model` beside the spawn's was passed twice, and Codex 0.164.0 refused it and exited. The Spawn dialog's *+ New account* signs in its
-    own agent and comes back on the new slot, and a Codex row's `!` hover names Codex's
+    own agent and comes back on the new slot, with the Effort chosen even where only the
+    role's Codex takes it (`minimal`, `ultra`), and a Codex row's `!` hover names Codex's
     sign-in (`aisquare accounts run <slot> login`).
     `fleet adopt` takes a hand-started Codex thread as it takes a Claude Code session: each
     agent's conversations, their folder and first prompt are read by its adapter
@@ -283,8 +284,8 @@ adapter.**
   the Spawn dialog's account label, left at the role's agent, names the account the spawn
   then runs on (it named the account Claude Code's own rung picked by the family, while the
   spawn ran on the one the order picked without it). A model the spawn names itself
-  (`--model`, the dialog's Model field, a `--model` or Codex's `-m` in its *Extra agent
-  args*) keeps it on the agent whose model it is, by the names that agent claims
+  (`--model`, the dialog's Model field, a `--model` or Codex's `-m` or `-c model=…` in its
+  *Extra agent args*) keeps it on the agent whose model it is, by the names that agent claims
   (`AgentAdapter.claims_model`: Claude Code's ladders' families; Codex's `gpt-*`, `o<digit>*`,
   `codex-*`, the catalog 0.164.0 bundles and its price table: `fable` is Claude Code's,
   `gpt-x`, `o3` and `gpt-5.4` Codex's), whose accounts alone are weighed, the first in the order

@@ -469,6 +469,72 @@ def test_the_keys_a_launch_leaves_go_with_a_projects_reset_and_purge(
         assert [key for key in keys if store.get_meta(key) is not None] == []
 
 
+def _bound_keys() -> list[str]:
+    """The tester's SQL (SMOKE11 8): the keys a spawn's first message and a launch's and a
+    fleet row's binding leave."""
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        rows = store._conn.execute(
+            "SELECT key FROM team_meta WHERE key LIKE 'first-prompt:%' "
+            "OR key LIKE 'fleet-session:%' OR key LIKE 'launch-session:%' ORDER BY key"
+        ).fetchall()
+    return [str(row["key"]) for row in rows]
+
+
+@pytest.mark.parametrize("how", ["reset", "purge"])
+def test_a_spawns_first_prompt_and_the_session_bindings_go_with_a_reset_and_purge(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    how: str,
+) -> None:
+    """SMOKE11 8, the tester's repro: ``fleet spawn coder --agent codex --no-worktree --prompt
+    hi`` (and a Claude Code one), their hooks' first events, the rows stopped, ``project
+    fresh``. It left ``first-prompt:<agent id>`` (a Codex row's), and ``fleet-session:`` and
+    ``launch-session:`` (both agents'), and nothing else ever expires a ``first-prompt:`` key.
+    They go with their rows and their sessions now, in a reset and a purge alike; another
+    project's are kept."""
+    from aisquare.core.agent_sessions import bind_launch_session
+
+    rows: list[FleetAgent] = []
+    for agent in ("codex", "claude-code"):
+        row = fleet_service.spawn(project, "coder", agent=agent, worktree=False, prompt="hi").agent
+        session = f"ses-{agent}"
+        _a_session(project, session, agent)
+        monkeypatch.setenv("AISQUARE_FLEET_AGENT", row.id)
+        monkeypatch.setenv("AISQUARE_LAUNCH_ID", f"lch-{agent}")
+        with store_session() as store:
+            bind_launch_session(store, session, started=True)  # its SessionStart
+        rows.append(row)
+    with store_session() as store:
+        for row in rows:
+            store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
+        store.set_meta("first-prompt:agt_elsewhere", "{}")  # another project's rows, kept
+        store.set_meta("fleet-session:agt_elsewhere", "ses-elsewhere")
+        store.set_meta("launch-session:lch-elsewhere", "ses-elsewhere")
+    kept = ["first-prompt:agt_elsewhere", "fleet-session:agt_elsewhere"]
+    kept.append("launch-session:lch-elsewhere")
+    codex = rows[0]
+    assert set(_bound_keys()) >= {
+        f"first-prompt:{codex.id}",
+        *(f"fleet-session:{row.id}" for row in rows),
+        "launch-session:lch-codex",
+        "launch-session:lch-claude-code",
+    }, "the fixture"
+
+    with store_session() as store:
+        if how == "reset":
+            planned = store.reset_project(project.id, apply=False)
+            cleared = store.reset_project(project.id, apply=True)
+            assert cleared["team_meta"] == planned["team_meta"], "each key counted once"
+        else:
+            store.purge_project(project.id)
+
+    assert _bound_keys() == sorted(kept)
+
+
 def test_a_codex_rows_tree_is_the_one_its_launch_record_names_not_its_rewritten_cwd(
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811

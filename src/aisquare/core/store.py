@@ -3156,9 +3156,11 @@ class SqliteStore:
 
         Inside the caller's transaction, in statements of at most
         :data:`_META_BATCH` sessions each (its keys, one per :data:`_SESSION_META_KINDS` and
-        its continuation prompt, in one ``IN``, and one glob each for its continuations, its
-        agent events and its launch and fleet sightings): one statement per purge was the
-        shape SQLite refused at 500 sessions.
+        its continuation prompt, in one ``IN``, one glob each for its continuations, its
+        agent events and its launch and fleet sightings, and the bindings whose value is
+        one of them): one statement per purge was the shape SQLite refused at 500 sessions.
+        The fleet rows' keys go with the rows (:func:`_fleet_meta_terms`), so it reads
+        them before the caller deletes the rows.
         """
         removed = self._conn.execute(
             "DELETE FROM team_meta WHERE key = ? OR key GLOB ? OR key GLOB ?",
@@ -3176,12 +3178,11 @@ class SqliteStore:
                 continue
             if isinstance(marker, dict) and marker.get("project_id") == project_id:
                 removed += self._clear_native_launch(key.removeprefix("native-launch:"))
-        for where, params in _session_meta_terms(sessions):
-            removed += self._conn.execute(f"DELETE FROM team_meta WHERE {where}", params).rowcount
         for start in range(0, len(sessions), _META_BATCH):
             batch = sessions[start : start + _META_BATCH]
             # Binding values carry the canonical session ID; never match an
             # unrelated metadata value just because it contains the same text.
+            # Read before the bindings themselves go (`_session_meta_terms`).
             launches = self._conn.execute(
                 "SELECT key FROM team_meta WHERE key GLOB 'launch-session:*' AND value IN ("
                 + ",".join("?" for _ in batch)
@@ -3192,13 +3193,14 @@ class SqliteStore:
                 removed += self._clear_native_launch(
                     str(launch["key"]).removeprefix("launch-session:")
                 )
-            removed += self._conn.execute(
-                "DELETE FROM team_meta WHERE (key GLOB 'launch-session:*' "
-                "OR key GLOB 'fleet-session:*' OR key GLOB 'session-alias:*') AND value IN ("
-                + ",".join("?" for _ in batch)
-                + ")",
-                batch,
-            ).rowcount
+        agents = [
+            str(row["id"])
+            for row in self._conn.execute(
+                "SELECT id FROM fleet_agent WHERE project_id = ?", (project_id,)
+            ).fetchall()
+        ]
+        for where, params in (*_session_meta_terms(sessions), *_fleet_meta_terms(agents)):
+            removed += self._conn.execute(f"DELETE FROM team_meta WHERE {where}", params).rowcount
         return removed
 
     def reset_project(
@@ -3210,8 +3212,10 @@ class SqliteStore:
 
         The board is its ``team_task``, ``team_event``, ``team_session`` and ``brief`` rows
         (the next brief is #1 again, as the next task is), and in
-        ``team_meta`` its signals (``signal/<id>/*``) and the keys of the sessions that go
-        (:func:`_session_meta_terms`: the nudge debounce, the continuation counters, …).
+        ``team_meta`` its signals (``signal/<id>/*``), the keys of the sessions that go
+        (:func:`_session_meta_terms`: the nudge debounce, the continuation counters, the
+        launch and fleet bindings to them, …) and of the fleet rows that go
+        (:func:`_fleet_meta_terms`: a spawn's first message, the row's binding).
         The ``ui_state`` rows the before-limit hand-over keeps per label
         (:data:`_FLEET_LABEL_STATE`) go with them, counted with the ``team_meta`` keys: the
         next fleet reuses a label (``coder-1``), and a stale "warned" row would hide its first
@@ -3251,6 +3255,12 @@ class SqliteStore:
                     "SELECT id FROM team_session WHERE project_id = ?", (project_id,)
                 ).fetchall()
             ]
+            agents = [
+                str(row["id"])
+                for row in self._conn.execute(
+                    "SELECT id FROM fleet_agent WHERE project_id = ?", (project_id,)
+                ).fetchall()
+            ]
             signals = ("key GLOB ?", (f"signal/{_glob_escape(project_id)}/*",))
             labels = (
                 " OR ".join(["key GLOB ?"] * len(_FLEET_LABEL_STATE)),
@@ -3259,7 +3269,11 @@ class SqliteStore:
             return [
                 *(
                     ("team_meta", where, params)
-                    for where, params in (signals, *_session_meta_terms(sessions))
+                    for where, params in (
+                        signals,
+                        *_session_meta_terms(sessions),
+                        *_fleet_meta_terms(agents),
+                    )
                 ),
                 ("ui_state", *labels),
             ]
@@ -3272,9 +3286,13 @@ class SqliteStore:
                 )
                 for table, where in scope
             }
-            counts["team_meta"] = sum(
-                int(self._conn.execute(count.format(table, where), params).fetchone()[0])
-                for table, where, params in meta()
+            # Each key once: a row's binding is its row's key and its session's value both.
+            counts["team_meta"] = len(
+                {
+                    (table, str(row[0]))
+                    for table, where, params in meta()
+                    for row in self._conn.execute(f"SELECT key FROM {table} WHERE {where}", params)
+                }
             )
             return counts
         removed: dict[str, int] = {}
@@ -6903,12 +6921,25 @@ end that last started a before-limit move, the crossing a ``warn`` has named
 clears a project's (:meth:`SqliteStore.reset_project`)."""
 
 
+_SESSION_BINDINGS: tuple[str, ...] = ("launch-session:", "fleet-session:", "session-alias:")
+"""The ``team_meta`` keys whose VALUE is a session: a launch's and a fleet row's binding to the
+session they run (``core.agent_sessions``, keyed by launch id and by row id) and an MCP row's
+alias (``session-alias:<provisional id>``)."""
+
+_FLEET_META: tuple[str, ...] = ("first-prompt:", "fleet-session:")
+"""The ``team_meta`` keys kept per fleet row as ``<prefix><agent id>``: what a spawn's first
+message was given as (``services.fleet.FIRST_PROMPT_META``) and the row's session binding. They
+go with the row (:func:`_fleet_meta_terms`): nothing else expires a ``first-prompt:`` key."""
+
+
 def _session_meta_terms(sessions: Sequence[str]) -> Iterator[tuple[str, tuple[str, ...]]]:
     """``(where, params)`` matching the ``team_meta`` keys of ``sessions``: each of
-    :data:`_SESSION_META_KINDS` and the continuation prompt, and the continuation counters,
-    agent events and launch and fleet sightings a session leaves. In statements of at most
-    :data:`_META_BATCH` sessions each: the keys are one ``IN`` and the globs OR'd beside it,
-    as one term per key passed SQLite's expression depth (1000) at a full batch."""
+    :data:`_SESSION_META_KINDS` and the continuation prompt, the continuation counters,
+    agent events and launch and fleet sightings a session leaves, and the keys whose value
+    names it (:data:`_SESSION_BINDINGS`). In statements of at most :data:`_META_BATCH`
+    sessions each: the keys are one ``IN`` and the globs OR'd beside it, as one term per key
+    passed SQLite's expression depth (1000) at a full batch."""
+    bound = " OR ".join(f"key GLOB '{prefix}*'" for prefix in _SESSION_BINDINGS)
     for start in range(0, len(sessions), _META_BATCH):
         batch = sessions[start : start + _META_BATCH]
         keys = [
@@ -6926,6 +6957,19 @@ def _session_meta_terms(sessions: Sequence[str]) -> Iterator[tuple[str, tuple[st
                 f"fleet-seen:*:{_glob_escape(sid)}",
             )
         ]
+        clauses = [f"key IN ({','.join('?' for _ in keys)})"] + ["key GLOB ?"] * len(globs)
+        clauses.append(f"(({bound}) AND value IN ({','.join('?' for _ in batch)}))")
+        yield " OR ".join(clauses), (*keys, *globs, *batch)
+
+
+def _fleet_meta_terms(agents: Sequence[str]) -> Iterator[tuple[str, tuple[str, ...]]]:
+    """``(where, params)`` matching the ``team_meta`` keys of the fleet rows ``agents``: each
+    of :data:`_FLEET_META`, and the sightings under the row's token (``fleet-seen:<id>:*``), in
+    statements of at most :data:`_META_BATCH` rows each, as :func:`_session_meta_terms`."""
+    for start in range(0, len(agents), _META_BATCH):
+        batch = agents[start : start + _META_BATCH]
+        keys = [f"{prefix}{agent}" for agent in batch for prefix in _FLEET_META]
+        globs = [f"fleet-seen:{_glob_escape(agent)}:*" for agent in batch]
         clauses = [f"key IN ({','.join('?' for _ in keys)})"] + ["key GLOB ?"] * len(globs)
         yield " OR ".join(clauses), (*keys, *globs)
 

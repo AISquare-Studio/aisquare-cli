@@ -39,6 +39,7 @@ from aisquare.services import settings as settings_service
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
 from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     FakeTmux,
+    claude_on_path,
     project,
     repo,
     tmux,
@@ -152,6 +153,7 @@ def _a_task_done_by(on: ProjectInfo, session: str | None) -> None:
 def test_a_codex_agent_counts_as_its_role_locally_and_in_no_shared_day(
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
 ) -> None:
     """The anonymous counts name a role, never an agent or a label: a Codex coder is one
@@ -217,6 +219,7 @@ def _session_of(agent: FleetAgent, session: str) -> None:
 def test_a_task_done_is_its_fleet_agent_s_before_its_session_s(
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
 ) -> None:
     """tester-42 on #42 (b), mutant L: whose a task done is, where the two disagree, is the

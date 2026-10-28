@@ -88,6 +88,8 @@ from aisquare.core.agent_adapters.types import (
     HoldsOpen,
     TurnsScan,
     UsageScan,
+    executable_name,
+    process_executable,
 )
 from aisquare.core.ledger import SessionLedger
 
@@ -210,15 +212,31 @@ class CodexTranscript:
         return _rollout_reply(file, since)
 
     def held_open(self, args: Sequence[str]) -> HoldsOpen | None:
-        """``clients`` for its managed app-server daemon (``<CODEX_HOME>/packages/
-        app-server-daemon/…/codex app-server --listen unix://… --managed-daemon``), which runs
-        the thread of a ``codex`` started with no arguments (0.164.0's default) and keeps its
-        rollout open for minutes after that ``codex`` quit: alone it holds no conversation
-        (SMOKE11, 5A). Its native binary otherwise, a TUI or an ``exec``, holds the rollout
-        open from the first prompt on for as long as its session lives (``lsof`` on 0.164.0,
+        """A process is Codex's when what it runs is (``types.process_executable``: its first
+        word, or the script of its npm shim, ``node …/bin/codex``); a shell, tmux or another
+        agent whose arguments merely mention codex is none (``None``).
+
+        ``clients`` for every process of its managed app-server daemon, which runs the thread
+        of a ``codex`` started with no arguments (0.164.0's default) and keeps its rollout open
+        for minutes after that ``codex`` quit: alone it holds no conversation (SMOKE11, 5A).
+        Measured on 0.164.0 (#47's reopen), a no-argument ``codex`` starts two, both run from
+        ``<CODEX_HOME>/packages/app-server-daemon/releases/<version>/bin/codex`` and both
+        living on after ``/exit``: ``app-server --listen unix://… --managed-daemon``, which
+        holds the rollout, and ``app-server daemon pid-update-loop``, which holds none.
+        ``session`` for any other: a TUI or an ``exec`` holds the rollout open from the first
+        prompt on for as long as its session lives (``lsof`` on 0.164.0,
         ``core.process_table``)."""
-        words = set(args)
-        return "clients" if {_APP_SERVER, _MANAGED_DAEMON} <= words else "session"
+        from aisquare.core.agent_adapters.codex import CodexAdapter
+
+        image = process_executable(args)
+        if image is None or executable_name(image) != CodexAdapter.binary:
+            return None
+        if _DAEMON_DIR in image.replace("\\", "/"):
+            return "clients"
+        words = list(args[args.index(image) + 1 :])
+        after = words[words.index(_APP_SERVER) + 1 :] if _APP_SERVER in words else None
+        daemon = after is not None and (after[:1] == [_DAEMON] or _MANAGED_DAEMON in after)
+        return "clients" if daemon else "session"
 
     def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
         """``sessions/YYYY/MM/DD/rollout-<local time>-<thread id>.jsonl``, by its name."""
@@ -266,9 +284,15 @@ class CodexTranscript:
 _ROLLOUT_NAME = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)\.jsonl$")
 """A rollout's name: the local time its session began, then its thread id."""
 _APP_SERVER = "app-server"
+_DAEMON = "daemon"
 _MANAGED_DAEMON = "--managed-daemon"
-"""The subcommand and the flag of the app-server daemon Codex manages itself (0.164.0, ``ps``
-in SMOKE11), which a ``codex`` with no arguments starts and attaches its TUI to."""
+"""The subcommand, its ``daemon`` subcommand and the flag of the app-server daemon Codex
+manages itself (0.164.0, ``ps`` in SMOKE11 and #47's reopen), which a ``codex`` with no
+arguments starts and attaches its TUI to: ``app-server … --managed-daemon`` and ``app-server
+daemon pid-update-loop``."""
+_DAEMON_DIR = "/packages/app-server-daemon/"
+"""Where under its home Codex installs the daemon it manages (``<CODEX_HOME>/packages/
+app-server-daemon/releases/<version>/bin/codex``): whatever runs from there is the daemon."""
 
 _REPLY_MAX_BYTES = 64_000_000
 """How far back :func:`_rollout_reply` reads for the prompt a reply answers, as Claude Code's

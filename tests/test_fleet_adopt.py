@@ -371,39 +371,72 @@ def test_a_codex_started_fresh_holds_the_rollout_it_has_open(
     assert adopt_service.adopt(THREAD).agent.agent == "codex"
 
 
-#: Codex 0.164.0's managed app-server daemon, as ``ps`` lists it (SMOKE11, 5A): a ``codex`` with
-#: no arguments starts it and runs its thread there, and it keeps the rollout open for minutes
-#: after that ``codex`` quit.
+#: Codex 0.164.0's managed app-server daemon, as ``ps`` lists it (SMOKE11, 5A, and #47's reopen,
+#: seq 4382): a ``codex`` with no arguments starts these two and runs its thread in the first,
+#: and both live on for minutes after that ``codex`` quit, the first holding its rollout open.
+CODEX_DAEMON_BIN = (
+    "/home/dev/.codex/packages/app-server-daemon/releases/0.164.0-aarch64-apple-darwin/bin/codex"
+)
 CODEX_DAEMON = (
-    "/home/dev/.codex/packages/app-server-daemon/0.164.0/codex app-server "
-    "--listen unix:///home/dev/.codex/app-server.sock --managed-daemon"
+    f"{CODEX_DAEMON_BIN} app-server --listen unix:// --analytics-default-enabled --managed-daemon"
+)
+CODEX_DAEMON_LOOP = f"{CODEX_DAEMON_BIN} app-server daemon pid-update-loop"
+#: Processes whose arguments mention codex and run none: another Claude Code session's Bash
+#: (seq 4382 named one, pid 392) and the fleet's tmux server for a Codex spawn.
+ZSH_NAMING_CODEX = (
+    "/bin/zsh -c source /home/dev/.claude/shell-snapshots/snapshot-zsh.sh && "
+    "eval aisquare fleet spawn coder --agent codex && which codex < /dev/null"
+)
+TMUX_NAMING_CODEX = (
+    "tmux -L asq new-session -d -s asq-coder -c /repo -- "
+    "/usr/local/bin/aisquare agent run --agent codex -- codex -c model=gpt-5.5"
 )
 
 
-def test_codexs_managed_daemon_holds_a_thread_only_while_a_codex_client_runs(
+@pytest.fixture
+def codex_daemon(
     tmux: FakeTmux,
     codex_on_path: Path,  # noqa: F811
     project: ProjectInfo,
     no_processes: list[tuple[int, int, str]],
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """SMOKE11, 5A: ``codex`` with no arguments runs its thread in the managed app-server
-    daemon, which keeps the rollout open after the TUI quit, so adopt refused for minutes,
-    naming the daemon. The daemon alone holds nothing (``AgentTranscript.held_open``:
-    ``clients``): adoptable. With a TUI of Codex's running too, it is held, the TUI named, the
-    process to quit; so too with a TUI on another thread, which the table cannot tell apart."""
+) -> list[tuple[int, int, str]]:
+    """A thread a no-argument ``codex`` ran, that ``codex`` quit: Codex's two daemon processes
+    left, reparented to 1, the ``--managed-daemon`` one (13090) alone holding the rollout
+    (``lsof`` in seq 4382), the ``pid-update-loop`` (13100) none."""
     slot = core.create_account("codex")
     rollout = _rollout(slot, THREAD, project.root)
-    no_processes.append((7000, 1, CODEX_DAEMON))
-    holds = {7000: frozenset({os.path.realpath(rollout)})}
+    no_processes.append((13090, 1, CODEX_DAEMON))
+    no_processes.append((13100, 1, CODEX_DAEMON_LOOP))
+    holds = {13090: frozenset({os.path.realpath(rollout)})}
 
     def open_files(pids: list[int]) -> frozenset[str] | None:
         return frozenset().union(*(holds.get(pid, frozenset()) for pid in pids))
 
     monkeypatch.setattr(process_table, "open_files", open_files)
-    no_processes.append((7001, 1, "/bin/zsh"))
-    no_processes.append((7002, 7001, "node /usr/local/bin/codex"))
-    no_processes.append((7003, 7002, CODEX_NATIVE))
+    return no_processes
+
+
+def test_codexs_two_daemon_processes_alone_hold_no_thread(
+    codex_daemon: list[tuple[int, int, str]],
+) -> None:
+    """#47's reopen: the daemon's ``pid-update-loop`` was taken for a client, so adopt refused
+    for as long as the daemon lived, naming it. Both of the daemon's processes are the daemon:
+    with no client of Codex's running, the thread is adoptable."""
+    [listed] = adopt_service.recent()
+    assert listed.held_by is None and adoptable(listed)
+    assert adopt_service.adopt(THREAD).agent.agent == "codex"
+
+
+def test_codexs_daemon_holds_a_thread_while_a_codex_tui_runs_which_is_named(
+    codex_daemon: list[tuple[int, int, str]],
+) -> None:
+    """SMOKE11, 5A: with a TUI of Codex's running too (its npm wrapper and the native binary
+    below it), the daemon's hold counts and the TUI is named, the process to quit, never the
+    daemon; so too with a TUI on another thread, which the table cannot tell apart."""
+    codex_daemon.append((7001, 1, "/bin/zsh"))
+    codex_daemon.append((7002, 7001, "node /usr/local/bin/codex"))
+    codex_daemon.append((7003, 7002, CODEX_NATIVE))
 
     with pytest.raises(adopt_service.AdoptRefused) as held:
         adopt_service.adopt(THREAD)
@@ -411,22 +444,48 @@ def test_codexs_managed_daemon_holds_a_thread_only_while_a_codex_client_runs(
     [listed] = adopt_service.recent()
     assert listed.held_by == 7002 and not adoptable(listed)
 
-    del no_processes[1:]  # the TUI quit: the daemon alone has the rollout open
+    del codex_daemon[2:]  # the TUI quit: the daemon alone has the rollout open
+    [listed] = adopt_service.recent()
+    assert listed.held_by is None and adoptable(listed)
+    assert adopt_service.adopt(THREAD).agent.agent == "codex"
+
+
+def test_a_process_that_only_mentions_codex_is_no_client_of_its_daemon(
+    codex_daemon: list[tuple[int, int, str]],
+) -> None:
+    """#47's reopen: a client was any process with a word naming codex, so a shell of another
+    session's (``zsh -c "… --agent codex"``) or the fleet's tmux server for a Codex spawn
+    made the daemon's hold count, and adopt named that unrelated process. A client is told by
+    what it runs: with neither run by Codex, the thread is adoptable and neither is named."""
+    codex_daemon.append((392, 1, ZSH_NAMING_CODEX))
+    codex_daemon.append((8000, 1, TMUX_NAMING_CODEX))
+
     [listed] = adopt_service.recent()
     assert listed.held_by is None and adoptable(listed)
     assert adopt_service.adopt(THREAD).agent.agent == "codex"
 
 
 def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
-    """``held_open``: Codex's daemon for its clients, its TUI and ``exec`` for their own
-    session; Claude Code's none."""
+    """``held_open``: every process of Codex's daemon for its clients, its TUI and ``exec``
+    (the native binary or its npm wrapper) for their own session; a process that runs no
+    Codex, whatever its arguments say, none; Claude Code's none."""
     reader = get_adapter("codex").transcript_reader
     claude = get_adapter("claude-code").transcript_reader
     assert reader is not None and claude is not None
     assert reader.held_open(CODEX_DAEMON.split()) == "clients"
+    assert reader.held_open(CODEX_DAEMON_LOOP.split()) == "clients"
+    assert reader.held_open([CODEX_DAEMON_BIN, "app-server"]) == "clients", "run from its dir"
+    assert reader.held_open(f"{CODEX_NATIVE} app-server daemon stop".split()) == "clients"
+    assert reader.held_open(f"{CODEX_NATIVE} app-server --managed-daemon".split()) == "clients"
     assert reader.held_open(f"{CODEX_NATIVE} app-server --listen stdio://".split()) == "session"
+    assert reader.held_open(f"{CODEX_NATIVE} exec --json daemon".split()) == "session"
     assert reader.held_open([CODEX_NATIVE]) == "session"
-    assert reader.held_open(f"{CODEX_NATIVE} exec --json go".split()) == "session"
+    assert reader.held_open(["node", "/usr/local/bin/codex"]) == "session"
+    assert reader.held_open(["node", "--no-warnings", "/usr/local/bin/codex", "exec"]) == "session"
+    assert reader.held_open(ZSH_NAMING_CODEX.split()) is None
+    assert reader.held_open(TMUX_NAMING_CODEX.split()) is None
+    assert reader.held_open(["node", "/usr/local/bin/claude", "codex"]) is None
+    assert reader.held_open([]) is None
     assert claude.held_open(["claude"]) is None
 
 

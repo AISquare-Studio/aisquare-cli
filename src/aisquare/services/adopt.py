@@ -21,8 +21,9 @@ A conversation is HELD when Claude Code's own registry says so (``<config dir>/s
 and older builds, or a ``codex resume <id>``), or, for an agent whose writer holds its
 transcript open (``AgentTranscript.held_open``, Codex's), when a process of that agent's holds
 it open (``core.process_table``): a ``codex`` started fresh names no thread. Codex's managed
-app-server daemon, which runs a ``codex`` started with no arguments and keeps its rollout open
-for minutes after it quit, holds it only while a client of Codex's runs. A stale entry
+app-server daemon (both its processes), which runs a ``codex`` started with no arguments and
+keeps its rollout open for minutes after it quit, holds it only while a client of Codex's runs,
+told by what it runs and never by a word in its arguments. A stale entry
 whose pid was reused can only make it refuse, which is the safe way to be wrong; a process
 table that cannot be read says nothing, as a registry that cannot be read does.
 """
@@ -43,12 +44,7 @@ from pathlib import Path
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import process_table, procs
 from aisquare.core.agent_adapters import adapters, default_adapter, recorded_adapter
-from aisquare.core.agent_adapters.types import (
-    AgentAdapter,
-    AgentTranscript,
-    HoldsOpen,
-    executable_name,
-)
+from aisquare.core.agent_adapters.types import AgentAdapter, AgentTranscript, HoldsOpen
 from aisquare.core.store import store_session
 from aisquare.models import AdoptableConversation, ClaudeAccount, ProjectInfo
 from aisquare.services import agent_events
@@ -180,10 +176,13 @@ class _Holders:
 
     def _holding_open(self, transcript: Path, adapter: AgentAdapter) -> int | None:
         """A process of ``adapter``'s that holds ``transcript`` open, as the agent's writer
-        holds one (``AgentTranscript.held_open``): one that holds it for its own session (a
-        TUI, an ``exec``); or one that holds it for the clients it serves (Codex's managed
-        app-server daemon), held only while a client of the agent's runs, which is named, as
-        the process to quit. ``None`` when none does or the process table cannot say.
+        holds one (``AgentTranscript.held_open``, which says which processes are the agent's
+        by what they run, never by a word in their arguments: a shell or a tmux server that
+        mentions the agent is none): one that holds it for its own session (a TUI, an
+        ``exec``); or one that holds it for the clients it serves (each process of Codex's
+        managed app-server daemon), held only while a client of the agent's runs, which is
+        named, as the process to quit; the daemon itself never is. ``None`` when none does or
+        the process table cannot say.
 
         A process table names no thread a client shows: a daemon's hold counts while any
         process of the agent's that holds for its own session runs, one showing another
@@ -196,8 +195,7 @@ class _Holders:
             runs = [
                 (pid, kind)
                 for pid, words in self._others
-                if any(executable_name(word) == adapter.binary for word in words)
-                and (kind := reader.held_open(words)) is not None
+                if (kind := reader.held_open(words)) is not None
             ]
             self._open[adapter.id] = (runs, process_table.open_files([pid for pid, _ in runs]))
         runs, held = self._open[adapter.id]

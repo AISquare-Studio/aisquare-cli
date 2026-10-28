@@ -936,8 +936,9 @@ AnswerKind = Literal["permission", "question", "plan"]
 HoldsOpen = Literal["session", "clients"]
 """How a process of the agent's holds the transcripts it writes (:meth:`AgentTranscript.
 held_open`): for as long as its own session lives (``session``: a TUI, an ``exec``), or for
-the clients it serves, and on after they quit (``clients``: Codex's managed app-server
-daemon), which holds a conversation only while a client of the agent's still runs."""
+the clients it serves, and on after they quit (``clients``: each process of Codex's managed
+app-server daemon), which holds a conversation only while a client of the agent's still runs,
+and is never named as its holder."""
 
 
 @dataclass(frozen=True)
@@ -1037,15 +1038,18 @@ class AgentTranscript(Protocol):
     """How a page names the agent's own turns: ``* <speaker>`` (``claude``, ``codex``)."""
 
     def held_open(self, args: Sequence[str]) -> HoldsOpen | None:
-        """How a process of the agent's run with ``args`` (``ps``'s words) holds the
-        transcripts it writes open (:data:`HoldsOpen`): ``None`` for one that holds none
-        (Claude Code's, whose session registry says who runs one). Codex's native binary
-        holds its rollout for as long as its session lives (``lsof`` on 0.164.0), its
-        managed app-server daemon (``codex app-server … --managed-daemon``, where a ``codex``
-        started with no arguments runs its thread) for its clients and minutes after the last
-        one quit. ``fleet adopt`` asks the process table (``core.process_table``) then
-        whether a process of the agent's holds a conversation whose arguments name no session
-        (a fresh start). Never raises."""
+        """How the process run with ``args`` (``ps``'s words, any process's) holds the
+        transcripts the agent writes open (:data:`HoldsOpen`): ``None`` for a process that is
+        not the agent's, told by what it runs (:func:`process_executable`) and never by a word
+        in its arguments (a shell or a tmux server that mentions the agent), and for one that
+        holds none (Claude Code's, whose session registry says who runs one). Codex's native
+        binary holds its rollout for as long as its session lives (``lsof`` on 0.164.0), each
+        process of its managed app-server daemon (``codex app-server … --managed-daemon`` and
+        ``codex app-server daemon pid-update-loop``, run from ``<CODEX_HOME>/packages/
+        app-server-daemon/``, where a ``codex`` started with no arguments runs its thread) for
+        its clients and minutes after the last one quit. ``fleet adopt`` asks the process
+        table (``core.process_table``) then whether a process of the agent's holds a
+        conversation whose arguments name no session (a fresh start). Never raises."""
         ...
 
     def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
@@ -1953,6 +1957,25 @@ def executable_name(binary: str) -> str:
         if name.endswith(suffix):
             return name.removesuffix(suffix)
     return name
+
+
+SCRIPT_RUNNERS = frozenset({"node", "nodejs"})
+"""The interpreters an agent's npm shim runs under (``#!/usr/bin/env node``), which ``ps``
+lists as ``node …/bin/<binary>``: the script is what the process runs (:func:`
+process_executable`)."""
+
+
+def process_executable(args: Sequence[str]) -> str | None:
+    """What a process runs, from ``ps``'s words: its first word, or for an npm shim under its
+    interpreter (:data:`SCRIPT_RUNNERS`) the script, the first word after the interpreter's
+    options. Never a word further on: a shell, tmux or another agent whose arguments merely
+    mention an agent (``zsh -c "… codex …"``, a tmux server's ``--agent codex``) runs none
+    (#47's reopen). ``None`` for no words."""
+    if not args:
+        return None
+    if executable_name(args[0]) not in SCRIPT_RUNNERS:
+        return args[0]
+    return next((word for word in args[1:] if not word.startswith("-")), None)
 
 
 def fleet_extra_args(

@@ -234,6 +234,31 @@ def test_a_codex_account_in_the_stats_is_called_by_its_alias_or_plain_codex(
     assert re.search(r"account -?\d", as_text.output) is None, as_text.output
 
 
+def test_the_plain_codex_is_called_plain_codex_with_its_home_gone(machine: Machine) -> None:
+    """tester-46's T9: turns recorded on the plain codex's slot and ``~/.codex`` gone since
+    (moved aside). The accounts list a plain home only while it exists, so the stats call the
+    slot by its number's own name (``core.slot_name``), ``plain codex``, never Claude Code's
+    unaliased one (``default_label``: ``account 0``)."""
+    home = core.plain_home("codex")
+    assert home == machine.home / ".codex", "a scratch home's, never the developer's"
+    _rollout(home, machine.repo("alpha"), THREAD)
+    assert usage_stats.sweep().sessions_new == 1
+    home.rename(home.with_name(".codex-aside"))
+    plain = core.kind("codex").plain_slot
+    assert core.find_account(plain) is None, "the fixture"
+    runner = CliRunner()
+
+    as_json = runner.invoke(
+        app, ["--json", "metrics", "stats", "--range", "lifetime", "--no-sweep"]
+    )
+    as_text = runner.invoke(app, ["metrics", "stats", "--range", "lifetime", "--no-sweep"])
+
+    stats = UsageStats.model_validate(json.loads(as_json.output))
+    assert [(row.slot, row.label) for row in stats.accounts.rows] == [(plain, "plain codex")]
+    assert "plain codex" in as_text.output, as_text.output
+    assert re.search(r"account -?\d", as_text.output) is None, as_text.output
+
+
 def test_codex_home_redirected_the_plain_codex_folder_is_swept_too(
     machine: Machine, codex_home: Path
 ) -> None:

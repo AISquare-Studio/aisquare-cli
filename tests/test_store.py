@@ -2449,6 +2449,52 @@ def test_a_usage_row_from_before_v47_is_given_its_agent_and_one_none_names_is_ne
         assert shared == {"claude-swept", "nobody"}, "every row a release recorded is Claude's"
 
 
+@pytest.mark.parametrize("recorded", ["a swept Codex row alone", "an agent unknown here"])
+def test_a_row_none_names_is_not_shared_where_any_table_records_an_unshared_agent(
+    tmp_path: Path, recorded: str
+) -> None:
+    """tester-42 on #42, (2) and (a): what says a store recorded an agent whose usage is not
+    shared is every table that names one, ``usage_session`` too. A v46 store the sweep wrote
+    (Codex rows since 4707b908) names Codex in no ``team_session``, ``fleet_agent`` or
+    ``agent_account`` row: its swept Codex row alone says so (mutant D), and its unnamed row
+    is never shared. An agent this install does not know, recorded anywhere, is one whose
+    usage is not shared (mutant E)."""
+    from aisquare.services.usage_stats import shared_usage
+
+    claude = tmp_path / ".claude" / "projects" / "-repo" / "s.jsonl"
+    rows: dict[str, str | None] = {
+        "claude-swept": str(claude),
+        "nobody": str(tmp_path / "elsewhere" / "s.jsonl"),
+    }
+    others = ""
+    if recorded == "an agent unknown here":
+        others = _hook_session("theirs", "an-agent-unknown-here")
+    else:
+        rows["codex-swept"] = str(
+            tmp_path / ".codex" / "sessions" / "2026" / "10" / "24" / "rollout-x-t.jsonl"
+        )
+    _at_version(46, after=others + _usage_rows(rows))
+
+    with store_session() as store:
+        agents = {row.session_id: row.agent for row in store.session_usages()}
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        named = {
+            str(agent)
+            for table in ("team_session", "fleet_agent", "agent_account")
+            for (agent,) in raw.execute(f"SELECT agent FROM {table} WHERE agent IS NOT NULL")
+        }
+    finally:
+        raw.close()
+
+    assert agents["nobody"] == store_module.UNATTRIBUTED_USAGE_AGENT
+    assert {session for session, agent in agents.items() if shared_usage(agent)} == {"claude-swept"}
+    if recorded == "an agent unknown here":
+        assert named == {"an-agent-unknown-here"}
+    else:
+        assert agents["codex-swept"] == "codex" and "codex" not in named
+
+
 def test_a_fresh_store_is_built_with_the_persona_step() -> None:
     """No file at all: v1 to v47, the same shape as every cohort above reaches."""
     open_store().close()

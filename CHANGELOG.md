@@ -759,7 +759,10 @@ adapter.**
   passed once, and the next restart starts them again; they stay that agent's, never your
   pick. It printed ✓ and ran neither, and the replacement recorded neither. A Codex
   restart also starts the model its spawn recorded over its binding's, as Claude Code's
-  does.
+  does. An effort Codex cannot take (`--effort "x y"`, `hi!`) is refused before the agent
+  is stopped, and the refusal says nothing was stopped; so is one its spawn recorded, on a
+  plain restart or a `fleet switch`. The agent was stopped first, then the restart refused,
+  and nothing was started.
 - `fleet spawn --agent codex` forwards Codex's own `-c KEY=VALUE` and `-a`;
   on `launch`, `-a` stays AISquare's `--account` and its help says so.
 - Harden coding-agent argument ownership, native effort mapping, and inherited

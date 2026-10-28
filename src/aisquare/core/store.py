@@ -2306,6 +2306,11 @@ def _maybe_dt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
+#: The key of a task event's ``meta`` that names the agent of the launch it was written in,
+#: when no session does (``services.team``'s task writes): what ``fleet_activity`` gives a
+#: task marked done there without ``--as`` (tester-42b on #42).
+LAUNCH_AGENT_META = "launch_agent"
+
 _SESSION_USAGE_COLUMNS = (
     "session_id, project_id, transcript_path, state, usage, turns, total_tokens, weighted, "
     "cost_usd, started_at, updated_at, ended_at, account_slot, account_type, repo_id, agent"
@@ -4469,10 +4474,12 @@ class SqliteStore:
     ) -> tuple[list[tuple[datetime, str, str | None]], list[tuple[datetime, str | None]]]:
         """What the fleet did in ``[since, until)``: ``(started, role, agent)`` of each agent
         started, and ``(when, agent)`` of each task marked done, its agent the one of the
-        session that marked it (its fleet agent's, else the session's own; ``None`` for one no
-        row names, a human's at the shell). Counts and agent ids are all the usage sharing wants
-        of it (its ``shared_only`` keeps the agents whose usage is shared): no label, task,
-        project or text leaves this method."""
+        session that marked it (its fleet agent's, else the session's own), else that of the
+        launch it was marked in (:data:`LAUNCH_AGENT_META`: a Codex agent's ``task done`` with
+        no ``--as``, in its shell or through its broker, is Codex's; tester-42b on #42);
+        ``None`` for one neither names, a human's at the shell. Counts and agent ids are all the
+        usage sharing wants of it (its ``shared_only`` keeps the agents whose usage is shared):
+        no label, task, project or text leaves this method."""
         low, high = since.astimezone(UTC).isoformat(), until.astimezone(UTC).isoformat()
         agents = [
             (datetime.fromisoformat(row["created_at"]), str(row["role"]), row["agent"])
@@ -4483,9 +4490,12 @@ class SqliteStore:
             ).fetchall()
         ]
         done = [
-            (datetime.fromisoformat(row["created_at"]), row["agent"])
+            (
+                datetime.fromisoformat(row["created_at"]),
+                row["agent"] or _json_object(row["meta"]).get(LAUNCH_AGENT_META) or None,
+            )
             for row in self._conn.execute(
-                "SELECT event.created_at, COALESCE("
+                "SELECT event.created_at, event.meta, COALESCE("
                 "(SELECT fleet.agent FROM fleet_agent AS fleet"
                 " WHERE fleet.session_id = event.session_id AND fleet.agent IS NOT NULL"
                 " ORDER BY fleet.created_at DESC LIMIT 1),"

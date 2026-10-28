@@ -297,6 +297,61 @@ def test_a_codex_launch_s_commands_are_in_no_count_and_a_person_s_are(
     assert shared_day.features == {"cli.task.list": 3}, "an agent unknown here is not shared"
 
 
+def _done_in(
+    on: ProjectInfo, env: dict[str, str], *, claimed_by: str | None = None, as_: str | None = None
+) -> None:
+    """``aisquare task done`` of a new task, run in ``env``, with no ``--as`` (else
+    ``--as as_``); ``claimed_by`` claimed it there first (``--as``) when given."""
+    from aisquare.services import team as team_service
+
+    task, _ = team_service.add_task("a task", cwd=Path(on.root))
+    if claimed_by is not None:
+        claim = ["task", "claim", task.id, "--as", claimed_by]
+        claimed = CliRunner().invoke(app, claim, env=env)
+        assert claimed.exit_code == 0, claimed.output
+    named = ["--as", as_] if as_ is not None else []
+    done = CliRunner().invoke(app, ["task", "done", task.id, *named], env=env)
+    assert done.exit_code == 0, done.output
+
+
+def test_a_task_a_codex_launch_marks_done_without_as_is_codex_s(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """tester-42b on #42 (1): a Codex agent's ``task done`` that names no session wrote an
+    event naming nobody, which the fleet counts read as a person's at the shell, so a day of
+    Codex's alone shipped ``{tasks_done: 1}``. A task event written in a launch with no
+    session names the launch's agent (``AISQUARE_LAUNCH_AGENT``), in a fleet window and in a
+    launch by hand; its broker's is ``tests/test_store_broker.py``. A Claude Code launch's
+    and a person's are counted, as before, and a person's ``--as`` a Codex session is not."""
+    from aisquare.core.spawn import LAUNCH_AGENT_ENV
+
+    monkeypatch.chdir(project.root)
+    monkeypatch.delenv(LAUNCH_AGENT_ENV, raising=False)
+    codex = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+    _session_of(codex, "ses-codex")
+    _a_session(project, "ses-codex", "codex")
+    in_its_window = {LAUNCH_AGENT_ENV: "codex", "AISQUARE_FLEET_AGENT": codex.id}
+    _done_in(project, in_its_window, claimed_by="ses-codex")  # tester-42b's repro
+    _done_in(project, {LAUNCH_AGENT_ENV: "codex"})  # `aisquare launch codex`, no fleet
+
+    [day] = usage_stats.daily_rollups(date.today(), date.today())
+
+    assert (day.fleet.agents_spawned, day.fleet.tasks_done) == ({"coder": 1}, 2), "local"
+    assert usage_stats.daily_rollups(date.today(), date.today(), shared_only=True) == []
+
+    _done_in(project, {LAUNCH_AGENT_ENV: "claude-code"})
+    _done_in(project, {})
+    _done_in(project, {}, as_="ses-codex")  # a person's, as the Codex session
+
+    [shared_day] = usage_stats.daily_rollups(date.today(), date.today(), shared_only=True)
+
+    assert (shared_day.fleet.agents_spawned, shared_day.fleet.tasks_done) == ({}, 2)
+    assert shared_day.features["cli.task.done"] == 3, "a Claude Code launch's, a person's two"
+
+
 # --- project fresh and a purge clear what a launch of any agent leaves ----------------------
 
 

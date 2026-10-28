@@ -45,7 +45,9 @@ from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.agent_adapters import DEFAULT_AGENT, recorded_adapter
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
+from aisquare.core.spawn import LAUNCH_AGENT_ENV
 from aisquare.core.store import (
+    LAUNCH_AGENT_META,
     AmbiguousIdError,
     ContextStore,
     Relevance,
@@ -2067,11 +2069,24 @@ def _finish_task(
             text,
             session_id=session.id if session else None,
             task_id=updated.id,
+            meta=_launch_meta(session),
         )
         _route_up(store, event)
         board = _board_of(store, updated.project_id)
     _record_delivery(event, board)
     return updated, board, manager
+
+
+def _launch_meta(session: TeamSession | None) -> dict[str, object] | None:
+    """What a task's event says of the launch it was written in, when it names no session:
+    that launch's agent (``AISQUARE_LAUNCH_AGENT``, which a launch exports to its tools'
+    shells, and in whose environment its broker runs each call it is handed). A Codex agent's
+    ``aisquare task done`` with no ``--as`` was a person's at the shell to the usage counts,
+    so a day of Codex's alone shipped a task done (tester-42b on #42; owner, 2026-10-27);
+    ``ContextStore.fleet_activity`` gives it its launch's agent. ``None`` for one that names
+    its session (whose agent it is) and for a person's, run in no launch."""
+    agent = os.environ.get(LAUNCH_AGENT_ENV, "").strip()
+    return {LAUNCH_AGENT_META: agent} if session is None and agent else None
 
 
 def finish_task(

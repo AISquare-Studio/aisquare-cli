@@ -37,7 +37,9 @@ Counts, per local calendar day, and nothing else:
   your machine either.
 - **The fleet**: how many Claude Code agents were started, by built-in role (`coder`, `tester`,
   …; a role you invented is `other`), and how many tasks they (or you, at the shell) marked done.
-  A Codex agent and the tasks it marked done are not in these counts.
+  A Codex agent and the tasks it marked done are not in these counts: one marked in its shell or
+  through its sandbox's broker is its own whether or not it names its session (`--as`), and one
+  you mark done `--as` a Codex agent's session is that agent's too.
 - **Your installation**: aisquare's version, your operating system and its version, the CPU
   architecture, the Python version and how aisquare was installed (`brew`, `pipx`, `uv`, `pip`,
   `script`, `unknown`), and a **random id** made the first time you turn sharing on (a UUID that

@@ -1305,9 +1305,10 @@ def _fleet_days(
     """The agents started and tasks done on each local day of ``[since, until]``: every
     agent's, or with ``shared_only`` those of the agents whose usage is shared alone
     (:func:`shared_usage`), so a Codex spawn is in no shipped day and a day of Codex's alone
-    makes none (owner, 2026-10-27; review r28 of #113, m2). One that names no agent (recorded
-    before agents were, or a task marked at the shell) is the default agent's
-    (``recorded_adapter``)."""
+    makes none (owner, 2026-10-27; review r28 of #113, m2). A task marked done in a launch
+    with no ``--as`` is its launch's agent's (``ContextStore.fleet_activity``). One that names
+    no agent (recorded before agents were, or a task marked at the shell) is the default
+    agent's (``recorded_adapter``)."""
     agents, done = store.fleet_activity(
         _day_start(since, tz), _day_start(until + timedelta(days=1), tz)
     )

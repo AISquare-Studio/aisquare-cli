@@ -19,7 +19,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Iterator, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from importlib import import_module
@@ -361,8 +361,18 @@ def test_a_request_is_never_read_through_a_link_or_a_fifo(tmp_path: Path) -> Non
 def running(work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """A broker started as a launch starts one, owned by a stand-in for the agent, and the
     CLI's side seeing the store read-only as in the agent's sandbox."""
+    yield from _a_launch_s_broker(work, monkeypatch, {})
+
+
+def _a_launch_s_broker(
+    work: Path, monkeypatch: pytest.MonkeyPatch, launch: dict[str, str]
+) -> Generator[Path, None, None]:
+    """:func:`running`'s broker, of a launch whose environment adds ``launch`` to this
+    process's, which itself has none of it."""
+    for name in launch:
+        monkeypatch.delenv(name, raising=False)
     agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
-    env = dict(os.environ)
+    env = {**os.environ, **launch}
     # Less the suite's stand-in `claude` (conftest's `no_real_fleet`, 0.8.2), first on PATH
     # in a folder under /tmp, which the sandbox may write: a launch refuses such a PATH.
     env["PATH"] = os.pathsep.join(
@@ -399,6 +409,44 @@ def running(work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iter
 
 def _profile() -> list[str]:
     return get_adapter("codex").store_access("workspace", store_dir())
+
+
+def test_a_codex_launch_s_broker_runs_its_calls_as_codex_s_and_counts_none(
+    work: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """tester-42b on #42 (1) and (2): a Codex launch exports its agent
+    (``AISQUARE_LAUNCH_AGENT``), and ``start_for_launch`` hands it to the broker it starts
+    (``run_broker``), in whose environment each call runs: a call it forwards is in no count,
+    and a ``task done`` with no ``--as`` is Codex's, not a person's at the shell. Mutant T
+    (the broker started without it) shipped the day as the calls and the task done of a
+    person; this process has no launch agent, so only that hop carries it."""
+    from aisquare.core.spawn import LAUNCH_AGENT_ENV
+    from aisquare.services import usage_stats
+
+    with store_session() as store:
+        mine = store.get_session(MINE)
+        assert mine is not None
+        store.upsert_session(mine.model_copy(update={"agent": "codex"}))
+    first, _ = team_service.add_task("a task")
+    second, _ = team_service.add_task("another")
+    running = _a_launch_s_broker(work, monkeypatch, {LAUNCH_AGENT_ENV: "codex"})
+    try:
+        directory = next(running)
+        assert store_broker.brokered() == directory
+        calls = [
+            ["task", "claim", first.id, "--as", MINE[:8]],
+            ["task", "done", first.id],  # tester-42b's: no --as
+            ["task", "done", second.id],
+            ["note", "n", "--as", MINE[:8]],
+        ]
+        assert [store_broker.forward(argv) for argv in calls] == [0, 0, 0, 0], capsys.readouterr()
+    finally:
+        running.close()
+
+    today = date.today()
+    [day] = usage_stats.daily_rollups(today, today)
+    assert (day.features, day.fleet.tasks_done) == ({}, 2), "counted nowhere, its marks kept"
+    assert usage_stats.daily_rollups(today, today, shared_only=True) == []
 
 
 def test_the_cli_runs_a_board_call_through_the_broker_and_prints_its_output(

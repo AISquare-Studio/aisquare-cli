@@ -38,7 +38,7 @@ from aisquare.services import agent_events, usage_stats
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
-from tests.gemini_shaped_agent import GeminiShapedAdapter
+from tests.fake_agent import FakeAgentAdapter
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
 from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     FakeTmux,
@@ -303,14 +303,6 @@ def test_a_codex_launch_s_commands_are_in_no_count_and_a_person_s_are(
     assert shared_day.features == {"cli.task.list": 3}, "an agent unknown here is not shared"
 
 
-class _MarkedThird(GeminiShapedAdapter):
-    """A third agent that marks its tools' shells, as Codex does, and is not in the share."""
-
-    capabilities = dataclasses.replace(
-        GeminiShapedAdapter.capabilities, tool_shell_env="GEMINI_SHAPED_TOOL_CALL"
-    )
-
-
 @pytest.fixture(params=["codex", "third"])
 def started_by_hand(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
@@ -322,7 +314,8 @@ def started_by_hand(
     from aisquare.core.spawn import LAUNCH_AGENT_ENV
 
     monkeypatch.delenv(LAUNCH_AGENT_ENV, raising=False)
-    third = _MarkedThird()
+    third = FakeAgentAdapter()  # marks its tools' shells as Codex does; not in the share
+    third.capabilities = dataclasses.replace(third.capabilities, tool_shell_env="FAKE_AGENT_THREAD")
     register(third)
     try:
         agent = "codex" if request.param == "codex" else third.id

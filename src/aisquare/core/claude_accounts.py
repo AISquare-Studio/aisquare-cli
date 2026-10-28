@@ -1086,25 +1086,44 @@ BEFORE_LIMIT_REASON = "before limit"
 agent's account read over ``switch_at`` at a turn end, and no limit was hit. The ``switched``
 line says it, ``(before limit)``, and the replacement is told it moved before its limit."""
 
-# The time is matched by a BOUNDED pattern (an optional weekday, a clock time,
-# am/pm — the shape ``_RESET_TIME`` reads) and nothing anchors the end: the
+# The time is matched by a BOUNDED pattern (an optional weekday or date, a clock
+# time, am/pm — the shape ``_RESET_TIME`` reads) and nothing anchors the end: the
 # rendered line can carry a period, a second sentence or more lines after the
 # zone ("… (America/Toronto).\nUpgrade for more usage."), and an anchor made the
 # whole match fail, which recorded the limit with no window and no reset
-# (review of #205, finding 7).
+# (review of #205, finding 7). The window is a word, or ``5-hour``: Claude Code
+# 2.1.312 renamed its five-hour window from "session limit" to "5-hour limit"
+# (SMOKE11 1c), and ``[A-Za-z]+`` read no window, so no mark and no hand-over.
+# A reset more than a day out is a date, ``Nov 1 at 2:09am`` (``Nov 1, 2027 at
+# 2am`` in another year; ``Nov 1, 2:09am`` where the runtime's dates have no
+# "at"), in 2.1.311 and 2.1.312 alike: read as a weekday was, a weekly or a
+# model's limit kept no reset, so no mark either.
+_DAY = r"(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\s+"
+_DATE = (
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}"
+    r"(?:,\s*\d{4})?(?:,|\s+at)?\s+"
+)
+_CLOCK = r"\d{1,2}(?::\d{2})?\s*(?:am|pm)"
 _LIMIT_MESSAGE = re.compile(
-    r"hit your (?P<window>[A-Za-z]+) limit"
-    r"(?:\s*·\s*resets\s+(?P<when>(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\s+)?"
-    r"\d{1,2}(?::\d{2})?\s*(?:am|pm)))?"
+    r"hit your (?P<window>5-hour|[A-Za-z]+) limit"
+    rf"(?:\s*·\s*resets\s+(?P<when>(?:{_DAY}|{_DATE})?{_CLOCK}))?"
     r"(?:\s*\((?P<zone>[A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)*)\))?",
     re.IGNORECASE,
 )
 _RESET_TIME = re.compile(
-    r"^(?:(?P<day>mon|tue|wed|thu|fri|sat|sun)[a-z]*\s+)?(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?"
-    r"\s*(?P<ampm>am|pm)$",
+    r"^(?:(?P<day>mon|tue|wed|thu|fri|sat|sun)[a-z]*\s+"
+    r"|(?P<month>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(?P<date>\d{1,2})"
+    r"(?:,\s*(?P<year>\d{4}))?(?:,|\s+at)?\s+)?"
+    r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>am|pm)$",
     re.IGNORECASE,
 )
 _WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+_WINDOW_NAMES = {"5-hour": "session"}
+"""A window a notice names in another word than the one a limit mark keeps: 2.1.312's
+``5-hour`` is the ``five_hour`` window 2.1.311 called ``session`` (Claude Code's own
+classifier reads both as ``session``). The weekly, Opus, Sonnet and Fable names are
+2.1.311's in 2.1.312."""
 
 
 @dataclass(frozen=True)
@@ -1139,10 +1158,14 @@ def parse_limit_notice(text: str | None, *, now: datetime | None = None) -> Limi
     hook as ``last_assistant_message`` — when a subscription's rolling allowance
     runs out (measured in this machine's own transcripts, 2026-09-13; the errors
     reference documents the same four shapes: session, weekly, Opus, Sonnet,
-    the weekly one with a weekday, ``resets Mon 12:00am``). The time is a clock
+    the weekly one with a weekday, ``resets Mon 12:00am``). Claude Code 2.1.312
+    names the session window ``5-hour``, ``You've hit your 5-hour limit · resets
+    5:36am (America/Toronto)``, and that reads as ``session`` too. The time is a clock
     time in the zone named in parentheses, or the local zone when none is; it
     is resolved to the next such moment at or after ``now``, on the named
-    weekday when there is one. A ``rate_limit`` that is not a usage limit —
+    weekday when there is one. A reset more than a day out is a date, as 2.1.311
+    and 2.1.312 render a weekly or a model's limit (``resets Nov 1 at 2:09am``):
+    that day, in the year it names or the nearest. A ``rate_limit`` that is not a usage limit —
     ``Request rejected (429)`` from an API key, the server's own throttle —
     does not match, and the caller treats it as a limit with no reset time.
     """
@@ -1152,6 +1175,7 @@ def parse_limit_notice(text: str | None, *, now: datetime | None = None) -> Limi
     if match is None:
         return None
     window = match.group("window").lower()
+    window = _WINDOW_NAMES.get(window, window)
     when = (match.group("when") or "").strip()
     if not when:
         return LimitNotice(window, None)
@@ -1177,6 +1201,32 @@ def _resolve_reset(when: str, zone_name: str | None, now: datetime) -> datetime 
     local_now = now.astimezone(zone)
     candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     day = clock.group("day")
+    month = clock.group("month")
+    if month is not None:
+        # `resets Nov 1 at 2:09am`: that date, in the year it names, else the one that puts
+        # it nearest now (`Jan 2` read on Dec 30 is next year's; a notice read a little
+        # late stays in the past, where a mark is simply not read, not a year away).
+        year = clock.group("year")
+        dates: list[datetime] = []
+        for each in (
+            (int(year),) if year else (local_now.year - 1, local_now.year, local_now.year + 1)
+        ):
+            try:
+                dates.append(
+                    datetime(
+                        each,
+                        _MONTHS.index(month.lower()[:3]) + 1,
+                        int(clock.group("date")),
+                        hour,
+                        minute,
+                        tzinfo=zone,
+                    )
+                )
+            except ValueError:  # no such day (`Feb 30`, `Feb 29` in a common year)
+                continue
+        if not dates:
+            return None
+        return min(dates, key=lambda d: abs(d - local_now)).astimezone(UTC)
     if day is not None:
         # `resets Mon 12:00am`: the next Monday at that time — today if it is
         # Monday and the time is still ahead, else up to a week out.

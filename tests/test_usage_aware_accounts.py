@@ -81,6 +81,28 @@ WEEKLY_LIMIT_DAYS_OUT = (
     f"You've hit your weekly limit · resets {_WEEKDAY} {_CLOCK} (America/Toronto)"
 )
 API_KEY_429 = "API Error: Request rejected (429) · this may be a temporary capacity issue."
+#: Claude Code's own limit notices, from the binaries: each version's StopFailure payload for
+#: each window that refused (``limit_notices_<version>.json`` says how they were made).
+CLAUDE_CODE_FIXTURES = Path(__file__).parent / "fixtures" / "claude_code"
+NOTICE_VERSIONS = ("2.1.311", "2.1.312")
+WINDOW_OF_CLAIM = {
+    "five_hour": "session",
+    "seven_day": "weekly",
+    "seven_day_opus": "opus",
+    "seven_day_sonnet": "sonnet",
+}
+"""The window a limit mark keeps for each ``representative-claim`` the stub refused with."""
+
+
+def claude_code_notice(version: str, claim: str) -> tuple[dict[str, Any], datetime]:
+    """Claude Code ``version``'s StopFailure payload for a ``claim`` limit, and when it was
+    recorded (the clock its reset is relative to)."""
+    document = json.loads(
+        (CLAUDE_CODE_FIXTURES / f"limit_notices_{version}.json").read_text(encoding="utf-8")
+    )
+    assert document["version"] == version
+    notice = document["notices"][claim]
+    return notice["payload"], datetime.fromisoformat(notice["recorded_at"])
 
 
 # --------------------------------------------------------------------------- helpers
@@ -198,6 +220,49 @@ def test_the_limit_message_is_read_for_its_window_and_its_reset(
         assert notice.resets_at == datetime(2026, 9, 13, 19, 45, tzinfo=UTC)
     else:
         assert notice.resets_at == resets_utc  # 12:30am has passed today → tomorrow
+
+
+@pytest.mark.parametrize("version", NOTICE_VERSIONS)
+@pytest.mark.parametrize("claim", list(WINDOW_OF_CLAIM))
+def test_claude_codes_own_notices_read_for_their_window_and_reset_in_either_version(
+    version: str, claim: str
+) -> None:
+    """SMOKE11 1c: 2.1.312 calls the five-hour window ``5-hour`` (``You've hit your 5-hour limit
+    · resets 6:08am (America/Toronto)``; 2.1.311 said ``session limit``), and a window of
+    letters alone read none, so the hook kept no mark and no reset and the hand-over never
+    crossed. Either version's notice reads as the ``session`` window now. The week's and a
+    model's are dated, more than a day out (``resets Nov 1 at 2:09am``), in both versions,
+    and they read with their reset too: read as a weekday was, they kept none, so no mark.
+    The stub refused for three hours (the five-hour window) or four days (a week), and the
+    notice names the minute."""
+    payload, recorded = claude_code_notice(version, claim)
+
+    notice = core.parse_limit_notice(payload["last_assistant_message"], now=recorded)
+
+    assert notice is not None and notice.window == WINDOW_OF_CLAIM[claim]
+    ahead = timedelta(hours=3) if claim == "five_hour" else timedelta(days=4)
+    assert notice.resets_at == (recorded + ahead).replace(second=0, microsecond=0)
+
+
+@pytest.mark.parametrize(
+    ("when", "resets_utc"),
+    [
+        ("Jan 2 at 2am", datetime(2027, 1, 2, 7, 0, tzinfo=UTC)),  # next year's, read in December
+        ("Jan 2, 2027 at 2:30am", datetime(2027, 1, 2, 7, 30, tzinfo=UTC)),
+        ("Dec 31, 2:09pm", datetime(2026, 12, 31, 19, 9, tzinfo=UTC)),  # dates with no "at"
+        ("Dec 29 at 11pm", datetime(2026, 12, 30, 4, 0, tzinfo=UTC)),  # just past: not a year on
+        ("Feb 30 at 2am", None),  # no such day
+    ],
+)
+def test_a_dated_reset_is_that_day_in_the_year_it_names_or_the_nearest(
+    when: str, resets_utc: datetime | None
+) -> None:
+    december = datetime(2026, 12, 30, 12, 0, tzinfo=UTC)  # 07:00 in Toronto (EST)
+    notice = core.parse_limit_notice(
+        f"You've hit your weekly limit · resets {when} (America/Toronto)", now=december
+    )
+    assert notice is not None and notice.window == "weekly"
+    assert notice.resets_at == resets_utc
 
 
 def test_text_after_the_zone_costs_neither_the_window_nor_the_reset() -> None:

@@ -16,6 +16,7 @@ legs, both directions, are in the conformance suite (``tests/test_adapter_contra
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
@@ -60,7 +61,13 @@ from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     repo,
     tmux,
 )
-from tests.test_usage_aware_accounts import _payload, _slot, _Usage
+from tests.test_usage_aware_accounts import (
+    NOTICE_VERSIONS,
+    _payload,
+    _slot,
+    _Usage,
+    claude_code_notice,
+)
 
 
 def _claude_slot(monkeypatch: pytest.MonkeyPatch, used: float) -> ClaudeAccount:
@@ -477,6 +484,74 @@ def test_an_own_account_with_a_limit_mark_in_force_counts_as_full(
     receipt = fleet_service.switch(project, agent.label, reason="5h limit", automatic=True)
 
     assert receipt.crossed and receipt.to_agent == "claude-code" and receipt.to_slot == claude.slot
+
+
+@pytest.mark.parametrize("version", NOTICE_VERSIONS)
+def test_either_versions_five_hour_notice_marks_its_account_and_the_hand_over_crosses(
+    tmux: FakeTmux,  # noqa: F811 - pytest resolves fixtures by NAME
+    codex_on_path: Path,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    version: str,
+) -> None:
+    """SMOKE11 1c, SMOKE10's limit sequence with the usage endpoint out of reach: the only word
+    that the other Claude Code account is full is the notice its own session hit. Claude Code
+    2.1.312's (``You've hit your 5-hour limit · …``) kept no mark, so that account read as
+    unreadable, not full, and the agent's hand-over refused ("no account under the line")
+    instead of crossing to the Codex account with room. Each version's own StopFailure
+    payload, through the hook, marks the account's session window now, and the hand-over
+    crosses."""
+    from typer.testing import CliRunner
+
+    from aisquare.cli.app import app
+    from aisquare.services import claude_accounts as accounts_service
+
+    leaving, other = (
+        _slot(f"c{n}@example.com", f"tok-c{n}", expires_in=timedelta(days=3650)) for n in range(2)
+    )
+
+    def unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(accounts_service, "_http_get", unreachable)
+    codex = _codex_slot(10)
+    payload, _ = claude_code_notice(version, "five_hour")
+    now = datetime.now(tz=UTC)
+    with store_session() as store:  # a session run by hand on the other account
+        store.upsert_session(
+            TeamSession(
+                id=payload["session_id"],
+                project_id=project.id,
+                role="coder",
+                started_at=now,
+                last_seen_at=now,
+                account=str(other.config_dir),
+            )
+        )
+    payload = {**payload, "cwd": str(project.root)}
+
+    hooked = CliRunner().invoke(app, ["hook", "stop-failure"], input=json.dumps(payload))
+
+    assert hooked.exit_code == 0, hooked.output
+    with store_session() as store:
+        assert list(store.list_meta(f"account_limit:{other.slot}:")) == [
+            f"account_limit:{other.slot}:session"
+        ]
+    assert any(
+        kind == "limited" and "hit its session limit · resets in " in text
+        for kind, text in _events(project)
+    ), _events(project)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account=str(leaving.slot)).agent
+    _ran(agent, _written(_moments(get_adapter("claude-code"))["asked"], tmp_path / "t.jsonl"))
+    _ready_as(tmux, monkeypatch, "codex")
+
+    assert handoff.own_accounts_full("claude-code", leaving.slot)
+    receipt = fleet_service.switch(project, agent.label, reason="session limit", automatic=True)
+
+    assert receipt.crossed and receipt.to_agent == "codex" and receipt.to_slot == codex.slot
+    assert receipt.resumed is False
 
 
 def test_a_family_limit_mark_fills_an_own_account_for_that_family_alone(

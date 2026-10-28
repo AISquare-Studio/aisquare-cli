@@ -231,12 +231,12 @@ BINARY_SETTLE_S = 0.3
 the Model field and *Extra agent args* rest as long."""
 
 AgentKey = tuple[str, str, str | None, str | None]
+"""What the role's agent is asked for (:meth:`SpawnDialog._agent_key`): the role, the Binary,
+*Extra agent args*' ``--model``, and the Model field as it is sent."""
 DefaultKey = tuple[str | None, str | None, str | None, str, str]
 """What the no-account option is read for (:meth:`SpawnDialog._default_inputs`): *Extra agent
 args*' ``--model``, the Model field, the agent and the Binary as the spawn is sent them, and
 the agent the form follows."""
-"""What the role's agent is asked for (:meth:`SpawnDialog._agent_key`): the role, the Binary,
-*Extra agent args*' ``--model``, and the Model field as it is sent."""
 
 ROLE_AGENT = ""
 """The Agent field's ``(role's: …)``: no ``--agent``, the role's agent."""

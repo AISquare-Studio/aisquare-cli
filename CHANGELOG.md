@@ -820,12 +820,16 @@ adapter.**
   `account 0`, beside `claude-a` and `plain claude`. Each agent's own registry and plain name
   are read now.
 
-- **`project fresh` and a purge clear a spawn's first message and the session bindings**
-  (SMOKE11 8). Three new keys stayed behind: `first-prompt:<agent>` (what a Codex spawn's first
-  message was given as), `fleet-session:<agent>` and `launch-session:<launch>` (a fleet
-  row's and a launch's binding to the session they run). Nothing else ever expired a
-  `first-prompt:` key. They go with their rows and sessions now, and the plan counts each key
-  once.
+- **`project fresh` and a purge clear a spawn's first message, the session bindings and the
+  fleet's marks** (SMOKE11 8, review r30). Seven new keys stayed behind: `first-prompt:<agent>`
+  (what a Codex spawn's first message was given as), `fleet-session:<agent>` and
+  `launch-session:<launch>` (a fleet row's and a launch's binding to the session they run),
+  `fleet-stopped:<agent>` (the mark of the stop that ended a row), `launch-refused:<agent>`
+  (the launch record's refusal its board was last told), `nudge-owed:<project>` (a nudge a
+  board write in Codex's sandbox owed the manager) and `broker-refused:<project>:<launch>:<kind>`
+  (a store broker's refusal its board was told, once per launch and kind). Nothing else ever
+  expired a `first-prompt:`, `fleet-stopped:` or `launch-refused:` key. They go with their
+  rows, sessions and project now, and the plan counts each key once.
 
 - **Ids made in one clock tick sort in the order they were made, and a turn's later notices
   keep their place after its first** (#29). `task add` in a loop, a Remote batch, or any

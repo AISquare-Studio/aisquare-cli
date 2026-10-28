@@ -97,8 +97,16 @@ adapter.**
     `AgentAdapter.adoptable` (`codex resume <id>`), and a `codex` started fresh holds the
     rollout it has open (`core.process_table`). Codex's managed app-server daemon, where a
     `codex` started with no arguments runs its thread and which keeps the rollout open for
-    minutes after that `codex` quit, holds it only while another Codex process runs, which
-    is named as the holder (`AgentTranscript.held_open`). A fleet Codex row's thread is the
+    minutes after that `codex` quit, holds it too, as Codex itself sees it (a `codex resume`
+    of it sat on "This conversation is open in another app"): while its `--managed-daemon`
+    process holds the rollout, adopt refuses, naming a running Codex TUI or `exec` first and
+    else the daemon, saying it is Codex's background app-server, that it lets go by itself
+    about 30 idle minutes after its TUI quit (measured), and that `aisquare accounts run
+    <slot> app-server daemon stop` (Codex's own stop, on the thread's account) stops it
+    sooner. A process is Codex's by what it runs, never by a word in its arguments, so a
+    shell, tmux or another agent that mentions codex is never named, nor the daemon's
+    `pid-update-loop`, which holds nothing (`AgentTranscript.held_open`, `server_note`), and
+    once the daemon lets go the adopted thread resumes. A fleet Codex row's thread is the
     fleet's from its first hook, its session in the row's own column as a Claude Code row's
     is from its spawn: `fleet adopt --list` leaves it out, and a stopped row's is refused
     ("restart that agent"), not adopted into a second row. The thread resumes on its own

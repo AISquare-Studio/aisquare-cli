@@ -330,6 +330,22 @@ def managed_slot(config_dir: Path | str, agent: str | None = AGENT) -> int | Non
     return None
 
 
+def transcript_home(transcript: Path) -> tuple[str, Path] | None:
+    """The agent, and the config dir, whose transcript roots (``AgentAccounts.
+    transcript_roots``) hold ``transcript`` as its path spells it: the nearest of its folders
+    one of an agent's roots is under (Claude Code's ``<dir>/projects/…``, Codex's
+    ``<home>/sessions/…``), agents in registration order; ``None`` under none. Nothing is
+    resolved and no file is read, so a path through a ``projects`` link into another home
+    names the folder it went through, as main's ``account_slot`` read ``parents[2]``."""
+    agents = account_agents()
+    for folder in transcript.parents:
+        for agent in agents:
+            roots = kind(agent).transcript_roots(folder)
+            if any(transcript != root and transcript.is_relative_to(root) for root in roots):
+                return agent, folder
+    return None
+
+
 def agent_config_dir(account: ClaudeAccount) -> Path:
     """The config dir ``account``'s agent reads in its home (``AgentAccounts.config_dir``):
     where its hooks, settings and login are. ``account.config_dir`` is the home the launch

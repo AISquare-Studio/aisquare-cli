@@ -217,6 +217,13 @@ def _same_path(a: Path, b: Path) -> bool:
         return a == b
 
 
+def _resolved(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11/3.12
+        return path
+
+
 def discover(found_in: Iterable[Home]) -> list[Transcript]:
     """The session transcripts in the homes ``found_in``, as each agent's reader lists them
     (``AgentTranscript.conversations``: Claude Code's ``projects/<folder>/<session>.jsonl``,
@@ -252,24 +259,36 @@ def discover(found_in: Iterable[Home]) -> list[Transcript]:
 
 
 class _Places:
-    """Which account, of which agent, a transcript's path is under: every home's transcript
-    roots, resolved once (:func:`homes`)."""
+    """Which account, of which agent, a transcript's path is under: every home, its config dir
+    and its transcript roots resolved once (:func:`homes`)."""
 
     def __init__(self, found_in: Iterable[Home] | None = None) -> None:
+        self.homes: list[tuple[Path, Home]] = []
         self.roots: list[tuple[Path, Home]] = []
         for home in homes() if found_in is None else found_in:
+            self.homes.append((_resolved(home.config_dir), home))
             for root in home.roots():
-                try:
-                    self.roots.append((root.resolve(), home))
-                except (OSError, RuntimeError):
-                    self.roots.append((root, home))
+                self.roots.append((_resolved(root), home))
 
     def of(self, transcript: Path) -> Home | None:
-        """The home whose transcript roots hold ``transcript``, or ``None``."""
-        try:
-            path = transcript.resolve()
-        except (OSError, RuntimeError):
-            path = transcript
+        """The home whose transcript roots hold ``transcript``, or ``None``.
+
+        First by the account folder its path names (``claude_accounts.transcript_home``), as
+        main's ``account_slot`` read it: a slot's, registered or not (``managed_slot``), else
+        the plain home that folder is. So a slot whose ``projects`` links into
+        ``~/.claude/projects`` keeps its own transcripts (review r28 of #113, m4). Else by the
+        resolved path, under the first home's resolved roots that hold it."""
+        named = accounts_core.transcript_home(transcript)
+        if named is not None:
+            agent, folder = named
+            slot = accounts_core.managed_slot(folder, agent)
+            real = _resolved(folder) if slot is None else None
+            for config_dir, home in self.homes:
+                if home.agent == agent and (home.slot == slot if slot else config_dir == real):
+                    return home
+            if slot is not None:
+                return Home(slot, agent, folder)  # a slot's folder no longer registered
+        path = _resolved(transcript)
         for root, home in self.roots:
             if path.is_relative_to(root):
                 return home

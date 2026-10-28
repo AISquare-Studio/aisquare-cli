@@ -599,6 +599,67 @@ def test_a_directory_no_account_names_is_other_directories_not_an_account(machin
     assert accounts.active == 0 and accounts.top is None and accounts.by_type == {}
 
 
+def _mains_account_slot(transcript: Path) -> int | None:
+    """Main's ``account_slot`` (d2f8d3f7), the oracle: the unresolved ``parents[2]`` of a
+    ``<dir>/projects/<folder>/<session>.jsonl``, then the managed slot it is (registered or
+    not), then the plain ``claude``'s two directories."""
+    from aisquare.core import claude_accounts as core
+
+    try:
+        directory = transcript.parents[2]
+    except IndexError:
+        return None
+    if transcript.parents[1].name != "projects":
+        return None
+    try:
+        parts = directory.resolve().relative_to(core.accounts_root().resolve()).parts
+    except ValueError:
+        parts = ()
+    if len(parts) == 1 and parts[0].isdigit() and int(parts[0]) >= core.FIRST_MANAGED_SLOT:
+        return int(parts[0])
+    for candidate in (core.default_config_dir(), core.home_config_dir()):
+        if directory.resolve() == candidate.resolve():
+            return core.DEFAULT_SLOT
+    return None
+
+
+@pytest.mark.skipif(not can_symlink(), reason="needs symlinks")
+def test_a_slot_whose_projects_links_into_the_plain_claudes_keeps_its_own_sessions(
+    machine: Machine,
+) -> None:
+    """The legacy layout the doctor still warns about (``claude_shared.py``): slot 3's
+    ``projects`` is a link to ``~/.claude/projects``. Its Stop hands over the transcript as slot
+    3 spells it, and that is slot 3's, as main's ``account_slot`` read the unresolved
+    ``parents[2]`` (review r28 of #113, m4: main said 3, this branch said 1). The path through
+    ``~/.claude`` stays slot 1's, a slot's folder no longer registered (no ``MARKER``) is still
+    its number, as main's ``managed_slot`` asked no registration, and a folder no account is
+    names none."""
+    from aisquare.core import claude_accounts as core
+
+    machine.account(3)
+    repo = machine.repo("linked-slot")
+    add_project(repo)
+    plain = _one_turn(machine, repo, SESSION, _day(0, 9))
+    slot_3 = core.accounts_root() / "3"
+    shutil.rmtree(slot_3 / "projects", ignore_errors=True)
+    (slot_3 / "projects").symlink_to(plain.parents[1], target_is_directory=True)
+    through_3 = slot_3 / "projects" / plain.parent.name / plain.name
+    gone = core.accounts_root() / "7" / "projects" / plain.parent.name / plain.name
+    write(gone, prompt(_day(0, 9), cwd=repo))
+    nowhere = machine.root / "nowhere" / "projects" / plain.parent.name / plain.name
+    assert through_3.resolve() == plain.resolve()
+
+    answers = {path: usage_stats.account_slot(path) for path in (through_3, plain, gone, nowhere)}
+
+    assert answers == {through_3: 3, plain: core.DEFAULT_SLOT, gone: 7, nowhere: None}
+    assert answers == {path: _mains_account_slot(path) for path in answers}, "main's answers"
+    hooks_service.turn_stopped(repo, session_id=SESSION, transcript_path=str(through_3))
+    with store_session() as store:
+        row = store.session_usage(SESSION)
+    assert row is not None and row.account_slot == 3
+    assert [row.slot for row in _read("lifetime").accounts.rows] == [3]
+
+
 def test_an_account_with_only_an_api_key_is_api_and_one_with_nothing_is_unknown(
     machine: Machine,
 ) -> None:

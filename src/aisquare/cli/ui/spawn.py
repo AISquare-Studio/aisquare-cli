@@ -650,7 +650,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._model_shown = self._pick.model or ACCOUNT_DEFAULT
         """The Model value the form itself last put in the field, sent as ``None``; any other
         is the owner's, sent as it is, though it equal the pick of the agent followed since: a
-        model the owner names keeps the spawn on its agent (``fleet.model_agent``), which the
+        model the owner names keeps the spawn on its agent (``fleet.role_agent``), which the
         field then follows, so read against that agent's pick it flipped back to unsent and
         the spawn's rung crossed again (review r29 of #113, m1)."""
         self._preset_model = None if self._captain else model
@@ -2049,8 +2049,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     @on(Input.Changed, "#spawn-model")
     def _args_changed(self) -> None:
         """A ``--model`` in the extra args, or the Model field, is the family a headroom pick
-        reads (#277), and a Claude model named keeps the spawn on Claude Code
-        (``fleet.model_agent``): the role's agent is asked again, and the no-account option
+        reads (#277), and a model one agent claims keeps the spawn on that agent
+        (``fleet.role_agent``): the role's agent is asked again, and the no-account option
         read again, when they name another model, not on every key typed (review of #424)."""
         if self._current_agent_key() != self._role_agent_asked_for:
             self._agent_inputs_changed()

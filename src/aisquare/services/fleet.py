@@ -4889,22 +4889,31 @@ def spawn(
         # Today's default stays the default: carried as `--command` only when chosen.
         chosen = replayed.binary if replayed.source != "default" else None
     try:
-        selected = agent_launch.resolve(
+        selected = role_agent(
+            project,
             role,
+            agent_args,
+            model=model,
+            effort=effort,
             agent=agent,
             binary=chosen,
-            cwd=project.root,
             account=account,
-            # The agent rung picks before the agent is known: it weighs the family a new spawn
-            # runs on Claude Code, the family the account pick below weighs (#277), and keeps
-            # to the agent of a model the spawn names itself.
-            family=_rung_family(role, agent_args, model, effort, config) if spec is None else None,
-            model_agent=model_agent(agent_args, model) if spec is None else None,
+            config=config,
+            replay=spec is not None,
         )
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
     resolution = selected.binary
     if agent_launch.executable(selected) is None:
+        if selected.source == "model":
+            # The agent the spawn's own model is (review r29 of #113, delta's nit): the way out
+            # is another model, or another agent named, not the accounts or the binding.
+            named = named_model(agent_args, model)
+            raise FleetError(
+                f"{resolution.binary!r} is not on your PATH (chosen by: the model {named!r}, "
+                f"{selected.adapter.label}'s) — install it, name another agent's model, or "
+                "pass --agent"
+            )
         way_out = (
             "install it, pass --bin, or change the role's binding"
             if bin_flag
@@ -9448,21 +9457,13 @@ def ladder_family(
     return harness.model_family(runs.model)
 
 
-def model_agent(agent_args: Sequence[str] = (), model: str | None = None) -> str | None:
-    """The agent whose model a new spawn names itself, which its agent rung keeps to: the
-    model of its ``--model`` in ``agent_args`` (*Extra agent args*), else ``model``
-    (``fleet spawn --model``, the Spawn dialog's Model field), when it is one of AISquare's
-    model ladders' (it has a family, ``harness.model_family``), is the ladder agent's
-    (``capabilities.model_ladders``: Claude Code). The rung then weighs that family among its
-    accounts alone (``claude_accounts.agent_pick``): weighed across agents, ``--model fable``
-    with every Claude account out of its Fable week ran Codex with ``--model fable``, whose
-    turns all failed (review r29 of #113, m1). ``None`` for a spawn that names no model, or
-    one no ladder names: the rung may cross by the family it runs (:func:`ladder_family`). A
-    role's settings, ``[agents.models.<agent>]`` and the last pick are each agent's own, so
-    they keep it to none."""
-    if harness.model_family(harness.model_arg(agent_args) or model) is None:
-        return None
-    return next((kind.id for kind in adapters() if kind.capabilities.model_ladders), None)
+def named_model(agent_args: Sequence[str] = (), model: str | None = None) -> str | None:
+    """The model a new spawn names itself: its ``--model`` in ``agent_args`` (*Extra agent
+    args*), else ``model`` (``fleet spawn --model``, the Spawn dialog's Model field), as
+    :func:`_model_choice` reads them; ``None`` for none, a cleared field among them. A role's
+    settings, ``[agents.models.<agent>]`` and the last pick are each agent's own, and name
+    none here."""
+    return harness.model_arg(agent_args) or model or None
 
 
 def role_agent(
@@ -9471,22 +9472,39 @@ def role_agent(
     agent_args: Sequence[str] = (),
     *,
     model: str | None = None,
+    effort: str | None = None,
+    agent: str | None = None,
     binary: str | None = None,
+    account: str | None = None,
     config: FleetSettings | None = None,
+    replay: bool = False,
 ) -> agent_launch.ResolvedAgent:
-    """The agent a new :func:`spawn` of ``role`` in ``project`` with no ``--agent`` runs
-    (``binary`` its ``--bin``), by the spawn's own steps: ``agent_launch.resolve``, its agent
-    rung given the family :func:`ladder_family` says and the agent of the spawn's own model
-    (:func:`model_agent`), as :func:`spawn` gives them. ``agent_args`` and ``model`` are the
-    spawn's. What the Spawn dialog's Agent field names (``(role's: …)``) and its label reads
-    (:func:`launch_default`): asked with neither, the field named Claude Code while the spawn
-    ran Codex (review r29 of #113, m1). Raises ``ValueError`` as ``resolve`` does."""
+    """The agent a :func:`spawn` of ``role`` in ``project`` runs, by its ``agent`` (``--agent``),
+    ``binary`` (``--bin``), ``account`` and the spawn's own ``agent_args`` and ``model`` /
+    ``effort``: ``agent_launch.resolve``, whose rungs below them decide a new spawn's.
+    - A model the spawn names (:func:`named_model`) that one agent claims
+      (``agent_launch.model_owner``: Claude Code's ladders, Codex's price table) keeps it on
+      that agent, the ``model`` rung: weighed across agents, a Claude model ran on Codex and a
+      Codex model on Claude Code, each failing every turn (review r29 of #113, m1 and its
+      delta's).
+    - One no agent claims stays on the agent the order puts first: the accounts rung reads
+      no usage (``measure=False``), so it never crosses for an account's room.
+    - With none named, the accounts rung weighs the family :func:`ladder_family` says (#277),
+      and may cross (f163791d).
+    A ``replay`` names its agent and asks no rung of these. What the Spawn dialog's Agent field
+    names (``(role's: …)``) and its label reads (:func:`launch_default`): asked another way,
+    the field named Claude Code while the spawn ran Codex. Raises ``ValueError`` as
+    ``resolve`` does."""
+    named = None if replay else named_model(agent_args, model)
     return agent_launch.resolve(
         role,
+        agent=agent,
         binary=binary,
         cwd=project.root,
-        family=_rung_family(role, agent_args, model, None, config),
-        model_agent=model_agent(agent_args, model),
+        account=account,
+        measure=named is None,
+        family=None if replay else _rung_family(role, agent_args, model, effort, config),
+        model_agent=agent_launch.model_owner(named),
     )
 
 

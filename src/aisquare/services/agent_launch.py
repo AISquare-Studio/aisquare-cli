@@ -16,6 +16,7 @@ from aisquare.core import agents, harness, orchestrator, paths, selfcli
 from aisquare.core.agent_adapters import (
     DEFAULT_AGENT,
     adapter_for_binary,
+    adapters,
     default_adapter,
     get_adapter,
 )
@@ -204,8 +205,11 @@ def resolve(
     ``family`` gives the model family the launch runs on an agent of AISquare's model
     ladders (a fleet spawn's: ``services.fleet.ladder_family``), asked only when that rung
     picks: the pick weighs its week as the account's own headroom rung does (#277).
-    ``model_agent`` is the agent whose model the launch names itself (a fleet spawn's:
-    ``services.fleet.model_agent``): that rung then picks it, never another agent's account."""
+    ``model_agent`` is the agent whose model the launch names itself (:func:`model_owner`; a
+    fleet spawn's, ``services.fleet.role_agent``): the rung above the accounts', ``model``,
+    which keeps the launch on it, so no other agent's account takes it for its room. A launch
+    that names a model no agent claims passes ``measure=False``: the order alone, no
+    crossing (review r29 of #113, m1, and its delta's)."""
     profile = harness.resolve_profile(role, env_overrides=env_overrides, extra_args=extra_args)
     chosen_binary = harness.resolve_binary(role, override=binary)
     try:
@@ -230,9 +234,10 @@ def resolve(
     # agent is the default agent's wrapper, as it always was.
     unpinned = not pinned and chosen_binary.source == "default"
     named = account_agent(account, role) if unpinned else None
+    model = model_agent if unpinned and not named else None
     pick = (
-        accounts_pick(measure=measure, family=family, agent=model_agent)
-        if unpinned and not named
+        accounts_pick(measure=measure, family=family)
+        if unpinned and not named and not model
         else None
     )
     choices = (
@@ -241,6 +246,7 @@ def resolve(
         (inferred.id if inferred else None, chosen_binary.source),
         (preferred, "project"),
         (named, "account"),
+        (model, "model"),
         (pick.agent if pick else None, "accounts"),
         (owned_family, "inherited"),
         (inherited, "operator"),
@@ -292,16 +298,34 @@ def account_agent(account: str | None, role: str) -> str | None:
     return claude_accounts.account_agent(account, role=role)
 
 
+def model_owner(model: str | None) -> str | None:
+    """The agent whose own model ``model`` is: the one registered agent that names it, by its
+    model ladders (``capabilities.model_ladders``: a model with a family,
+    ``harness.model_family``: Claude Code's ``fable``, ``opus``, ``claude-opus-5-5``) or by its
+    price table (``AgentAdapter.price_table``: Codex's ``gpt-5.4``, a dated snapshot of one).
+    ``None`` for no model, one no agent names, or one two agents name. A model a launch names
+    keeps it on that agent (:func:`resolve`'s ``model`` rung): weighed across agents, a Claude
+    model went to a Codex account with room and a Codex model to a Claude Code one, each
+    started with a model it does not run (review r29 of #113, m1, and its delta's)."""
+    if not model:
+        return None
+
+    def names(adapter: AgentAdapter) -> bool:
+        if adapter.capabilities.model_ladders and harness.model_family(model) is not None:
+            return True
+        table = adapter.price_table
+        return table is not None and table.price_for(model) is not None
+
+    owners = [adapter.id for adapter in adapters() if names(adapter)]
+    return owners[0] if len(owners) == 1 else None
+
+
 def accounts_pick(
-    *,
-    measure: bool = True,
-    family: Callable[[], str | None] | None = None,
-    agent: str | None = None,
+    *, measure: bool = True, family: Callable[[], str | None] | None = None
 ) -> AgentPick | None:
     """The accounts rung (``claude_accounts.agent_pick``), weighing the model family
-    ``family`` gives (:func:`resolve`), on ``agent`` when the launch's own model is that
-    agent's; ``None`` on any failure, as a damaged store must not prevent launching. A family
-    that cannot be worked out is none: the rung still picks."""
+    ``family`` gives (:func:`resolve`); ``None`` on any failure, as a damaged store must not
+    prevent launching. A family that cannot be worked out is none: the rung still picks."""
     from aisquare.services import claude_accounts
 
     try:
@@ -309,7 +333,7 @@ def accounts_pick(
     except Exception:
         weighed = None
     try:
-        return claude_accounts.agent_pick(measure=measure, family=weighed, agent=agent)
+        return claude_accounts.agent_pick(measure=measure, family=weighed)
     except Exception:
         return None
 

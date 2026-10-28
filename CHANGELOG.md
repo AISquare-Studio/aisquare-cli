@@ -771,6 +771,34 @@ adapter.**
 
 ### Fixed
 
+- **Claude Code 2.1.312's "5-hour limit" notice is read again, so a limit marks its account
+  and the hand-over moves the agent** (SMOKE11 1c). 2.1.312 renamed its five-hour window:
+  `You've hit your 5-hour limit · resets 5:36am (America/Toronto)`, where 2.1.311 said
+  `session limit`. The parser took a window of letters only, so it read nothing from the new
+  notice. aisquare kept no limit mark and no reset time (the row said `usage limit`, with no
+  `resets in`), and with the usage endpoint out of reach the automatic hand-over refused
+  ("no account under the line") instead of crossing to another agent's account. `5-hour` now
+  reads as the session window, as Claude Code's own code reads it, and 2.1.311's wording
+  still does. The weekly and the Opus and Sonnet notices kept their names in 2.1.312. But in
+  2.1.311 and 2.1.312 alike their reset, more than a day out, is a date
+  (`resets Nov 1 at 2:09am`), which was read as no time, so those limits kept no mark either.
+  The date is read now, in the year it names or else the nearest one. Pinned by both
+  versions' own StopFailure payloads (`tests/fixtures/claude_code/limit_notices_*.json`).
+  Every release before this one has the same parser.
+
+- **`metrics stats` calls a Codex account by its alias, or `plain codex`** (SMOKE11 3). The
+  accounts table, and `--json`, read aliases from Claude Code's registry alone and named every
+  unaliased slot as Claude Code's own, so `codex-b` read `account 4` and the plain codex
+  `account 0`, beside `claude-a` and `plain claude`. Each agent's own registry and plain name
+  are read now.
+
+- **`project fresh` and a purge clear a spawn's first message and the session bindings**
+  (SMOKE11 8). Three new keys stayed behind: `first-prompt:<agent>` (what a Codex spawn's first
+  message was given as), `fleet-session:<agent>` and `launch-session:<launch>` (a fleet
+  row's and a launch's binding to the session they run). Nothing else ever expired a
+  `first-prompt:` key. They go with their rows and sessions now, and the plan counts each key
+  once.
+
 - **Ids made in one clock tick sort in the order they were made, and a turn's later notices
   keep their place after its first** (#29). `task add` in a loop, a Remote batch, or any
   burst of rows read the same millisecond (a Windows clock reads the same one for ~15 ms),

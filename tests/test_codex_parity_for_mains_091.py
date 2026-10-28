@@ -245,6 +245,58 @@ def test_a_task_done_is_its_fleet_agent_s_before_its_session_s(
     assert (shared_day.fleet.agents_spawned, shared_day.fleet.tasks_done) == ({"tester": 1}, 1)
 
 
+def _done_by(on: ProjectInfo, session: str, env: dict[str, str]) -> None:
+    """``aisquare task done`` of a task ``session`` claimed, run in ``env``."""
+    from aisquare.services import team as team_service
+
+    task, _ = team_service.add_task("a task", cwd=Path(on.root))
+    team_service.claim_task(task.id, session_ref=session)
+    done = CliRunner().invoke(app, ["task", "done", task.id, "--as", session], env=env)
+    assert done.exit_code == 0, done.output
+
+
+def test_a_codex_launch_s_commands_are_in_no_count_and_a_person_s_are(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """tester-42 on #42 (1): every ``aisquare`` command was counted in the feature spool
+    whoever ran it, so a Codex agent's ``aisquare task done`` (its board's protocol) made a
+    Codex-only day a shared day of ``{cli.task.done: 1}``. A command run in the launch of an
+    agent whose usage is not shared (``AISQUARE_LAUNCH_AGENT``, which a launch exports to its
+    tools' shells) is not counted; its broker's are ``tests/test_store_broker.py``. A
+    person's is, and a Claude Code launch's, as before."""
+    from aisquare.core.spawn import LAUNCH_AGENT_ENV
+
+    monkeypatch.chdir(project.root)
+    monkeypatch.delenv(LAUNCH_AGENT_ENV, raising=False)
+    codex = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+    _session_of(codex, "ses-codex")
+    _a_session(project, "ses-codex", "codex")
+    _done_by(project, "ses-codex", {LAUNCH_AGENT_ENV: "codex"})
+    listed = CliRunner().invoke(app, ["task", "list"], env={LAUNCH_AGENT_ENV: "codex"})
+    assert listed.exit_code == 0, listed.output
+
+    [day] = usage_stats.daily_rollups(date.today(), date.today())
+
+    assert day.fleet.tasks_done == 1 and day.features == {}, "not even counted locally"
+    assert usage_stats.daily_rollups(date.today(), date.today(), shared_only=True) == []
+
+    for env in ({}, {LAUNCH_AGENT_ENV: "claude-code"}, {LAUNCH_AGENT_ENV: ""}):
+        result = CliRunner().invoke(app, ["task", "list"], env=env)
+        assert result.exit_code == 0, result.output
+
+    [shared_day] = usage_stats.daily_rollups(date.today(), date.today(), shared_only=True)
+
+    assert shared_day.features == {"cli.task.list": 3}, "a person's, a Claude Code launch's"
+    assert (shared_day.fleet.agents_spawned, shared_day.fleet.tasks_done) == ({}, 0)
+    unknown = CliRunner().invoke(app, ["task", "list"], env={LAUNCH_AGENT_ENV: "an-agent-x"})
+    assert unknown.exit_code == 0, unknown.output
+    [shared_day] = usage_stats.daily_rollups(date.today(), date.today(), shared_only=True)
+    assert shared_day.features == {"cli.task.list": 3}, "an agent unknown here is not shared"
+
+
 # --- project fresh and a purge clear what a launch of any agent leaves ----------------------
 
 

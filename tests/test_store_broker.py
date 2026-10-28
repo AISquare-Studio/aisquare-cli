@@ -21,7 +21,7 @@ import threading
 import time
 from collections.abc import Iterator, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from importlib import import_module
 from pathlib import Path
 from unittest.mock import Mock
@@ -258,6 +258,42 @@ def test_the_command_runs_as_the_launchs_own_session_and_no_other(
         assert project is not None
         texts = [event.text for event in store.recent_events(project.project_id, limit=20)]
     assert "brokered note" in texts and "forged" not in texts
+
+
+def test_a_codex_launch_s_brokered_board_calls_are_in_no_count(work: Path, tmp_path: Path) -> None:
+    """tester-42 on #42 (1): the broker runs a sandboxed agent's board calls as ``aisquare
+    <argv>`` outside its sandbox, in its launch's environment, and each was counted as a
+    feature used, so a Codex agent's ``task done`` made a day of Codex's alone a shared day.
+    The launch's agent is in that environment (``AISQUARE_LAUNCH_AGENT``), and a command run
+    for an agent whose usage is not shared is not counted; a Claude Code launch's is."""
+    from aisquare.core.spawn import LAUNCH_AGENT_ENV
+    from aisquare.services import usage_stats
+
+    with store_session() as store:
+        mine = store.get_session(MINE)
+        assert mine is not None
+        store.upsert_session(mine.model_copy(update={"agent": "codex"}))
+    task, _ = team_service.add_task("a task")
+    team_service.claim_task(task.id, session_ref=MINE)
+    codex = store_broker.Broker(
+        tmp_path / "codex", NONCE, {**os.environ, LAUNCH_AGENT_ENV: "codex"}
+    )
+
+    done = _answer(codex, _request(["task", "done", task.id, "--as", MINE[:8]], work))
+    noted = _answer(codex, _request(["note", "n", "--as", MINE[:8]], work, rid="1" * 32))
+
+    assert done["code"] == 0 and noted["code"] == 0, (done, noted)
+    today = date.today()
+    [day] = usage_stats.daily_rollups(today, today)
+    assert (day.features, day.fleet.tasks_done) == ({}, 1), "counted nowhere, its mark kept"
+    assert usage_stats.daily_rollups(today, today, shared_only=True) == []
+
+    claude = store_broker.Broker(
+        tmp_path / "claude", NONCE, {**os.environ, LAUNCH_AGENT_ENV: "claude-code"}
+    )
+    assert _answer(claude, _request(["note", "m", "--as", MINE[:8]], work))["code"] == 0
+    [shared] = usage_stats.daily_rollups(today, today, shared_only=True)
+    assert (shared.features, shared.fleet.tasks_done) == ({"cli.note": 1}, 0)
 
 
 def test_a_brokered_command_acts_only_as_its_own_session(

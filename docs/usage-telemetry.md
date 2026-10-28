@@ -32,7 +32,9 @@ Counts, per local calendar day, and nothing else:
   bucket (`xs` to `xl`) and whether it is a monorepo.
 - **Which features you use**: how often each command (`cli.fleet.spawn`) and each page of the UI
   (`tui.view.usage_stats`) was used, by name. Commands run by tools on your behalf (hooks, the MCP
-  server) are not counted.
+  server) are not counted, nor those an agent whose usage is not shared runs (a Codex agent's
+  `aisquare task done`, in its shell or through its sandbox's broker): they are not counted on
+  your machine either.
 - **The fleet**: how many Claude Code agents were started, by built-in role (`coder`, `tester`,
   …; a role you invented is `other`), and how many tasks they (or you, at the shell) marked done.
   A Codex agent and the tasks it marked done are not in these counts.
@@ -53,8 +55,9 @@ Settings ▸ Usage & stats, and when `aisquare metrics share on` turns it on. A 
 with `project forget --purge` is not counted, shown or sent again, by the sweep or by the Stop
 hook. Codex's sessions, which the sweep reads too, are counted on your machine (Usage & stats,
 `aisquare metrics stats`) and never sent: sharing covers Claude Code's alone, its tokens,
-repositories, sessions and accounts, and its agents in the fleet counts. A day with only Codex
-activity sends no record.
+repositories, sessions and accounts, its agents alone in the fleet counts (agents started by
+role, tasks done) and the commands of its launches and yours alone in the feature counts. A day
+with only Codex activity sends no record.
 
 ## What we never collect
 

@@ -487,8 +487,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # repo profile and the feature counters), v41-v43 the coding-agent identity, team_meta
     # dates and their repair (#113), v44 the arrangement of another agent's account slots
     # (Codex accounts), v45 every window of a usage reading (an agent's daily per-model
-    # quotas), v46 one priority order over every agent's accounts (account_rank)
-    assert version == SCHEMA_VERSION == 46
+    # quotas), v46 one priority order over every agent's accounts (account_rank), v47 the agent
+    # of a usage session (usage_session.agent: the opt-in share keeps Claude Code's alone)
+    assert version == SCHEMA_VERSION == 47
 
 
 def test_a_v14_store_gains_nullable_persona_columns_through_the_persona_step() -> None:
@@ -683,11 +684,12 @@ def test_a_store_113_stamped_before_the_081_merge_reaches_every_step(
     too. The sixth is #113's own head before 0.9.0 was merged: main's v37 and all six of its
     steps (v38-v43 there), stamped v43, with neither 0.9.0's parent-manager columns (v38 here)
     nor its ``brief`` table (v39): the presence pass adds them, the ladder runs the three steps
-    past the stamp again (v44 to v46), which add nothing, and ``account_rank`` and every
-    other table of the line is left as it was. The seventh is #113's head before 0.9.1 was
-    merged: main's 0.9.0 ladder (v39) and all six steps (v40-v45 there), stamped v45, with
-    none of 0.9.1's Usage & stats tables and columns (v40 here): the presence pass adds them,
-    the ladder runs the last step again (v46), which adds nothing."""
+    past the stamp again (v44 to v46), which add nothing, and v47 ``usage_session.agent``, and
+    ``account_rank`` and every other table of the line is left as it was. The seventh is
+    #113's head before 0.9.1 was merged: main's 0.9.0 ladder (v39) and all six steps (v40-v45
+    there), stamped v45, with none of 0.9.1's Usage & stats tables and columns (v40 here): the
+    presence pass adds them, the ladder runs the last step again (v46), which adds nothing,
+    and v47."""
     if stamp == 28:
         # Before t3 the branch had no ``agent_account``: its v29 is the step that makes it.
         db = _branch_113_store(stamp)
@@ -1583,7 +1585,7 @@ _USAGE_STEP = {
 
 
 def _pr_113_steps() -> set[tuple[str, str]]:
-    """#113's v41 to v46 by name (the coding-agent steps, appended on main's v40): what a
+    """#113's v41 to v47 by name (the coding-agent steps, appended on main's v40): what a
     fresh store holds past main's ladder."""
     return _built(SCHEMA_VERSION) - _built(40)
 
@@ -2118,12 +2120,12 @@ def test_one_schema_is_mains_v32_with_the_persona_columns_and_the_rcs_v21_with_m
     by it. v34 adds ``fleet_agent.ended_by`` (#38) on top, v35 the two token-usage tables
     (#346), v36 the first message's three columns (P0-W1a), v37 a board event's actor and
     details (P1 WS-2), v38 a group's parent manager and a task's origin (P2-W6), v39 the
-    work-brief table, v40 0.9.1's Usage & stats, #113's v41 to v46 the coding-agent steps, and
+    work-brief table, v40 0.9.1's Usage & stats, #113's v41 to v47 the coding-agent steps, and
     nothing else."""
     fresh = _built(SCHEMA_VERSION)
     persona = _built(33)
 
-    assert SCHEMA_VERSION == 46
+    assert SCHEMA_VERSION == 47
     ours = _pr_113_steps()
     assert fresh == _built(40) | ours
     assert _built(40) == _built(39) | _USAGE_STATS_STEP
@@ -2237,7 +2239,7 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
     _schema_again, rows_again = _contents(db)
     version, shape, notnull = _persona_shape(db)
 
-    assert version == SCHEMA_VERSION == 46, label
+    assert version == SCHEMA_VERSION == 47, label
     assert shape == _built(SCHEMA_VERSION), label
     assert notnull == {"team_session": 0, "fleet_agent": 0}, label
     assert old_session is not None and old_session.persona == persona, label
@@ -2280,7 +2282,7 @@ def test_a_v44_stores_usage_reading_reaches_v45_and_reads_as_its_session_and_wee
         store.close()
     version, shape, _notnull = _persona_shape(db)
 
-    assert version == SCHEMA_VERSION == 46
+    assert version == SCHEMA_VERSION == 47
     assert shape == _built(SCHEMA_VERSION)
     assert _built(45) - _built(44) == {("column", "claude_usage.windows")}
     assert (old.session_percent, old.week_percent, old.token_fingerprint) == (12.0, 40.0, "fp")
@@ -2290,12 +2292,12 @@ def test_a_v44_stores_usage_reading_reaches_v45_and_reads_as_its_session_and_wee
 
 def test_a_store_from_main_0_9_0_reaches_head_with_the_coding_agent_steps() -> None:
     """Main's v39 (0.9.0: the parent-manager columns and the ``brief`` table, both there)
-    opens here at v46 through 0.9.1's v40 (Usage & stats) and #113's six steps (v41-v46),
+    opens here at v47 through 0.9.1's v40 (Usage & stats) and #113's seven steps (v41-v47),
     which only add: the identity columns, whose
     backfill marks the rows Claude Code made (every row on a store that never had another
     agent), ``team_meta``'s dates, the Codex accounts' table, ``claude_usage.windows`` and
-    ``account_rank``. Its rows read back unchanged, 0.9.0's tables and columns are as they
-    were, and a second open changes nothing."""
+    ``account_rank``, and a usage session's agent. Its rows read back unchanged, 0.9.0's tables
+    and columns are as they were, and a second open changes nothing."""
     claude_made = (
         "UPDATE team_session SET account = '/a', "
         "transcript_path = '/a/projects/p/ses_old.jsonl' WHERE id = 'ses_old'; "
@@ -2319,7 +2321,7 @@ def test_a_store_from_main_0_9_0_reaches_head_with_the_coding_agent_steps() -> N
 
     version, shape, _notnull = _persona_shape(db)
     assert (version, missing) == (SCHEMA_VERSION, [])
-    assert SCHEMA_VERSION == 46
+    assert SCHEMA_VERSION == 47
     assert shape == _built(SCHEMA_VERSION), "not the schema a fresh store has"
     assert shape >= _PARENT_COLUMNS | _BRIEF_STEP | _USAGE_STATS_STEP | _pr_113_steps()
     assert after == before, "a row the store held changed on a column it had"
@@ -2336,12 +2338,12 @@ def test_a_store_from_main_0_9_0_reaches_head_with_the_coding_agent_steps() -> N
 
 def test_a_store_from_main_0_9_1_reaches_head_with_the_coding_agent_steps() -> None:
     """Main's v40 (0.9.1: Usage & stats on top of 0.9.0's parent-manager columns and ``brief``
-    table, all there) opens here at v46 through #113's six steps (v41-v46), which only add:
+    table, all there) opens here at v47 through #113's seven steps (v41-v47), which only add:
     the identity columns, whose
     backfill marks the rows Claude Code made (every row on a store that never had another
     agent), ``team_meta``'s dates, the Codex accounts' table, ``claude_usage.windows`` and
-    ``account_rank``. Its rows read back unchanged, 0.9.0's tables and columns are as they
-    were, and a second open changes nothing."""
+    ``account_rank``, and a usage session's agent. Its rows read back unchanged, 0.9.0's tables
+    and columns are as they were, and a second open changes nothing."""
     claude_made = (
         "UPDATE team_session SET account = '/a', "
         "transcript_path = '/a/projects/p/ses_old.jsonl' WHERE id = 'ses_old'; "
@@ -2367,7 +2369,7 @@ def test_a_store_from_main_0_9_1_reaches_head_with_the_coding_agent_steps() -> N
 
     version, shape, _notnull = _persona_shape(db)
     assert (version, missing) == (SCHEMA_VERSION, [])
-    assert SCHEMA_VERSION == 46
+    assert SCHEMA_VERSION == 47
     assert shape == _built(SCHEMA_VERSION), "not the schema a fresh store has"
     assert shape >= _PARENT_COLUMNS | _BRIEF_STEP | _USAGE_STATS_STEP | _pr_113_steps()
     assert after == before, "a row the store held changed on a column it had"
@@ -2383,11 +2385,11 @@ def test_a_store_from_main_0_9_1_reaches_head_with_the_coding_agent_steps() -> N
 
 
 def test_a_fresh_store_is_built_with_the_persona_step() -> None:
-    """No file at all: v1 to v46, the same shape as every cohort above reaches."""
+    """No file at all: v1 to v47, the same shape as every cohort above reaches."""
     open_store().close()
     version, shape, notnull = _persona_shape(_db_path())
 
-    assert version == SCHEMA_VERSION == 46
+    assert version == SCHEMA_VERSION == 47
     assert shape == _built(SCHEMA_VERSION)
     assert {("column", "team_session.persona"), ("column", "fleet_agent.persona")} <= shape
     assert notnull == {"team_session": 0, "fleet_agent": 0}
@@ -2473,7 +2475,7 @@ def test_the_two_v34_steps_are_v34_and_v35_each_idempotent() -> None:
     Run twice on one store, each leaves what it left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 46
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 47
     assert _MIGRATIONS[33] == ""
     assert _PRODUCTS[33] == _Products(columns=(("fleet_agent", "ended_by", "TEXT"),))
     assert _PRODUCTS[34] == _Products(
@@ -2657,7 +2659,7 @@ def test_the_first_prompt_step_is_v36_past_mains_two_and_idempotent() -> None:
     it left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 46  # #113's v41 to v46 follow main's v40
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 47  # #113's v41 to v47 follow main's v40
     assert _MIGRATIONS[35] == ""
     assert _PRODUCTS[33] == _Products(columns=(("fleet_agent", "ended_by", "TEXT"),))
     assert _PRODUCTS[35] == _Products(
@@ -2692,7 +2694,7 @@ def test_the_event_actor_step_is_v37_past_the_first_prompt_and_idempotent() -> N
     left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 46  # #113's v41 to v46 follow main's v40
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 47  # #113's v41 to v47 follow main's v40
     assert _MIGRATIONS[36] == ""
     assert _PRODUCTS[36] == _Products(
         columns=(("team_event", "actor", "TEXT"), ("team_event", "meta", "TEXT"))
@@ -2717,7 +2719,7 @@ def test_the_parent_step_is_v38_past_the_event_actor_and_idempotent() -> None:
     leaves what it left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 46  # #113's v41 to v46 follow main's v40
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 47  # #113's v41 to v47 follow main's v40
     assert _MIGRATIONS[37] == ""
     assert _PRODUCTS[37] == _Products(
         columns=(
@@ -2920,7 +2922,7 @@ def test_the_brief_step_is_v39_and_idempotent() -> None:
     leaves what it left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 46  # #113's v41 to v46 follow it
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 47  # #113's v41 to v47 follow it
     assert _PRODUCTS[38] == _Products(("brief", "brief_number"))
     conn = sqlite3.connect(":memory:")
     try:
@@ -3059,7 +3061,7 @@ def test_the_usage_stats_step_is_v40_and_idempotent() -> None:
     twice on one store, it leaves what it left once; a fresh store has all of it."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 46  # #113's v41 to v46 follow it
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 47  # #113's v41 to v47 follow it
     assert _PRODUCTS[39] == _Products(
         ("repo_profile", "feature_use", "usage_turn_recorded"),
         (

@@ -261,7 +261,7 @@ def _record_usage(
 
     adapter = recorded_adapter(agent)
     reader = adapter.transcript_reader if adapter is not None else None
-    if reader is None:
+    if adapter is None or reader is None:
         return None  # an agent this install does not know, or no reader: nothing is read
 
     now = datetime.now(tz=UTC)
@@ -314,6 +314,7 @@ def _record_usage(
             account_slot=attribution[0],
             account_type=attribution[1],
             repo_id=attribution[2],
+            agent=adapter.id,
             # A turn recorded after the session ended is the session running again (a
             # `claude --resume` of the same id): no longer ended (#45, n3). A record that is
             # not an end and adds nothing returned above.

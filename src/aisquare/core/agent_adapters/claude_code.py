@@ -251,6 +251,7 @@ class ClaudeCodeAdapter:
         own_doctor_check=True,
         model_proxy=True,
         model_ladders=True,
+        usage_shared=True,
         remote_control=True,
         legacy_fleet_args=True,
         value_options=frozenset(

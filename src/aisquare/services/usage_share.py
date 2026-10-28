@@ -3,11 +3,13 @@
 What is shared, and when, is ``docs/usage-telemetry.md`` (the wire contract and, in plain words,
 what is and is never collected). This module is its client:
 
-- :func:`build_batch` turns the local daily rollups (``services.usage_stats.daily_rollups``)
-  into the contract's body: today, and every day of the last 31 not yet acknowledged, oldest
-  first. Repositories are sent as ``HMAC-SHA256(per-install salt, remote or root)[:16]`` with
-  four coarse traits and nothing else; commands and pages as counts of their NAMES. The one
-  function builds what :func:`preview` shows and what :func:`ship` posts, so they cannot differ.
+- :func:`build_batch` turns the local daily rollups (``services.usage_stats.daily_rollups``) of the
+  agents whose usage is shared into the contract's body (``AgentCapabilities.usage_shared``:
+  Claude Code's, as :data:`COVERAGE` says; Codex's is counted locally and never sent): today, and
+  every day of the last 31 not yet acknowledged, oldest first. Repositories are sent as
+  ``HMAC-SHA256(per-install salt, remote or root)[:16]`` with four coarse traits and nothing else;
+  commands and pages as counts of their NAMES. The one function builds what :func:`preview` shows
+  and what :func:`ship` posts, so they cannot differ.
 - :func:`ship` posts it, off every hot path (``aisquare metrics ship`` in a detached process, or
   a TUI worker): 5 s timeouts, the AISquare sign-in as a bearer when there is one and a retry
   once without it on a 401, a backoff on any failure, the days acknowledged only when the server
@@ -280,7 +282,10 @@ def build_batches(
     first = _first_day(held, today, sample=sample)
     settled = held.settled_through or ""
     withheld = frozenset(held.withheld)
-    rollups = usage_stats.daily_rollups(first, today, now=moment, tz=tz, store=store)
+    # Its consent names Claude Code's usage alone: another agent's is counted locally, never sent.
+    rollups = usage_stats.daily_rollups(
+        first, today, now=moment, tz=tz, store=store, shared_only=True
+    )
     signed_in = iam.signed_in_quietly() is not None
     wanted: list[tuple[str, dict[str, Any], str]] = []
     for rollup in rollups:

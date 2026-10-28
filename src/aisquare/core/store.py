@@ -1406,6 +1406,12 @@ CREATE TABLE IF NOT EXISTS account_rank (
     rank  INTEGER NOT NULL
 );
 """
+# v47: the agent whose session a usage row is (``usage_session.agent``, its adapter's id), so
+# the opt-in usage share keeps the agents its consent names (``AgentCapabilities.usage_shared``)
+# and leaves the rest out, while the local stats count every one. The column is the whole
+# step, so the script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps NULL,
+# which reads as the default agent's, as every release before it recorded no other's.
+_SCHEMA_V47 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1454,6 +1460,7 @@ _MIGRATIONS = (
     _SCHEMA_V44,
     _SCHEMA_V45,
     _SCHEMA_V46,
+    _SCHEMA_V47,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1554,6 +1561,7 @@ _PRODUCTS: dict[int, _Products] = {
     43: _Products(("agent_account", "agent_account_alias", "agent_account_default")),
     44: _Products(columns=(("claude_usage", "windows", "TEXT"),)),
     45: _Products(("account_rank",)),
+    46: _Products(columns=(("usage_session", "agent", "TEXT"),)),
 }
 
 _PROJECT_COLUMNS = (
@@ -2229,7 +2237,7 @@ def _maybe_dt(value: str | None) -> datetime | None:
 
 _SESSION_USAGE_COLUMNS = (
     "session_id, project_id, transcript_path, state, usage, turns, total_tokens, weighted, "
-    "cost_usd, started_at, updated_at, ended_at, account_slot, account_type, repo_id"
+    "cost_usd, started_at, updated_at, ended_at, account_slot, account_type, repo_id, agent"
 )
 _TURN_USAGE_COLUMNS = (
     "id, session_id, project_id, trace_id, seq, trigger, recorded_at, usage, total_tokens, "
@@ -2268,6 +2276,7 @@ def _row_to_session_usage(row: sqlite3.Row) -> SessionUsage:
         account_slot=row["account_slot"],
         account_type=row["account_type"],
         repo_id=row["repo_id"],
+        agent=row["agent"],
     )
 
 
@@ -4246,7 +4255,7 @@ class SqliteStore:
         the further turn rows of a scan that read several (the sweep's), written with
         ``turn``.
 
-        The account and repository the session ran in are written once known and never
+        The account, repository and agent the session ran in are written once known and never
         unset: a later record that does not know them leaves what an earlier one did.
         """
         values = (
@@ -4261,14 +4270,14 @@ class SqliteStore:
             session.updated_at.isoformat(),
             session.ended_at.isoformat() if session.ended_at else None,
         )
-        attribution = (session.account_slot, session.account_type, session.repo_id)
+        attribution = (session.account_slot, session.account_type, session.repo_id, session.agent)
         try:
             if previous_state is None:
                 cursor = self._conn.execute(
                     "INSERT INTO usage_session (project_id, transcript_path, state, usage, turns, "
                     "total_tokens, weighted, cost_usd, updated_at, ended_at, session_id, "
-                    "started_at, account_slot, account_type, repo_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "started_at, account_slot, account_type, repo_id, agent) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT (session_id) DO NOTHING",
                     (*values, session.session_id, session.started_at.isoformat(), *attribution),
                 )
@@ -4277,8 +4286,8 @@ class SqliteStore:
                     "UPDATE usage_session SET project_id = ?, transcript_path = ?, state = ?, "
                     "usage = ?, turns = ?, total_tokens = ?, weighted = ?, cost_usd = ?, "
                     "updated_at = ?, ended_at = ?, account_slot = COALESCE(?, account_slot), "
-                    "account_type = COALESCE(?, account_type), repo_id = COALESCE(?, repo_id) "
-                    "WHERE session_id = ? AND state = ?",
+                    "account_type = COALESCE(?, account_type), repo_id = COALESCE(?, repo_id), "
+                    "agent = COALESCE(?, agent) WHERE session_id = ? AND state = ?",
                     (*values, *attribution, session.session_id, previous_state),
                 )
             if cursor.rowcount == 0:
@@ -4366,7 +4375,7 @@ class SqliteStore:
         where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         rows = self._conn.execute(
             "SELECT t.session_id, COALESCE(s.repo_id, t.project_id) AS repo_id, t.recorded_at, "
-            "t.usage, s.account_slot, s.account_type "
+            "t.usage, s.account_slot, s.account_type, s.agent "
             "FROM usage_turn t LEFT JOIN usage_session s ON s.session_id = t.session_id "
             f"{where}ORDER BY t.recorded_at, t.id",
             tuple(params),
@@ -4379,6 +4388,7 @@ class SqliteStore:
                 usage=_json_object(row["usage"]),
                 account_slot=row["account_slot"],
                 account_type=row["account_type"],
+                agent=row["agent"],
             )
             for row in rows
         ]

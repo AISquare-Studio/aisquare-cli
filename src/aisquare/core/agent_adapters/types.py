@@ -352,6 +352,13 @@ class AgentCapabilities:
     model_ladders: bool = False
     """AISquare's role model ladder and its probe choose the model (Claude Code); an
     agent without keeps its native default unless a model is pinned."""
+    usage_shared: bool = False
+    """Its sessions' usage is in the opt-in anonymous usage share (``services.usage_share``),
+    whose consent names Claude Code's alone (``usage_share.COVERAGE``; the owner's decision of
+    2026-10-27): Claude Code's. An agent without is counted on this machine all the same
+    (``metrics stats``, Usage & stats) and left out of every shared batch, its tokens,
+    repositories, sessions and accounts, until the consent names it
+    (``usage_stats.daily_rollups(shared_only=True)``)."""
     remote_control: bool = False
     """It can be started so that another client continues the session, titled (Claude Code's
     ``--remote-control``, #289): ``cli.launch`` adds the flag where ``[fleet.roles.<role>]

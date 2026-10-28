@@ -584,7 +584,7 @@ def _sweep_one(
     outcome = _Outcome()
     adapter = recorded_adapter(found.agent)
     reader = adapter.transcript_reader if adapter is not None else None
-    if reader is None:
+    if adapter is None or reader is None:
         outcome.unchanged = 1
         return outcome
     session_id = known.get(str(found.path), found.session_id)
@@ -660,6 +660,7 @@ def _sweep_one(
         account_slot=slot,
         account_type=types.get(slot) if slot is not None else None,
         repo_id=repo_id_of(*repo) if repo else None,
+        agent=adapter.id,
     )
     written = store.record_usage(
         session,
@@ -839,6 +840,8 @@ class _Turn:
     slot: int | None
     kind: str | None
     models: dict[str, usage_core.ModelUsage]
+    agent: str | None = None
+    """Its session's agent (``SessionUsage.agent``); ``None`` for a row from before agents."""
 
 
 @dataclass
@@ -936,6 +939,7 @@ def _place(row: UsageTurnRow, tz: tzinfo | None, identify: Callable[[str], str])
         slot=row.account_slot,
         kind=row.account_type,
         models=models,
+        agent=row.agent,
     )
 
 
@@ -1182,18 +1186,26 @@ def daily_rollups(
     now: datetime | None = None,
     tz: tzinfo | None = None,
     store: ContextStore | None = None,
+    shared_only: bool = False,
 ) -> list[DailyRollup]:
     """One record per local day in ``[since, until]`` that had any activity (a turn or a
     counted feature), oldest first, shaped as the telemetry contract's ``days[]`` before
     hashing (the sharing path replaces ``repo_id`` with a salted hash and drops the rest).
 
     Built from the same loader as :func:`stats`, so ``tokens.total`` of a day is the day's
-    figure on the dashboard and in ``aisquare metrics tokens``."""
+    figure on the dashboard and in ``aisquare metrics tokens``. ``shared_only``, the sharing
+    path's: the sessions of the agents whose usage is shared alone (:func:`shared_usage`), and
+    their accounts alone among those registered; another agent's tokens, repositories,
+    sessions and accounts are on the dashboard and in no rollup of these."""
 
     def run(active: ContextStore) -> list[DailyRollup]:
         feature_use.fold(active)
         profiles = active.repo_profiles()
         turns = _load(active, since, until, tz, _identity(profiles))
+        accounts = accounts_core.list_accounts()
+        if shared_only:
+            turns = [turn for turn in turns if shared_usage(turn.agent)]
+            accounts = [account for account in accounts if shared_usage(account.agent)]
         uses: dict[date, dict[str, int]] = {}
         for day_text, name, count in active.feature_uses(since.isoformat(), until.isoformat()):
             with contextlib.suppress(ValueError):
@@ -1201,7 +1213,7 @@ def daily_rollups(
         by_day: dict[date, list[_Turn]] = {}
         for turn in turns:
             by_day.setdefault(turn.day, []).append(turn)
-        registered = len(accounts_core.list_accounts())
+        registered = len(accounts)
         known_types = account_types(active, refresh=False)
         fleet = _fleet_days(active, since, until, tz)
         return [
@@ -1222,6 +1234,17 @@ def daily_rollups(
         return run(store)
     with store_session() as owned:
         return run(owned)
+
+
+def shared_usage(agent: str | None) -> bool:
+    """Whether the usage of ``agent``'s sessions is in the opt-in share
+    (``AgentCapabilities.usage_shared``: Claude Code's, as its consent says). A row from before
+    agents were recorded (``None``) is the default agent's, as no release before them recorded
+    another's; an agent this install does not know is not shared."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(agent)
+    return adapter is not None and adapter.capabilities.usage_shared
 
 
 def _fleet_days(

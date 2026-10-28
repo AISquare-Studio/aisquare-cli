@@ -170,7 +170,9 @@ ignores a new one, Codex's: a restart's receipt says a persona changed since rea
 through the briefing alone), `exports_home_env`, `own_doctor_check` (the doctor has a dedicated check for it, Claude Code's, which Welcome's step 2 probes it with too; the per-adapter row and the generic probe skip it), `model_ladders`,
 `model_proxy` (its traffic goes through the explainability proxy, the lane the doctor and
 Remote's card judge it by; with `native_telemetry` instead, the card judges its own
-telemetry's lane, and with neither it reads untraced), `remote_control` (it can be started so
+telemetry's lane, and with neither it reads untraced), `usage_shared` (its usage is in the
+opt-in anonymous usage share, whose consent names Claude Code's alone; an agent without is
+counted locally and left out of every shared batch), `remote_control` (it can be started so
 that another client continues the session, titled: Claude Code's `--remote-control`, #289; a
 launch that asks of an agent without says so and starts it as it was), `positional_prompt` (its first
 message on its command line, after `--`), `compact` (a `CompactCommand(line, instructions)`:

@@ -16,6 +16,7 @@ sweep is ``tests/test_usage_stats.py``.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +28,11 @@ from aisquare.core import claude_accounts as core
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.store import store_session
 from aisquare.models import SessionUsage, UsageStats
-from aisquare.services import usage_stats
+from aisquare.services import usage_share, usage_stats
 from aisquare.services.agent_events import session_key
 from tests.projects import add_project
 from tests.test_codex_accounts import _sign_in
-from tests.usage_stats_support import Machine
+from tests.usage_stats_support import IST, MODEL, NOW, Machine, prompt, request
 
 RECORDED = Path(__file__).parent / "fixtures" / "agent_transcripts" / "codex-usage-0.164.0.jsonl"
 LINES = RECORDED.read_text(encoding="utf-8").splitlines()
@@ -159,7 +160,7 @@ def test_a_codex_session_its_stop_recorded_is_read_on_by_the_sweep_not_again(
     rollout = _rollout(codex_home, alpha, THREAD, lines=FIRST_TURN)
     _stop(codex_home, rollout, alpha, "turn-1")
     hooked = _row(codex_home, THREAD)
-    assert hooked.turns == 1
+    assert hooked.turns == 1 and hooked.agent == "codex"
     assert (hooked.account_slot, hooked.repo_id) == (
         core.kind("codex").plain_slot,
         usage_stats.repo_of(alpha)[0],  # type: ignore[index]
@@ -249,3 +250,60 @@ def test_every_rollout_codex_lists_names_the_slot_of_its_home(
     assert all(any(path.is_relative_to(root) for root in roots) for path in listed)
     assert usage_stats.account_slot(rollout) == core.kind("codex").plain_slot
     assert usage_stats.account_slot(machine.root / "elsewhere" / rollout.name) is None
+
+
+# --- the opt-in usage share: Claude Code's alone ---------------------------------------------
+
+
+@pytest.mark.usefixtures("sharing_allowed")
+def test_the_shared_batch_holds_the_claude_code_session_alone_and_the_stats_both(
+    machine: Machine, codex_home: Path
+) -> None:
+    """The owner's decision (2026-10-27): opt-in usage sharing shares Claude Code's usage alone,
+    as its consent says (``usage_share.COVERAGE``, unchanged), now that the sweep records
+    Codex's too. One Claude Code session and one Codex session, swept: ``metrics stats`` shows
+    both, and the preview of the shared batch (what ``metrics share preview`` prints and a
+    shipment posts) holds the Claude Code session's tokens, repository, session and account
+    alone: no Codex token, model, repository or slot."""
+    alpha, beta = machine.repo("alpha"), machine.repo("beta")
+    at = NOW - timedelta(days=1)
+    machine.session(
+        core.DEFAULT_SLOT,
+        alpha,
+        "claude-session",
+        prompt(at, cwd=alpha),
+        request(at + timedelta(minutes=1), "m1", cwd=alpha),
+    )
+    rollout = _rollout(codex_home, beta, THREAD)
+    runner = CliRunner()
+    assert runner.invoke(app, ["metrics", "backfill"]).exit_code == 0
+
+    as_json = runner.invoke(
+        app, ["--json", "metrics", "stats", "--range", "lifetime", "--no-sweep"]
+    )
+    shown = json.loads(usage_share.preview(now=NOW, tz=IST))
+
+    stats = UsageStats.model_validate(json.loads(as_json.output))
+    by_repo = {row.name: row.tokens.total for row in stats.repos.rows}
+    assert stats.sessions == 2 and set(by_repo) == {"alpha", "beta"}
+    assert by_repo["beta"] == _tokens(rollout)
+    with store_session() as store:
+        claude_row = store.session_usage("claude-session")
+    assert claude_row is not None and claude_row.agent == "claude-code"
+    assert _row(codex_home, THREAD).agent == "codex"
+    days = shown["days"]
+    assert sum(day["tokens"]["total"] for day in days) == by_repo["alpha"]
+    assert sum(day["sessions"] for day in days) == 1
+    assert sum(len(day["repos"]) for day in days) == 1
+    assert {name for day in days for name in day["models"]} == {MODEL}, "no Codex model"
+    assert len(core.list_accounts()) == 2, "Claude Code's plain slot and Codex's"
+    assert {day["accounts"]["registered"] for day in days} == {1}
+
+
+def test_a_row_from_before_agents_is_claude_codes_and_an_agent_unknown_here_is_not_shared() -> None:
+    """Whose usage is shared is its agent's capability (``AgentCapabilities.usage_shared``):
+    Claude Code's, and a usage row from before agents were recorded, which no release but
+    Claude Code's wrote; never Codex's, nor an agent this install does not know."""
+    assert usage_stats.shared_usage(None) and usage_stats.shared_usage("claude-code")
+    assert not usage_stats.shared_usage("codex")
+    assert not usage_stats.shared_usage("an-agent-this-install-does-not-know")

@@ -1005,6 +1005,10 @@ class SessionUsage(BaseModel):
     """The repository the session ran in, by working directory (``core.workspace.project_id_for``
     of its root) — whatever ``project_id`` is, which a pinned project overrides. ``None`` for
     a row from before it was recorded: ``project_id`` then stands for it."""
+    agent: str | None = None
+    """The agent whose session it is (its adapter's id): what the opt-in usage share keeps or
+    leaves out (``AgentCapabilities.usage_shared``). ``None`` for a row from before it was
+    recorded, which reads as the default agent's: no release before it recorded another's."""
 
 
 class TurnUsage(BaseModel):
@@ -1085,6 +1089,8 @@ class UsageTurnRow(BaseModel):
     usage: dict[str, Any] = Field(default_factory=dict)
     account_slot: int | None = None
     account_type: str | None = None
+    agent: str | None = None
+    """Its session's agent (``SessionUsage.agent``)."""
 
 
 class TokenCounts(BaseModel):

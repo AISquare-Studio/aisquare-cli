@@ -5019,6 +5019,19 @@ def spawn(
             if added:
                 bound = harness.without_flag(bound, flag)
         bound = selected.adapter.merged_args(bound, [*role_args, *extra])
+        # A replay of an agent that keeps its own models starts what its spawn recorded, and a
+        # restart's own pick over it (`_own_replay`), through its model slot (below): those
+        # replace the binding's, as a recorded flag does Claude Code's above, wherever the slot
+        # passes them, no model its arguments name holding them back (#129 b).
+        restart_pick = model_memory.Pick() if spec is None else models.picked
+        if spec is not None and not selected.adapter.capabilities.model_ladders:
+            slot_args = selected.adapter.model_args(
+                restart_pick.model or spec.model, restart_pick.effort or spec.effort
+            )
+            unbound = selected.adapter.merged_args(bound, slot_args)
+            beside = [*defaults.args, *unbound, *role_args, *extra]
+            if slot_args and selected.adapter.native_choice(beside).model is None:
+                bound = unbound
         arguments = agent_launch.prepare_arguments(
             selected, [*defaults.args, *bound, *role_args], extra
         )
@@ -5033,11 +5046,12 @@ def spawn(
         if model_resolution is not None and spec is not None:
             # A replay starts the model and effort its spawn recorded, not today's ladder
             # (a probe verdict or an entitlement since: #129 b), each on its own: a model
-            # picked with no effort is started again, the effort read as today's.
+            # picked with no effort is started again, the effort read as today's. A restart's
+            # own (`fleet restart … --model`) over them (`_own_replay`).
             recorded = {
-                name: getattr(spec, name)
+                name: getattr(restart_pick, name) or getattr(spec, name)
                 for name in ("model", "effort")
-                if getattr(spec, name) is not None
+                if getattr(restart_pick, name) or getattr(spec, name) is not None
             }
             if recorded:
                 model_resolution = model_resolution.model_copy(update=recorded)
@@ -9052,7 +9066,8 @@ class _ModelChoice:
     its model is the family the account pick reads (#277)."""
     picked: model_memory.Pick
     """This spawn's own pick, to remember once the agent is up: ``None`` leaves the memory,
-    ``""`` forgets it (``model_memory.remember``)."""
+    ``""`` forgets it (``model_memory.remember``). A replay's, of an agent that keeps its own
+    models (:func:`_own_replay`), runs and is never remembered."""
     kept: model_memory.Pick = field(default_factory=model_memory.Pick)
     """An agent that keeps its own models: its last pick (``model_memory.remembered(agent=)``),
     which its own model slot is given under its configured pins (:func:`_own_pick`)."""
@@ -9119,11 +9134,14 @@ def _model_choice(
     ``capabilities.model_ladders``) gets nothing added in these flags: a new spawn's pick (its
     own native arguments', else ``model`` / ``effort``), its ``[agents.models.<agent>]`` and its
     last pick (``kept``) are given to its own model slot (:func:`_own_pick`), and ``runs`` is
-    what that passes (:func:`_own_runs`).
+    what that passes (:func:`_own_runs`); a replay given ``model`` / ``effort`` gives them to
+    that slot too (:func:`_own_replay`).
     """
     role_args, extra = list(role_args), list(extra)
     kind = adapter or adapter_for_binary(binary)
     if kind is None or not kind.capabilities.model_ladders:
+        if kind is not None and spec is not None and (model is not None or effort is not None):
+            return _own_replay(kind, role, role_args, extra, model, effort)
         named = [*role_args, *extra]
         ran = model_memory.Pick(harness.model_arg(named), harness.effort_arg(named))
         if kind is None or spec is not None:
@@ -9217,6 +9235,40 @@ def _model_choice(
         model_memory.Pick(picked.get("model"), picked.get("effort")),
         why=model_memory.Pick(rungs.get("model"), rungs.get("effort")),
     )
+
+
+def _own_replay(
+    kind: AgentAdapter,
+    role: str,
+    role_args: list[str],
+    extra: list[str],
+    model: str | None,
+    effort: str | None,
+) -> _ModelChoice:
+    """A replay given ``model`` / ``effort`` (``fleet restart … --model``) of an agent that keeps
+    its own models: that agent's, each on its own, over what its spawn recorded and its binding
+    names, as Claude Code's are. It ran neither, and recorded neither (tester-43c on #43, (B)).
+    The recorded arguments' own option for each goes (``merged_args``; the binding's, in
+    :func:`spawn`), and the pick is given to its model slot over what the spawn recorded, so the
+    replacement's ``LaunchSpec.model`` / ``effort`` hold it and a later restart starts it again.
+    An effort picked beside a model its arguments still name joins them: that model takes the
+    effort with it (#129 b), and a later restart replays them as they are. Never remembered."""
+    try:
+        own = kind.model_args(model, effort)
+    except ValueError as exc:
+        raise FleetError(str(exc)) from exc
+    role_args, extra = kind.merged_args(role_args, own), kind.merged_args(extra, own)
+    bound = kind.merged_args(harness.binding_args(role), own)
+    if kind.native_choice([*bound, *role_args, *extra]).model is not None:
+        extra = [*extra, *own]
+    ran = kind.native_choice([*role_args, *extra])
+    runs = model_memory.Pick(model or ran.model, effort or ran.effort)
+    why = model_memory.Pick(
+        "picked" if model else "native" if ran.model else None,
+        "picked" if effort else "native" if ran.effort else None,
+    )
+    picked = model_memory.Pick(model, effort)
+    return _ModelChoice(role_args, extra, model_memory.Pick(), runs, picked, why=why)
 
 
 def _configured(adapter: AgentAdapter, role: str) -> model_memory.Pick:

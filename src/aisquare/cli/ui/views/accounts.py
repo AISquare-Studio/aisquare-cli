@@ -13,7 +13,7 @@ docs/plans/claude-accounts.md. Two halves, one page:
   name, who is signed in, the five-hour and seven-day windows (a bar and the
   percent USED, or one ``!`` across the two when there is no reading, whose
   tooltip says why and what to do) with *Log in* beside them, when each window
-  resets, then the plan.
+  resets (the distance; the clock time on hover), then the plan.
   *Add* makes a fresh slot and opens Claude Code's own login in a tmux window
   rendered right here (a ``TerminalPane``); the view polls the slot's
   directory and, the moment Claude Code has written a login into it, records
@@ -416,28 +416,34 @@ class Column(NamedTuple):
 
 COLUMNS: tuple[Column, ...] = (
     Column("slot", "#", 2),
-    Column("name", "name", 16),
-    Column("email", "signed in as", 24),
+    Column("name", "name", 12),
+    Column("email", "signed in as", 18),
     Column("session", "session used", 16),
     Column("week", "week used", 10),
-    Column("session-resets", "session resets", 21),
-    Column("week-resets", "week resets", 21),
+    Column("session-resets", "5h resets", 9),
+    Column("week-resets", "wk resets", 9),
     Column("plan", "plan", 7),
 )
 """The table's data columns, left to right; the header and every row are cut from them.
 
 Fixed widths, so a column starts at the same x on every row whatever its values:
 a value too long for its cell ends in ``…`` and never wraps (the whole text is the
-cell's tooltip). The resets columns fit :func:`format_reset`'s longest answer,
-``in 6d 12h (Tue 02:00)``; the usage columns fit ``▮▮▮▮▮ 100%``, the session's also a
+cell's tooltip). The resets columns show the distance alone, ``format_reset(clock=False)``,
+whose longest answer is ``in 6d 12h``; the whole reset, ``in 6d 12h (Tue 02:00)``, is the
+cell's tooltip (:func:`reset_tooltip`). Their headers say ``5h`` and ``wk``, as the
+status line does. The usage columns fit ``▮▮▮▮▮ 100%``, the session's also a
 kept reading's age beside its bar, ``▮▮▮▮▮ 100% · 59m`` (F1 of #400): a session window
 resets within five hours, and a kept reading's reset window reads ``reset``. When there
 is no reading, one ``!`` stands across the two usage cells (:data:`PROBLEM_COLUMN`), and
 its tooltip says why and what to do (:func:`problem_tooltip`): a reason cut to 16 cells
 was noise, and ``—`` read as no usage rather than as an error.
+
+With the *↑*/*↓*, *Log in* and arranging buttons as wide as their labels, a whole line
+is 123 cells, the width a 160-column terminal gives the page beside the default sidebar
+(seq 4391 on the board: at 167 the week-resets column was cut and the table scrolled).
 """
 
-MOVE_COLUMNS: tuple[Column, ...] = (Column("up", "↑", 3), Column("down", "↓", 3))
+MOVE_COLUMNS: tuple[Column, ...] = (Column("up", "↑", 1), Column("down", "↓", 1))
 """The *↑*/*↓* buttons, the first columns of every line: the order IS the arrangement."""
 
 _SESSION, _WEEK = (column for column in COLUMNS if column.key in ("session", "week"))
@@ -450,7 +456,7 @@ wide as the two and the cell between them: a ``!`` whose tooltip says why and th
 PROBLEM_MARK = "!"
 """What a row with no usage to show reads across its usage cells: why is its tooltip."""
 
-LOGIN_COLUMN = Column("login", "", 14)
+LOGIN_COLUMN = Column("login", "", 12)
 """*Log in*'s column, beside the usage (or the ``!`` that says why it is there) — or *Log in
 again*, the same flow as a secondary action on a row that reads fine
 (:func:`offers_login_again`)."""
@@ -464,8 +470,8 @@ LAYOUT: tuple[Column, ...] = (
 )
 """Every column of a line as laid out: *↑*/*↓*, then :data:`COLUMNS` with *Log in* after
 the usage that says why it is there — what needs doing reads, and can be done, without
-scrolling sideways at 160 columns — and the plan last; then the arranging buttons
-(:data:`_ACTIONS`)."""
+scrolling sideways — and the plan last; then the arranging buttons (:data:`_ACTIONS`).
+At 160 columns the whole line fits, the arranging buttons too (see :data:`COLUMNS`)."""
 
 
 def offers_login_again(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> bool:
@@ -491,11 +497,12 @@ def needs_login(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> bool:
 
 
 def _window_cells(
-    usage: ClaudeUsage | None, window: str, *, now: datetime | None
+    usage: ClaudeUsage | None, window: str, *, now: datetime | None, clock: bool = True
 ) -> tuple[Text, Text]:
     """One window's two cells (``session`` or ``week``): its bar and percent USED, and its reset.
 
-    ``…`` while a reading is owed, ``—`` when there is none to show.
+    ``…`` while a reading is owed, ``—`` when there is none to show. ``clock=False`` is the
+    reset's distance alone, ``in 6d 12h``, what the row's resets cell has room for.
     """
     if usage is None:
         return Text("…", style="dim"), Text()
@@ -512,7 +519,7 @@ def _window_cells(
     bar = usage_bar(percent)
     if window == "session" and (kept := kept_age(usage, now=moment)) is not None:
         bar.append(f" · {kept}", style="yellow")
-    return bar, Text(format_reset(resets_at, now=moment), style="dim")
+    return bar, Text(format_reset(resets_at, now=moment, clock=clock), style="dim")
 
 
 def kept_age(usage: ClaudeUsage, *, now: datetime | None = None) -> str | None:
@@ -561,7 +568,8 @@ def account_cells(
     now: datetime | None = None,
 ) -> dict[str, Text]:
     """One slot's cells, keyed like :data:`COLUMNS`: ``2``, ``work``, ``me@…``,
-    ``▮▯▯▯▯ 12%``, ``▮▮▯▯▯ 40%``, ``in 3h 10m (15:29)``, ``in 6d 12h (Tue 02:00)``, ``max 5x``.
+    ``▮▯▯▯▯ 12%``, ``▮▮▯▯▯ 40%``, ``in 3h 10m``, ``in 6d 12h``, ``max 5x`` (each reset's clock
+    time is its cell's tooltip, :func:`reset_tooltip`).
 
     The name is the alias when there is one (``core.label``), so the row reads the way
     the operator named it. With no reading to show — no login, a missing, expired or
@@ -579,7 +587,9 @@ def account_cells(
         if status.subscription:
             cells["plan"] = Text(status.subscription, style="dim")
         for window in ("session", "week"):
-            cells[window], cells[f"{window}-resets"] = _window_cells(usage, window, now=now)
+            cells[window], cells[f"{window}-resets"] = _window_cells(
+                usage, window, now=now, clock=False
+            )
     if accounts_service.usage_problem(status, usage) is not None:
         # No bars or resets for a login that cannot be read, whatever an older reading said.
         for key in ("session", "week", "session-resets", "week-resets"):
@@ -589,6 +599,15 @@ def account_cells(
         text.no_wrap = True
         text.overflow = "ellipsis"
     return cells
+
+
+def reset_tooltip(
+    usage: ClaudeUsage | None, window: str, *, now: datetime | None = None
+) -> str | None:
+    """A resets cell's hover: the whole reset of ``window`` (``session`` or ``week``), the
+    clock time too, ``in 6d 12h (Tue 02:00)``, where the cell has room for the distance
+    alone (:data:`COLUMNS`); ``None`` when there is no reset to show."""
+    return _window_cells(usage, window, now=now)[1].plain or None
 
 
 def problem_tooltip(
@@ -676,19 +695,21 @@ def _column_css() -> str:
 
 
 _ACTIONS: tuple[tuple[str, str, int], ...] = (
-    ("toggle", "Disable", 9),
-    ("remove", "Remove", 8),
+    ("toggle", "Disable", 7),
+    ("remove", "Remove", 6),
 )
-"""The arranging buttons at the end of a line, left to right: id stem, label and width.
+"""The arranging buttons at the end of a line, left to right: id stem, label and width,
+each as wide as its longest label (a compact button has no padding; *Enable* is one shorter).
 *↑*/*↓* and *Log in* are not among them: they have columns of their own (:data:`LAYOUT`)."""
 
 
 class AccountsTable(Vertical):
     """The Claude accounts table: a header line, then one :class:`AccountRow` per slot.
 
-    The whole table scrolls sideways as one when the page is narrower than it, so the
-    header stays over its columns and the action buttons stay reachable at any width
-    (a focused button is scrolled into view).
+    At 160 columns the whole table fits the page, nothing to scroll: its line is cut to the
+    123 cells the page has there (:data:`COLUMNS`). On a narrower terminal it scrolls
+    sideways as one, so the header stays over its columns and the action buttons stay
+    reachable at any width (a focused button is scrolled into view).
     """
 
     DEFAULT_CSS = """
@@ -867,6 +888,11 @@ class AccountRow(Horizontal, can_focus=True):
                 yield button
 
     def on_mount(self) -> None:
+        for button in self.query(Button):
+            # Each button is as wide as its label (:data:`COLUMNS`), so no cell of padding
+            # either side: Button's own ``line-pad: 1`` drew *Disable* as ``Disab``. Set
+            # here, since Textual's CSS parser refuses ``line-pad: 0``.
+            button.styles.line_pad = 0
         self._paint()
 
     def action_rename(self) -> None:
@@ -988,6 +1014,11 @@ class AccountRow(Horizontal, can_focus=True):
             if column.key in ("name", "email", "session", "week"):
                 # The whole value, for the cell that cut it short with an ellipsis.
                 cell.tooltip = self._cell_tooltip(column.key, cells[column.key])
+            elif column.key.endswith("-resets"):
+                # The distance in the cell; the whole reset, clock time and all, on hover.
+                window = column.key.removesuffix("-resets")
+                shown_reset = cells[column.key].plain
+                cell.tooltip = reset_tooltip(self.usage, window) if shown_reset else None
         # No usage to show: one '!' across both usage cells, why and the fix on hover.
         why = problem_tooltip(self.status, self.usage)
         problem = self.cell(PROBLEM_COLUMN.key)

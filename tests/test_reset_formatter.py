@@ -157,9 +157,12 @@ def test_both_surfaces_render_the_same_string() -> None:
 
     cells = accounts_view.account_cells(_status(2, "two@example.com"), usage, now=NOW)
     assert cells["session"].plain == "▮▮▮▯▯ 68%"  # 68 % rounds to three cells
-    assert cells["session-resets"].plain == "in 3h 10m (17:10)"
     assert cells["week"].plain == "▮▮▯▯▯ 35%"
-    assert cells["week-resets"].plain == "in 6d 12h (Tue 02:00)"
+    # The row's resets cells have room for the distance; the whole reset is their tooltip.
+    assert cells["session-resets"].plain == "in 3h 10m"
+    assert cells["week-resets"].plain == "in 6d 12h"
+    assert accounts_view.reset_tooltip(usage, "session", now=NOW) == "in 3h 10m (17:10)"
+    assert accounts_view.reset_tooltip(usage, "week", now=NOW) == "in 6d 12h (Tue 02:00)"
 
 
 def _formats_a_reset_itself(node: ast.FunctionDef) -> bool:

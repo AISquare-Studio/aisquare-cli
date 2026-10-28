@@ -5224,6 +5224,12 @@ def spawn(
         native=arguments.argv,
         notes=notes,
     )
+    # Where the session's own id goes (`identity.inject_args`, below): before the label's
+    # flags, where main's launch put it (`--session-id <id> --name <label>`), so Claude Code's
+    # argv with no config is main's byte for byte (#47).
+    label_flags = list(selected.adapter.label_args(picked).args)
+    labelled = bool(label_flags) and native[-len(label_flags) :] == label_flags
+    session_at = len(native) - len(label_flags) if labelled else len(native)
     # WHICH ACCOUNT, decided here and carried into the window as an explicit
     # `--account <slot>` (#145). The one resolver `launch` itself uses — flag,
     # role binding, project default, machine default — runs HERE rather than
@@ -5370,7 +5376,7 @@ def spawn(
     # Its model and effort are this spawn's one decision (`models` and `model_args`, below):
     # the window's `launch` passes them as they are (`agent_launch.FLEET_DECIDED_FLAG`).
     flags += [agent_launch.FLEET_DECIDED_FLAG]
-    native += list(identity.inject_args)
+    native[session_at:session_at] = identity.inject_args
     if choice.account is not None:
         # Carried to `launch` as the RESOLVED slot, so the window's own pass
         # through the resolver lands on the same account whatever its

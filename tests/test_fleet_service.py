@@ -1047,6 +1047,21 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
         assert store.fleet_agent_by_label(project.id, "manager") == agent
 
 
+def test_claude_codes_session_id_comes_before_its_name_as_on_main(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """#47: S3's label part put ``--name`` before the minted ``--session-id``, where main's
+    launch passed ``--session-id <id> --name <label>``. Claude Code named, with no config,
+    gets main's argv in main's order."""
+    receipt = fleet_service.spawn(project, "coder", agent="claude-code")
+
+    command = _command(tmux)
+    native = command[command.index("--") + 1 :]
+    session = receipt.agent.session_id
+    assert session is not None
+    assert native == ["--permission-mode", "auto", "--session-id", session, "--name", "coder-1"]
+
+
 def test_spawn_with_a_persona_carries_it_to_launch_and_records_it(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

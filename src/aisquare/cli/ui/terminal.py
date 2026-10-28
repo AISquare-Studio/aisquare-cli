@@ -99,7 +99,7 @@ bound a frame at ``k`` pipes ``k + H`` rows out of the subprocess and splits
 them all to keep ``H`` — reading the top of a 50 000-line Claude session, that
 is 50 000 rows per tick on the event loop (measured with the fake tmux: 3006
 rows unbounded against 6 bounded, at ``k=3000`` in a 6-row widget). A stale
-hint yields a short frame, which ``core.tmux.capture`` detects and refetches
+hint yields a short frame, which ``core.tmux.TmuxServer.capture`` detects and refetches
 unbounded — one extra process, only then.
 
 Input (§4.3). With the pane focused every key goes to tmux through

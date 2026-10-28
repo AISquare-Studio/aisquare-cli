@@ -1,7 +1,7 @@
 """Claude Code's token usage, read off its session JSONL INCREMENTALLY: its answer to
-``AgentTranscript.usage`` (:func:`usage`), and main's ``core.usage.scan`` and ``ScanState``
-(#274), moved here unchanged by lane 274-L2 of #113, which put the shared record on this
-slot. The neutral ``Usage`` and ``ModelUsage`` stay in ``core.usage``.
+``AgentTranscript.usage`` (:func:`usage`), and :func:`scan` and ``ScanState``, which main kept
+in ``core.usage`` (#274), moved here unchanged by lane 274-L2 of #113, which put the shared
+record on this slot. The neutral ``Usage`` and ``ModelUsage`` stay in ``core.usage``.
 
 The transcript is the only exact record there is: every API request Claude
 Code makes leaves an ``assistant`` entry carrying the request's

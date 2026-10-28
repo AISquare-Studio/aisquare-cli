@@ -157,7 +157,8 @@ class ClaudeTranscript:
         return (*(AnswerKey(str(n), (str(n),)) for n in range(1, options + 1)), *keys)
 
     def usage(self, file: Path, state: str | None) -> UsageScan:
-        """Main's ``core.usage.scan``, moved to :mod:`claude_usage`."""
+        """:func:`claude_usage.usage`, over :func:`claude_usage.scan` (main kept the scan in
+        ``core.usage``)."""
         from aisquare.core.agent_adapters import claude_usage
 
         return claude_usage.usage(file, state)
@@ -247,7 +248,7 @@ def _typed(entry: dict[str, Any]) -> str | None:
     return content
 
 
-# --- the reply the captain reads back: main's ``core.transcripts.last_reply``, moved ---------
+# --- the reply the captain reads back: :func:`last_reply`, moved from ``core.transcripts`` ---
 
 #: How much of a transcript's tail :func:`last_reply` reads first.
 _REPLY_TAIL_BYTES = 256_000

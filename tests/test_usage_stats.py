@@ -660,6 +660,31 @@ def test_a_slot_whose_projects_links_into_the_plain_claudes_keeps_its_own_sessio
     assert [row.slot for row in _read("lifetime").accounts.rows] == [3]
 
 
+# --- which directory, which repository ----------
+
+
+def test_a_claude_code_session_s_folder_is_the_first_non_empty_cwd_in_its_head(
+    tmp_path: Path,
+) -> None:
+    """Main's rule for a Claude Code transcript (review r28 of #113, n3): the first non-empty
+    ``cwd`` in the first 256 KiB, however many lines come before it. The reader's opening reads
+    400 lines and took the first ``cwd`` whatever it held, so a transcript whose ``cwd`` comes
+    after 450 short lines, or whose first record says ``"cwd": ""``, had no repository."""
+    late = write(
+        tmp_path / "projects" / "f" / "late.jsonl",
+        *({"type": "summary", "summary": f"line {n}"} for n in range(450)),
+        prompt(_day(0, 9), cwd=Path("/real/repo")),
+    )
+    empty = write(
+        tmp_path / "projects" / "f" / "empty.jsonl",
+        {"type": "user", "cwd": "", "message": {"role": "user", "content": "x"}},
+        prompt(_day(0, 9), cwd=Path("/real/repo")),
+    )
+
+    assert usage_stats.session_cwd(late) == Path("/real/repo")
+    assert usage_stats.session_cwd(empty) == Path("/real/repo")
+
+
 def test_an_account_with_only_an_api_key_is_api_and_one_with_nothing_is_unknown(
     machine: Machine,
 ) -> None:

@@ -254,6 +254,19 @@ def test_every_rollout_codex_lists_names_the_slot_of_its_home(
     assert usage_stats.account_slot(machine.root / "elsewhere" / rollout.name) is None
 
 
+def test_a_rollout_s_folder_is_the_one_its_session_meta_names(
+    machine: Machine, codex_home: Path
+) -> None:
+    """Codex keeps its own opening (``AgentTranscript.opening``: its ``session_meta``'s
+    ``cwd``), which no record of the rollout carries at its top level, where main's rule for a
+    Claude Code transcript reads (review r28 of #113, n3)."""
+    repo = machine.repo("alpha")
+    rollout = _rollout(codex_home, repo, THREAD)
+
+    assert usage_stats.session_cwd(rollout) == repo
+    assert usage_stats._head_cwd(rollout) is None
+
+
 # --- the opt-in usage share: Claude Code's alone ---------------------------------------------
 
 

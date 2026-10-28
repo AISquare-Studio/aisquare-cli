@@ -306,14 +306,41 @@ def account_slot(transcript: Path, places: _Places | None = None) -> int | None:
 def session_cwd(transcript: Path, places: _Places | None = None) -> Path | None:
     """The directory the session ran in, as its agent's reader reads its transcript's head
     (``AgentTranscript.opening``): the reader of the agent of the home that holds it, Claude
-    Code's for a transcript no home holds (the transcripts recorded before agents)."""
+    Code's for a transcript no home holds (the transcripts recorded before agents). Where that
+    names none (none in its first lines, or an empty one first), main's rule (:func:`_head_cwd`):
+    so a Claude Code transcript gets main's answer, and a Codex rollout, whose records carry no
+    ``cwd`` of their own (its ``session_meta``'s payload does), its opening's."""
     from aisquare.core.agent_adapters import recorded_adapter
 
     home = (places or _Places()).of(transcript)
     adapter = recorded_adapter(home.agent if home is not None else None)
     reader = adapter.transcript_reader if adapter is not None else None
     cwd = reader.opening(transcript)[0] if reader is not None else None
+    if not cwd:
+        cwd = _head_cwd(transcript)
     return Path(cwd) if cwd else None
+
+
+def _head_cwd(transcript: Path) -> str | None:
+    """Main's ``session_cwd``: the first non-empty ``cwd`` a record carries in the first
+    :data:`_HEAD_BYTES` of ``transcript``, however many lines come before it (review r28 of
+    #113, n3)."""
+    try:
+        with transcript.open("rb") as handle:
+            head = handle.read(_HEAD_BYTES)
+    except OSError:
+        return None
+    for line in head.split(b"\n"):
+        if b'"cwd"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        cwd = entry.get("cwd") if isinstance(entry, dict) else None
+        if isinstance(cwd, str) and cwd:
+            return cwd
+    return None
 
 
 def repo_of(cwd: Path | None) -> tuple[str, Path] | None:

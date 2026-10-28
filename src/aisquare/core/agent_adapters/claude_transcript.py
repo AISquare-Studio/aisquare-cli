@@ -190,6 +190,9 @@ class ClaudeTranscript:
         process runs a session is its registry's to say (``<config dir>/sessions/<pid>.json``)."""
         return None
 
+    def server_note(self, run: Sequence[str]) -> str:
+        return ""  # no process of its holds a session for others (``held_open``)
+
     def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
         """``projects/<folder>/<id>.jsonl``: a subagent's, one level further down, is no
         conversation of its own."""

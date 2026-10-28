@@ -297,6 +297,9 @@ class FakeTranscript:
         say."""
         return None
 
+    def server_note(self, run: Sequence[str]) -> str:
+        return ""  # no process of its serves others (``held_open``)
+
     def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
         # Its threads: ``threads/<id>.log``, one record a line.
         with suppress(OSError):

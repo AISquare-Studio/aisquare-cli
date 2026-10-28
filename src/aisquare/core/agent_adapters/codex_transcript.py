@@ -92,6 +92,7 @@ from aisquare.core.agent_adapters.types import (
     process_executable,
 )
 from aisquare.core.ledger import SessionLedger
+from aisquare.core.shell_line import command_line
 
 SPEAKER = "codex"
 
@@ -218,7 +219,8 @@ class CodexTranscript:
 
         ``clients`` for every process of its managed app-server daemon, which runs the thread
         of a ``codex`` started with no arguments (0.164.0's default) and keeps its rollout open
-        for minutes after that ``codex`` quit: alone it holds no conversation (SMOKE11, 5A).
+        for minutes after that ``codex`` quit, a hold Codex itself keeps to
+        (:meth:`server_note`): a TUI of Codex's that runs is named before it (SMOKE11, 5A).
         Measured on 0.164.0 (#47's reopen), a no-argument ``codex`` starts two, both run from
         ``<CODEX_HOME>/packages/app-server-daemon/releases/<version>/bin/codex`` and both
         living on after ``/exit``: ``app-server --listen unix://… --managed-daemon``, which
@@ -237,6 +239,20 @@ class CodexTranscript:
         after = words[words.index(_APP_SERVER) + 1 :] if _APP_SERVER in words else None
         daemon = after is not None and (after[:1] == [_DAEMON] or _MANAGED_DAEMON in after)
         return "clients" if daemon else "session"
+
+    def server_note(self, run: Sequence[str]) -> str:
+        """Its managed app-server daemon's, measured on 0.164.0 (#47): the daemon holds what
+        it has open, as Codex sees it (a ``codex resume`` of the thread it keeps sat on "This
+        conversation is open in another app", and its ``R`` retried in vain), keeps a thread
+        :data:`_DAEMON_KEEPS` after its TUI quit, and stops at ``codex app-server daemon
+        stop`` on that account's home (which leaves its ``pid-update-loop`` running), run
+        through ``run``."""
+        stop = command_line([*run, "app-server", "daemon", "stop"])
+        return (
+            "it is Codex's background app-server, which keeps a thread open after its TUI quit "
+            f"and lets go of it by itself {_DAEMON_KEEPS}: retry then, or stop it first with "
+            f"`{stop}`"
+        )
 
     def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
         """``sessions/YYYY/MM/DD/rollout-<local time>-<thread id>.jsonl``, by its name."""
@@ -290,6 +306,10 @@ _MANAGED_DAEMON = "--managed-daemon"
 manages itself (0.164.0, ``ps`` in SMOKE11 and #47's reopen), which a ``codex`` with no
 arguments starts and attaches its TUI to: ``app-server … --managed-daemon`` and ``app-server
 daemon pid-update-loop``."""
+_DAEMON_KEEPS = "about 30 idle minutes later"
+"""How long Codex's managed daemon keeps a thread after its TUI quit (:meth:`CodexTranscript.
+server_note`): measured on 0.164.0 with ``lsof`` every 15 s (#47), held from ``/exit`` at
+14:58:21 to between 15:28:13 and 15:28:28, the daemon living on and holding nothing after."""
 _DAEMON_DIR = "/packages/app-server-daemon/"
 """Where under its home Codex installs the daemon it manages (``<CODEX_HOME>/packages/
 app-server-daemon/releases/<version>/bin/codex``): whatever runs from there is the daemon."""

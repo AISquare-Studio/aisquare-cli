@@ -937,8 +937,9 @@ HoldsOpen = Literal["session", "clients"]
 """How a process of the agent's holds the transcripts it writes (:meth:`AgentTranscript.
 held_open`): for as long as its own session lives (``session``: a TUI, an ``exec``), or for
 the clients it serves, and on after they quit (``clients``: each process of Codex's managed
-app-server daemon), which holds a conversation only while a client of the agent's still runs,
-and is never named as its holder."""
+app-server daemon). Either holds what it has open: a client of the agent's that runs is named
+before a ``clients`` one, and a ``clients`` one is named only when it holds the conversation
+itself, its refusal saying how it lets go (:meth:`AgentTranscript.server_note`)."""
 
 
 @dataclass(frozen=True)
@@ -1050,6 +1051,17 @@ class AgentTranscript(Protocol):
         its clients and minutes after the last one quit. ``fleet adopt`` asks the process
         table (``core.process_table``) then whether a process of the agent's holds a
         conversation whose arguments name no session (a fresh start). Never raises."""
+        ...
+
+    def server_note(self, run: Sequence[str]) -> str:
+        """What ``fleet adopt``'s refusal says of a process of the agent's that holds a
+        conversation for the clients it serves (:meth:`held_open`'s ``clients``), named as its
+        holder because no client of the agent's runs: what it is, how it lets go and what to
+        do. ``run`` runs the agent's binary on the conversation's account (``aisquare accounts
+        run <slot>``), the way to give any command of the agent's it names, written with
+        ``core.shell_line.command_line``. Codex's: its background app-server, how long it
+        keeps a thread, and ``codex app-server daemon stop``. ``""`` for an agent with no such
+        process, which is never asked."""
         ...
 
     def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:

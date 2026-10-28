@@ -393,6 +393,10 @@ TMUX_NAMING_CODEX = (
 )
 
 
+DaemonTable = tuple[list[tuple[int, int, str]], dict[int, frozenset[str]]]
+"""The processes running (pid, parent, args) and what each holds open, as ``lsof`` says."""
+
+
 @pytest.fixture
 def codex_daemon(
     tmux: FakeTmux,
@@ -400,7 +404,7 @@ def codex_daemon(
     project: ProjectInfo,
     no_processes: list[tuple[int, int, str]],
     monkeypatch: pytest.MonkeyPatch,
-) -> list[tuple[int, int, str]]:
+) -> DaemonTable:
     """A thread a no-argument ``codex`` ran, that ``codex`` quit: Codex's two daemon processes
     left, reparented to 1, the ``--managed-daemon`` one (13090) alone holding the rollout
     (``lsof`` in seq 4382), the ``pid-update-loop`` (13100) none."""
@@ -414,52 +418,85 @@ def codex_daemon(
         return frozenset().union(*(holds.get(pid, frozenset()) for pid in pids))
 
     monkeypatch.setattr(process_table, "open_files", open_files)
-    return no_processes
+    return no_processes, holds
 
 
-def test_codexs_two_daemon_processes_alone_hold_no_thread(
-    codex_daemon: list[tuple[int, int, str]],
-) -> None:
-    """#47's reopen: the daemon's ``pid-update-loop`` was taken for a client, so adopt refused
-    for as long as the daemon lived, naming it. Both of the daemon's processes are the daemon:
-    with no client of Codex's running, the thread is adoptable."""
+def _refused(pid: int) -> str:
+    """``fleet adopt``'s refusal of the thread, which names ``pid`` as its holder."""
+    with pytest.raises(adopt_service.AdoptRefused) as held:
+        adopt_service.adopt(THREAD)
+    assert held.value.code == "held" and f"(pid {pid})" in str(held.value)
     [listed] = adopt_service.recent()
-    assert listed.held_by is None and adoptable(listed)
-    assert adopt_service.adopt(THREAD).agent.agent == "codex"
+    assert listed.held_by == pid and not adoptable(listed)
+    return str(held.value)
+
+
+def test_codexs_daemon_holding_a_thread_after_its_tui_quit_is_named_and_says_how_it_lets_go(
+    codex_daemon: DaemonTable,
+) -> None:
+    """#47's reopen, the manager's rule: Codex resumes no thread its managed daemon has open
+    (an adopted ``codex resume`` sat on "This conversation is open in another app", 0.164.0),
+    so while the ``--managed-daemon`` process holds the rollout, adopt refuses, naming it,
+    and says it is Codex's background app-server, that it lets go by itself and how to stop
+    it. The ``pid-update-loop``, which holds nothing and was named before, never is."""
+    processes, _holds = codex_daemon
+    said = _refused(13090)
+    assert "13100" not in said
+    assert "Codex's background app-server" in said and "lets go of it by itself" in said
+    [listed] = adopt_service.recent()
+    stop = f"`aisquare accounts run {listed.slot} app-server daemon stop`"
+    assert stop in said, "Codex's own stop, on the thread's account"
+    assert "quit it first" not in said
+
+    processes.reverse()  # the loop listed first: the one that holds the rollout is named
+    _refused(13090)
 
 
 def test_codexs_daemon_holds_a_thread_while_a_codex_tui_runs_which_is_named(
-    codex_daemon: list[tuple[int, int, str]],
+    codex_daemon: DaemonTable,
 ) -> None:
     """SMOKE11, 5A: with a TUI of Codex's running too (its npm wrapper and the native binary
-    below it), the daemon's hold counts and the TUI is named, the process to quit, never the
-    daemon; so too with a TUI on another thread, which the table cannot tell apart."""
-    codex_daemon.append((7001, 1, "/bin/zsh"))
-    codex_daemon.append((7002, 7001, "node /usr/local/bin/codex"))
-    codex_daemon.append((7003, 7002, CODEX_NATIVE))
+    below it), the TUI is named, the process to quit, before the daemon; so too with a TUI
+    on another thread, which the table cannot tell apart. Once it quit, the daemon is."""
+    processes, _holds = codex_daemon
+    processes.append((7001, 1, "/bin/zsh"))
+    processes.append((7002, 7001, "node /usr/local/bin/codex"))
+    processes.append((7003, 7002, CODEX_NATIVE))
 
-    with pytest.raises(adopt_service.AdoptRefused) as held:
-        adopt_service.adopt(THREAD)
-    assert held.value.code == "held" and "pid 7002" in str(held.value), "the TUI, not the daemon"
-    [listed] = adopt_service.recent()
-    assert listed.held_by == 7002 and not adoptable(listed)
+    assert "quit it first" in _refused(7002), "the TUI, not the daemon"
 
-    del codex_daemon[2:]  # the TUI quit: the daemon alone has the rollout open
+    del processes[2:]  # the TUI quit: the daemon alone has the rollout open
+    _refused(13090)
+
+
+def test_a_process_that_only_mentions_codex_is_never_named_for_its_daemon(
+    codex_daemon: DaemonTable,
+) -> None:
+    """#47's reopen: a client was any process with a word naming codex, so adopt named a
+    shell of another session's (``zsh -c "… --agent codex"``, pid 392 live) or the fleet's
+    tmux server for a Codex spawn. A client is told by what it runs: with neither run by
+    Codex, the daemon holding the rollout is named, never they."""
+    processes, _holds = codex_daemon
+    processes.append((392, 1, ZSH_NAMING_CODEX))
+    processes.append((8000, 1, TMUX_NAMING_CODEX))
+
+    said = _refused(13090)
+    assert "392" not in said and "8000" not in said
+
+
+def test_codexs_daemon_that_holds_no_rollout_leaves_the_thread_adoptable(
+    codex_daemon: DaemonTable,
+) -> None:
+    """The daemon alive but holding the thread no more (it let go after its idle minutes,
+    ``lsof`` naming no holder), or its ``pid-update-loop`` alone (the daemon stopped by
+    ``codex app-server daemon stop``, which leaves it running): adoptable."""
+    processes, holds = codex_daemon
+    holds.clear()  # let go
     [listed] = adopt_service.recent()
     assert listed.held_by is None and adoptable(listed)
-    assert adopt_service.adopt(THREAD).agent.agent == "codex"
 
-
-def test_a_process_that_only_mentions_codex_is_no_client_of_its_daemon(
-    codex_daemon: list[tuple[int, int, str]],
-) -> None:
-    """#47's reopen: a client was any process with a word naming codex, so a shell of another
-    session's (``zsh -c "… --agent codex"``) or the fleet's tmux server for a Codex spawn
-    made the daemon's hold count, and adopt named that unrelated process. A client is told by
-    what it runs: with neither run by Codex, the thread is adoptable and neither is named."""
-    codex_daemon.append((392, 1, ZSH_NAMING_CODEX))
-    codex_daemon.append((8000, 1, TMUX_NAMING_CODEX))
-
+    holds[13100] = holds.get(13090, frozenset())  # nothing, as lsof says of it
+    del processes[0]  # stopped: its pid-update-loop alone
     [listed] = adopt_service.recent()
     assert listed.held_by is None and adoptable(listed)
     assert adopt_service.adopt(THREAD).agent.agent == "codex"

@@ -21,9 +21,11 @@ A conversation is HELD when Claude Code's own registry says so (``<config dir>/s
 and older builds, or a ``codex resume <id>``), or, for an agent whose writer holds its
 transcript open (``AgentTranscript.held_open``, Codex's), when a process of that agent's holds
 it open (``core.process_table``): a ``codex`` started fresh names no thread. Codex's managed
-app-server daemon (both its processes), which runs a ``codex`` started with no arguments and
-keeps its rollout open for minutes after it quit, holds it only while a client of Codex's runs,
-told by what it runs and never by a word in its arguments. A stale entry
+app-server daemon, which runs a ``codex`` started with no arguments and keeps its rollout open
+for minutes after it quit, holds it too (Codex resumes no thread it has open): a client of
+Codex's that runs is named before it, told by what it runs and never by a word in its
+arguments, and the refusal of the daemon itself says how it lets go
+(``AgentTranscript.server_note``). Its process that holds nothing is never named. A stale entry
 whose pid was reused can only make it refuse, which is the safe way to be wrong; a process
 table that cannot be read says nothing, as a registry that cannot be read does.
 """
@@ -179,15 +181,18 @@ class _Holders:
         holds one (``AgentTranscript.held_open``, which says which processes are the agent's
         by what they run, never by a word in their arguments: a shell or a tmux server that
         mentions the agent is none): one that holds it for its own session (a TUI, an
-        ``exec``); or one that holds it for the clients it serves (each process of Codex's
-        managed app-server daemon), held only while a client of the agent's runs, which is
-        named, as the process to quit; the daemon itself never is. ``None`` when none does or
-        the process table cannot say.
+        ``exec``), named; or one that holds it for the clients it serves (Codex's managed
+        app-server daemon), a hold too: Codex resumes no thread its daemon has open (the
+        adopted ``codex resume`` sat on "This conversation is open in another app", measured
+        on 0.164.0, #47). A client of the agent's that runs is named before the daemon, the
+        process the human knows to quit; with none, the daemon is (:meth:`serving`). A
+        process of the daemon's that holds nothing (its ``pid-update-loop``) is never named.
+        ``None`` when none holds it or the process table cannot say.
 
-        A process table names no thread a client shows: a daemon's hold counts while any
-        process of the agent's that holds for its own session runs, one showing another
-        thread or attached to another home's daemon among them. That refuses where it might
-        not have to, which is the safe way to be wrong: two writers on one rollout are not."""
+        A process table names no thread a client shows: with the daemon holding the rollout,
+        any client of the agent's is named, one showing another thread or attached to another
+        home's daemon among them. Either way it refuses, and quitting it leaves the daemon
+        named next: it never names a process that is not the agent's."""
         reader = adapter.transcript_reader
         if reader is None:
             return None
@@ -207,8 +212,21 @@ class _Holders:
             (pid, kind) for pid, kind in runs if real in (process_table.open_files([pid]) or ())
         ]
         own = next((pid for pid, kind in holders if kind == "session"), None)
-        clients = [pid for pid, kind in runs if kind == "session"]
-        return own if own is not None else clients[0] if clients else None
+        server = next((pid for pid, kind in holders if kind == "clients"), None)
+        if own is not None or server is None:
+            return own
+        return next((pid for pid, kind in runs if kind == "session"), server)
+
+    def serving(self, pid: int) -> bool:
+        """Whether ``pid``, as :meth:`of` named it, holds the conversation for the clients it
+        serves (``AgentTranscript.held_open``'s ``clients``: Codex's managed app-server
+        daemon), none of them running: its refusal says how it lets go
+        (``AgentTranscript.server_note``), not "quit it"."""
+        return any(
+            each == pid and kind == "clients"
+            for runs, _held in self._open.values()
+            for each, kind in runs
+        )
 
 
 def holder(
@@ -382,11 +400,15 @@ def adopt(ref: str, *, role: str = "coder", label: str | None = None) -> fleet_s
         raise AdoptRefused(
             "owned_by_the_fleet", f"{found.native} is already {owner.label} in the fleet"
         )
-    if (pid := _Holders(accounts, None).of(found.native, found.path, found.adapter)) is not None:
+    holders = _Holders(accounts, None)
+    if (pid := holders.of(found.native, found.path, found.adapter)) is not None:
+        why = (
+            found.reader.server_note(["aisquare", "accounts", "run", str(found.account.slot)])
+            if holders.serving(pid)
+            else "quit it first, then adopt — two processes would write one conversation"
+        )
         raise AdoptRefused(
-            "held",
-            f"a live {found.adapter.label} (pid {pid}) still holds {found.native}: quit it "
-            "first, then adopt — two processes would write one conversation",
+            "held", f"a live {found.adapter.label} (pid {pid}) still holds {found.native}: {why}"
         )
     conversation = _conversation(found, projects, None)
     project = _project_for(conversation.cwd, projects)

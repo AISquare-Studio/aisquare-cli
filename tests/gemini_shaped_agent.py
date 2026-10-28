@@ -370,6 +370,9 @@ class GeminiShapedTranscript:
         """None, unmeasured: nothing is asked of the process table for it."""
         return None
 
+    def server_note(self, run: Sequence[str]) -> str:
+        return ""  # unmeasured, as ``held_open``
+
     def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
         """None listed: its chats are kept per project hash (``tmp/<hash>/chats``), unmeasured."""
         return iter(())

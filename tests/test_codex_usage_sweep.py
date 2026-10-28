@@ -16,6 +16,7 @@ sweep is ``tests/test_usage_stats.py``.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import timedelta
 from pathlib import Path
@@ -190,6 +191,47 @@ def test_a_codex_session_the_sweep_recorded_is_not_counted_again_at_its_stop(
 
     row = _row(codex_home, THREAD)
     assert row.turns == 2 and row.total_tokens == _tokens(rollout)
+
+
+def test_a_codex_account_in_the_stats_is_called_by_its_alias_or_plain_codex(
+    machine: Machine, codex_home: Path
+) -> None:
+    """SMOKE11 3, the tester's repro: ``accounts alias <slot> codex-b`` on a Codex slot, a Codex
+    session on it and one on the plain codex, ``metrics stats``. Claude Code's rows read their
+    alias or ``plain claude``; the Codex ones read ``account N`` and ``account 0``, in the table
+    and in ``--json``, as the aliases were read from Claude Code's registry alone and the
+    unaliased name was Claude Code's. Each agent's own registry and plain name now."""
+    machine.account(1, "max")
+    machine.account(2, "max")  # a Claude Code slot, made before the Codex one takes a number
+    managed = core.create_account("codex")
+    alpha = machine.repo("alpha")
+    for slot, session in ((1, "plain-claude"), (2, "claude-a")):
+        machine.session(
+            slot,
+            alpha,
+            session,
+            prompt(NOW - timedelta(minutes=5), cwd=alpha),
+            request(NOW - timedelta(minutes=4), f"msg_{session}", cwd=alpha),
+        )
+    _rollout(codex_home, alpha, THREAD)
+    _rollout(managed.config_dir, alpha, OTHER)
+    runner = CliRunner()
+    for slot, alias in ((2, "claude-a"), (managed.slot, "codex-b")):
+        named = runner.invoke(app, ["accounts", "alias", str(slot), alias])
+        assert named.exit_code == 0, named.output
+
+    as_json = runner.invoke(app, ["--json", "metrics", "stats", "--range", "lifetime"])
+    as_text = runner.invoke(app, ["metrics", "stats", "--range", "lifetime", "--no-sweep"])
+
+    stats = UsageStats.model_validate(json.loads(as_json.output))
+    assert {(row.slot, row.label) for row in stats.accounts.rows} == {
+        (1, "plain claude"),
+        (2, "claude-a"),
+        (core.kind("codex").plain_slot, "plain codex"),
+        (managed.slot, "codex-b"),
+    }
+    assert "plain codex" in as_text.output and "codex-b" in as_text.output, as_text.output
+    assert re.search(r"account -?\d", as_text.output) is None, as_text.output
 
 
 def test_codex_home_redirected_the_plain_codex_folder_is_swept_too(

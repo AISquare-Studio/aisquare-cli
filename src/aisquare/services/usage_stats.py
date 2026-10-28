@@ -1018,14 +1018,22 @@ def _share(part: int, whole: int) -> float:
 
 
 def _labels(store: ContextStore) -> dict[int, str]:
-    """Slot → how the account is called: its alias, else ``plain claude`` / ``account N``."""
+    """Slot → how the account is called, for every agent's slots: its alias, else its agent's
+    plain name (``plain claude``, ``plain codex``) or ``account N`` (``core.label``). Each
+    agent's aliases are in its own registry (``AgentAccounts.legacy_slots``: Claude Code's
+    ``claude_account``, another agent's ``agent_account``); Claude Code's alone were read,
+    and a Codex row said ``account 4`` for ``codex-b`` and ``account 0`` for the plain codex
+    (SMOKE11 3)."""
     labels = {
-        account.slot: accounts_core.default_label(account.slot)
-        for account in accounts_core.list_accounts()
+        account.slot: accounts_core.label(account) for account in accounts_core.list_accounts()
     }
-    for record in store.claude_accounts():
-        if record.alias:
-            labels[record.slot] = record.alias
+    for agent in accounts_core.account_agents():
+        records = (
+            store.claude_accounts()
+            if accounts_core.kind(agent).legacy_slots
+            else store.agent_accounts(agent)
+        )
+        labels.update({record.slot: record.alias for record in records if record.alias})
     return labels
 
 
@@ -1161,7 +1169,7 @@ def _accounts_of(store: ContextStore, turns: list[_Turn], total: _Sums) -> Usage
         rows.append(
             UsageAccountRow(
                 slot=slot,
-                label=labels.get(slot, accounts_core.default_label(slot))
+                label=labels.get(slot, accounts_core.slot_name(slot))
                 if slot is not None
                 else "other directories",
                 subscription=kind,

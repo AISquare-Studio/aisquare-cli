@@ -100,11 +100,14 @@ adapter.**
     `codex` started with no arguments runs its thread and which keeps the rollout open for
     minutes after that `codex` quit, holds it too, as Codex itself sees it (a `codex resume`
     of it sat on "This conversation is open in another app"): while its `--managed-daemon`
-    process holds the rollout, adopt refuses, naming a running Codex TUI or `exec` first and
-    else the daemon, saying it is Codex's background app-server, that it lets go by itself
-    about 30 idle minutes after its TUI quit (measured), and that `aisquare accounts run
-    <slot> app-server daemon stop` (Codex's own stop, on the thread's account) stops it
-    sooner. A process is Codex's by what it runs, never by a word in its arguments, so a
+    process holds the rollout, adopt refuses, naming first a running Codex TUI that can be
+    its client, never one that runs embedded (`-c`, `--search`, `--profile`, `--no-daemon`,
+    `--strict-config`, `--dangerously-bypass-hook-trust` or `exec`, measured: each holds its
+    own rollout, and is named only when that is this one) nor a fleet agent, which shows its
+    own thread; else the daemon, saying it is Codex's background app-server, that it lets go
+    by itself about 30 idle minutes after its TUI quit (measured), and that `aisquare
+    accounts run <slot> app-server daemon stop` (Codex's own stop, on the thread's account)
+    stops it sooner. A process is Codex's by what it runs, never by a word in its arguments, so a
     shell, tmux or another agent that mentions codex is never named, nor the daemon's
     `pid-update-loop`, which holds nothing (`AgentTranscript.held_open`, `server_note`), and
     once the daemon lets go the adopted thread resumes. A fleet Codex row's thread is the

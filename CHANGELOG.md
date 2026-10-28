@@ -112,7 +112,10 @@ adapter.**
     home it was found in (`AgentAccounts.transcript_roots`) and the repository it ran in; a
     Codex Stop's row now carries both, and a Stop and a sweep read on from each other; the
     page and `metrics stats` say "the agents' transcripts", naming none. Usage sharing stays
-    Claude Code's: Codex sessions are counted locally and never shared. The doctor's `role
+    Claude Code's: Codex sessions are counted locally and never shared, and the shared fleet
+    counts (agents started by role, tasks done) cover Claude Code's agents alone; a usage row
+    recorded before agents were is given its session's or its transcript's agent, and one
+    neither names is not shared where the store holds another agent's. The doctor's `role
     bindings` row asks every agent's home variable, `CODEX_HOME` too, with that agent's own
     connected test and `agents connect <agent>` fix.
   - **Claude Code's alone** (N-A): Remote Control (`AgentCapabilities.remote_control`: a launch

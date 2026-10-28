@@ -1214,8 +1214,9 @@ def daily_rollups(
     Built from the same loader as :func:`stats`, so ``tokens.total`` of a day is the day's
     figure on the dashboard and in ``aisquare metrics tokens``. ``shared_only``, the sharing
     path's: the sessions of the agents whose usage is shared alone (:func:`shared_usage`), and
-    their accounts alone among those registered; another agent's tokens, repositories,
-    sessions and accounts are on the dashboard and in no rollup of these."""
+    their accounts alone among those registered, their fleet's spawns and tasks done alone
+    (:func:`_fleet_days`); another agent's tokens, repositories, sessions, accounts, spawns
+    and tasks are on the dashboard and in no rollup of these."""
 
     def run(active: ContextStore) -> list[DailyRollup]:
         feature_use.fold(active)
@@ -1234,7 +1235,7 @@ def daily_rollups(
             by_day.setdefault(turn.day, []).append(turn)
         registered = len(accounts)
         known_types = account_types(active, refresh=False)
-        fleet = _fleet_days(active, since, until, tz)
+        fleet = _fleet_days(active, since, until, tz, shared_only=shared_only)
         return [
             _rollup(
                 day,
@@ -1267,18 +1268,27 @@ def shared_usage(agent: str | None) -> bool:
 
 
 def _fleet_days(
-    store: ContextStore, since: date, until: date, tz: tzinfo | None
+    store: ContextStore, since: date, until: date, tz: tzinfo | None, *, shared_only: bool = False
 ) -> dict[date, FleetDay]:
-    """The agents started and tasks done on each local day of ``[since, until]``."""
+    """The agents started and tasks done on each local day of ``[since, until]``: every
+    agent's, or with ``shared_only`` those of the agents whose usage is shared alone
+    (:func:`shared_usage`), so a Codex spawn is in no shipped day and a day of Codex's alone
+    makes none (owner, 2026-10-27; review r28 of #113, m2). One that names no agent (recorded
+    before agents were, or a task marked at the shell) is the default agent's
+    (``recorded_adapter``)."""
     agents, done = store.fleet_activity(
         _day_start(since, tz), _day_start(until + timedelta(days=1), tz)
     )
     days: dict[date, FleetDay] = {}
-    for started, role in agents:
+    for started, role, agent in agents:
+        if shared_only and not shared_usage(agent):
+            continue
         spawned = days.setdefault(_local(started, tz).date(), FleetDay()).agents_spawned
         name = role if role in FLEET_ROLES else "other"
         spawned[name] = spawned.get(name, 0) + 1
-    for finished in done:
+    for finished, agent in done:
+        if shared_only and not shared_usage(agent):
+            continue
         days.setdefault(_local(finished, tz).date(), FleetDay()).tasks_done += 1
     return days
 

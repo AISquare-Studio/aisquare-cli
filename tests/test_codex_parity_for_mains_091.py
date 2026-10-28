@@ -4,7 +4,8 @@ through the adapter, on scratch accounts of both agents and the fleet's fake tmu
 - A headroom pick, and rank 1, leave a hand-written ``CODEX_HOME`` binding alone as they leave
   a ``CLAUDE_CONFIG_DIR`` one (#9, #406); a hand-over still moves the agent.
 - A Codex Stop records the rollout's tokens, and Usage & stats sums them with Claude Code's.
-- A Codex agent counts as its role in the anonymous counts, which name no agent.
+- A Codex agent counts as its role in the local anonymous counts, which name no agent, and in
+  no shared day: usage sharing is Claude Code's alone (owner, 2026-10-27).
 - The keys a Codex launch leaves on the board (its launch and fleet sightings, its agent events,
   its continuation prompt) go with a project's reset (``project fresh``) and its purge, and the
   trees it removes are the ones the rows' launch records name (item 6's GAP, closed).
@@ -28,8 +29,9 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import launch_seal
+from aisquare.core.ids import new_event_id
 from aisquare.core.store import SqliteStore, store_session
-from aisquare.models import ProjectInfo, TeamSession
+from aisquare.models import ProjectInfo, TeamEvent, TeamSession
 from aisquare.services import agent_events, usage_stats
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
@@ -132,19 +134,67 @@ def test_a_codex_stop_is_in_the_usage_stats(tmp_path: Path) -> None:
 # --- anonymous counts name no agent --------------------------------------------------------
 
 
-def test_a_codex_agent_counts_as_its_role_in_the_shared_counts(
+def _a_task_done_by(on: ProjectInfo, session: str | None) -> None:
+    """A ``task_done`` on ``on``'s board, marked by ``session`` (``None``: at the shell)."""
+    with store_session() as store:
+        store.add_team_event(
+            TeamEvent(
+                id=new_event_id(),
+                project_id=on.id,
+                session_id=session,
+                kind="task_done",
+                text="done",
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+
+
+def test_a_codex_agent_counts_as_its_role_locally_and_in_no_shared_day(
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
 ) -> None:
-    """``usage_share`` sends agents started by role, never by agent or label: a Codex coder is
-    one ``coder`` in the day's counts, as a Claude Code one is."""
+    """The anonymous counts name a role, never an agent or a label: a Codex coder is one
+    ``coder`` in the day's local counts, as a Claude Code one is. Usage sharing is Claude
+    Code's alone (owner, 2026-10-27), its fleet counts too (review r28 of #113, m2): the shared
+    path (``shared_only``, what ``usage_share`` builds from) holds no Codex spawn and no task a
+    Codex session marked done, and a day of Codex's alone is no shared day at all."""
     fleet_service.spawn(project, "coder", agent="codex", worktree=False)
+    with store_session() as store:
+        [codex] = store.fleet_agents(project.id)
+        store._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE fleet_agent SET session_id = 'ses-codex-agent' WHERE id = ?", (codex.id,)
+        )
+        store._conn.commit()  # type: ignore[attr-defined]
+        store.upsert_session(
+            TeamSession(
+                id="ses-codex",
+                agent="codex",
+                project_id=project.id,
+                started_at=datetime.now(tz=UTC),
+                last_seen_at=datetime.now(tz=UTC),
+            )
+        )
+    _a_task_done_by(project, "ses-codex")  # by a Codex session no fleet agent is
+    _a_task_done_by(project, "ses-codex-agent")  # by the Codex fleet agent's session
 
     [day] = usage_stats.daily_rollups(date.today(), date.today())
+    shared = usage_stats.daily_rollups(date.today(), date.today(), shared_only=True)
 
-    assert day.fleet.agents_spawned == {"coder": 1}
+    assert codex.agent == "codex"
+    assert (day.fleet.agents_spawned, day.fleet.tasks_done) == ({"coder": 1}, 2)
     assert "codex" not in json.dumps(day.model_dump(mode="json"))
+    assert shared == [], "a day of Codex's alone is no shared day"
+
+    fleet_service.spawn(project, "tester", worktree=False)  # Claude Code's
+    _a_task_done_by(project, None)  # at the shell: no agent's
+
+    [day] = usage_stats.daily_rollups(date.today(), date.today())
+    [shared_day] = usage_stats.daily_rollups(date.today(), date.today(), shared_only=True)
+
+    assert day.fleet.agents_spawned == {"coder": 1, "tester": 1}
+    assert day.fleet.tasks_done == 3
+    assert (shared_day.fleet.agents_spawned, shared_day.fleet.tasks_done) == ({"tester": 1}, 1)
 
 
 # --- project fresh and a purge clear what a launch of any agent leaves ----------------------

@@ -1900,7 +1900,7 @@ class ContextStore(Protocol):
     def usage_transcripts(self) -> dict[str, str]: ...
     def fleet_activity(
         self, since: datetime, until: datetime
-    ) -> tuple[list[tuple[datetime, str]], list[datetime]]: ...
+    ) -> tuple[list[tuple[datetime, str, str | None]], list[tuple[datetime, str | None]]]: ...
     def usage_turn_count(self) -> int: ...
     def unattributed_usage(self, limit: int = 5_000) -> list[SessionUsage]: ...
     def attribute_usage(
@@ -4463,23 +4463,33 @@ class SqliteStore:
 
     def fleet_activity(
         self, since: datetime, until: datetime
-    ) -> tuple[list[tuple[datetime, str]], list[datetime]]:
-        """What the fleet did in ``[since, until)``: ``(started, role)`` of each agent started,
-        and when each task was marked done. Counts are all the usage sharing wants of it: no
-        label, task, project or text leaves this method."""
+    ) -> tuple[list[tuple[datetime, str, str | None]], list[tuple[datetime, str | None]]]:
+        """What the fleet did in ``[since, until)``: ``(started, role, agent)`` of each agent
+        started, and ``(when, agent)`` of each task marked done, its agent the one of the
+        session that marked it (its fleet agent's, else the session's own; ``None`` for one no
+        row names, a human's at the shell). Counts and agent ids are all the usage sharing wants
+        of it (its ``shared_only`` keeps the agents whose usage is shared): no label, task,
+        project or text leaves this method."""
         low, high = since.astimezone(UTC).isoformat(), until.astimezone(UTC).isoformat()
         agents = [
-            (datetime.fromisoformat(row["created_at"]), str(row["role"]))
+            (datetime.fromisoformat(row["created_at"]), str(row["role"]), row["agent"])
             for row in self._conn.execute(
-                "SELECT created_at, role FROM fleet_agent WHERE created_at >= ? AND created_at < ?",
+                "SELECT created_at, role, agent FROM fleet_agent"
+                " WHERE created_at >= ? AND created_at < ?",
                 (low, high),
             ).fetchall()
         ]
         done = [
-            datetime.fromisoformat(row["created_at"])
+            (datetime.fromisoformat(row["created_at"]), row["agent"])
             for row in self._conn.execute(
-                "SELECT created_at FROM team_event WHERE kind = 'task_done' "
-                "AND created_at >= ? AND created_at < ?",
+                "SELECT event.created_at, COALESCE("
+                "(SELECT fleet.agent FROM fleet_agent AS fleet"
+                " WHERE fleet.session_id = event.session_id AND fleet.agent IS NOT NULL"
+                " ORDER BY fleet.created_at DESC LIMIT 1),"
+                " (SELECT session.agent FROM team_session AS session"
+                " WHERE session.id = event.session_id)) AS agent"
+                " FROM team_event AS event WHERE event.kind = 'task_done'"
+                " AND event.created_at >= ? AND event.created_at < ?",
                 (low, high),
             ).fetchall()
         ]

@@ -80,9 +80,11 @@ adapter.**
     included, under main's cancel loop; a Codex row with no login shows the one `!` and
     "login incomplete" on hover; the sidebar line and `accounts usage` give each agent its own
     share left. A spawn's model and effort (#441) are each agent's own: the Spawn dialog's
-    Model and Effort follow its Agent, a Codex spawn passes them as Codex's `--model` and
-    `model_reasoning_effort` and remembers them for Codex alone (a pick never crosses
-    agents), and `[agents.models.<agent>]` pins win over the last pick for either; a Codex
+    Model and Effort follow its Agent, Effort offering the levels that agent takes (Codex's
+    `minimal` to `ultra`, Claude Code's scale and `ultracode`), a Codex spawn passes them as
+    Codex's `--model` and `model_reasoning_effort` and remembers them for Codex alone (a pick
+    never crosses agents: a model one agent claims is never another's pick, nor read back as
+    one), and `[agents.models.<agent>]` pins win over the last pick for either; a Codex
     role's own `agent_args` that name the model or the effort run over the pick, and the
     receipt says each pick they overrule. A Codex spawn's own arguments win over its role's
     and its binding's, and each option is passed once, restarts included: before, a role's
@@ -93,8 +95,14 @@ adapter.**
     agent's conversations, their folder and first prompt are read by its adapter
     (`AgentTranscript.conversations`, `opening`), a process's arguments by
     `AgentAdapter.adoptable` (`codex resume <id>`), and a `codex` started fresh holds the
-    rollout it has open (`core.process_table`); the thread resumes on its own Codex slot as
-    `codex resume <id>`, the picker naming each row's agent, and `fleet adopt --list` too
+    rollout it has open (`core.process_table`). Codex's managed app-server daemon, where a
+    `codex` started with no arguments runs its thread and which keeps the rollout open for
+    minutes after that `codex` quit, holds it only while another Codex process runs, which
+    is named as the holder (`AgentTranscript.held_open`). A fleet Codex row's thread is the
+    fleet's from its first hook, its session in the row's own column as a Claude Code row's
+    is from its spawn: `fleet adopt --list` leaves it out, and a stopped row's is refused
+    ("restart that agent"), not adopted into a second row. The thread resumes on its own
+    Codex slot as `codex resume <id>`, the picker naming each row's agent, and `fleet adopt --list` too
     when more than one agent is listed. A solo Codex session's own MCP
     server writes as the session: its process is the one of the hook's ancestors that holds
     its rollout open (measured on 0.164.0), its hooks being handed no pid. `project fresh`
@@ -267,9 +275,11 @@ adapter.**
   the Spawn dialog's account label, left at the role's agent, names the account the spawn
   then runs on (it named the account Claude Code's own rung picked by the family, while the
   spawn ran on the one the order picked without it). A model the spawn names itself
-  (`--model`, the dialog's Model field, a `--model` in its *Extra agent args*) keeps it on
-  the agent whose model it is, by that agent's model ladders or price table (`fable` is
-  Claude Code's, `gpt-5.4` Codex's), whose accounts alone are weighed, the first in the order
+  (`--model`, the dialog's Model field, a `--model` or Codex's `-m` in its *Extra agent
+  args*) keeps it on the agent whose model it is, by the names that agent claims
+  (`AgentAdapter.claims_model`: Claude Code's ladders' families; Codex's `gpt-*`, `o<digit>*`,
+  `codex-*`, the catalog 0.164.0 bundles and its price table: `fable` is Claude Code's,
+  `gpt-x`, `o3` and `gpt-5.4` Codex's), whose accounts alone are weighed, the first in the order
   when none has room: weighed across agents, a Claude model went to a Codex account with
   room and a Codex model to a Claude one, each failing every turn. A model no agent names
   stays on the agent the order puts first, and a refusal for an agent a model chose names

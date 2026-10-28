@@ -1243,10 +1243,15 @@ def daily_rollups(
     path's: the sessions of the agents whose usage is shared alone (:func:`shared_usage`), and
     their accounts alone among those registered, their fleet's spawns and tasks done alone
     (:func:`_fleet_days`); another agent's tokens, repositories, sessions, accounts, spawns
-    and tasks are on the dashboard and in no rollup of these."""
+    and tasks are on the dashboard and in no rollup of these. A row that names no agent is
+    first given the one v47's backfill would give it, written back
+    (``ContextStore.attribute_usage_agents``), so whether that backfill ran changes nothing
+    shared."""
 
     def run(active: ContextStore) -> list[DailyRollup]:
         feature_use.fold(active)
+        if shared_only:
+            active.attribute_usage_agents()
         profiles = active.repo_profiles()
         turns = _load(active, since, until, tz, _identity(profiles))
         accounts = accounts_core.list_accounts()

@@ -363,6 +363,60 @@ def test_a_codex_row_recorded_before_v47_is_in_no_preview(
     assert {name for day in shown for name in day["models"]} == {MODEL}, "no Codex model"
 
 
+def _agents_unset(*sessions: str) -> None:
+    """``usage_session.agent`` NULL again on ``sessions`` (every row with none), in a store
+    left at v47: what a v47 build that had no backfill left, or a v46 build wrote since."""
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        where = f" WHERE session_id IN ({', '.join('?' * len(sessions))})" if sessions else ""
+        raw.execute(f"UPDATE usage_session SET agent = NULL{where}", sessions)
+        raw.commit()
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 47
+    finally:
+        raw.close()
+
+
+@pytest.mark.usefixtures("sharing_allowed")
+@pytest.mark.parametrize(
+    "case", ["(c) a v46 build's row after the backfill", "(d) v47 with no backfill"]
+)
+def test_a_codex_row_still_naming_no_agent_is_attributed_before_a_batch_is_built(
+    machine: Machine, codex_home: Path, case: str
+) -> None:
+    """tester-42 on #42, (c) and (d): v47's backfill runs once, when the column is added, so
+    a store a v47 build migrated before it existed (4e5176a2..1efa3ce0) never ran it, and a
+    v46 build sharing a store that did still writes NULL; such a Codex row was shared as the
+    default agent's (4233 tokens, model 'other'). The sharing path gives every row still NULL
+    the backfill's attribution when it builds a batch, and writes it back."""
+    alpha, beta = machine.repo("alpha"), machine.repo("beta")
+    at = NOW - timedelta(days=1)
+    machine.session(
+        core.DEFAULT_SLOT,
+        alpha,
+        "claude-session",
+        prompt(at, cwd=alpha),
+        request(at + timedelta(minutes=1), "m1", cwd=alpha),
+    )
+    _rollout(codex_home, beta, THREAD)
+    assert CliRunner().invoke(app, ["metrics", "backfill"]).exit_code == 0
+    claude_alone = json.loads(usage_share.preview(now=NOW, tz=IST))["days"]
+    if case.startswith("(c)"):
+        _rollout(codex_home, beta, OTHER)  # a second session, written by a v46 build
+        assert CliRunner().invoke(app, ["metrics", "backfill"]).exit_code == 0
+        _agents_unset(session_key(CODEX, codex_home, OTHER))
+    else:
+        _agents_unset()
+
+    shown = json.loads(usage_share.preview(now=NOW, tz=IST))["days"]
+
+    assert shown == claude_alone
+    assert {name for day in shown for name in day["models"]} == {MODEL}, "no 'other' model"
+    assert _row(codex_home, OTHER if case.startswith("(c)") else THREAD).agent == "codex"
+    with store_session() as store:
+        claude_row = store.session_usage("claude-session")
+    assert claude_row is not None and claude_row.agent == "claude-code", "written back"
+
+
 def test_a_row_from_before_agents_is_claude_codes_and_an_agent_unknown_here_is_not_shared() -> None:
     """Whose usage is shared is its agent's capability (``AgentCapabilities.usage_shared``):
     Claude Code's, and a usage row from before agents were recorded, which no release but

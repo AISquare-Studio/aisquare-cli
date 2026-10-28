@@ -854,7 +854,9 @@ def _attribute_usage_sessions(connection: sqlite3.Connection) -> None:
     writes NULL); in any other it is :data:`UNATTRIBUTED_USAGE_AGENT`, never shared.
 
     Runs right after ``usage_session.agent`` is added, in the same transaction, and only then
-    (:data:`_BACKFILLS`).
+    (:data:`_BACKFILLS`); and again on the rows still NULL whenever the sharing path builds a
+    batch (:meth:`SqliteStore.attribute_usage_agents`), since a store can be stamped v47 with
+    none of this run, or be given a NULL row by an older build after it ran.
     """
     # Lazy: the adapters, and the account modules they read, are no import of the store's.
     from aisquare.core import claude_accounts as accounts_core
@@ -1911,6 +1913,7 @@ class ContextStore(Protocol):
         account_type: str | None,
         repo_id: str | None,
     ) -> None: ...
+    def attribute_usage_agents(self) -> None: ...
     def repo_profiles(self) -> dict[str, RepoProfile]: ...
     def save_repo_profile(self, profile: RepoProfile) -> None: ...
     def add_feature_uses(self, counts: Mapping[tuple[str, str], int]) -> None: ...
@@ -4536,6 +4539,21 @@ class SqliteStore:
             (account_slot, account_type, repo_id, session_id),
         )
         self._conn.commit()
+
+    def attribute_usage_agents(self) -> None:
+        """Give each usage row that names no agent the one v47's backfill would, and write
+        it back (:func:`_attribute_usage_sessions`): what the sharing path asks before it
+        builds a batch, so a row is shared by the same rule whether that backfill ran or not.
+        A store a v47 build migrated before the backfill existed never ran it, and a build
+        from before v47 that shares the store still writes NULL (tester-42 on #42, (c) and
+        (d)). In one transaction; one that fails is rolled back and raises, and no batch is
+        built from rows it did not attribute."""
+        try:
+            _attribute_usage_sessions(self._conn)
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
 
     def repo_profiles(self) -> dict[str, RepoProfile]:
         """Every repository profile, by repo id."""

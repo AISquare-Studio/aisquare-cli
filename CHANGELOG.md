@@ -119,10 +119,12 @@ adapter.**
     page and `metrics stats` say "the agents' transcripts", naming none. Usage sharing stays
     Claude Code's: Codex sessions are counted locally and never shared, and the shared fleet
     counts (agents started by role, tasks done) cover Claude Code's agents alone; a usage row
-    recorded before agents were is given its session's or its transcript's agent, and one
-    neither names is not shared where the store holds another agent's. The doctor's `role
-    bindings` row asks every agent's home variable, `CODEX_HOME` too, with that agent's own
-    connected test and `agents connect <agent>` fix.
+    recorded before agents were is given its session's or its transcript's agent, again
+    before each shared batch (a store a v47 build migrated
+    without it, a row an older build wrote), and one neither names is not shared where the
+    store holds another agent's. The doctor's `role bindings` row asks every agent's home
+    variable, `CODEX_HOME` too, with that agent's own connected test and `agents connect
+    <agent>` fix.
   - **Claude Code's alone** (N-A): Remote Control (`AgentCapabilities.remote_control`: a launch
     that asks of Codex says so and starts it as it was, and the Spawn dialog shows the switch
     for Claude Code alone) and `asq-statusline` (Claude Code's `statusLine` setting; Codex's

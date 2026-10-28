@@ -24,6 +24,7 @@ import subprocess
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -39,6 +40,7 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
 from tests.fake_agent import FakeAgentAdapter
+from tests.projects import add_project
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
 from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     FakeTmux,
@@ -55,6 +57,7 @@ from tests.test_one_priority_order_across_agents import (  # noqa: F401 - fixtur
     _usage,
     machine,
 )
+from tests.test_worktree import _git
 
 # --- the headroom pick vs a hand-written CODEX_HOME ---------------------------------------
 
@@ -481,12 +484,60 @@ def _bound_keys() -> list[str]:
     return [str(row["key"]) for row in rows]
 
 
+def _spawned_and_bound(on: ProjectInfo, monkeypatch: pytest.MonkeyPatch) -> list[FleetAgent]:
+    """A Codex and a Claude Code row of ``on``, as ``fleet spawn coder --agent <agent>
+    --no-worktree --prompt hi`` leaves them, each with its hook's first event under its row's
+    and its launch's token (session ``ses-<agent>-<project id>``, launch ``lch-…`` alike), and
+    stopped: the Codex row first."""
+    from aisquare.core.agent_sessions import bind_launch_session
+
+    rows: list[FleetAgent] = []
+    for agent in ("codex", "claude-code"):
+        row = fleet_service.spawn(on, "coder", agent=agent, worktree=False, prompt="hi").agent
+        session = f"ses-{agent}-{on.id}"
+        _a_session(on, session, agent)
+        monkeypatch.setenv("AISQUARE_FLEET_AGENT", row.id)
+        monkeypatch.setenv("AISQUARE_LAUNCH_ID", f"lch-{agent}-{on.id}")
+        with store_session() as store:
+            bind_launch_session(store, session, started=True)  # its SessionStart
+        rows.append(row)
+    with store_session() as store:
+        for row in rows:
+            store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
+    return rows
+
+
+def _as_stored(on: ProjectInfo, rows: list[FleetAgent]) -> dict[str, list[tuple[Any, ...]]]:
+    """``on``'s fleet rows and sessions as stored, and every ``team_meta`` key and value that
+    names one of its ``rows`` or its project (its sessions' and launches' ids carry it)."""
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        tables = {
+            table: [
+                tuple(row)
+                for row in store._conn.execute(
+                    f"SELECT * FROM {table} WHERE project_id = ? ORDER BY rowid", (on.id,)
+                )
+            ]
+            for table in ("fleet_agent", "team_session")
+        }
+        meta = store._conn.execute("SELECT key, value FROM team_meta ORDER BY key").fetchall()
+    names = (on.id, *(row.id for row in rows))
+    tables["team_meta"] = [
+        (key, value)
+        for key, value in map(tuple, meta)
+        if any(n in key or n in value for n in names)
+    ]
+    return tables
+
+
 @pytest.mark.parametrize("how", ["reset", "purge"])
 def test_a_spawns_first_prompt_and_the_session_bindings_go_with_a_reset_and_purge(
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
     claude_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     how: str,
 ) -> None:
@@ -494,35 +545,28 @@ def test_a_spawns_first_prompt_and_the_session_bindings_go_with_a_reset_and_purg
     hi`` (and a Claude Code one), their hooks' first events, the rows stopped, ``project
     fresh``. It left ``first-prompt:<agent id>`` (a Codex row's), and ``fleet-session:`` and
     ``launch-session:`` (both agents'), and nothing else ever expires a ``first-prompt:`` key.
-    They go with their rows and their sessions now, in a reset and a purge alike; another
-    project's are kept."""
-    from aisquare.core.agent_sessions import bind_launch_session
+    They go with their rows and their sessions now, in a reset and a purge alike.
 
-    rows: list[FleetAgent] = []
-    for agent in ("codex", "claude-code"):
-        row = fleet_service.spawn(project, "coder", agent=agent, worktree=False, prompt="hi").agent
-        session = f"ses-{agent}"
-        _a_session(project, session, agent)
-        monkeypatch.setenv("AISQUARE_FLEET_AGENT", row.id)
-        monkeypatch.setenv("AISQUARE_LAUNCH_ID", f"lch-{agent}")
-        with store_session() as store:
-            bind_launch_session(store, session, started=True)  # its SessionStart
-        rows.append(row)
-    with store_session() as store:
-        for row in rows:
-            store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
-        store.set_meta("first-prompt:agt_elsewhere", "{}")  # another project's rows, kept
-        store.set_meta("fleet-session:agt_elsewhere", "ses-elsewhere")
-        store.set_meta("launch-session:lch-elsewhere", "ses-elsewhere")
-    kept = ["first-prompt:agt_elsewhere", "fleet-session:agt_elsewhere"]
-    kept.append("launch-session:lch-elsewhere")
-    codex = rows[0]
-    assert set(_bound_keys()) >= {
-        f"first-prompt:{codex.id}",
-        *(f"fleet-session:{row.id}" for row in rows),
-        "launch-session:lch-codex",
-        "launch-session:lch-claude-code",
-    }, "the fixture"
+    Another project with rows of its own, spawned and bound the same way, keeps its rows and
+    every key of theirs byte for byte: the rows' keys are found by the ids the reset and the
+    purge read from ``fleet_agent`` by project. tester-46's T14/T15: ``SELECT id FROM
+    fleet_agent WHERE project_id = ? OR 1`` passed while the other project's keys had no row."""
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    _git("init", "-q", "-b", "main", cwd=other_root)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=other_root)
+    other = add_project(other_root)
+    theirs = _spawned_and_bound(other, monkeypatch)
+    rows = _spawned_and_bound(project, monkeypatch)
+    kept = _as_stored(other, theirs)
+    for of, spawned in ((project, rows), (other, theirs)):
+        assert {
+            f"first-prompt:{spawned[0].id}",
+            *(f"fleet-session:{row.id}" for row in spawned),
+            *(f"fleet-seen:{row.id}:ses-{row.agent}-{of.id}" for row in spawned),
+            *(f"launch-session:lch-{row.agent}-{of.id}" for row in spawned),
+        } <= {key for key, _ in _as_stored(of, spawned)["team_meta"]}, "the fixture"
+    assert len(kept["fleet_agent"]) == len(kept["team_session"]) == 2, "the fixture"
 
     with store_session() as store:
         if how == "reset":
@@ -532,7 +576,9 @@ def test_a_spawns_first_prompt_and_the_session_bindings_go_with_a_reset_and_purg
         else:
             store.purge_project(project.id)
 
-    assert _bound_keys() == sorted(kept)
+    bound = ("first-prompt:", "fleet-session:", "launch-session:")
+    assert _bound_keys() == sorted(key for key, _ in kept["team_meta"] if key.startswith(bound))
+    assert _as_stored(other, theirs) == kept, "another project's rows and keys, byte for byte"
 
 
 def test_a_codex_rows_tree_is_the_one_its_launch_record_names_not_its_rewritten_cwd(

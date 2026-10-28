@@ -1644,6 +1644,16 @@ def _as_captured(frame: list[str]) -> list[str]:
     return [*frame[:box], styled, *frame[box + 1 :]]
 
 
+def _footer_gapped(frame: list[str]) -> list[str]:
+    """``frame`` with blank rows between its box's bottom rule and its footer, most of them a
+    capture's lone escape: more rows below the rule than ``FOOTER_LINES`` until the blank ones
+    are dropped, as main's reading (``claude_screen.tail``) dropped them, escapes first (review
+    r28 of #113, n2)."""
+    bottom = max(i for i, row in enumerate(frame) if row.startswith("─" * 20))
+    gap = ["", "\x1b[39m", "\x1b[0m", "\x1b[39m"]
+    return [*frame[: bottom + 1], *gap, *frame[bottom + 1 :]]
+
+
 @pytest.mark.parametrize(
     ("frame", "shows"),
     [
@@ -1653,6 +1663,7 @@ def _as_captured(frame: list[str]) -> list[str]:
         (captain_screens.REAL_WORKING, "busy"),
         (_as_captured(captain_screens.REAL_WORKING), "busy"),
         (_PROMPT_HOOK_RUNNING, "busy"),
+        (_footer_gapped(captain_screens.REAL_WORKING), "busy"),
         (captain_screens.REAL_CHOOSER, "unknown"),
         (captain_screens.REAL_TRUST, "unknown"),
         (None, "unknown"),
@@ -1664,6 +1675,7 @@ def _as_captured(frame: list[str]) -> list[str]:
         "mid-turn",
         "mid-turn as captured",
         "prompt hook",
+        "mid-turn, footer gapped",
         "chooser",
         "trust",
         "no capture",

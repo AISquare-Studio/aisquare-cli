@@ -1292,7 +1292,11 @@ def _pane_shows(agent: FleetAgent) -> str:
         return "unknown"
     if pane_screen.ready(agent, lines):
         return "idle"
-    return "busy" if pane_screen.drawn(agent, lines) else "unknown"
+    # Its blank rows dropped, as main read the box (`claude_screen.tail`): a footer drawn with
+    # a gap in it counted the gap against its rows, and a turn read as no prompt at all
+    # (review r28 of #113, n2).
+    shown = [row for row in pane_screen.strip_escapes(lines) if row.strip()]
+    return "busy" if pane_screen.drawn(agent, shown) else "unknown"
 
 
 def hand_over(

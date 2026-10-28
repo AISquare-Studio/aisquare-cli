@@ -2762,6 +2762,46 @@ def test_the_shown_pin_is_the_roles_arguments_over_its_bindings_as_the_argv_pass
     assert shown.model == runs.model == "role-model"
 
 
+@pytest.mark.parametrize("agent", ["claude-code", "codex"])
+def test_the_roles_settings_run_over_its_agents_models_pin_and_the_dialog_says_so(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    agent: str,
+) -> None:
+    """#43 reopen, tester-43 (3), mutant T43a2: the role's settings come before
+    ``[agents.models.<agent>]`` in the one order (``_model_choice``). Claude Code's role
+    ``extra_args`` name sonnet and ``[agents.models.claude-code]`` names fable for the coder:
+    the spawn runs sonnet, and ``spawn_runs`` (the label's family) and ``role_pin`` (the shown
+    pin) say sonnet. Codex's role ``agent_args`` over its ``[agents.models.codex]`` likewise;
+    and there, arguments that name the model take the effort too (#129 b): the argv passes no
+    configured effort, and neither says one (``team harness`` reads ``spawn_runs``' rule)."""
+    role_model = {"claude-code": "sonnet", "codex": "gpt-role"}[agent]
+    config = load_config()
+    config.fleet.roles["coder"] = (
+        FleetRoleSettings(worktree=False, extra_args=["--model", role_model])
+        if agent == "claude-code"
+        else FleetRoleSettings(worktree=False, agent_args={agent: ["--model", role_model]})
+    )
+    configured = {"claude-code": "fable", "codex": _CONFIGURED["codex"]}[agent]
+    config.agents.models[agent] = AgentModelSettings(
+        roles={"coder": AgentModelDefault(model=configured, effort="high")}
+    )
+    save_config(config)
+
+    runs = fleet_service.spawn_runs("coder", agent=agent)
+    shown = fleet_service.role_pin("coder", agent=agent)
+    fleet_service.spawn(project, "coder", agent=agent)
+    argv = _spawn_native(tmux)
+
+    ran = get_adapter(agent).native_choice(argv)
+    assert ran.model == role_model and configured not in argv, argv
+    assert runs.model == shown.model == role_model
+    effort = "high" if agent == "claude-code" else None  # Claude Code's flags are each its own
+    assert ran.effort == runs.effort == shown.effort == effort, argv
+
+
 @pytest.mark.parametrize("pin", ["configured", "last-pick", "none"])
 @pytest.mark.parametrize("agent", ["claude-code", "codex"])
 def test_team_harness_says_what_a_fleet_spawn_runs_under_an_env_pin_for_both_agents(

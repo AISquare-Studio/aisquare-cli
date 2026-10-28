@@ -9228,10 +9228,13 @@ def _own_runs(
     ``[agents.models.<agent>]`` (``pinned``), else its last pick (``kept``), else its own
     default (``None``). A cleared field (``""``) is no pick, and forgets the last: the pin
     runs, else its default. :func:`_own_pick` and ``agent_launch.resolved_model_args`` give
-    its argv the same order."""
+    its argv the same order. Native arguments that name the model take the effort too (#129
+    b): the argv then passes no other effort, so none is said (#43 reopen, tester-43 (3))."""
 
     def one(name: str) -> tuple[str | None, str | None]:
         chose = getattr(picked, name)
+        if name == "effort" and named.model is not None:
+            return (named.effort, "native") if named.effort else (None, None)
         for value, source in (
             (getattr(named, name), "native"),
             (chose, "picked"),
@@ -9512,7 +9515,9 @@ def role_pin(
     if adapter is not None and not adapter.capabilities.model_ladders:
         own = fleet_extra_args(adapter, settings.extra_args, settings.agent_args)
         chosen = adapter.native_choice([*bound, *own])
-        return model_memory.Pick(chosen.model or pinned.model, chosen.effort or pinned.effort)
+        # Arguments that name the model take the effort too (#129 b, :func:`_own_runs`).
+        effort = chosen.effort or (pinned.effort if chosen.model is None else None)
+        return model_memory.Pick(chosen.model or pinned.model, effort)
     own = (
         fleet_extra_args(adapter, settings.extra_args, settings.agent_args)
         if adapter is not None

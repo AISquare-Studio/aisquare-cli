@@ -391,6 +391,21 @@ TMUX_NAMING_CODEX = (
     "tmux -L asq new-session -d -s asq-coder -c /repo -- "
     "/usr/local/bin/aisquare agent run --agent codex -- codex -c model=gpt-5.5"
 )
+#: And two whose word right after their first ``--`` is codex (tester-47b's decoy 1741 live,
+#: #47's K4): a tmux server running the fleet's runner, and a human's own tmux starting one.
+TMUX_RUNNING_CODEX = (
+    "tmux -L asq new-session -d -s asq-coder -c /repo "
+    "/usr/local/bin/aisquare agent run --agent codex -- codex -c model=gpt-5.5"
+)
+TMUX_STARTING_CODEX = "tmux new-session -s work -- codex"
+#: A Codex fleet agent's TUI as ``ps`` lists it (#50, coder-1 live): run with ``-c`` overrides,
+#: so embedded ("Running without the shared background server: command-line configuration
+#: overrides (-c, --enable, --disable, or --search) requires embedded mode", 0.164.0), its
+#: own process holding its rollout, never the daemon's client.
+CODEX_EMBEDDED_ARGS = (
+    "-c mcp_servers.aisquare.command=/usr/local/bin/aisquare -c mcp_servers.aisquare.args=[] "
+    "--approve-for-me -c developer_instructions=You are the coder"
+)
 
 
 DaemonTable = tuple[list[tuple[int, int, str]], dict[int, frozenset[str]]]
@@ -479,9 +494,75 @@ def test_a_process_that_only_mentions_codex_is_never_named_for_its_daemon(
     processes, _holds = codex_daemon
     processes.append((392, 1, ZSH_NAMING_CODEX))
     processes.append((8000, 1, TMUX_NAMING_CODEX))
+    processes.append((8001, 1, TMUX_RUNNING_CODEX))
+    processes.append((8002, 1, TMUX_STARTING_CODEX))
 
     said = _refused(13090)
-    assert "392" not in said and "8000" not in said
+    assert not {"392", "8000", "8001", "8002"} & set(re.findall(r"\d+", said))
+
+
+def _says_the_daemon(said: str) -> None:
+    """The refusal of the daemon itself (:func:`_refused` named it): what it is, how it lets
+    go and Codex's own stop on the thread's account, never "quit it"."""
+    [listed] = adopt_service.recent()
+    assert "Codex's background app-server" in said and "lets go of it by itself" in said
+    assert f"`aisquare accounts run {listed.slot} app-server daemon stop`" in said
+    assert "quit it first" not in said
+
+
+def test_a_codex_that_runs_embedded_is_never_named_as_its_daemons_client(
+    codex_daemon: DaemonTable,
+) -> None:
+    """#50: with a Codex fleet agent running (``-c`` overrides, so embedded: its own process
+    holds its own rollout, no daemon socket), a thread the daemon held was refused naming the
+    agent, "quit it first", and a human who obeyed quit a working agent for nothing. One that
+    runs embedded is no client of the daemon's: the daemon is named, with its note and stop."""
+    processes, _holds = codex_daemon
+    processes.append((7101, 1, f"node /usr/local/bin/codex {CODEX_EMBEDDED_ARGS}"))
+    processes.append((7102, 7101, f"{CODEX_NATIVE} {CODEX_EMBEDDED_ARGS}"))
+    processes.append((7103, 1, f"{CODEX_NATIVE} exec --json say hi"))
+
+    _says_the_daemon(_refused(13090))
+
+    processes.append((7001, 1, "node /usr/local/bin/codex"))  # a TUI on the daemon: its client
+    assert "quit it first" in _refused(7001), "a plain TUI is still named, embedded ones listed"
+
+
+def test_a_codex_that_runs_embedded_and_holds_the_thread_itself_is_named(
+    codex_daemon: DaemonTable,
+) -> None:
+    """An embedded Codex that does hold the thread (``lsof`` says so) is its holder, the one to
+    quit, the daemon holding it too or not."""
+    processes, holds = codex_daemon
+    processes.append((7101, 1, f"node /usr/local/bin/codex {CODEX_EMBEDDED_ARGS}"))
+    processes.append((7102, 7101, f"{CODEX_NATIVE} {CODEX_EMBEDDED_ARGS}"))
+    holds[7102] = holds[13090]
+
+    assert "quit it first" in _refused(7102)
+
+    del holds[13090]
+    assert "quit it first" in _refused(7102)
+
+
+def test_a_fleet_agents_codex_is_never_named_as_its_daemons_client(
+    codex_daemon: DaemonTable, tmux: FakeTmux, project: ProjectInfo
+) -> None:
+    """#50: a fleet agent shows its own thread, never the one adopted, so its process (the one
+    tmux started in its row's pane, and those below it) is never named as the daemon's client,
+    even one with no ``-c`` (MCP and the persona's system prompt off) that is one."""
+    processes, _holds = codex_daemon
+    fleet = core.create_account("codex")
+    row = fleet_service.spawn(
+        project, "coder", agent="codex", account=str(fleet.slot), worktree=False
+    ).agent
+    tmux.pids[row.pane_id] = 7201
+    processes.append((7201, 1, "node /usr/local/bin/codex --approve-for-me"))
+    processes.append((7202, 7201, f"{CODEX_NATIVE} --approve-for-me"))
+
+    _says_the_daemon(_refused(13090))
+
+    processes.append((7001, 1, "node /usr/local/bin/codex"))  # the human's own TUI
+    assert "quit it first" in _refused(7001)
 
 
 def test_codexs_daemon_that_holds_no_rollout_leaves_the_thread_adoptable(
@@ -503,9 +584,12 @@ def test_codexs_daemon_that_holds_no_rollout_leaves_the_thread_adoptable(
 
 
 def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
-    """``held_open``: every process of Codex's daemon for its clients, its TUI and ``exec``
-    (the native binary or its npm wrapper) for their own session; a process that runs no
-    Codex, whatever its arguments say, none; Claude Code's none."""
+    """``held_open``: every process of Codex's daemon for its clients, its TUI (the native
+    binary or its npm wrapper) for its own session, and one that runs embedded alone (#50,
+    measured on 0.164.0: each of these options and ``exec`` had its own process hold its
+    rollout, the daemon running), never ``--enable`` nor ``--disable``, which ran on the
+    daemon when it matched them; a process that runs no Codex, whatever its arguments say,
+    none; Claude Code's none."""
     reader = get_adapter("codex").transcript_reader
     claude = get_adapter("claude-code").transcript_reader
     assert reader is not None and claude is not None
@@ -515,12 +599,46 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
     assert reader.held_open(f"{CODEX_NATIVE} app-server daemon stop".split()) == "clients"
     assert reader.held_open(f"{CODEX_NATIVE} app-server --managed-daemon".split()) == "clients"
     assert reader.held_open(f"{CODEX_NATIVE} app-server --listen stdio://".split()) == "session"
-    assert reader.held_open(f"{CODEX_NATIVE} exec --json daemon".split()) == "session"
     assert reader.held_open([CODEX_NATIVE]) == "session"
     assert reader.held_open(["node", "/usr/local/bin/codex"]) == "session"
-    assert reader.held_open(["node", "--no-warnings", "/usr/local/bin/codex", "exec"]) == "session"
+    for plain in (
+        "--enable hooks",
+        "--disable artifact",
+        "-m gpt-5.5 --approve-for-me --no-alt-screen",
+        "-C /repo -s workspace-write -a never",
+        "-m exec",  # a model named exec, no subcommand
+        "fix the exec path",  # a prompt, as ps splits it
+        "resume 019a2b3c",
+        "-- use -c and --search",  # a prompt
+    ):
+        assert reader.held_open([CODEX_NATIVE, *plain.split()]) == "session", plain
+    for embedded in (
+        CODEX_EMBEDDED_ARGS,
+        "-c model=gpt-5.5",
+        "-cmodel=gpt-5.5",
+        "--config model=gpt-5.5",
+        "--config=model=gpt-5.5",
+        "--search",
+        "--no-daemon",
+        "--strict-config",
+        "--dangerously-bypass-hook-trust",
+        "--profile p2",
+        "-p p2",
+        "--profile=p2",
+        "exec --json daemon",
+        "e say hi",
+        "-m gpt-5.5 exec say hi",
+        "resume 019a2b3c -c model=gpt-5.5",
+    ):
+        assert reader.held_open([CODEX_NATIVE, *embedded.split()]) == "alone", embedded
+    assert reader.held_open(["node", "--no-warnings", "/usr/local/bin/codex", "exec"]) == "alone"
+    assert reader.held_open(f"node /usr/local/bin/codex {CODEX_EMBEDDED_ARGS}".split()) == "alone"
     assert reader.held_open(ZSH_NAMING_CODEX.split()) is None
     assert reader.held_open(TMUX_NAMING_CODEX.split()) is None
+    assert reader.held_open(TMUX_RUNNING_CODEX.split()) is None
+    assert reader.held_open(TMUX_STARTING_CODEX.split()) is None
+    runner = ["/usr/local/bin/aisquare", "agent", "run", "--agent", "codex", "--", "codex"]
+    assert reader.held_open(runner) is None
     assert reader.held_open(["node", "/usr/local/bin/claude", "codex"]) is None
     assert reader.held_open([]) is None
     assert claude.held_open(["claude"]) is None

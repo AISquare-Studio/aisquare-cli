@@ -225,9 +225,11 @@ class CodexTranscript:
         ``<CODEX_HOME>/packages/app-server-daemon/releases/<version>/bin/codex`` and both
         living on after ``/exit``: ``app-server --listen unix://… --managed-daemon``, which
         holds the rollout, and ``app-server daemon pid-update-loop``, which holds none.
-        ``session`` for any other: a TUI or an ``exec`` holds the rollout open from the first
-        prompt on for as long as its session lives (``lsof`` on 0.164.0,
-        ``core.process_table``)."""
+        ``alone`` for a TUI or an ``exec`` that runs embedded (:func:`_embedded`), which holds
+        its rollout itself and is never the daemon's client: a fleet Codex is one (its ``-c``
+        overrides). ``session`` for any other: a TUI on the daemon, which holds its rollout
+        for it, and one that holds it open itself from the first prompt on for as long as its
+        session lives (``lsof`` on 0.164.0, ``core.process_table``)."""
         from aisquare.core.agent_adapters.codex import CodexAdapter
 
         image = process_executable(args)
@@ -238,7 +240,9 @@ class CodexTranscript:
         words = list(args[args.index(image) + 1 :])
         after = words[words.index(_APP_SERVER) + 1 :] if _APP_SERVER in words else None
         daemon = after is not None and (after[:1] == [_DAEMON] or _MANAGED_DAEMON in after)
-        return "clients" if daemon else "session"
+        if daemon:
+            return "clients"
+        return "alone" if _embedded(words) else "session"
 
     def server_note(self, run: Sequence[str]) -> str:
         """Its managed app-server daemon's, measured on 0.164.0 (#47): the daemon holds what
@@ -313,6 +317,57 @@ server_note`): measured on 0.164.0 with ``lsof`` every 15 s (#47), held from ``/
 _DAEMON_DIR = "/packages/app-server-daemon/"
 """Where under its home Codex installs the daemon it manages (``<CODEX_HOME>/packages/
 app-server-daemon/releases/<version>/bin/codex``): whatever runs from there is the daemon."""
+_EMBEDDED = frozenset(
+    {
+        "-c",
+        "--config",
+        "--search",
+        "--no-daemon",
+        "--strict-config",
+        "--dangerously-bypass-hook-trust",
+        "-p",
+        "--profile",
+    }
+)
+"""The options a Codex runs embedded with, never on its managed daemon (:func:`_embedded`).
+Measured on 0.164.0 (#50): a TUI given each, one prompt, its daemon running, and ``lsof``
+named its own native binary the rollout's holder, where a ``codex`` with no arguments had
+the daemon hold it; each but ``--no-daemon`` says so ("Running without the shared background
+server: … requires embedded mode"). Not ``--enable`` nor ``--disable``, which that warning
+names beside ``-c``: one the daemon's features already match (``--enable hooks``,
+``--disable artifact``) runs on the daemon, the daemon holding the rollout, and one they do
+not asks to run without it this time or to restart it with them, or refuses to start
+(measured). Not ``--oss``, which 0.164.0's binary lists beside these and which would not
+start on a loopback (unmeasured)."""
+_EMBEDDED_COMMANDS = frozenset({"exec", "e"})
+"""``codex exec`` and its alias (``codex --help``), which run embedded: measured on 0.164.0
+(#50), an ``exec`` mid-turn with the daemon running held its rollout itself."""
+
+
+def _embedded(words: Sequence[str]) -> bool:
+    """Whether a Codex run with ``words`` after its binary runs embedded: an option of
+    :data:`_EMBEDDED` (``--config=…`` and ``-c…`` too) before a ``--`` (a prompt), or a
+    subcommand of :data:`_EMBEDDED_COMMANDS`, the first word that is neither an option nor an
+    option's value (``capabilities.value_options``)."""
+    from aisquare.core.agent_adapters.codex import CodexAdapter
+
+    values = CodexAdapter.capabilities.value_options
+    rest = iter(words)
+    command: str | None = None
+    for word in rest:
+        if word == "--":
+            return False
+        if word.startswith("-"):
+            if word.split("=", 1)[0] in _EMBEDDED or word[:2] in _EMBEDDED:
+                return True
+            if "=" not in word and word in values:
+                next(rest, None)  # its value
+        elif command is None:
+            command = word
+            if command in _EMBEDDED_COMMANDS:
+                return True
+    return False
+
 
 _REPLY_MAX_BYTES = 64_000_000
 """How far back :func:`_rollout_reply` reads for the prompt a reply answers, as Claude Code's

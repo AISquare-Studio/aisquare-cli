@@ -25,7 +25,8 @@ app-server daemon, which runs a ``codex`` started with no arguments and keeps it
 for minutes after it quit, holds it too (Codex resumes no thread it has open): a client of
 Codex's that runs is named before it, told by what it runs and never by a word in its
 arguments, and the refusal of the daemon itself says how it lets go
-(``AgentTranscript.server_note``). Its process that holds nothing is never named. A stale entry
+(``AgentTranscript.server_note``). Its process that holds nothing is never named, nor as its
+client a Codex that runs embedded or a fleet agent, which is none. A stale entry
 whose pid was reused can only make it refuse, which is the safe way to be wrong; a process
 table that cannot be read says nothing, as a registry that cannot be read does.
 """
@@ -48,6 +49,7 @@ from aisquare.core import process_table, procs
 from aisquare.core.agent_adapters import adapters, default_adapter, recorded_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, AgentTranscript, HoldsOpen
 from aisquare.core.store import store_session
+from aisquare.core.tmux import TmuxError
 from aisquare.models import AdoptableConversation, ClaudeAccount, ProjectInfo
 from aisquare.services import agent_events
 from aisquare.services import claude_accounts as accounts_service
@@ -152,6 +154,23 @@ def _ancestors(processes: Sequence[Process], pid: int) -> set[int]:
     return seen
 
 
+def _fleet_panes() -> set[int]:
+    """The pid tmux started in each live fleet row's pane, where its launch record places it
+    (``fleet.resolve_place``, never the row's own columns): none of a row it cannot place,
+    nor of a server that will not say."""
+    with store_session() as store:
+        rows = store.live_fleet_agents()
+    config = fleet_service.settings()
+    pids: set[int] = set()
+    for row in rows:
+        place = fleet_service.resolve_place(row, config=config)
+        if isinstance(place, fleet_service.Placed):
+            with contextlib.suppress(TmuxError):
+                if (pid := place.pane.pid()) is not None:
+                    pids.add(pid)
+    return pids
+
+
 class _Holders:
     """Who holds a conversation, read once for a listing: the registries, the processes this
     command does not run under, and, for an agent whose writer holds its transcript open, what
@@ -164,8 +183,10 @@ class _Holders:
         self._registry = _registry_holders(accounts)
         listed = _process_args() if processes is None else processes
         mine = _ancestors(listed, os.getpid())
+        self._listed = listed
         self._others = [(pid, args.split()) for pid, _parent, args in listed if pid not in mine]
         self._open: dict[str, tuple[list[tuple[int, HoldsOpen]], frozenset[str] | None]] = {}
+        self._fleet: set[int] | None = None
 
     def of(self, native: str, transcript: Path, adapter: AgentAdapter) -> int | None:
         if (pid := self._registry.get(native)) is not None:
@@ -186,8 +207,12 @@ class _Holders:
         adopted ``codex resume`` sat on "This conversation is open in another app", measured
         on 0.164.0, #47). A client of the agent's that runs is named before the daemon, the
         process the human knows to quit; with none, the daemon is (:meth:`serving`). A
-        process of the daemon's that holds nothing (its ``pid-update-loop``) is never named.
-        ``None`` when none holds it or the process table cannot say.
+        process of the daemon's that holds nothing (its ``pid-update-loop``) is never named,
+        nor as its client one that is none: one that runs embedded (``held_open``'s
+        ``alone``), named only when it holds the conversation itself, and a fleet agent's
+        (:meth:`_fleets`), which shows its own (#50: a Codex fleet agent was named for a
+        thread the daemon held, a human told to quit it). ``None`` when none holds it or the
+        process table cannot say.
 
         A process table names no thread a client shows: with the daemon holding the rollout,
         any client of the agent's is named, one showing another thread or attached to another
@@ -211,11 +236,20 @@ class _Holders:
         holders = [
             (pid, kind) for pid, kind in runs if real in (process_table.open_files([pid]) or ())
         ]
-        own = next((pid for pid, kind in holders if kind == "session"), None)
+        own = next((pid for pid, kind in holders if kind != "clients"), None)
         server = next((pid for pid, kind in holders if kind == "clients"), None)
         if own is not None or server is None:
             return own
-        return next((pid for pid, kind in runs if kind == "session"), server)
+        clients = [pid for pid, kind in runs if kind == "session"]
+        return next((pid for pid in clients if not self._fleets(pid)), server)
+
+    def _fleets(self, pid: int) -> bool:
+        """Whether ``pid`` is a live fleet row's agent: the process tmux started in its pane
+        or one below it, the pane where its launch record places it (``fleet.resolve_place``),
+        asked of tmux once a listing and only when a client would be named."""
+        if self._fleet is None:
+            self._fleet = _fleet_panes()
+        return not self._fleet.isdisjoint(_ancestors(self._listed, pid))
 
     def serving(self, pid: int) -> bool:
         """Whether ``pid``, as :meth:`of` named it, holds the conversation for the clients it

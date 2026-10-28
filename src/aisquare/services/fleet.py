@@ -9134,7 +9134,7 @@ def _model_choice(
     added: dict[str, str | None] = {}
     runs: dict[str, str | None] = {}
     picked: dict[str, str | None] = {}
-    why: dict[str, str | None] = {}
+    rungs: dict[str, str | None] = {}
     for flag, name in ((harness.MODEL_FLAG, "model"), (harness.EFFORT_FLAG, "effort")):
         of_binding = harness.flag_arg(bound, flag)
         given = model if name == "model" else effort
@@ -9147,17 +9147,17 @@ def _model_choice(
                 # `fleet restart … --model`: that agent's, over all it ran and recorded.
                 extra = harness.without_flag(extra, flag)
                 added[name] = runs[name] = given
-                why[name] = "picked"
+                rungs[name] = "picked"
             elif running is not None and _moved(
                 name, getattr(running.now, name), getattr(running.launched, name), then
             ):
                 extra = harness.without_flag(extra, flag)
                 added[name] = runs[name] = getattr(running.now, name)
-                why[name] = "running"
+                rungs[name] = "running"
             else:
                 added[name] = None if recorded is not None else getattr(spec, name)
                 runs[name] = then
-                why[name] = "recorded" if then else None
+                rungs[name] = "recorded" if then else None
             continue
         typed = harness.flag_arg(extra, flag)
         if (typed is None and flag in extra) or typed == "":
@@ -9180,10 +9180,10 @@ def _model_choice(
             added[name] = asked if typed is None and asked else None
             runs[name] = asked or None
             picked[name] = asked
-            why[name] = None if not asked else "native" if typed is not None else "picked"
+            rungs[name] = None if not asked else "native" if typed is not None else "picked"
         elif of_role is not None or of_binding is not None:
             runs[name] = of_role or of_binding
-            why[name] = "native" if runs[name] else None
+            rungs[name] = "native" if runs[name] else None
         elif of_config:
             if name == "effort":
                 try:
@@ -9191,17 +9191,17 @@ def _model_choice(
                 except ValueError as exc:
                     raise FleetError(str(exc)) from exc
             added[name] = runs[name] = of_config
-            why[name] = "configured"
+            rungs[name] = "configured"
         else:
             added[name] = runs[name] = getattr(remembered, name)
-            why[name] = "remembered" if runs[name] else None
+            rungs[name] = "remembered" if runs[name] else None
     return _ModelChoice(
         role_args,
         extra,
         model_memory.Pick(added.get("model"), added.get("effort")),
         model_memory.Pick(runs.get("model"), runs.get("effort")),
         model_memory.Pick(picked.get("model"), picked.get("effort")),
-        why=model_memory.Pick(why.get("model"), why.get("effort")),
+        why=model_memory.Pick(rungs.get("model"), rungs.get("effort")),
     )
 
 

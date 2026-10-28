@@ -50,7 +50,9 @@ counts that are sent, each as a salted hash with four coarse traits, like any ot
 said wherever sharing is switched on: in the question, in the description of the switch in
 Settings ▸ Usage & stats, and when `aisquare metrics share on` turns it on. A project you forgot
 with `project forget --purge` is not counted, shown or sent again, by the sweep or by the Stop
-hook.
+hook. Codex's sessions, which the sweep reads too, are counted on your machine (Usage & stats,
+`aisquare metrics stats`) and never sent: sharing covers Claude Code's alone, its tokens,
+repositories, sessions and accounts.
 
 ## What we never collect
 

@@ -111,7 +111,8 @@ adapter.**
     too), cut into turns by that reader (`AgentTranscript.turns`), each with the slot of the
     home it was found in (`AgentAccounts.transcript_roots`) and the repository it ran in; a
     Codex Stop's row now carries both, and a Stop and a sweep read on from each other; the
-    page and `metrics stats` say "the agents' transcripts", naming none. The doctor's `role
+    page and `metrics stats` say "the agents' transcripts", naming none. Usage sharing stays
+    Claude Code's: Codex sessions are counted locally and never shared. The doctor's `role
     bindings` row asks every agent's home variable, `CODEX_HOME` too, with that agent's own
     connected test and `agents connect <agent>` fix.
   - **Claude Code's alone** (N-A): Remote Control (`AgentCapabilities.remote_control`: a launch

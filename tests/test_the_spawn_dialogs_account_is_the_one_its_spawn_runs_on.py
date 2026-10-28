@@ -245,3 +245,74 @@ def test_the_dialogs_agent_field_says_the_agent_its_spawn_runs_crossing_or_kept_
     ), "typed, so sent"
     assert (receipt.agent.agent, receipt.agent.account_slot) == ("claude-code", home["work"].slot)
     assert (agent_field, label) == ("(role's: Claude Code)", "(default: rank 2 · work)")
+
+
+@pytest.mark.parametrize(
+    ("how", "runs_on", "label"),
+    [
+        ("explicit-claude-code", "work", "(default: rank 2 · work)"),
+        ("binary-claude", "work", "(default: rank 2 · work)"),
+        ("explicit-codex", "codex-a", "(default: headroom · codex-a)"),
+    ],
+)
+def test_the_label_follows_what_the_dialog_sends_not_only_the_agent_it_follows(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    how: str,
+    runs_on: str,
+    label: str,
+) -> None:
+    """tester-43b on #43, (1): with ``coder = fable`` configured and Fable spent on every
+    Claude slot, the default path labels codex-a. Picking *Claude Code* in the Agent field, or
+    typing ``claude`` in Binary, left the label on codex-a while the spawn ran on work: the
+    read was keyed on the agent the form follows, and ``(role's: Claude Code)`` and *Claude
+    Code* are both claude-code, sent as no agent and as claude-code. It is keyed on what the
+    dialog sends, the agent and the Binary among it. An explicit Codex is read as Codex's."""
+    home = _every_claude_week_of_fable_spent(monkeypatch)
+    config = load_config()
+    config.agents.models["claude-code"] = AgentModelSettings(
+        roles={"coder": AgentModelDefault(model="fable", effort="high")}
+    )
+    save_config(config)
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> Any:
+        before = account_field(dialog)[0]
+        if how == "binary-claude":
+            dialog.query_one("#spawn-binary", Input).value = "claude"
+        else:
+            select(dialog, "agent").value = how.removeprefix("explicit-")
+        await settle(pilot)
+        return before, account_field(dialog)[0], dialog.spawn_kwargs()
+
+    before, shown_label, sent = drive(project, scenario)
+    receipt = fleet_service.spawn(project, "coder", **sent)
+
+    assert before == "(default: headroom · codex-a)", "the default path crosses"
+    assert receipt.agent.account_slot == home[runs_on].slot, f"ran on {receipt.agent.account_slot}"
+    assert shown_label == label, "the label names where it ran"
+
+
+def test_a_cleared_model_field_weighs_no_family_where_the_last_pick_would(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """tester-43b's MA: the agent rung's family read without the spawn's own Model field.
+    With the last pick Fable and Fable spent on every Claude slot, a spawn given no model
+    weighs Fable and crosses to codex-a; one whose Model field is cleared runs the account's
+    default, no family, and stays on work, where its label says it runs."""
+    home = _every_claude_week_of_fable_spent(monkeypatch)
+    model_memory.remember(model="fable", effort="high")
+
+    crossed = fleet_service.launch_default(project, "coder").choice.account
+    cleared = fleet_service.launch_default(project, "coder", model="").choice.account
+    receipt = fleet_service.spawn(project, "coder", model="")
+
+    assert crossed is not None and crossed.slot == home["codex-a"].slot
+    assert cleared is not None and cleared.slot == home["work"].slot
+    assert (receipt.agent.agent, receipt.agent.account_slot) == ("claude-code", home["work"].slot)

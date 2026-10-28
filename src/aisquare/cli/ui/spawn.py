@@ -230,6 +230,10 @@ BINARY_SETTLE_S = 0.3
 the Model field and *Extra agent args* rest as long."""
 
 AgentKey = tuple[str, str, str | None, str | None]
+DefaultKey = tuple[str | None, str | None, str | None, str, str]
+"""What the no-account option is read for (:meth:`SpawnDialog._default_inputs`): *Extra agent
+args*' ``--model``, the Model field, the agent and the Binary as the spawn is sent them, and
+the agent the form follows."""
 """What the role's agent is asked for (:meth:`SpawnDialog._agent_key`): the role, the Binary,
 *Extra agent args*' ``--model``, and the Model field as it is sent."""
 
@@ -595,9 +599,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self.project = project
         self._accounts = accounts
         self._launch_default = defaults
-        self._default_key: tuple[str | None, str | None, str | None] | None = None
-        """The ``--model`` of the args, the Model field as sent and the agent, which the
-        no-account option was last read with."""
+        self._default_key: DefaultKey | None = None
+        """What the no-account option was last read with (:meth:`_default_inputs`)."""
         self._default_label = DEFAULT_PENDING
         """The no-account option's label: what the spawn runs on (:func:`default_account_label`)."""
         self._default_noted = False
@@ -1133,17 +1136,12 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         the form holds now, off the UI thread: the registry, the config and, for a headroom
         pick, the usage cache."""
         defaults = self._launch_default
-        agent = self.launch_agent()
-        if defaults is None or agent is None:
+        key = self._default_inputs()
+        if defaults is None or key is None:
             return  # an agent not known yet is read when it lands (:meth:`_follow_agent`)
-        args, model = self._form_args(), self._model_kwarg()
-        self._default_key = key = (harness.model_arg(args), model, agent)
+        self._default_key = key
+        args, model, sent = self._form_args(), key[1], key[2]
         project, role = self.project, self._role
-        # The agent the spawn is sent: none with the Agent field at the role's and no Binary,
-        # so the read asks the spawn's own agent rung, as the spawn does (review r28 of #113,
-        # M1); a Binary names its agent, the one the form follows.
-        binary = self.query_one("#spawn-binary", Input).value.strip()
-        sent = self._value_of("#spawn-agent") or (agent if binary else None)
         self.run_worker(
             lambda: (project.id, role, key, defaults(project, role, args, model, sent)),
             name=DEFAULT_WORKER,
@@ -1152,6 +1150,23 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             exclusive=True,
             exit_on_error=False,
         )
+
+    def _default_inputs(self) -> DefaultKey | None:
+        """What the no-account option is read for, ``None`` before the form knows its agent:
+        *Extra agent args*' ``--model``, the Model field, the agent and the Binary as the spawn
+        is sent them, and the agent the form follows, which names the label's home. The agent
+        sent is none with the Agent field at the role's and no Binary, so the read asks the
+        spawn's own agent rung, as the spawn does (review r28 of #113, M1); a Binary names its
+        agent, the one the form follows. Keyed on the agent the form followed alone, the read
+        was not asked again when the owner picked *Claude Code* over ``(role's: Claude
+        Code)``, which the spawn is sent otherwise, and the label kept the rung's Codex slot
+        while the spawn ran on Claude Code (tester-43b on #43, (1))."""
+        agent = self.launch_agent()
+        if agent is None:
+            return None
+        binary = self.query_one("#spawn-binary", Input).value.strip()
+        sent = self._value_of("#spawn-agent") or (agent if binary else None)
+        return harness.model_arg(self._form_args()), self._model_kwarg(), sent, binary, agent
 
     def _grey_out_manager(self) -> None:
         overlay = self.query_one("#spawn-role", Select).query_one(OptionList)
@@ -1393,7 +1408,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             self._follow_pick(agent)
         self.query_one("#spawn-remote-row").display = self._remote_control(agent)
         self._offer_accounts(agent)
-        if self._default_key is None or self._default_key[2] != agent:
+        if self._default_key != self._default_inputs():
             self._read_default()  # the no-account option is the agent's own pick
         sandboxed = self._sandboxed(agent)
         # One value for every agent replaces the agent's own words, which then hide. The
@@ -2054,8 +2069,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         read again, when they name another model, not on every key typed (review of #424)."""
         if self._current_agent_key() != self._role_agent_asked_for:
             self._agent_inputs_changed()
-        key = (harness.model_arg(self._form_args()), self._model_kwarg(), self.launch_agent())
-        if key != self._default_key:
+        if self._default_inputs() != self._default_key:
             self._read_default()
 
     def _model_kwarg(self) -> str | None:
@@ -2447,7 +2461,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                 project_id == self.project.id and role == self._role and key == self._default_key
             )
             if current and isinstance(default, accounts_service.LaunchDefault):
-                agent = key[2] if isinstance(key, tuple) else None
+                agent = key[4] if isinstance(key, tuple) else None
                 self._label_default(default_account_label(default, self._role, agent))
                 if self._default_noted:
                     self._default_noted = False

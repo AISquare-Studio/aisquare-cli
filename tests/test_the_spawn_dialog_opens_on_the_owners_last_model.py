@@ -239,6 +239,7 @@ def test_the_account_label_reads_the_family_the_spawn_runs(
         project: ProjectInfo | None = None,
         family: str | None = None,
         agent: str | None = None,
+        pick: accounts_service.AgentPick | None = None,
     ) -> accounts_service.LaunchDefault:
         families.append(family)
         return accounts_service.LaunchDefault(accounts_service.AccountChoice(None, None))

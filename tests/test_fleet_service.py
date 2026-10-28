@@ -3008,7 +3008,7 @@ def test_the_dialog_and_the_spawn_read_one_family(
     monkeypatch.setattr(
         accounts_service,
         "launch_default",
-        lambda role, *, project=None, family=None, agent=None: families.append(family),
+        lambda role, *, project=None, family=None, agent=None, pick=None: families.append(family),
     )
     cases = [
         ("reviewer", [], None),

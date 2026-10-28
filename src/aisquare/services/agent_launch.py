@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -186,6 +186,7 @@ def resolve(
     extra_args: list[str] | None = None,
     account: str | None = None,
     measure: bool = True,
+    family: Callable[[], str | None] | None = None,
 ) -> ResolvedAgent:
     """The agent ``role`` launches, its binary and why. ``account`` is the launch's
     ``--account``: the account it names (else the role's bound one) names the agent when
@@ -197,7 +198,11 @@ def resolve(
     ``measure=False`` is for a caller that only DISPLAYS the agent (a doctor row, a printed
     hint): the order alone, no read, so it may differ from what a launch then picks when
     headroom puts a later account's agent first. A UI thread passes neither: it asks in a
-    worker (``cli.ui.spawn``)."""
+    worker (``cli.ui.spawn``).
+
+    ``family`` gives the model family the launch runs on an agent of AISquare's model
+    ladders (a fleet spawn's: ``services.fleet.ladder_family``), asked only when that rung
+    picks: the pick weighs its week as the account's own headroom rung does (#277)."""
     profile = harness.resolve_profile(role, env_overrides=env_overrides, extra_args=extra_args)
     chosen_binary = harness.resolve_binary(role, override=binary)
     try:
@@ -222,7 +227,7 @@ def resolve(
     # agent is the default agent's wrapper, as it always was.
     unpinned = not pinned and chosen_binary.source == "default"
     named = account_agent(account, role) if unpinned else None
-    pick = accounts_pick(measure=measure) if unpinned and not named else None
+    pick = accounts_pick(measure=measure, family=family) if unpinned and not named else None
     choices = (
         (agent, "flag"),
         (bound.agent if bound else None, "role"),
@@ -280,13 +285,20 @@ def account_agent(account: str | None, role: str) -> str | None:
     return claude_accounts.account_agent(account, role=role)
 
 
-def accounts_pick(*, measure: bool = True) -> AgentPick | None:
-    """The accounts rung (``claude_accounts.agent_pick``); ``None`` on any failure, as a
-    damaged store must not prevent launching."""
+def accounts_pick(
+    *, measure: bool = True, family: Callable[[], str | None] | None = None
+) -> AgentPick | None:
+    """The accounts rung (``claude_accounts.agent_pick``), weighing the model family
+    ``family`` gives (:func:`resolve`); ``None`` on any failure, as a damaged store must not
+    prevent launching. A family that cannot be worked out is none: the rung still picks."""
     from aisquare.services import claude_accounts
 
     try:
-        return claude_accounts.agent_pick(measure=measure)
+        weighed = family() if family is not None else None
+    except Exception:
+        weighed = None
+    try:
+        return claude_accounts.agent_pick(measure=measure, family=weighed)
     except Exception:
         return None
 

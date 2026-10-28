@@ -66,6 +66,7 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters import (
     DEFAULT_AGENT,
     adapter_for_binary,
+    adapters,
     get_adapter,
     recorded_adapter,
 )
@@ -4889,7 +4890,14 @@ def spawn(
         chosen = replayed.binary if replayed.source != "default" else None
     try:
         selected = agent_launch.resolve(
-            role, agent=agent, binary=chosen, cwd=project.root, account=account
+            role,
+            agent=agent,
+            binary=chosen,
+            cwd=project.root,
+            account=account,
+            # The agent rung picks before the agent is known: it weighs the family a new spawn
+            # runs on Claude Code, the family the account pick below weighs (#277).
+            family=_rung_family(role, agent_args, model, effort, config) if spec is None else None,
         )
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
@@ -9354,6 +9362,76 @@ def spawn_runs(
         ).runs
     except FleetError:
         return model_memory.Pick()
+
+
+def ladder_family(
+    role: str,
+    agent_args: Sequence[str] = (),
+    *,
+    model: str | None = None,
+    effort: str | None = None,
+    config: FleetSettings | None = None,
+) -> str | None:
+    """The model family a new spawn of ``role`` runs on an agent of AISquare's model ladders
+    (``capabilities.model_ladders``: Claude Code), by :func:`spawn_runs` on it: what a spawn's
+    agent rung weighs, which picks the agent before it is known (``agent_launch.resolve``,
+    ``claude_accounts.agent_pick``, #277). ``None`` for no model (the account's own default)
+    or no such agent."""
+    ladder = next((kind for kind in adapters() if kind.capabilities.model_ladders), None)
+    if ladder is None:
+        return None
+    runs = spawn_runs(role, agent_args, model=model, effort=effort, config=config, agent=ladder.id)
+    return harness.model_family(runs.model)
+
+
+def _rung_family(
+    role: str,
+    agent_args: Sequence[str],
+    model: str | None,
+    effort: str | None,
+    config: FleetSettings | None,
+) -> Callable[[], str | None]:
+    """:func:`ladder_family` for a new spawn, asked by the agent rung only when it picks."""
+    return lambda: ladder_family(role, agent_args, model=model, effort=effort, config=config)
+
+
+def launch_default(
+    project: ProjectInfo,
+    role: str,
+    agent_args: Sequence[str] = (),
+    *,
+    model: str | None = None,
+    agent: str | None = None,
+    config: FleetSettings | None = None,
+) -> claude_accounts_service.LaunchDefault:
+    """What a new :func:`spawn` of ``role`` in ``project`` with no ``--account`` runs on, for a
+    form to show (the Spawn dialog's Account field, ``cli.ui.spawn``), by the spawn's own
+    steps: its agent, ``agent`` else the role's (``agent_launch.resolve``, whose agent rung
+    weighs :func:`ladder_family` as the spawn's does), then that agent's account by
+    ``claude_accounts.launch_default`` (its ``choose``), given the agent rung's pick and the
+    family :func:`spawn_runs` says the spawn runs, as :func:`spawn` gives them. With the Agent
+    field left at the role's, the label read ``choose`` with no pick while the spawn took the
+    agent rung's, which picked with no family: the label named spare, the spawn ran on work
+    (review r28 of #113, M1). An ``agent`` named reaches no agent rung, so there is no pick.
+    ``agent_args`` and ``model`` are the form's, as the spawn takes them. Raises
+    ``claude_accounts.NoSuchAccount`` as the spawn would, and ``ValueError`` for a role whose
+    agent cannot be worked out."""
+    pick: claude_accounts_service.AgentPick | None = None
+    if agent is not None:
+        kind = recorded_adapter(agent) or get_adapter(DEFAULT_AGENT)
+    else:
+        selected = agent_launch.resolve(
+            role, cwd=project.root, family=_rung_family(role, agent_args, model, None, config)
+        )
+        kind, pick = selected.adapter, selected.pick
+    runs = spawn_runs(role, agent_args, model=model, config=config, agent=kind.id)
+    return claude_accounts_service.launch_default(
+        role,
+        project=project,
+        family=harness.model_family(runs.model) if kind.capabilities.model_ladders else None,
+        agent=kind.id,
+        pick=pick,
+    )
 
 
 def role_pin(

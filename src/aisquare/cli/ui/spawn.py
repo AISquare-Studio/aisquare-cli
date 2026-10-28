@@ -354,25 +354,17 @@ def read_launch_default(
     model: str | None = None,
     agent: str | None = None,
 ) -> accounts_service.LaunchDefault:
-    """What a spawn of ``role`` in ``project`` on ``agent`` with no account runs on: the
-    service's ``launch_default``, with the model family ``fleet.spawn`` passes the account pick
-    (#277). The model is the spawn's own answer (``fleet.spawn_runs``) for the form's
-    ``agent_args`` and its Model field as sent (``model``: ``None`` untouched, ``""``
-    cleared), so a ``--model opus`` typed into *Extra agent args* reads that family's week
-    (review of #424) and the label never reads another model than the spawn runs (review of
-    #441). None at all, the agent runs its account's default: no family; and an agent that
-    keeps its own models (``capabilities.model_ladders`` off) runs none of AISquare's."""
-    adapter = recorded_adapter(agent)
-    family = None
-    if adapter is None or adapter.capabilities.model_ladders:
-        runs = fleet_service.spawn_runs(role, agent_args, model=model)
-        family = harness.model_family(runs.model)
-    return accounts_service.launch_default(
-        role,
-        project=project,
-        family=family,
-        agent=adapter.id if adapter is not None else DEFAULT_AGENT,
-    )
+    """What a spawn of ``role`` in ``project`` on ``agent`` with no account runs on, ``agent``
+    ``None`` the role's (the Agent field left at ``(role's: …)``, so no ``--agent``): the
+    spawn's own answer (``fleet.launch_default``), its agent rung and its account pick given
+    the model family ``fleet.spawn`` gives them (#277; review r28 of #113, M1). The model is
+    the spawn's own answer (``fleet.spawn_runs``) for the form's ``agent_args`` and its Model
+    field as sent (``model``: ``None`` untouched, ``""`` cleared), so a ``--model opus`` typed
+    into *Extra agent args* reads that family's week (review of #424) and the label never
+    reads another model than the spawn runs (review of #441). None at all, the agent runs its
+    account's default: no family; and an agent that keeps its own models
+    (``capabilities.model_ladders`` off) runs none of AISquare's."""
+    return fleet_service.launch_default(project, role, agent_args, model=model, agent=agent)
 
 
 def default_account_label(
@@ -1119,8 +1111,13 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         args, model = self._form_args(), self._model_kwarg()
         self._default_key = key = (harness.model_arg(args), model, agent)
         project, role = self.project, self._role
+        # The agent the spawn is sent: none with the Agent field at the role's and no Binary,
+        # so the read asks the spawn's own agent rung, as the spawn does (review r28 of #113,
+        # M1); a Binary names its agent, the one the form follows.
+        binary = self.query_one("#spawn-binary", Input).value.strip()
+        sent = self._value_of("#spawn-agent") or (agent if binary else None)
         self.run_worker(
-            lambda: (project.id, role, key, defaults(project, role, args, model, agent)),
+            lambda: (project.id, role, key, defaults(project, role, args, model, sent)),
             name=DEFAULT_WORKER,
             group=DEFAULT_WORKER,
             thread=True,

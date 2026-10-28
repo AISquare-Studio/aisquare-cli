@@ -3575,6 +3575,7 @@ def agent_pick(
     fetch: Fetch | None = None,
     which: Callable[[str], str | None] | None = None,
     measure: bool = True,
+    family: str | None = None,
 ) -> AgentPick:
     """The agent a launch that nothing pins runs: the agent of the best usable account.
 
@@ -3598,6 +3599,14 @@ def agent_pick(
     left to :func:`choose`, whose last rung is that same first account. ``agent=None`` when no
     account is usable, the registry cannot be read, or this machine has no store yet:
     the launch's fallbacks decide (the user's coding agent under App settings).
+
+    ``family`` is the model family the launch runs on an agent of AISquare's model ladders
+    (``services.fleet.spawn_runs``), when it is known: its week and its limit marks weigh the
+    accounts as :func:`choose`'s headroom rung weighs them (#277), so an account whose week
+    of that family is spent is not the pick this rung hands :func:`choose`, which took it
+    (review r28 of #113, M1: the Spawn dialog's label named spare, the spawn ran on work).
+    Only those agents' accounts record family weeks or family marks, so the one family
+    weighs no other agent's account.
     """
     if not paths.db_path().exists():
         return AgentPick(None, None)
@@ -3618,6 +3627,7 @@ def agent_pick(
         switch_at=settings.switch_at,
         fetch=fetch,
         max_age=PICK_MAX_AGE_SECONDS,
+        family=family,
         prefer=settings.prefer,
         unread_keeps_place=True,
     )

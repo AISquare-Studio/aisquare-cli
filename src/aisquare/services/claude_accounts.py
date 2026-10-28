@@ -714,7 +714,7 @@ def choose(
     the model was known), when the headroom rung reads as usual; every rung above it
     still wins.
 
-    ``family`` is the launch's model family (``core.harness.launch_family``), for the
+    ``family`` is the launch's model family (``services.fleet.spawn_runs``), for the
     headroom rung's per-family weeks and limit marks (#277). ``max_age`` is how deep a
     launch's headroom rung reads the cache, :data:`PICK_MAX_AGE_SECONDS` when unsaid: a
     form that only SHOWS the pick reads the shared five minutes (:func:`launch_default`).

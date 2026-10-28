@@ -2554,8 +2554,6 @@ def _account_default_checks(agent: str) -> list[DoctorCheck]:
     return checks
 
 
-#: A binding's variables that point Claude Code at a directory: its config directory,
-#: whose ``settings.json`` must carry aisquare's hooks, and its temp directory.
 def _check_role_bindings() -> list[DoctorCheck]:
     """``role bindings``: each role a binding points at another agent home runs one that
     works (#98; SCOPE #113 091, item 14).

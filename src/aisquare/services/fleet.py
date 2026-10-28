@@ -69,10 +69,12 @@ from aisquare.core.agent_adapters import (
     get_adapter,
     recorded_adapter,
 )
+from aisquare.core.agent_adapters.native_models import configured as configured_models
 from aisquare.core.agent_adapters.types import (
     AgentAdapter,
     AgentScreen,
     ForkArgs,
+    NativeChoice,
     PermissionIntent,
     fleet_extra_args,
     option_values,
@@ -4922,11 +4924,12 @@ def spawn(
         # session choices were left out of it still holds them, and the board session
         # its hook joined is what shows the binary to be that agent's whatever its name.
         extra = _without_session_choice(resolution.binary, extra, family=family)
-    # The model and the effort of an agent whose models are AISquare's to choose
-    # (``capabilities.model_ladders``): what this spawn chose, else the role's settings, else
-    # the owner's last pick, else nothing (the account's own default); a replay starts what the
-    # agent runs now (#441). Asked before the account, whose pick reads the model's family
-    # (#277). The role's ladder is no longer passed: another agent's pins are validated below.
+    # The model and the effort: what this spawn chose, else the role's settings, else
+    # `[agents.models.<agent>]`, else the owner's last pick, else nothing (the account's own
+    # default); a replay starts what the agent runs now (#441). Asked before the account, whose
+    # pick reads the model's family (#277). The role's ladder is no longer passed, nor its
+    # `AISQUARE_MODEL_<ROLE>` pins (review r28 of #113, M1): another agent's choice is
+    # validated below.
     models = _model_choice(
         role,
         resolution.binary,
@@ -4983,40 +4986,11 @@ def spawn(
         arguments = agent_launch.prepare_arguments(
             selected, [*defaults.args, *bound, *role_args], extra
         )
-        # The role's ladder and pins, as `team spawn` resolves them (`team harness`).
-        model_resolution = agent_launch.launch_model_for(selected, role, arguments)
-        if spec is None and selected.adapter.capabilities.model_ladders:
-            # No ladder for an agent whose pick is the owner's (#441), but the owner's own
-            # settings for the role (`[agents.models.<agent>]`, `AISQUARE_MODEL_<ROLE>`) are
-            # the role's: they win over the last pick, and a pick this spawn made wins over
-            # them (a cleared field is no pick).
-            configured = agent_launch.launch_model_for(selected, role, arguments, ladder=True)
-            if configured is not None:
-                pins = {
-                    "model": configured.source in {"configured", "pinned"},
-                    "effort": configured.effort_source in {"configured", "pinned"},
-                }
-                chose = {"model": bool(models.picked.model), "effort": bool(models.picked.effort)}
-                use = {name: pins[name] and not chose[name] for name in pins}
-                if any(use.values()):
-                    model_resolution = configured.model_copy(
-                        update={
-                            "model": configured.model if use["model"] else "",
-                            "effort": configured.effort if use["effort"] else "",
-                        }
-                    )
-                    models = replace(
-                        models,
-                        added=model_memory.Pick(
-                            None if use["model"] else models.added.model,
-                            None if use["effort"] else models.added.effort,
-                        ),
-                        runs=model_memory.Pick(
-                            configured.model if use["model"] else models.runs.model,
-                            configured.effort if use["effort"] else models.runs.effort,
-                        ),
-                    )
-        elif spec is None and model_resolution is not None:
+        # Another agent's `[agents.models.<agent>]`, validated and in its own words, with no
+        # `AISQUARE_MODEL_<ROLE>` (`_configured`); none for an agent with AISquare's ladders,
+        # whose flags `_model_choice` worked out (#441).
+        model_resolution = agent_launch.launch_model_for(selected, role, arguments, env_pins=False)
+        if spec is None and model_resolution is not None:
             # An agent that keeps its own models: the pick, this spawn's or its last, through
             # its own model slot (SCOPE #113 091, item 2).
             model_resolution = _own_pick(model_resolution, models)
@@ -9071,25 +9045,31 @@ def _model_choice(
     ``model`` / ``effort`` (the Spawn dialog's fields: a value is a pick, ``""`` the
     account's default), then the role's settings (its ``extra_args``, ``role_args``, or its
     binding's arguments), then the owner's last pick (``model_memory.remembered``), whatever
-    the role. With none, no flag: Claude Code runs the account's own default. A flag this
-    spawn chose replaces the role's, and ``aisquare launch`` drops the binding's beside it
-    (no flag is passed twice); it is the next pick. The role's settings are that role's
-    alone, and never the pick. An empty ``--model`` or ``--effort`` in ``extra`` is refused:
-    only the dialog's cleared field asks for the account's default (seq 3424, b).
+    the role. With none, no flag: Claude Code runs the account's own default. Between the
+    role's settings and the last pick, ``[agents.models.<agent>]`` (:func:`_configured`), for
+    every agent; never ``AISQUARE_MODEL_<ROLE>`` / ``AISQUARE_EFFORT_<ROLE>``, as on main
+    (#441): computed here, so the spawn, the Spawn dialog's label and headroom family
+    (:func:`spawn_runs`, #277) and its shown pin (:func:`role_pin`) give one answer (review r28
+    of #113, M1). A flag this spawn chose replaces the role's, and ``aisquare launch`` drops
+    the binding's beside it (no flag is passed twice); it is the next pick. The role's
+    settings are that role's alone, and never the pick. An empty ``--model`` or ``--effort`` in
+    ``extra`` is refused: only the dialog's cleared field asks for the account's default (seq
+    3424, b).
 
-    A cleared field (``""``) over a role whose settings pin that flag is no choice at all:
-    the pin runs. A replay given ``model`` / ``effort`` (``fleet restart … --model``) runs
-    it, for that agent alone. Otherwise a replay of ``spec`` (restart, switch, hand-over,
-    and a fork as the same role; a fork as another role is a new spawn of that role) keeps
-    what the agent was actually running (``running.now``, its hooks' last reading,
-    ``model_memory.observe``), the account's default included, on any account
-    (:func:`_moved`), in place of the recorded flag and the binding's; the recorded flag
-    stays where it already runs that (an alias and the id its session reported for it, a
-    mode alias and its models). A replay remembers
+    A cleared field (``""``) over a role whose settings pin that flag, or a
+    ``[agents.models.<agent>]`` pin, is no choice at all: the pin runs. A replay given
+    ``model`` / ``effort`` (``fleet restart … --model``) runs it, for that agent alone.
+    Otherwise a replay of ``spec`` (restart, switch, hand-over, and a fork as the same role; a
+    fork as another role is a new spawn of that role) keeps what the agent was actually
+    running (``running.now``, its hooks' last reading, ``model_memory.observe``), the
+    account's default included, on any account (:func:`_moved`), in place of the recorded
+    flag and the binding's; the recorded flag stays where it already runs that (an alias and
+    the id its session reported for it, a mode alias and its models). A replay remembers
     nothing. An agent whose models are not AISquare's to choose (no
-    ``capabilities.model_ladders``) gets nothing added in these flags: its adapter's pins are
-    its own, and a new spawn's pick (its own native arguments', else ``model`` / ``effort``)
-    and its last pick (``kept``) are given to its own model slot (:func:`_own_pick`).
+    ``capabilities.model_ladders``) gets nothing added in these flags: a new spawn's pick (its
+    own native arguments', else ``model`` / ``effort``), its ``[agents.models.<agent>]`` and its
+    last pick (``kept``) are given to its own model slot (:func:`_own_pick`), and ``runs`` is
+    what that passes (:func:`_own_runs`).
     """
     role_args, extra = list(role_args), list(extra)
     kind = adapter or adapter_for_binary(binary)
@@ -9099,19 +9079,17 @@ def _model_choice(
         if kind is None or spec is not None:
             return _ModelChoice(role_args, extra, model_memory.Pick(), ran, model_memory.Pick())
         native = kind.native_choice(extra)
-        return _ModelChoice(
-            role_args,
-            extra,
-            model_memory.Pick(),
-            ran,
-            model_memory.Pick(
-                native.model if native.model is not None else model,
-                native.effort if native.effort is not None else effort,
-            ),
-            model_memory.remembered(agent=kind.id),
+        chose = model_memory.Pick(
+            native.model if native.model is not None else model,
+            native.effort if native.effort is not None else effort,
         )
+        kept = model_memory.remembered(agent=kind.id)
+        passed = kind.native_choice([*harness.binding_args(role), *role_args, *extra])
+        own = _own_runs(passed, chose, _configured(kind, role), kept)
+        return _ModelChoice(role_args, extra, model_memory.Pick(), own, chose, kept)
     bound = harness.binding_args(role)
     remembered = model_memory.remembered() if spec is None else model_memory.Pick()
+    pinned = _configured(kind, role) if spec is None else model_memory.Pick()
     added: dict[str, str | None] = {}
     runs: dict[str, str | None] = {}
     picked: dict[str, str | None] = {}
@@ -9146,9 +9124,10 @@ def _model_choice(
             )
         asked = typed if typed is not None else given
         of_role = harness.flag_arg(role_args, flag)
-        if asked == "" and (of_role is not None or of_binding is not None):
+        of_config = getattr(pinned, name)
+        if asked == "" and (of_role is not None or of_binding is not None or of_config):
             # A cleared field is no pick, and the role's settings win over the pick: over a
-            # pin, of either kind, the pin runs and the pick is left alone (review of #441,
+            # pin, of any kind, the pin runs and the pick is left alone (review of #441,
             # round 2, minor 2).
             asked = None
         if asked is not None:
@@ -9158,6 +9137,13 @@ def _model_choice(
             picked[name] = asked
         elif of_role is not None or of_binding is not None:
             runs[name] = of_role or of_binding
+        elif of_config:
+            if name == "effort":
+                try:
+                    kind.validate(None, of_config)
+                except ValueError as exc:
+                    raise FleetError(str(exc)) from exc
+            added[name] = runs[name] = of_config
         else:
             added[name] = runs[name] = getattr(remembered, name)
     return _ModelChoice(
@@ -9169,14 +9155,49 @@ def _model_choice(
     )
 
 
+def _configured(adapter: AgentAdapter, role: str) -> model_memory.Pick:
+    """The model and effort ``[agents.models.<agent>]`` names for ``role`` (its seat, its base
+    role, the agent's own: ``native_models.configured``), each ``None`` for none: a new
+    spawn's, under its own pick and its role's settings, over the owner's last pick, for
+    every agent. Never ``AISQUARE_MODEL_<ROLE>`` / ``AISQUARE_EFFORT_<ROLE>``, which reach
+    ``team spawn``, ``team harness`` and a hand ``aisquare launch``, never a fleet spawn, as
+    on main since #441 (manager decision on review r28 of #113, M1)."""
+    return model_memory.Pick(*configured_models(adapter.id, role))
+
+
+def _own_runs(
+    named: NativeChoice,
+    picked: model_memory.Pick,
+    pinned: model_memory.Pick,
+    kept: model_memory.Pick,
+) -> model_memory.Pick:
+    """What a new spawn of an agent that keeps its own models runs (:func:`_model_choice`'s
+    ``runs``), each of the model and the effort on its own, as its argv passes it: what its
+    native arguments name (``named``: the binding's, the role's, the spawn's), else this
+    spawn's pick, else ``[agents.models.<agent>]`` (``pinned``), else its last pick (``kept``),
+    else its own default (``None``). A cleared field (``""``) is no pick, and forgets the last:
+    the pin runs, else its default. :func:`_own_pick` and ``agent_launch.resolved_model_args``
+    give its argv the same order."""
+
+    def one(name: str) -> str | None:
+        chose = getattr(picked, name)
+        for value in (getattr(named, name), chose, getattr(pinned, name)):
+            if value:
+                return str(value)
+        return getattr(kept, name) if chose is None else None
+
+    return model_memory.Pick(one("model"), one("effort"))
+
+
 def _own_pick(resolution: harness.ModelResolution, models: _ModelChoice) -> harness.ModelResolution:
     """What a new spawn gives the model slot (``AgentAdapter.model_args``) of an agent that
     keeps its own models (no ``capabilities.model_ladders``: Codex), each of the model and the
     effort on its own: this spawn's pick (the Spawn dialog's field) over its configured pins
-    (``[agents.models.<agent>]``, ``AISQUARE_MODEL_<ROLE>``: ``resolution``), those over its
-    own last pick (``models.kept``), as Claude Code's are (#441). A cleared field (``""``) is
-    no pick: the pins run, else its default. What its native arguments name wins over all of
-    it (``agent_launch.resolved_model_args``)."""
+    (``[agents.models.<agent>]``: ``resolution``, read with no ``AISQUARE_MODEL_<ROLE>``), those
+    over its own last pick (``models.kept``), as Claude Code's are (#441). A cleared field
+    (``""``) is no pick: the pins run, else its default. What its native arguments name wins
+    over all of it (``agent_launch.resolved_model_args``). :func:`_own_runs` is the same order,
+    for the answer the Spawn dialog reads (:func:`spawn_runs`)."""
     update: dict[str, str] = {}
     for name, source in (("model", "source"), ("effort", "effort_source")):
         chose, kept = getattr(models.picked, name), getattr(models.kept, name)
@@ -9285,23 +9306,34 @@ def spawn_runs(
     effort: str | None = None,
     binary: str | None = None,
     config: FleetSettings | None = None,
+    agent: str | None = None,
 ) -> model_memory.Pick:
     """The model and effort a new spawn of ``role`` runs (``None`` each: the account's own
     default), worked out by the spawn's own rule (:func:`_model_choice`), with ``agent_args``
-    and the Spawn dialog's ``model`` / ``effort`` as :func:`spawn` takes them. The ONE
-    answer the dialog's account label reads, for the family a headroom pick reads (#277),
-    so the two never disagree (review of #441, round 2, minor 1). An empty flag in
-    ``agent_args``, which the spawn refuses, runs nothing."""
+    and the Spawn dialog's ``model`` / ``effort`` as :func:`spawn` takes them, on ``agent``
+    (else the agent ``binary`` runs, the role's own binary by default). The ONE answer the
+    dialog's account label reads, for the family a headroom pick reads (#277), so the two
+    never disagree (review of #441, round 2, minor 1; review r28 of #113, M1). An empty flag
+    in ``agent_args``, which the spawn refuses, runs nothing."""
+    binary = binary or harness.resolve_binary(role).binary
+    kind = (recorded_adapter(agent) if agent is not None else None) or adapter_for_binary(binary)
+    settings = role_settings(role, config)
+    role_args = (
+        fleet_extra_args(kind, settings.extra_args, settings.agent_args)
+        if kind is not None
+        else list(settings.extra_args)
+    )
     try:
         return _model_choice(
             role,
-            binary or harness.resolve_binary(role).binary,
-            role_settings(role, config).extra_args,
+            binary,
+            role_args,
             agent_args,
             spec=None,
             running=None,
             model=model,
             effort=effort,
+            adapter=kind,
         ).runs
     except FleetError:
         return model_memory.Pick()
@@ -9310,20 +9342,32 @@ def spawn_runs(
 def role_pin(
     role: str, config: FleetSettings | None = None, *, agent: str | None = None
 ) -> model_memory.Pick:
-    """The model and effort ``role``'s settings pin (``[fleet.roles.<role>] extra_args``, else
-    its binding's ``--arg``), which a spawn of it runs over the owner's last pick; ``None``
-    each for none. The Spawn dialog shows them for that role. On an ``agent`` that keeps its
-    own models (no ``capabilities.model_ladders``: Codex), what the arguments a spawn of it
-    passes choose, in its own words (its ``agent_args``, ``AgentAdapter.native_choice``),
-    never Claude Code's ``extra_args``."""
+    """The model and effort ``role``'s settings pin (``[fleet.roles.<role>]``'s arguments for
+    the agent, else its binding's ``--arg``), else ``[agents.models.<agent>]``
+    (:func:`_configured`), which a spawn of it runs over the owner's last pick
+    (:func:`_model_choice`); ``None`` each for none. The Spawn dialog shows them for that
+    role. On an ``agent`` that keeps its own models (no ``capabilities.model_ladders``:
+    Codex), what the arguments a spawn of it passes choose, in its own words (its
+    ``agent_args`` over its binding's, as ``AgentAdapter.merged_args`` passes them;
+    ``AgentAdapter.native_choice``), never Claude Code's ``extra_args``. ``agent`` ``None`` is
+    the default agent."""
     settings = role_settings(role, config)
-    adapter = recorded_adapter(agent) if agent is not None else None
+    adapter = recorded_adapter(agent)
+    pinned = _configured(adapter, role) if adapter is not None else model_memory.Pick()
+    bound = harness.binding_args(role)
     if adapter is not None and not adapter.capabilities.model_ladders:
         own = fleet_extra_args(adapter, settings.extra_args, settings.agent_args)
-        chosen = adapter.native_choice([*own, *harness.binding_args(role)])
-        return model_memory.Pick(chosen.model, chosen.effort)
-    args = [*settings.extra_args, *harness.binding_args(role)]
-    return model_memory.Pick(harness.model_arg(args), harness.effort_arg(args))
+        chosen = adapter.native_choice([*bound, *own])
+        return model_memory.Pick(chosen.model or pinned.model, chosen.effort or pinned.effort)
+    own = (
+        fleet_extra_args(adapter, settings.extra_args, settings.agent_args)
+        if adapter is not None
+        else list(settings.extra_args)
+    )
+    args = [*own, *bound]
+    return model_memory.Pick(
+        harness.model_arg(args) or pinned.model, harness.effort_arg(args) or pinned.effort
+    )
 
 
 def _board_context(

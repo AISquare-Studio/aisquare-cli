@@ -113,18 +113,25 @@ def test_codex_effort_is_normalized_in_cli_and_environment(
     assert f'model_reasoning_effort="{expected}"' in json.loads(spawned.stdout)["command"]
 
 
+@pytest.mark.parametrize(
+    "agent, refusal", [("codex", "reasoning effort"), ("claude-code", "does not support effort")]
+)
 def test_bad_native_effort_cannot_create_a_worktree_window_or_live_row(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    agent: str, refusal: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("AISQUARE_EFFORT_CODER", "not a level")
+    # The fleet's own pin, for either agent: `AISQUARE_EFFORT_<ROLE>` reaches no fleet spawn
+    # (review r28 of #113, M1), `[agents.models.<agent>]` does.
+    config = load_config()
+    config.agents.models[agent] = AgentModelSettings(effort="not a level")
+    save_config(config)
     tmux = FakeTmux()
     monkeypatch.setattr(fleet, "server", lambda config: tmux)
     monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/agent")
     worktree = Mock(side_effect=AssertionError("worktree created before validation"))
     monkeypatch.setattr(fleet, "_worktree_for", worktree)
     project = team_project(tmp_path)
-    with pytest.raises(fleet.FleetError, match="reasoning effort"):
-        fleet.spawn(project, "coder", agent="codex", worktree=True)
+    with pytest.raises(fleet.FleetError, match=refusal):
+        fleet.spawn(project, "coder", agent=agent, worktree=True)
     assert not tmux.spawned and not worktree.called
     with store_session() as store:
         assert not store.fleet_agents(project.id)

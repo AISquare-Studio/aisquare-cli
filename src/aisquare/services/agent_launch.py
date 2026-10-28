@@ -371,7 +371,12 @@ def model_for(
     refresh: bool = False,
     effort: str | None = None,
     raw_args: list[str] | NativeArguments | None = None,
+    env_pins: bool = True,
 ) -> harness.ModelResolution | None:
+    """The model and effort ``selected`` runs as ``role``, by its adapter's
+    ``resolve_model``, what ``raw_args`` name natively over it. ``env_pins`` off reads it with
+    no ``AISQUARE_MODEL_<ROLE>`` / ``AISQUARE_EFFORT_<ROLE>``, in the shell's environment or
+    the binding's: a fleet spawn's (:func:`launch_model_for`)."""
     if effort is not None:
         if not effort.strip():
             raise BadEffortError("--effort requires a reasoning level, not an empty value")
@@ -379,6 +384,9 @@ def model_for(
     arguments = _arguments(selected, raw_args)
     model, native_effort = arguments.model, arguments.effort
     effective = {**os.environ, **selected.profile.env}
+    if not env_pins:
+        for kind in ("MODEL", "EFFORT"):
+            effective.pop(harness.role_env_key(kind, role), None)
     if model is not None:
         effective[harness.role_env_key("MODEL", role)] = model
     result = selected.adapter.resolve_model(
@@ -460,21 +468,24 @@ def launch_model_for(
     raw_args: list[str] | NativeArguments,
     *,
     ladder: bool = False,
+    env_pins: bool = True,
 ) -> harness.ModelResolution | None:
     """The model and effort a launch passes, never probing (no paid call at a launch).
 
-    ``ladder`` is ``fleet spawn``'s, which resolves the role as ``team spawn`` does
-    (``team harness`` reports it) for every agent: one with AISquare's ladders (Claude
-    Code) walks its role's ladder on the cached probe verdicts, else takes its first
-    rung (Claude Code runs its own default in place of a model the account lacks), under
-    its pins (``AISQUARE_MODEL_<ROLE>``, ``[agents.models.<agent>]``). A hand ``aisquare
-    launch`` of such an agent passes nothing, its argv as it always was; another agent
-    takes its configured pins there too. What the native arguments already choose wins
-    (:func:`resolved_model_args`)."""
+    ``ladder`` is ``team spawn``'s (``team harness`` reports it) for every agent: one with
+    AISquare's ladders (Claude Code) walks its role's ladder on the cached probe verdicts,
+    else takes its first rung (Claude Code runs its own default in place of a model the
+    account lacks), under its pins (``AISQUARE_MODEL_<ROLE>``, ``[agents.models.<agent>]``).
+    Without it, such an agent passes nothing: a hand ``aisquare launch`` its argv as it always
+    was, and a fleet spawn the flags ``fleet._model_choice`` works out (#441). Another agent
+    takes its pins at either. ``env_pins`` off is a fleet spawn's, which takes no
+    ``AISQUARE_MODEL_<ROLE>`` / ``AISQUARE_EFFORT_<ROLE>`` for any agent, as on main for Claude
+    Code (review r28 of #113, M1): ``[agents.models.<agent>]`` alone. What the native
+    arguments already choose wins (:func:`resolved_model_args`)."""
     arguments = _arguments(selected, raw_args)
     if selected.adapter.capabilities.model_ladders and not ladder:
         return None
-    return model_for(selected, role, probe=False, raw_args=arguments)
+    return model_for(selected, role, probe=False, raw_args=arguments, env_pins=env_pins)
 
 
 def resolved_model_args(

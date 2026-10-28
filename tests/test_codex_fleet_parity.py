@@ -37,7 +37,7 @@ from aisquare.cli.app import app
 from aisquare.cli.ui.views.agent import key_spellings
 from aisquare.cli.ui.views.app_settings import launch_line
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core import launch_seal
+from aisquare.core import harness, launch_seal
 from aisquare.core.agent_adapters import codex_config, get_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, prepare_store, screen_of, store_dir
 from aisquare.core.config import (
@@ -69,6 +69,7 @@ from aisquare.services import (
     diagnostics,
     model_memory,
 )
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
 from aisquare.services import team as team_service
@@ -2633,6 +2634,132 @@ def test_fleet_spawn_passes_the_roles_model_and_effort_for_both_agents(
     fleet_service.spawn(project, "coder", agent="claude-code")
     pinned = _spawn_native(tmux)
     assert (_pair(pinned, "--model"), _pair(pinned, "--effort")) == ("opus", "xhigh")
+
+
+#: What ``[agents.models.<agent>]`` and the last pick name, per agent, in the tests below.
+_CONFIGURED = {"claude-code": "opus", "codex": "gpt-test"}
+_LAST = {"claude-code": "sonnet", "codex": "gpt-last"}
+
+
+@pytest.mark.parametrize("last", [False, True], ids=["no-last-pick", "last-pick"])
+@pytest.mark.parametrize("pin", ["env", "configured", "none"])
+@pytest.mark.parametrize("agent", ["claude-code", "codex"])
+def test_a_fleet_spawn_runs_what_its_label_and_shown_pin_say_for_both_agents(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    agent: str,
+    pin: str,
+    last: bool,
+) -> None:
+    """Review r28 of #113, M1 (manager decision): one order for both agents, worked out in
+    ``_model_choice``: the spawn's own pick, then ``[agents.models.<agent>]``, then that
+    agent's last pick, then no flag. ``AISQUARE_MODEL_<ROLE>`` / ``AISQUARE_EFFORT_<ROLE>``
+    reach no fleet spawn, as on main since #441 (they reach ``team spawn``). What the argv
+    passes is what ``spawn_runs`` says (the Spawn dialog's account label), the family the
+    spawn's account pick weighs (#277), and, for a pin, what ``role_pin`` shows. Claude Code
+    with no ``[agents.models]`` is main's: no flag, or the last pick."""
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
+    if pin == "configured":
+        config.agents.models[agent] = AgentModelSettings(
+            roles={"coder": AgentModelDefault(model=_CONFIGURED[agent], effort="high")}
+        )
+    save_config(config)
+    if pin == "env":
+        monkeypatch.setenv("AISQUARE_MODEL_CODER", "env-model")
+        monkeypatch.setenv("AISQUARE_EFFORT_CODER", "low")
+    if last:
+        model_memory.remember(model=_LAST[agent], effort="medium", agent=agent)
+    families: list[str | None] = []
+    choose = accounts_service.choose
+
+    def weighed(*args: Any, **kwargs: Any) -> accounts_service.AccountChoice:
+        families.append(kwargs.get("family"))
+        return choose(*args, **kwargs)
+
+    monkeypatch.setattr(accounts_service, "choose", weighed)
+    adapter = get_adapter(agent)
+
+    runs = fleet_service.spawn_runs("coder", agent=agent)
+    shown = fleet_service.role_pin("coder", agent=agent)
+    fleet_service.spawn(project, "coder", agent=agent)
+    argv = _spawn_native(tmux)
+
+    ran = adapter.native_choice(argv)
+    if pin == "configured":
+        expected: tuple[str | None, str | None] = (_CONFIGURED[agent], "high")
+    elif last:
+        expected = (_LAST[agent], "medium")
+    else:
+        expected = (None, None)
+    assert (ran.model, ran.effort) == expected, argv
+    assert (runs.model, runs.effort) == expected, "the label reads what the spawn passes"
+    assert not {"env-model", "low"} & set(argv), "no env pin reaches a fleet spawn"
+    pinned = expected if pin == "configured" else (None, None)
+    assert (shown.model, shown.effort) == pinned, "the dialog shows the pin that runs"
+    weighs = harness.model_family(runs.model) if adapter.capabilities.model_ladders else None
+    assert families == [weighs], "the account pick weighs the family the label reads"
+
+
+@pytest.mark.parametrize("pin", ["configured", "none"])
+@pytest.mark.parametrize("agent", ["claude-code", "codex"])
+def test_a_cleared_field_runs_the_pin_else_the_agents_default_never_the_last_pick(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    agent: str,
+    pin: str,
+) -> None:
+    """The Spawn dialog's cleared Model and Effort (``""``) are no pick: over a
+    ``[agents.models.<agent>]`` pin the pin runs, and with none the agent's own default, never
+    the last pick, the same for both agents, and ``spawn_runs`` says so (review r28 of #113,
+    M1)."""
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
+    if pin == "configured":
+        config.agents.models[agent] = AgentModelSettings(model=_CONFIGURED[agent], effort="high")
+    save_config(config)
+    model_memory.remember(model=_LAST[agent], effort="medium", agent=agent)
+
+    runs = fleet_service.spawn_runs("coder", model="", effort="", agent=agent)
+    fleet_service.spawn(project, "coder", agent=agent, model="", effort="")
+    argv = _spawn_native(tmux)
+
+    ran = get_adapter(agent).native_choice(argv)
+    expected = (_CONFIGURED[agent], "high") if pin == "configured" else (None, None)
+    assert (ran.model, ran.effort) == (runs.model, runs.effort) == expected, argv
+
+
+@pytest.mark.parametrize("agent", ["claude-code", "codex"])
+def test_the_shown_pin_is_the_roles_arguments_over_its_bindings_as_the_argv_passes_them(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    agent: str,
+) -> None:
+    """The role's own arguments for the agent and its binding's both name a model: the
+    role's runs (``merged_args``, and Claude Code's last ``--model``), and ``role_pin`` and
+    ``spawn_runs`` say the same, ``agent_args`` read for either agent (review r28 of #113, M1:
+    one answer)."""
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(
+        worktree=False, agent_args={agent: ["--model", "role-model"]}
+    )
+    config.team.profiles["coder"] = RoleLaunchProfile(args=["--model", "bound-model"])
+    save_config(config)
+
+    shown = fleet_service.role_pin("coder", agent=agent)
+    runs = fleet_service.spawn_runs("coder", agent=agent)
+    fleet_service.spawn(project, "coder", agent=agent)
+    argv = _spawn_native(tmux)
+
+    assert get_adapter(agent).native_choice(argv).model == "role-model", argv
+    assert shown.model == runs.model == "role-model"
 
 
 def test_a_remembered_pick_is_claude_codes_alone_and_a_codex_spawn_gets_no_flag_of_it(

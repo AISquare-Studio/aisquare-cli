@@ -342,6 +342,31 @@ def test_a_codex_restart_given_an_effort_its_slot_refuses_stops_nothing(
     _as_it_was(tmux, project, row, before)
 
 
+def test_a_claude_code_restart_given_any_effort_passes_it_through_as_main_does(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r30 of #113, n3; tester-43e's mutant E5, the ``model_ladders`` guard dropped.
+    The check before the stop is the model slot's, which an agent that keeps its own models
+    has (Codex's). Claude Code's ``--effort`` is passed as it is given: ``fleet restart
+    coder-1 --effort "x y"`` of a Claude Code coder stops it, starts it and passes ``--effort
+    "x y"`` through, once, as main does; it is refused by nothing here."""
+    row = _spawn_with(project, "claude-code", "nothing")
+
+    assert fleet_service.restart(project, row.label, effort="x y").was_running
+
+    assert tmux.killed, "it was stopped"
+    argv = _window_launched(tmux, CliRunner(), monkeypatch)
+    assert _ran("claude-code", argv)[1] == "x y", argv
+    assert argv.count("--effort") == 1, argv
+    live = fleet_service.list_agents(project, live_only=True)
+    assert [status.agent.label for status in live] == [row.label]
+    assert [status.agent.id for status in live] != [row.id], "a new row runs under its label"
+
+
 @pytest.mark.parametrize(("effort", "native"), [("High", "high"), ("ultracode", "max")])
 def test_a_codex_restart_given_an_effort_its_slot_takes_runs_it(
     tmux: FakeTmux,  # noqa: F811

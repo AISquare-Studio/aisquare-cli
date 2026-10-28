@@ -18,8 +18,10 @@ cite the tests of the shared code they run through (``tests/test_project_fresh.p
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
+from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -36,6 +38,7 @@ from aisquare.services import agent_events, usage_stats
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
+from tests.gemini_shaped_agent import GeminiShapedAdapter
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
 from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     FakeTmux,
@@ -298,6 +301,84 @@ def test_a_codex_launch_s_commands_are_in_no_count_and_a_person_s_are(
     assert unknown.exit_code == 0, unknown.output
     [shared_day] = usage_stats.daily_rollups(date.today(), date.today(), shared_only=True)
     assert shared_day.features == {"cli.task.list": 3}, "an agent unknown here is not shared"
+
+
+class _MarkedThird(GeminiShapedAdapter):
+    """A third agent that marks its tools' shells, as Codex does, and is not in the share."""
+
+    capabilities = dataclasses.replace(
+        GeminiShapedAdapter.capabilities, tool_shell_env="GEMINI_SHAPED_TOOL_CALL"
+    )
+
+
+@pytest.fixture(params=["codex", "third"])
+def started_by_hand(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[tuple[str, dict[str, str]]]:
+    """An agent started by hand (no ``aisquare launch``, so no ``AISQUARE_LAUNCH_AGENT``) and
+    the environment of its tools' shells, as its own mark (``tool_shell_env``) says: Codex's,
+    or a third agent's registered here, so no agent's name is what is read."""
+    from aisquare.core.agent_adapters import get_adapter, register, unregister
+    from aisquare.core.spawn import LAUNCH_AGENT_ENV
+
+    monkeypatch.delenv(LAUNCH_AGENT_ENV, raising=False)
+    third = _MarkedThird()
+    register(third)
+    try:
+        agent = "codex" if request.param == "codex" else third.id
+        for adapter in (get_adapter("codex"), third):
+            assert adapter.capabilities.tool_shell_env is not None
+            monkeypatch.delenv(adapter.capabilities.tool_shell_env, raising=False)
+        mark = get_adapter(agent).capabilities.tool_shell_env
+        assert mark is not None
+        yield agent, {mark: "019a3c2e-thread"}
+    finally:
+        unregister(third.id)
+
+
+def test_a_hand_started_codex_s_commands_are_in_no_count_and_its_task_events_name_it(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    started_by_hand: tuple[str, dict[str, str]],
+) -> None:
+    """Review r29 of #113, m2: only ``AISQUARE_LAUNCH_AGENT`` was read, which ``aisquare
+    launch`` alone exports. A ``codex`` started by hand and hooked by ``agents connect`` joins
+    the board, and its tools' shells carry its ``CODEX_THREAD_ID`` and no launch agent: its
+    ``aisquare task list`` was shared as ``{cli.task.list: 1}``, and a ``task done`` it ran
+    with no ``--as`` was a person's. Each agent's own mark of its tools' shells is read too
+    (``tool_shell_env``, through the adapters: a third agent's is). Where a Claude Code
+    launch's agent and that mark are both in a shell, the one the share leaves out is the
+    answer. A person's at a plain shell and a Claude Code launch's are counted, as before."""
+    from aisquare.core.spawn import LAUNCH_AGENT_ENV
+
+    agent, its_shell = started_by_hand
+    monkeypatch.chdir(project.root)
+    for env in (its_shell, {LAUNCH_AGENT_ENV: "claude-code", **its_shell}):
+        listed = CliRunner().invoke(app, ["task", "list"], env=env)
+        assert listed.exit_code == 0, listed.output
+        _done_in(project, env)
+
+    [day] = usage_stats.daily_rollups(date.today(), date.today())
+
+    assert (day.features, day.fleet.tasks_done) == ({}, 2), "not counted, its tasks done local"
+    assert usage_stats.daily_rollups(date.today(), date.today(), shared_only=True) == []
+    with store_session() as store:
+        marked = store.filtered_events(project.id, kind="task_done")
+    assert [(done.session_id, done.meta) for done in marked] == [
+        (None, {"launch_agent": agent})
+    ] * 2, "its agent's"
+
+    for env in ({}, {LAUNCH_AGENT_ENV: "claude-code"}):
+        result = CliRunner().invoke(app, ["task", "list"], env=env)
+        assert result.exit_code == 0, result.output
+    _done_in(project, {})
+
+    [shared_day] = usage_stats.daily_rollups(date.today(), date.today(), shared_only=True)
+
+    assert shared_day.features == {"cli.task.list": 2, "cli.task.done": 1}
+    assert shared_day.fleet.tasks_done == 1, "a person's"
 
 
 def _done_in(

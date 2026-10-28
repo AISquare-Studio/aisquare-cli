@@ -635,6 +635,27 @@ def tool_shell_homes(env: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(homes))
 
 
+def run_agents(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    """The agents a command run in ``env`` (this process's by default) runs under: its
+    launch's (:data:`LAUNCH_AGENT_ENV`, which ``aisquare launch`` exports to the agent and so
+    to its tools' shells), then every registered agent whose tool shell ``env`` is (one
+    holding its ``AgentCapabilities.tool_shell_env``, which the agent sets in its tools'
+    shells alone: Codex's ``CODEX_THREAD_ID``). A ``codex`` started by hand and hooked by
+    ``agents connect`` runs its tools with no launch agent, and its board commands read as a
+    person's at a shell (review r29 of #113, m2). Empty for a person's, at a shell no agent
+    started."""
+    from aisquare.core.agent_adapters import adapters
+
+    source = os.environ if env is None else env
+    launch = source.get(LAUNCH_AGENT_ENV, "").strip()
+    shells = (
+        adapter.id
+        for adapter in adapters()
+        if adapter.capabilities.tool_shell_env and source.get(adapter.capabilities.tool_shell_env)
+    )
+    return tuple(dict.fromkeys(agent for agent in (launch, *shells) if agent))
+
+
 def tmux_client_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     """What a tmux client runs with: :func:`untraced_env` less :data:`TEAM_ENV_VARS`, every
     agent's process identity (:func:`agent_identity_env_vars`) and, from an agent's tool

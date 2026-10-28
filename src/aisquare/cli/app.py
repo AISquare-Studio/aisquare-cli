@@ -9,7 +9,6 @@ the same refusal is one JSON object, because there stdout belongs to a program.
 from __future__ import annotations
 
 import json
-import os
 from typing import Annotated, Any
 
 import typer
@@ -44,7 +43,6 @@ from aisquare.cli import config as config_cli
 from aisquare.cli import metrics as metrics_cli
 from aisquare.cli.global_flags import DISPATCHED_WORDS, GlobalFlagsGroup
 from aisquare.core import feature_use, sharing
-from aisquare.core.spawn import LAUNCH_AGENT_ENV
 from aisquare.core.state import RuntimeState, get_state, set_state
 from aisquare.core.version import __version__
 
@@ -192,25 +190,26 @@ def _count_command(ctx: typer.Context) -> None:
 
 
 def _launch_usage_shared() -> bool:
-    """Whether a command run here may be counted: one a person runs (no launch's agent in its
-    environment), or one run in the launch of an agent whose usage is shared
-    (``services.usage_stats.shared_usage``: Claude Code's). A launch exports its agent
-    (``AISQUARE_LAUNCH_AGENT``) to the agent and so to its tools' shells, and the broker of a
-    sandboxed agent runs the board calls it is handed in the launch's environment: a Codex
-    agent's ``aisquare task done``, run there or through its broker, is in no count (owner,
-    2026-10-27; tester-42 on #42).
+    """Whether a command run here may be counted: one a person runs (no agent's run in its
+    environment), or one run under an agent whose usage is shared
+    (``services.usage_stats.shared_usage``: Claude Code's), by ``usage_stats.run_agent``. A
+    launch exports its agent (``AISQUARE_LAUNCH_AGENT``) to the agent and so to its tools'
+    shells, and the broker of a sandboxed agent runs the board calls it is handed in the
+    launch's environment: a Codex agent's ``aisquare task done``, run there or through its
+    broker, is in no count (owner, 2026-10-27; tester-42 on #42). Nor is one run in the tool
+    shell of an agent started by hand, which no launch marks: each agent's own mark of its
+    tools' shells says it (``AgentCapabilities.tool_shell_env``: Codex's ``CODEX_THREAD_ID``;
+    review r29 of #113, m2).
 
     Not counted locally either: the counters are one table (``feature_use``), and every build
     that shares the store ships each row of it, 0.9.1's among them, so a count kept there is
     a count shared. A count of its own would need a table of its own, a schema step, for
     names alone; and what an agent runs by its board's protocol is no feature the person
     chose, as a hook or the MCP server is not (:data:`_NOT_FEATURES`)."""
-    agent = os.environ.get(LAUNCH_AGENT_ENV, "").strip()
-    if not agent:
-        return True
-    from aisquare.services.usage_stats import shared_usage
+    from aisquare.services.usage_stats import run_agent, shared_usage
 
-    return shared_usage(agent)
+    agent = run_agent()
+    return agent is None or shared_usage(agent)
 
 
 def _no_arguments(ctx: typer.Context) -> None:

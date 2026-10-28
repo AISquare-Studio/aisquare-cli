@@ -48,7 +48,7 @@ import json
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from datetime import time as day_time
@@ -1297,6 +1297,19 @@ def shared_usage(agent: str | None) -> bool:
 
     adapter = recorded_adapter(agent)
     return adapter is not None and adapter.capabilities.usage_shared
+
+
+def run_agent(env: Mapping[str, str] | None = None) -> str | None:
+    """The agent a command run in ``env`` (this process's by default) is counted as, of those
+    it runs under (``core.spawn.run_agents``: its launch's, and that of any agent whose tool
+    shell it is): the first whose usage is not shared (:func:`shared_usage`), else the
+    first; ``None`` for a person's, at a shell no agent started. Where two disagree (a launch
+    started in another agent's tool shell, or an agent started by hand in a launch's), the
+    one the share leaves out is the answer, so nothing an unshared agent ran is shared."""
+    from aisquare.core.spawn import run_agents
+
+    agents = run_agents(env)
+    return next((agent for agent in agents if not shared_usage(agent)), next(iter(agents), None))
 
 
 def _fleet_days(

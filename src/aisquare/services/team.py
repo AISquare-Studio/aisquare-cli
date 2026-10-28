@@ -45,7 +45,6 @@ from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.agent_adapters import DEFAULT_AGENT, recorded_adapter
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
-from aisquare.core.spawn import LAUNCH_AGENT_ENV
 from aisquare.core.store import (
     LAUNCH_AGENT_META,
     AmbiguousIdError,
@@ -2079,14 +2078,20 @@ def _finish_task(
 
 def _launch_meta(session: TeamSession | None) -> dict[str, object] | None:
     """What a task's event says of the launch it was written in, when it names no session:
-    that launch's agent (``AISQUARE_LAUNCH_AGENT``, which a launch exports to its tools'
-    shells, and in whose environment its broker runs each call it is handed). A Codex agent's
-    ``aisquare task done`` with no ``--as`` was a person's at the shell to the usage counts,
-    so a day of Codex's alone shipped a task done (tester-42b on #42; owner, 2026-10-27);
-    ``ContextStore.fleet_activity`` gives it its launch's agent. ``None`` for one that names
-    its session (whose agent it is) and for a person's, run in no launch."""
-    agent = os.environ.get(LAUNCH_AGENT_ENV, "").strip()
-    return {LAUNCH_AGENT_META: agent} if session is None and agent else None
+    the agent it ran under (``usage_stats.run_agent``): its launch's (``AISQUARE_LAUNCH_AGENT``,
+    which a launch exports to its tools' shells, and in whose environment its broker runs
+    each call it is handed), or the agent whose tool shell it is (its
+    ``AgentCapabilities.tool_shell_env``), started by hand. A Codex agent's ``aisquare task
+    done`` with no ``--as`` was a person's at the shell to the usage counts, so a day of
+    Codex's alone shipped a task done (tester-42b on #42; owner, 2026-10-27; review r29 of
+    #113, m2); ``ContextStore.fleet_activity`` gives it that agent. ``None`` for one that
+    names its session (whose agent it is) and for a person's, run under no agent."""
+    if session is not None:
+        return None
+    from aisquare.services.usage_stats import run_agent
+
+    agent = run_agent()
+    return {LAUNCH_AGENT_META: agent} if agent else None
 
 
 def finish_task(

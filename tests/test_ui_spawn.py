@@ -3805,6 +3805,49 @@ def test_an_effort_owed_from_a_sign_in_is_dropped_by_an_agent_that_does_not_take
     assert spawns.calls == [(git_project.id, "coder", UNTOUCHED)]
 
 
+def test_an_effort_the_owner_picks_while_the_roles_agent_is_asked_beats_one_owed(
+    git_project: ProjectInfo, spawns: SpawnRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """n1's guard: an owed Effort waits for the role's agent, asked in a worker. A level the
+    owner picks meanwhile is the owner's newer choice, and Codex's answer does not put the
+    owed ``minimal`` over it."""
+    settings_service.bind_role("coder", agent="codex")
+    gate = threading.Event()
+    real = SpawnDialog._ask_role_agent
+
+    def held(
+        self: SpawnDialog, key: AgentKey, settle: float, project: ProjectInfo
+    ) -> tuple[str, AgentKey, str] | None:
+        gate.wait(10)
+        return real(self, key, settle, project)
+
+    monkeypatch.setattr(SpawnDialog, "_ask_role_agent", held)
+
+    async def run() -> list[str]:
+        host = Host(git_project, presets={"role": "coder", "effort": "minimal"})
+        async with host.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            dialog = host.screen
+            assert isinstance(dialog, SpawnDialog)
+            picking = str(select(dialog, "agent")._options[0][0])
+            select(dialog, "effort").value = "low"
+            await pilot.pause()
+            gate.set()
+            await settle(pilot)
+            seen = [picking, str(select(dialog, "agent")._options[0][0]), model_fields(dialog)[1]]
+            submit(dialog).press()
+            await settle(pilot)
+            return seen
+
+    try:
+        seen = asyncio.run(run())
+    finally:
+        gate.set()
+
+    assert seen == ["(role's: picking…)", "(role's: Codex)", "low"]
+    assert spawns.calls == [(git_project.id, "coder", {**UNTOUCHED, "effort": "low"})]
+
+
 def test_a_roles_pin_shown_for_codex_is_its_own_arguments_never_claude_codes(
     git_project: ProjectInfo,
 ) -> None:

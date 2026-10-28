@@ -39,7 +39,12 @@ from aisquare.core.config import (
 )
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import SCHEMA_VERSION, SqliteStore, store_session
-from aisquare.services import agent_launch, diagnostics, fleet, native_telemetry
+from aisquare.services import (
+    agent_launch,
+    explainability_ops,
+    fleet,
+    native_telemetry,
+)
 from tests.test_fleet_service import FakeTmux
 from tests.test_store import _dogfooded_113
 
@@ -498,7 +503,7 @@ def test_readonly_receipt_store_is_permanent_and_reported(
         Mock(side_effect=sqlite3.OperationalError("attempt to write a readonly database")),
     )
     assert receiver(_payload()) == 200
-    assert diagnostics._check_outbox().status != "ok"
+    assert explainability_ops._check_outbox().status != "ok"
 
 
 @pytest.mark.parametrize("failure", ["disk-full", "unserialisable"])
@@ -521,21 +526,37 @@ def test_a_primary_path_spool_failure_is_not_a_receiver_failure(
         else:
             patch.setattr(Path, "write_text", full)
         assert outbox.enqueue(record) is None
-    assert diagnostics._check_outbox().status == "ok"
+    assert explainability_ops._check_outbox().status == "ok"
     # Control: the receiver's own write still reports its failure.
     native: dict[str, object] = {"kind": "native"}
     native["self"] = native
     assert outbox.enqueue_retryable(native) is None
-    assert diagnostics._check_outbox().status != "ok"
+    assert explainability_ops._check_outbox().status != "ok"
+
+
+def test_the_explainability_section_shows_the_spool_row_with_the_receivers_last_failure(
+    shipping: None,
+) -> None:
+    """``explainability-spool`` is a row of the explainability section
+    (``explainability_ops.checks``, ``aisquare explainability doctor``), main's home for these
+    rows: the merge of 0.9.1 took main's ``doctor()`` list, which lacks it, and the receiver's
+    last failure showed nowhere (review r28 of #113, m5)."""
+    rows = {check.name: check for check in explainability_ops.checks()}
+    assert rows["explainability-spool"].status == "ok", rows["explainability-spool"]
+
+    outbox.report_failure(OSError(errno.ENOSPC, "fixture"))
+    row = {check.name: check for check in explainability_ops.checks()}["explainability-spool"]
+
+    assert row.status == "warn" and "last receiver failure" in (row.detail or ""), row
 
 
 def test_recovery_clears_the_previous_receiver_diagnostic(
     receiver: Callable[[dict[str, Any]], int],
 ) -> None:
     outbox.report_failure(OSError(errno.ENOSPC, "fixture"))
-    assert diagnostics._check_outbox().status != "ok"
+    assert explainability_ops._check_outbox().status != "ok"
     assert receiver(_payload()) == 200
-    assert diagnostics._check_outbox().status == "ok"
+    assert explainability_ops._check_outbox().status == "ok"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Native receiver is POSIX/WSL only")
@@ -629,7 +650,7 @@ def test_receiver_retries_and_reports_unexpected_capture_failures(
 ) -> None:
     monkeypatch.setattr(native_telemetry, "capture", Mock(side_effect=error))
     assert receiver(_payload()) == 503
-    diagnostic = diagnostics._check_outbox()
+    diagnostic = explainability_ops._check_outbox()
     assert type(error).__name__ in diagnostic.detail
     assert "last-error.json" in (diagnostic.fix or "")
 
@@ -702,14 +723,14 @@ def test_permanent_spool_failure_costs_one_attempt_per_request_and_is_diagnosed(
     for _ in range(3):
         assert receiver(_payload(512)) == 200
     assert attempts == 3 and not outbox.pending()
-    assert diagnostics._check_outbox().status != "ok"
+    assert explainability_ops._check_outbox().status != "ok"
 
 
 def test_doctor_probes_spool_permissions(monkeypatch: pytest.MonkeyPatch, shipping: None) -> None:
     monkeypatch.setattr(
         Path, "write_bytes", Mock(side_effect=PermissionError(errno.EACCES, "fixture"))
     )
-    check = diagnostics._check_outbox()
+    check = explainability_ops._check_outbox()
     assert str(outbox.queue_dir()) in check.detail
     assert "Restore write access" in (check.fix or "")
 

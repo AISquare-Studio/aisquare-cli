@@ -39,6 +39,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -51,7 +52,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
-from aisquare.core import paths
+from aisquare.core import outbox, paths
 from aisquare.core.config import (
     ExplainabilitySettings,
     ExplainabilityTarget,
@@ -1544,10 +1545,45 @@ def checks(
     results = [switch, _check_sdk(on=touched, live=live, deployable=target.configured)]
     results.append(_check_config(target, on=on))
     results.append(_check_redaction(_redaction_level(), shipping=resolved_settings.ship))
+    results.append(_check_outbox(resolved_settings))
     results.append(_check_lane(adapter, target, resolved_settings, on=on, live=live))
     if live:
         results.extend(_live_checks(target, on=on))
     return results
+
+
+def _check_outbox(settings: ExplainabilitySettings | None = None) -> DoctorCheck:
+    """``explainability-spool``: the insights spool takes a write and a rename (the seam a
+    capture uses; ``os.access`` is unreliable under ACLs), and the receiver's last failure,
+    while it ships. It was a row of ``aisquare doctor`` on this line, and the merge of main's
+    0.9.1 took main's list, without it (review r28 of #113, m5): here, beside the redaction
+    row, as main keeps its explainability rows."""
+    name = "explainability-spool"
+    directory = outbox.queue_dir()
+    fix = f"Restore write access and free space in {directory}, then rerun aisquare doctor"
+    try:
+        settings = load_config().explainability if settings is None else settings
+        if not settings.enabled or not settings.ship:
+            return _ok(name, "Insight shipping is disabled")
+        directory.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".doctor-", dir=directory) as scratch:
+            source = Path(scratch) / "probe"
+            source.write_bytes(b"aisquare spool write probe")
+            source.replace(source.with_suffix(".renamed"))
+        failure = outbox.root() / "last-error.json"
+        if failure.exists():
+            recent = json.loads(failure.read_text())
+            if not isinstance(recent, dict):
+                raise ValueError("Invalid receiver diagnostic")
+            return _warn(
+                name,
+                f"Spool is writable at {directory}; last receiver failure: "
+                f"{recent.get('kind', 'unknown')} ({recent.get('code')})",
+                f"Retry insight shipping; inspect {failure} if events remain missing",
+            )
+    except (OSError, ValueError) as exc:
+        return _warn(name, f"Cannot write telemetry spool at {directory}: {exc}", fix)
+    return _ok(name, f"Telemetry spool is writable at {directory}")
 
 
 def _check_switch(

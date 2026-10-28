@@ -10,7 +10,6 @@ import shlex
 import shutil
 import string
 import sys
-import tempfile
 from collections.abc import Callable, Collection, Container, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from importlib import metadata
@@ -26,7 +25,6 @@ from aisquare.core import (
     harness,
     launch_seal,
     orchestrator,
-    outbox,
     paths,
     tls,
 )
@@ -383,36 +381,6 @@ def _sandbox_path_check(cwd: Path | None = None) -> DoctorCheck | None:
         f"launch {labels} agents from a shell whose PATH names nothing in the project "
         "(deactivate its virtualenv)",
     )
-
-
-def _check_outbox() -> DoctorCheck:
-    """Test the actual write/rename seam; os.access is unreliable under ACLs."""
-    name = "explainability-spool"
-    directory = outbox.queue_dir()
-    fix = f"Restore write access and free space in {directory}, then rerun aisquare doctor"
-    try:
-        settings = load_config().explainability
-        if not settings.enabled or not settings.ship:
-            return _ok(name, "Insight shipping is disabled")
-        directory.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix=".doctor-", dir=directory) as scratch:
-            source = Path(scratch) / "probe"
-            source.write_bytes(b"aisquare spool write probe")
-            source.replace(source.with_suffix(".renamed"))
-        failure = outbox.root() / "last-error.json"
-        if failure.exists():
-            recent = json.loads(failure.read_text())
-            if not isinstance(recent, dict):
-                raise ValueError("Invalid receiver diagnostic")
-            return _warn(
-                name,
-                f"Spool is writable at {directory}; last receiver failure: "
-                f"{recent.get('kind', 'unknown')} ({recent.get('code')})",
-                f"Retry insight shipping; inspect {failure} if events remain missing",
-            )
-    except (OSError, ValueError) as exc:
-        return _warn(name, f"Cannot write telemetry spool at {directory}: {exc}", fix)
-    return _ok(name, f"Telemetry spool is writable at {directory}")
 
 
 def _optional(check: DoctorCheck | None) -> list[DoctorCheck]:

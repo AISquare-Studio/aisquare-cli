@@ -84,7 +84,9 @@ adapter.**
     `model_reasoning_effort` and remembers them for Codex alone (a pick never crosses
     agents), and `[agents.models.<agent>]` pins win over the last pick for either; a Codex
     role's own `agent_args` that name the model or the effort run over the pick, and the
-    receipt says each pick they overrule. The Spawn dialog's *+ New account* signs in its
+    receipt says each pick they overrule. A Codex spawn's own arguments win over its role's
+    and its binding's, and each option is passed once, restarts included: before, a role's
+    `--model` beside the spawn's was passed twice, and Codex 0.164.0 refused it and exited. The Spawn dialog's *+ New account* signs in its
     own agent and comes back on the new slot, and a Codex row's `!` hover names Codex's
     sign-in (`aisquare accounts run <slot> login`).
     `fleet adopt` takes a hand-started Codex thread as it takes a Claude Code session: each
@@ -92,12 +94,13 @@ adapter.**
     (`AgentTranscript.conversations`, `opening`), a process's arguments by
     `AgentAdapter.adoptable` (`codex resume <id>`), and a `codex` started fresh holds the
     rollout it has open (`core.process_table`); the thread resumes on its own Codex slot as
-    `codex resume <id>`, the picker naming each row's agent. A solo Codex session's own MCP
+    `codex resume <id>`, the picker naming each row's agent, and `fleet adopt --list` too
+    when more than one agent is listed. A solo Codex session's own MCP
     server writes as the session: its process is the one of the hook's ancestors that holds
     its rollout open (measured on 0.164.0), its hooks being handed no pid. `project fresh`
     and `fleet reap` remove the worktrees the launch records name, never a `cwd` rewritten in
-    the store; a tree reap keeps for an ended row no launch record places is on its report,
-    with why.
+    the store; a tree they keep for an ended row no launch record places is on reap's report
+    and `project fresh`'s, with why.
     `[accounts] before_limit` moves a Codex agent too: whether its turn end is a safe point
     is read off its rollout by its own reader (`AgentTranscript.background_work`: an exec
     answered `Process running with session ID <n>` runs until its `CommandExecution`
@@ -106,7 +109,9 @@ adapter.**
     and never cached, is looked at once a cool-down, not at every turn end. The move's last
     look at the pane reads it as the screen readers take it, the escapes of the capture
     stripped: Codex draws its prompt styled, and read with them its idle prompt was none, so
-    no Codex row was ever moved (live on 0.164.0, `tests/test_codex_native.py`). Usage &
+    no Codex row was ever moved (live on 0.164.0, `tests/test_codex_native.py`). Its blank
+    rows are dropped before the box is looked for, as 0.9.1 read it: a Claude Code turn whose
+    footer has a gap is busy, not unknown. Usage &
     stats' sweep reads every agent's sessions as its reader lists them (Codex's rollouts
     too), cut into turns by that reader (`AgentTranscript.turns`), each with the slot of the
     home it was found in (`AgentAccounts.transcript_roots`) and the repository it ran in; a
@@ -703,12 +708,15 @@ adapter.**
   store profile over `:read-only`, with no `--sandbox`.
   `fleet.roles.<role>.approve_for_me = false` turns `--approve-for-me` off. Codex's approval
   policies are `on-request` and `never`, as in 0.162.1.
-- `fleet spawn` gives a Claude Code agent its role's model and effort, as
-  `team spawn` resolves them: the role's ladder from the cached probe verdicts,
-  else its first rung, with no paid probe at the spawn. `[agents.models.claude-code]`
-  (and its `roles.<role>`) pins the model over the ladder. 0.8.0's fleet spawn
-  passed neither, so Claude Code ran its own default. A hand `aisquare launch
-  <role>` still leaves Claude Code's argv as it was.
+- `fleet spawn` gives every agent the model and effort `[agents.models.<agent>]` (and its
+  `roles.<role>`) pins, under the spawn's own pick and the role's settings and over that
+  agent's last pick; with none of them, no flag, as main's #441 has it for Claude Code. The
+  role's ladder and `AISQUARE_MODEL_<ROLE>` / `AISQUARE_EFFORT_<ROLE>` are `team spawn`'s
+  (and a hand `aisquare launch`'s for Codex), never a fleet spawn's. **A Codex fleet spawn no
+  longer takes `AISQUARE_MODEL_<ROLE>` / `AISQUARE_EFFORT_<ROLE>`**: pin its model in
+  `[agents.models.codex]` or pick it in the Spawn dialog. The dialog's account label, the
+  headroom pick's model family and the dialog's shown pin read the same answer the spawn
+  passes. A hand `aisquare launch <role>` still leaves Claude Code's argv as it was.
 - `fleet spawn --agent codex` forwards Codex's own `-c KEY=VALUE` and `-a`;
   on `launch`, `-a` stays AISquare's `--account` and its help says so.
 - Harden coding-agent argument ownership, native effort mapping, and inherited
@@ -716,8 +724,9 @@ adapter.**
 - Preserve resumed session bindings, rate-limit cleanup for manually started
   agents too, and defer account refreshes when a sign-in changes an in-flight read.
 - Deduplicate native telemetry with durable spool receipts across receiver crashes
-  and board checkpoint failures. Report spool failures in doctor and preserve valid
-  records beside malformed OTLP entries.
+  and board checkpoint failures. Report spool failures in `aisquare explainability doctor`
+  (its `explainability-spool` row, beside the redaction row) and preserve valid records
+  beside malformed OTLP entries.
 - Bin-only wrappers retain Claude compatibility with the implicit or saved Claude user default.
   This works inside AISquare-launched panes too. With a non-Claude user, project, or
   operator-exported agent default, explicitly bind the wrapper's

@@ -16,6 +16,7 @@ sweep is ``tests/test_usage_stats.py``.
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import claude_accounts as core
+from aisquare.core import paths
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.store import store_session
 from aisquare.models import SessionUsage, UsageStats
@@ -300,6 +302,54 @@ def test_the_shared_batch_holds_the_claude_code_session_alone_and_the_stats_both
     assert {day["accounts"]["registered"] for day in days} == {1}
 
 
+def _as_before_v47() -> None:
+    """The store as a build of this branch left it before v47: its usage rows, Codex's among
+    them, and no ``usage_session.agent``."""
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        raw.execute("ALTER TABLE usage_session DROP COLUMN agent")
+        raw.execute("PRAGMA user_version = 46")
+        raw.commit()
+    finally:
+        raw.close()
+
+
+@pytest.mark.usefixtures("sharing_allowed")
+def test_a_codex_row_recorded_before_v47_is_in_no_preview(
+    machine: Machine, codex_home: Path
+) -> None:
+    """Review r28 of #113, m1: this branch recorded Codex sessions (the Stop hook's, the
+    sweep's) before v47 gave a usage row its agent, and a row that names none reads as the
+    default agent's, which is shared, until a new turn rewrites it. v47's backfill gives each
+    its agent (its transcript's here: no board session names it), so the preview of the shared
+    batch holds the Claude Code session alone, as it did before the store was taken back."""
+    alpha, beta = machine.repo("alpha"), machine.repo("beta")
+    at = NOW - timedelta(days=1)
+    machine.session(
+        core.DEFAULT_SLOT,
+        alpha,
+        "claude-session",
+        prompt(at, cwd=alpha),
+        request(at + timedelta(minutes=1), "m1", cwd=alpha),
+    )
+    _rollout(codex_home, beta, THREAD)
+    assert CliRunner().invoke(app, ["metrics", "backfill"]).exit_code == 0
+    claude_alone = json.loads(usage_share.preview(now=NOW, tz=IST))["days"]
+    _as_before_v47()
+
+    swept = CliRunner().invoke(app, ["--json", "metrics", "backfill"])
+    shown = json.loads(usage_share.preview(now=NOW, tz=IST))["days"]
+
+    assert swept.exit_code == 0, swept.output
+    assert _row(codex_home, THREAD).agent == "codex", "backfilled from its rollout's path"
+    with store_session() as store:
+        claude_row = store.session_usage("claude-session")
+    assert claude_row is not None and claude_row.agent == "claude-code"
+    assert shown == claude_alone
+    assert sum(day["sessions"] for day in shown) == 1
+    assert {name for day in shown for name in day["models"]} == {MODEL}, "no Codex model"
+
+
 def test_a_row_from_before_agents_is_claude_codes_and_an_agent_unknown_here_is_not_shared() -> None:
     """Whose usage is shared is its agent's capability (``AgentCapabilities.usage_shared``):
     Claude Code's, and a usage row from before agents were recorded, which no release but
@@ -307,3 +357,34 @@ def test_a_row_from_before_agents_is_claude_codes_and_an_agent_unknown_here_is_n
     assert usage_stats.shared_usage(None) and usage_stats.shared_usage("claude-code")
     assert not usage_stats.shared_usage("codex")
     assert not usage_stats.shared_usage("an-agent-this-install-does-not-know")
+
+
+def test_a_row_that_names_no_agent_is_shared_as_the_default_agent_s_never_as_null(
+    machine: Machine, codex_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A share needs a positive attribution (review r28 of #113, m1; board note 4247, mutant
+    S1): a NULL agent is shared only as the default agent's usage is, never for being NULL.
+    With a default agent whose usage is not shared, a NULL is not, and a store taken back to
+    v46 previews its Claude Code row alone, which v47's backfill attributed by its path."""
+    from aisquare.core import agent_adapters
+
+    alpha, beta = machine.repo("alpha"), machine.repo("beta")
+    at = NOW - timedelta(days=1)
+    machine.session(
+        core.DEFAULT_SLOT,
+        alpha,
+        "claude-session",
+        prompt(at, cwd=alpha),
+        request(at + timedelta(minutes=1), "m1", cwd=alpha),
+    )
+    _rollout(codex_home, beta, THREAD)
+    assert CliRunner().invoke(app, ["metrics", "backfill"]).exit_code == 0
+    claude_alone = json.loads(usage_share.preview(now=NOW, tz=IST))["days"]
+    _as_before_v47()
+    monkeypatch.setattr(agent_adapters, "DEFAULT_AGENT", CODEX.id)
+
+    shown = json.loads(usage_share.preview(now=NOW, tz=IST))["days"]
+
+    assert not usage_stats.shared_usage(None), "a NULL is the default agent's, not shared"
+    assert shown == claude_alone, "the Claude Code row is shared by its own attribution"
+    assert {name for day in shown for name in day["models"]} == {MODEL}, "no 'other' model"

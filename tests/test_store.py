@@ -2384,6 +2384,71 @@ def test_a_store_from_main_0_9_1_reaches_head_with_the_coding_agent_steps() -> N
     assert _contents(db) == once, "a second open changed the store"
 
 
+def _usage_rows(rows: dict[str, str | None]) -> str:
+    """A pre-v47 ``usage_session`` row per session id, with its transcript path (no agent)."""
+    return "".join(
+        "INSERT INTO usage_session (session_id, project_id, transcript_path, started_at,"
+        f" updated_at) VALUES ('{session}', 'prj_a', {_sql_text(path)},"
+        " '2026-10-24T10:00:00+00:00', '2026-10-24T10:00:00+00:00');"
+        for session, path in rows.items()
+    )
+
+
+def _sql_text(value: str | None) -> str:
+    return "NULL" if value is None else "'" + value.replace("'", "''") + "'"
+
+
+def _hook_session(session: str, agent: str) -> str:
+    """The board's ``team_session`` of a session a Stop recorded, which names its agent."""
+    return (
+        "INSERT INTO team_session (id, project_id, started_at, last_seen_at, agent) VALUES"
+        f" ('{session}', 'prj_a', '2026-10-24T10:00:00+00:00', '2026-10-24T10:00:00+00:00',"
+        f" '{agent}');"
+    )
+
+
+@pytest.mark.parametrize("store_from", ["this branch, with Codex rows", "main, Claude Code alone"])
+def test_a_usage_row_from_before_v47_is_given_its_agent_and_one_none_names_is_never_shared(
+    tmp_path: Path, store_from: str
+) -> None:
+    """v47's backfill (review r28 of #113, m1): this branch recorded Codex usage rows before
+    ``usage_session.agent``, and a NULL reads as the default agent's, which is shared. Each row
+    is given its session's agent (``team_session.agent``, a Stop's row being under the board's
+    id), else the agent whose transcript roots hold its transcript, by its path alone; a row
+    neither names is never shared in a store that recorded another agent, and stays the
+    default agent's in one that never did (a release's, main's v40)."""
+    from aisquare.services.usage_stats import shared_usage
+
+    codex = tmp_path / ".codex" / "sessions" / "2026" / "10" / "24" / "rollout-x-t.jsonl"
+    claude = tmp_path / ".claude" / "projects" / "-repo" / "s.jsonl"
+    nowhere = tmp_path / "elsewhere" / "s.jsonl"
+    rows: dict[str, str | None] = {"claude-swept": str(claude), "nobody": str(nowhere)}
+    hooks = ""
+    if store_from.startswith("this branch"):
+        rows |= {"codex-hook": None, "claude-hook": None, "codex-swept": str(codex)}
+        hooks = _hook_session("codex-hook", "codex") + _hook_session("claude-hook", "claude-code")
+        _at_version(46, after=hooks + _usage_rows(rows))
+    else:
+        _at_version(40, after=_usage_rows(rows))
+
+    with store_session() as store:
+        agents = {row.session_id: row.agent for row in store.session_usages()}
+    shared = {session for session, agent in agents.items() if shared_usage(agent)}
+
+    if store_from.startswith("this branch"):
+        assert agents == {
+            "codex-hook": "codex",
+            "claude-hook": "claude-code",
+            "codex-swept": "codex",
+            "claude-swept": "claude-code",
+            "nobody": store_module.UNATTRIBUTED_USAGE_AGENT,
+        }
+        assert shared == {"claude-hook", "claude-swept"}, "a positive attribution alone"
+    else:
+        assert agents == {"claude-swept": "claude-code", "nobody": None}
+        assert shared == {"claude-swept", "nobody"}, "every row a release recorded is Claude's"
+
+
 def test_a_fresh_store_is_built_with_the_persona_step() -> None:
     """No file at all: v1 to v47, the same shape as every cohort above reaches."""
     open_store().close()

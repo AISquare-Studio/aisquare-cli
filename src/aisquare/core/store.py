@@ -825,6 +825,71 @@ def _adopt_claude_code_fleet_agents(connection: sqlite3.Connection) -> None:
     connection.execute("UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude'")
 
 
+#: The agent a usage row from before v47 is given when nothing says whose it was, in a store
+#: that recorded an agent whose usage is not shared: one no install knows, so the row is
+#: counted locally and never shared (``services.usage_stats.shared_usage``). A sweep that
+#: reads the session on writes its agent over it (``record_usage``).
+UNATTRIBUTED_USAGE_AGENT = "unattributed"
+
+
+def _column_values(connection: sqlite3.Connection, table: str, column: str) -> set[str]:
+    """The distinct values ``table.column`` holds, none where either is missing."""
+    if not _has_table(connection, table):
+        return set()
+    if column not in {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}:
+        return set()
+    query = f"SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL"
+    return {str(row[0]) for row in connection.execute(query)}
+
+
+def _attribute_usage_sessions(connection: sqlite3.Connection) -> None:
+    """v46 → v47's backfill (#113, review r28 m1): the agent of each usage row from before
+    the column. Its session's (``team_session.agent``: a Stop records a row under the board's
+    id for its session), else the agent whose transcript roots hold its transcript
+    (``claude_accounts.transcript_home``, by the path alone: the file may be gone).
+
+    A share needs a positive attribution. A row neither gives keeps NULL, which reads as the
+    default agent's, only in a store that never recorded an agent whose usage is not shared
+    (every release's: they ran Claude Code alone, and a release that shares the store still
+    writes NULL); in any other it is :data:`UNATTRIBUTED_USAGE_AGENT`, never shared.
+
+    Runs right after ``usage_session.agent`` is added, in the same transaction, and only then
+    (:data:`_BACKFILLS`).
+    """
+    # Lazy: the adapters, and the account modules they read, are no import of the store's.
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    if "agent" in {row[1] for row in connection.execute("PRAGMA table_info(team_session)")}:
+        connection.execute(
+            "UPDATE usage_session SET agent = (SELECT session.agent FROM team_session AS session"
+            " WHERE session.id = usage_session.session_id) WHERE agent IS NULL"
+        )
+    rows = connection.execute(
+        "SELECT session_id, transcript_path FROM usage_session"
+        " WHERE agent IS NULL AND transcript_path IS NOT NULL"
+    ).fetchall()
+    for session_id, transcript_path in rows:
+        named = accounts_core.transcript_home(Path(transcript_path))
+        if named is not None:
+            connection.execute(
+                "UPDATE usage_session SET agent = ? WHERE session_id = ?", (named[0], session_id)
+            )
+    recorded = set().union(
+        *(
+            _column_values(connection, table, "agent")
+            for table in ("team_session", "fleet_agent", "agent_account", "usage_session")
+        )
+    )
+    if any(
+        (adapter := recorded_adapter(agent)) is None or not adapter.capabilities.usage_shared
+        for agent in recorded
+    ):
+        connection.execute(
+            "UPDATE usage_session SET agent = ? WHERE agent IS NULL", (UNATTRIBUTED_USAGE_AGENT,)
+        )
+
+
 def _date_team_meta(connection: sqlite3.Connection) -> None:
     """v41 → v42's backfill (#113): the ``team_meta`` rows from before the column are
     dated now, so the launch-metadata cleanup gives them a full retention period."""
@@ -847,6 +912,7 @@ _BACKFILLS: dict[tuple[str, str], Callable[[sqlite3.Connection], None]] = {
     ("team_session", "native_session_id"): _adopt_claude_code_identity,
     ("fleet_agent", "agent"): _adopt_claude_code_fleet_agents,
     ("team_meta", "updated_at"): _date_team_meta,
+    ("usage_session", "agent"): _attribute_usage_sessions,
 }
 
 # v14: ``project forget`` — a tombstone on the registration, in the same spirit as
@@ -1409,8 +1475,10 @@ CREATE TABLE IF NOT EXISTS account_rank (
 # v47: the agent whose session a usage row is (``usage_session.agent``, its adapter's id), so
 # the opt-in usage share keeps the agents its consent names (``AgentCapabilities.usage_shared``)
 # and leaves the rest out, while the local stats count every one. The column is the whole
-# step, so the script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps NULL,
-# which reads as the default agent's, as every release before it recorded no other's.
+# step, so the script is empty: it is in :data:`_PRODUCTS`. A row from before it is given its
+# session's agent, else its transcript's (:func:`_attribute_usage_sessions`): this branch
+# recorded Codex rows before the column (review r28 of #113, m1). One neither names keeps
+# NULL, which reads as the default agent's, only where the store never recorded another.
 _SCHEMA_V47 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (

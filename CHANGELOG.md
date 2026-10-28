@@ -261,6 +261,11 @@ adapter.**
   stays unread; when every account is over the line, an account with a live reading goes
   before any floor, which is a lower bound and not a figure). Codex's readings, taken
   offline off its rollouts, follow the same rule by the age of the record they came from.
+  A fleet spawn's pick weighs the model family it runs on Claude Code (#277): an account
+  out of that family's week gives its place, as it does within one agent's accounts, and
+  the Spawn dialog's account label, left at the role's agent, names the account the spawn
+  then runs on (it named the account Claude Code's own rung picked by the family, while the
+  spawn ran on the one the order picked without it).
   `--agent`, a role's agent, a binary, the project's agent and the account a
   launch names (`--account`, or the role's bound one, unless it is disabled) still pin it;
   a restart and Fork keep their record's agent, and so do a switch and a hand-over unless
@@ -720,7 +725,11 @@ adapter.**
   longer takes `AISQUARE_MODEL_<ROLE>` / `AISQUARE_EFFORT_<ROLE>`**: pin its model in
   `[agents.models.codex]` or pick it in the Spawn dialog. The dialog's account label, the
   headroom pick's model family and the dialog's shown pin read the same answer the spawn
-  passes. A hand `aisquare launch <role>` still leaves Claude Code's argv as it was.
+  passes, and so does `team harness`'s fleet line, with the rung that decided it
+  (`configured`, `remembered`, `native`), shown apart from the team row whenever the two
+  differ (it read the env pins). A Codex role's own arguments that name the model take the
+  effort too, as its argv has: the shown pin names no configured effort beside them. A hand
+  `aisquare launch <role>` still leaves Claude Code's argv as it was.
 - `fleet spawn --agent codex` forwards Codex's own `-c KEY=VALUE` and `-a`;
   on `launch`, `-a` stays AISquare's `--account` and its help says so.
 - Harden coding-agent argument ownership, native effort mapping, and inherited

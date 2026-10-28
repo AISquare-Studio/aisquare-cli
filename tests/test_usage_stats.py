@@ -669,7 +669,19 @@ def test_a_claude_code_session_s_folder_is_the_first_non_empty_cwd_in_its_head(
     """Main's rule for a Claude Code transcript (review r28 of #113, n3): the first non-empty
     ``cwd`` in the first 256 KiB, however many lines come before it. The reader's opening reads
     400 lines and took the first ``cwd`` whatever it held, so a transcript whose ``cwd`` comes
-    after 450 short lines, or whose first record says ``"cwd": ""``, had no repository."""
+    after 450 short lines, or whose first record says ``"cwd": ""``, had no repository.
+
+    The opening is still asked first, so a ``cwd`` past 256 KiB but within its 400 lines is
+    found where main found none (tester-42 on #42, (e)): accepted by the manager, as the
+    session's own folder is never a worse answer than none."""
+    far = write(
+        tmp_path / "projects" / "f" / "far.jsonl",
+        *({"type": "summary", "summary": "x" * 1024} for _ in range(300)),
+        prompt(_day(0, 9), cwd=Path("/real/repo")),
+    )
+    assert far.stat().st_size > usage_stats._HEAD_BYTES
+    assert usage_stats._head_cwd(far) is None, "main's rule: none in its first 256 KiB"
+    assert usage_stats.session_cwd(far) == Path("/real/repo")
     late = write(
         tmp_path / "projects" / "f" / "late.jsonl",
         *({"type": "summary", "summary": f"line {n}"} for n in range(450)),

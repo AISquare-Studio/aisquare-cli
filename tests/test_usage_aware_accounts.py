@@ -249,6 +249,7 @@ def test_claude_codes_own_notices_read_for_their_window_and_reset_in_either_vers
     [
         ("Jan 2 at 2am", datetime(2027, 1, 2, 7, 0, tzinfo=UTC)),  # next year's, read in December
         ("Jan 2, 2027 at 2:30am", datetime(2027, 1, 2, 7, 30, tzinfo=UTC)),
+        ("Jan 3, 2026 at 2am", datetime(2026, 1, 3, 7, 0, tzinfo=UTC)),  # named, not the nearest
         ("Dec 31, 2:09pm", datetime(2026, 12, 31, 19, 9, tzinfo=UTC)),  # dates with no "at"
         ("Dec 29 at 11pm", datetime(2026, 12, 30, 4, 0, tzinfo=UTC)),  # just past: not a year on
         ("Feb 30 at 2am", None),  # no such day

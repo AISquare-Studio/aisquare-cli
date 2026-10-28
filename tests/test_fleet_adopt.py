@@ -524,3 +524,19 @@ def test_the_cli_list_names_each_conversations_agent(
     assert listed.exit_code == 0, listed.output
     assert f"{THREAD[:8]}  codex  " in listed.stdout, listed.stdout
     assert f"{SESSION[:8]}  claude-code  " in listed.stdout, listed.stdout
+
+
+def test_the_cli_list_names_no_agent_when_one_agent_is_listed(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, runner: CliRunner
+) -> None:
+    """With one agent's conversations listed (Claude Code's alone, on a machine without
+    Codex), ``fleet adopt --list`` has no agent column: it tells no rows apart (review r28 of
+    #113, n5)."""
+    _transcript(core.create_account(), SESSION, project.root)
+    (row,) = adopt_service.recent()
+
+    listed = runner.invoke(app, ["fleet", "adopt", "--list"])
+
+    assert listed.exit_code == 0, listed.output
+    assert f"{SESSION[:8]}  {row.account}  " in listed.stdout, listed.stdout
+    assert "claude-code" not in listed.stdout, listed.stdout

@@ -1524,7 +1524,8 @@ def adopt(
     it ran in, as a row on that directory's project, keeping its session: the board row is
     its own. Refused while a process still holds it, when the fleet already owns it, and
     when its directory is no onboarded project. --list shows the recent ones no fleet row
-    owns: id, agent, account, directory, last activity and the first thing you typed.
+    owns: id, agent (when more than one is listed), account, directory, last activity and
+    the first thing you typed.
     """
     if listing:
         conversations = adopt_service.recent(limit)
@@ -1536,9 +1537,12 @@ def adopt(
             console.print("no conversation outside the fleet on the accounts the CLI knows")
             return
         now = datetime.now(tz=UTC)
+        # The agent column only where it tells rows apart: a machine with one agent's
+        # conversations listed reads as it did (review r28 of #113, n5).
+        agents = len({c.agent for c in conversations}) > 1
         for c in conversations:
             line = Text(c.session_id[:8], style="bold")
-            line.append(f"  {c.agent}  {c.account}  {c.cwd or '—'}  ")
+            line.append(f"  {f'{c.agent}  ' if agents else ''}{c.account}  {c.cwd or '—'}  ")
             line.append(_ago(now - c.last_activity), style="dim")
             if c.held_by is not None:
                 line.append(f"  held by pid {c.held_by}", style="yellow")

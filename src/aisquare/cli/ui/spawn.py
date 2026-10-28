@@ -1343,6 +1343,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             with self.prevent(Select.Changed):
                 field.set_options(options)
                 field.value = picked
+                # The same value set again redraws nothing: the closed field kept
+                # "(role's: picking…)" once the role's agent had landed (#43 reopen).
+                field.mutate_reactive(type(field).value)
         known = picked or self._role_agent(role, binary)
         if known is not None:
             self._agent_shown = known

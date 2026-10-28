@@ -2616,6 +2616,46 @@ def test_a_preset_account_brings_its_agent_when_the_accounts_land_after_the_role
     assert after == "codex"
 
 
+def test_the_closed_agent_field_names_the_roles_agent_once_it_lands(
+    git_project: ProjectInfo, spawns: SpawnRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#43 reopen (tester-43, out of scope then): the role's agent is asked in a worker, and
+    the closed Agent field showed ``(role's: picking…)`` after it landed, its options already
+    saying ``(role's: Claude Code)``: the options were set again around the same value, which
+    redraws nothing. Held until the field has been seen picking, then let go."""
+    gate = threading.Event()
+    real = SpawnDialog._ask_role_agent
+
+    def held(
+        self: SpawnDialog, role: str, binary: str, settle: float, project: ProjectInfo
+    ) -> tuple[str, str, str, str] | None:
+        gate.wait(10)
+        return real(self, role, binary, settle, project)
+
+    monkeypatch.setattr(SpawnDialog, "_ask_role_agent", held)
+
+    def closed(dialog: SpawnDialog) -> str:
+        return shown(select(dialog, "agent").query_one("SelectCurrent #label", Static))
+
+    async def run() -> list[str]:
+        host = Host(git_project)
+        async with host.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            dialog = host.screen
+            assert isinstance(dialog, SpawnDialog)
+            before = closed(dialog)
+            gate.set()
+            await settle(pilot)
+            return [before, closed(dialog), str(select(dialog, "agent")._options[0][0])]
+
+    try:
+        seen = asyncio.run(run())
+    finally:
+        gate.set()
+
+    assert seen == ["(role's: picking…)", "(role's: Claude Code)", "(role's: Claude Code)"]
+
+
 def test_a_failed_ask_never_leaves_the_form_waiting_for_an_agent(
     git_project: ProjectInfo, spawns: SpawnRecorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:

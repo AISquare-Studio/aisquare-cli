@@ -937,10 +937,12 @@ HoldsOpen = Literal["session", "alone", "clients"]
 """How a process of the agent's holds the transcripts it writes (:meth:`AgentTranscript.
 held_open`): for as long as its own session lives, itself or through a ``clients`` process it
 may be a client of (``session``: a TUI), the same but never any such process's client
-(``alone``: one that runs embedded, an ``exec``), or for the clients it serves, and on after
-they quit (``clients``: each process of Codex's managed app-server daemon). Each holds what
-it has open: a ``session`` one that runs is named before a ``clients`` one, never an ``alone``
-one that holds nothing of it, and a ``clients`` one is named only when it holds the
+(``alone``: one that runs embedded, an ``exec``, or a command that runs no thread of such a
+process's, Codex's own ``app-server``, ``exec-server`` or ``login``), or for the clients it
+serves, and on after they quit (``clients``: each process of Codex's managed app-server
+daemon). Each holds what it has open: a client of a ``clients`` one that runs (one connected
+to its socket, or where that cannot be told a ``session`` one) is named before it, never an
+``alone`` one that holds nothing of it, and a ``clients`` one is named only when it holds the
 conversation itself, its refusal saying how it lets go (:meth:`AgentTranscript.server_note`)."""
 
 
@@ -1051,9 +1053,11 @@ class AgentTranscript(Protocol):
         ``codex app-server daemon pid-update-loop``, run from ``<CODEX_HOME>/packages/
         app-server-daemon/``, where a ``codex`` started with no arguments runs its thread) for
         its clients and minutes after the last one quit, and a ``codex`` that runs embedded
-        (``-c``, ``--search``, ``exec``…) is never its client. ``fleet adopt`` asks the process
-        table (``core.process_table``) then whether a process of the agent's holds a
-        conversation whose arguments name no session (a fresh start). Never raises."""
+        (``-c``, ``--search``, ``exec``…) or runs no thread of the daemon's (its own
+        ``app-server``, ``exec-server``, ``login``…) is never its client. ``fleet adopt``
+        asks the process table (``core.process_table``) then whether a process of the
+        agent's holds a conversation whose arguments name no session (a fresh start). Never
+        raises."""
         ...
 
     def server_note(self, run: Sequence[str]) -> str:

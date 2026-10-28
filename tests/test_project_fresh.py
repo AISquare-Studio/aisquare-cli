@@ -475,6 +475,40 @@ def test_discard_unpushed_removes_the_tree_and_branches_deletes_its_branch_local
     assert _branches(alpha.root) == ["main", "mine"]
 
 
+@pytest.mark.parametrize("at", ["its-tree", "the-root"])
+def test_a_tree_no_launch_record_places_is_kept_and_said_as_reap_says_it(
+    at: str, runner: CliRunner, tmp_path: Path, spawned: list[tuple[str, str, dict[str, Any]]]
+) -> None:
+    """An ended row whose launch record is gone (``Unplaced``) names no tree the reset may
+    remove (``fleet_trees``), and its row goes with the board: the tree stays on disk, and the
+    report says so and why, in reap's words, never in silence (review r28 of #113, m3). A row
+    whose store ``cwd`` names the project's root names no tree kept: the root is no tree."""
+    alpha = _add(tmp_path / "alpha", "alpha-x")
+    _git("init", "-q", "-b", "main", cwd=alpha.root)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=alpha.root)
+    tree = tmp_path / "trees" / "coder-1"
+    _git("worktree", "add", "-q", "-b", "fleet/alpha-x/coder-1", str(tree), cwd=alpha.root)
+    cwd = tree if at == "its-tree" else alpha.root
+    fleet_service.take_census()  # before the row: a row spawned since, with no record
+    with store_session() as store:
+        row = store.upsert_fleet_agent(_agent(alpha, "coder-1", cwd=cwd, worktree=True))
+        store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
+    assert isinstance(fleet_service.resolve_place(row), fleet_service.Unplaced), "the fixture"
+
+    result = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    said = " ".join(result.output.split())
+    kept = [line for line in result.output.splitlines() if "⚠ kept" in line]
+    if at == "its-tree":
+        assert f"⚠ kept {tree} — no launch record places coder-1: " in said, said
+    else:
+        assert kept == [], kept
+    assert tree.is_dir() and alpha.root.is_dir()
+    with store_session() as store:
+        assert [row.label for row in store.fleet_agents(alpha.id)] == ["manager"], "row gone"
+
+
 # --- the CLI -------------------------------------------------------------------------------
 
 

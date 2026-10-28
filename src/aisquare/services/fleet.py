@@ -2655,7 +2655,7 @@ def _remove_finished_worktrees(
     :func:`_in_its_recorded_tree`), as stop asks git about it and :func:`fleet_trees` names
     it, never a path the row was rewritten to name in the store (``core.launch_seal``): a
     row no record places (:class:`Unplaced`) names no tree to remove: the tree its store
-    columns name is kept, and said so (:func:`_say_unplaced_trees_kept`). A tree a live row's
+    columns name is kept, and said so (:func:`_unplaced_trees_kept`). A tree a live row's
     store columns name is kept all the same (:func:`_reap_tree`): keeping is the safe side.
 
     A tree, or a project root, that cannot be looked at (a folder above it this user may not
@@ -2723,29 +2723,45 @@ def _remove_finished_worktrees(
             report.worktrees_removed.append(agent.cwd)
         elif kept is not None:
             report.worktrees_kept.append((agent.cwd, kept))
-    _say_unplaced_trees_kept(placed, owners, in_use, report)
+    report.worktrees_kept.extend(_unplaced_trees_kept(placed, owners, in_use))
     # Read again: the branches recorded just now are the ones the sweep asks about.
     _sweep_fleet_branches(root, common, default, store.fleet_agents(project.id), report)
 
 
-def _say_unplaced_trees_kept(
-    placed: Sequence[Placement],
-    owners: Mapping[Path, FleetAgent],
-    in_use: Collection[Path],
-    report: ReapReport,
-) -> None:
-    """Put on ``report`` the tree of each ENDED row with a tree that no launch record places
-    (:class:`Unplaced`), kept as the store names it, with why: reap removes no tree for such a
-    row (:func:`_remove_finished_worktrees`), and kept unsaid, it stayed with nothing on the
-    report to say so (tester-40b, seq 4207). Once a path, for the newest row there, as
-    ``owners`` holds it. Left unsaid, as before: a tree gone already, one a placed row's
-    record names (removed or kept, and said so, for that row), and one in use: the root, or a
-    tree a live row works in, by its record or by its store columns (a respawn that reused
-    it, a row rewritten onto it), as :func:`_reap_tree` leaves such a tree unsaid. A live
-    row's own tree is one of those, so only an ended row's is said. Read by the records
-    alone, a live respawn's tree was said to be kept for the ended row before it (tester-40c,
-    seq 4239)."""
+def unplaced_trees_kept(project: ProjectInfo, rows: Sequence[FleetAgent]) -> list[tuple[Path, str]]:
+    """The trees of ``rows`` (the project's fleet rows) that no launch record places, each with
+    why it is kept, as reap says them (:func:`_unplaced_trees_kept`): ``project fresh`` removes
+    the trees :func:`fleet_trees` names and none of these, and deleted with the rows, such a
+    tree stayed on disk with nothing naming it and no line on the report (review r28 of #113,
+    m3). Never the project's root, nor a tree a placed row's record names."""
+    config = settings()
+    placed = [resolve_place(row, config=config) for row in rows]
+    recorded = [_in_its_recorded_tree(p) for p in placed if isinstance(p, Placed)]
+    trees = [(_tree_at(agent.cwd), agent) for agent in recorded]
+    owners = {here for here, agent in trees if here is not None and agent.worktree}
+    in_use = {here for here, agent in trees if here is not None and agent.ended_at is None}
+    root = _tree_at(project.root)
+    if root is not None:
+        in_use.add(root)
+    return _unplaced_trees_kept(placed, owners, in_use)
+
+
+def _unplaced_trees_kept(
+    placed: Sequence[Placement], owners: Collection[Path], in_use: Collection[Path]
+) -> list[tuple[Path, str]]:
+    """The tree of each ENDED row with a tree that no launch record places
+    (:class:`Unplaced`), kept as the store names it, with why, for the report: reap removes no
+    tree for such a row (:func:`_remove_finished_worktrees`), and kept unsaid, it stayed with
+    nothing on the report to say so (tester-40b, seq 4207). Once a path, for the newest row
+    there, as ``owners`` (the trees the placed rows' records name) holds it. Left unsaid, as
+    before: a tree gone already, one a placed row's record names (removed or kept, and said
+    so, for that row), and one in use: the root, or a tree a live row works in, by its record
+    or by its store columns (a respawn that reused it, a row rewritten onto it), as
+    :func:`_reap_tree` leaves such a tree unsaid. A live row's own tree is one of those, so
+    only an ended row's is said. Read by the records alone, a live respawn's tree was said to
+    be kept for the ended row before it (tester-40c, seq 4239)."""
     live = {_tree_at(p.row.cwd) for p in placed if p.row.ended_at is None}
+    kept: list[tuple[Path, str]] = []
     unplaced: dict[Path, Unplaced] = {}
     for placement in placed:
         row = placement.row
@@ -2760,9 +2776,10 @@ def _say_unplaced_trees_kept(
             if not _present(tree):
                 continue
         except OSError as exc:
-            report.worktrees_kept.append((tree, f"not looked at: {_why(exc)}"))
+            kept.append((tree, f"not looked at: {_why(exc)}"))
             continue
-        report.worktrees_kept.append((tree, f"no launch record places {label}: {placement.why}"))
+        kept.append((tree, f"no launch record places {label}: {placement.why}"))
+    return kept
 
 
 def _present(path: Path) -> bool:

@@ -96,7 +96,8 @@ adapter.**
     server writes as the session: its process is the one of the hook's ancestors that holds
     its rollout open (measured on 0.164.0), its hooks being handed no pid. `project fresh`
     and `fleet reap` remove the worktrees the launch records name, never a `cwd` rewritten in
-    the store.
+    the store; a tree reap keeps for an ended row no launch record places is on its report,
+    with why.
     `[accounts] before_limit` moves a Codex agent too: whether its turn end is a safe point
     is read off its rollout by its own reader (`AgentTranscript.background_work`: an exec
     answered `Process running with session ID <n>` runs until its `CommandExecution`

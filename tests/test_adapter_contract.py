@@ -2472,7 +2472,11 @@ def test_the_contract_names_every_member_of_the_protocol() -> None:
         "PriceTable",
         "UsageScan",
         "FirstEdit",
+        "TurnChunk",
+        "TurnsScan",
     }
+    defined = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+    assert classes <= defined, f"no such class in types.py: {sorted(classes - defined)}"
     missing = []
     for node in tree.body:
         if not (isinstance(node, ast.ClassDef) and node.name in classes):

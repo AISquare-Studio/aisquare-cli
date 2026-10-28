@@ -752,7 +752,14 @@ adapter.**
   beside Claude Code's ladder, #441's rule on every role (it read the env pins). A Codex
   role's own arguments that name the model take the effort too, as its argv has: the shown
   pin names no configured effort beside them. A hand `aisquare launch <role>` still leaves
-  Claude Code's argv as it was.
+  Claude Code's argv as it was. A restart's and a switch's window pass what the fleet
+  decided as a new spawn's do, never the server's env pins. **`fleet restart <label> --model
+  … --effort …` runs them for a Codex agent** as for Claude Code, each on its own, in place
+  of what it ran (its spawn's own arguments, its Spawn dialog pick, its binding's), each
+  passed once, and the next restart starts them again; they stay that agent's, never your
+  pick. It printed ✓ and ran neither, and the replacement recorded neither. A Codex
+  restart also starts the model its spawn recorded over its binding's, as Claude Code's
+  does.
 - `fleet spawn --agent codex` forwards Codex's own `-c KEY=VALUE` and `-a`;
   on `launch`, `-a` stays AISquare's `--account` and its help says so.
 - Harden coding-agent argument ownership, native effort mapping, and inherited

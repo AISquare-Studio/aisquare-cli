@@ -266,12 +266,15 @@ adapter.**
   out of that family's week gives its place, as it does within one agent's accounts, and
   the Spawn dialog's account label, left at the role's agent, names the account the spawn
   then runs on (it named the account Claude Code's own rung picked by the family, while the
-  spawn ran on the one the order picked without it). A Claude model the spawn names itself
+  spawn ran on the one the order picked without it). A model the spawn names itself
   (`--model`, the dialog's Model field, a `--model` in its *Extra agent args*) keeps it on
-  Claude Code, whose accounts alone are weighed for that family, the first in the order when
-  none has room: weighed across agents, it went to a Codex account with room, which took
-  `--model fable` and failed every turn. The dialog's *(role's: …)* names the agent its
-  spawn runs, asked as the spawn asks it.
+  the agent whose model it is, by that agent's model ladders or price table (`fable` is
+  Claude Code's, `gpt-5.4` Codex's), whose accounts alone are weighed, the first in the order
+  when none has room: weighed across agents, a Claude model went to a Codex account with
+  room and a Codex model to a Claude one, each failing every turn. A model no agent names
+  stays on the agent the order puts first, and a refusal for an agent a model chose names
+  the model. The dialog's *(role's: …)* names the agent its spawn runs, asked as the spawn
+  asks it, and its account label is read again for whatever the dialog sends.
   `--agent`, a role's agent, a binary, the project's agent and the account a
   launch names (`--account`, or the role's bound one, unless it is disabled) still pin it;
   a restart and Fork keep their record's agent, and so do a switch and a hand-over unless
@@ -729,13 +732,17 @@ adapter.**
   role's ladder and `AISQUARE_MODEL_<ROLE>` / `AISQUARE_EFFORT_<ROLE>` are `team spawn`'s
   (and a hand `aisquare launch`'s for Codex), never a fleet spawn's. **A Codex fleet spawn no
   longer takes `AISQUARE_MODEL_<ROLE>` / `AISQUARE_EFFORT_<ROLE>`**: pin its model in
-  `[agents.models.codex]` or pick it in the Spawn dialog. The dialog's account label, the
-  headroom pick's model family and the dialog's shown pin read the same answer the spawn
-  passes, and so does `team harness`'s fleet line, with the rung that decided it
-  (`configured`, `remembered`, `native`), shown apart from the team row whenever the two
-  differ (it read the env pins). A Codex role's own arguments that name the model take the
-  effort too, as its argv has: the shown pin names no configured effort beside them. A hand
-  `aisquare launch <role>` still leaves Claude Code's argv as it was.
+  `[agents.models.codex]` or pick it in the Spawn dialog. The fleet decides a spawn's model
+  and effort once: its window's `aisquare launch` passes what it was given and resolves none
+  again (it gave a Codex agent the fleet server's env pins, and a configured effort beside
+  the role's own model). The dialog's account label, the headroom pick's model family and
+  the dialog's shown pin read the same answer the spawn passes, and so does `team harness`'s
+  fleet line, with the rung that decided it (`configured`, `remembered`, `native`), shown
+  apart from the team row where it says more: not for a fleet spawn that passes nothing
+  beside Claude Code's ladder, #441's rule on every role (it read the env pins). A Codex
+  role's own arguments that name the model take the effort too, as its argv has: the shown
+  pin names no configured effort beside them. A hand `aisquare launch <role>` still leaves
+  Claude Code's argv as it was.
 - `fleet spawn --agent codex` forwards Codex's own `-c KEY=VALUE` and `-a`;
   on `launch`, `-a` stays AISquare's `--account` and its help says so.
 - Harden coding-agent argument ownership, native effort mapping, and inherited

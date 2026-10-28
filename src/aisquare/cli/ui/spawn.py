@@ -672,15 +672,21 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         field then follows, so read against that agent's pick it flipped back to unsent and
         the spawn's rung crossed again (review r29 of #113, m1)."""
         self._preset_model = None if self._captain else model
-        self._preset_effort = (
-            effort
-            if not self._captain
-            and effort is not None
-            and (effort == ACCOUNT_DEFAULT or effort in effort_levels(agent))
-            else None
-        )
+        chosen = effort if not self._captain and effort is not None else None
+        shown = chosen == ACCOUNT_DEFAULT or chosen in effort_levels(agent)
+        self._preset_effort = chosen if shown else None
         """The Model and Effort the owner chose before a sign-in (``form_state``), ``""``
         cleared; ``None``: the form fills them in (:attr:`_pick`)."""
+        self._effort_owed = (
+            chosen
+            if not shown and agent is None and any(chosen in a.effort_levels for a in adapters())
+            else None
+        )
+        """An Effort the owner chose before a sign-in that the field cannot show yet: the
+        agent was the role's (``form_state`` carries no Agent then), not known until it is
+        asked, and the field opens on the default agent's levels. Codex's ``minimal`` was
+        dropped there for Claude Code's list (review r30 of #113, n1). Shown once the form
+        follows an agent that takes it, else dropped (:meth:`_follow_pick`)."""
         self._preset_task: str = (
             task_id if task_id and any(t.id == task_id for t in self._tasks) else NO_TASK
         )
@@ -698,6 +704,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             or bool(self._preset_prompt)
             or self._preset_model is not None
             or self._preset_effort is not None
+            or self._effort_owed is not None
         )
         """A preset fills an Advanced field (Binary, Agent, Persona…), so the section opens with
         the form: a form reopened after a sign-in (#286) shows the label, task and prompt it
@@ -1623,11 +1630,18 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     def _follow_pick(self, agent: str) -> None:
         """Model and Effort for the agent the launch starts, as for a new role (:meth:`_repick`):
-        a field still showing the last agent's pick shows ``agent``'s; one typed in stays."""
+        a field still showing the last agent's pick shows ``agent``'s; one typed in stays. The
+        first agent followed takes an Effort owed from before a sign-in (:attr:`_effort_owed`)
+        if it offers it and the field was left as the form opened it."""
         if agent == self._pick_agent:
             return
+        owed, self._effort_owed = self._effort_owed, None
+        untouched = self._effort_value() == (self._pick.effort or ACCOUNT_DEFAULT)
         self._pick_agent = agent
         self._repick(self._shown_pick(self._role))
+        if owed is not None and untouched and self._offered(owed) is not None:
+            with self.prevent(Select.Changed):
+                self.query_one("#spawn-effort", Select).value = owed
 
     def _effort_options(self, role: str) -> list[tuple[str, str]]:
         """The Effort field's options for ``role``: its blank, then the levels of the agent the

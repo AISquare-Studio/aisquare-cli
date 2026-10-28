@@ -3758,6 +3758,53 @@ def test_effort_offers_the_levels_of_the_agent_the_form_follows(
     assert drive(git_project, reopen) == "minimal"
 
 
+@pytest.mark.parametrize("effort", ["minimal", "ultra"])
+def test_a_codex_only_effort_rides_the_sign_in_round_trip_when_codex_is_the_roles(
+    git_project: ProjectInfo, spawns: SpawnRecorder, effort: str
+) -> None:
+    """Review r30 of #113, n1: *+ New account* reopens the form from ``form_state()``, which
+    carries the Agent only when one was picked. The role's Codex, left at the role's, came
+    back with an Effort checked against the default agent's levels (Claude Code's), so a
+    level Codex alone takes (``minimal``, ``ultra``) was dropped for the pick. It is checked
+    against the agent the reopened form follows, once that is known, and sent."""
+    settings_service.bind_role("coder", agent="codex")
+
+    async def chosen(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> dict[str, Any]:
+        select(dialog, "effort").value = effort
+        await pilot.pause()
+        return dialog.form_state()
+
+    state = drive(git_project, chosen)
+    assert state == {"role": "coder", "effort": effort}, "the role's agent: no Agent carried"
+
+    async def reopened(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> str:
+        shown = model_fields(dialog)[1]
+        submit(dialog).press()
+        await settle(pilot)
+        return shown
+
+    assert drive(git_project, reopened, presets=state) == effort
+    assert spawns.calls == [(git_project.id, "coder", {**UNTOUCHED, "effort": effort})]
+
+
+def test_an_effort_owed_from_a_sign_in_is_dropped_by_an_agent_that_does_not_take_it(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """n1's other half: the same ``minimal`` reopened on a role whose agent is Claude Code,
+    which does not take it, opens on Claude Code's pick and is not sent, as an Agent switch
+    drops it (:func:`test_effort_offers_the_levels_of_the_agent_the_form_follows`)."""
+    model_memory.remember(effort="xhigh")  # Claude Code's
+
+    async def reopened(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> str:
+        shown = model_fields(dialog)[1]
+        submit(dialog).press()
+        await settle(pilot)
+        return shown
+
+    assert drive(git_project, reopened, presets={"role": "coder", "effort": "minimal"}) == "xhigh"
+    assert spawns.calls == [(git_project.id, "coder", UNTOUCHED)]
+
+
 def test_a_roles_pin_shown_for_codex_is_its_own_arguments_never_claude_codes(
     git_project: ProjectInfo,
 ) -> None:

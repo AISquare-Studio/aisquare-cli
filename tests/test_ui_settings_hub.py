@@ -326,6 +326,18 @@ def test_the_hub_is_titled_settings_and_says_what_each_link_opens() -> None:
     assert len(about) == 7 and all(about)  # the Fleet section's two share one line
 
 
+def test_the_usage_link_names_no_agent() -> None:
+    """Usage & stats and ``metrics stats`` count every agent's sessions (4cc76f2c), so the
+    hub's line for the page names none (review r28 of #113, n4)."""
+    from aisquare.cli.ui.views.settings_hub import LINKS
+    from aisquare.core.agent_adapters import adapters
+
+    [about] = [about for stem, _label, about in LINKS if stem == "usage-stats"]
+
+    assert not [adapter.label for adapter in adapters() if adapter.label in about]
+    assert "sessions" in about
+
+
 # --- what the doctor found (review of #261, m9) ----------------------------------------
 
 FAILING = DoctorCheck(name="tmux", status=CheckStatus.fail, detail="not installed")

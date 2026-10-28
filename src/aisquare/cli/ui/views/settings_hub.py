@@ -59,7 +59,7 @@ LINKS: tuple[tuple[str, str, str], ...] = (
     (
         "usage-stats",
         "Usage & stats",
-        "tokens, cost, repositories and accounts across all your Claude Code sessions",
+        "tokens, cost, repositories and accounts across all your agents' sessions",
     ),
     ("doctor", "Doctor", "the checks — they run when the page opens"),
 )

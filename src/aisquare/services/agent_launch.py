@@ -571,7 +571,7 @@ def fleet_settings(
     return selected.adapter.fleet_settings(_launch_home(selected, env), raw_args)
 
 
-MODELS_DECIDED_FLAG = "--models-decided"
+FLEET_DECIDED_FLAG = "--fleet-decided"
 """What a fleet spawn's window passes its ``aisquare launch``: the model and effort on its line
 are the fleet's one decision (``fleet._model_choice``, as ``fleet.spawn_runs`` and
 ``fleet.role_pin`` say it), and the launch passes them as they are, resolving none again

@@ -100,11 +100,21 @@ adapter.**
     `codex` started with no arguments runs its thread and which keeps the rollout open for
     minutes after that `codex` quit, holds it too, as Codex itself sees it (a `codex resume`
     of it sat on "This conversation is open in another app"): while its `--managed-daemon`
-    process holds the rollout, adopt refuses, naming first a running Codex TUI that can be
-    its client, never one that runs embedded (`-c`, `--search`, `--profile`, `--no-daemon`,
-    `--strict-config`, `--dangerously-bypass-hook-trust` or `exec`, measured: each holds its
-    own rollout, and is named only when that is this one) nor a fleet agent, which shows its
-    own thread; else the daemon, saying it is Codex's background app-server, that it lets go
+    process holds the rollout, adopt refuses, naming first a running Codex that is its
+    client: one connected to its socket (`lsof -U`, measured on macOS), so never a TUI of
+    another Codex home, which is its own home's daemon's, though one of this home's showing
+    another thread is (a process table names no thread a client shows). Where the socket
+    cannot say (a machine with `/proc`, unmeasured), a form that can be one, of any home
+    (its TUI with no subcommand or a prompt, `resume`, `fork`, `agents`, `app-server
+    proxy`, each measured connected; read up to the prompt and never into it, and a
+    subcommand's name followed by what could be a prompt's words read as a prompt's, so
+    `codex 'add a -c flag'` is a TUI). Never one that runs embedded
+    (`-c`, `--search`, `--profile`, `--no-daemon`, `--strict-config`,
+    `--dangerously-bypass-hook-trust`, `exec` or `review`, measured: each holds its own
+    rollout) or runs no thread of the daemon's (an `app-server` of its own, an IDE's or
+    with `--listen`, `exec-server`, `login`, measured unconnected), each named only when it
+    holds this rollout itself, nor a fleet agent, which shows its own thread. Else the
+    daemon, saying it is Codex's background app-server, that it lets go
     by itself about 30 idle minutes after its TUI quit (measured), and that `aisquare
     accounts run <slot> app-server daemon stop` (Codex's own stop, on the thread's account)
     stops it sooner. A process is Codex's by what it runs, never by a word in its arguments, so a

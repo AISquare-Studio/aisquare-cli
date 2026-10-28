@@ -351,6 +351,37 @@ def test_usage_bar_fills_five_cells_and_colours_by_pressure() -> None:
     assert styles[12] == "green" and styles[60] == "yellow" and styles[95] == "bold red"
 
 
+def test_every_reset_a_window_can_show_fits_its_column_whole() -> None:
+    """Review of PR 454: a week ``in 15h 30m`` away is 10 cells and a kept reading's
+    ``reset 45m ago`` 13, so 9-cell columns cut them. Every minute a week can be from its
+    reset, and every minute of a five-hour session window, fits its column; a kept reading
+    whose window has reset reads ``reset``, with its age on hover."""
+    widths = {column.key: column.width for column in COLUMNS}
+    status = _status(2, "two@example.com")
+    longest = {"session-resets": "", "week-resets": ""}
+    for minutes in range(0, 7 * 24 * 60 + 1):
+        usage = ClaudeUsage(
+            available=True,
+            session_percent=10,
+            session_resets_at=NOW + timedelta(minutes=min(minutes, 5 * 60), seconds=30),
+            week_percent=10,
+            week_resets_at=NOW + timedelta(minutes=minutes, seconds=30),
+        )
+        cells = account_cells(status, usage, now=NOW)
+        for key, text in longest.items():
+            shown = cells[key].plain
+            assert len(shown) <= widths[key], (minutes, key, shown)
+            longest[key] = max(text, shown, key=len)
+    assert longest == {"session-resets": "in 1h 01m", "week-resets": "in 10h 01m"}  # the widest
+
+    kept = ClaudeUsage(
+        available=True, session_resets_at=NOW - timedelta(minutes=45), week_percent=10
+    )
+    cells = account_cells(status, kept, now=NOW)
+    assert cells["session-resets"].plain == "reset"
+    assert accounts_view.reset_tooltip(kept, "session", now=NOW) == "reset 45m ago"
+
+
 def test_account_cells_say_who_how_much_what_is_wrong_and_the_plan_last() -> None:
     usage = ClaudeUsage(
         available=True,
@@ -3684,10 +3715,11 @@ def test_the_whole_table_fits_160_by_48_with_no_sideways_scroll(
     is drawn whole on screen, the arranging buttons' too (a Button pads its label by a cell
     each side unless told not to); a resets cell shows the distance alone and its tooltip
     the whole reset, clock and all."""
-    week_resets = datetime.now(tz=UTC) + timedelta(days=6, hours=12, minutes=30)
+    week_resets = datetime.now(tz=UTC) + timedelta(hours=15, minutes=30, seconds=30)
 
     def usage(account: ClaudeAccount) -> ClaudeUsage:
-        # The page reads the wall clock: a reset half an hour clear of a minute's edge.
+        # The page reads the wall clock: the widest a week's reset reads, ``in 15h 30m``,
+        # half a minute clear of a minute's edge.
         return _table_usage(account).model_copy(update={"week_resets_at": week_resets})
 
     no_network["usage"] = usage
@@ -3727,8 +3759,8 @@ def test_the_whole_table_fits_160_by_48_with_no_sideways_scroll(
         assert "Remove" in lines[slot], lines[slot]
     assert "Enable" in lines[4] and "Remove" in lines[4], lines[4]  # slot 4 is disabled
     text, tip = out["week"]
-    assert text == "in 6d 12h", text  # the distance alone, as the 9-cell column fits
-    assert tip is not None and tip.startswith("in 6d 12h (") and tip.endswith(")"), tip
+    assert text == "in 15h 30m", text  # the distance alone, whole in the 10-cell column
+    assert tip is not None and tip.startswith("in 15h 30m (") and tip.endswith(")"), tip
 
 
 @pytest.mark.parametrize("size", [(160, 50), (100, 40)], ids=["160x50", "100x40"])

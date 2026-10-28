@@ -17,9 +17,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The Accounts table fits a 160-column terminal, with no sideways scroll.** A row was
   167 cells on the 123 the page has there, so the week-resets column was cut and a
   horizontal scrollbar showed. The resets columns show the distance alone
-  (`in 6d 12h`), with the whole reset, clock time and all, on hover; their headers read
-  `5h resets` and `wk resets`, as the status line does; the name and email columns are
-  12 and 18 cells (a longer value ends in `…`, the whole of it on hover); and the *↑*,
+  (`in 6d 12h`, at most `in 4h 59m` for the session and `in 23h 59m` for the week; a kept
+  reading whose window has reset reads `reset`), with the whole reset, clock time or age
+  and all, on hover; their headers read `5h resets` and `wk resets`, as the status line
+  does; the name and email columns are 12 and 17 cells (a longer value ends in `…`, the
+  whole of it on hover); and the *↑*,
   *↓*, *Log in*, *Disable* and *Remove* buttons are as wide as their labels. A narrower
   terminal still scrolls the table sideways as one.
 

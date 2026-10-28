@@ -417,19 +417,21 @@ class Column(NamedTuple):
 COLUMNS: tuple[Column, ...] = (
     Column("slot", "#", 2),
     Column("name", "name", 12),
-    Column("email", "signed in as", 18),
+    Column("email", "signed in as", 17),
     Column("session", "session used", 16),
     Column("week", "week used", 10),
     Column("session-resets", "5h resets", 9),
-    Column("week-resets", "wk resets", 9),
+    Column("week-resets", "wk resets", 10),
     Column("plan", "plan", 7),
 )
 """The table's data columns, left to right; the header and every row are cut from them.
 
 Fixed widths, so a column starts at the same x on every row whatever its values:
 a value too long for its cell ends in ``…`` and never wraps (the whole text is the
-cell's tooltip). The resets columns show the distance alone, ``format_reset(clock=False)``,
-whose longest answer is ``in 6d 12h``; the whole reset, ``in 6d 12h (Tue 02:00)``, is the
+cell's tooltip). The resets columns show the distance alone, ``format_reset(clock=False)``:
+a session window resets within five hours, at most ``in 4h 59m`` (9 cells), and a week's
+at most ``in 23h 59m`` (10; ``in 6d 12h`` is 9), a kept reading whose window has reset
+reads ``reset``; the whole reset, ``in 6d 12h (Tue 02:00)`` or ``reset 12m ago``, is the
 cell's tooltip (:func:`reset_tooltip`). Their headers say ``5h`` and ``wk``, as the
 status line does. The usage columns fit ``▮▮▮▮▮ 100%``, the session's also a
 kept reading's age beside its bar, ``▮▮▮▮▮ 100% · 59m`` (F1 of #400): a session window
@@ -513,7 +515,8 @@ def _window_cells(
         # A kept reading's window that has reset since: its figure is over (review of #408,
         # MAJ-1), so it reads as reset, never as the old bar with "now".
         age = accounts_service.describe_age(resets_at, now=moment)
-        return Text("reset", style="dim"), Text(f"reset {age}", style="dim")
+        # The row's cell has room for "reset"; its age is the tooltip (reset_tooltip).
+        return Text("reset", style="dim"), Text(f"reset {age}" if clock else "reset", style="dim")
     if not usage.available or percent is None:
         return Text("—", style="dim"), Text()
     bar = usage_bar(percent)
@@ -699,7 +702,8 @@ _ACTIONS: tuple[tuple[str, str, int], ...] = (
     ("remove", "Remove", 6),
 )
 """The arranging buttons at the end of a line, left to right: id stem, label and width,
-each as wide as its longest label (a compact button has no padding; *Enable* is one shorter).
+each as wide as its longest label (*Enable* is one shorter): ``AccountRow.on_mount`` sets
+the row's buttons' ``line_pad`` to 0, as Button's own CSS pads a label by a cell each side.
 *↑*/*↓* and *Log in* are not among them: they have columns of their own (:data:`LAYOUT`)."""
 
 

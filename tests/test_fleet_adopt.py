@@ -620,11 +620,16 @@ def test_a_codex_that_runs_no_thread_of_the_daemons_is_never_named_as_its_client
     processes, _holds = codex_daemon
     others = [_codex(9100 + at, words) for at, words in enumerate(NO_CLIENTS)]
     processes.extend(others)
+    pids = {str(pid) for pid, _parent, _args in others}
 
-    _says_the_daemon(_refused(13090))  # the socket cannot say: told by their words
+    said = _refused(13090)  # the socket cannot say: told by their words
+    _says_the_daemon(said)
+    assert not pids & set(re.findall(r"\d+", said))
 
     daemon_sockets[13090] = set()  # it says: none connected
-    _says_the_daemon(_refused(13090))
+    said = _refused(13090)
+    _says_the_daemon(said)
+    assert not pids & set(re.findall(r"\d+", said))
 
 
 @pytest.mark.parametrize(

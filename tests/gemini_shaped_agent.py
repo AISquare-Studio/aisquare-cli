@@ -62,6 +62,7 @@ from aisquare.core.agent_adapters.types import (
     CallAsk,
     EventKind,
     ForkArgs,
+    HoldsOpen,
     HookSpec,
     HooksSwitch,
     InstallRoute,
@@ -365,8 +366,9 @@ class GeminiShapedTranscript:
     def compacted_since(self, file: Path, since: datetime) -> bool:
         return False  # no compaction record of its own
 
-    #: Unmeasured: nothing is asked of the process table for it.
-    held_open = False
+    def held_open(self, args: Sequence[str]) -> HoldsOpen | None:
+        """None, unmeasured: nothing is asked of the process table for it."""
+        return None
 
     def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
         """None listed: its chats are kept per project hash (``tmp/<hash>/chats``), unmeasured."""
@@ -705,6 +707,8 @@ class GeminiShapedAdapter:
     transcript_reader: AgentTranscript | None = GeminiShapedTranscript()
     price_table: PriceTable | None = PRICES
     screen: AgentScreen | None = None  # its screens are unmeasured: none is read
+    model_flags: tuple[str, ...] = ("--model", "-m")
+    effort_levels: tuple[str, ...] = ()  # thinking is a settings override, no effort
     capabilities = AgentCapabilities(
         launch_inputs=(CONFIG, ".agents"),
         hooks=tuple(
@@ -862,6 +866,10 @@ class GeminiShapedAdapter:
     def validate(self, model: str | None, effort: str | None) -> None:
         if effort is not None:
             raise BadEffortError("Gemini-shaped takes no effort: thinking is a settings override")
+
+    def claims_model(self, model: str) -> bool:
+        table = self.price_table  # its price table's names alone
+        return table is not None and table.price_for(model) is not None
 
     def effort_alias(self, effort: str) -> str:
         return effort.strip().lower()

@@ -185,6 +185,9 @@ class ClaudeCodeAdapter:
         prompt_on_screen=box_drawn,
         modal_on_screen=modal_showing,
     )
+    #: ``--model`` alone: Claude Code has no ``-m`` ("unknown option '-m'").
+    model_flags: tuple[str, ...] = (harness.MODEL_FLAG,)
+    effort_levels: tuple[str, ...] = (*harness.EFFORT_SCALE, harness.ULTRACODE)
     capabilities = AgentCapabilities(
         launch_inputs=(".claude", ".mcp.json"),
         hooks=(
@@ -548,8 +551,16 @@ class ClaudeCodeAdapter:
         if effort is not None and harness.normalize_effort(effort) is None:
             raise BadEffortError(
                 f"Claude Code does not support effort {effort!r}; use one of: "
-                + ", ".join((*harness.EFFORT_SCALE, harness.ULTRACODE))
+                + ", ".join(self.effort_levels)
             )
+
+    def claims_model(self, model: str) -> bool:
+        """Its ladders' families (``harness.model_family``: an alias, a full id, a dated or a
+        provider's id of one), and what its price table lists."""
+        table = self.price_table
+        return harness.model_family(model) is not None or (
+            table is not None and table.price_for(model) is not None
+        )
 
     def role_defaults(self, role: str, *, binary: str, args: Sequence[str]) -> harness.RoleDefaults:
         """``RoleProfile.default_args`` (the ui-tester's ``--chrome``, ``harness.

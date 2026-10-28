@@ -9461,11 +9461,11 @@ def ladder_family(
 
 
 def named_model(agent_args: Sequence[str] = (), model: str | None = None) -> str | None:
-    """The model a new spawn names itself: its ``--model`` in ``agent_args`` (*Extra agent
-    args*), else ``model`` (``fleet spawn --model``, the Spawn dialog's Model field), as
-    :func:`_model_choice` reads them; ``None`` for none, a cleared field among them. A role's
-    settings, ``[agents.models.<agent>]`` and the last pick are each agent's own, and name
-    none here."""
+    """The model a new spawn names itself: its model option in ``agent_args`` (*Extra agent
+    args*: ``harness.model_arg``, ``--model`` or Codex's ``-m``), else ``model`` (``fleet
+    spawn --model``, the Spawn dialog's Model field), as :func:`_model_choice` reads them;
+    ``None`` for none, a cleared field among them. A role's settings,
+    ``[agents.models.<agent>]`` and the last pick are each agent's own, and name none here."""
     return harness.model_arg(agent_args) or model or None
 
 
@@ -9486,7 +9486,8 @@ def role_agent(
     ``binary`` (``--bin``), ``account`` and the spawn's own ``agent_args`` and ``model`` /
     ``effort``: ``agent_launch.resolve``, whose rungs below them decide a new spawn's.
     - A model the spawn names (:func:`named_model`) that one agent claims
-      (``agent_launch.model_owner``: Claude Code's ladders, Codex's price table) keeps it on
+      (``agent_launch.model_owner``, ``AgentAdapter.claims_model``: Claude Code's ladders'
+      families; Codex's ``gpt-*``, ``o<digit>*``, ``codex-*`` and price table) keeps it on
       that agent, the ``model`` rung: weighed across agents, a Claude model ran on Codex and a
       Codex model on Claude Code, each failing every turn (review r29 of #113, m1 and its
       delta's).

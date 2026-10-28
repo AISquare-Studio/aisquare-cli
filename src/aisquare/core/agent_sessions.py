@@ -132,6 +132,10 @@ def bind_launch_session(
                         store.set_meta(binding, session_id)
             else:
                 store.set_meta_once(binding, session_id)
+            if prefix == _FLEET:
+                # Into the row's own column too, as a row spawned on a minted id holds its
+                # session from its spawn: `fleet adopt` reads the column (SMOKE11, 5B).
+                store.land_fleet_session(token)
     if started:
         # Refresh the current binding before expiring abandoned identities.
         # A replay from an older session must never replace a newer binding.

@@ -79,12 +79,14 @@ APPROVAL_POLICIES = ("on-request", "never")
 _APPROVAL_SWITCHES = frozenset(
     {"--approve-for-me", "--dangerously-bypass-approvals-and-sandbox", "--yolo"}
 )
+#: Its model option's spellings (``CodexAdapter.model_flags``).
+MODEL_FLAGS = ("--model", "-m")
 #: The options with a value Codex refuses given twice, each with its spellings: 0.164.0 does
 #: not start on ``-m a --model b`` ("error: the argument '--model <MODEL>' cannot be used
 #: multiple times"), nor on any of these doubled (measured). ``-c``, ``--enable``,
 #: ``--disable``, ``--add-dir`` and ``--image`` repeat.
 TAKEN_ONCE = (
-    ("--model", "-m"),
+    MODEL_FLAGS,
     ("--profile", "-p"),
     ("--sandbox", "-s"),
     ("--ask-for-approval", "-a"),
@@ -334,6 +336,30 @@ def canonical_model(model: str) -> str:
 
 
 PRICE_TABLE = PriceTable(PRICES_AS_OF, PRICES_SOURCE, PRICES, canonical_model)
+
+#: The model catalog Codex 0.164.0 bundles (its ``models.json``: each entry's ``slug``, read
+#: off the native binary), each in :data:`OPENAI_FAMILIES` too; :data:`PRICES` lists none of
+#: ``codex-auto-review`` and the two ``gpt-daybreak`` ones.
+BUNDLED_MODELS = frozenset(
+    {
+        "codex-auto-review",
+        "gpt-5.5",
+        "gpt-5.6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-6-astra",
+        "gpt-6-luna",
+        "gpt-6-sol",
+        "gpt-6.1-sol",
+        "gpt-daybreak-blue-latest",
+        "gpt-daybreak-red-latest",
+    }
+)
+#: The model names that are OpenAI's, which Codex runs and no other agent does: ``gpt-*``
+#: (``gpt-x``, ``gpt-5.4-mini``, ``gpt-5.1-codex-max``), ``o<digit>*`` (``o3``,
+#: ``o4-mini``) and ``codex-*`` (``codex-mini-latest``), as :func:`canonical_model` spells
+#: them (SMOKE11, 11: ``--model gpt-x`` ran on Claude Code, and became its pick).
+OPENAI_FAMILIES = re.compile(r"(?:gpt-|o\d|codex-)")
 
 
 _EVENTS = {
@@ -597,6 +623,8 @@ class CodexAdapter:
     accounts = CodexAccounts(SHARE_PARTS)
     plugin = CodexPlugin()
     mcp_registration = CodexMcp()
+    model_flags: tuple[str, ...] = MODEL_FLAGS
+    effort_levels: tuple[str, ...] = REASONING_EFFORTS
     screen: AgentScreen | None = AgentScreen(
         idle_prompt_mark=IDLE_PROMPT_MARK,
         idle_on_screen=idle_on_screen,
@@ -938,7 +966,7 @@ class CodexAdapter:
                 model = native
             elif key == "model_reasoning_effort":
                 effort = native
-        models = option_values(args, "--model", "-m")
+        models = option_values(args, *MODEL_FLAGS)
         return NativeChoice(models[-1] if models else model, effort)
 
     def native_args(self, args: list[str]) -> list[str]:
@@ -1076,6 +1104,17 @@ class CodexAdapter:
     def validate(self, model: str | None, effort: str | None) -> None:
         self.reasoning_effort(effort)
 
+    def claims_model(self, model: str) -> bool:
+        """OpenAI's families (:data:`OPENAI_FAMILIES`), the catalog it bundles
+        (:data:`BUNDLED_MODELS`) and its price table's models (:data:`PRICES`): ``gpt-x`` is
+        Codex's whether or not it is priced."""
+        name = canonical_model(model)
+        return (
+            OPENAI_FAMILIES.match(name) is not None
+            or name in BUNDLED_MODELS
+            or PRICE_TABLE.price_for(model) is not None
+        )
+
     def role_defaults(self, role: str, *, binary: str, args: Sequence[str]) -> harness.RoleDefaults:
         """None: the ui-tester's browser is Codex's ``browser_use`` feature (stable and on
         in 0.162.1) and its bundled browser plugin, read by ``aisquare doctor``
@@ -1132,7 +1171,7 @@ class CodexAdapter:
             once=TAKEN_ONCE,
             switches=SWITCHED_ONCE,
             keyed=("-c", "--config"),
-            same={"model": ("--model", "-m")},
+            same={"model": MODEL_FLAGS},
         )
 
     @staticmethod

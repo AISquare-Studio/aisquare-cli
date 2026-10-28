@@ -3708,6 +3708,56 @@ def test_model_and_effort_follow_the_agent_and_a_codex_pick_opens_the_next_codex
     assert [(k["model"], k["effort"]) for k in sent[1:]] == [(None, None)]
 
 
+def test_effort_offers_the_levels_of_the_agent_the_form_follows(
+    git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE11's observation: the Effort list for Codex was Claude Code's, without
+    ``minimal``. It offers the followed agent's own levels (``AgentAdapter.effort_levels``):
+    Codex's ``minimal`` to ``ultra``, Claude Code's scale and ``ultracode``. ``minimal`` is
+    sent, kept as Codex's pick and opens the next Codex form; switched to Claude Code, which
+    does not take it, the field shows Claude Code's pick."""
+    model_memory.remember(effort="xhigh")  # Claude Code's
+    sent: list[dict[str, Any]] = []
+
+    def spawn(project: ProjectInfo, role: str, **kwargs: Any) -> fleet_service.SpawnReceipt:
+        sent.append(kwargs)
+        model_memory.remember(model=kwargs["model"], effort=kwargs["effort"], agent=kwargs["agent"])
+        return receipt_for(project)
+
+    monkeypatch.setattr(fleet_service, "spawn", spawn)
+
+    async def pick(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [offered(dialog, "effort")]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        seen.append(offered(dialog, "effort"))
+        select(dialog, "effort").value = "minimal"
+        await pilot.pause()
+        select(dialog, "agent").value = "claude-code"
+        await settle(pilot)
+        seen += [offered(dialog, "effort"), model_fields(dialog)[1]]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        select(dialog, "effort").value = "minimal"
+        await pilot.pause()
+        submit(dialog).press()
+        await settle(pilot)
+        return seen
+
+    async def reopen(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> str:
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        return model_fields(dialog)[1]
+
+    claude, codex, back, kept = drive(git_project, pick)
+    assert claude == ["", "low", "medium", "high", "xhigh", "max", "ultracode"]
+    assert codex == ["", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+    assert (back, kept) == (claude, "xhigh"), "Claude Code takes no minimal: its pick shows"
+    assert [(k["agent"], k["effort"]) for k in sent] == [("codex", "minimal")]
+    assert model_memory.remembered(agent="codex").effort == "minimal"
+    assert drive(git_project, reopen) == "minimal"
+
+
 def test_a_roles_pin_shown_for_codex_is_its_own_arguments_never_claude_codes(
     git_project: ProjectInfo,
 ) -> None:

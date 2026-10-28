@@ -2028,6 +2028,7 @@ class ContextStore(Protocol):
     def fleet_manager_board(self, project_id: str) -> str | None: ...
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None: ...
     def fleet_session_ids(self) -> set[str]: ...
+    def land_fleet_session(self, agent_id: str) -> bool: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
     def replace_ui_state(self, key: str, expected: str | None, value: str | None) -> bool: ...
@@ -5346,10 +5347,14 @@ class SqliteStore:
             if unless_stopped is not None
             else "WHERE true "  # INSERT … SELECT … ON CONFLICT needs a WHERE to parse
         )
+        # A row with no session of its own takes the one its launch bound already
+        # (`fleet-session:<id>`): its agent may start before the spawn records it, and the
+        # column is then what `land_fleet_session` would have made it (SMOKE11, 5B).
         cursor = self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, "
+            "COALESCE(?, (SELECT value FROM team_meta WHERE key = 'fleet-session:' || ?)), "
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
             f"{guard}"
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
@@ -5367,6 +5372,7 @@ class SqliteStore:
                 agent.tmux_socket,
                 agent.pane_id,
                 agent.session_id,
+                agent.id,
                 str(agent.cwd),
                 int(agent.worktree),
                 agent.task_id,
@@ -6260,11 +6266,34 @@ class SqliteStore:
     def fleet_session_ids(self) -> set[str]:
         """Every session id a fleet row has recorded, live or ended, in any project: the
         conversations the fleet already owns, which ``fleet adopt`` neither lists nor takes
-        (#290). An ended row comes back with ``fleet restart``, not by adoption."""
+        (#290). An ended row comes back with ``fleet restart``, not by adoption. A row whose
+        own column is empty is the session its launch bound (``fleet-session:<id>``), as
+        :meth:`_bound_fleet_agent` reads it: a Codex row spawned before its landing wrote the
+        column (:meth:`land_fleet_session`) has its thread there alone, which ``fleet adopt
+        --list`` listed and a second row took once it stopped (SMOKE11, 5B)."""
         rows = self._conn.execute(
-            "SELECT DISTINCT session_id FROM fleet_agent WHERE session_id IS NOT NULL"
+            "SELECT DISTINCT COALESCE(session_id, (SELECT value FROM team_meta "
+            "WHERE key = 'fleet-session:' || fleet_agent.id)) AS owned FROM fleet_agent "
+            "WHERE owned IS NOT NULL"
         ).fetchall()
         return {str(row[0]) for row in rows}
+
+    def land_fleet_session(self, agent_id: str) -> bool:
+        """Write the session the launch bound to live row ``agent_id`` (``fleet-session:<id>``,
+        an agent whose native id binds at its start: Codex's) into the row's own column, where
+        it has none, as a row spawned on a minted id holds its own from its spawn: whatever
+        reads the column reads it then, ``fleet_session_ids`` among them (SMOKE11, 5B).
+        ``False`` when nothing was written: no such live row, one with a session of its own,
+        or no binding."""
+        cursor = self._conn.execute(
+            "UPDATE fleet_agent SET session_id = "
+            "(SELECT value FROM team_meta WHERE key = 'fleet-session:' || fleet_agent.id) "
+            "WHERE id = ? AND session_id IS NULL AND ended_at IS NULL AND EXISTS "
+            "(SELECT 1 FROM team_meta WHERE key = 'fleet-session:' || fleet_agent.id)",
+            (agent_id,),
+        )
+        self._commit()
+        return cursor.rowcount == 1
 
     def adopt_fleet_agent_session(
         self, agent_id: str, previous: str | None, session_id: str, lease_until: datetime

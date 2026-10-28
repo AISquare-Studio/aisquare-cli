@@ -57,11 +57,12 @@ agent's own controls. What the launch would pass for permission is under them
 follows (``services.model_memory``: one per home and agent, made at a spawn or, on Claude Code,
 by ``/model`` inside any fleet agent), whatever the role; blank is the account's own default.
 They follow the agent as they follow the role: an untouched field shows the new agent's pick,
-and a spawn passes them in that agent's own words (``AgentAdapter.model_args``: Codex's
-``--model`` and ``model_reasoning_effort``), so a Codex pick is Codex's alone (SCOPE #113 091,
-item 2). A role whose settings
-pin one (``[fleet.roles.<role>] extra_args``, a binding's ``--arg``: ``fleet.role_pin``)
-shows its pin instead, and an untouched field follows the role between the two; a value
+Effort offers the levels that agent takes (``AgentAdapter.effort_levels``: Codex's ``minimal``
+too, Claude Code's ``ultracode``), and a spawn passes them in that agent's own words
+(``AgentAdapter.model_args``: Codex's ``--model`` and ``model_reasoning_effort``), so a Codex
+pick is Codex's alone (SCOPE #113 091, item 2). A role whose settings pin one
+(``[fleet.roles.<role>] extra_args``, a binding's ``--arg``: ``fleet.role_pin``) shows its pin
+instead, and an untouched field follows the role between the two; a value
 the owner typed stays. Untouched, each is sent as ``None`` and the service decides as for
 ``fleet spawn``: the Extra agent args, the role's settings, then the pick. A changed one is
 this spawn's pick and the next one, and a cleared one (``""``) runs the account's default
@@ -282,8 +283,22 @@ EFFORT_OPTIONS: tuple[tuple[str, str], ...] = (
     *((level, level) for level in harness.EFFORT_SCALE),
     (harness.ULTRACODE, harness.ULTRACODE),
 )
-"""What the Effort field offers: every level of the harness's scale (``claude --effort``'s;
-Codex takes the same words, ``adapter.validate`` says what an agent refuses), and none."""
+"""What the Effort field offers an agent this install does not know: every level of the
+harness's scale (``claude --effort``'s), and none. A known agent's are its own
+(:func:`effort_levels`)."""
+
+
+def effort_levels(agent: str | None) -> tuple[str, ...]:
+    """The efforts the Effort field offers while it follows ``agent`` (``None``: the default
+    agent's): the levels it takes (``AgentAdapter.effort_levels``: Codex's ``minimal`` to
+    ``ultra``, Claude Code's scale and ``ultracode``), never another agent's; the harness's
+    for an agent this install does not know."""
+    try:
+        return get_adapter(agent or DEFAULT_AGENT).effort_levels
+    except ValueError:
+        return tuple(value for _, value in EFFORT_OPTIONS[1:])
+
+
 NO_ROLE_NOTE = "a plain session of its agent on the board: no standing cycle, no mission"
 
 OPEN_TASK_STATUSES = ("todo", "doing", "review", "blocked")
@@ -659,7 +674,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._preset_model = None if self._captain else model
         self._preset_effort = (
             effort
-            if not self._captain and any(effort == value for _, value in EFFORT_OPTIONS)
+            if not self._captain
+            and effort is not None
+            and (effort == ACCOUNT_DEFAULT or effort in effort_levels(agent))
             else None
         )
         """The Model and Effort the owner chose before a sign-in (``form_state``), ``""``
@@ -1613,7 +1630,15 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._repick(self._shown_pick(self._role))
 
     def _effort_options(self, role: str) -> list[tuple[str, str]]:
-        return [(self._blanks(role)[1], ACCOUNT_DEFAULT), *EFFORT_OPTIONS[1:]]
+        """The Effort field's options for ``role``: its blank, then the levels of the agent the
+        fields follow (:func:`effort_levels`)."""
+        levels = effort_levels(self._pick_agent)
+        return [(self._blanks(role)[1], ACCOUNT_DEFAULT), *((level, level) for level in levels)]
+
+    def _offered(self, effort: str | None) -> str | None:
+        """``effort`` where the Effort field offers it for the agent it follows, else ``None``."""
+        level = effort.strip().lower() if effort else None
+        return level if level in effort_levels(self._pick_agent) else None
 
     def _shown_pick(self, role: str) -> model_memory.Pick:
         """What Model and Effort show for ``role``: what its settings pin, else the owner's
@@ -1621,7 +1646,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         pin, memory = self._role_pin(role), self._memory()
         return model_memory.Pick(
             pin.model or memory.model,
-            harness.clean_effort(pin.effort) or memory.effort,
+            self._offered(pin.effort) or self._offered(memory.effort),
         )
 
     def _repick(self, pick: model_memory.Pick) -> None:
@@ -1636,7 +1661,11 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         kept = self._effort_value()
         with self.prevent(Select.Changed):
             effort.set_options(self._effort_options(self._role))
-        if kept == (old.effort or ACCOUNT_DEFAULT):
+        if kept == (old.effort or ACCOUNT_DEFAULT) or (
+            # A level the agent followed now does not take (Codex's minimal, Claude Code's
+            # ultracode) is no choice for it.
+            kept != ACCOUNT_DEFAULT and self._offered(kept) is None
+        ):
             kept = pick.effort or ACCOUNT_DEFAULT
         with self.prevent(Select.Changed):
             effort.value = kept

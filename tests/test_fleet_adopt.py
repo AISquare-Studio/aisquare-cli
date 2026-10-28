@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -25,12 +26,13 @@ from aisquare.core import claude_accounts as core
 from aisquare.core import launch_seal, process_table
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.store import SqliteStore, store_session
-from aisquare.models import ClaudeAccount, ProjectInfo
+from aisquare.models import ClaudeAccount, FleetAgent, ProjectInfo
 from aisquare.services import adopt as adopt_service
 from aisquare.services import agent_events
 from aisquare.services import fleet as fleet_service
 from tests import test_fleet_service as fleet_suite
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
+from tests.test_codex_fleet_parity import Codex
 from tests.test_fleet_service import FakeTmux, _command, _flag
 
 # The fleet suite's fixtures, bound here so pytest finds them for this module's tests.
@@ -367,6 +369,142 @@ def test_a_codex_started_fresh_holds_the_rollout_it_has_open(
 
     monkeypatch.setattr(process_table, "open_files", lambda pids: None)
     assert adopt_service.adopt(THREAD).agent.agent == "codex"
+
+
+#: Codex 0.164.0's managed app-server daemon, as ``ps`` lists it (SMOKE11, 5A): a ``codex`` with
+#: no arguments starts it and runs its thread there, and it keeps the rollout open for minutes
+#: after that ``codex`` quit.
+CODEX_DAEMON = (
+    "/home/dev/.codex/packages/app-server-daemon/0.164.0/codex app-server "
+    "--listen unix:///home/dev/.codex/app-server.sock --managed-daemon"
+)
+
+
+def test_codexs_managed_daemon_holds_a_thread_only_while_a_codex_client_runs(
+    tmux: FakeTmux,
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,
+    no_processes: list[tuple[int, int, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SMOKE11, 5A: ``codex`` with no arguments runs its thread in the managed app-server
+    daemon, which keeps the rollout open after the TUI quit, so adopt refused for minutes,
+    naming the daemon. The daemon alone holds nothing (``AgentTranscript.held_open``:
+    ``clients``): adoptable. With a TUI of Codex's running too, it is held, the TUI named, the
+    process to quit; so too with a TUI on another thread, which the table cannot tell apart."""
+    slot = core.create_account("codex")
+    rollout = _rollout(slot, THREAD, project.root)
+    no_processes.append((7000, 1, CODEX_DAEMON))
+    holds = {7000: frozenset({os.path.realpath(rollout)})}
+
+    def open_files(pids: list[int]) -> frozenset[str] | None:
+        return frozenset().union(*(holds.get(pid, frozenset()) for pid in pids))
+
+    monkeypatch.setattr(process_table, "open_files", open_files)
+    no_processes.append((7001, 1, "/bin/zsh"))
+    no_processes.append((7002, 7001, "node /usr/local/bin/codex"))
+    no_processes.append((7003, 7002, CODEX_NATIVE))
+
+    with pytest.raises(adopt_service.AdoptRefused) as held:
+        adopt_service.adopt(THREAD)
+    assert held.value.code == "held" and "pid 7002" in str(held.value), "the TUI, not the daemon"
+    [listed] = adopt_service.recent()
+    assert listed.held_by == 7002 and not adoptable(listed)
+
+    del no_processes[1:]  # the TUI quit: the daemon alone has the rollout open
+    [listed] = adopt_service.recent()
+    assert listed.held_by is None and adoptable(listed)
+    assert adopt_service.adopt(THREAD).agent.agent == "codex"
+
+
+def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
+    """``held_open``: Codex's daemon for its clients, its TUI and ``exec`` for their own
+    session; Claude Code's none."""
+    reader = get_adapter("codex").transcript_reader
+    claude = get_adapter("claude-code").transcript_reader
+    assert reader is not None and claude is not None
+    assert reader.held_open(CODEX_DAEMON.split()) == "clients"
+    assert reader.held_open(f"{CODEX_NATIVE} app-server --listen stdio://".split()) == "session"
+    assert reader.held_open([CODEX_NATIVE]) == "session"
+    assert reader.held_open(f"{CODEX_NATIVE} exec --json go".split()) == "session"
+    assert claude.held_open(["claude"]) is None
+
+
+def test_a_stopped_fleet_codex_rows_thread_is_the_fleets_and_never_listed(
+    tmux: FakeTmux,
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SMOKE11, 5B: a plain-spawned Codex row's session landed only in ``fleet-session:<id>``,
+    its column NULL, and ``fleet_session_ids`` read the column alone: ``fleet adopt --list``
+    listed the row's own thread, and once stopped it was adopted into a second row. The
+    landing writes the column, as a Claude row's spawn does, and a row from before it (its
+    column empty) is read by its binding: refused as a stopped Claude row's is."""
+    slot = core.create_account("codex")
+    receipt = fleet_service.spawn(
+        project, "coder", agent="codex", account=str(slot.slot), worktree=False
+    )
+    codex = Codex(receipt.agent, project, slot.config_dir, tmux, monkeypatch)
+    codex.start(THREAD)
+    _rollout(slot, THREAD, project.root)
+    board_id = codex.board_id(THREAD)
+
+    def column() -> str | None:
+        with store_session() as store:
+            assert isinstance(store, SqliteStore)
+            row = store._conn.execute(
+                "SELECT session_id FROM fleet_agent WHERE id = ?", (receipt.agent.id,)
+            ).fetchone()
+        return None if row[0] is None else str(row[0])
+
+    assert column() == board_id, "the session landed in the row's own column"
+    assert adopt_service.recent() == []
+    fleet_service.stop(project, receipt.agent.label, force=True)
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        store._conn.execute(
+            "UPDATE fleet_agent SET session_id = NULL WHERE id = ?", (receipt.agent.id,)
+        )
+        store._conn.commit()
+    assert column() is None, "a row from before the landing wrote the column"
+
+    assert adopt_service.recent() == []
+    with pytest.raises(adopt_service.AdoptRefused) as refused:
+        adopt_service.adopt(THREAD, label="stolen")
+    assert refused.value.code == "owned_by_the_fleet"
+    assert "was a fleet agent's: restart that agent" in str(refused.value)
+
+
+def test_a_codex_row_recorded_after_its_session_landed_takes_it_into_its_column(
+    tmux: FakeTmux, project: ProjectInfo
+) -> None:
+    """The window opens before the spawn records the row, so the agent's start may bind the
+    launch first: the row's insert takes the binding, as the landing would have written it."""
+    with store_session() as store:
+        store.set_meta("fleet-session:row-late", "the-thread")
+        stored = store.upsert_fleet_agent(
+            FleetAgent(
+                id="row-late",
+                project_id=project.id,
+                label="late",
+                role="coder",
+                binary="codex",
+                tmux_socket="fleet",
+                pane_id="%9",
+                session_id=None,
+                cwd=project.root,
+                worktree=False,
+                spawned_by="test",
+                created_at=datetime.now(tz=UTC),
+                agent="codex",
+            )
+        )
+        assert isinstance(store, SqliteStore)
+        raw = store._conn.execute(
+            "SELECT session_id FROM fleet_agent WHERE id = 'row-late'"
+        ).fetchone()
+    assert stored.session_id == raw[0] == "the-thread"
 
 
 def test_the_list_holds_both_agents_conversations_and_the_picker_names_each(

@@ -933,6 +933,12 @@ CallAsk = Literal["tool", "question", "plan", "subagent"]
 AnswerKind = Literal["permission", "question", "plan"]
 """The cards a phone answers with keys (:meth:`AgentTranscript.answer_keys`)."""
 
+HoldsOpen = Literal["session", "clients"]
+"""How a process of the agent's holds the transcripts it writes (:meth:`AgentTranscript.
+held_open`): for as long as its own session lives (``session``: a TUI, an ``exec``), or for
+the clients it serves, and on after they quit (``clients``: Codex's managed app-server
+daemon), which holds a conversation only while a client of the agent's still runs."""
+
 
 @dataclass(frozen=True)
 class AnswerKey:
@@ -1029,12 +1035,18 @@ class AgentTranscript(Protocol):
 
     speaker: str
     """How a page names the agent's own turns: ``* <speaker>`` (``claude``, ``codex``)."""
-    held_open: bool
-    """Whether the process that writes a transcript holds it open for as long as its session
-    lives (Codex's rollouts: its native binary, measured with ``lsof`` on 0.164.0; Claude
-    Code's transcript is held by none, its session registry says who runs one). ``fleet
-    adopt`` asks the process table (``core.process_table``) then whether a process of the
-    agent's holds a conversation whose arguments name no session (a fresh start)."""
+
+    def held_open(self, args: Sequence[str]) -> HoldsOpen | None:
+        """How a process of the agent's run with ``args`` (``ps``'s words) holds the
+        transcripts it writes open (:data:`HoldsOpen`): ``None`` for one that holds none
+        (Claude Code's, whose session registry says who runs one). Codex's native binary
+        holds its rollout for as long as its session lives (``lsof`` on 0.164.0), its
+        managed app-server daemon (``codex app-server … --managed-daemon``, where a ``codex``
+        started with no arguments runs its thread) for its clients and minutes after the last
+        one quit. ``fleet adopt`` asks the process table (``core.process_table``) then
+        whether a process of the agent's holds a conversation whose arguments name no session
+        (a fresh start). Never raises."""
+        ...
 
     def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
         """Each conversation the agent keeps under config dir ``home``: its native id and its
@@ -1320,6 +1332,15 @@ class AgentAdapter(Protocol):
     screen: AgentScreen | None
     """How its screen is read (:class:`AgentScreen`); ``None`` for an agent whose screen is
     not read, which the shared code reads as :data:`NO_SCREEN` (:func:`screen_of`)."""
+    model_flags: tuple[str, ...]
+    """Every spelling of its model option, as its command line takes one (``--model``;
+    Codex's ``-m`` too): what ``harness.model_arg`` reads the model an argv names by,
+    whichever agent the argv is for, so a spawn's ``-m gpt-5.5`` is a model it names."""
+    effort_levels: tuple[str, ...]
+    """The efforts it takes, lowest first, by the names it takes them by (Claude Code's
+    ``harness.EFFORT_SCALE`` and ``ultracode``; Codex's ``model_reasoning_effort`` levels,
+    ``minimal`` among them): what the Spawn dialog's Effort field offers while it follows
+    this agent, and the efforts its pick keeps (``services.model_memory``)."""
 
     @property
     def accounts(self) -> AgentAccounts | None:
@@ -1436,6 +1457,15 @@ class AgentAdapter(Protocol):
 
     def validate(self, model: str | None, effort: str | None) -> None:
         """Raise :class:`BadEffortError` for an effort the agent cannot take."""
+        ...
+
+    def claims_model(self, model: str) -> bool:
+        """Whether ``model`` is one of the agent's own model names, by its families as much as
+        by its :attr:`price_table` (Claude Code's ladders' families, ``harness.model_family``:
+        ``opus``, ``claude-opus-5-5``; Codex's ``gpt-*``, ``o<digit>*``, ``codex-*`` and the
+        models its catalog bundles): a model one agent claims keeps a launch that names it on
+        that agent (``agent_adapters.model_owner``), and is never another agent's pick
+        (``services.model_memory``). Never raises."""
         ...
 
     def effort_alias(self, effort: str) -> str: ...

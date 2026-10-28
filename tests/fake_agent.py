@@ -50,6 +50,7 @@ from aisquare.core.agent_adapters.types import (
     CompactCommand,
     EventKind,
     ForkArgs,
+    HoldsOpen,
     HookSpec,
     HooksSwitch,
     InstallRoute,
@@ -291,8 +292,10 @@ class FakeTranscript:
             for record in ledger.entries(file, row)
         )
 
-    #: Its log is closed between records: who runs a thread is its arguments' to say.
-    held_open = False
+    def held_open(self, args: Sequence[str]) -> HoldsOpen | None:
+        """None: its log is closed between records, who runs a thread is its arguments' to
+        say."""
+        return None
 
     def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
         # Its threads: ``threads/<id>.log``, one record a line.
@@ -591,6 +594,8 @@ class FakeAgentAdapter:
         dialog_on_screen=dialog_on_screen,
         screen_prompt=screen_prompt,
     )
+    model_flags: tuple[str, ...] = ("--model",)
+    effort_levels: tuple[str, ...] = ("low", "high")
     capabilities = AgentCapabilities(
         approves_for_me=True,
         launch_inputs=(".fakeagent",),
@@ -750,6 +755,10 @@ class FakeAgentAdapter:
 
     def effort_alias(self, effort: str) -> str:
         return effort.strip().lower()
+
+    def claims_model(self, model: str) -> bool:
+        table = self.price_table  # its rate card's names alone
+        return table is not None and table.price_for(model) is not None
 
     def instruction_files(self, home: Path, cwd: Path | None) -> tuple[Path, ...]:
         # Its home's FAKE.md, and the one of the folder it starts in, none above: unlike both.

@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -85,6 +85,7 @@ from aisquare.core.agent_adapters.types import (
     AnswerKey,
     AnswerKind,
     CallAsk,
+    HoldsOpen,
     TurnsScan,
     UsageScan,
 )
@@ -208,9 +209,16 @@ class CodexTranscript:
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         return _rollout_reply(file, since)
 
-    #: Its native binary holds the rollout open from the first prompt on for as long as the
-    #: session lives (``lsof`` on 0.164.0, ``core.process_table``).
-    held_open = True
+    def held_open(self, args: Sequence[str]) -> HoldsOpen | None:
+        """``clients`` for its managed app-server daemon (``<CODEX_HOME>/packages/
+        app-server-daemon/…/codex app-server --listen unix://… --managed-daemon``), which runs
+        the thread of a ``codex`` started with no arguments (0.164.0's default) and keeps its
+        rollout open for minutes after that ``codex`` quit: alone it holds no conversation
+        (SMOKE11, 5A). Its native binary otherwise, a TUI or an ``exec``, holds the rollout
+        open from the first prompt on for as long as its session lives (``lsof`` on 0.164.0,
+        ``core.process_table``)."""
+        words = set(args)
+        return "clients" if {_APP_SERVER, _MANAGED_DAEMON} <= words else "session"
 
     def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
         """``sessions/YYYY/MM/DD/rollout-<local time>-<thread id>.jsonl``, by its name."""
@@ -257,6 +265,10 @@ class CodexTranscript:
 
 _ROLLOUT_NAME = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)\.jsonl$")
 """A rollout's name: the local time its session began, then its thread id."""
+_APP_SERVER = "app-server"
+_MANAGED_DAEMON = "--managed-daemon"
+"""The subcommand and the flag of the app-server daemon Codex manages itself (0.164.0, ``ps``
+in SMOKE11), which a ``codex`` with no arguments starts and attaches its TUI to."""
 
 _REPLY_MAX_BYTES = 64_000_000
 """How far back :func:`_rollout_reply` reads for the prompt a reply answers, as Claude Code's

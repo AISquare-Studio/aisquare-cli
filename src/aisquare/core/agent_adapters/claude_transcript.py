@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,6 +53,7 @@ from aisquare.core.agent_adapters.types import (
     AnswerKey,
     AnswerKind,
     CallAsk,
+    HoldsOpen,
     TurnsScan,
     UsageScan,
 )
@@ -184,9 +185,10 @@ class ClaudeTranscript:
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         return last_reply(file, since=since)
 
-    #: Claude Code appends to its transcript and holds it open no longer: which process runs a
-    #: session is its registry's to say (``<config dir>/sessions/<pid>.json``).
-    held_open = False
+    def held_open(self, args: Sequence[str]) -> HoldsOpen | None:
+        """None: Claude Code appends to its transcript and holds it open no longer, and which
+        process runs a session is its registry's to say (``<config dir>/sessions/<pid>.json``)."""
+        return None
 
     def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:
         """``projects/<folder>/<id>.jsonl``: a subagent's, one level further down, is no

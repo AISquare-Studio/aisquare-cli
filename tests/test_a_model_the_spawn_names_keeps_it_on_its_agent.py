@@ -23,12 +23,16 @@ from textual.pilot import Pilot
 from textual.widgets import Input, Static
 
 from aisquare.cli.ui.spawn import SpawnDialog
+from aisquare.core import harness
 from aisquare.core.agent_adapters import register, unregister
+from aisquare.core.agent_adapters.codex import BUNDLED_MODELS
 from aisquare.core.agent_adapters.types import PriceTable
 from aisquare.core.config import AgentModelDefault, AgentModelSettings, load_config, save_config
 from aisquare.core.pricing import Price
+from aisquare.core.store import store_session
 from aisquare.models import ClaudeUsage, ProjectInfo, UsageWindow
-from aisquare.services import agent_launch
+from aisquare.services import agent_launch, model_memory
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from tests.fake_agent import FakeAgentAdapter
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
@@ -256,3 +260,147 @@ def test_a_named_model_two_agents_claim_keeps_the_rung_from_crossing(
     shared = fleet_service.role_agent(project, "coder", model="gpt-5.4")
 
     assert (shared.adapter.id, shared.source) == ("claude-code", "accounts")
+
+
+# --- SMOKE11, 11: Codex's models are its families', not its price table's alone -----------
+
+#: Codex's though its price table lists none of them (SMOKE11, 11): OpenAI's families
+#: (``gpt-*``, ``o<digit>*``, ``codex-*``), and what Codex 0.164.0 names (``gpt-5.1-codex-max``,
+#: ``gpt-6-pro``). Each went to the agent first in the order, Claude Code, and became its pick.
+UNPRICED_CODEX = (
+    "gpt-x",
+    "gpt-5.4-mini",
+    "gpt-5.2",
+    "o3",
+    "o4-mini",
+    "codex-mini-latest",
+    "gpt-5.1-codex-max",
+    "gpt-6-pro",
+)
+
+
+def test_codex_claims_openais_families_and_its_bundled_catalog_beside_its_price_table() -> None:
+    """``AgentAdapter.claims_model``: Codex's models are OpenAI's families and the catalog
+    0.164.0 bundles, priced or not; Claude Code's are still its own, and a name of neither
+    (``omni``: an ``o`` with no digit) is no one's."""
+    owner = agent_launch.model_owner
+    assert {model: owner(model) for model in UNPRICED_CODEX} == dict.fromkeys(
+        UNPRICED_CODEX, "codex"
+    )
+    assert {model: owner(model) for model in BUNDLED_MODELS} == dict.fromkeys(
+        BUNDLED_MODELS, "codex"
+    )
+    assert [owner(model) for model in ("GPT-X", "openai/o3", "codex-mini-latest-2026-01-02")] == [
+        "codex"
+    ] * 3
+    claude = ("opus", "sonnet", "haiku", "fable", "opusplan", "claude-3-5-sonnet-20241022")
+    assert {model: owner(model) for model in claude} == dict.fromkeys(claude, "claude-code")
+    assert [owner(model) for model in ("my-own-model", "llama3", "omni", "  ")] == [None] * 4
+
+
+def test_the_model_arg_reads_every_agents_model_option() -> None:
+    """``harness.model_arg``: ``-m`` (Codex's ``model_flags``) as well as ``--model``, either
+    form, the first named; a lone flag at the end names none."""
+    assert harness.model_arg(["-m", "gpt-5.5"]) == "gpt-5.5"
+    assert harness.model_arg(["-m=gpt-5.5"]) == "gpt-5.5"
+    assert harness.model_arg(["--model=gpt-x", "-m", "o3"]) == "gpt-x"
+    assert harness.model_arg(["-c", "x=1", "-m", "o3", "--model", "gpt-x"]) == "o3"
+    assert harness.model_arg(["--effort", "high", "-m"]) is None
+
+
+def _codex_first(home: dict[str, Any]) -> None:
+    """Codex's account on top of the one order: what a launch nothing pins runs."""
+    accounts_service.move(str(home["codex-a"].slot), "top")
+
+
+@pytest.mark.parametrize("first", ["claude-first", "codex-first"])
+@pytest.mark.parametrize(
+    ("named", "model"),
+    [
+        ({"model": "gpt-x"}, "gpt-x"),
+        ({"agent_args": ["--model=gpt-5.4-mini"]}, "gpt-5.4-mini"),
+        ({"agent_args": ["-m", "gpt-5.5"]}, "gpt-5.5"),
+        ({"model": "o3"}, "o3"),
+        ({"model": "codex-mini-latest"}, "codex-mini-latest"),
+    ],
+    ids=["gpt-x", "eq-gpt-5.4-mini", "m-gpt-5.5", "o3", "codex-mini-latest"],
+)
+def test_a_codex_model_outside_its_price_table_runs_codex_and_is_no_claude_pick(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    first: str,
+    named: dict[str, Any],
+    model: str,
+) -> None:
+    """SMOKE11, 11's repro, in both orders: with Claude Code first, ``--model gpt-x``,
+    ``--model=gpt-5.4-mini`` and ``-m gpt-5.5`` launched Claude Code with them (``-m`` killed
+    it: "unknown option '-m'"), and the model became Claude Code's pick, which the next plain
+    Claude Code spawn ran. Each runs Codex, on its first slot, with the model once; the next
+    Claude Code spawn names no model."""
+    home = _claude_first_with_room(monkeypatch)
+    if first == "codex-first":
+        _codex_first(home)
+
+    receipt = fleet_service.spawn(project, "coder", **named)
+
+    assert (receipt.agent.agent, receipt.agent.account_slot) == ("codex", home["codex-a"].slot)
+    command = tmux.spawned[-1]["command"]
+    assert isinstance(command, list)
+    once = [word for word in command if model in (word, word.partition("=")[2])]
+    assert len(once) == 1, command
+    assert model_memory.remembered(agent="codex").model == model, "Codex's own pick"
+    claude = fleet_service.spawn(project, "coder", agent="claude-code")
+    command = tmux.spawned[-1]["command"]
+    assert claude.agent.agent == "claude-code"
+    assert isinstance(command, list) and "--model" not in command and model not in command
+    assert model_memory.remembered(agent="claude-code").model is None
+
+
+def test_a_pick_is_kept_only_for_the_agent_that_owns_it_or_ran_one_no_agent_claims(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``model_memory.remember``: an agent pinned to run another agent's model runs it (the
+    owner said so), but it is never that agent's pick, and an effort it takes still is. A
+    model no agent claims is the pick of the agent that ran it."""
+    _claude_first_with_room(monkeypatch)
+
+    fleet_service.spawn(project, "coder", agent="claude-code", model="gpt-x", effort="low")
+    assert _flag_of(tmux.spawned[-1]["command"], "--model") == "gpt-x", "pinned: it runs it"
+    assert (_kept("fleet-model"), _kept("fleet-effort")) == (None, "low"), "never written"
+    fleet_service.spawn(project, "coder", agent="codex", model="opus")
+    assert _kept("fleet-model:codex") is None
+    fleet_service.spawn(project, "coder", agent="claude-code", model="my-own-model")
+    assert model_memory.remembered(agent="claude-code").model == "my-own-model"
+    later = fleet_service.spawn(project, "coder", agent="claude-code")
+    assert later.agent.agent == "claude-code"
+    assert _flag_of(tmux.spawned[-1]["command"], "--model") == "my-own-model"
+
+
+def test_a_model_another_agent_claims_kept_before_is_no_pick() -> None:
+    """A store a build before this one wrote, holding ``gpt-x`` as Claude Code's pick (and
+    ``opus`` as Codex's), reads as no pick: the next spawn runs the account's default."""
+    with store_session() as store:
+        store.set_ui_state("fleet-model", "gpt-x")
+        store.set_ui_state("fleet-model:codex", "opus")
+        store.set_ui_state("fleet-effort:codex", "minimal")
+    assert model_memory.remembered(agent="claude-code").model is None
+    assert model_memory.remembered() == model_memory.Pick()
+    assert model_memory.remembered(agent="codex") == model_memory.Pick(None, "minimal")
+
+
+def _kept(key: str) -> str | None:
+    """What the store keeps under a pick's key, as written (``model_memory._keys``)."""
+    with store_session() as store:
+        return store.ui_state(key)
+
+
+def _flag_of(command: object, flag: str) -> str | None:
+    assert isinstance(command, list)
+    return command[command.index(flag) + 1] if flag in command else None

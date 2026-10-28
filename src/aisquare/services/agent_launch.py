@@ -12,11 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from aisquare.core import agents, harness, orchestrator, paths, selfcli
+from aisquare.core import agent_adapters, agents, harness, orchestrator, paths, selfcli
 from aisquare.core.agent_adapters import (
     DEFAULT_AGENT,
     adapter_for_binary,
-    adapters,
     default_adapter,
     get_adapter,
 )
@@ -299,25 +298,17 @@ def account_agent(account: str | None, role: str) -> str | None:
 
 
 def model_owner(model: str | None) -> str | None:
-    """The agent whose own model ``model`` is: the one registered agent that names it, by its
-    model ladders (``capabilities.model_ladders``: a model with a family,
-    ``harness.model_family``: Claude Code's ``fable``, ``opus``, ``claude-opus-5-5``) or by its
-    price table (``AgentAdapter.price_table``: Codex's ``gpt-5.4``, a dated snapshot of one).
-    ``None`` for no model, one no agent names, or one two agents name. A model a launch names
-    keeps it on that agent (:func:`resolve`'s ``model`` rung): weighed across agents, a Claude
-    model went to a Codex account with room and a Codex model to a Claude Code one, each
-    started with a model it does not run (review r29 of #113, m1, and its delta's)."""
-    if not model:
-        return None
-
-    def names(adapter: AgentAdapter) -> bool:
-        if adapter.capabilities.model_ladders and harness.model_family(model) is not None:
-            return True
-        table = adapter.price_table
-        return table is not None and table.price_for(model) is not None
-
-    owners = [adapter.id for adapter in adapters() if names(adapter)]
-    return owners[0] if len(owners) == 1 else None
+    """The agent whose own model ``model`` is: the one registered agent that claims it
+    (``agent_adapters.model_owner``, ``AgentAdapter.claims_model``: Claude Code's ladders'
+    families and price table, ``fable``, ``opus``, ``claude-opus-5-5``; Codex's ``gpt-*``,
+    ``o<digit>*``, ``codex-*``, the catalog it bundles and its price table, ``gpt-x``,
+    ``o3``, ``gpt-5.4``). ``None`` for no model, one no agent claims, or one two agents
+    claim. A model a launch names keeps it on that agent (:func:`resolve`'s ``model`` rung):
+    weighed across agents, a Claude model went to a Codex account with room and a Codex model
+    to a Claude Code one, each started with a model it does not run (review r29 of #113, m1,
+    and its delta's); one outside Codex's price table went to the agent first in the order,
+    and became Claude Code's pick (SMOKE11, 11)."""
+    return agent_adapters.model_owner(model)
 
 
 def accounts_pick(

@@ -31,7 +31,7 @@ from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import launch_seal
 from aisquare.core.ids import new_event_id
 from aisquare.core.store import SqliteStore, store_session
-from aisquare.models import ProjectInfo, TeamEvent, TeamSession
+from aisquare.models import FleetAgent, ProjectInfo, TeamEvent, TeamSession
 from aisquare.services import agent_events, usage_stats
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
@@ -194,6 +194,54 @@ def test_a_codex_agent_counts_as_its_role_locally_and_in_no_shared_day(
 
     assert day.fleet.agents_spawned == {"coder": 1, "tester": 1}
     assert day.fleet.tasks_done == 3
+    assert (shared_day.fleet.agents_spawned, shared_day.fleet.tasks_done) == ({"tester": 1}, 1)
+
+
+def _a_session(on: ProjectInfo, session: str, agent: str) -> None:
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(id=session, agent=agent, project_id=on.id, started_at=now, last_seen_at=now)
+        )
+
+
+def _session_of(agent: FleetAgent, session: str) -> None:
+    """Fleet agent ``agent`` bound to board session ``session``, as its hook binds it."""
+    with store_session() as store:
+        store._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE fleet_agent SET session_id = ? WHERE id = ?", (session, agent.id)
+        )
+        store._conn.commit()  # type: ignore[attr-defined]
+
+
+def test_a_task_done_is_its_fleet_agent_s_before_its_session_s(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """tester-42 on #42 (b), mutant L: whose a task done is, where the two disagree, is the
+    fleet agent's bound to the session that marked it, before the session's own
+    (``store.fleet_activity``): a Codex agent's mark is in no shared count though its session
+    reads as Claude Code's, and a Claude Code agent's is though its session reads as Codex's."""
+    codex = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+    _session_of(codex, "ses-codex-agent")
+    _a_session(project, "ses-codex-agent", "claude-code")  # the session disagrees
+    _a_task_done_by(project, "ses-codex-agent")
+
+    [day] = usage_stats.daily_rollups(date.today(), date.today())
+    shared = usage_stats.daily_rollups(date.today(), date.today(), shared_only=True)
+
+    assert day.fleet.tasks_done == 1
+    assert shared == [], "the Codex agent's mark, whatever its session says"
+
+    claude = fleet_service.spawn(project, "tester", worktree=False).agent
+    _session_of(claude, "ses-claude-agent")
+    _a_session(project, "ses-claude-agent", "codex")  # the session disagrees
+    _a_task_done_by(project, "ses-claude-agent")
+
+    [shared_day] = usage_stats.daily_rollups(date.today(), date.today(), shared_only=True)
+
+    assert claude.agent == "claude-code"
     assert (shared_day.fleet.agents_spawned, shared_day.fleet.tasks_done) == ({"tester": 1}, 1)
 
 

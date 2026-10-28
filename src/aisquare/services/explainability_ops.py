@@ -1560,7 +1560,10 @@ def _check_outbox(settings: ExplainabilitySettings | None = None) -> DoctorCheck
     row, as main keeps its explainability rows."""
     name = "explainability-spool"
     directory = outbox.queue_dir()
-    fix = f"Restore write access and free space in {directory}, then rerun aisquare doctor"
+    fix = (
+        f"Restore write access and free space in {directory}, then rerun "
+        "aisquare explainability doctor"
+    )
     try:
         settings = load_config().explainability if settings is None else settings
         if not settings.enabled or not settings.ship:

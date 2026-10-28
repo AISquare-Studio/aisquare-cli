@@ -536,7 +536,7 @@ def test_a_primary_path_spool_failure_is_not_a_receiver_failure(
 
 
 def test_the_explainability_section_shows_the_spool_row_with_the_receivers_last_failure(
-    shipping: None,
+    shipping: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``explainability-spool`` is a row of the explainability section
     (``explainability_ops.checks``, ``aisquare explainability doctor``), main's home for these
@@ -549,6 +549,16 @@ def test_the_explainability_section_shows_the_spool_row_with_the_receivers_last_
     row = {check.name: check for check in explainability_ops.checks()}["explainability-spool"]
 
     assert row.status == "warn" and "last receiver failure" in (row.detail or ""), row
+
+    # A spool it cannot write: its fix names the command that shows the row again, not
+    # `aisquare doctor`, which has none of it (#43 reopen, tester-43's nit).
+    def unwritable(path: Path, *args: Any, **kwargs: Any) -> int:
+        raise OSError(errno.EACCES, "fixture read-only spool")
+
+    monkeypatch.setattr(Path, "write_bytes", unwritable)
+    row = {check.name: check for check in explainability_ops.checks()}["explainability-spool"]
+    assert row.status == "warn" and "Cannot write" in (row.detail or ""), row
+    assert (row.fix or "").endswith("then rerun aisquare explainability doctor"), row
 
 
 def test_recovery_clears_the_previous_receiver_diagnostic(

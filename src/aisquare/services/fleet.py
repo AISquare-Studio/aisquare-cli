@@ -2737,14 +2737,20 @@ def _say_unplaced_trees_kept(
     row (:func:`_remove_finished_worktrees`), and kept unsaid, it stayed with nothing on the
     report to say so (tester-40b, seq 4207). Once a path, for the newest row there, as
     ``owners`` holds it. Left unsaid, as before: a tree gone already, one a placed row's
-    record names (removed or kept, and said so, for that row), and one in use."""
+    record names (removed or kept, and said so, for that row), and one in use: the root, or a
+    tree a live row works in, by its record or by its store columns (a respawn that reused
+    it, a row rewritten onto it), as :func:`_reap_tree` leaves such a tree unsaid. A live
+    row's own tree is one of those, so only an ended row's is said. Read by the records
+    alone, a live respawn's tree was said to be kept for the ended row before it (tester-40c,
+    seq 4239)."""
+    live = {_tree_at(p.row.cwd) for p in placed if p.row.ended_at is None}
     unplaced: dict[Path, Unplaced] = {}
     for placement in placed:
         row = placement.row
-        if not isinstance(placement, Unplaced) or row.ended_at is None or not row.worktree:
+        if not isinstance(placement, Unplaced) or not row.worktree:
             continue
         here = _tree_at(row.cwd)
-        if here is not None and here not in owners and here not in in_use:
+        if here is not None and here not in owners and here not in in_use and here not in live:
             unplaced[here] = placement
     for placement in unplaced.values():
         tree, label = placement.row.cwd, placement.row.label

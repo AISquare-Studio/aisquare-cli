@@ -312,6 +312,131 @@ def test_reap_says_nothing_of_an_unplaced_rows_tree_in_use(
     assert agent.cwd.is_dir() and project.root.is_dir()
 
 
+def test_reap_says_nothing_of_an_unplaced_rows_tree_gone_already(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """An ended row no record places whose tree was removed by hand: nothing is kept there,
+    and the report does not say it is (tester-40c, seq 4239, c1)."""
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=True).agent
+    fleet_service.stop(project, agent.label, force=True)
+    launch_seal._path(agent.id).unlink()
+    git = ["git", "-C", str(project.root)]
+    subprocess.run([*git, "worktree", "remove", "--force", str(agent.cwd)], check=True)
+    assert not agent.cwd.exists(), "the fixture: the tree is gone"
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [] and report.worktrees_kept == []
+
+
+def test_reap_says_nothing_of_a_live_unplaced_rows_tree(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """A LIVE row no record places: its tree is in use, not one reap keeps for an ended row,
+    and the report does not say it is (c2). An ended placed row has reap look at the trees,
+    and its own tree goes."""
+    done = fleet_service.spawn(project, "coder", agent="codex", worktree=True, label="done").agent
+    fleet_service.stop(project, done.label, force=True)
+    live = fleet_service.spawn(project, "coder", agent="codex", worktree=True, label="cx").agent
+    launch_seal._path(live.id).unlink()
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_kept == [] and live.cwd.is_dir()
+    assert [tree.resolve() for tree in report.worktrees_removed] == [done.cwd.resolve()]
+
+
+def test_reap_says_nothing_for_an_unplaced_row_that_had_no_tree(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """An ended row no record places that ran with no tree of its own, its store ``cwd``
+    rewritten to a folder elsewhere: that folder was never the fleet's tree, and the report
+    does not say it is kept (c3)."""
+    done = fleet_service.spawn(project, "coder", agent="codex", worktree=True, label="done").agent
+    fleet_service.stop(project, done.label, force=True)
+    plain = fleet_service.spawn(project, "coder", agent="codex", worktree=False, label="pl").agent
+    fleet_service.stop(project, plain.label, force=True)
+    launch_seal._path(plain.id).unlink()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _rewrite_cwd(plain.id, elsewhere)
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_kept == [] and elsewhere.is_dir()
+
+
+def test_reap_says_an_unplaced_tree_once_for_the_newest_row_there(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """Two ended rows no record places at one tree (the newer's store ``cwd`` rewritten to the
+    older's tree): the tree is on the report once, for the newest row there, as ``owners``
+    holds a placed row's tree (c4)."""
+    a = fleet_service.spawn(project, "coder", agent="codex", worktree=True, label="cx-a").agent
+    fleet_service.stop(project, a.label, force=True)
+    launch_seal._path(a.id).unlink()
+    b = fleet_service.spawn(project, "coder", agent="codex", worktree=True, label="cx-b").agent
+    fleet_service.stop(project, b.label, force=True)
+    launch_seal._path(b.id).unlink()
+    _rewrite_cwd(b.id, a.cwd)
+
+    report = fleet_service.reap(project)
+
+    assert [(tree, why.split(":")[0]) for tree, why in report.worktrees_kept] == [
+        (a.cwd, "no launch record places cx-b")
+    ]
+
+
+def test_reap_says_nothing_of_an_unplaced_rows_tree_a_live_respawn_works_in(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """An ended row no record places, and its label's respawn, live, which reused the tree and
+    whose record is gone too: the tree is the live agent's, in use, and the report does not
+    say it is kept for the ended row (c5). Read by the records alone, it did."""
+    ended = fleet_service.spawn(project, "coder", agent="codex", worktree=True, label="cx").agent
+    fleet_service.stop(project, ended.label, force=True)
+    launch_seal._path(ended.id).unlink()
+    live = fleet_service.spawn(project, "coder", agent="codex", worktree=True, label="cx").agent
+    assert live.cwd.resolve() == ended.cwd.resolve(), "the fixture: the respawn reused the tree"
+    launch_seal._path(live.id).unlink()
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [] and report.worktrees_kept == []
+    assert live.cwd.is_dir()
+
+
+def test_reap_says_nothing_of_an_unplaced_rows_tree_a_live_rows_store_names(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """An ended row no record places, at its tree, and a live placed row with no tree whose
+    store ``cwd`` was rewritten onto it: ``_reap_tree`` leaves a tree a live row's store names
+    unsaid, as in use, and the report says nothing of it either (c6)."""
+    ended = fleet_service.spawn(project, "coder", agent="codex", worktree=True, label="cx").agent
+    fleet_service.stop(project, ended.label, force=True)
+    launch_seal._path(ended.id).unlink()
+    live = fleet_service.spawn(project, "coder", agent="codex", worktree=False, label="lv").agent
+    _rewrite_cwd(live.id, ended.cwd)
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [] and report.worktrees_kept == []
+    assert ended.cwd.is_dir()
+
+
 def test_reap_keeps_a_tree_a_live_rows_store_names_whatever_the_records_say(
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811

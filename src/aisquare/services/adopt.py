@@ -206,18 +206,23 @@ class _Holders:
         app-server daemon), a hold too: Codex resumes no thread its daemon has open (the
         adopted ``codex resume`` sat on "This conversation is open in another app", measured
         on 0.164.0, #47). A client of the agent's that runs is named before the daemon, the
-        process the human knows to quit; with none, the daemon is (:meth:`serving`). A
-        process of the daemon's that holds nothing (its ``pid-update-loop``) is never named,
-        nor as its client one that is none: one that runs embedded (``held_open``'s
-        ``alone``), named only when it holds the conversation itself, and a fleet agent's
-        (:meth:`_fleets`), which shows its own (#50: a Codex fleet agent was named for a
-        thread the daemon held, a human told to quit it). ``None`` when none holds it or the
-        process table cannot say.
+        process the human knows to quit; with none, the daemon is (:meth:`serving`). A client
+        is a process of the agent's connected to the daemon's socket
+        (``process_table.connected_to``, measured on macOS: r31), whatever its arguments
+        say; where the socket cannot say (``/proc``, no ``lsof``), one that runs a form that
+        can be one (``held_open``'s ``session``). A process of the daemon's that holds nothing
+        (its ``pid-update-loop``) is never named, nor as its client one that is none: one
+        that runs embedded or runs no thread of the daemon's (``held_open``'s ``alone``: an
+        ``exec``, an ``app-server`` of its own, an ``exec-server``, a ``login``), named only
+        when it holds the conversation itself, and a fleet agent's (:meth:`_fleets`), which
+        shows its own (#50: a Codex fleet agent was named for a thread the daemon held, a
+        human told to quit it). ``None`` when none holds it or the process table cannot say.
 
         A process table names no thread a client shows: with the daemon holding the rollout,
-        any client of the agent's is named, one showing another thread or attached to another
-        home's daemon among them. Either way it refuses, and quitting it leaves the daemon
-        named next: it never names a process that is not the agent's."""
+        any client of that daemon's is named, one showing another thread among them, and
+        where the socket cannot say, one attached to another home's daemon too. Either way it
+        refuses, and quitting it leaves the daemon named next: it never names a process that
+        is not the agent's."""
         reader = adapter.transcript_reader
         if reader is None:
             return None
@@ -240,7 +245,12 @@ class _Holders:
         server = next((pid for pid, kind in holders if kind == "clients"), None)
         if own is not None or server is None:
             return own
-        clients = [pid for pid, kind in runs if kind == "session"]
+        agents = [pid for pid, kind in runs if kind != "clients"]
+        connected = process_table.connected_to(server, agents)
+        if connected is None:  # the socket cannot say: the forms that can be its client
+            clients = [pid for pid, kind in runs if kind == "session"]
+        else:
+            clients = [pid for pid in agents if pid in connected]
         return next((pid for pid in clients if not self._fleets(pid)), server)
 
     def _fleets(self, pid: int) -> bool:

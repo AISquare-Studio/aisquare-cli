@@ -282,6 +282,147 @@ def test_no_process_is_no_files() -> None:
     assert process_table.open_files([]) == frozenset()
 
 
+# --- who is connected to a server's socket
+
+#: ``lsof -n -P -w -a -U -F pdn`` on Codex 0.164.0's managed daemon (8465) and the native
+#: binary of a TUI on it (8455), as macOS printed them (r31): the daemon's listening socket
+#: and the one it accepted the TUI on are named by the path it listens on, the TUI's by the
+#: address of the daemon's end, and each one's own pairs by each other.
+DAEMON_AND_TUI = """p8455
+f7
+d0x1d1432ccc9653db0
+n->0xadb288b360af64ac
+f8
+d0xadb288b360af64ac
+n->0x1d1432ccc9653db0
+f34
+d0xbd36af0859b1a9e0
+n->0x82db500f89b6c624
+p8465
+f7
+d0x23914f2eff05f361
+n->0x4efb5832c07efb84
+f8
+d0x4efb5832c07efb84
+n->0x23914f2eff05f361
+f32
+d0x7a8355fc85ebbfac
+n/private/tmp/codex-daemon-501/4277e226934b024274daf3c36c8922af8d10a0b42f9a4c9ce9351b810b1f01ed
+f33
+d0x82db500f89b6c624
+n/private/tmp/codex-daemon-501/4277e226934b024274daf3c36c8922af8d10a0b42f9a4c9ce9351b810b1f01ed
+"""
+
+
+def _lsof_says(monkeypatch: pytest.MonkeyPatch, out: str | None) -> list[list[str]]:
+    """``lsof`` printing ``out`` (``None``: it could not run); the commands it was given."""
+    asked: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
+        asked.append(argv)
+        return None if out is None else subprocess.CompletedProcess(argv, 0, out, "")
+
+    monkeypatch.setattr(process_table, "_run", run)
+    return asked
+
+
+def test_a_servers_client_is_the_process_whose_socket_is_connected_to_its_own(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The TUI is the daemon's client by its socket's peer, one of the daemon's on the path it
+    listens on. A process whose peer is another server's (another home's daemon), or one of the
+    daemon's own pairs (a child of the daemon's holding one end), is none; so is one that
+    holds no socket (its npm wrapper), and a process ``lsof`` did not list."""
+    other = "p9000\nf5\nd0x1\nn->0x7a8355fc85ebbfa\np9001\nf5\nd0x2\nn->0x23914f2eff05f361\n"
+    asked = _lsof_says(monkeypatch, DAEMON_AND_TUI + other)
+    no_proc = tmp_path / "no-proc"
+
+    connected = process_table.connected_to(8465, [8453, 8455, 9000, 9001, 8465], proc=no_proc)
+
+    assert connected == frozenset({8455})
+    assert asked == [
+        ["lsof", "-n", "-P", "-w", "-a", "-U", "-F", "pdn", "-p", "8465,8453,8455,9000,9001"]
+    ]
+    assert process_table.connected_to(8465, [8465], proc=no_proc) == frozenset()
+    assert len(asked) == 1, "nothing asked of lsof for no process"
+
+
+def test_who_is_connected_is_not_told_where_the_sockets_cannot_say(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Not on a machine with ``/proc``, whose ``lsof`` names no peer (unmeasured: no Linux
+    Codex at hand), and never asked there; nor when ``lsof`` cannot run, nor when it does not
+    list the server or lists no socket of it named by a path: "cannot tell", never "none"."""
+    asked = _lsof_says(monkeypatch, DAEMON_AND_TUI)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    assert process_table.connected_to(8465, [8455], proc=proc) is None
+    assert asked == []
+
+    no_proc = tmp_path / "no-proc"
+    _lsof_says(monkeypatch, None)
+    assert process_table.connected_to(8465, [8455], proc=no_proc) is None
+    _lsof_says(monkeypatch, DAEMON_AND_TUI)
+    assert process_table.connected_to(8466, [8455], proc=no_proc) is None, "server unlisted"
+    pairs_only = DAEMON_AND_TUI.split("f32\n")[0]
+    _lsof_says(monkeypatch, pairs_only)
+    assert process_table.connected_to(8465, [8455], proc=no_proc) is None, "no listening one"
+
+
+def test_a_descriptor_lsof_gives_no_address_takes_none_of_the_one_before(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A socket listed with no ``d`` line has no address, never the last descriptor's: the
+    server's pair is not taken for the path it listens on, nor its pair's peer for a client."""
+    _lsof_says(monkeypatch, "p1\nf3\nd0xa\nn->0xb\nf4\nn/run/s.sock\np2\nf3\nd0xc\nn->0xa\n")
+    assert process_table.connected_to(1, [2], proc=tmp_path / "no-proc") is None
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or process_table.PROC.is_dir() or shutil.which("lsof") is None,
+    reason="the sockets say who is connected only through lsof where there is no /proc",
+)
+def test_a_real_client_is_told_by_its_connection_to_a_real_server() -> None:
+    """Against real processes: a server listening on a Unix socket, a client connected to it,
+    and a process beside them with a socket pair of its own."""
+    import tempfile
+
+    folder = Path(tempfile.mkdtemp(prefix="asqct", dir="/tmp"))
+    path = str(folder / "s")
+    serve = (
+        "import socket, time; s = socket.socket(socket.AF_UNIX); "
+        f"s.bind({path!r}); s.listen(); print('ready', flush=True); c, _ = s.accept(); "
+        "time.sleep(60)"
+    )
+    connect = (
+        "import socket, time; s = socket.socket(socket.AF_UNIX); "
+        f"s.connect({path!r}); print('ready', flush=True); time.sleep(60)"
+    )
+    paired = (
+        "import socket, time; a = socket.socketpair(); print('ready', flush=True); time.sleep(60)"
+    )
+    children: list[subprocess.Popen[str]] = []
+    try:
+        for script in (serve, connect, paired):
+            child = subprocess.Popen(
+                [sys.executable, "-c", script], stdout=subprocess.PIPE, text=True
+            )
+            children.append(child)
+            assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+        server, client, beside = (child.pid for child in children)
+        _until(
+            lambda: process_table.connected_to(server, [client, beside]) == frozenset({client}),
+            f"the client was never told: {process_table.connected_to(server, [client, beside])}",
+        )
+    finally:
+        for child in children:
+            child.kill()
+            child.wait()
+            if child.stdout is not None:
+                child.stdout.close()
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 # --- Linux's /proc, made up
 
 

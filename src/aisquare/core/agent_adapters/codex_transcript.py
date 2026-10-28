@@ -225,11 +225,14 @@ class CodexTranscript:
         ``<CODEX_HOME>/packages/app-server-daemon/releases/<version>/bin/codex`` and both
         living on after ``/exit``: ``app-server --listen unix://… --managed-daemon``, which
         holds the rollout, and ``app-server daemon pid-update-loop``, which holds none.
-        ``alone`` for a TUI or an ``exec`` that runs embedded (:func:`_embedded`), which holds
-        its rollout itself and is never the daemon's client: a fleet Codex is one (its ``-c``
-        overrides). ``session`` for any other: a TUI on the daemon, which holds its rollout
-        for it, and one that holds it open itself from the first prompt on for as long as its
-        session lives (``lsof`` on 0.164.0, ``core.process_table``)."""
+        ``session`` for a form that can be the daemon's client (:func:`_runs_as`): its TUI
+        (no subcommand, a prompt, ``resume``, ``fork``) and ``agents`` and ``app-server
+        proxy``, each measured connected to the daemon's socket. ``alone`` for any other,
+        never the daemon's client: one that runs embedded (a fleet Codex's ``-c`` overrides,
+        ``exec``, ``review``), which holds its rollout itself, and one that runs no thread of
+        the daemon's (``app-server`` of its own, ``exec-server``, ``login``). Each holds what
+        it has open from its first prompt on for as long as its session lives (``lsof`` on
+        0.164.0, ``core.process_table``)."""
         from aisquare.core.agent_adapters.codex import CodexAdapter
 
         image = process_executable(args)
@@ -237,12 +240,7 @@ class CodexTranscript:
             return None
         if _DAEMON_DIR in image.replace("\\", "/"):
             return "clients"
-        words = list(args[args.index(image) + 1 :])
-        after = words[words.index(_APP_SERVER) + 1 :] if _APP_SERVER in words else None
-        daemon = after is not None and (after[:1] == [_DAEMON] or _MANAGED_DAEMON in after)
-        if daemon:
-            return "clients"
-        return "alone" if _embedded(words) else "session"
+        return _runs_as(args[args.index(image) + 1 :])
 
     def server_note(self, run: Sequence[str]) -> str:
         """Its managed app-server daemon's, measured on 0.164.0 (#47): the daemon holds what
@@ -329,7 +327,7 @@ _EMBEDDED = frozenset(
         "--profile",
     }
 )
-"""The options a Codex runs embedded with, never on its managed daemon (:func:`_embedded`).
+"""The options a Codex runs embedded with, never on its managed daemon (:func:`_runs_as`).
 Measured on 0.164.0 (#50): a TUI given each, one prompt, its daemon running, and ``lsof``
 named its own native binary the rollout's holder, where a ``codex`` with no arguments had
 the daemon hold it; each but ``--no-daemon`` says so ("Running without the shared background
@@ -339,33 +337,153 @@ names beside ``-c``: one the daemon's features already match (``--enable hooks``
 not asks to run without it this time or to restart it with them, or refuses to start
 (measured). Not ``--oss``, which 0.164.0's binary lists beside these and which would not
 start on a loopback (unmeasured)."""
-_EMBEDDED_COMMANDS = frozenset({"exec", "e"})
-"""``codex exec`` and its alias (``codex --help``), which run embedded: measured on 0.164.0
-(#50), an ``exec`` mid-turn with the daemon running held its rollout itself."""
+_COMMANDS = frozenset(
+    {
+        "agents",
+        "exec",
+        "e",
+        "review",
+        "login",
+        "logout",
+        "mcp",
+        "plugin",
+        _APP_SERVER,
+        "remote-control",
+        "app",
+        "completion",
+        "update",
+        "doctor",
+        "sandbox",
+        "debug",
+        "apply",
+        "a",
+        "resume",
+        "queue",
+        "archive",
+        "delete",
+        "migrate-rollouts",
+        "migrate-nfs-db",
+        "unarchive",
+        "fork",
+        "cloud",
+        "exec-server",
+        "features",
+        "help",
+        "responses-api-proxy",
+        "stdio-to-uds",
+    }
+)
+"""Codex 0.164.0's subcommands and their aliases (``codex --help``, and the two it hides, its
+``Internal:`` ones): a first word that is none of them is a prompt's (``codex [OPTIONS]
+[PROMPT]``), a TUI's."""
+_RESUMES = frozenset({"resume", "fork"})
+"""The subcommands that run Codex's TUI on a thread (``resume``/``fork [OPTIONS] [SESSION_ID]
+[PROMPT]``), on its daemon unless they run embedded."""
+_CLIENTS = frozenset({"agents"})
+_PROXY = "proxy"
+"""The other forms that connect to Codex's managed daemon, measured on 0.164.0 (``lsof -U``:
+a socket whose peer is the daemon's on the path it listens on): ``agents`` ("Browse all agent
+sessions on the shared local app-server daemon") and ``app-server proxy`` ("Proxy stdio bytes
+to the running app-server control socket"). With the daemon holding a thread, these, a TUI
+with no subcommand, ``--remote unix://``, a prompt (``codex 'review the diff with -c and
+-p'``, which ``ps`` lists as ``review the diff with -c and -p``), ``resume <id>`` and ``fork
+<id>`` were connected to it; ``app-server`` (stdio), ``app-server --listen ws://…``,
+``exec-server`` and ``login`` were not, and ``review`` and ``exec``, mid-turn, held their own
+rollouts."""
+_THREAD_ID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+"""A thread id (a UUID), the ``SESSION_ID`` of a ``resume`` or a ``fork``."""
 
 
-def _embedded(words: Sequence[str]) -> bool:
-    """Whether a Codex run with ``words`` after its binary runs embedded: an option of
-    :data:`_EMBEDDED` (``--config=…`` and ``-c…`` too) before a ``--`` (a prompt), or a
-    subcommand of :data:`_EMBEDDED_COMMANDS`, the first word that is neither an option nor an
-    option's value (``capabilities.value_options``)."""
+def _runs_as(words: Sequence[str]) -> HoldsOpen:
+    """How a Codex run with ``words`` after its binary holds what it writes
+    (``AgentTranscript.held_open``), read as Codex reads its command line up to the prompt
+    and never into it: ``ps`` loses quoting, so ``codex 'add a -c flag'`` lists as ``codex
+    add a -c flag`` (tester-50). Options come first, each value skipped
+    (``capabilities.value_options``); the first word that is neither is the subcommand, or
+    else a prompt's, which ends the reading.
+
+    ``clients`` for the daemon's own (``app-server daemon …``, ``app-server …
+    --managed-daemon``). ``alone`` for an option of :data:`_EMBEDDED` (``--config=…``, ``-c…`` and
+    ``-p…`` too) before the prompt, and for a subcommand of :data:`_COMMANDS` that is not
+    one of those that can be the daemon's client (:data:`_RESUMES`, :data:`_CLIENTS`,
+    ``app-server`` :data:`_PROXY`). ``session`` for those, for no subcommand, and for a
+    first word that is none (a prompt). A subcommand's name followed by a word that could be
+    a prompt's (:func:`_could_be_prompt`) reads as a prompt too: ``codex 'exec the tests'``
+    and ``codex exec the tests`` list alike, and the TUI the first is, is a possible client
+    (the MANAGER DECISION: naming a Codex the human started, "quit it first", is the lesser
+    harm; telling them to stop the daemon under an open TUI breaks their conversation)."""
     from aisquare.core.agent_adapters.codex import CodexAdapter
 
     values = CodexAdapter.capabilities.value_options
     rest = iter(words)
-    command: str | None = None
+    embedded = False
     for word in rest:
         if word == "--":
-            return False
+            break  # a prompt
         if word.startswith("-"):
-            if word.split("=", 1)[0] in _EMBEDDED or word[:2] in _EMBEDDED:
-                return True
+            embedded = embedded or _marks_embedded(word)
             if "=" not in word and word in values:
                 next(rest, None)  # its value
-        elif command is None:
-            command = word
-            if command in _EMBEDDED_COMMANDS:
-                return True
+            continue
+        after = list(rest)
+        if word == _APP_SERVER and (after[:1] == [_DAEMON] or _MANAGED_DAEMON in after):
+            return "clients"
+        if embedded:
+            return "alone"
+        if word not in _COMMANDS:
+            return "session"  # a prompt's first word
+        if word in _RESUMES:
+            return _resumes_as(after)
+        if word in _CLIENTS or (word == _APP_SERVER and after[:1] == [_PROXY]):
+            return "session"
+        return "session" if _could_be_prompt(after) else "alone"
+    return "alone" if embedded else "session"
+
+
+def _marks_embedded(option: str) -> bool:
+    """Whether ``option`` is one of :data:`_EMBEDDED`, ``--config=…`` too, or ``-c``/``-p``
+    with its value joined to it (``-cmodel=…``, ``-pp2``)."""
+    return option.split("=", 1)[0] in _EMBEDDED or option[:2] in _EMBEDDED
+
+
+def _resumes_as(words: Sequence[str]) -> HoldsOpen:
+    """A ``resume`` or a ``fork`` run with ``words`` after it: ``alone`` for an option of
+    :data:`_EMBEDDED` before its prompt, else ``session``. Its ``SESSION_ID`` is read past
+    when it is a thread id (:data:`_THREAD_ID`); any other word is its prompt (``--last``'s
+    too), a session's name, or a prompt that begins with ``resume`` (``codex 'resume work
+    -c'``), and ends the reading."""
+    from aisquare.core.agent_adapters.codex import CodexAdapter
+
+    values = CodexAdapter.capabilities.value_options
+    rest = iter(words)
+    named = False
+    for word in rest:
+        if word == "--":
+            break
+        if word.startswith("-"):
+            if _marks_embedded(word):
+                return "alone"
+            if "=" not in word and word in values:
+                next(rest, None)
+            continue
+        if named or not _THREAD_ID.fullmatch(word):
+            break
+        named = True
+    return "session"
+
+
+def _could_be_prompt(words: Sequence[str]) -> bool:
+    """Whether ``words``, after a subcommand's name, could be the rest of a prompt that starts
+    with that name: one is neither an option nor the value right after one (``app-server
+    --listen ws://127.0.0.1:4500`` cannot; ``exec the tests`` can)."""
+    valued = False
+    for word in words:
+        if word.startswith("-") and word != "--":
+            valued = "=" not in word
+        elif valued:
+            valued = False
+        else:
+            return True
     return False
 
 

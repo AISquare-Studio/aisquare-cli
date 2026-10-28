@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -54,6 +55,20 @@ def no_processes(fake_home: Path, monkeypatch: pytest.MonkeyPatch) -> list[tuple
     running: list[tuple[int, int, str]] = []
     monkeypatch.setattr(adopt_service, "_process_args", lambda: list(running))
     return running
+
+
+@pytest.fixture(autouse=True)
+def daemon_sockets(monkeypatch: pytest.MonkeyPatch) -> dict[int, set[int]]:
+    """Which processes ``lsof -U`` says are connected to each server's socket
+    (``process_table.connected_to``): none told for a server a test names none for, as on a
+    machine whose sockets cannot say (``/proc``), and never this machine's."""
+    told: dict[int, set[int]] = {}
+
+    def connected_to(server: int, pids: Iterable[int]) -> frozenset[int] | None:
+        return frozenset(told[server]) & frozenset(pids) if server in told else None
+
+    monkeypatch.setattr(process_table, "connected_to", connected_to)
+    return told
 
 
 def _transcript(
@@ -407,6 +422,30 @@ CODEX_EMBEDDED_ARGS = (
     "--approve-for-me -c developer_instructions=You are the coder"
 )
 
+#: Prompts as ``ps`` lists a ``codex '<prompt>'`` (tester-50's, #50's reopen): words that are
+#: Codex's options or subcommands, which are the prompt's and never read as either. Live,
+#: ``codex 'use git log -p to explain the last commit'`` ran on the daemon, its client.
+PROMPTS = (
+    "use git log -p to explain the last commit",
+    "add a -c flag",
+    "exec the tests",
+    "run make -check",
+    "fix the exec path",
+)
+#: Codex processes that run no thread of the daemon's, as ``ps`` lists them (r31): an
+#: ``app-server`` of its own (VS Code's extension runs this one; r31's probe named it, pid
+#: 9100), one listening on a websocket, the standalone exec-server, a ``review``, and a
+#: ``login`` waiting on its browser. Measured on 0.164.0 with the daemon holding a thread:
+#: none was connected to its socket (``lsof -U``), the ``review`` holding its own rollouts.
+NO_CLIENTS = (
+    "app-server --analytics-default-enabled",
+    "app-server",
+    "app-server --listen ws://127.0.0.1:4500",
+    "exec-server",
+    "review",
+    "login",
+)
+
 
 DaemonTable = tuple[list[tuple[int, int, str]], dict[int, frozenset[str]]]
 """The processes running (pid, parent, args) and what each holds open, as ``lsof`` says."""
@@ -520,7 +559,7 @@ def test_a_codex_that_runs_embedded_is_never_named_as_its_daemons_client(
     processes, _holds = codex_daemon
     processes.append((7101, 1, f"node /usr/local/bin/codex {CODEX_EMBEDDED_ARGS}"))
     processes.append((7102, 7101, f"{CODEX_NATIVE} {CODEX_EMBEDDED_ARGS}"))
-    processes.append((7103, 1, f"{CODEX_NATIVE} exec --json say hi"))
+    processes.append((7103, 1, f"{CODEX_NATIVE} exec --json"))  # its prompt on stdin
 
     _says_the_daemon(_refused(13090))
 
@@ -565,6 +604,135 @@ def test_a_fleet_agents_codex_is_never_named_as_its_daemons_client(
     assert "quit it first" in _refused(7001)
 
 
+def _codex(pid: int, words: str, *, shim: bool = False) -> tuple[int, int, str]:
+    """A Codex process as ``ps`` lists it: its native binary, or its npm wrapper (``node …``)."""
+    return (pid, 1, f"{'node /usr/local/bin/codex' if shim else CODEX_NATIVE} {words}".strip())
+
+
+def test_a_codex_that_runs_no_thread_of_the_daemons_is_never_named_as_its_client(
+    codex_daemon: DaemonTable, daemon_sockets: dict[int, set[int]]
+) -> None:
+    """r31: every Codex that was neither the daemon nor embedded was its client, so with the
+    daemon holding the thread adopt named an ``app-server`` of its own (VS Code's, r31's probe:
+    "a live Codex (pid 9100) … quit it first"), and quitting it released nothing. None of
+    these runs a thread of the daemon's (measured: none connected to its socket): the daemon
+    is named, with its note and stop, whether the socket says so or cannot say."""
+    processes, _holds = codex_daemon
+    others = [_codex(9100 + at, words) for at, words in enumerate(NO_CLIENTS)]
+    processes.extend(others)
+
+    _says_the_daemon(_refused(13090))  # the socket cannot say: told by their words
+
+    daemon_sockets[13090] = set()  # it says: none connected
+    _says_the_daemon(_refused(13090))
+
+
+@pytest.mark.parametrize(
+    "words", ["", f"resume {THREAD}", f"fork {THREAD}", "agents", "app-server proxy"]
+)
+def test_a_codex_that_can_be_the_daemons_client_is_named_before_it(
+    codex_daemon: DaemonTable, words: str
+) -> None:
+    """Codex's TUI with no subcommand, ``resume <id>`` and ``fork <id>``, and its ``agents``
+    and ``app-server proxy``, each measured connected to the daemon's socket (r31): with the
+    socket unable to say, each is named before the daemon, "quit it first", unchanged."""
+    processes, _holds = codex_daemon
+    processes.append(_codex(7001, words))
+    assert "quit it first" in _refused(7001)
+
+
+@pytest.mark.parametrize("shim", [False, True], ids=["native", "npm"])
+@pytest.mark.parametrize("prompt", PROMPTS)
+def test_a_prompt_is_never_read_for_codexs_options(
+    codex_daemon: DaemonTable, prompt: str, shim: bool
+) -> None:
+    """#50's reopen (tester-50): a prompt's words were read as options, ``-p`` in ``codex
+    'use git log -p to explain the last commit'`` making that TUI embedded, so adopt named the
+    daemon under it and its printed stop broke the human's open TUI. The reading ends at the
+    prompt: the TUI is named, a possible client, the lesser harm (the MANAGER DECISION)."""
+    processes, _holds = codex_daemon
+    processes.append(_codex(7401, prompt, shim=shim))
+    assert "quit it first" in _refused(7401)
+
+
+@pytest.mark.parametrize("words", NO_CLIENTS)
+def test_a_codex_that_is_no_client_and_holds_the_thread_itself_is_named(
+    codex_daemon: DaemonTable, words: str
+) -> None:
+    """One that is never the daemon's client but holds the thread (``lsof`` says so) is its
+    holder, the one to quit, the daemon holding it too or not."""
+    processes, holds = codex_daemon
+    processes.append(_codex(9100, words))
+    holds[9100] = holds[13090]
+
+    assert "quit it first" in _refused(9100)
+
+    del holds[13090]
+    assert "quit it first" in _refused(9100)
+
+
+def test_a_daemons_client_is_the_codex_connected_to_its_socket_when_that_can_be_told(
+    codex_daemon: DaemonTable,
+    daemon_sockets: dict[int, set[int]],
+    tmux: FakeTmux,
+    project: ProjectInfo,
+) -> None:
+    """The MANAGER DECISION's best way (r31, 8a): a client is told by its connection, not its
+    words, which ``ps`` loses the quoting of (``codex 'review the diff with -c and -p'`` lists
+    as a ``review``). Measured on 0.164.0 (``lsof -U``), the TUI's native binary is connected
+    to the daemon's socket and its npm wrapper is not. So the connected one is named whatever
+    its words say, and one whose words say it can be a client but is not connected (a TUI on
+    another home's daemon, an ``exec``) is not; a fleet agent's, connected or not, never."""
+    processes, _holds = codex_daemon
+    processes.append(_codex(7001, "", shim=True))  # a TUI on another home's daemon
+    processes.append((7002, 7001, CODEX_NATIVE))
+    processes.append(_codex(7003, "exec say hi"))
+    processes.append(_codex(7101, "review the diff with -c and -p", shim=True))
+    processes.append((7102, 7101, f"{CODEX_NATIVE} review the diff with -c and -p"))
+    daemon_sockets[13090] = {7102}
+
+    assert "quit it first" in _refused(7102)
+
+    daemon_sockets[13090] = set()
+    _says_the_daemon(_refused(13090))
+
+    fleet = core.create_account("codex")
+    row = fleet_service.spawn(
+        project, "coder", agent="codex", account=str(fleet.slot), worktree=False
+    ).agent
+    tmux.pids[row.pane_id] = 7201
+    processes.append((7201, 1, "node /usr/local/bin/codex --approve-for-me"))
+    processes.append((7202, 7201, f"{CODEX_NATIVE} --approve-for-me"))
+    daemon_sockets[13090] = {7202}
+    _says_the_daemon(_refused(13090))
+
+
+def test_a_codex_tui_of_another_home_is_never_named_as_this_daemons_client(
+    codex_daemon: DaemonTable, daemon_sockets: dict[int, set[int]]
+) -> None:
+    """SMOKE11's re-run, item 5 (seq 4804): with a plain ``codex`` idle at its prompt (6921, its
+    native 6923), a thread another home's daemon alone held was refused naming that TUI,
+    "quit it first", and the daemon's stop never showed. A TUI is connected to its own home's
+    daemon, and a client of this one is connected to this one: the daemon is named, with its
+    note and stop. One of this home's that is connected is still named, though it may show
+    another thread: a process table names none (stated in the CHANGELOG)."""
+    processes, _holds = codex_daemon
+    home = "/home/dev/.aisquare/codex-accounts/5/packages/app-server-daemon/releases/0.164.0"
+    processes.append((7061, 1, f"{home}/bin/codex app-server --listen unix:// --managed-daemon"))
+    processes.append((7062, 1, f"{home}/bin/codex app-server daemon pid-update-loop"))
+    processes.append((6921, 1, "node /usr/local/bin/codex"))
+    processes.append((6923, 6921, CODEX_NATIVE))
+    daemon_sockets[13090] = set()
+    daemon_sockets[7061] = {6923}
+
+    _says_the_daemon(_refused(13090))
+
+    processes.append((7001, 1, "node /usr/local/bin/codex"))  # a TUI of this home's
+    processes.append((7002, 7001, CODEX_NATIVE))
+    daemon_sockets[13090] = {7002}
+    assert "quit it first" in _refused(7002)
+
+
 def test_codexs_daemon_that_holds_no_rollout_leaves_the_thread_adoptable(
     codex_daemon: DaemonTable,
 ) -> None:
@@ -584,12 +752,16 @@ def test_codexs_daemon_that_holds_no_rollout_leaves_the_thread_adoptable(
 
 
 def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
-    """``held_open``: every process of Codex's daemon for its clients, its TUI (the native
-    binary or its npm wrapper) for its own session, and one that runs embedded alone (#50,
-    measured on 0.164.0: each of these options and ``exec`` had its own process hold its
-    rollout, the daemon running), never ``--enable`` nor ``--disable``, which ran on the
-    daemon when it matched them; a process that runs no Codex, whatever its arguments say,
-    none; Claude Code's none."""
+    """``held_open``: every process of Codex's daemon for its clients; for its own session, a
+    form that can be the daemon's client (``session``: its TUI with no subcommand or a
+    prompt, ``resume``, ``fork``, ``agents``, ``app-server proxy``, each measured connected to
+    the daemon's socket, r31) or one that never is (``alone``: one that runs embedded, #50,
+    and every other subcommand, an ``app-server`` of its own, ``exec-server``, ``review``,
+    ``login``…, measured not connected or holding their own rollouts); never ``--enable`` nor
+    ``--disable``, which ran on the daemon when it matched them. A prompt is never read for
+    options (tester-50: ``ps`` loses quoting), and a subcommand's name followed by what could
+    be a prompt's words reads as a prompt's, a possible client. A process that runs no Codex,
+    whatever its arguments say, none; Claude Code's none."""
     reader = get_adapter("codex").transcript_reader
     claude = get_adapter("claude-code").transcript_reader
     assert reader is not None and claude is not None
@@ -598,7 +770,6 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
     assert reader.held_open([CODEX_DAEMON_BIN, "app-server"]) == "clients", "run from its dir"
     assert reader.held_open(f"{CODEX_NATIVE} app-server daemon stop".split()) == "clients"
     assert reader.held_open(f"{CODEX_NATIVE} app-server --managed-daemon".split()) == "clients"
-    assert reader.held_open(f"{CODEX_NATIVE} app-server --listen stdio://".split()) == "session"
     assert reader.held_open([CODEX_NATIVE]) == "session"
     assert reader.held_open(["node", "/usr/local/bin/codex"]) == "session"
     for plain in (
@@ -606,13 +777,32 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
         "--disable artifact",
         "-m gpt-5.5 --approve-for-me --no-alt-screen",
         "-C /repo -s workspace-write -a never",
+        "--remote unix://",
         "-m exec",  # a model named exec, no subcommand
-        "fix the exec path",  # a prompt, as ps splits it
-        "resume 019a2b3c",
+        *PROMPTS,
+        "review the diff with -c and -p",  # a prompt, measured connected
+        "exec say hi",  # or ``codex 'exec say hi'``, which ps lists alike
+        "e say hi",
+        "-m gpt-5.5 exec --json say hi",
+        "app-server is down, fix it",
         "-- use -c and --search",  # a prompt
+        "resume",
+        "resume --last",
+        f"resume {THREAD}",
+        f"fork {THREAD}",
+        f"-C /repo resume {THREAD} carry on",
+        "resume 019a2b3c -c model=gpt-5.5",  # a session's name, then its prompt
+        "resume work -c flag",  # ``codex 'resume work -c flag'``
+        "resume --last use -c",  # its prompt
+        "agents",
+        "app-server proxy",
+        "app-server generate-ts",  # nothing tells its second word from a prompt's
     ):
         assert reader.held_open([CODEX_NATIVE, *plain.split()]) == "session", plain
-    for embedded in (
+    for prompt in PROMPTS:
+        node = ["node", "/usr/local/bin/codex", *prompt.split()]
+        assert reader.held_open(node) == "session", prompt
+    for alone in (
         CODEX_EMBEDDED_ARGS,
         "-c model=gpt-5.5",
         "-cmodel=gpt-5.5",
@@ -624,13 +814,27 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
         "--dangerously-bypass-hook-trust",
         "--profile p2",
         "-p p2",
+        "-pp2",
         "--profile=p2",
+        "-c model=gpt-5.5 exec the tests",  # an option before it: embedded, whatever follows
+        f"resume {THREAD} -c model=gpt-5.5",
+        f"fork {THREAD} --profile p2",
+        f"resume --last -c model=gpt-5.5 {THREAD}",
+        *NO_CLIENTS,
+        "app-server --listen stdio://",
+        "exec",
         "exec --json daemon",
-        "e say hi",
-        "-m gpt-5.5 exec say hi",
-        "resume 019a2b3c -c model=gpt-5.5",
+        "exec --json",
+        "e --skip-git-repo-check",
+        "review --uncommitted",
+        "review --base main",
+        "login --device-auth",
+        "logout",
+        "mcp",
+        "cloud",
+        "stdio-to-uds",
     ):
-        assert reader.held_open([CODEX_NATIVE, *embedded.split()]) == "alone", embedded
+        assert reader.held_open([CODEX_NATIVE, *alone.split()]) == "alone", alone
     assert reader.held_open(["node", "--no-warnings", "/usr/local/bin/codex", "exec"]) == "alone"
     assert reader.held_open(f"node /usr/local/bin/codex {CODEX_EMBEDDED_ARGS}".split()) == "alone"
     assert reader.held_open(ZSH_NAMING_CODEX.split()) is None

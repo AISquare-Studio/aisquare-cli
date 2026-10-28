@@ -207,6 +207,65 @@ def _from_lsof(pids: list[int]) -> frozenset[str] | None:
     return frozenset(found) if answered else None
 
 
+def connected_to(server: int, pids: Iterable[int], *, proc: Path = PROC) -> frozenset[int] | None:
+    """Which of ``pids`` hold a Unix socket connected to ``server`` on a path it listens on:
+    its clients, told by their connection and not by what their arguments say (a local
+    server's, Codex's managed app-server daemon's, whose TUI talks to it over one). ``None``
+    when that cannot be told.
+
+    Measured on macOS (``lsof -U``, Codex 0.164.0, r31): a client's socket is named ``->`` and
+    the address of the server's end, which the server lists under the path it listens on
+    (``d0x82db…`` named ``/private/tmp/codex-daemon-501/…``, the TUI's ``n->0x82db…``); the
+    server's other sockets, its own pairs, are named by their peers and count for none. Not
+    on a machine with ``/proc``, where no Linux Codex was at hand to measure how its sockets
+    name their peers, nor where ``lsof`` cannot run or does not list the server."""
+    wanted = sorted(set(pids) - {server})
+    if not wanted:
+        return frozenset()
+    if proc.is_dir():
+        return None
+    asked = ",".join(map(str, [server, *wanted]))
+    done = _run(["lsof", "-n", "-P", "-w", "-a", "-U", "-F", "pdn", "-p", asked])
+    if done is None:
+        return None
+    sockets: dict[int, list[tuple[int | None, str]]] = {}
+    pid, address = 0, ""
+    for line in done.stdout.splitlines():
+        kind, value = line[:1], line[1:]
+        if kind == "p" and value.isdecimal():
+            pid = int(value)
+            sockets.setdefault(pid, [])
+        elif kind == "f":
+            address = ""  # a descriptor of its own: no address of the last one's
+        elif kind == "d":
+            address = value
+        elif kind == "n" and pid in sockets:
+            sockets[pid].append((_address(address), value))
+    listens = {
+        own
+        for own, name in sockets.get(server, ())
+        if own is not None and name and not name.startswith("->")
+    }
+    if not listens:
+        return None
+    return frozenset(
+        each
+        for each, held in sockets.items()
+        if each != server
+        and any(name.startswith("->") and _address(name[2:]) in listens for _own, name in held)
+    )
+
+
+def _address(word: str) -> int | None:
+    """A socket's kernel address as ``lsof`` writes it (``0x82db500f89b6c624``), read as a
+    number, so one column's leading zeros are no other address than another's; ``None`` for
+    a word that is none (``->(none)``)."""
+    try:
+        return int(word, 16) if word.startswith("0x") else None
+    except ValueError:
+        return None
+
+
 def held_by_pane(root: int) -> frozenset[str] | None:
     """The files held open by ``root`` and everything below it, kept for :data:`HELD_FOR`
     seconds; ``None`` when the processes or their files cannot be told, and for

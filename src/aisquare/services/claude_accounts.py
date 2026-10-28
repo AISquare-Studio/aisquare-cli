@@ -3576,6 +3576,7 @@ def agent_pick(
     which: Callable[[str], str | None] | None = None,
     measure: bool = True,
     family: str | None = None,
+    agent: str | None = None,
 ) -> AgentPick:
     """The agent a launch that nothing pins runs: the agent of the best usable account.
 
@@ -3607,7 +3608,17 @@ def agent_pick(
     (review r28 of #113, M1: the Spawn dialog's label named spare, the spawn ran on work).
     Only those agents' accounts record family weeks or family marks, so the one family
     weighs no other agent's account.
+
+    ``agent`` is the agent whose model the launch names itself (``services.fleet.model_agent``:
+    ``fleet spawn --model fable``, the Spawn dialog's Model field, a ``--model`` in its *Extra
+    agent args*). That model is its alone, so that agent is the pick: :func:`choose` weighs
+    the family among its accounts, and runs on the best of them or, when none has room, on
+    the first of them in the order, as with one agent. Weighed across agents, a Claude model
+    whose week every Claude account had spent went to a Codex account, which took ``--model
+    fable`` and failed every turn (review r29 of #113, m1).
     """
+    if agent is not None:
+        return AgentPick(agent, None)
     if not paths.db_path().exists():
         return AgentPick(None, None)
     accounts, note = _read_arranged()

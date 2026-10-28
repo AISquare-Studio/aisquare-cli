@@ -43,10 +43,10 @@ over a role that has a default — ``spawn`` reads an empty name as "no persona"
 so that choice is honoured rather than replaced by the config.
 
 **The agent** (``--agent``) is the coding agent the launch starts, and the form
-follows it: the one picked, else the one ``agent_launch.resolve`` gives the role (and
-the Binary typed) in this project, which the field's *(role's: …)* names. Only that
-agent's accounts are offered — a launch refuses another agent's slot, and slots are
-one ladder, so an account preset or picked brings its own agent with it — and only
+follows it: the one picked, else the one a spawn of the role (and the Binary typed, and the
+model it names) runs in this project (``fleet.role_agent``), which the field's *(role's: …)*
+names. Only that agent's accounts are offered — a launch refuses another agent's slot, and
+slots are one ladder, so an account preset or picked brings its own agent with it — and only
 its permission controls show: Claude Code's mode, or the sandbox and approval policy
 of an agent whose permissions are a sandbox (Codex). *Permission* is the one
 ``WRITE:APPROVALS`` value every agent maps to its own flags; chosen, it replaces the
@@ -198,9 +198,9 @@ from aisquare.models import (
     ProjectInfo,
     TeamTask,
 )
-from aisquare.services import agent_launch, model_memory
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import model_memory
 from aisquare.services import personas as personas_service
 from aisquare.services.project import display_name
 
@@ -215,17 +215,23 @@ DEFAULT_WORKER = "spawn-default-account"
 the registry, the config, and through the shared cache the usage a headroom pick reads."""
 
 ROLE_AGENT_WORKER = "spawn-role-agent"
-"""The worker that asks which agent the role launches on, for the role and the Binary typed,
-off the UI thread: the answer reads the config and the store, and with accounts of two agents
-the usage of each (:meth:`SpawnDialog._role_agent`). The dialog shows :data:`PICKING` until
-it answers (review of #14, M2)."""
+"""The worker that asks which agent the role launches on, for the role, the Binary typed and
+the model the form names (:data:`AgentKey`), off the UI thread: the answer reads the config
+and the store, and with accounts of two agents the usage of each
+(:meth:`SpawnDialog._role_agent`). The dialog shows :data:`PICKING` until it answers (review
+of #14, M2)."""
 
 PICKING = "picking…"
 """What the Agent field's ``(role's: …)`` says, and the launch line with it, while the role's
 agent is being asked."""
 
 BINARY_SETTLE_S = 0.3
-"""How long the Binary field rests before its agent is asked: once per pause, not per key."""
+"""How long the Binary field rests before its agent is asked: once per pause, not per key;
+the Model field and *Extra agent args* rest as long."""
+
+AgentKey = tuple[str, str, str | None, str | None]
+"""What the role's agent is asked for (:meth:`SpawnDialog._agent_key`): the role, the Binary,
+*Extra agent args*' ``--model``, and the Model field as it is sent."""
 
 ROLE_AGENT = ""
 """The Agent field's ``(role's: …)``: no ``--agent``, the role's agent."""
@@ -611,10 +617,10 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         roles = role_choices(_bound_roles())
         self._roles = roles if self._role in roles else [*roles, self._role]
         self._preset_agent = agent or ROLE_AGENT
-        self._role_agents: dict[tuple[str, str], str] = {}
-        """Role and binary → the agent they launch on (:meth:`_role_agent`)."""
-        self._role_agent_asked_for: tuple[str, str] | None = None
-        """The role and binary a worker is asking the agent of now (:meth:`_ask_agent_of`)."""
+        self._role_agents: dict[AgentKey, str] = {}
+        """Role, binary and model → the agent they launch on (:meth:`_role_agent`)."""
+        self._role_agent_asked_for: AgentKey | None = None
+        """What a worker is asking the agent of now (:meth:`_ask_agent_of`)."""
         self._agent_shown: str | None = None
         """The agent the form last followed: what it keeps showing while a newer role or Binary
         is asked, so that a key typed ahead of its answer resets nothing (:meth:`launch_agent`).
@@ -640,7 +646,13 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         else the default agent's until the role's agent is known."""
         self._pick = self._shown_pick(self._role)
         """What the Model and Effort fields show for the current role (:meth:`_shown_pick`).
-        A field still showing it is sent as ``None``."""
+        An Effort field still showing it is sent as ``None``."""
+        self._model_shown = self._pick.model or ACCOUNT_DEFAULT
+        """The Model value the form itself last put in the field, sent as ``None``; any other
+        is the owner's, sent as it is, though it equal the pick of the agent followed since: a
+        model the owner names keeps the spawn on its agent (``fleet.model_agent``), which the
+        field then follows, so read against that agent's pick it flipped back to unsent and
+        the spawn's rung crossed again (review r29 of #113, m1)."""
         self._preset_model = None if self._captain else model
         self._preset_effort = (
             effort
@@ -763,24 +775,39 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             return harness.default_binary()
 
     def _role_agent(self, role: str, binary: str = "") -> str | None:
-        """The agent ``role`` launches on here with no ``--agent``, as ``agent_launch.resolve``
-        answered for what the Binary field holds; ``None`` while that is being asked.
+        """The agent ``role`` launches on here with no ``--agent``, as ``fleet.role_agent``
+        answered for what the Binary field holds and the model the form names
+        (:meth:`_agent_key`); ``None`` while that is being asked.
 
         Never asked here: the answer reads the config and the store, and with accounts of two
         agents their usage, up to ``core.USAGE_TIMEOUT_SECONDS`` when the cache is cold, which on
         the UI thread froze the app as it opened (review of #14, M2). It is asked once per
-        role and binary in a worker (:meth:`_ask_agent_of`, :meth:`_binary_changed`) and kept;
+        key in a worker (:meth:`_ask_agent_of`, :meth:`_agent_inputs_changed`) and kept;
         until it lands the form says :data:`PICKING` and *Spawn* waits."""
-        return self._role_agents.get((role, binary))
+        if not self._role_agents:
+            return None  # none answered yet, as while the fields its key reads are composed
+        return self._role_agents.get(self._agent_key(role, binary))
 
-    def _resolve_role_agent(
-        self, role: str, binary: str, project: ProjectInfo | None = None
-    ) -> str:
-        """:meth:`_role_agent`'s answer, asked of ``agent_launch.resolve`` (any thread) in
-        ``project`` (the dialog's, as it is now, when not given)."""
+    def _agent_key(self, role: str, binary: str) -> AgentKey:
+        """What the agent of ``role`` with ``binary`` is asked for: those, and the model the
+        spawn names, *Extra agent args*' ``--model`` and the Model field as it is sent, which
+        give its agent rung the family it weighs and keep it to that model's agent."""
+        return role, binary, harness.model_arg(self._form_args()), self._model_kwarg()
+
+    def _resolve_role_agent(self, key: AgentKey, project: ProjectInfo | None = None) -> str:
+        """:meth:`_role_agent`'s answer for ``key``, asked of ``fleet.role_agent`` (any
+        thread) in ``project`` (the dialog's, as it is now, when not given): the spawn's own
+        steps, its agent rung given the family and the model's agent the spawn gives it.
+        Asked with neither, the field named Claude Code while the spawn ran Codex, and a Claude
+        model sent ran Codex (review r29 of #113, m1)."""
+        role, binary, typed, model = key
         try:
-            return agent_launch.resolve(
-                role, binary=binary or None, cwd=(project or self.project).root
+            return fleet_service.role_agent(
+                project or self.project,
+                role,
+                [harness.MODEL_FLAG, typed] if typed is not None else [],
+                model=model,
+                binary=binary or None,
             ).adapter.id
         except Exception:  # a hint, never a reason to fail
             return DEFAULT_AGENT
@@ -847,7 +874,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     def compose(self) -> ComposeResult:
         defaults = self._defaults(self._role)
-        agent = self._preset_agent or self._role_agent(self._role, self._preset_binary)
+        # The role's own is asked once the form is up (:meth:`_follow_agent`): none yet.
+        agent = self._preset_agent or None
         with Vertical(id="spawn-box"):
             yield Static(self._header(), id="spawn-header")
             with VerticalScroll(id="spawn-fields"):
@@ -1446,27 +1474,31 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     @on(Input.Changed, "#spawn-binary")
     def _binary_changed(self) -> None:
-        """Follow the agent the Binary typed launches on: at once when it is known, else
-        asked in a worker once the field rests (:data:`BINARY_SETTLE_S`). Asked here at every
-        key, each new prefix read the config and the store on the UI thread, and a locked
-        store stalled typing (review r17 of #113, finding 11)."""
-        role, binary = self._role, self.query_one("#spawn-binary", Input).value.strip()
-        if (role, binary) in self._role_agents:
+        self._agent_inputs_changed()
+
+    def _agent_inputs_changed(self) -> None:
+        """Follow the agent the Binary typed, or the model named, launches on: at once when it
+        is known, else asked in a worker once the field rests (:data:`BINARY_SETTLE_S`). Asked
+        here at every key, each new prefix read the config and the store on the UI thread, and
+        a locked store stalled typing (review r17 of #113, finding 11)."""
+        key = self._current_agent_key()
+        if key in self._role_agents:
             self.workers.cancel_group(self, ROLE_AGENT_WORKER)
             self._role_agent_asked_for = None  # the ask just cancelled is nobody's now
             self._follow_agent()
             return
-        self._ask_agent_of(role, binary, settle=BINARY_SETTLE_S)
+        self._ask_agent_of(key[0], key[1], settle=BINARY_SETTLE_S)
 
     def _ask_agent_of(self, role: str, binary: str, *, settle: float = 0.0) -> None:
-        """Ask ``agent_launch.resolve`` the agent of ``role`` and ``binary`` in a worker, after
-        ``settle`` seconds without a newer ask; one already out for them is not asked twice."""
-        key = (role, binary)
+        """Ask ``fleet.role_agent`` the agent of ``role`` and ``binary``, for the model the form
+        names now (:meth:`_agent_key`), in a worker, after ``settle`` seconds without a newer
+        ask; one already out for them is not asked twice."""
+        key = self._agent_key(role, binary)
         if key in self._role_agents or self._role_agent_asked_for == key:
             return
         self._role_agent_asked_for = key
         self.run_worker(
-            partial(self._ask_role_agent, role, binary, settle, self.project),
+            partial(self._ask_role_agent, key, settle, self.project),
             name=ROLE_AGENT_WORKER,
             group=ROLE_AGENT_WORKER,
             thread=True,
@@ -1475,15 +1507,15 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         )
 
     def _ask_role_agent(
-        self, role: str, binary: str, settle: float, project: ProjectInfo
-    ) -> tuple[str, str, str, str] | None:
-        """In the worker: ``(project id, role, binary, agent)`` once the field has rested,
-        ``None`` for an ask a newer key replaced meanwhile."""
+        self, key: AgentKey, settle: float, project: ProjectInfo
+    ) -> tuple[str, AgentKey, str] | None:
+        """In the worker: ``(project id, key, agent)`` once the field has rested, ``None`` for
+        an ask a newer key replaced meanwhile."""
         if settle:
             time.sleep(settle)
         if get_current_worker().is_cancelled:
             return None
-        return project.id, role, binary, self._resolve_role_agent(role, binary, project)
+        return project.id, key, self._resolve_role_agent(key, project)
 
     def _role_agent_asked(self, worker: Worker[Any], state: WorkerState) -> None:
         if state is WorkerState.ERROR:
@@ -1495,17 +1527,17 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             return
         if state is not WorkerState.SUCCESS or not isinstance(worker.result, tuple):
             return
-        project_id, role, binary, agent = worker.result
+        project_id, key, agent = worker.result
         if project_id != self.project.id:
             return  # asked in a project the form has left since
-        self._role_agents[(role, binary)] = agent
-        if self._role_agent_asked_for == (role, binary):
+        self._role_agents[key] = agent
+        if self._role_agent_asked_for == key:
             self._role_agent_asked_for = None
-        if (role, binary) == self._current_agent_key():
+        if key == self._current_agent_key():
             self._agent_of_the_role_landed()
 
-    def _current_agent_key(self) -> tuple[str, str]:
-        return self._role, self.query_one("#spawn-binary", Input).value.strip()
+    def _current_agent_key(self) -> AgentKey:
+        return self._agent_key(self._role, self.query_one("#spawn-binary", Input).value.strip())
 
     def _agent_of_the_role_landed(self) -> None:
         """The role's agent is known for the form as it is now: fill in what waited for it."""
@@ -1583,8 +1615,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         old, self._pick = self._pick, pick
         model = self.query_one("#spawn-model", Input)
         model.placeholder = self._blanks(self._role)[0]
-        if model.value.strip() == (old.model or ACCOUNT_DEFAULT):
-            model.value = pick.model or ACCOUNT_DEFAULT
+        if model.value.strip() == self._model_shown:
+            model.value = self._model_shown = pick.model or ACCOUNT_DEFAULT
         effort = self.query_one("#spawn-effort", Select)
         kept = self._effort_value()
         with self.prevent(Select.Changed):
@@ -2017,17 +2049,21 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     @on(Input.Changed, "#spawn-model")
     def _args_changed(self) -> None:
         """A ``--model`` in the extra args, or the Model field, is the family a headroom pick
-        reads (#277): the no-account option is read again when they name another model, not
-        on every key typed (review of #424)."""
+        reads (#277), and a Claude model named keeps the spawn on Claude Code
+        (``fleet.model_agent``): the role's agent is asked again, and the no-account option
+        read again, when they name another model, not on every key typed (review of #424)."""
+        if self._current_agent_key() != self._role_agent_asked_for:
+            self._agent_inputs_changed()
         key = (harness.model_arg(self._form_args()), self._model_kwarg(), self.launch_agent())
         if key != self._default_key:
             self._read_default()
 
     def _model_kwarg(self) -> str | None:
         """The Model field as the spawn is sent it: ``None`` while it shows what the form put
-        there (the service decides), else its value, ``""`` for cleared."""
+        there (:attr:`_model_shown`: the service decides), else its value, ``""`` for
+        cleared."""
         model = self._model_value()
-        return None if model == (self._pick.model or ACCOUNT_DEFAULT) else model
+        return None if model == self._model_shown else model
 
     def _form_args(self) -> list[str]:
         """*Extra agent args* as the spawn would send them; none while they do not parse

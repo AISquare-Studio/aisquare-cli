@@ -66,6 +66,7 @@ from aisquare.cli.ui.sidebar import (
 from aisquare.cli.ui.spawn import (
     LABEL_RULE,
     NO_TASK,
+    AgentKey,
     PickTargetRequested,
     SpawnDialog,
     dice_label,
@@ -2536,19 +2537,19 @@ def test_a_role_and_binary_already_being_asked_are_not_asked_a_second_time(
     spawns: SpawnRecorder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The key (role, binary) is asked in one worker: a second ask for it while the first is
+    """The key (role, binary, model) is asked in one worker: a second ask for it while the first is
     out (the Binary field resting on the same text again, a role picked twice) would start a
     worker that replaces the first and reads the same usage again (tester-14's survivor)."""
     slots = _two_agents_codex_on_top(monkeypatch)
     started, release, _threads, ui = _usage_read_held(monkeypatch, slots)
-    asked: list[tuple[str, str]] = []
+    asked: list[AgentKey] = []
     real = SpawnDialog._ask_role_agent
 
     def counting(
-        self: SpawnDialog, role: str, binary: str, settle: float, project: ProjectInfo
-    ) -> tuple[str, str, str, str] | None:
-        asked.append((role, binary))
-        return real(self, role, binary, settle, project)
+        self: SpawnDialog, key: AgentKey, settle: float, project: ProjectInfo
+    ) -> tuple[str, AgentKey, str] | None:
+        asked.append(key)
+        return real(self, key, settle, project)
 
     monkeypatch.setattr(SpawnDialog, "_ask_role_agent", counting)
 
@@ -2562,11 +2563,11 @@ def test_a_role_and_binary_already_being_asked_are_not_asked_a_second_time(
             assert await asyncio.to_thread(started.wait, 10), "the first ask never read usage"
             key = dialog._current_agent_key()
             for _ in range(3):
-                dialog._ask_agent_of(*key)
+                dialog._ask_agent_of(key[0], key[1])
             await pilot.pause()
             release.set()
             await settle(pilot)
-            dialog._ask_agent_of(*key)  # answered now: kept, never asked again
+            dialog._ask_agent_of(key[0], key[1])  # answered now: kept, never asked again
             await settle(pilot)
             return [list(asked), key, str(select(dialog, "agent")._options[0][0])]
 
@@ -2627,10 +2628,10 @@ def test_the_closed_agent_field_names_the_roles_agent_once_it_lands(
     real = SpawnDialog._ask_role_agent
 
     def held(
-        self: SpawnDialog, role: str, binary: str, settle: float, project: ProjectInfo
-    ) -> tuple[str, str, str, str] | None:
+        self: SpawnDialog, key: AgentKey, settle: float, project: ProjectInfo
+    ) -> tuple[str, AgentKey, str] | None:
         gate.wait(10)
-        return real(self, role, binary, settle, project)
+        return real(self, key, settle, project)
 
     monkeypatch.setattr(SpawnDialog, "_ask_role_agent", held)
 
@@ -2662,7 +2663,7 @@ def test_a_failed_ask_never_leaves_the_form_waiting_for_an_agent(
     """``_resolve_role_agent`` answers for everything it can catch; a worker that fails anyway
     still ends the wait, on Claude Code, rather than leave *Spawn* disabled for good."""
 
-    def broken(self: SpawnDialog, role: str, binary: str, settle: float = 0.0) -> None:
+    def broken(self: SpawnDialog, key: AgentKey, settle: float, project: ProjectInfo) -> None:
         raise RuntimeError("the worker fell over")
 
     monkeypatch.setattr(SpawnDialog, "_ask_role_agent", broken)

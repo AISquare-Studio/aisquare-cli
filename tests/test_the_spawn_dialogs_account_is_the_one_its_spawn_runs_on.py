@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 from textual.pilot import Pilot
+from textual.widgets import Input, Static
 
 from aisquare.cli.ui.spawn import SpawnDialog
 from aisquare.core import claude_accounts as accounts_core
@@ -45,7 +46,7 @@ from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     repo,
     tmux,
 )
-from tests.test_ui_spawn import Host, account_field, drive
+from tests.test_ui_spawn import Host, account_field, drive, select, settle, shown
 
 RESETS = datetime.now(tz=UTC) + timedelta(days=3)
 
@@ -134,9 +135,9 @@ def test_the_label_of_the_dialogs_default_path_is_the_account_the_spawn_runs_on(
         model_memory.remember(model="opus", effort="high")
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> Any:
-        return account_field(dialog)[0], dialog.spawn_kwargs()
+        return account_field(dialog)[0], _agent_field(dialog), dialog.spawn_kwargs()
 
-    label, sent = drive(project, scenario)
+    label, agent_field, sent = drive(project, scenario)
     receipt = fleet_service.spawn(project, "coder", **sent)
 
     assert sent["agent"] is None and sent["account"] is None, "the dialog's default path"
@@ -144,3 +145,103 @@ def test_the_label_of_the_dialogs_default_path_is_the_account_the_spawn_runs_on(
     assert receipt.agent.account_slot == ran.slot, f"ran on slot {receipt.agent.account_slot}"
     assert receipt.agent.agent == ran.agent
     assert label == f"(default: headroom · {runs_on})", "the label names where it ran"
+    assert agent_field == f"(role's: {_LABELS[ran.agent]})", "the Agent field names what ran"
+
+
+_LABELS = {"claude-code": "Claude Code", "codex": "Codex"}
+
+
+def _agent_field(dialog: SpawnDialog) -> str:
+    """What the Agent field shows closed: ``(role's: …)`` on the dialog's default path."""
+    return shown(select(dialog, "agent").query_one("SelectCurrent #label", Static))
+
+
+def _every_claude_week_of_fable_spent(monkeypatch: pytest.MonkeyPatch) -> dict[str, ClaudeAccount]:
+    """The tester's home, work out of its Opus and Fable weeks and spare out of every
+    family's, both Codex slots with room."""
+    home = _home()
+    _scripted(
+        monkeypatch,
+        {
+            home["work"].slot: _reading(("opus", "fable")),
+            home["spare"].slot: _reading(("opus", "sonnet", "haiku", "fable")),
+            home["codex-a"].slot: _reading(),
+            home["codex-b"].slot: _reading(),
+        },
+    )
+    return home
+
+
+@pytest.mark.parametrize(
+    "named",
+    [{"model": "fable"}, {"model": "opus"}, {"agent_args": ["--model", "fable"]}],
+    ids=["model", "another-family", "extra-args"],
+)
+def test_a_claude_model_the_spawn_names_keeps_it_on_claude_code_with_every_week_spent(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    named: dict[str, Any],
+) -> None:
+    """Review r29 of #113, m1: the agent rung weighed the family of a model the spawn named
+    across agents, and with every Claude account out of that family's week it picked a Codex
+    account with room, which took ``--model fable`` and failed every turn (before f163791d it
+    ran Claude Code on slot 2). A model the spawn names is its agent's: the rung keeps to
+    Claude Code, whose ``choose`` finds no account of it with room and runs on the first in
+    the order, as main's did."""
+    home = _every_claude_week_of_fable_spent(monkeypatch)
+
+    receipt = fleet_service.spawn(project, "coder", **named)
+
+    assert receipt.agent.agent == "claude-code", f"ran {receipt.agent.agent}"
+    assert receipt.agent.account_slot == home["work"].slot, "no Claude slot has room: the first"
+
+
+@pytest.mark.parametrize(("field", "typed"), [("model", "fable"), ("args", "--model fable")])
+def test_the_dialogs_agent_field_says_the_agent_its_spawn_runs_crossing_or_kept_by_a_model(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    typed: str,
+) -> None:
+    """Review r29 of #113, m1, the dialog: its Agent field asked the role's agent with no
+    family, so with ``[agents.models.claude-code] coder = fable`` spent on every Claude slot
+    it read ``(role's: Claude Code)`` while its label named a Codex slot and its spawn ran
+    Codex (seq 4283). It asks the spawn's own steps now (``fleet.role_agent``). And ``fable``
+    typed into the Model field, or ``--model fable`` into *Extra agent args*, is sent, so the
+    spawn stays on Claude Code, and the field and the label say so. The Model field read
+    against Claude Code's pick, which is that same ``fable``, flipped back to unsent once the
+    form followed Claude Code, and the spawn crossed."""
+    home = _every_claude_week_of_fable_spent(monkeypatch)
+    config = load_config()
+    config.agents.models["claude-code"] = AgentModelSettings(
+        roles={"coder": AgentModelDefault(model="fable")}
+    )
+    save_config(config)
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> Any:
+        crossing = (_agent_field(dialog), account_field(dialog)[0], dialog.spawn_kwargs())
+        dialog.query_one(f"#spawn-{field}", Input).value = typed
+        await settle(pilot)
+        kept = (_agent_field(dialog), account_field(dialog)[0], dialog.spawn_kwargs())
+        return crossing, kept
+
+    crossing, kept = drive(project, scenario)
+
+    agent_field, label, sent = crossing
+    receipt = fleet_service.spawn(project, "coder", **sent)
+    assert (receipt.agent.agent, receipt.agent.account_slot) == ("codex", home["codex-a"].slot)
+    assert (agent_field, label) == ("(role's: Codex)", "(default: headroom · codex-a)")
+
+    agent_field, label, sent = kept
+    receipt = fleet_service.spawn(project, "coder", **sent)
+    assert (sent["model"], sent["agent_args"]) == (
+        ("fable", []) if field == "model" else (None, ["--model", "fable"])
+    ), "typed, so sent"
+    assert (receipt.agent.agent, receipt.agent.account_slot) == ("claude-code", home["work"].slot)
+    assert (agent_field, label) == ("(role's: Claude Code)", "(default: rank 2 · work)")

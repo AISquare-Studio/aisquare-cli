@@ -4896,8 +4896,10 @@ def spawn(
             cwd=project.root,
             account=account,
             # The agent rung picks before the agent is known: it weighs the family a new spawn
-            # runs on Claude Code, the family the account pick below weighs (#277).
+            # runs on Claude Code, the family the account pick below weighs (#277), and keeps
+            # to the agent of a model the spawn names itself.
             family=_rung_family(role, agent_args, model, effort, config) if spec is None else None,
+            model_agent=model_agent(agent_args, model) if spec is None else None,
         )
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
@@ -9446,6 +9448,48 @@ def ladder_family(
     return harness.model_family(runs.model)
 
 
+def model_agent(agent_args: Sequence[str] = (), model: str | None = None) -> str | None:
+    """The agent whose model a new spawn names itself, which its agent rung keeps to: the
+    model of its ``--model`` in ``agent_args`` (*Extra agent args*), else ``model``
+    (``fleet spawn --model``, the Spawn dialog's Model field), when it is one of AISquare's
+    model ladders' (it has a family, ``harness.model_family``), is the ladder agent's
+    (``capabilities.model_ladders``: Claude Code). The rung then weighs that family among its
+    accounts alone (``claude_accounts.agent_pick``): weighed across agents, ``--model fable``
+    with every Claude account out of its Fable week ran Codex with ``--model fable``, whose
+    turns all failed (review r29 of #113, m1). ``None`` for a spawn that names no model, or
+    one no ladder names: the rung may cross by the family it runs (:func:`ladder_family`). A
+    role's settings, ``[agents.models.<agent>]`` and the last pick are each agent's own, so
+    they keep it to none."""
+    if harness.model_family(harness.model_arg(agent_args) or model) is None:
+        return None
+    return next((kind.id for kind in adapters() if kind.capabilities.model_ladders), None)
+
+
+def role_agent(
+    project: ProjectInfo,
+    role: str,
+    agent_args: Sequence[str] = (),
+    *,
+    model: str | None = None,
+    binary: str | None = None,
+    config: FleetSettings | None = None,
+) -> agent_launch.ResolvedAgent:
+    """The agent a new :func:`spawn` of ``role`` in ``project`` with no ``--agent`` runs
+    (``binary`` its ``--bin``), by the spawn's own steps: ``agent_launch.resolve``, its agent
+    rung given the family :func:`ladder_family` says and the agent of the spawn's own model
+    (:func:`model_agent`), as :func:`spawn` gives them. ``agent_args`` and ``model`` are the
+    spawn's. What the Spawn dialog's Agent field names (``(role's: …)``) and its label reads
+    (:func:`launch_default`): asked with neither, the field named Claude Code while the spawn
+    ran Codex (review r29 of #113, m1). Raises ``ValueError`` as ``resolve`` does."""
+    return agent_launch.resolve(
+        role,
+        binary=binary,
+        cwd=project.root,
+        family=_rung_family(role, agent_args, model, None, config),
+        model_agent=model_agent(agent_args, model),
+    )
+
+
 def _rung_family(
     role: str,
     agent_args: Sequence[str],
@@ -9468,23 +9512,20 @@ def launch_default(
 ) -> claude_accounts_service.LaunchDefault:
     """What a new :func:`spawn` of ``role`` in ``project`` with no ``--account`` runs on, for a
     form to show (the Spawn dialog's Account field, ``cli.ui.spawn``), by the spawn's own
-    steps: its agent, ``agent`` else the role's (``agent_launch.resolve``, whose agent rung
-    weighs :func:`ladder_family` as the spawn's does), then that agent's account by
-    ``claude_accounts.launch_default`` (its ``choose``), given the agent rung's pick and the
-    family :func:`spawn_runs` says the spawn runs, as :func:`spawn` gives them. With the Agent
-    field left at the role's, the label read ``choose`` with no pick while the spawn took the
-    agent rung's, which picked with no family: the label named spare, the spawn ran on work
-    (review r28 of #113, M1). An ``agent`` named reaches no agent rung, so there is no pick.
-    ``agent_args`` and ``model`` are the form's, as the spawn takes them. Raises
+    steps: its agent, ``agent`` else the role's (:func:`role_agent`), then that agent's
+    account by ``claude_accounts.launch_default`` (its ``choose``), given the agent rung's
+    pick and the family :func:`spawn_runs` says the spawn runs, as :func:`spawn` gives them.
+    With the Agent field left at the role's, the label read ``choose`` with no pick while the
+    spawn took the agent rung's, which picked with no family: the label named spare, the spawn
+    ran on work (review r28 of #113, M1). An ``agent`` named reaches no agent rung, so there is
+    no pick. ``agent_args`` and ``model`` are the form's, as the spawn takes them. Raises
     ``claude_accounts.NoSuchAccount`` as the spawn would, and ``ValueError`` for a role whose
     agent cannot be worked out."""
     pick: claude_accounts_service.AgentPick | None = None
     if agent is not None:
         kind = recorded_adapter(agent) or get_adapter(DEFAULT_AGENT)
     else:
-        selected = agent_launch.resolve(
-            role, cwd=project.root, family=_rung_family(role, agent_args, model, None, config)
-        )
+        selected = role_agent(project, role, agent_args, model=model, config=config)
         kind, pick = selected.adapter, selected.pick
     runs = spawn_runs(role, agent_args, model=model, config=config, agent=kind.id)
     return claude_accounts_service.launch_default(

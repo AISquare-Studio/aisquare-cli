@@ -518,7 +518,9 @@ def record_refusal(kind: str, detail: str, *, board: str | None = None) -> None:
             f"{_who(agent)}: its sandbox asked its store broker for what it may not do, "
             f"refused ({kind}): {flat[:300]} — later refusals of this kind are in "
             f"{paths.log_dir() / LOG_NAME}",
-            key=f"broker-refused:{launch}:{kind}",
+            # under its board, so the board's reset and purge take the mark with the note
+            # (``core.store._PROJECT_META``): a launch need not have bound a session to it
+            key=f"broker-refused:{board}:{launch}:{kind}",
         )
 
 

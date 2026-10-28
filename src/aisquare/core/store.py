@@ -3163,13 +3163,14 @@ class SqliteStore:
         The fleet rows' keys go with the rows (:func:`_fleet_meta_terms`), so it reads
         them before the caller deletes the rows.
         """
+        own, globs = _project_meta_term(project_id)
         removed = self._conn.execute(
-            "DELETE FROM team_meta WHERE key = ? OR key GLOB ? OR key GLOB ?",
+            f"DELETE FROM team_meta WHERE key = ? OR key GLOB ? OR {own}",
             (
                 f"coding-agent:{project_id}",
-                f"signal/{_glob_escape(project_id)}/*",
                 # the processes that run this board's sessions (``services.mcp_host``)
                 f"host/{_glob_escape(project_id)}/*",
+                *globs,
             ),
         ).rowcount
         for key, raw in self.list_meta("native-launch:").items():
@@ -3213,10 +3214,12 @@ class SqliteStore:
 
         The board is its ``team_task``, ``team_event``, ``team_session`` and ``brief`` rows
         (the next brief is #1 again, as the next task is), and in
-        ``team_meta`` its signals (``signal/<id>/*``), the keys of the sessions that go
-        (:func:`_session_meta_terms`: the nudge debounce, the continuation counters, the
+        ``team_meta`` its own keys (:data:`_PROJECT_META`: its signals, a nudge owed its
+        manager, the marks of the broker refusals it was told), the keys of the sessions that
+        go (:func:`_session_meta_terms`: the nudge debounce, the continuation counters, the
         launch and fleet bindings to them, …) and of the fleet rows that go
-        (:func:`_fleet_meta_terms`: a spawn's first message, the row's binding).
+        (:func:`_fleet_meta_terms`: a spawn's first message, the row's binding, its stop's
+        mark, its launch record's refusal).
         The ``ui_state`` rows the before-limit hand-over keeps per label
         (:data:`_FLEET_LABEL_STATE`) go with them, counted with the ``team_meta`` keys: the
         next fleet reuses a label (``coder-1``), and a stale "warned" row would hide its first
@@ -3227,7 +3230,12 @@ class SqliteStore:
         process overwrites its own when it next registers. ``host_of`` needs the session's
         row as well as the key, and the row goes here, so a live solo session's own MCP
         server cannot prove itself until its next SessionStart or UserPromptSubmit writes
-        the record again, whether the key stayed or not. Narrow, and it heals itself.
+        the record again, whether the key stayed or not. Narrow, and it heals itself. So do
+        ``coding-agent:<project id>``, the project's choice of agent, a setting as its
+        registration is, and a launch's native-telemetry keys (``native-launch:``,
+        ``native-event:``, ``native-provider:``): its receiver's dedup, which it clears as it
+        exits (:meth:`clear_native_launch`) and :meth:`expire_native_launches` reaps. A purge
+        takes both.
 
         The fleet is its ``fleet_agent`` rows, and a live one refuses the reset
         (``ValueError``): asked under the write lock, so an agent a spawn recorded after the
@@ -3262,7 +3270,7 @@ class SqliteStore:
                     "SELECT id FROM fleet_agent WHERE project_id = ?", (project_id,)
                 ).fetchall()
             ]
-            signals = ("key GLOB ?", (f"signal/{_glob_escape(project_id)}/*",))
+            signals = _project_meta_term(project_id)
             labels = (
                 " OR ".join(["key GLOB ?"] * len(_FLEET_LABEL_STATE)),
                 tuple(f"{prefix}{_glob_escape(project_id)}:*" for prefix in _FLEET_LABEL_STATE),
@@ -6955,10 +6963,24 @@ _SESSION_BINDINGS: tuple[str, ...] = ("launch-session:", "fleet-session:", "sess
 session they run (``core.agent_sessions``, keyed by launch id and by row id) and an MCP row's
 alias (``session-alias:<provisional id>``)."""
 
-_FLEET_META: tuple[str, ...] = ("first-prompt:", "fleet-session:")
+_FLEET_META: tuple[str, ...] = (
+    "first-prompt:",
+    "fleet-session:",
+    "fleet-stopped:",
+    "launch-refused:",
+)
 """The ``team_meta`` keys kept per fleet row as ``<prefix><agent id>``: what a spawn's first
-message was given as (``services.fleet.FIRST_PROMPT_META``) and the row's session binding. They
-go with the row (:func:`_fleet_meta_terms`): nothing else expires a ``first-prompt:`` key."""
+message was given as (``services.fleet.FIRST_PROMPT_META``), the row's session binding, the
+mark the stop that ended the row took (``services.fleet._end_store_ended``) and the reason of
+the launch record's refusal its board was last told (``services.fleet._say_refused``). They
+go with the row (:func:`_fleet_meta_terms`): nothing else expires a ``first-prompt:``,
+``fleet-stopped:`` or ``launch-refused:`` key."""
+
+_PROJECT_META: tuple[str, ...] = ("signal/{}/*", "nudge-owed:{}", "broker-refused:{}:*")
+"""The ``team_meta`` keys kept per project, as GLOBs of its id: its signals, the nudge a board
+write owed its manager (``services.fleet.NUDGE_OWED``) and the once-per-launch-and-kind marks
+of the broker refusals its board was told (``services.store_broker.record_refusal``). A reset
+and a purge clear them (:func:`_project_meta_term`)."""
 
 
 def _session_meta_terms(sessions: Sequence[str]) -> Iterator[tuple[str, tuple[str, ...]]]:
@@ -7001,6 +7023,14 @@ def _fleet_meta_terms(agents: Sequence[str]) -> Iterator[tuple[str, tuple[str, .
         globs = [f"fleet-seen:{_glob_escape(agent)}:*" for agent in batch]
         clauses = [f"key IN ({','.join('?' for _ in keys)})"] + ["key GLOB ?"] * len(globs)
         yield " OR ".join(clauses), (*keys, *globs)
+
+
+def _project_meta_term(project_id: str) -> tuple[str, tuple[str, ...]]:
+    """``(where, params)`` matching the ``team_meta`` keys of :data:`_PROJECT_META` that are
+    ``project_id``'s, its id taken as itself (:func:`_glob_escape`)."""
+    escaped = _glob_escape(project_id)
+    globs = tuple(pattern.format(escaped) for pattern in _PROJECT_META)
+    return " OR ".join(["key GLOB ?"] * len(globs)), globs
 
 
 class GroupSettings(NamedTuple):

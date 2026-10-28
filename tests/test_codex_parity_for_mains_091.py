@@ -472,14 +472,31 @@ def test_the_keys_a_launch_leaves_go_with_a_projects_reset_and_purge(
         assert [key for key in keys if store.get_meta(key) is not None] == []
 
 
+_LEFT: tuple[str, ...] = (
+    "first-prompt:",
+    "fleet-session:",
+    "launch-session:",
+    "fleet-stopped:",
+    "launch-refused:",
+    fleet_service.NUDGE_OWED,
+    "broker-refused:",
+)
+"""The kinds of key a reset and a purge left (SMOKE11 8, and review r30 of #113, m1): a
+spawn's first message, a launch's and a fleet row's binding, the mark the stop that ended a
+row took, the refusal a row's launch record last put on the board, the nudge a board write
+owed its manager and the mark of a broker's refusal its board was told."""
+
+
 def _bound_keys() -> list[str]:
-    """The tester's SQL (SMOKE11 8): the keys a spawn's first message and a launch's and a
-    fleet row's binding leave."""
+    """The tester's SQL (SMOKE11 8), over every kind of :data:`_LEFT`: the keys of those
+    kinds in the store."""
     with store_session() as store:
         assert isinstance(store, SqliteStore)
         rows = store._conn.execute(
-            "SELECT key FROM team_meta WHERE key LIKE 'first-prompt:%' "
-            "OR key LIKE 'fleet-session:%' OR key LIKE 'launch-session:%' ORDER BY key"
+            "SELECT key FROM team_meta WHERE "
+            + " OR ".join("key LIKE ?" for _ in _LEFT)
+            + " ORDER BY key",
+            tuple(f"{kind}%" for kind in _LEFT),
         ).fetchall()
     return [str(row["key"]) for row in rows]
 
@@ -487,9 +504,12 @@ def _bound_keys() -> list[str]:
 def _spawned_and_bound(on: ProjectInfo, monkeypatch: pytest.MonkeyPatch) -> list[FleetAgent]:
     """A Codex and a Claude Code row of ``on``, as ``fleet spawn coder --agent <agent>
     --no-worktree --prompt hi`` leaves them, each with its hook's first event under its row's
-    and its launch's token (session ``ses-<agent>-<project id>``, launch ``lch-…`` alike), and
-    stopped: the Codex row first."""
+    and its launch's token (session ``ses-<agent>-<project id>``, launch ``lch-…`` alike), a
+    refusal its broker put on the board and one its launch record did, and stopped by a stop
+    that found it ended (``fleet-stopped:``): the Codex row first. And a nudge owed ``on``'s
+    manager, as a board write in Codex's sandbox leaves it."""
     from aisquare.core.agent_sessions import bind_launch_session
+    from aisquare.services import store_broker
 
     rows: list[FleetAgent] = []
     for agent in ("codex", "claude-code"):
@@ -500,10 +520,13 @@ def _spawned_and_bound(on: ProjectInfo, monkeypatch: pytest.MonkeyPatch) -> list
         monkeypatch.setenv("AISQUARE_LAUNCH_ID", f"lch-{agent}-{on.id}")
         with store_session() as store:
             bind_launch_session(store, session, started=True)  # its SessionStart
+        store_broker.record_refusal("fleet", "aisquare fleet stop manager", board=on.id)
+        fleet_service._say_refused(on.id, row, "it is not replayed", "no record", "respawn it")
         rows.append(row)
     with store_session() as store:
         for row in rows:
-            store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
+            assert fleet_service._end_store_ended(store, row.id, 0) is not None, "the fixture"
+        store.set_meta(fleet_service.NUDGE_OWED + on.id, datetime.now(UTC).isoformat())
     return rows
 
 
@@ -545,7 +568,10 @@ def test_a_spawns_first_prompt_and_the_session_bindings_go_with_a_reset_and_purg
     hi`` (and a Claude Code one), their hooks' first events, the rows stopped, ``project
     fresh``. It left ``first-prompt:<agent id>`` (a Codex row's), and ``fleet-session:`` and
     ``launch-session:`` (both agents'), and nothing else ever expires a ``first-prompt:`` key.
-    They go with their rows and their sessions now, in a reset and a purge alike.
+    They go with their rows and their sessions now, in a reset and a purge alike. So do
+    the four kinds review r30 found left (m1): a row's ``fleet-stopped:`` and
+    ``launch-refused:``, with its row; the project's ``nudge-owed:`` and
+    ``broker-refused:``, with its signals.
 
     Another project with rows of its own, spawned and bound the same way, keeps its rows and
     every key of theirs byte for byte: the rows' keys are found by the ids the reset and the
@@ -565,8 +591,13 @@ def test_a_spawns_first_prompt_and_the_session_bindings_go_with_a_reset_and_purg
             *(f"fleet-session:{row.id}" for row in spawned),
             *(f"fleet-seen:{row.id}:ses-{row.agent}-{of.id}" for row in spawned),
             *(f"launch-session:lch-{row.agent}-{of.id}" for row in spawned),
+            *(f"fleet-stopped:{row.id}" for row in spawned),
+            *(f"launch-refused:{row.id}" for row in spawned),
+            f"{fleet_service.NUDGE_OWED}{of.id}",
+            *(f"broker-refused:{of.id}:lch-{row.agent}-{of.id}:fleet" for row in spawned),
         } <= {key for key, _ in _as_stored(of, spawned)["team_meta"]}, "the fixture"
     assert len(kept["fleet_agent"]) == len(kept["team_session"]) == 2, "the fixture"
+    assert {key.split(":")[0] + ":" for key in _bound_keys()} == set(_LEFT), "the fixture"
 
     with store_session() as store:
         if how == "reset":
@@ -576,8 +607,7 @@ def test_a_spawns_first_prompt_and_the_session_bindings_go_with_a_reset_and_purg
         else:
             store.purge_project(project.id)
 
-    bound = ("first-prompt:", "fleet-session:", "launch-session:")
-    assert _bound_keys() == sorted(key for key, _ in kept["team_meta"] if key.startswith(bound))
+    assert _bound_keys() == sorted(key for key, _ in kept["team_meta"] if key.startswith(_LEFT))
     assert _as_stored(other, theirs) == kept, "another project's rows and keys, byte for byte"
 
 

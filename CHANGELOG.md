@@ -119,9 +119,10 @@ adapter.**
     page and `metrics stats` say "the agents' transcripts", naming none. Usage sharing stays
     Claude Code's: Codex sessions are counted locally and never shared, the shared fleet
     counts (agents started by role, tasks done) cover Claude Code's agents alone (a task a
-    Codex launch marks done with no `--as` is its launch's agent's, not yours at the shell),
-    and a command a Codex launch runs (its `aisquare task done`, direct or through its broker)
-    is not counted at all; a usage row recorded before agents were is given its session's or
+    Codex agent marks done with no `--as` is its agent's, not yours at the shell), and a
+    command a Codex agent runs (its `aisquare task done`, direct, through its broker, or in
+    the tool shell of a `codex` started by hand, which each agent's own mark of its tools'
+    shells names) is not counted at all; a usage row recorded before agents were is given its session's or
     its transcript's agent, again before each shared batch (a store a v47 build migrated
     without it, a row an older build wrote), and one neither names is not shared where the
     store holds another agent's. The doctor's `role bindings` row asks every agent's home
@@ -265,7 +266,12 @@ adapter.**
   out of that family's week gives its place, as it does within one agent's accounts, and
   the Spawn dialog's account label, left at the role's agent, names the account the spawn
   then runs on (it named the account Claude Code's own rung picked by the family, while the
-  spawn ran on the one the order picked without it).
+  spawn ran on the one the order picked without it). A Claude model the spawn names itself
+  (`--model`, the dialog's Model field, a `--model` in its *Extra agent args*) keeps it on
+  Claude Code, whose accounts alone are weighed for that family, the first in the order when
+  none has room: weighed across agents, it went to a Codex account with room, which took
+  `--model fable` and failed every turn. The dialog's *(role's: …)* names the agent its
+  spawn runs, asked as the spawn asks it.
   `--agent`, a role's agent, a binary, the project's agent and the account a
   launch names (`--account`, or the role's bound one, unless it is disabled) still pin it;
   a restart and Fork keep their record's agent, and so do a switch and a hand-over unless

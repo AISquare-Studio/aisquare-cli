@@ -9042,6 +9042,9 @@ class _ModelChoice:
     kept: model_memory.Pick = field(default_factory=model_memory.Pick)
     """An agent that keeps its own models: its last pick (``model_memory.remembered(agent=)``),
     which its own model slot is given under its configured pins (:func:`_own_pick`)."""
+    why: model_memory.Pick = field(default_factory=model_memory.Pick)
+    """Which rung decided each of ``runs`` (:data:`SPAWN_SOURCES`), ``None`` for no value: the
+    account's own default (``team harness``'s fleet row, :func:`spawn_choice`)."""
 
     @property
     def flags(self) -> list[str]:
@@ -9049,6 +9052,14 @@ class _ModelChoice:
             *([harness.MODEL_FLAG, self.added.model] if self.added.model else []),
             *([harness.EFFORT_FLAG, self.added.effort] if self.added.effort else []),
         ]
+
+
+SPAWN_SOURCES = ("picked", "native", "configured", "remembered", "recorded", "running")
+"""The words :func:`_model_choice` says each of a spawn's model and effort came from: this
+spawn's pick (the Spawn dialog's fields, ``fleet restart … --model``), its arguments (the
+role's, its binding's, its own: ``native`` as ``team harness`` says of a flag), its
+``[agents.models.<agent>]`` (``configured``), the owner's last pick (``remembered``); for a
+replay, what its spawn recorded, or what the agent runs now."""
 
 
 def _model_choice(
@@ -9102,7 +9113,12 @@ def _model_choice(
         named = [*role_args, *extra]
         ran = model_memory.Pick(harness.model_arg(named), harness.effort_arg(named))
         if kind is None or spec is not None:
-            return _ModelChoice(role_args, extra, model_memory.Pick(), ran, model_memory.Pick())
+            said = model_memory.Pick(
+                "native" if ran.model else None, "native" if ran.effort else None
+            )
+            return _ModelChoice(
+                role_args, extra, model_memory.Pick(), ran, model_memory.Pick(), why=said
+            )
         native = kind.native_choice(extra)
         chose = model_memory.Pick(
             native.model if native.model is not None else model,
@@ -9110,14 +9126,15 @@ def _model_choice(
         )
         kept = model_memory.remembered(agent=kind.id)
         passed = kind.native_choice([*harness.binding_args(role), *role_args, *extra])
-        own = _own_runs(passed, chose, _configured(kind, role), kept)
-        return _ModelChoice(role_args, extra, model_memory.Pick(), own, chose, kept)
+        own, why = _own_runs(passed, chose, _configured(kind, role), kept)
+        return _ModelChoice(role_args, extra, model_memory.Pick(), own, chose, kept, why)
     bound = harness.binding_args(role)
     remembered = model_memory.remembered() if spec is None else model_memory.Pick()
     pinned = _configured(kind, role) if spec is None else model_memory.Pick()
     added: dict[str, str | None] = {}
     runs: dict[str, str | None] = {}
     picked: dict[str, str | None] = {}
+    why: dict[str, str | None] = {}
     for flag, name in ((harness.MODEL_FLAG, "model"), (harness.EFFORT_FLAG, "effort")):
         of_binding = harness.flag_arg(bound, flag)
         given = model if name == "model" else effort
@@ -9130,14 +9147,17 @@ def _model_choice(
                 # `fleet restart … --model`: that agent's, over all it ran and recorded.
                 extra = harness.without_flag(extra, flag)
                 added[name] = runs[name] = given
+                why[name] = "picked"
             elif running is not None and _moved(
                 name, getattr(running.now, name), getattr(running.launched, name), then
             ):
                 extra = harness.without_flag(extra, flag)
                 added[name] = runs[name] = getattr(running.now, name)
+                why[name] = "running"
             else:
                 added[name] = None if recorded is not None else getattr(spec, name)
                 runs[name] = then
+                why[name] = "recorded" if then else None
             continue
         typed = harness.flag_arg(extra, flag)
         if (typed is None and flag in extra) or typed == "":
@@ -9160,8 +9180,10 @@ def _model_choice(
             added[name] = asked if typed is None and asked else None
             runs[name] = asked or None
             picked[name] = asked
+            why[name] = None if not asked else "native" if typed is not None else "picked"
         elif of_role is not None or of_binding is not None:
             runs[name] = of_role or of_binding
+            why[name] = "native" if runs[name] else None
         elif of_config:
             if name == "effort":
                 try:
@@ -9169,14 +9191,17 @@ def _model_choice(
                 except ValueError as exc:
                     raise FleetError(str(exc)) from exc
             added[name] = runs[name] = of_config
+            why[name] = "configured"
         else:
             added[name] = runs[name] = getattr(remembered, name)
+            why[name] = "remembered" if runs[name] else None
     return _ModelChoice(
         role_args,
         extra,
         model_memory.Pick(added.get("model"), added.get("effort")),
         model_memory.Pick(runs.get("model"), runs.get("effort")),
         model_memory.Pick(picked.get("model"), picked.get("effort")),
+        why=model_memory.Pick(why.get("model"), why.get("effort")),
     )
 
 
@@ -9195,23 +9220,30 @@ def _own_runs(
     picked: model_memory.Pick,
     pinned: model_memory.Pick,
     kept: model_memory.Pick,
-) -> model_memory.Pick:
+) -> tuple[model_memory.Pick, model_memory.Pick]:
     """What a new spawn of an agent that keeps its own models runs (:func:`_model_choice`'s
-    ``runs``), each of the model and the effort on its own, as its argv passes it: what its
-    native arguments name (``named``: the binding's, the role's, the spawn's), else this
-    spawn's pick, else ``[agents.models.<agent>]`` (``pinned``), else its last pick (``kept``),
-    else its own default (``None``). A cleared field (``""``) is no pick, and forgets the last:
-    the pin runs, else its default. :func:`_own_pick` and ``agent_launch.resolved_model_args``
-    give its argv the same order."""
+    ``runs``), each of the model and the effort on its own, as its argv passes it, and which
+    rung decided each (its ``why``, :data:`SPAWN_SOURCES`): what its native arguments name
+    (``named``: the binding's, the role's, the spawn's), else this spawn's pick, else
+    ``[agents.models.<agent>]`` (``pinned``), else its last pick (``kept``), else its own
+    default (``None``). A cleared field (``""``) is no pick, and forgets the last: the pin
+    runs, else its default. :func:`_own_pick` and ``agent_launch.resolved_model_args`` give
+    its argv the same order."""
 
-    def one(name: str) -> str | None:
+    def one(name: str) -> tuple[str | None, str | None]:
         chose = getattr(picked, name)
-        for value in (getattr(named, name), chose, getattr(pinned, name)):
+        for value, source in (
+            (getattr(named, name), "native"),
+            (chose, "picked"),
+            (getattr(pinned, name), "configured"),
+        ):
             if value:
-                return str(value)
-        return getattr(kept, name) if chose is None else None
+                return str(value), source
+        last = getattr(kept, name) if chose is None else None
+        return last, "remembered" if last else None
 
-    return model_memory.Pick(one("model"), one("effort"))
+    (model, model_why), (effort, effort_why) = one("model"), one("effort")
+    return model_memory.Pick(model, effort), model_memory.Pick(model_why, effort_why)
 
 
 def _own_pick(resolution: harness.ModelResolution, models: _ModelChoice) -> harness.ModelResolution:
@@ -9340,6 +9372,35 @@ def spawn_runs(
     dialog's account label reads, for the family a headroom pick reads (#277), so the two
     never disagree (review of #441, round 2, minor 1; review r28 of #113, M1). An empty flag
     in ``agent_args``, which the spawn refuses, runs nothing."""
+    try:
+        return spawn_choice(
+            role,
+            agent_args,
+            model=model,
+            effort=effort,
+            binary=binary,
+            config=config,
+            agent=agent,
+        )[0]
+    except FleetError:
+        return model_memory.Pick()
+
+
+def spawn_choice(
+    role: str,
+    agent_args: Sequence[str] = (),
+    *,
+    model: str | None = None,
+    effort: str | None = None,
+    binary: str | None = None,
+    config: FleetSettings | None = None,
+    agent: str | None = None,
+) -> tuple[model_memory.Pick, model_memory.Pick]:
+    """:func:`spawn_runs`'s answer, and which rung decided each of its model and effort
+    (:data:`SPAWN_SOURCES`; ``None`` for no value, the account's own default): what
+    ``team harness`` says a fleet spawn of ``role`` runs, never an ``AISQUARE_MODEL_<ROLE>``
+    pin (review r28 of #113, M1; #43 reopen, tester-43 (2)). Raises :class:`FleetError` where
+    the spawn refuses (a configured effort the agent does not take)."""
     binary = binary or harness.resolve_binary(role).binary
     kind = (recorded_adapter(agent) if agent is not None else None) or adapter_for_binary(binary)
     settings = role_settings(role, config)
@@ -9348,20 +9409,18 @@ def spawn_runs(
         if kind is not None
         else list(settings.extra_args)
     )
-    try:
-        return _model_choice(
-            role,
-            binary,
-            role_args,
-            agent_args,
-            spec=None,
-            running=None,
-            model=model,
-            effort=effort,
-            adapter=kind,
-        ).runs
-    except FleetError:
-        return model_memory.Pick()
+    choice = _model_choice(
+        role,
+        binary,
+        role_args,
+        agent_args,
+        spec=None,
+        running=None,
+        model=model,
+        effort=effort,
+        adapter=kind,
+    )
+    return choice.runs, choice.why
 
 
 def ladder_family(

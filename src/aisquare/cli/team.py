@@ -682,7 +682,13 @@ def spawn(
 
 
 def _fleet_model_status(selected: agent_launch.ResolvedAgent, role: str) -> dict[str, Any]:
-    """Report fleet's separate argument defaults without attributing them to team spawn."""
+    """What a ``fleet spawn`` of ``role`` given no model runs, apart from ``team spawn``'s row:
+    the fleet's own rule (``fleet.spawn_choice``, the spawn's ``_model_choice``: the role's
+    settings, ``[agents.models.<agent>]``, the owner's last pick, else the agent's own
+    default), never ``AISQUARE_MODEL_<ROLE>`` / ``AISQUARE_EFFORT_<ROLE>``, which reach ``team
+    spawn`` and no fleet spawn. It read them, and said a fleet spawn ran the env pin it never
+    passed (#43 reopen, tester-43 (2)). The notes are the agent's own words for its pins, read
+    as the fleet spawn reads them (``env_pins=False``)."""
     from aisquare.core.agent_adapters.types import fleet_extra_args
     from aisquare.services import fleet
 
@@ -699,23 +705,16 @@ def _fleet_model_status(selected: agent_launch.ResolvedAgent, role: str) -> dict
         args = fleet_extra_args(selected.adapter, settings.extra_args, settings.agent_args)
         row["agent_args"] = args
         arguments = agent_launch.prepare_arguments(selected, [*selected.profile.args, *args])
-        resolution = agent_launch.launch_model_for(selected, role, arguments, ladder=True)
-        if resolution is None:
-            row.update(
-                resolves_to=arguments.model or "",
-                source="native" if arguments.model is not None else "native-default",
-                effort=arguments.effort or "",
-                effort_source="native" if arguments.effort is not None else "native-default",
-            )
-        else:
-            row.update(
-                resolves_to=resolution.model,
-                source=resolution.source,
-                effort=resolution.effort,
-                effort_source=resolution.effort_source,
-                notes=resolution.notes,
-            )
-    except (ValueError, TypeError, AttributeError) as exc:
+        resolution = agent_launch.launch_model_for(selected, role, arguments, env_pins=False)
+        runs, why = fleet.spawn_choice(role, agent=selected.adapter.id)
+        row.update(
+            resolves_to=runs.model or "",
+            source=why.model or "native-default",
+            effort=runs.effort or "",
+            effort_source=why.effort or "native-default",
+            notes=resolution.notes if resolution is not None else [],
+        )
+    except (ValueError, TypeError, AttributeError, fleet.FleetError) as exc:
         row.update(
             error=str(exc),
             source="error",

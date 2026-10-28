@@ -2762,6 +2762,57 @@ def test_the_shown_pin_is_the_roles_arguments_over_its_bindings_as_the_argv_pass
     assert shown.model == runs.model == "role-model"
 
 
+@pytest.mark.parametrize("pin", ["configured", "last-pick", "none"])
+@pytest.mark.parametrize("agent", ["claude-code", "codex"])
+def test_team_harness_says_what_a_fleet_spawn_runs_under_an_env_pin_for_both_agents(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    agent: str,
+    pin: str,
+) -> None:
+    """#43 reopen, tester-43 (2): ``team harness``'s fleet row read ``AISQUARE_MODEL_<ROLE>``
+    / ``AISQUARE_EFFORT_<ROLE>`` (``launch_model_for(ladder=True)``), and said a fleet spawn ran
+    the env pin it never passes; its text printed no fleet line, the two rows being equal.
+    The row is the spawn's own rule now (``fleet.spawn_choice``): what the real spawn under that
+    env passes, by the rung that decided it, and the text says it apart from the team row,
+    which still takes the env pin (``team spawn`` does)."""
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
+    config.team.profiles["coder"] = RoleLaunchProfile(agent=agent)
+    if pin == "configured":
+        config.agents.models[agent] = AgentModelSettings(
+            roles={"coder": AgentModelDefault(model=_CONFIGURED[agent], effort="high")}
+        )
+    save_config(config)
+    if pin == "last-pick":
+        model_memory.remember(model=_LAST[agent], effort="medium", agent=agent)
+    monkeypatch.setenv("AISQUARE_MODEL_CODER", "env-model")
+    monkeypatch.setenv("AISQUARE_EFFORT_CODER", "low")
+
+    shown = CliRunner().invoke(app, ["--json", "team", "harness"])
+    text = CliRunner().invoke(app, ["team", "harness"])
+    fleet_service.spawn(project, "coder")
+    argv = _spawn_native(tmux)
+
+    assert shown.exit_code == 0 and text.exit_code == 0, shown.output + text.output
+    coder = next(row for row in json.loads(shown.stdout)["roles"] if row["role"] == "coder")
+    row = coder["fleet"]
+    ran = get_adapter(agent).native_choice(argv)
+    assert (row["resolves_to"] or None, row["effort"] or None) == (ran.model, ran.effort), argv
+    source = {"configured": "configured", "last-pick": "remembered"}.get(pin, "native-default")
+    assert (row["source"], row["effort_source"]) == (source, source)
+    assert (coder["agent"], coder["resolves_to"], coder["source"]) == (
+        agent,
+        "env-model",
+        "pinned",
+    ), "team spawn takes the env pin"
+    line = f"  fleet: {ran.model or 'native default'} [{source}] effort={ran.effort or 'native'} "
+    assert line in text.stdout, text.stdout
+
+
 def test_a_remembered_pick_is_claude_codes_alone_and_a_codex_spawn_gets_no_flag_of_it(
     tmux: FakeTmux,  # noqa: F811
     claude_on_path: Path,  # noqa: F811

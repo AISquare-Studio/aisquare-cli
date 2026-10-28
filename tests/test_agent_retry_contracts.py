@@ -383,17 +383,18 @@ def test_harness_shows_differing_fleet_defaults_and_stable_error_shape(
     runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A fleet spawn resolves the role as `team spawn` does — Claude Code's ladder — so
-    # its row says the same and is not shown apart; arguments of its own are.
+    # `team spawn` walks Claude Code's ladder; a fleet spawn given no model runs the owner's
+    # last pick, else the account's own default (#441), so its row is shown apart (#43 reopen,
+    # tester-43 (2)); and so are arguments of its own.
     result = runner.invoke(app, ["--json", "team", "harness"])
     assert result.exit_code == 0, result.output
     coder = next(row for row in json.loads(result.stdout)["roles"] if row["role"] == "coder")
     fleet_row = coder["fleet"]
-    assert (fleet_row["resolves_to"], fleet_row["source"]) == (
-        coder["resolves_to"],
-        coder["source"],
-    )
-    assert fleet_row["resolves_to"] == "sonnet" and fleet_row["effort"] == coder["effort"]
+    assert coder["resolves_to"] == "sonnet"
+    assert (fleet_row["resolves_to"], fleet_row["source"]) == ("", "native-default")
+    assert (fleet_row["effort"], fleet_row["effort_source"]) == ("", "native-default")
+    result = runner.invoke(app, ["team", "harness"])
+    assert "fleet: native default [native-default] effort=native" in result.output
     config = load_config()
     config.fleet.roles["coder"] = FleetRoleSettings(extra_args=["--model", "opus"])
     save_config(config)

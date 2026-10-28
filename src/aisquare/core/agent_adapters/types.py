@@ -1468,7 +1468,9 @@ class AgentAdapter(Protocol):
         ...
 
     def native_choice(self, args: Sequence[str]) -> NativeChoice:
-        """The model and effort ``args`` choose natively, the last one winning."""
+        """The model and effort ``args`` choose natively, the last one winning. Asked of every
+        agent by ``harness.model_arg`` too, for a model no :attr:`model_flags` spelling names
+        (Codex's ``-c model=…``), whichever agent the argv is for."""
         ...
 
     def validate(self, model: str | None, effort: str | None) -> None:

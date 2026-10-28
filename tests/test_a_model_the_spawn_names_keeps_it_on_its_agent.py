@@ -331,6 +331,20 @@ def test_the_model_arg_reads_every_agents_model_option() -> None:
     assert harness.model_arg(["--effort", "high", "-m"]) is None
 
 
+def test_the_model_arg_reads_a_model_an_agents_own_reader_finds() -> None:
+    """Review r30 of #113, n2: Codex's own reader (``native_choice``) names the model of
+    ``-c model=…`` and ``--config model="…"``, which ``model_arg`` read as none, so the spawn
+    went to the order's first agent. It asks every agent's reader where no option spelling
+    names one; the one they find is the model, an option spelled ``--model``/``-m`` first."""
+    assert harness.model_arg(["-c", "model=gpt-5.4"]) == "gpt-5.4"
+    assert harness.model_arg(["--config", 'model="gpt-5.4"']) == "gpt-5.4"
+    assert harness.model_arg(["-c", "model='o3'"]) == "o3"
+    assert harness.model_arg(["--config=model=gpt-5.4"]) == "gpt-5.4"
+    assert harness.model_arg(["-c", "model=gpt-x", "-m", "o3"]) == "o3", "the option over it"
+    assert harness.model_arg(["-c", 'model_reasoning_effort="high"']) is None
+    assert harness.model_arg(["-c", "--effort", "high"]) is None, "Claude Code's --continue"
+
+
 def _codex_first(home: dict[str, Any]) -> None:
     """Codex's account on top of the one order: what a launch nothing pins runs."""
     accounts_service.move(str(home["codex-a"].slot), "top")
@@ -345,8 +359,20 @@ def _codex_first(home: dict[str, Any]) -> None:
         ({"agent_args": ["-m", "gpt-5.5"]}, "gpt-5.5"),
         ({"model": "o3"}, "o3"),
         ({"model": "codex-mini-latest"}, "codex-mini-latest"),
+        ({"agent_args": ["-c", "model=gpt-5.4"]}, "gpt-5.4"),
+        ({"agent_args": ["--config", 'model="gpt-5.4"']}, "gpt-5.4"),
+        ({"agent_args": ["-c", "model='o3'"]}, "o3"),
     ],
-    ids=["gpt-x", "eq-gpt-5.4-mini", "m-gpt-5.5", "o3", "codex-mini-latest"],
+    ids=[
+        "gpt-x",
+        "eq-gpt-5.4-mini",
+        "m-gpt-5.5",
+        "o3",
+        "codex-mini-latest",
+        "c-model-gpt-5.4",
+        "config-model-quoted-gpt-5.4",
+        "c-model-single-quoted-o3",
+    ],
 )
 def test_a_codex_model_outside_its_price_table_runs_codex_and_is_no_claude_pick(
     tmux: FakeTmux,  # noqa: F811
@@ -362,7 +388,8 @@ def test_a_codex_model_outside_its_price_table_runs_codex_and_is_no_claude_pick(
     ``--model=gpt-5.4-mini`` and ``-m gpt-5.5`` launched Claude Code with them (``-m`` killed
     it: "unknown option '-m'"), and the model became Claude Code's pick, which the next plain
     Claude Code spawn ran. Each runs Codex, on its first slot, with the model once; the next
-    Claude Code spawn names no model."""
+    Claude Code spawn names no model. So does Codex's ``-c model=…`` in each of its quotings
+    (review r30, n2): Claude Code read ``-c`` as ``--continue``."""
     home = _claude_first_with_room(monkeypatch)
     if first == "codex-first":
         _codex_first(home)
@@ -372,7 +399,7 @@ def test_a_codex_model_outside_its_price_table_runs_codex_and_is_no_claude_pick(
     assert (receipt.agent.agent, receipt.agent.account_slot) == ("codex", home["codex-a"].slot)
     command = tmux.spawned[-1]["command"]
     assert isinstance(command, list)
-    once = [word for word in command if model in (word, word.partition("=")[2])]
+    once = [word for word in command if model in (word, word.partition("=")[2].strip("'\""))]
     assert len(once) == 1, command
     assert model_memory.remembered(agent="codex").model == model, "Codex's own pick"
     claude = fleet_service.spawn(project, "coder", agent="claude-code")

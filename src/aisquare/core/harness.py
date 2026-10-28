@@ -133,8 +133,12 @@ EFFORT_FLAG = "--effort"
 def model_arg(args: Sequence[str]) -> str | None:
     """The model ``args`` name, the first ``--model X`` or ``--model=X`` by any spelling of an
     agent's model option (``AgentAdapter.model_flags``: Codex's ``-m X`` too, whichever agent
-    then runs it); ``None`` for none. A spawn's ``-m gpt-5.5`` read as no model went to the
-    agent first in the order, Claude Code, which has no ``-m`` (SMOKE11, 11)."""
+    then runs it); else the one model the agents' own readers find there
+    (``AgentAdapter.native_choice``: Codex's ``-c model=…``, ``--config model="…"``), none
+    where two find different ones; ``None`` for none. A spawn's ``-m gpt-5.5`` read as no
+    model went to the agent first in the order, Claude Code, which has no ``-m`` (SMOKE11,
+    11), and so did its ``-c model=gpt-5.4``, which Codex's own reader names (review r30 of
+    #113, n2)."""
     from aisquare.core.agent_adapters import adapters  # they import this module
 
     flags = {MODEL_FLAG, *(flag for adapter in adapters() for flag in adapter.model_flags)}
@@ -144,7 +148,8 @@ def model_arg(args: Sequence[str]) -> str | None:
         name, equals, value = arg.partition("=")
         if equals and name in flags:
             return value
-    return None
+    native = {model for adapter in adapters() if (model := adapter.native_choice(args).model)}
+    return native.pop() if len(native) == 1 else None
 
 
 def effort_arg(args: Sequence[str]) -> str | None:

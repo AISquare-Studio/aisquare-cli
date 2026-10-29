@@ -799,7 +799,7 @@ def test_the_daemons_own_processes_are_never_named_as_its_clients(
     "words",
     ["app-server daemon keeps dying", "app-server daemon stop", "app-server daemon restart"],
 )
-def test_a_tui_whose_prompt_is_or_starts_with_the_daemons_own_words_is_never_the_daemon(
+def test_a_tui_whose_prompt_is_app_server_daemon_then_a_prompts_words_is_never_the_daemon(
     codex_daemon: DaemonTable, daemon_sockets: dict[int, set[int]], words: str
 ) -> None:
     """r33 1: ``codex 'app-server daemon keeps dying'`` lists as ``codex app-server daemon
@@ -809,7 +809,11 @@ def test_a_tui_whose_prompt_is_or_starts_with_the_daemons_own_words_is_never_the
     connected, and the stop printed left the TUI on "Reconnecting to server…". The daemon's
     words are read up to the prompt, and one of its own subcommands as the last word as a
     prompt's too (the MANAGER DECISION (b)): where the socket cannot say, it is a form that
-    can be the daemon's client; where it says it is connected, it is named."""
+    can be the daemon's client; where it says it is connected, it is named. Not the daemon's
+    words with nothing after them that could be a prompt's (``app-server … --managed-daemon``,
+    ``app-server daemon pid-update-loop``, one of its own subcommands followed by options),
+    which read as the daemon where the socket cannot say, the limit
+    (:func:`test_a_codex_connected_to_its_daemon_is_named_whatever_its_words_say`)."""
     processes, _holds = codex_daemon
     processes.append(_codex(7005, words))
 

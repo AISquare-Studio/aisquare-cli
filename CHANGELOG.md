@@ -101,7 +101,9 @@ adapter.**
     minutes after that `codex` quit, holds it too, as Codex itself sees it (a `codex resume`
     of it sat on "This conversation is open in another app"): while its `--managed-daemon`
     process holds the rollout, adopt refuses, naming first a running Codex that is its
-    client: one connected to its socket (`lsof -U`, measured on macOS), so never a TUI of
+    client: one connected to its socket (`lsof -U`, measured on macOS), whatever its words
+    say, the daemon's own command line too (`codex 'app-server daemon stop'`, measured
+    connected; never the daemon's own processes, run from its dir), so never a TUI of
     another Codex home, which is its own home's daemon's, though one of this home's showing
     another thread is (a process table names no thread a client shows), the TUI that runs
     adopt among them. Where the socket cannot say (a machine with `/proc`, unmeasured), a
@@ -111,14 +113,19 @@ adapter.**
     followed by what could be a prompt's words, past one of its own subcommands, or by one of
     them alone, read as a prompt's, so `codex 'add a -c flag'` is a TUI, and so, the lesser
     harm, is `codex exec fix the tests`, `codex review the diff` or `codex login status`; the
-    daemon's own words too, so `codex 'app-server daemon keeps dying'` is a TUI, never the
-    daemon). So never, where the socket can say, one that runs embedded (`-c`, `--search`,
-    `--profile`, `--no-daemon`, `--strict-config`, `--dangerously-bypass-hook-trust`, `exec`
-    or `review`, measured: each holds its own rollout) or runs no thread of the daemon's (an
-    `app-server` of its own, an IDE's or with `--listen`, `exec-server`, `login`, measured
-    unconnected, and every other subcommand, `execpolicy`, `tcp-tunnel` and `cloud-tasks`
-    too), nor, where it cannot, one of them whose words could not be a prompt's; each is
-    named only when it holds this rollout itself. Never a fleet agent, which shows its own
+    daemon's own words too, so `codex 'app-server daemon keeps dying'` and `codex 'app-server
+    daemon stop'` are TUIs, an option that runs Codex embedded read before them, and only the
+    forms that run on read as the daemon, `app-server daemon pid-update-loop` and `app-server
+    … --managed-daemon` (each a daemon's process when run by hand), a TUI whose prompt is one
+    of them the limit; one of the daemon's own subcommands followed by options reads as that
+    subcommand, as every subcommand's does). So never, where the socket can say, one that
+    runs embedded (`-c`, `--search`, `--profile`, `--no-daemon`, `--strict-config`,
+    `--dangerously-bypass-hook-trust`, `exec` or `review`, measured: each holds its own
+    rollout) or runs no thread of the daemon's (an `app-server` of its own, an IDE's or with
+    `--listen`, `exec-server`, `login`, measured unconnected, and every other subcommand,
+    `execpolicy`, `tcp-tunnel` and `cloud-tasks` too), nor, where it cannot, one of them
+    whose words could not be a prompt's; each is named only when it holds this rollout
+    itself. Never a fleet agent, which shows its own
     thread. A Codex runs its shell commands as its own children when embedded, and the
     daemon those of every TUI on it, whose parent is the TUI that started it (both
     measured), so adopt run from such a shell still counts that Codex, or the daemon, and

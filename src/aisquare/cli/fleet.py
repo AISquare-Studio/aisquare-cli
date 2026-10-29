@@ -29,6 +29,9 @@ from rich.console import Console
 from rich.text import Text
 
 from aisquare.cli.common import USAGE_ERROR, fail, refuse_conflicting_scope
+from aisquare.cli.native_args import NativeForwardingCommand
+from aisquare.core import harness
+from aisquare.core.claude_accounts import agent_label
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
@@ -146,7 +149,9 @@ def slot_label(slot: int, labels: Mapping[int, str] | None) -> str:
     named = (labels or {}).get(slot)
     if named:
         return named
-    return "plain claude" if slot == 1 else f"account {slot}"
+    from aisquare.core.claude_accounts import slot_name
+
+    return slot_name(slot)
 
 
 def agents_json(project: ProjectInfo, agents: list[FleetAgentStatus]) -> dict[str, object]:
@@ -185,6 +190,7 @@ def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
 
 @app.command(
     "spawn",
+    cls=NativeForwardingCommand,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def spawn(
@@ -193,7 +199,7 @@ def spawn(
         str,
         typer.Argument(
             help=f"Role to run: {', '.join(fleet_service.FLEET_ROLES)}, a bound one, or "
-            f"{fleet_service.PLAIN_ROLE} for none (a plain Claude Code session)."
+            f"{fleet_service.PLAIN_ROLE} for none (a plain session of its agent)."
         ),
     ],
     label: Annotated[
@@ -212,8 +218,22 @@ def spawn(
         str | None,
         typer.Option(
             "--permission-mode",
-            help="Claude Code permission mode (auto, acceptEdits, …); default per role.",
+            help="Permission as WRITE:APPROVALS, mapped to each agent's own flags "
+            "(workspace:auto, read_only:auto, workspace:ask, full:never…), "
+            "or in the agent's own words (Claude Code: auto, acceptEdits, …; Codex: a "
+            "sandbox); default per role.",
         ),
+    ] = None,
+    agent: Annotated[str | None, typer.Option("--agent", help="Coding agent family.")] = None,
+    sandbox: Annotated[
+        str | None,
+        typer.Option(
+            "--sandbox", help="Codex write scope: read-only, workspace-write, danger-full-access."
+        ),
+    ] = None,
+    approval: Annotated[
+        str | None,
+        typer.Option("--approval", help="Codex approval policy: on-request, untrusted, never."),
     ] = None,
     binary: Annotated[
         str | None, typer.Option("--bin", help="Agent executable (default: the role's binding).")
@@ -230,9 +250,9 @@ def spawn(
         str | None,
         typer.Option(
             "--account",
-            help="Claude Code account to run under: a slot number, alias or email (see "
-            "`aisquare accounts`); default: the role's binding, the project default, "
-            "then the machine default.",
+            help="Account to run under, one of the agent's own (Claude Code or Codex): a "
+            "slot number, alias or email (see `aisquare accounts`); default: the role's "
+            "binding, the project default, then the machine default.",
             metavar="ACCOUNT",
         ),
     ] = None,
@@ -283,7 +303,10 @@ def spawn(
             task_id=task,
             worktree=worktree,
             permission_mode=permission_mode,
+            sandbox=sandbox,
+            approval_policy=approval,
             binary=binary,
+            agent=agent,
             prompt=prompt,
             agent_args=list(ctx.args),
             spawned_by=as_session or "user",
@@ -373,9 +396,10 @@ def restart(
         str | None,
         typer.Option(
             "--permission-mode",
-            help="Claude Code permission mode for the replacement (auto, acceptEdits, …); "
-            "default: the one the agent was launched with, or the role's for an agent "
-            "spawned before that was recorded (#144).",
+            help="Permission for the replacement: WRITE:APPROVALS mapped per agent "
+            "(workspace:auto, read_only:auto…) or the agent's own (Claude Code: auto, "
+            "acceptEdits, …); default: the one the agent was launched with, or the role's "
+            "for an agent spawned before that was recorded (#144).",
         ),
     ] = None,
     model: Annotated[
@@ -427,8 +451,8 @@ def restart(
         {
             "--fresh": fresh,
             "--permission-mode": permission_mode,
-            "--model": model,
-            "--effort": effort,
+            harness.MODEL_FLAG: model,
+            harness.EFFORT_FLAG: effort,
         },
     )
     if label is None:
@@ -469,9 +493,20 @@ def switch(
         str | None,
         typer.Option(
             "--to",
-            help="Account to move it to: a slot, alias or email. Default: the account with "
-            "the most headroom that is not the one it is on.",
+            help="Account to move it to: a slot, alias or email, of its own agent or another "
+            "(which it then runs). Default: its own agent's account with the most headroom "
+            "that is not the one it is on; once every one is full, another agent's "
+            "(`\\[accounts] cross_agent_handover`).",
             metavar="ACCOUNT",
+        ),
+    ] = None,
+    to_agent: Annotated[
+        str | None,
+        typer.Option(
+            "--agent",
+            help="Coding agent to move it onto (claude-code, codex, …). No conversation moves "
+            "between agents: it starts fresh there with a hand-off brief of its work.",
+            metavar="AGENT",
         ),
     ] = None,
     fresh: Annotated[
@@ -506,6 +541,10 @@ def switch(
     with `--as <its session>` when the usage-limit hand-over could not
     (`handover_failed`). An agent that hand-over moved minutes ago is refused
     without --force: one switch per limit.
+
+    Onto another agent (`--agent`, or `--to` one of its accounts) the conversation does
+    not move, the work does: the replacement starts fresh there with a hand-off brief of
+    its task, claims, board entries, tree and the newest of its conversation.
     """
     target = _project(project)
     try:
@@ -513,6 +552,7 @@ def switch(
             target,
             label,
             to=to,
+            to_agent=to_agent,
             fresh=fresh,
             reason=reason,
             spawned_by=as_session or "user",
@@ -529,6 +569,8 @@ def switch(
                     "started": receipt.started.model_dump(mode="json"),
                     "from_slot": receipt.from_slot,
                     "to_slot": receipt.to_slot,
+                    "from_agent": receipt.from_agent,
+                    "to_agent": receipt.to_agent,
                     "resumed": receipt.resumed,
                     "prompt_typed": fleet_service.prompt_typed_json(receipt.prompt_typed),
                     "prompt_delivery": receipt.prompt_delivery,
@@ -549,7 +591,14 @@ def switch(
         if receipt.from_slot is not None
         else "its shell's claude"
     )
-    target_name = f"{slot_label(receipt.to_slot, labels)} (slot {receipt.to_slot})"
+    target_name = (
+        f"{slot_label(receipt.to_slot, labels)} (slot {receipt.to_slot})"
+        if receipt.to_slot is not None
+        else "its plain home"
+    )
+    if receipt.crossed and receipt.from_agent and receipt.to_agent:
+        origin = f"{agent_label(receipt.from_agent)} {origin}"
+        target_name = f"{agent_label(receipt.to_agent)} {target_name}"
     console.print(
         f"✓ {label}: moved from {origin} to {target_name} — {receipt.how} "
         f"({receipt.started.pane_id} in {receipt.tmux_session})",
@@ -753,6 +802,8 @@ def _stop_notes(receipt: fleet_service.StopReceipt, project: ProjectInfo) -> lis
     the count (:func:`_released_line`). Then the claims it could not give back.
     """
     notes: list[str] = []
+    if receipt.killed:
+        notes.append(f"⚠ {receipt.killed}")
     if receipt.agent.worktree:
         reap = project_service.fleet_command("reap", project)
         notes.append(f"· run `{reap}` to remove its worktree once its work is pushed")
@@ -869,6 +920,7 @@ def _stop_json(receipt: fleet_service.StopReceipt) -> dict[str, object]:
         "agent": receipt.agent.model_dump(mode="json"),
         "claims_released": [task.id for task in receipt.released],
         "release_failed": receipt.release_failed,
+        "killed": receipt.killed,
         # An ended agent with no window left was only recorded as stopped (#38): the JSON
         # says so as the human line does (final delta review, n4).
         "marked_only": receipt.marked_only,
@@ -1447,7 +1499,9 @@ def rename(
 def adopt(
     ref: Annotated[
         str | None,
-        typer.Argument(help="The conversation: its session id, or its transcript's .jsonl path."),
+        typer.Argument(
+            help="The conversation: its session id (a Codex thread's), or its transcript's path."
+        ),
     ] = None,
     role: Annotated[str, typer.Option("--role", help="Role it runs as in the fleet.")] = "coder",
     label: Annotated[
@@ -1463,14 +1517,15 @@ def adopt(
         int, typer.Option("--limit", help="With --list: how many.", min=1, max=50)
     ] = adopt_service.LIST_LIMIT,
 ) -> None:
-    """Bring a Claude Code conversation you started by hand under the fleet (#290).
+    """Bring a coding-agent conversation you started by hand under the fleet (#290).
 
-    It resumes on the account whose directory holds its transcript (a slot, or the plain
-    claude's ~/.claude) and in the directory it ran in, as a row on that directory's
-    project, keeping its session id: the board row is its own. Refused while a claude
-    still holds it, when the fleet already owns it, and when its directory is no onboarded
-    project. --list shows the recent ones no fleet row owns: id, account, directory, last
-    activity and the first thing you typed.
+    It resumes on its own agent (a Claude Code session, a Codex thread), on the account whose
+    directory holds its transcript (a slot, or the agent's plain home) and in the directory
+    it ran in, as a row on that directory's project, keeping its session: the board row is
+    its own. Refused while a process still holds it, when the fleet already owns it, and
+    when its directory is no onboarded project. --list shows the recent ones no fleet row
+    owns: id, agent (when more than one is listed), account, directory, last activity and
+    the first thing you typed.
     """
     if listing:
         conversations = adopt_service.recent(limit)
@@ -1482,9 +1537,12 @@ def adopt(
             console.print("no conversation outside the fleet on the accounts the CLI knows")
             return
         now = datetime.now(tz=UTC)
+        # The agent column only where it tells rows apart: a machine with one agent's
+        # conversations listed reads as it did (review r28 of #113, n5).
+        agents = len({c.agent for c in conversations}) > 1
         for c in conversations:
             line = Text(c.session_id[:8], style="bold")
-            line.append(f"  {c.account}  {c.cwd or '—'}  ")
+            line.append(f"  {f'{c.agent}  ' if agents else ''}{c.account}  {c.cwd or '—'}  ")
             line.append(_ago(now - c.last_activity), style="dim")
             if c.held_by is not None:
                 line.append(f"  held by pid {c.held_by}", style="yellow")

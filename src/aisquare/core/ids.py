@@ -4,7 +4,8 @@ Entry ids are ULID-style: a 48-bit millisecond timestamp followed by 80 bits
 of randomness, rendered in lowercase Crockford base32 behind a ``ctx_`` prefix
 (e.g. ``ctx_01j9q8p3k7zr4m2n6v0c1d8e5f``). Two properties matter:
 
-- **time-sortable** — lexicographic order of ids matches creation order, so a
+- **time-sortable** — lexicographic order of ids matches creation order (within one
+  process, to the id; across processes, to within ``_MAX_LEAD_MS``: see :func:`_new_id`), so a
   plain ``ORDER BY id`` lists entries oldest-first;
 - **prefix-addressable** — like a git short hash, an unambiguous leading
   substring resolves to the full id (see ``core.store``).
@@ -13,6 +14,7 @@ of randomness, rendered in lowercase Crockford base32 behind a ``ctx_`` prefix
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 # Crockford base32, lowercased: digits plus letters minus i, l, o and u.
@@ -41,11 +43,63 @@ def _encode(value: int, length: int) -> str:
     return "".join(chars)
 
 
+#: The millisecond and the 80 random bits of the id this process issued last, under the lock that
+#: keeps threads from reading them at once.
+_LAST_MS = [0]
+_LAST_TAIL = [0]
+_LAST_LOCK = threading.Lock()
+
+#: How far ahead of the clock a burst of ids may run, in milliseconds. A burst of ``n`` ids
+#: in one millisecond would run ``n`` ahead of it, and an id another process makes at the
+#: clock's time sorts before every later one of the burst; past this, an id stays in the
+#: millisecond of the one before it and is ordered by its tail (see :func:`_new_id`).
+_MAX_LEAD_MS = 50
+
+#: The size of the step a tail takes past the bound: 1 to 2**40, drawn at random.
+_STEP_BYTES = 5
+
+
 def _new_id(prefix: str) -> str:
-    """A fresh, time-sortable ULID-style id behind ``prefix``."""
-    timestamp_ms = int(time.time() * 1000)
-    randomness = int.from_bytes(os.urandom(_RAND_BYTES), "big")
-    return prefix + _encode(timestamp_ms, _TS_CHARS) + _encode(randomness, 16)
+    """A fresh, time-sortable ULID-style id behind ``prefix``.
+
+    Ordered in the process: an id issued in the millisecond of the one before it (or after a
+    clock that stepped back) takes the millisecond after that one, with randomness of its
+    own. Ids made within a millisecond are common (a script's ``task add`` loop, a Remote
+    batch) and a clock that reads every 15 ms (Windows') puts a hundred rows in one, so 80
+    random bits chose the order ``ORDER BY id`` listed them in: a board's tasks came back as
+    #1, #3, #2, and a tie on ``created_at`` fell to the order of dice. The millisecond is
+    bumped rather than the randomness incremented, as the ULID spec's monotonic form has it,
+    so that two ids of a burst still differ inside the first 14 characters and a short prefix
+    of one resolves as it did.
+
+    A burst runs ahead of the clock, which then catches up, and an id another process makes
+    meanwhile sorts before the burst's later ones. The lead is held to ``_MAX_LEAD_MS``, and
+    never by waiting: an id that would run further stays in the millisecond of the one before
+    it, and its 80 random bits are that one's plus a random step of 1 to 2**40 (the spec's
+    monotonic form again; the step is random so that the ids stay unguessable). Past the bound
+    the order is kept by the tail and not by the millisecond, and the ids of a burst past it
+    share their first 14 characters (``ctx_`` and the timestamp), so a prefix that tells them
+    apart needs about 23: the 14, then the first nine of the tail, where a step of up to 2**40
+    first shows (a long burst needs a character or two more). A tail that would overflow takes
+    the next millisecond with randomness of its own, so that one roll runs a millisecond past
+    the bound, ``_MAX_LEAD_MS + 1`` ahead of the clock. A clock that does not
+    move (a test's), one that stepped back, and a loop that mints faster than a millisecond an
+    id (``context import``) go on at the speed of the loop. Ids of two processes are ordered to
+    within ``_MAX_LEAD_MS`` milliseconds, and by dice in the same one.
+    """
+    with _LAST_LOCK:
+        last_ms, last_tail = _LAST_MS[0], _LAST_TAIL[0]
+        now_ms = int(time.time() * 1000)
+        timestamp_ms = max(now_ms, last_ms + 1)
+        tail = None
+        if timestamp_ms - now_ms > _MAX_LEAD_MS:
+            stepped = last_tail + 1 + int.from_bytes(os.urandom(_STEP_BYTES), "big")
+            if stepped >> (8 * _RAND_BYTES) == 0:
+                timestamp_ms, tail = last_ms, stepped
+        if tail is None:
+            tail = int.from_bytes(os.urandom(_RAND_BYTES), "big")
+        _LAST_MS[0], _LAST_TAIL[0] = timestamp_ms, tail
+    return prefix + _encode(timestamp_ms, _TS_CHARS) + _encode(tail, 16)
 
 
 def new_entry_id() -> str:

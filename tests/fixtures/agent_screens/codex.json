@@ -1,0 +1,363 @@
+{
+  "about": "Codex 0.162.1's screens under tmux 3.7c as `capture-pane -p` gives them, paths sanitized: each dialog of its own that the needs scan reads off its screen (AgentScreen.dialog_on_screen) with the words it reads, and screens that show none. The folder-trust, hook-review, Switch, Implement-this-plan, numbered-draft and after-Esc screens were measured for task #108 in a fleet window (160x40) with a loopback provider at 100 % of its window; the others are the measured screens tests/test_codex_fleet_parity.py, tests/test_remote_needs_codex.py and tests/test_remote_codex.py hold. A screen marked ready is one AgentScreen.ready_on_screen (or its default) reads as ready for a typed line; every other is not. AgentScreen.modal_on_screen (or its default) names each dialog by its words, and no screen without one. Codex 0.164.0's screens, measured in a fleet window the same way (folder trust, hook review, approval, question, Implement this plan?, Switch, the empty prompt, one and two Escs, drafts, a turn), read the same as these; only a refused command's line changed (`• Failed (exit 1)` became `• Exited (status 1)`), which nothing reads. Its update dialog is the one screen here measured on 0.164.0. The `Working directory · fork` screen is the chooser a bare `codex fork <id>` opened, run from a directory other than the source thread's last cwd (a hand-off Fork into its own worktree, SMOKE8 of #113), measured the same on 0.162.1 and 0.164.0 under tmux 3.8 (160x40, --no-alt-screen); with -C the fork opens none.",
+  "dialogs": [
+    {
+      "what": "folder trust, asked in a git checkout no trust covers",
+      "rows": [
+        "  Folder access",
+        "  /work/repo",
+        "",
+        "  Trust this folder? Codex can read, edit, and run files here, subject to your permission settings. Folder settings",
+        "  can run code automatically, even without a model request. Continue only if you trust these files. Your trust",
+        "  decision will be saved.",
+        "",
+        "› 1. Trust and continue",
+        "  2. Quit",
+        "",
+        "  enter continue · esc quit"
+      ],
+      "words": "Trust this folder? Codex can read, edit, and run files here, subject to your permission settings. Folder settings can run code automatically, even without a model request. Continue only if you trust these files. Your trust decision will be saved."
+    },
+    {
+      "what": "the hook review",
+      "rows": [
+        "  Hooks need review",
+        "  8 hooks are new or changed.",
+        "  Hooks can run outside the sandbox after you trust them.",
+        "",
+        "",
+        "› 1. Review hooks",
+        "  2. Trust all and continue",
+        "  3. Continue without trusting (hooks won't run)",
+        "",
+        "  enter confirm · esc skip"
+      ],
+      "words": "Hooks need review 8 hooks are new or changed. Hooks can run outside the sandbox after you trust them."
+    },
+    {
+      "what": "the hook review, its highlight moved by a 2",
+      "rows": [
+        "  Hooks need review",
+        "  8 hooks are new or changed.",
+        "  Hooks can run outside the sandbox after you trust them.",
+        "",
+        "",
+        "  1. Review hooks",
+        "› 2. Trust all and continue",
+        "  3. Continue without trusting (hooks won't run)",
+        "",
+        "  enter confirm · esc skip"
+      ],
+      "words": "Hooks need review 8 hooks are new or changed. Hooks can run outside the sandbox after you trust them."
+    },
+    {
+      "what": "Switch to gpt-6-luna, after a turn's Stop near the limit",
+      "rows": [
+        "  >_ OpenAI Codex (v0.162.1)",
+        "     /work/repo",
+        "",
+        "",
+        "› say ok",
+        "",
+        "",
+        "• ok",
+        "",
+        "  Worked for <1s • 23:10",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "  Approaching rate limits",
+        "  Switch to gpt-6-luna for lower credit usage?",
+        "",
+        "",
+        "› 1. Switch to gpt-6-luna                   Fast and affordable model for easier tasks.",
+        "  2. Keep current model",
+        "  3. Keep current model (never show again)  Hide future rate limit reminders about switching models",
+        "",
+        "  enter select · esc back"
+      ],
+      "words": "Approaching rate limits Switch to gpt-6-luna for lower credit usage?"
+    },
+    {
+      "what": "Implement this plan?, after a Plan-mode turn's Stop",
+      "rows": [
+        "  >_ OpenAI Codex (v0.162.1)",
+        "     /work/repo",
+        "",
+        "",
+        "› say ok",
+        "",
+        "",
+        "• ok",
+        "",
+        "  Worked for <1s • 23:25",
+        "",
+        "• Model changed to local-fixture medium for Plan mode.",
+        "",
+        "",
+        "› PLAN",
+        "",
+        "",
+        "• Proposed Plan",
+        "",
+        "",
+        "  # Paint the button",
+        "",
+        "  • Make it blue",
+        "  • Ship it",
+        "",
+        "",
+        "• Here is the plan.",
+        "",
+        "  Worked for <1s • 23:26",
+        "",
+        "",
+        "  Implement this plan?",
+        "",
+        "",
+        "› 1. Yes, implement this plan          Switch to Default and start coding",
+        "  2. Yes, clear context and implement  Fresh thread with this plan",
+        "  3. No, stay in Plan mode             Continue planning with the model",
+        "",
+        "  enter select · esc back"
+      ],
+      "words": "Implement this plan?"
+    },
+    {
+      "what": "an approval view",
+      "rows": [
+        "› ESC sleep 12; echo slow-done",
+        "• Running sleep 12; echo slow-done",
+        "  Would you like to run the following command?",
+        "  Reason: reach the aisquare board",
+        "  $ sleep 12; echo slow-done",
+        "› 1. Yes, proceed (y)",
+        "  2. Yes, and don't ask again for commands that start with `sleep 12` (p)",
+        "  3. No, and tell Codex what to do differently (esc)",
+        "  Press enter to confirm or esc to cancel"
+      ],
+      "words": "Would you like to run the following command? Reason: reach the aisquare board $ sleep 12; echo slow-done"
+    },
+    {
+      "what": "an approval view in a 60x8 pane, its second option chosen",
+      "rows": [
+        "  Would you like to run the following command?",
+        "  [… 7 lines] ^a view all",
+        "  1. Yes, proceed (y)",
+        "› 2. Yes, and don't ask again for commands that start with",
+        "     `true # (9s • esc to interrupt)` (p)",
+        "  Press enter to confirm or esc to cancel"
+      ],
+      "words": "Would you like to run the following command? [… 7 lines] ^a view all"
+    },
+    {
+      "what": "a question view (request_user_input, --no-alt-screen)",
+      "rows": [
+        "  >_ OpenAI Codex (v0.162.1)",
+        "     ~/alpha",
+        "› ASK",
+        "  Question 1/1 (1 unanswered)",
+        "  Which colour should the button be?",
+        "  › 1. Red (Recommended)  Warm and loud",
+        "    2. Blue               Calm",
+        "    3. None of the above  Optionally, add details in notes (tab)",
+        "  tab to add notes | enter to submit answer | esc to interrupt"
+      ],
+      "words": "Question 1/1 (1 unanswered) Which colour should the button be?"
+    },
+    {
+      "what": "the update dialog, an npm-installed 0.164.0 at start with a newer release in its version.json (no -c check_for_update_on_startup=false)",
+      "rows": [
+        "  Update available · 0.164.0 → 0.999.0",
+        "  Release notes: https://github.com/openai/codex/releases/latest",
+        "",
+        "› 1. Update now (runs `npm install -g @openai/codex`)",
+        "  2. Skip",
+        "  3. Skip until next version",
+        "",
+        "  enter continue · esc skip"
+      ],
+      "words": "Update available · 0.164.0 → 0.999.0 Release notes: https://github.com/openai/codex/releases/latest"
+    },
+    {
+      "what": "Working directory · fork, a bare codex fork run outside the source thread's cwd",
+      "rows": [
+        "",
+        "  Working directory · fork",
+        "  Session = latest cwd recorded in the forked session",
+        "  Current = your current working directory",
+        "",
+        "› 1. Use session directory (/work/repo)",
+        "  2. Use current directory (/work/repo/.aisquare-worktrees/coder-2)",
+        "  3. Always use session directory",
+        "  4. Always use current directory",
+        "",
+        "  enter continue · esc use session · ^c quit"
+      ],
+      "words": "Working directory · fork Session = latest cwd recorded in the forked session Current = your current working directory"
+    }
+  ],
+  "not_dialogs": [
+    {
+      "what": "its empty prompt after a turn",
+      "rows": [
+        "› say hi",
+        "• ok",
+        "  Worked for <1s • 2:52 PM",
+        "› Ask Codex to do anything",
+        "  local-fixture default · /work/repo",
+        "  ? for shortcuts                                       ⚠ 2 warnings · f2 to view"
+      ],
+      "ready": true
+    },
+    {
+      "what": "its empty prompt after the Switch dialog's Esc",
+      "rows": [
+        "  >_ OpenAI Codex (v0.162.1)",
+        "     /work/repo",
+        "",
+        "",
+        "› say ok",
+        "",
+        "",
+        "• ok",
+        "",
+        "  Worked for <1s • 23:10",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "                                                                                    ⚠ 5h limit: only <1% left · /status",
+        "",
+        "› Ask Codex to do anything",
+        "",
+        "  local-fixture default · /work/repo",
+        "  ? for shortcuts                                                                             ⚠ 2 warnings · f2 to view"
+      ],
+      "ready": true
+    },
+    {
+      "what": "its empty prompt after one Esc",
+      "rows": [
+        "› say hi",
+        "• ok",
+        "  Worked for <1s • 2:52 PM",
+        "› Ask Codex to do anything",
+        "  local-fixture default · /work/repo",
+        "  esc again to edit previous message"
+      ],
+      "ready": true
+    },
+    {
+      "what": "its transcript after a second Esc",
+      "rows": [
+        "› say hi",
+        "• ok",
+        "  Worked for <1s • 2:52 PM",
+        "› Ask Codex to do anything",
+        "  local-fixture default · /work/repo",
+        "  Browsing transcript · ↑↓/jk scroll · ←→/hl prompts · ^t details · ↵ rewind · esc back"
+      ]
+    },
+    {
+      "what": "a draft",
+      "rows": [
+        "› say hi",
+        "• ok",
+        "  Worked for <1s • 2:52 PM",
+        "› half a sentence of the human's",
+        "  local-fixture default · /work/repo"
+      ]
+    },
+    {
+      "what": "a draft that starts 1. ",
+      "rows": [
+        "  >_ OpenAI Codex (v0.162.1)",
+        "     /work/repo",
+        "",
+        "",
+        "› say ok",
+        "",
+        "",
+        "• ok",
+        "",
+        "  Worked for <1s • 23:10",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "                                                                                    ⚠ 5h limit: only <1% left · /status",
+        "",
+        "› 1. fix the bug",
+        "",
+        "  local-fixture default · /work/repo",
+        "                                                                                              ⚠ 2 warnings · f2 to view"
+      ]
+    },
+    {
+      "what": "a turn running",
+      "rows": [
+        "› SLOW one",
+        "• Working (2s • esc to interrupt)",
+        "› Ask Codex to do anything",
+        "  local-fixture default · /work/repo",
+        "  ? for shortcuts                                       ⚠ 2 warnings · f2 to view"
+      ]
+    }
+  ]
+}

@@ -153,7 +153,7 @@ def test_every_role_resolves_to_the_trees_defaults() -> None:
         assert harness.resolve_binary(role).source == "default", role
         assert harness.role_model_override(role) is None, role
         assert harness.role_effort_override(role) is None, role
-    assert explainability.accepts_session_id(harness.DEFAULT_AGENT_BINARY), (
+    assert explainability.accepts_session_id(harness.default_binary()), (
         "the caller's AISQUARE_PIN_SESSION_ID turned session-id pinning off inside a test"
     )
 

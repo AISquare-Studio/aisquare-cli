@@ -24,6 +24,7 @@ from aisquare.core.workspace import current_project
 from aisquare.services import mcp_server
 from aisquare.services import team as team_service
 from tests import proc_tree
+from tests.wall_clock import after_the_tick
 
 pytestmark = pytest.mark.usefixtures("project_capture")
 
@@ -367,6 +368,7 @@ def test_a_solo_session_pruned_while_alive_is_still_briefed_when_a_team_forms(
     mark is kept, and the board comes once."""
     _team_on(runner)
     _start(runner, SOLO, work_dir)
+    after_the_tick()  # "older than 0 minutes": a session seen in this very tick is not
     report = team_service.prune_sessions(older_than_minutes=0)
     assert [pruned.id for pruned in report.pruned] == [SOLO]
     with store_session() as store:
@@ -514,3 +516,53 @@ def test_a_remote_teammate_over_serve_makes_the_board_a_team(
     assert runner.invoke(app, ["hook", "session-end"], input=ended).exit_code == 0
     assert mcp_server.server_instructions() == mcp_server.TEAM_INSTRUCTIONS
     assert "<aisquare-team>" in _start(runner, OTHER, work_dir)
+
+
+# --- Codex (SCOPE #113 274, L7): its one hook entry runs the same rule ----------------------
+
+
+def _codex(runner: CliRunner, home: Path, event: str, native: str, work: Path) -> str:
+    """One Codex hook through its installed command (``hook codex``), shaped as 0.162.1's."""
+    payload: dict[str, Any] = {
+        "hook_event_name": event,
+        "session_id": native,
+        "cwd": str(work),
+        "transcript_path": str(home / "sessions" / f"rollout-{native}.jsonl"),
+    }
+    if event == "SessionStart":
+        payload |= {"source": "startup", "model": "gpt-test"}
+    else:
+        payload["prompt"] = "go"
+    result = runner.invoke(
+        app, ["hook", "codex", "--config-dir", str(home)], input=json.dumps(payload)
+    )
+    assert result.exit_code == 0, result.output
+    return result.stdout
+
+
+@pytest.fixture
+def codex_home(tmp_path: Path) -> Path:
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    return home
+
+
+def test_a_solo_codex_session_gets_no_team_block_and_is_briefed_once_a_team_forms(
+    runner: CliRunner, work_dir: Path, codex_home: Path
+) -> None:
+    _team_on(runner)
+    started = _codex(runner, codex_home, "SessionStart", SOLO, work_dir)
+    assert "<aisquare-team>" not in started
+    assert "<aisquare-team>" not in _codex(runner, codex_home, "UserPromptSubmit", SOLO, work_dir)
+    # A teammate comes (Claude Code or Codex alike): the solo one is briefed on its next prompt.
+    assert "<aisquare-team>" in _start(runner, OTHER, work_dir)
+    assert "<aisquare-team>" in _codex(runner, codex_home, "UserPromptSubmit", SOLO, work_dir)
+    assert "<aisquare-team>" not in _codex(runner, codex_home, "UserPromptSubmit", SOLO, work_dir)
+
+
+def test_a_codex_session_beside_a_live_teammate_gets_the_board(
+    runner: CliRunner, work_dir: Path, codex_home: Path
+) -> None:
+    _team_on(runner)
+    _start(runner, OTHER, work_dir)
+    assert "<aisquare-team>" in _codex(runner, codex_home, "SessionStart", SOLO, work_dir)

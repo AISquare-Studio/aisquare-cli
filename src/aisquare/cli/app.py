@@ -177,14 +177,39 @@ def command_path(ctx: typer.Context) -> str | None:
 
 def _count_command(ctx: typer.Context) -> None:
     """Count this command in the local feature counters: an append to a spool file, failing
-    open (``core.feature_use``)."""
+    open (``core.feature_use``). Not one run in the launch of an agent whose usage is not
+    shared (:func:`_launch_usage_shared`)."""
     try:
         path = command_path(ctx)
         if path is not None and path != _SHIPPER:
-            feature_use.record(path)
+            if _launch_usage_shared():
+                feature_use.record(path)
             sharing.start_background_ship()  # a detached `metrics ship`, once in 6 h if on
     except Exception:  # a counter never costs a command
         return
+
+
+def _launch_usage_shared() -> bool:
+    """Whether a command run here may be counted: one a person runs (no agent's run in its
+    environment), or one run under an agent whose usage is shared
+    (``services.usage_stats.shared_usage``: Claude Code's), by ``usage_stats.run_agent``. A
+    launch exports its agent (``AISQUARE_LAUNCH_AGENT``) to the agent and so to its tools'
+    shells, and the broker of a sandboxed agent runs the board calls it is handed in the
+    launch's environment: a Codex agent's ``aisquare task done``, run there or through its
+    broker, is in no count (owner, 2026-10-27; tester-42 on #42). Nor is one run in the tool
+    shell of an agent started by hand, which no launch marks: each agent's own mark of its
+    tools' shells says it (``AgentCapabilities.tool_shell_env``: Codex's ``CODEX_THREAD_ID``;
+    review r29 of #113, m2).
+
+    Not counted locally either: the counters are one table (``feature_use``), and every build
+    that shares the store ships each row of it, 0.9.1's among them, so a count kept there is
+    a count shared. A count of its own would need a table of its own, a schema step, for
+    names alone; and what an agent runs by its board's protocol is no feature the person
+    chose, as a hook or the MCP server is not (:data:`_NOT_FEATURES`)."""
+    from aisquare.services.usage_stats import run_agent, shared_usage
+
+    agent = run_agent()
+    return agent is None or shared_usage(agent)
 
 
 def _no_arguments(ctx: typer.Context) -> None:
@@ -252,6 +277,24 @@ app.add_typer(hook.app, name="hook", hidden=True)
 app.add_typer(explainability.app, name="explainability")
 
 
-def main() -> None:
-    """Console-script entry point for both ``aisquare`` and ``asq``."""
-    app()
+def main(prog_name: str | None = None) -> None:
+    """Console-script entry point for both ``aisquare`` and ``asq``.
+
+    In an agent's sandbox, where the aisquare store is read-only, a command goes to its
+    launch's broker outside it and prints what ran there (``services.store_broker``).
+    ``prog_name`` is what a usage line calls the program: ``python -m aisquare`` (what the
+    broker, the hooks and the fleet run) passes ``aisquare``, which Click would otherwise
+    print as ``python -m aisquare`` (SMOKE6)."""
+    import sys
+
+    from aisquare.services import store_broker
+
+    code = store_broker.forward(sys.argv[1:])
+    if code is not None:
+        raise SystemExit(code)
+    why = store_broker.check_cwd()
+    if why is not None:
+        store_broker.record_refusal("board", why)
+        sys.stderr.write(f"aisquare: {why}\n")
+        raise SystemExit(2)
+    app(prog_name=prog_name)

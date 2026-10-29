@@ -224,6 +224,8 @@ def live_panes(seeded: tuple[TmuxServer, str, int], monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(remote_server, "_resolve_project", lambda ref: _project_stub(ref))
     monkeypatch.setattr("aisquare.core.store.store_session", lambda: _Store())
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: server)
+    # The store is faked and keeps no launch records: placement has tests of its own.
+    monkeypatch.setattr(fleet_service, "placed_row", lambda row: row)
     return remote_server._live_panes
 
 

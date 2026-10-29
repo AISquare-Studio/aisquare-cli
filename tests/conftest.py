@@ -12,6 +12,7 @@ import contextlib
 import os
 import shlex
 import shutil
+import sqlite3
 import sys
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
@@ -19,7 +20,7 @@ from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as metadata_version
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import pytest
 from typer.testing import CliRunner
@@ -204,6 +205,14 @@ AMBIENT_ENV_VARS = (
     # round).
     "AISQUARE_PLAIN_CLAUDE_CONFIG_DIR",
     "AISQUARE_PLAIN_CLAUDE_CODE_TMPDIR",
+    # Codex's CLAUDE_CONFIG_DIR, and the coding-agent family a launch or an operator
+    # chose (`services.agent_launch`): a suite run from inside a Codex session, or a
+    # fleet pane, would otherwise detect, connect and launch THEIR agent.
+    "CODEX_HOME",
+    "AISQUARE_CODING_AGENT",
+    "AISQUARE_LAUNCH_AGENT",
+    "AISQUARE_LAUNCH_ID",
+    "AISQUARE_LAUNCH_PID",
     # Claude Code's override of the directory its macOS Keychain item is keyed on
     # (`core.claude_accounts.keychain_service`), which it hands to the teammates it
     # spawns: a suite run from one of those would name every account's item after it.
@@ -824,8 +833,8 @@ def fresh_file_checks() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def isolated_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point agent detection and the Claude accounts at a temp home so tests never read
-    ``~/.claude*``.
+    """Point agent detection, launch and the Claude accounts at a temp home so tests never
+    read ``~/.claude*`` or ``~/.codex``.
 
     ``core.agents._home`` is the indirection its own docstring offers for this.
     Without it the claude-code doctor row read the developer's REAL
@@ -1131,6 +1140,124 @@ def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     from aisquare.core.version import __version__
 
     monkeypatch.setattr(agents, "hook_binary_version", lambda argv, **_kwargs: __version__)
+
+
+class _BoardWithoutFsync(sqlite3.Connection):
+    """A connection that stops waiting for the disk once the store has set its journal.
+
+    ``open_store`` runs ``PRAGMA journal_mode = WAL`` and then migrates one step at a time,
+    each step a commit of its own: 45 commits for every home a test makes, and SQLite's default
+    (``synchronous = FULL``) has the disk confirm each. On windows-latest a commit measured
+    21 ms (a fresh store 0.95 s, a third of the leg's time), on a Linux runner a millisecond or
+    two. A test's board is thrown away with its ``tmp_path``: nothing in it has to survive a
+    power cut. Everything else is as it was: the pragma is set only AFTER the journal mode took
+    (a file that is not a database, or a store held by another connection, fails at that statement
+    exactly as before) and an error from it is left unsaid.
+    """
+
+    _quiet = False
+
+    def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+        cursor = super().execute(sql, parameters)
+        if not self._quiet and sql.startswith("PRAGMA journal_mode"):
+            self._quiet = True
+            with contextlib.suppress(sqlite3.Error):
+                super().execute("PRAGMA synchronous = OFF")
+        return cursor
+
+
+@pytest.fixture(scope="session", autouse=True)
+def the_board_does_not_wait_for_the_disk() -> Iterator[None]:
+    """Every ``sqlite3.connect`` of the run returns a :class:`_BoardWithoutFsync`.
+
+    A caller that names its own ``factory`` keeps it. A test that patches ``sqlite3.connect``
+    replaces this for its own length (``test_store_migration_race``), and the real function it
+    calls through is this one: the connection it gets traces the same statements.
+    """
+    real_connect = sqlite3.connect
+
+    def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        if len(args) < 6:  # the sixth positional is ``factory``
+            kwargs.setdefault("factory", _BoardWithoutFsync)
+        connection: sqlite3.Connection = real_connect(*args, **kwargs)
+        return connection
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(sqlite3, "connect", connect)
+        yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def the_command_tree_is_built_once() -> Iterator[None]:
+    """``CliRunner.invoke(app)`` gets the click tree of ``aisquare`` from this, once.
+
+    Typer builds the whole tree again for every ``invoke``: 242 commands, their signatures and
+    type hints, 99 ms for ``--version`` on a Mac, which is all of its cost, and about 2 700
+    ``invoke`` calls of the suite are parametrized into many thousands of runs. Four CLI files
+    (581 tests) took 37 s of CPU and now take 7. The tree is a function of the app's
+    registrations alone, so it is built again when their count moves, and an app a test makes
+    for itself is never kept. ``typer.main.get_command`` is not touched: the tests that read
+    the tree (``test_documented_commands``) still see it built.
+    """
+    from aisquare.cli.app import app as main_app
+
+    real: Any = None
+    built: dict[str, Any] = {}
+
+    def get_command(app: Any) -> Any:
+        if app is not main_app:
+            return real(app)
+        shape = (
+            len(app.registered_commands),
+            len(app.registered_groups),
+            id(app.registered_callback),
+        )
+        if built.get("shape") != shape:
+            built.update(shape=shape, command=real(app))
+        return built["command"]
+
+    with pytest.MonkeyPatch.context() as patch:
+        import typer.testing
+
+        real = typer.testing._get_command  # type: ignore[attr-defined]
+        patch.setattr(typer.testing, "_get_command", get_command)
+        yield
+
+
+@pytest.fixture(autouse=True)
+def no_store_broker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never start a store broker process from a test's launch; mark it ready instead.
+
+    ``aisquare launch`` of an agent that sandboxes its tools starts one per launch
+    (``services.store_broker.run_broker``), owned by the process the agent becomes, which
+    in a test is the suite itself: each would poll until the run ends. Tests of the broker
+    capture the real function at import and start it against their own directory.
+    """
+    from aisquare.services import store_broker
+
+    def ready(directory: Path, env: object) -> None:
+        (directory / store_broker.READY).write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(store_broker, "run_broker", ready)
+
+
+@pytest.fixture(autouse=True)
+def install_outside_the_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer, for the suite, that this aisquare lives outside every project tree.
+
+    The install under test is this checkout (an editable ``src/``, a ``.venv`` beside it),
+    and a test that does not ``chdir`` runs in it, where a sandboxed launch is refused
+    (``services.store_broker.refuse_inside``) as it must be in a real project. Tests of
+    that refusal set the install's place themselves.
+    """
+    from aisquare.services import store_broker
+
+    monkeypatch.setattr(
+        store_broker,
+        "install_paths",
+        lambda *args, **kwargs: (Path("/nonexistent/aisquare-under-test"),),
+        raising=False,
+    )
 
 
 @pytest.fixture(autouse=True)

@@ -313,7 +313,7 @@ def import_(
         list[str] | None,
         typer.Argument(
             help="One or more of: a skill directory, a SKILL.md or any text file, - for "
-            "stdin, an https:// URL, or a Claude Code skill's name.",
+            "stdin, an https:// URL, or the name of a skill a coding agent reads (see --list).",
             show_default=False,
         ),
     ] = None,
@@ -334,7 +334,8 @@ def import_(
         bool, typer.Option("--force", help="Replace a persona of the same name in that layer.")
     ] = False,
     list_skills: Annotated[
-        bool, typer.Option("--list", help="List the skills in Claude Code's skill directories.")
+        bool,
+        typer.Option("--list", help="List the skills in every coding agent's skill directories."),
     ] = False,
     llm: Annotated[
         bool | None,
@@ -373,7 +374,7 @@ def import_(
     any engine it started, and exits 130."""
     root = _root()
     if list_skills:
-        _emit_skills(persona_service.importable_skills(root))
+        _emit_skills(root)
         return
     batch: list[tuple[str, str | None]] = [(source, None) for source in sources or []]
     if from_dir is not None:
@@ -602,21 +603,35 @@ def _receipt_table(rows: list[dict[str, Any]]) -> None:
     typer.echo(f"{imported} imported, {refused} not{tail}", err=True)
 
 
-def _emit_skills(skills: list[persona_service.SkillRef]) -> None:
+def _emit_skills(root: Path | None) -> None:
+    roots = persona_service.skill_roots(root)
+    skills = persona_service.importable_skills(root)
     if _json():
-        _emit({"skills": [skill.model_dump(mode="json") for skill in skills]})
+        _emit(
+            {
+                "skills": [skill.model_dump(mode="json") for skill in skills],
+                "roots": [where.model_dump(mode="json") for where in roots],
+            }
+        )
         return
     if not skills:
-        typer.echo("No Claude Code skills found in the personal or project skill directories.")
+        typer.echo("No skills found in any coding agent's skill directories:")
+        for where in roots:
+            typer.echo(f"  {where.scope:<7}  {','.join(where.agents)}  {where.path}")
         return
     width = max(len(skill.name) for skill in skills)
-    for skill in skills:
+    readers = [",".join(skill.agents) for skill in skills]
+    agents_width = max(len(names) for names in readers)
+    for skill, names in zip(skills, readers, strict=True):
         mark = "imported" if skill.imported else " " * len("imported")
         about = (
             _flattened(skill.description) if skill.recognised else f"✗ {skill.reason or 'invalid'}"
         )
         taken = f"  (name taken by {skill.taken_by} {skill.name})" if skill.taken_by else ""
-        typer.echo(f"{skill.name:<{width}}  {skill.scope:<7}  {mark}  {about}{taken}")
+        typer.echo(
+            f"{skill.name:<{width}}  {skill.scope:<7}  {names:<{agents_width}}  {mark}  "
+            f"{about}{taken}"
+        )
 
 
 @app.command("export")
@@ -627,24 +642,42 @@ def export(
     ] = None,
     skill: Annotated[
         bool,
-        typer.Option("--skill", help="Write into Claude Code's skills (with --user or --project)."),
+        typer.Option(
+            "--skill", help="Write into a coding agent's skills (with --user or --project)."
+        ),
     ] = False,
     user: UserFlag = False,
     project: ProjectFlag = False,
+    agent: Annotated[
+        str | None,
+        typer.Option(
+            "--agent",
+            help="The coding agent whose skills --skill writes into (default: the one this "
+            "directory launches).",
+        ),
+    ] = None,
     force: Annotated[bool, typer.Option("--force", help="Replace an existing target.")] = False,
 ) -> None:
     """Print a persona's SKILL.md, or write its directory elsewhere (default: stdout)."""
     scope = resolve_pool(user, project)
     if skill and scope is None:
         fail(
-            "--skill needs --user (<config dir>/skills) or --project (<project>/.claude/skills)",
+            "--skill needs --user (the agent's own skills) or --project (the project's)",
             error="usage",
         )
     if scope is not None and not skill:
-        fail("--user and --project pick Claude Code's skill directory — add --skill", error="usage")
+        fail("--user and --project pick the agent's skill directory — add --skill", error="usage")
+    if agent is not None and not skill:
+        fail("--agent picks whose skills --skill writes into — add --skill", error="usage")
     with _reported():
+        adapter = persona_service.skill_agent(agent) if skill else None
         result = persona_service.export(
-            name, root=_root(), to=to, skill=scope if skill else None, force=force
+            name,
+            root=_root(),
+            to=to,
+            skill=scope if skill else None,
+            force=force,
+            agent=adapter.id if adapter is not None else None,
         )
     if isinstance(result, str):
         if _json():
@@ -658,12 +691,13 @@ def export(
                 "name": name,
                 "path": str(result.path),
                 "skill": scope if skill else None,
+                "agent": adapter.id if adapter is not None else None,
                 "skipped_links": result.skipped_links,
             }
         )
         return
-    slash = f" — it is /{name} in Claude Code now" if skill else ""
-    typer.echo(f"✓ exported {name} to {result.path}{slash}")
+    reads = f" — a skill {adapter.label} reads now" if adapter is not None else ""
+    typer.echo(f"✓ exported {name} to {result.path}{reads}")
     _warn_links(result.skipped_links)
 
 

@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from aisquare.core import usage
+from aisquare.core.agent_adapters import claude_usage as usage
 from tests.budgets import budget
 
 MODEL = "claude-sonnet-5-5"

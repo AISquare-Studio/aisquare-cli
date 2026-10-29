@@ -22,6 +22,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import feature_use, paths, procs, repo_profile
 from aisquare.core import usage as usage_core
+from aisquare.core.agent_adapters import claude_usage
 from aisquare.core.claude_sharing import memory_key
 from aisquare.core.store import store_session
 from aisquare.models import SessionUsage, TurnUsage, UsageStats
@@ -106,8 +107,8 @@ def test_scan_turns_sums_to_what_scan_reads_and_cuts_at_each_prompt(tmp_path: Pa
         prompt(_day(0, 9, 30), cwd=cwd),
         request(_day(0, 9, 31), "m3", cwd=cwd, tool="Edit"),
     )
-    scanned, _ = usage_core.scan_turns(transcript, day_of=_day_of)
-    whole, _ = usage_core.scan(transcript)
+    scanned, _ = claude_usage.scan_turns(transcript, day_of=_day_of)
+    whole, _ = claude_usage.scan(transcript)
 
     assert [chunk.usage.requests for chunk in scanned.chunks] == [2, 1]
     assert scanned.total().to_dict() == whole.to_dict()
@@ -132,7 +133,7 @@ def test_only_a_typed_message_opens_a_turn(tmp_path: Path, not_a_prompt: dict[st
         other,
         request(_day(0, 9, 6), "m2", cwd=tmp_path),
     )
-    scanned, _ = usage_core.scan_turns(transcript)
+    scanned, _ = claude_usage.scan_turns(transcript)
     assert len(scanned.chunks) == 1
 
 
@@ -144,8 +145,8 @@ def test_a_turn_across_local_midnight_is_two_turns_each_in_its_own_day(tmp_path:
         request(before, "m1", cwd=tmp_path),
         request(after, "m2", cwd=tmp_path, cache_read=3000),
     )
-    scanned, _ = usage_core.scan_turns(transcript, day_of=_day_of)
-    whole, _ = usage_core.scan(transcript)
+    scanned, _ = claude_usage.scan_turns(transcript, day_of=_day_of)
+    whole, _ = claude_usage.scan(transcript)
 
     assert [(_day_of(c.ended_at), c.usage.totals().total) for c in scanned.chunks] == [
         ("2026-10-25", tokens()),
@@ -162,12 +163,12 @@ def test_a_second_scan_from_the_state_finds_nothing_and_a_longer_file_only_the_r
         prompt(_day(0, 9), cwd=tmp_path),
         request(_day(0, 9, 1), "m1", cwd=tmp_path),
     )
-    first, state = usage_core.scan_turns(transcript)
-    again, state = usage_core.scan_turns(transcript, state)
+    first, state = claude_usage.scan_turns(transcript)
+    again, state = claude_usage.scan_turns(transcript, state)
     write(
         transcript, prompt(_day(0, 10), cwd=tmp_path), request(_day(0, 10, 1), "m2", cwd=tmp_path)
     )
-    more, _ = usage_core.scan_turns(transcript, state)
+    more, _ = claude_usage.scan_turns(transcript, state)
 
     assert (len(first.chunks), len(again.chunks), len(more.chunks)) == (1, 0, 1)
     assert more.total().totals().total == tokens()
@@ -596,6 +597,104 @@ def test_a_directory_no_account_names_is_other_directories_not_an_account(machin
     assert usage_stats.account_slot(strange) is None
     assert [(row.slot, row.label) for row in accounts.rows] == [(None, "other directories")]
     assert accounts.active == 0 and accounts.top is None and accounts.by_type == {}
+
+
+def _mains_account_slot(transcript: Path) -> int | None:
+    """Main's ``account_slot`` (d2f8d3f7), the oracle: the unresolved ``parents[2]`` of a
+    ``<dir>/projects/<folder>/<session>.jsonl``, then the managed slot it is (registered or
+    not), then the plain ``claude``'s two directories."""
+    from aisquare.core import claude_accounts as core
+
+    try:
+        directory = transcript.parents[2]
+    except IndexError:
+        return None
+    if transcript.parents[1].name != "projects":
+        return None
+    try:
+        parts = directory.resolve().relative_to(core.accounts_root().resolve()).parts
+    except ValueError:
+        parts = ()
+    if len(parts) == 1 and parts[0].isdigit() and int(parts[0]) >= core.FIRST_MANAGED_SLOT:
+        return int(parts[0])
+    for candidate in (core.default_config_dir(), core.home_config_dir()):
+        if directory.resolve() == candidate.resolve():
+            return core.DEFAULT_SLOT
+    return None
+
+
+@pytest.mark.skipif(not can_symlink(), reason="needs symlinks")
+def test_a_slot_whose_projects_links_into_the_plain_claudes_keeps_its_own_sessions(
+    machine: Machine,
+) -> None:
+    """The legacy layout the doctor still warns about (``claude_shared.py``): slot 3's
+    ``projects`` is a link to ``~/.claude/projects``. Its Stop hands over the transcript as slot
+    3 spells it, and that is slot 3's, as main's ``account_slot`` read the unresolved
+    ``parents[2]`` (review r28 of #113, m4: main said 3, this branch said 1). The path through
+    ``~/.claude`` stays slot 1's, a slot's folder no longer registered (no ``MARKER``) is still
+    its number, as main's ``managed_slot`` asked no registration, and a folder no account is
+    names none."""
+    from aisquare.core import claude_accounts as core
+
+    machine.account(3)
+    repo = machine.repo("linked-slot")
+    add_project(repo)
+    plain = _one_turn(machine, repo, SESSION, _day(0, 9))
+    slot_3 = core.accounts_root() / "3"
+    shutil.rmtree(slot_3 / "projects", ignore_errors=True)
+    (slot_3 / "projects").symlink_to(plain.parents[1], target_is_directory=True)
+    through_3 = slot_3 / "projects" / plain.parent.name / plain.name
+    gone = core.accounts_root() / "7" / "projects" / plain.parent.name / plain.name
+    write(gone, prompt(_day(0, 9), cwd=repo))
+    nowhere = machine.root / "nowhere" / "projects" / plain.parent.name / plain.name
+    assert through_3.resolve() == plain.resolve()
+
+    answers = {path: usage_stats.account_slot(path) for path in (through_3, plain, gone, nowhere)}
+
+    assert answers == {through_3: 3, plain: core.DEFAULT_SLOT, gone: 7, nowhere: None}
+    assert answers == {path: _mains_account_slot(path) for path in answers}, "main's answers"
+    hooks_service.turn_stopped(repo, session_id=SESSION, transcript_path=str(through_3))
+    with store_session() as store:
+        row = store.session_usage(SESSION)
+    assert row is not None and row.account_slot == 3
+    assert [row.slot for row in _read("lifetime").accounts.rows] == [3]
+
+
+# --- which directory, which repository ----------
+
+
+def test_a_claude_code_session_s_folder_is_the_first_non_empty_cwd_in_its_head(
+    tmp_path: Path,
+) -> None:
+    """Main's rule for a Claude Code transcript (review r28 of #113, n3): the first non-empty
+    ``cwd`` in the first 256 KiB, however many lines come before it. The reader's opening reads
+    400 lines and took the first ``cwd`` whatever it held, so a transcript whose ``cwd`` comes
+    after 450 short lines, or whose first record says ``"cwd": ""``, had no repository.
+
+    The opening is still asked first, so a ``cwd`` past 256 KiB but within its 400 lines is
+    found where main found none (tester-42 on #42, (e)): accepted by the manager, as the
+    session's own folder is never a worse answer than none."""
+    far = write(
+        tmp_path / "projects" / "f" / "far.jsonl",
+        *({"type": "summary", "summary": "x" * 1024} for _ in range(300)),
+        prompt(_day(0, 9), cwd=Path("/real/repo")),
+    )
+    assert far.stat().st_size > usage_stats._HEAD_BYTES
+    assert usage_stats._head_cwd(far) is None, "main's rule: none in its first 256 KiB"
+    assert usage_stats.session_cwd(far) == Path("/real/repo")
+    late = write(
+        tmp_path / "projects" / "f" / "late.jsonl",
+        *({"type": "summary", "summary": f"line {n}"} for n in range(450)),
+        prompt(_day(0, 9), cwd=Path("/real/repo")),
+    )
+    empty = write(
+        tmp_path / "projects" / "f" / "empty.jsonl",
+        {"type": "user", "cwd": "", "message": {"role": "user", "content": "x"}},
+        prompt(_day(0, 9), cwd=Path("/real/repo")),
+    )
+
+    assert usage_stats.session_cwd(late) == Path("/real/repo")
+    assert usage_stats.session_cwd(empty) == Path("/real/repo")
 
 
 def test_an_account_with_only_an_api_key_is_api_and_one_with_nothing_is_unknown(
@@ -1195,6 +1294,7 @@ def test_metrics_stats_on_an_empty_machine_says_how_to_fill_it() -> None:
     assert result.exit_code == 0
     assert "No usage recorded for 7 days yet" in result.output
     assert "aisquare metrics backfill" in result.output
+    assert "Claude Code" not in result.output, "the sweep reads every agent's transcripts"
 
 
 def test_an_empty_range_says_nothing_is_in_it_when_other_ranges_have_something(
@@ -1207,7 +1307,7 @@ def test_an_empty_range_says_nothing_is_in_it_when_other_ranges_have_something(
     quiet = runner.invoke(app, ["metrics", "stats", "--range", "today", "--no-sweep"])
     everything = runner.invoke(app, ["metrics", "stats", "--range", "lifetime", "--no-sweep"])
 
-    assert "Nothing in today: Claude Code was not used in it." in quiet.output
+    assert "Nothing in today: no agent was used in it." in quiet.output
     assert "1 turns are recorded in all: try --range lifetime." in quiet.output
     assert "backfill" not in quiet.output
     assert "Usage — Lifetime" in everything.output
@@ -1248,8 +1348,8 @@ def test_the_first_stats_sweep_says_it_is_reading_the_transcripts_on_a_terminal(
         store.delete_meta("usage.sweep.at")  # the throttle is open again
     shown = runner.invoke(app, ["metrics", "stats", "--range", "lifetime"])
 
-    assert "reading Claude Code's transcripts" not in piped.stderr  # not a terminal: silent
-    assert "reading Claude Code's transcripts 1/1" in shown.stderr
+    assert "reading the agents' transcripts" not in piped.stderr  # not a terminal: silent
+    assert "reading the agents' transcripts 1/1" in shown.stderr
 
 
 def test_the_utc_stamp_the_sweep_writes_sorts_with_the_hooks() -> None:

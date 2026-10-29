@@ -10,7 +10,8 @@ dialog asks which project — and under the separator, one
 row, *⚙ Settings* (the Settings hub: App settings, Accounts, Doctor), under it the
 ⬆ row while a newer aisquare is out (:func:`update_row_text`), and under that
 one dim status line (:func:`status_line_text`): the AISquare sign-in and the
-Claude accounts' headroom as two dots. A click on that line opens Accounts.
+Claude accounts' headroom as two dots, and under them a dot for each other agent's
+accounts (Codex's). A click on that line opens Accounts.
 
 Two rules shape the code more than the layout does:
 
@@ -35,9 +36,9 @@ markup in data).
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 from rich.cells import cell_len
 from rich.text import Text
@@ -62,7 +63,9 @@ from aisquare.cli.ui.groups import (
     UndoLayout,
 )
 from aisquare.cli.ui.terminal import InPlaceField
+from aisquare.core.agent_adapters import default_binary
 from aisquare.models import FleetAgentStatus, HeadroomSummary, ProjectGroup, ProjectInfo
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services.project import NICKNAME_MAX, display_name
 from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
@@ -161,12 +164,15 @@ class DoctorSelected(Message):
 
 
 class AccountsSelected(Message):
-    """The Accounts page: the AISquare sign-in and the Claude Code accounts.
+    """The Accounts page: the AISquare sign-in and the coding agents' accounts.
 
+    ``sign_in`` asks the page to open that slot's sign-in as it shows (Welcome's step 2
+    for a Codex login, the Doctor's *Sign in* fix); ``None`` only shows the page.
     ``return_to`` is where to go back once a sign-in started there lands: Welcome's
     *Sign in* asks to come back to Welcome (#286). Every other way in carries none."""
 
-    def __init__(self, return_to: ReturnTo | None = None) -> None:
+    def __init__(self, return_to: ReturnTo | None = None, *, sign_in: int | None = None) -> None:
+        self.sign_in = sign_in
         self.return_to = return_to
         super().__init__()
 
@@ -202,7 +208,7 @@ class RenameProject(Message):
 
 
 class ProjectRenamed(Message):
-    """A project's nickname was written — by a card, its menu or a Settings tab: repaint."""
+    """A nickname was written — by a card, its menu or a Settings tab: repaint."""
 
     def __init__(self, project: ProjectInfo) -> None:
         self.project = project
@@ -298,8 +304,8 @@ def agent_row_text(
     """``🧭 manager       ⏸ #1·42% · skeptic`` — icon, label, state chip, the account's slot
     and the session use on it, exit status when exited, persona.
 
-    ``#<slot>`` is ``FleetAgent.account_slot`` and ``percent`` that account's five-hour
-    window, percent USED (:func:`session_percent_text`); with no percent the slot alone,
+    ``#<slot>`` is ``FleetAgent.account_slot`` and ``percent`` that account's window that
+    limits, percent USED (:func:`used_percent_text`); with no percent the slot alone,
     with no slot neither. An exited row shows ``💤 exited(N)`` instead: it no longer draws
     on the account, and at the default width the two did not fit beside each other.
 
@@ -330,7 +336,7 @@ def agent_row_text(
     elif agent.account_slot is not None:
         tail.append(f" #{agent.account_slot}" + ("·" if percent is not None else ""), style="dim")
         if percent is not None:
-            tail.append_text(session_percent_text(percent))
+            tail.append_text(used_percent_text(percent))
     badge = persona_badge(status)
     label = Text(agent.label)
     room = LABEL_WIDTH if width is None else max(2, width - cell_len(icon) - 1 - tail.cell_len)
@@ -416,18 +422,19 @@ HEADROOM_DOT: dict[str, tuple[str, str]] = {
 5-25 % orange-red, under 5 % red, nothing left a skull, not read yet grey."""
 
 SESSION_WARN_FROM = 70
-"""From this share of an account's five-hour window USED, its figure is yellow."""
+"""From this share of an account's window that limits USED, its figure is yellow."""
 SESSION_HIGH_FROM = 90
 """From this share USED, red: the account is close to its session limit."""
 
 
-def session_percent_text(percent: float) -> Text:
-    """``42%`` — an account's five-hour window, percent USED, in the colour of how close it is.
+def used_percent_text(percent: float) -> Text:
+    """``42%`` — an account's window that limits, percent USED, in the colour of how close it is.
 
     Green below :data:`SESSION_WARN_FROM`, yellow up to :data:`SESSION_HIGH_FROM`, red from
     there: the one format the sidebar's agent rows and the agent info line share. The
-    colour is the shown figure's, so ``70%`` is never green for a 69.6 read. The SESSION
-    window only (``HeadroomSummary.session_by_slot``), never the weekly one.
+    colour is the shown figure's, so ``70%`` is never green for a 69.6 read. The window
+    that limits (``HeadroomSummary.limit_by_slot``): the five-hour one unless the week, or
+    another window of the agent's, is fuller.
     """
     shown = round(percent)
     colour = RED if shown >= SESSION_HIGH_FROM else YELLOW if shown >= SESSION_WARN_FROM else GREEN
@@ -455,11 +462,27 @@ def headroom_dot(
     return HEADROOM_DOT[headroom.level]
 
 
+class AgentHeadroom(NamedTuple):
+    """Another agent's accounts on the status line, on a line of their own: the word its
+    binary goes by (``codex``), the room left across them, and whether every enabled one
+    needs a login (:func:`headroom_dot`)."""
+
+    name: str
+    headroom: HeadroomSummary
+    every_needs_login: bool = False
+
+
+STATUS_INDENT = " " * len("● aisquare  ")
+"""What puts another agent's dot under the first one's."""
+
+
 def status_line_text(
     aisquare: bool | None,
     headroom: HeadroomSummary | None,
     *,
     every_needs_login: bool = False,
+    name: str | None = None,
+    more: Sequence[AgentHeadroom] = (),
     width: int | None = None,
 ) -> Text:
     """``● aisquare  ● 3x claude 58%`` (the x a multiplication sign), under *⚙ Settings*.
@@ -468,7 +491,10 @@ def status_line_text(
     Claude dot is :func:`headroom_dot`; the count is how many accounts are usable;
     the figure is the fleet's share LEFT (``HeadroomSummary.percent_left``, #287), in
     the dot's colour, and absent until a reading; a ``⚠`` follows when an account
-    needs a login. ``headroom`` is ``None`` until the first summary lands.
+    needs a login. ``headroom`` is ``None`` until the first summary lands. ``name`` is
+    what the first dot names its accounts by, the default agent's binary unless given.
+    Each agent in ``more`` (Codex's accounts) has a line of its own under it, read the
+    same way: ``● 1x codex 58%``.
 
     ``width``, the cells the line has: the figure is left out where the line would not
     fit it, so the ellipsis never cuts the ``⚠`` (something to do) nor a number in two.
@@ -480,20 +506,38 @@ def status_line_text(
     text.append("● ", style=colour)
     text.append("aisquare", style="dim")
     text.append("  ")
+    room = None if width is None else max(0, width - cell_len(STATUS_INDENT))
+    _append_agent(text, name or default_binary(), headroom, every_needs_login, room)
+    for other in more:
+        text.append("\n" + STATUS_INDENT)
+        _append_agent(text, other.name, other.headroom, other.every_needs_login, room)
+    return text
+
+
+def _append_agent(
+    text: Text,
+    name: str,
+    headroom: HeadroomSummary | None,
+    every_needs_login: bool,
+    room: int | None,
+) -> None:
+    """One agent's dot, count, name, figure and ``⚠`` at the end of ``text``'s last line;
+    ``room`` is the cells that line has past the indent (every line starts with it)."""
+    line = Text()
     dot, colour = headroom_dot(headroom, every_needs_login=every_needs_login)
-    text.append(f"{dot} ", style=colour)
+    line.append(f"{dot} ", style=colour)
     if headroom is not None:
-        text.append(f"{headroom.usable}{TIMES} ", style="dim")
-    text.append("claude", style="dim")
+        line.append(f"{headroom.usable}{TIMES} ", style="dim")
+    line.append(name, style="dim")
     warning = " ⚠" if headroom is not None and headroom.needs_login else ""
     if headroom is not None and headroom.percent_left is not None:
         # The figure the dot's band stands for (#287): percent LEFT, in the dot's colour.
         figure = f" {round(headroom.percent_left)}%"
-        if width is None or text.cell_len + cell_len(figure + warning) <= width:
-            text.append(figure, style=colour)
+        if room is None or line.cell_len + cell_len(figure + warning) <= room:
+            line.append(figure, style=colour)
     if warning:
-        text.append(warning, style="yellow")
-    return text
+        line.append(warning, style="yellow")
+    text.append_text(line)
 
 
 def update_row_text(version: str, *, runnable: bool = True) -> Text:
@@ -1424,20 +1468,29 @@ class StatusLine(Static):
     """
 
     DEFAULT_CSS = """
-    StatusLine { height: 1; color: $text-muted; text-wrap: nowrap; text-overflow: ellipsis; }
+    StatusLine { height: auto; color: $text-muted; text-wrap: nowrap; text-overflow: ellipsis; }
     """
 
     ALLOW_SELECT = False
 
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
-        self.facts: tuple[bool | None, HeadroomSummary | None, bool] = (None, None, False)
-        """What the line says: the AISquare sign-in, the headroom, ``every_needs_login``."""
+        self.facts: tuple[
+            bool | None, HeadroomSummary | None, bool, str | None, tuple[AgentHeadroom, ...]
+        ] = (None, None, False, None, ())
+        """What the line says: the AISquare sign-in, the headroom, ``every_needs_login``, the
+        first dot's name and the other agents' lines."""
 
     def show_facts(
-        self, aisquare: bool | None, headroom: HeadroomSummary | None, every_needs_login: bool
+        self,
+        aisquare: bool | None,
+        headroom: HeadroomSummary | None,
+        every_needs_login: bool,
+        *,
+        name: str | None = None,
+        more: Sequence[AgentHeadroom] = (),
     ) -> None:
-        self.facts = (aisquare, headroom, every_needs_login)
+        self.facts = (aisquare, headroom, every_needs_login, name, tuple(more))
         self.fit_line()
 
     def on_resize(self) -> None:
@@ -1446,12 +1499,14 @@ class StatusLine(Static):
     def fit_line(self) -> None:
         """The line for :attr:`facts`, fitted to the cells it has now (:func:`status_line_text`'s
         ``width``); before the first layout, whole."""
-        aisquare, headroom, every_needs_login = self.facts
+        aisquare, headroom, every_needs_login, name, more = self.facts
         self.update(
             status_line_text(
                 aisquare,
                 headroom,
                 every_needs_login=every_needs_login,
+                name=name,
+                more=more,
                 width=self.content_size.width or None,
             )
         )
@@ -1551,9 +1606,13 @@ class Sidebar(Vertical):
         """The Claude accounts' headroom the status line shows; ``None`` until the first."""
         self.every_needs_login = False
         """Whether every enabled account needs a login: the one case the dot is red for it."""
+        self.headroom_name = default_binary()
+        """The word the first dot names its accounts by (``status_line_text``'s ``name``)."""
+        self.more_headroom: tuple[AgentHeadroom, ...] = ()
+        """Every other agent's accounts the status line shows, each on its own line."""
         self.session_usage: Mapping[int, float] = {}
-        """Slot → its five-hour window, percent USED, from the last headroom read: the
-        ``#N·NN%`` on the agent rows (``HeadroomSummary.session_by_slot``)."""
+        """Slot → its window that limits, percent USED, from the last headroom read: the
+        ``#N·NN%`` on the agent rows (``HeadroomSummary.limit_by_slot``)."""
         self._prev_states: dict[str, str] = {}
         self._cursor_key: str | None = None
         self.last_frame: tuple[list[ProjectInfo], dict[str, list[FleetAgentStatus]]] | None = None
@@ -2003,14 +2062,25 @@ class Sidebar(Vertical):
         self.aisquare = signed_in
         self._paint_status()
 
-    def show_headroom(self, headroom: HeadroomSummary, *, every_needs_login: bool = False) -> None:
-        """The status line's Claude dot, from the usage cache (``FleetApp.refresh_headroom``),
-        and the agent rows' session use from the same read — never from the two-second tick."""
+    def show_headroom(
+        self,
+        headroom: HeadroomSummary,
+        *,
+        every_needs_login: bool = False,
+        name: str | None = None,
+        more: Sequence[AgentHeadroom] = (),
+    ) -> None:
+        """The status line's Claude dot, and one for each other agent's accounts (``more``),
+        from the usage cache (``FleetApp.refresh_headroom``), and the agent rows' session use
+        from the same read, every agent's slots — never from the two-second tick."""
         self.headroom = headroom
         self.every_needs_login = every_needs_login
+        self.headroom_name = name or default_binary()
+        self.more_headroom = tuple(more)
         self._paint_status()
-        if headroom.session_by_slot != self.session_usage:
-            self.session_usage = headroom.session_by_slot
+        usage = accounts_service.limit_by_slot([headroom, *(m.headroom for m in more)])
+        if usage != self.session_usage:
+            self.session_usage = usage
             for row in self.query(AgentRow):
                 row.paint()
 
@@ -2020,7 +2090,13 @@ class Sidebar(Vertical):
         self.query_one(UpdateRow).offer(version, runnable=runnable)
 
     def _paint_status(self) -> None:
-        self.query_one(StatusLine).show_facts(self.aisquare, self.headroom, self.every_needs_login)
+        self.query_one(StatusLine).show_facts(
+            self.aisquare,
+            self.headroom,
+            self.every_needs_login,
+            name=self.headroom_name,
+            more=self.more_headroom,
+        )
 
     # --- what the Spawn dialog asks of the sidebar ------------------------------------
 
@@ -2071,7 +2147,7 @@ class Sidebar(Vertical):
     def _ring_on_attention(self, statuses: Iterable[FleetAgentStatus]) -> None:
         """Terminal bell when an agent newly flips to needing the user.
 
-        Mirrors ``cli.watch._ring_on_attention``: one bell per frame, only on a
+        Mirrors ``cli.ui.board.BoardPanel._ring_on_attention``: one bell per frame, only on a
         transition INTO attention from a known other state — never on the first
         frame (nothing changed; the user just opened the UI) and never while it
         stays there.

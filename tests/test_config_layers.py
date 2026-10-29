@@ -158,6 +158,7 @@ def test_an_entry_the_user_added_to_a_mapping_is_written_with_only_what_it_sets(
         "permission_mode": "auto",
         "worktree": False,
         "extra_args": [],
+        "agent_args": {},
         "remote_control": False,
         "deny_tools": [],
         "allow_tools": [],
@@ -244,7 +245,7 @@ def test_config_list_overrides_with_none_still_prints_toml(runner: CliRunner) ->
 # --- version 1 -> 2 --------------------------------------------------------------------
 
 
-def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> None:
+def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults_and_the_agents() -> None:
     """The snapshot is version 1's defaults, frozen. When a default changes later, or a
     setting is added, it changes here — never in ``_V1_DEFAULTS``, which is what 0.8.0 wrote.
     A section removed since is one of ``RETIRED_SECTIONS``: 0.8.0 wrote ``[snapshot]``."""
@@ -252,6 +253,8 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
         "accounts": {
             "pick": "headroom",
             "on_limit": "switch",
+            # A hand-over may cross agents once its own are full (task #15 of #113).
+            "cross_agent_handover": True,
             "share_trust": True,
             "share_settings": False,
             "prefer": "priority",  # added by P0-W3 (#277)
@@ -259,6 +262,9 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "before_limit": "off",  # added by F2 of #400
         },
         "projects": {"capture": False},
+        # Added with the coding-agent adapters (#113): each agent's own role arguments (under
+        # fleet, below), its model pins and whether its MCP server is wired.
+        "agents": {"mcp": False, "models": {}},
         # The persona train and the captain's switch, added since (#201, #240).
         "persona": {
             "system_prompt": True,
@@ -301,6 +307,8 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "quiet_compact_resume": False,
             "roles": {
                 role: {
+                    # Each role's agent arguments, per agent (#113).
+                    "agent_args": {},
                     "deny_tools": [],
                     "allow_tools": [],
                     "skill_listing": "full" if role == "manager" else "names",
@@ -314,6 +322,7 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
                 # The role-less agent, a default since review of #405 (M1): no v1 table to
                 # overlay, so the whole of it.
                 PLAIN_ROLE: {
+                    "agent_args": {},
                     "permission_mode": "auto",
                     "worktree": False,
                     "extra_args": [],

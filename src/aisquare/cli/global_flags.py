@@ -47,6 +47,7 @@ from aisquare.core.store import (
     damaged_store_message,
     damaged_store_recovery,
     is_corrupt_error,
+    store_recovery,
 )
 
 DISPATCHED_WORDS = "aisquare.dispatched_words"
@@ -314,7 +315,7 @@ class GlobalFlagsGroup(TyperGroup):
             fail(
                 damaged_store_message(damaged),
                 error="store_unopenable",
-                hint=damaged_store_recovery(),
+                hint=store_recovery(damaged),
                 detail=str(damaged),
             )
         except sqlite3.DatabaseError as damaged:

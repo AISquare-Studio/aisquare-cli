@@ -15,7 +15,8 @@
 #      downloader is preinstalled, so this is the run that exercises the §5
 #      package matrix — tmux, gh, git and the extra's Node all come from the
 #      platform's own manager (Node through NodeSource or fnm where that one is
-#      too old). The extra registers its MCP only where Claude Code is installed.
+#      too old). The extra registers its MCP with each agent the run installs
+#      (Claude Code, Codex), and with neither under --no-agent.
 #   2. with a project. A local wheel is always installed, never short-circuited,
 #      so this run registers the project. THIS is the run the acceptance
 #      criterion is asserted against.
@@ -30,6 +31,11 @@
 #   CELL_SKIP_AGENT=0         install Claude Code for real (one cell does; the
 #                             rest pass --no-agent so the matrix does not depend
 #                             on a third party's CDN being up).
+#   CELL_AGENT=codex          install Codex for real instead (one cell does), with
+#                             `--agent codex` on a machine with no Claude Code. The
+#                             doctor's codex row stays amber for the one step no
+#                             script may take, trusting the hooks in Codex's /hooks,
+#                             so that row is the one amber check expected.
 
 set -eu
 
@@ -40,6 +46,7 @@ WORKDIR=${WORKDIR:-/work}
 STUBDIR=${STUBDIR:-$HOME/pkg-stub}
 STUB_LOG=${STUB_LOG:-${TMPDIR:-/tmp}/pkg-stub.log}
 SKIP_AGENT=${CELL_SKIP_AGENT:-1}
+AGENT=${CELL_AGENT:-}
 # Every run here grades THIS tree's install.sh, so none hands off to the latest
 # release's own (install.sh's `hand_off`). CI passes a wheel, which turns it off
 # as well, but runs 3 and 4 drop the wheel and a cell run by hand may have none.
@@ -112,6 +119,13 @@ fi
 
 AGENT_FLAG=""
 [ "$SKIP_AGENT" = 1 ] && AGENT_FLAG="--no-agent"
+# What run 2 accepts as the whole amber set: nothing, and for the Codex cell the codex
+# row, whose detail is then checked to be the trust step and nothing else.
+EXPECTED=""
+if [ "$AGENT" = codex ]; then
+    AGENT_FLAG="--agent codex"
+    EXPECTED="codex"
+fi
 
 # ---------------------------------------------------------------------------
 # helpers that read the installed CLI
@@ -153,10 +167,20 @@ cd "$WORKDIR"
 
 set +e
 # shellcheck disable=SC2086  # AGENT_FLAG is deliberately word-split (or empty).
-sh "$INSTALLER" --yes --no-project --with chrome-devtools $AGENT_FLAG
+sh "$INSTALLER" --yes --no-project --with chrome-devtools $AGENT_FLAG >"${TMPDIR:-/tmp}/run1.log" 2>&1
 run1=$?
 set -e
+cat "${TMPDIR:-/tmp}/run1.log"
 printf '\nrun 1 exit: %s\n' "$run1"
+# Codex's own installer is a third party's CDN. When IT failed there is nothing of this
+# repo's to grade, and the cell says so with the one status the job maps to a warning
+# (75, EX_TEMPFAIL, in .github/workflows/install.yml's with-codex); every other failure
+# of this cell is a failure of the run.
+if [ "$AGENT" = codex ] && ! command -v codex >/dev/null 2>&1 &&
+    grep -q 'the Codex installer failed' "${TMPDIR:-/tmp}/run1.log"; then
+    printf '\n### SKIPPED: the Codex installer failed (a third party CDN); nothing was graded\n' >&2
+    exit 75
+fi
 # 0 or 2 are both legitimate here: 2 is a check amber for a reason the script
 # did not expect, which run 2's gate names, or a Node that did not install, which
 # the check below names. 1 means a FATAL step failed, which is never acceptable.
@@ -176,14 +200,26 @@ aisquare --version >/dev/null || fail "aisquare --version does not run"
 command -v node >/dev/null 2>&1 ||
     fail "node absent after run 1 — the installer's Chrome DevTools extra failed (no doctor row names Node)"
 
-# The extra's MCP, read from the file `claude mcp add --scope user` writes (`claude
-# mcp get` would start the server to health-check it). Under --no-agent, every
-# cell but one, Claude Code is left alone and nothing is registered; the cell
-# with Claude Code installed for real must have it.
+# The extra's MCP is registered with each agent the run sets up, by that agent's own
+# command, and read here from the file the command writes: `claude mcp add --scope user`
+# keeps it in .claude.json (`claude mcp get` would start the server to health-check it),
+# `codex mcp add` in config.toml under CODEX_HOME. Under --no-agent, every cell but two,
+# nothing is registered with either; the cell with Claude Code installed for real must
+# have it in Claude Code's, and the cell with Codex installed for real in Codex's and
+# not in Claude Code's, which that run does not set up.
 CLAUDE_JSON="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+CODEX_CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
 if [ "$SKIP_AGENT" = 1 ]; then
     if [ -f "$CLAUDE_JSON" ] && grep -q '"chrome-devtools"' "$CLAUDE_JSON"; then
-        fail "run 1 registered the Chrome DevTools MCP under --no-agent"
+        fail "run 1 registered the Chrome DevTools MCP with Claude Code under --no-agent"
+    fi
+    if [ -f "$CODEX_CONFIG" ] && grep -q 'chrome-devtools' "$CODEX_CONFIG"; then
+        fail "run 1 registered the Chrome DevTools MCP with Codex under --no-agent"
+    fi
+elif [ "$AGENT" = codex ]; then
+    # Read below, once `codex` itself is known to be on PATH.
+    if [ -f "$CLAUDE_JSON" ] && grep -q '"chrome-devtools"' "$CLAUDE_JSON"; then
+        fail "run 1 registered the Chrome DevTools MCP with Claude Code, which an --agent codex run does not set up"
     fi
 else
     grep -q '^    "chrome-devtools": ' "$CLAUDE_JSON" 2>/dev/null ||
@@ -195,6 +231,26 @@ fi
 case "$(amber_checks)" in
     *install*) fail "the 'install' check is amber — uv produced a shape doctor rejects" ;;
 esac
+
+if [ "$AGENT" = codex ]; then
+    command -v codex >/dev/null 2>&1 || fail "codex is not on PATH after run 1 — its installer did not take"
+    head1 "codex: $(codex --version)"
+    if command -v claude >/dev/null 2>&1; then
+        fail "claude is on PATH after an --agent codex run — Claude Code was installed"
+    fi
+    # The extra's MCP, as `codex mcp add` writes it: the table in config.toml, which Codex
+    # itself then reads back (`codex mcp get` prints the entry and starts nothing, measured
+    # with 0.164.0) as the npx command the guide gives.
+    grep -q '^\[mcp_servers\.chrome-devtools\]' "$CODEX_CONFIG" 2>/dev/null ||
+        fail "the Chrome DevTools MCP is not in $CODEX_CONFIG after run 1 chose it with Codex installed"
+    mcp_entry=$(codex mcp get chrome-devtools </dev/null 2>&1) ||
+        fail "codex does not know the Chrome DevTools MCP after run 1: $mcp_entry"
+    printf '%s\n' "$mcp_entry" | grep -q 'command: npx' ||
+        fail "codex reads the Chrome DevTools MCP as something other than npx: $mcp_entry"
+    printf '%s\n' "$mcp_entry" | grep -q 'args: chrome-devtools-mcp@latest' ||
+        fail "codex reads the Chrome DevTools MCP as something other than chrome-devtools-mcp@latest: $mcp_entry"
+    head1 "codex mcp get: chrome-devtools is registered with Codex"
+fi
 
 for tool in tmux gh git node; do
     if command -v "$tool" >/dev/null 2>&1; then
@@ -225,9 +281,10 @@ git commit -qm "one file, so the project has a commit"
 
 set +e
 # shellcheck disable=SC2086
-sh "$INSTALLER" --yes $AGENT_FLAG
+sh "$INSTALLER" --yes $AGENT_FLAG >"${TMPDIR:-/tmp}/run2.log" 2>&1
 run2=$?
 set -e
+cat "${TMPDIR:-/tmp}/run2.log"
 printf '\nrun 2 exit: %s\n' "$run2"
 [ "$run2" = 1 ] && fail "run 2 exited 1 — a fatal step failed"
 
@@ -240,14 +297,24 @@ head1 "doctor: $total checks, not-ok = [$amber]"
 [ "$total" -ge 15 ] || fail "doctor reported only $total checks — expected the full set (17+)"
 
 # THE ACCEPTANCE CRITERION OF THE WHOLE FEATURE (§0.3, §0.4, §8.3).
-if [ -n "$amber" ]; then
+if [ "$amber" != "$EXPECTED" ]; then
     printf '\n--- full doctor, for the log ---\n'
     aisquare doctor || true
-    fail "expected nothing amber, got [$amber]"
+    fail "expected exactly [$EXPECTED] amber, got [$amber]"
 fi
-head1 "ACCEPTANCE: 	 every check ok"
+if [ "$AGENT" = codex ]; then
+    # Amber for the review in Codex's /hooks, and for nothing else: hooks installed,
+    # never yet trusted, so never yet seen running.
+    codex_rows=$(aisquare --json doctor 2>/dev/null | tr '{' '\n' | grep '"name": *"codex"' || true)
+    printf '%s\n' "$codex_rows" | grep -q '"detail": *"Codex: unverified in ' ||
+        fail "the codex row is amber for something other than the /hooks review: $codex_rows"
+    # And the summary names that step as the user's own, rather than as unexpected.
+    grep -q "codex — run codex (sign in if it asks), open /hooks and trust aisquare's hooks" \
+        "${TMPDIR:-/tmp}/run2.log" || fail "run 2's summary did not name the /hooks step"
+fi
+head1 "ACCEPTANCE: 	 every check ok${EXPECTED:+ except $EXPECTED}"
 
-[ "$run2" = 0 ] || fail "with nothing amber the installer must exit 0, got $run2"
+[ "$run2" = 0 ] || fail "with only [$EXPECTED] amber the installer must exit 0, got $run2"
 
 # ---------------------------------------------------------------------------
 # RUN 3 — idempotence, with the package managers stubbed (§3.9.4, §8.4)
@@ -295,6 +362,7 @@ done
 # filtering its own groups is what prevents it — so the file is fingerprinted
 # rather than trusted.
 SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+[ "$AGENT" = codex ] && SETTINGS="${CODEX_HOME:-$HOME/.codex}/hooks.json"
 before=""
 [ -f "$SETTINGS" ] && before=$(cksum <"$SETTINGS")
 
@@ -333,11 +401,11 @@ if [ -f "$SETTINGS" ]; then
     after=$(cksum <"$SETTINGS")
     [ "$before" = "$after" ] ||
         fail "$SETTINGS changed on a re-run (hook accumulation): $before -> $after"
-    head1 "settings.json byte-identical across the re-run"
+    head1 "$(basename "$SETTINGS") byte-identical across the re-run"
 fi
 
 amber_again=$(amber_checks)
-[ -z "$amber_again" ] || fail "after the re-run, not-ok = [$amber_again], expected none"
+[ "$amber_again" = "$EXPECTED" ] || fail "after the re-run, not-ok = [$amber_again], expected [$EXPECTED]"
 
 # ---------------------------------------------------------------------------
 # RUN 4 — the upgrade path (§3.9.1, §8.4)
@@ -383,7 +451,12 @@ latest=$(
 )
 latest=$(printf '%s' "$latest" | tr ',' '\n' | sed -n 's/^"version":"\([^"]*\)".*/\1/p' | head -1)
 
-if [ -z "$latest" ]; then
+if [ "$AGENT" = codex ]; then
+    # PyPI's release is the target here, and 0.8.0 predates Codex support: its `init
+    # --agent codex` connects nothing. Run 4 is about uv's pin, which the other cells
+    # already prove; this cell's subject is Codex.
+    echo "SKIP: PyPI's aisquare-cli $latest has no Codex hooks to connect yet"
+elif [ -z "$latest" ]; then
     echo "SKIP: could not read the latest version from PyPI"
 elif [ "$latest" = "$pinned" ]; then
     echo "SKIP: PyPI's latest IS $pinned, so an upgrade assertion would be vacuous"

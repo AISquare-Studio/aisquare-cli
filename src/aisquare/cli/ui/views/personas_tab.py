@@ -52,6 +52,7 @@ from aisquare.cli.ui.attach import (
 )
 from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
 from aisquare.core import personas as core
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.personas import Layer, Persona, PersonaError
 from aisquare.models import ProjectInfo
 from aisquare.services import claude_accounts as accounts_service
@@ -538,8 +539,8 @@ class PersonasTab(Vertical):
         if done is None:
             return
         where = f"✓ exported {done.name} to {done.path}"
-        if done.skill is not None:
-            where += f" — it is /{done.name} in Claude Code now"
+        if done.skill is not None and done.agent is not None:
+            where += f" — a skill {get_adapter(done.agent).label} reads now"
         self.notify(where, timeout=8, markup=False)
         self.reload()
 

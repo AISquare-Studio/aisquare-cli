@@ -17,6 +17,7 @@ import sys
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -24,16 +25,18 @@ import pytest
 
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.sidebar import group_header_text
+from aisquare.core import launch_seal
 from aisquare.core import tmux as tmux_core
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.workspace import project_id_for
-from aisquare.models import FleetAgent, ProjectInfo, TeamSession
+from aisquare.models import FleetAgent, LaunchSpec, ProjectInfo, TeamSession
 from aisquare.services import fleet as fleet_service
 from aisquare.services.project_groups import arrange
 
 PROJECTS = 50
 WITH_AGENTS = 10
 AGENTS_EACH = 3
+STOPPED = 5  # of the projects with agents, this many also have a worker that was stopped
 STARTED = datetime(2026, 10, 23, 9, 0, tzinfo=UTC)
 
 _SEP = tmux_core._SEP
@@ -51,12 +54,15 @@ class Panes:
     def __init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
         self.panes: list[dict[str, str]] = []
+        self.session_ids: dict[str, str] = {}
 
     def add(self, session: str, pane_id: str, *, dead: bool = False) -> None:
         n = len(self.panes) + 1
         self.panes.append(
             {
                 "session_name": session,
+                # tmux's own id for the session, which it keeps whatever the session is called
+                "session_id": self.session_ids.setdefault(session, f"${len(self.session_ids)}"),
                 "window_id": f"@{n}",
                 "window_name": f"w{n}",
                 "pane_id": pane_id,
@@ -79,10 +85,12 @@ class Panes:
         fields = [f.strip("#{}") for f in fmt.split(_SEP)]
         panes = self.panes
         if verb == "list-panes" and "-t" in args:
-            session = args[args.index("-t") + 1].lstrip("=")
-            panes = [p for p in panes if p["session_name"] == session]
+            session = args[args.index("-t") + 1].lstrip("=")  # a name (`=asq-x`) or an id (`$3`)
+            panes = [p for p in panes if session in (p["session_name"], p["session_id"])]
         elif verb == "display-message":
-            panes = panes[:1]
+            # One pane's facts, by the id it is asked for (`display-message -t %N`), as tmux.
+            asked = args[args.index("-t") + 1] if "-t" in args else None
+            panes = [p for p in panes if p["pane_id"] == asked] if asked else panes[:1]
         lines = [_SEP.join(p.get(field, "") for field in fields) for p in panes]
         return tmux_core.Completed(0, "\n".join(lines) + ("\n" if lines else ""), "")
 
@@ -148,6 +156,9 @@ def test_one_read_of_50_projects_is_one_store_session_and_one_tmux_process(
     fleet: tuple[list[ProjectInfo], Panes], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _projects, panes = fleet
+    # The rows have no launch record: the one-time census (#113) makes theirs, as the first
+    # fleet read of a machine does, so the read counted is the steady state it is budgeted for.
+    fleet_service.take_census()
     with counted(monkeypatch) as opened:
         panes.calls.clear()
         began = time.perf_counter()
@@ -177,6 +188,172 @@ def test_a_project_without_rows_costs_no_tmux_call(
         listings = fleet_service.read_listings(store, quiet)
     assert fleet_service.list_agents_many(listings).agents == {}
     assert panes.calls == []
+
+
+def end_a_worker(
+    panes: Panes,
+    project: ProjectInfo,
+    n: int,
+    *,
+    spawned: bool,
+    label: str = "stopped",
+    window: str = "killed",
+) -> FleetAgent:
+    """A worker of ``project`` whose row is ended: ``stopped`` as ``fleet stop`` leaves it, and
+    its ``window`` killed (the default: no pane of it on the server), lingering dead
+    (``remain-on-exit``, the 💤 row) or still running (ended in the store only). If a spawn
+    made it (``spawned``), its launch record names its session and its entry in the project's
+    window index is left standing, which only ``reap`` and ``shutdown`` forget (``_stop_row``
+    does not; W1b's auto-stop makes exactly such rows). Unless, the census makes its record
+    from the row (``take_census``, taken after), which names no session."""
+    ended = STARTED + timedelta(minutes=30)
+    pane = f"%9{n:02d}"
+    with store_session() as store:
+        row = store.upsert_fleet_agent(
+            FleetAgent(
+                id=f"agt_{label}_{n:02d}", project_id=project.id, label=label, role="coder",
+                pane_id=pane, cwd=project.root, created_at=STARTED, ended_at=ended,
+                exit_status=0,
+            )
+        )  # fmt: skip
+        store.mark_fleet_agent_stopped(row.id)
+    name = fleet_service.session_name(project.codename or "")
+    if window != "killed":
+        panes.add(name, pane, dead=window == "lingers")
+    if not spawned:
+        return row
+    session_id = panes.session_ids[name]
+    record = launch_seal.LaunchRecord(
+        id=row.id, project_id=project.id, project_root=str(project.root), role="coder",
+        agent="claude", binary="claude", cwd=str(project.root),
+        spec=LaunchSpec(binary="claude"), label=row.label,
+    )  # fmt: skip
+    assert launch_seal.write(record) is None
+    place = launch_seal.WindowPlace(
+        tmux_socket=row.tmux_socket or "", pane_id=pane, created_at=STARTED,
+        server_started_at=STARTED, session=name, session_id=session_id,
+    )  # fmt: skip
+    assert launch_seal.placed(row.id, place) is None
+    where = launch_seal.SessionPlace(
+        tmux_socket=place.tmux_socket, session_id=session_id, name=name,
+        created_at=STARTED, server_started_at=STARTED,
+    )  # fmt: skip
+    entry = launch_seal.WindowEntry(
+        row_id=row.id, tmux_socket=place.tmux_socket, session_id=session_id,
+        pane_id=pane, created_at=STARTED, server_started_at=STARTED,
+    )  # fmt: skip
+    assert launch_seal.add_project_session(project.id, where, entry) is None
+    return row
+
+
+@TMUX_ONLY
+@pytest.mark.parametrize("spawned", [True, False], ids=["a recorded window", "a census record"])
+def test_a_project_with_a_stopped_worker_still_costs_the_tick_one_tmux_process(
+    fleet: tuple[list[ProjectInfo], Panes], monkeypatch: pytest.MonkeyPatch, spawned: bool
+) -> None:
+    """W3's budget (SCOPE row 4) once a project has a worker that was stopped (r23, 3):
+    ``_running_ids`` asked each project's server for its start and for every live pane, two
+    tmux processes per project per tick for a row that ended long ago, because the entry of
+    its window is still in the index. Answered from the tick's one answer, it costs none."""
+    projects, panes = fleet
+    monkeypatch.setattr(fleet_service, "_now", lambda: STARTED + timedelta(hours=1))
+    if spawned:
+        fleet_service.take_census()  # the live rows' records; the stopped rows' are real ones
+    stopped = [end_a_worker(panes, projects[n], n, spawned=spawned) for n in range(STOPPED)]
+    if not spawned:
+        fleet_service.take_census()
+    with counted(monkeypatch):
+        panes.calls.clear()
+        read = app_mod._read_fleet(False, viewed=())
+    verbs = [next(a for a in call if a in ("list-panes", "capture-pane", "display-message"))
+             for call in panes.calls]  # fmt: skip
+    assert read.error is None and not read.notices
+    assert len(panes.calls) == 1, f"one tmux process per server per read, not {verbs}"
+
+    # Cost, not correctness: each project reads what its own read says, the stopped rows'
+    # killed windows shown nowhere, the live agents as before.
+    for project in projects[:STOPPED]:
+        labels = [s.agent.label for s in read.agents[project.id]]
+        assert labels == [f"coder-{k}" for k in range(AGENTS_EACH)], project.codename
+        assert read.agents[project.id] == fleet_service.list_agents(project), project.codename
+    assert {row.id for row in stopped}.isdisjoint(
+        s.agent.id for agents in read.agents.values() for s in agents
+    )
+
+
+@TMUX_ONLY
+def test_the_tick_finds_the_window_of_an_ended_row_where_the_single_read_does(
+    fleet: tuple[list[ProjectInfo], Panes], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the tick no longer asks tmux (``_running_ids``, r23 finding 3) it reads out of
+    the server's one answer, and finds the same: a row ended in the store whose window runs
+    is an agent of the project's, one whose dead window lingers is its 💤 row, and one whose
+    window was killed is neither, in the tick and in the project's own read alike."""
+    projects, panes = fleet
+    monkeypatch.setattr(fleet_service, "_now", lambda: STARTED + timedelta(hours=1))
+    fleet_service.take_census()
+    runs = end_a_worker(panes, projects[0], 0, spawned=True, label="runs", window="runs")
+    lingers = end_a_worker(panes, projects[1], 1, spawned=True, label="lingers", window="lingers")
+    killed = end_a_worker(panes, projects[2], 2, spawned=True)
+
+    with store_session() as store:
+        many = fleet_service.list_agents_many(fleet_service.read_listings(store, projects))
+    for project in projects[:3]:
+        assert many.agents[project.id] == fleet_service.list_agents(project), project.codename
+    shown = {s.agent.id for agents in many.agents.values() for s in agents}
+    assert runs.id in shown and lingers.id in shown and killed.id not in shown
+    [lingering] = [s for s in many.agents[projects[1].id] if s.agent.id == lingers.id]
+    assert lingering.state == "exited"
+    [running] = [s for s in many.agents[projects[0].id] if s.agent.id == runs.id]
+    assert running.agent.ended_at is None, "listed and acted on as running, whatever ended_at"
+
+
+@TMUX_ONLY
+def test_the_tick_answers_what_tmux_answers_one_question_at_a_time(
+    fleet: tuple[list[ProjectInfo], Panes], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """r24 4: the tick's tests priced the read and compared its listing, and six mutants of
+    what it replaced lived (no live pane, no windows, no server start, panes under the wrong
+    id, ``every_window`` without the session id, ``_running_ids`` answering nothing). So each
+    answer is held to the question it stands in for, over the same fake server: the start and
+    the live panes (:meth:`TmuxServer.started_at`, ``live_panes_or_raise``), a session's
+    windows (``windows_or_raise``), and ``_running_ids`` itself, which says a row ended in the
+    store runs when its window does, a lingering dead one and a killed one not."""
+    projects, panes = fleet
+    monkeypatch.setattr(fleet_service, "_now", lambda: STARTED + timedelta(hours=1))
+    fleet_service.take_census()
+    project = projects[0]
+    runs = end_a_worker(panes, project, 0, spawned=True, label="runs", window="runs")
+    lingers = end_a_worker(panes, project, 1, spawned=True, label="lingers", window="lingers")
+    killed = end_a_worker(panes, project, 2, spawned=True)
+    config = fleet_service.settings()
+    ended = {runs.id, lingers.id, killed.id}
+    [placed] = fleet_service._indexed_sessions(project.id, config)
+    srv = placed.server()
+    name = fleet_service.session_name(project.codename or "")
+
+    tick = fleet_service._Tick()
+
+    started, live = srv.started_at(), srv.live_panes_or_raise()
+    assert started is not None and live, "the fake server has a start and live panes"
+    assert tick.live_panes(srv) == (started, live), "the start and every live pane, by tmux's id"
+    assert live[panes.session_ids[name]] >= {runs.pane_id}, "the session is keyed by tmux's id"
+    assert lingers.pane_id not in live[panes.session_ids[name]], "a dead pane is no live pane"
+    windows = srv.windows_or_raise(name)
+    assert windows, "the project's session has windows"
+    # The per-session listing leaves the session's id unset, which the server-wide one fills.
+    listed_start, listed = tick.listed(srv, name)
+    assert listed_start == started, "the server's start, out of the one answer"
+    assert [replace(w, session_id=None) for w in listed] == windows, "the session's windows"
+    assert tick.listed(srv, "no-such-session") == (started, []), "a session it has not: none"
+    every, _ = tick.every_window(srv)
+    assert {w.session_id for found in every.values() for w in found} == set(
+        panes.session_ids.values()
+    )
+
+    alone = fleet_service._running_ids(project.id, ended, config)
+    under_a_tick = fleet_service._running_ids(project.id, ended, config, fleet_service._Tick())
+    assert alone == {runs.id} == under_a_tick
 
 
 @TMUX_ONLY
@@ -211,6 +388,7 @@ def test_list_agents_many_answers_what_list_agents_answers(
         )  # fmt: skip
     panes.add(fleet_service.session_name("proj-00"), dead.pane_id, dead=True)
     panes.add(fleet_service.session_name("proj-12"), "%902", dead=True)
+    fleet_service.take_census()  # every row above, the dead and the ended ones too, has its record
 
     with store_session() as store:
         many = fleet_service.list_agents_many(fleet_service.read_listings(store, projects))
@@ -219,8 +397,20 @@ def test_list_agents_many_answers_what_list_agents_answers(
 
     assert many.errors == {}
     for project in projects:
-        assert many.agents.get(project.id, []) == one_by_one[project.id], project.codename
-    assert [s.agent.label for s in one_by_one[projects[12].id]] == ["ended"]
+        # The dead row has no launch record of its own session (the census made its record
+        # from the row: no session to look in): the read that ended it shows its lingering
+        # window as 💤 exited, and the next, finding it ended, does not (#113).
+        got = [s for s in many.agents.get(project.id, []) if s.agent.id != dead.id]
+        assert got == one_by_one[project.id], project.codename
+    [ended_now] = [s for s in many.agents[projects[0].id] if s.agent.id == dead.id]
+    assert ended_now.state == "exited"
+    # Main asserted `["ended"]` here: an ended row whose window lingers shows as 💤. It is
+    # narrowed on purpose (r23, 10): this row's record is the census's, which names the
+    # session by its name and not by tmux's id (`WindowPlace.session_id`), and the listing
+    # looks an ended row up in the sessions its record names by id. Left out, by the single
+    # read and the tick alike; a real spawn's lingering window, recorded with its session's
+    # id, is 💤 in both (`test_the_tick_finds_the_window_of_an_ended_row...`, below).
+    assert one_by_one[projects[12].id] == [] == many.agents.get(projects[12].id, [])
     assert one_by_one[projects[11].id] == []
 
 

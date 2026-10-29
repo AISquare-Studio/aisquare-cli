@@ -129,6 +129,8 @@ def test_a_lone_space_is_no_longer_nothing_to_do() -> None:
         patch.setattr(remote_server, "_resolve_project", lambda ref: _Project())
         patch.setattr(store_module, "store_session", lambda: _Store())
         patch.setattr(fleet_service, "server_for", lambda socket, config=None: _Tmux())
+        # The store is faked whole and keeps no launch records: placement is tested apart.
+        patch.setattr(fleet_service, "placed_row", lambda row: row)
         handler = remote_server.live_writes().handlers["send-keys"]
         result, summary = handler({"agent": "c", "text": " "})
     assert sent == [("literal", " ")]

@@ -6,11 +6,18 @@ started on ``--model fable --effort high`` over the default the owner had saved 
 spawn now runs the owner's last pick, and nothing when there is none: Claude Code then runs
 the account's own default, as before 0.9.0 (``fleet.spawn``).
 
-ONE pick per home (the store's ``ui_state``), for every role and persona: the owner's last
-preference, not a role's. A role is customised in its settings alone (``[fleet.roles.<role>]
-extra_args``, a binding's ``--arg``), which win over the pick for that role and never write
-it. The model and the effort are kept apart: either can be chosen without the other. Only
-the owner's choices write the pick (manager decision, board seq 3428):
+ONE pick per home and agent (the store's ``ui_state``), for every role and persona: the
+owner's last preference, not a role's. An agent whose models are AISquare's to choose
+(``capabilities.model_ladders``, Claude Code's) keeps the pick #441 kept, under the keys it
+always had; an agent that keeps its own models (Codex) keeps its own beside it, keyed by its
+id (:func:`_keys`), which its spawn gives its own model slot (``AgentAdapter.model_args``,
+``fleet._own_pick``) and never crosses to another agent (SCOPE #113 091, item 2): a model one
+agent claims (``AgentAdapter.claims_model``) is never another's pick, and its efforts are the
+levels it takes (``AgentAdapter.effort_levels``). A role is
+customised in its settings alone (``[fleet.roles.<role>] extra_args``, a binding's
+``--arg``), which win over the pick for that role and never write it. The model and the
+effort are kept apart: either can be chosen without the other. Only the owner's choices write
+the pick (manager decision, board seq 3428):
 
 - an owner's new spawn that chooses one, in its own arguments or the Spawn dialog's fields
   (:func:`remember`, from ``fleet.spawn``; ``fleet._the_owners_spawn``); a cleared field
@@ -38,6 +45,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from aisquare.core import harness, transcripts
+from aisquare.core.agent_adapters import adapters, get_adapter, model_owner
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import FleetAgent, TeamSession
 
@@ -53,42 +61,97 @@ class Pick:
     effort: str | None = None
 
 
-def remembered(*, store: ContextStore | None = None) -> Pick:
-    """What a spawn runs when neither it nor its role's settings choose; an empty
-    :class:`Pick` with nothing kept, or a store that cannot be read (the account's default
-    is never wrong)."""
+def _keys(agent: str | None) -> tuple[str, str]:
+    """The ``ui_state`` keys of ``agent``'s pick, its model's and its effort's: #441's own for
+    an agent whose models are AISquare's to choose (``capabilities.model_ladders``) and for
+    ``None``, every caller from before the pick was an agent's; ``<key>:<agent id>`` for any
+    other agent, an id this install does not know included."""
+    try:
+        ladders = agent is None or get_adapter(agent).capabilities.model_ladders
+    except ValueError:
+        ladders = False
+    if ladders:
+        return _MODEL_KEY, _EFFORT_KEY
+    return f"{_MODEL_KEY}:{agent}", f"{_EFFORT_KEY}:{agent}"
+
+
+def _foreign(model: str | None, agent: str | None) -> bool:
+    """Whether ``model`` is another agent's than ``agent``'s (:func:`_keys`): one agent claims
+    it (``agent_adapters.model_owner``), whose pick is not ``agent``'s. A model no agent
+    claims is the pick of the agent that ran it (SMOKE11, 11: ``--model gpt-x`` that ran on
+    Claude Code became its pick, and its next spawn ran ``claude --model gpt-x``)."""
+    owner = model_owner(model)
+    return owner is not None and _keys(owner) != _keys(agent)
+
+
+def _effort(agent: str | None, value: str | None) -> str | None:
+    """``value`` as ``agent``'s pick keeps an effort: one of the levels it takes
+    (``AgentAdapter.effort_levels``: Codex's ``minimal`` too), else ``None``; for ``None``
+    and an agent this install does not know, the harness's (``harness.clean_effort``)."""
+    try:
+        levels = get_adapter(agent).effort_levels if agent is not None else None
+    except ValueError:
+        levels = None
+    if value is None or levels is None:
+        return harness.clean_effort(value)
+    candidate = value.strip().lower()
+    return candidate if candidate in levels else None
+
+
+def remembered(*, agent: str | None = None, store: ContextStore | None = None) -> Pick:
+    """What a spawn of ``agent`` runs when neither it nor its role's settings choose
+    (:func:`_keys`); an empty :class:`Pick` with nothing kept, or a store that cannot be read
+    (the account's default is never wrong). A model another agent claims (:func:`_foreign`),
+    kept before the pick was its owner's alone, is none."""
     if store is None:
         try:
             with store_session() as opened:
-                return remembered(store=opened)
+                return remembered(agent=agent, store=opened)
         except Exception:  # a pick is a default; a store that cannot say has none
             return Pick()
+    model_key, effort_key = _keys(agent)
+    model = harness.clean_model_id(store.ui_state(model_key))
     return Pick(
-        harness.clean_model_id(store.ui_state(_MODEL_KEY)),
-        harness.clean_effort(store.ui_state(_EFFORT_KEY)),
+        None if _foreign(model, agent) else model,
+        _effort(agent, store.ui_state(effort_key)),
     )
+
+
+def picks() -> dict[str, Pick]:
+    """Every registered agent's pick by its id (:func:`remembered`), read in one store session:
+    what the Spawn dialog's Model and Effort show for the agent it follows. Empty for a store
+    that cannot be read, which has none."""
+    try:
+        with store_session() as store:
+            return {adapter.id: remembered(agent=adapter.id, store=store) for adapter in adapters()}
+    except Exception:  # a pick is a default; a store that cannot say has none
+        return {}
 
 
 def remember(
     *,
     model: str | None = None,
     effort: str | None = None,
+    agent: str | None = None,
     store: ContextStore | None = None,
 ) -> None:
-    """Keep ``model`` and ``effort`` as the pick: ``None`` leaves that one as it is, ``""``
-    forgets it (the account's default). A value Claude Code could not have been given
-    (``harness.clean_model_id``, ``clean_effort``) is not kept."""
+    """Keep ``model`` and ``effort`` as ``agent``'s pick (:func:`_keys`): ``None`` leaves that
+    one as it is, ``""`` forgets it (the account's default). A value no agent could have been
+    given (``harness.clean_model_id``), an effort ``agent`` does not take (:func:`_effort`),
+    and a model another agent claims (:func:`_foreign`) are not kept: ``agent`` is the one
+    that ran it, and its pick is a model of its own or one no agent claims."""
     if model is None and effort is None:
         return
     if store is None:
         with store_session() as opened:
-            remember(model=model, effort=effort, store=opened)
+            remember(model=model, effort=effort, agent=agent, store=opened)
         return
+    model_key, effort_key = _keys(agent)
     for key, value, clean in (
-        (_MODEL_KEY, model, harness.clean_model_id),
-        (_EFFORT_KEY, effort, harness.clean_effort),
+        (model_key, model, harness.clean_model_id),
+        (effort_key, effort, lambda level: _effort(agent, level)),
     ):
-        if value is None:
+        if value is None or (key == model_key and _foreign(value, agent)):
             continue
         if value == "":
             store.set_ui_state(key, None)
@@ -653,7 +716,5 @@ def _launch_flags(agent: FleetAgent) -> Pick:
     bound = harness.binding_args(agent.role)
     return Pick(
         harness.model_arg(spec.extra_args) or spec.model or harness.model_arg(bound),
-        harness.flag_arg(spec.extra_args, "--effort")
-        or spec.effort
-        or harness.flag_arg(bound, "--effort"),
+        harness.effort_arg(spec.extra_args) or spec.effort or harness.effort_arg(bound),
     )

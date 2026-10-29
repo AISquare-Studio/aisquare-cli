@@ -59,6 +59,10 @@ UV_INSTALLER_URL="https://astral.sh/uv/install.sh"
 NL='
 '
 CLAUDE_INSTALLER_URL="https://claude.ai/install.sh"
+# Codex's own standalone installer, the route its docs give for macOS and Linux
+# (learn.chatgpt.com/docs/codex/cli): it puts `codex` in ~/.local/bin, linked into
+# $CODEX_HOME/packages/standalone.
+CODEX_INSTALLER_URL="https://chatgpt.com/codex/install.sh"
 FNM_INSTALLER_URL="https://fnm.vercel.app/install"
 NODESOURCE_DEB_URL="https://deb.nodesource.com/setup_NODEMAJOR.x"
 NODESOURCE_RPM_URL="https://rpm.nodesource.com/setup_NODEMAJOR.x"
@@ -172,6 +176,13 @@ HAVE_WGET=0
 UV_VERSION=""
 CLI_VERSION=""
 CLAUDE_VERSION=""
+CODEX_VERSION=""
+# The coding agents this run installs and connects: Claude Code unless --agent names
+# others (`want_agent`). --no-agent (WANT_AGENT=0) switches both off whatever these say,
+# which is why every reader asks `wants_claude` / `wants_codex` rather than these.
+WANT_CLAUDE=1
+WANT_CODEX=0
+AGENT_NAMED=0
 TMUX_VERSION=""
 GH_VERSION=""
 GIT_VERSION=""
@@ -183,12 +194,16 @@ TMUX_ACTION=""   # install | current
 GH_ACTION=""     # install | current
 GIT_ACTION=""    # install | current
 CLAUDE_ACTION="" # install | update
+CODEX_ACTION=""  # install | update | current
 
 CHOSEN_EXTRAS="" # named with --with, or said yes to at their prompt
 # The Chrome DevTools MCP in Claude Code's config: registered | absent (survey),
-# or skipped once register_devtools_mcp has said why it did not register it.
+# or skipped once register_devtools_mcp has said why it did not register it. And in
+# Codex's, the same words.
 DEVTOOLS_MCP=""
+DEVTOOLS_MCP_CODEX=""
 DEVTOOLS_MCP_ADDED=0 # 1 when this run registered it, so the summary says how to undo it
+DEVTOOLS_MCP_CODEX_ADDED=0
 
 INSTALLED_LIST=""
 UPGRADED_LIST=""
@@ -265,6 +280,44 @@ claude_settings_shown() {
     _cs_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
     shown_path "${_cs_dir%/}/settings.json"
 }
+# Codex's home the same way: CODEX_HOME when set (core/agent_adapters/types.py
+# config_home), else ~/.codex. Its hooks.json is where init merges Codex's hooks.
+codex_home_shown() {
+    _ch_dir=${CODEX_HOME:-$HOME/.codex}
+    shown_path "${_ch_dir%/}"
+}
+
+# Whether this run installs and connects Claude Code, and Codex (--agent, --no-agent).
+wants_claude() { [ "$WANT_AGENT" = 1 ] && [ "$WANT_CLAUDE" = 1 ]; }
+wants_codex() { [ "$WANT_AGENT" = 1 ] && [ "$WANT_CODEX" = 1 ]; }
+
+# The flag that left Claude Code alone, as a note names it: --no-agent, or --agent codex.
+agent_flag_shown() {
+    if [ "$WANT_AGENT" = 0 ]; then
+        printf -- '--no-agent'
+    else
+        printf -- '--agent codex'
+    fi
+}
+
+# The agents whose hooks this run connects, as the banner and the no-op summary name them.
+agents_connected_shown() {
+    if wants_claude && wants_codex; then
+        printf "claude-code's and codex's"
+    elif wants_codex; then
+        printf "codex's"
+    else
+        printf "claude-code's"
+    fi
+}
+
+# Where `codex mcp add` writes: config.toml in CODEX_HOME, or in ~/.codex (measured with
+# Codex 0.164.0, which has one global scope).
+codex_config_toml() {
+    _cc_dir=${CODEX_HOME:-$HOME/.codex}
+    printf '%s' "${_cc_dir%/}/config.toml"
+}
+
 # Where `claude mcp add --scope user` writes: ~/.claude.json, or .claude.json in
 # CLAUDE_CONFIG_DIR when that is set (measured with Claude Code 2.1.310).
 claude_json() {
@@ -884,6 +937,7 @@ first_line() { head -1 2>/dev/null || true; }
 version_of_aisquare() { aisquare --version 2>/dev/null | first_line | cut -d' ' -f2; }
 version_of_uv() { uv --version 2>/dev/null | first_line | cut -d' ' -f2; }
 version_of_claude() { claude --version 2>/dev/null | first_line | cut -d' ' -f1; }
+version_of_codex() { codex --version 2>/dev/null | first_line | cut -d' ' -f2; } # codex-cli X
 version_of_tmux() { tmux -V 2>/dev/null | first_line | cut -d' ' -f2; }
 version_of_gh() { gh --version 2>/dev/null | first_line | cut -d' ' -f3; }
 version_of_git() { git --version 2>/dev/null | first_line | cut -d' ' -f3; }
@@ -895,24 +949,43 @@ survey() {
     have uv && UV_VERSION=$(version_of_uv || true)
     have aisquare && CLI_VERSION=$(version_of_aisquare || true)
     have claude && CLAUDE_VERSION=$(version_of_claude || true)
+    have codex && CODEX_VERSION=$(version_of_codex || true)
     have tmux && TMUX_VERSION=$(version_of_tmux || true)
     have gh && GH_VERSION=$(version_of_gh || true)
     have git && GIT_VERSION=$(version_of_git || true)
     have node && NODE_VERSION=$(version_of_node || true)
     DEVTOOLS_MCP=absent
     devtools_mcp_registered && DEVTOOLS_MCP=registered
+    DEVTOOLS_MCP_CODEX=absent
+    devtools_mcp_codex_registered && DEVTOOLS_MCP_CODEX=registered
 
     _report uv "$UV_VERSION"
     _report aisquare "$CLI_VERSION"
     _report "Claude Code" "$CLAUDE_VERSION"
+    # Only where it is asked for or already there: a Claude Code install has no use for
+    # a "Codex — not installed" line.
+    if wants_codex || [ -n "$CODEX_VERSION" ]; then
+        _report "Codex" "$CODEX_VERSION"
+    fi
     _report tmux "$TMUX_VERSION"
     _report gh "$GH_VERSION"
     _report git "$GIT_VERSION"
     _report Node "$NODE_VERSION"
-    if [ "$DEVTOOLS_MCP" = registered ]; then
-        note "Chrome DevTools MCP — registered with Claude Code"
-    else
-        note "Chrome DevTools MCP — not registered"
+    # Claude Code's, and --no-agent's (which sets neither up); a run for Codex alone has
+    # only Codex's to report.
+    if wants_claude || ! wants_codex; then
+        if [ "$DEVTOOLS_MCP" = registered ]; then
+            note "Chrome DevTools MCP — registered with Claude Code"
+        else
+            note "Chrome DevTools MCP — not registered"
+        fi
+    fi
+    if wants_codex; then
+        if [ "$DEVTOOLS_MCP_CODEX" = registered ]; then
+            note "Chrome DevTools MCP — registered with Codex"
+        else
+            note "Chrome DevTools MCP — not registered with Codex"
+        fi
     fi
 }
 
@@ -1029,7 +1102,7 @@ resolve() {
     fi
 
     _resolve_system
-    debug "cli=$CLI_ACTION tmux=$TMUX_ACTION gh=$GH_ACTION git=$GIT_ACTION claude=$CLAUDE_ACTION extras=${CHOSEN_EXTRAS:-none}"
+    debug "cli=$CLI_ACTION tmux=$TMUX_ACTION gh=$GH_ACTION git=$GIT_ACTION claude=$CLAUDE_ACTION codex=$CODEX_ACTION extras=${CHOSEN_EXTRAS:-none}"
 }
 
 # The System and Agent classes' decisions, which do not depend on how the CLI
@@ -1064,6 +1137,18 @@ _resolve_system() {
         CLAUDE_ACTION=install
     else
         CLAUDE_ACTION=update
+    fi
+
+    # --- Codex: installed when absent, moved only by --upgrade-all -----------
+    # Never version-managed by us either: its standalone installer and `codex update`
+    # own the version. One that is there is left as it is unless --upgrade-all asks
+    # for every tool to move, which runs its own updater.
+    if [ -z "$CODEX_VERSION" ]; then
+        CODEX_ACTION=install
+    elif [ "$UPGRADE_ALL" = 1 ]; then
+        CODEX_ACTION=update
+    else
+        CODEX_ACTION=current
     fi
 }
 
@@ -1109,7 +1194,12 @@ short_circuit() {
     # Code IS the requested state, and demanding it here meant a second run
     # never short-circuited — measured in the container matrix, where every
     # cell passes --no-agent.
-    [ "$WANT_AGENT" = 0 ] || [ -n "$CLAUDE_VERSION" ] || return 1
+    if wants_claude; then
+        [ -n "$CLAUDE_VERSION" ] || return 1
+    fi
+    if wants_codex; then
+        [ "$CODEX_ACTION" = current ] || return 1
+    fi
     have aisquare || return 1
 
     # A SUBSET, not an equal set. Measured on macOS, where the amber list came
@@ -1126,20 +1216,32 @@ short_circuit() {
     # for `--json doctor`. §3.8's own words: "a script that exits 0 onto a
     # broken machine is worse than one that never ran." An unanswerable doctor
     # is a reason to do the work, not to skip it.
-    _amber=$(doctor_amber 2>/dev/null) || return 1
+    #
+    # The payload is kept (DOCTOR_RAW) for the codex rows, which are read by their
+    # detail: amber only for the review in Codex's /hooks that no run can do, and
+    # not connected at all when they say so.
+    DOCTOR_RAW=$(doctor_json 2>/dev/null) || DOCTOR_RAW=""
+    _amber=$(doctor_amber "$DOCTOR_RAW" 2>/dev/null) || return 1
     _sc_ifs=$IFS
     IFS=$NL
     for _amber_check in $_amber; do
         IFS=$_sc_ifs
-        is_expected_amber "$_amber_check" || return 1
+        is_expected_amber "$_amber_check" && continue
+        [ "$_amber_check" = codex ] && codex_awaits_trust_only && continue
+        return 1
     done
     IFS=$_sc_ifs
+    if wants_codex; then
+        codex_row_connected || return 1
+    fi
 
     say ""
     say "${C_BOLD}aisquare $CLI_VERSION is already the latest.${C_RESET}"
-    note "uv $UV_VERSION · Claude Code ${CLAUDE_VERSION:-skipped} · tmux $TMUX_VERSION · gh $GH_VERSION · git $GIT_VERSION${NODE_VERSION:+ · Node $NODE_VERSION}"
+    _sc_codex=""
+    wants_codex && _sc_codex=" · Codex $CODEX_VERSION"
+    note "uv $UV_VERSION · Claude Code ${CLAUDE_VERSION:-skipped}$_sc_codex · tmux $TMUX_VERSION · gh $GH_VERSION · git $GIT_VERSION${NODE_VERSION:+ · Node $NODE_VERSION}"
     if [ "$WANT_AGENT" = 1 ]; then
-        note "$(aisquare_home_shown) configured · claude-code hooks installed"
+        note "$(aisquare_home_shown) configured · $(agents_connected_shown | sed "s/'s//g") hooks installed"
     else
         note "$(aisquare_home_shown) configured (--no-agent: no agent hooks)"
     fi
@@ -1147,7 +1249,13 @@ short_circuit() {
     # green would blame a check that was fine.
     _why=""
     if listed "$_amber" claude-code; then
-        _why="Claude Code left alone (--no-agent)"
+        [ -n "$_why" ] && _why="$_why; "
+        _why="${_why}Claude Code left alone ($(agent_flag_shown))"
+    fi
+    if listed "$_amber" codex; then
+        # Only the review in Codex's /hooks gets this far (codex_awaits_trust_only).
+        [ -n "$_why" ] && _why="$_why; "
+        _why="${_why}Codex's hooks await your review in its /hooks"
     fi
     if listed "$_amber" tmux || listed "$_amber" gh; then
         [ -n "$_why" ] && _why="$_why; "
@@ -1216,12 +1324,16 @@ banner() {
         fi
     done
 
-    if [ "$WANT_AGENT" = 1 ]; then
+    if wants_claude; then
         [ "$CLAUDE_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Claude Code"
         [ "$CLAUDE_ACTION" = update ] && _plan="$_plan$_bn_nl  update   Claude Code $CLAUDE_VERSION (via its own updater)"
-    else
-        _plan="$_plan$_bn_nl  skip     Claude Code (--no-agent)"
     fi
+    if wants_codex; then
+        [ "$CODEX_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Codex (its own installer, $CODEX_INSTALLER_URL)"
+        [ "$CODEX_ACTION" = update ] && _plan="$_plan$_bn_nl  update   Codex $CODEX_VERSION (codex update, --upgrade-all)"
+        [ "$CODEX_ACTION" = current ] && _plan="$_plan$_bn_nl  keep     Codex $CODEX_VERSION"
+    fi
+    [ "$WANT_AGENT" = 1 ] || _plan="$_plan$_bn_nl  skip     Claude Code (--no-agent)"
 
     if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
         _plan="$_plan$_bn_nl  register $PROJECT_DIR as a project"
@@ -1230,7 +1342,7 @@ banner() {
     fi
     # Its own line: init connects the hooks with or without a project, and not
     # at all under --no-agent.
-    [ "$WANT_AGENT" = 1 ] && _plan="$_plan$_bn_nl  connect  claude-code's hooks"
+    [ "$WANT_AGENT" = 1 ] && _plan="$_plan$_bn_nl  connect  $(agents_connected_shown) hooks"
 
     # As text: as the format a % in a path was a conversion, and under %b a \c
     # ended the banner there and \t or \0NNN were rewritten (review of #257).
@@ -1238,41 +1350,59 @@ banner() {
 
     # Only what THIS run's own steps write, from the same decisions as the plan
     # above: uv when it installs uv, aisquare and asq when it installs or upgrades
-    # the CLI, claude when it installs Claude Code. The updaters the plan names
-    # (`uv self update`, `claude update`) write at their own paths.
+    # the CLI, claude when it installs Claude Code, codex when it installs Codex. The
+    # updaters the plan names (`uv self update`, `claude update`, `codex update`) write
+    # at their own paths.
     _written=""
     [ -z "$UV_VERSION" ] && _written="uv"
     case "$CLI_ACTION" in
         install | upgrade) _written="${_written:+$_written, }aisquare, asq" ;;
     esac
-    [ "$WANT_AGENT" = 1 ] && [ "$CLAUDE_ACTION" = install ] && _written="${_written:+$_written, }claude"
+    wants_claude && [ "$CLAUDE_ACTION" = install ] && _written="${_written:+$_written, }claude"
+    wants_codex && [ "$CODEX_ACTION" = install ] && _written="${_written:+$_written, }codex"
     say ""
     say "Written to:"
     [ -n "$_written" ] && note "~/.local/bin/                     $_written"
     case "$CLI_ACTION" in
         install | upgrade) note "~/.local/share/uv/tools/          the $PYPI_PACKAGE tool environment" ;;
     esac
-    # Where this run's init writes, as aisquare resolves it: AISQUARE_HOME and
-    # CLAUDE_CONFIG_DIR redirect both, and the one-liner inherits them.
+    if wants_codex && [ "$CODEX_ACTION" = install ]; then
+        note "$(printf '%-33s %s' "$(codex_home_shown)/packages/" "Codex's own install (its installer's)")"
+    fi
+    # Where this run's init writes, as aisquare resolves it: AISQUARE_HOME,
+    # CLAUDE_CONFIG_DIR and CODEX_HOME redirect them, and the one-liner inherits them.
     note "$(printf '%-33s %s' "$(aisquare_home_shown)/" "config.toml, context.db, projects/")"
-    if [ "$WANT_AGENT" = 1 ]; then
+    if wants_claude; then
         note "$(printf '%-33s %s' "$(claude_settings_shown)" "MERGED — aisquare's hook groups only")"
     fi
-    # register_devtools_mcp's one write, for a run that can make it: the extra
-    # chosen or still to be asked about, the MCP not there, and not --no-agent.
-    if [ "$WANT_AGENT" = 1 ] && [ "$DEVTOOLS_MCP" = absent ]; then
-        _bn_mcp="ADDED — the $DEVTOOLS_MCP_NAME MCP server (user scope)"
-        if extra_chosen chrome-devtools; then
-            note "$(printf '%-33s %s' "$(shown_path "$(claude_json)")" "$_bn_mcp")"
-        elif extras_are_asked; then
-            note "$(printf '%-33s %s' "$(shown_path "$(claude_json)")" "$_bn_mcp, if you choose it below")"
-        fi
+    if wants_codex; then
+        note "$(printf '%-33s %s' "$(codex_home_shown)/hooks.json" "MERGED — aisquare's hook groups only")"
+    fi
+    # register_devtools_mcp's writes, for a run that can make them: the extra chosen
+    # or still to be asked about, the MCP not there, and not --no-agent. One file per
+    # agent the run sets up.
+    if wants_claude && [ "$DEVTOOLS_MCP" = absent ]; then
+        _banner_devtools_write "$(claude_json)" "user scope"
+    fi
+    if wants_codex && [ "$DEVTOOLS_MCP_CODEX" = absent ]; then
+        _banner_devtools_write "$(codex_config_toml)" "global"
     fi
     say ""
 
     if [ "$DRY_RUN" = 1 ]; then
         say "${C_BOLD}--dry-run: printing commands, running none.${C_RESET}"
         say ""
+    fi
+}
+
+# One "Written to" line for the Chrome DevTools MCP: $1 is the agent's file, $2 the scope
+# its own command words (Claude Code's user scope, Codex's global config).
+_banner_devtools_write() {
+    _bd_mcp="ADDED — the $DEVTOOLS_MCP_NAME MCP server ($2)"
+    if extra_chosen chrome-devtools; then
+        note "$(printf '%-33s %s' "$(shown_path "$1")" "$_bd_mcp")"
+    elif extras_are_asked; then
+        note "$(printf '%-33s %s' "$(shown_path "$1")" "$_bd_mcp, if you choose it below")"
     fi
 }
 
@@ -1784,12 +1914,31 @@ extra_call() {
     esac
 }
 
-# --- chrome-devtools: Node, then the MCP registered with Claude Code --------
+# --- chrome-devtools: Node, then the MCP registered with each agent ---------
+
+# The agents the MCP is registered with, as the plan names them: the ones this run sets up.
+devtools_mcp_agents_shown() {
+    if wants_claude && wants_codex; then
+        printf 'Claude Code and Codex'
+    elif wants_codex; then
+        printf 'Codex'
+    else
+        printf 'Claude Code'
+    fi
+}
+
+# True when a run that sets an agent up still has the MCP to register with one it sets up:
+# the survey found it absent from that agent's config. Not for an agent --agent left out.
+devtools_mcp_pending() {
+    wants_claude && [ "$DEVTOOLS_MCP" = absent ] && return 0
+    wants_codex && [ "$DEVTOOLS_MCP_CODEX" = absent ] && return 0
+    return 1
+}
 
 extra_chrome_devtools_line() {
     if [ "$WANT_AGENT" = 1 ]; then
-        printf 'the Chrome DevTools MCP for browser tools: Node %s.%s+, registered with Claude Code' \
-            "$MIN_NODE_MAJOR" "$MIN_NODE_MINOR"
+        printf 'the Chrome DevTools MCP for browser tools: Node %s.%s+, registered with %s' \
+            "$MIN_NODE_MAJOR" "$MIN_NODE_MINOR" "$(devtools_mcp_agents_shown)"
     else
         printf 'the Chrome DevTools MCP for browser tools: Node %s.%s+ (--no-agent: not registered with Claude Code)' \
             "$MIN_NODE_MAJOR" "$MIN_NODE_MINOR"
@@ -1797,19 +1946,19 @@ extra_chrome_devtools_line() {
 }
 
 # Nothing to do: Node at the floor with the npx that starts the MCP, and the MCP
-# registered, not this run's to register (--no-agent), or already answered for by
-# register_devtools_mcp, whose failure only warns. npx is part of it because on
+# registered with every agent this run sets up, not this run's to register (--no-agent),
+# or already answered for by register_devtools_mcp, whose failure only warns. npx is part of it because on
 # Arch, Alpine and Debian's own nodejs npm is a package of its own: a Node 22
 # with no npx was otherwise "current", short-circuited past _ensure_npx, and a
 # failed npm install was never reported (review of #399).
 extra_chrome_devtools_current() {
     _node_ok || return 1
     have npx || return 1
-    [ "$WANT_AGENT" = 0 ] || [ "$DEVTOOLS_MCP" != absent ]
+    ! devtools_mcp_pending
 }
 
-# The Node half. The MCP half is register_devtools_mcp, after install_claude, so
-# a Claude Code this run installs is there to take it.
+# The Node half. The MCP half is register_devtools_mcp, after install_agent, so
+# an agent this run installs is there to take it.
 install_chrome_devtools() { install_node; }
 
 # True when Claude Code already has the Chrome DevTools MCP: a user-scope server
@@ -1839,6 +1988,43 @@ devtools_mcp_registered() {
 
 devtools_mcp_add_shown() {
     printf 'claude mcp add %s --scope user npx %s' "$DEVTOOLS_MCP_NAME" "$DEVTOOLS_MCP_PACKAGE"
+}
+
+# True when Codex's config.toml already has the Chrome DevTools MCP: a [mcp_servers.NAME]
+# table (or a sub-table of it, a hand-written env), or anything that runs the package under
+# another name, by the same reading as devtools_mcp_registered's. Read from the file, as
+# `codex mcp add` writes it; and the survey is not optional here: measured with Codex 0.164.0,
+# `codex mcp add` of a name it has REPLACES that table without a word, so an operator's own
+# entry (its env, its cwd) would be overwritten. A commented line is not a server, and only
+# what is in an [mcp_servers...] table (or a dotted mcp_servers.NAME.key line) is read, as the
+# adapter reads `mcp_servers` alone: Codex's config also holds [projects."/path"] trust
+# tables, and a checkout of the package's own repository is not a registered server (r24 5).
+devtools_mcp_codex_registered() {
+    _dc_file=$(codex_config_toml)
+    [ -r "$_dc_file" ] || return 1
+    _dc_in=0
+    while IFS= read -r _dc_line || [ -n "$_dc_line" ]; do
+        _dc_text=${_dc_line#"${_dc_line%%[![:space:]]*}"}
+        _dc_here=$_dc_in
+        case $_dc_text in
+            '#'*) continue ;;
+            '[mcp_servers]'* | '[mcp_servers.'*) _dc_in=1 _dc_here=1 ;;
+            '['*) _dc_in=0 _dc_here=0 ;;
+            mcp_servers.* | mcp_servers[\ =]*) _dc_here=1 ;;
+        esac
+        [ "$_dc_here" = 1 ] || continue
+        case $_dc_text in
+            "[mcp_servers.$DEVTOOLS_MCP_NAME]"* | "[mcp_servers.$DEVTOOLS_MCP_NAME."*) return 0 ;;
+            "[mcp_servers.\"$DEVTOOLS_MCP_NAME\"]"* | "[mcp_servers.\"$DEVTOOLS_MCP_NAME\"."*) return 0 ;;
+            "mcp_servers.$DEVTOOLS_MCP_NAME."* | "mcp_servers.\"$DEVTOOLS_MCP_NAME\"."*) return 0 ;;
+            *[/\"]chrome-devtools-mcp[@\"/]*) return 0 ;;
+        esac
+    done <"$_dc_file"
+    return 1
+}
+
+devtools_mcp_codex_add_shown() {
+    printf 'codex mcp add %s -- npx %s' "$DEVTOOLS_MCP_NAME" "$DEVTOOLS_MCP_PACKAGE"
 }
 
 # Node is the Chrome DevTools extra's first half: the MCP is started with
@@ -2055,11 +2241,17 @@ _install_node_via_fnm() {
 # 14  install_claude — the Agent class. WARN-ONLY (§3.2).
 # ---------------------------------------------------------------------------
 
+# The coding agents --agent asked for, Claude Code by default: each WARN-ONLY.
+install_agent() {
+    install_claude
+    install_codex
+}
+
 install_claude() {
-    [ "$WANT_AGENT" = 1 ] || {
-        note "skipping Claude Code (--no-agent)"
+    if ! wants_claude; then
+        [ "$WANT_AGENT" = 1 ] || note "skipping Claude Code (--no-agent)"
         return 0
-    }
+    fi
 
     if [ "$CLAUDE_ACTION" = update ]; then
         step "Claude Code $CLAUDE_VERSION — letting its own updater run"
@@ -2102,37 +2294,53 @@ install_claude() {
     fi
 }
 
-# The Chrome DevTools extra's second half: `claude mcp add` at user scope, as the
-# package's own guide gives it, for a run that chose the extra and nothing else.
-# Each reason not to is one line. A failure warns and never fails the install:
-# browser tools are optional, and doctor's browser tools row is green either way.
-# `claude mcp add` refuses a name it already has, so its answer is the check
-# behind the survey's, and nothing is ever registered twice.
+# The Chrome DevTools extra's second half: each agent's own command, at user scope, as
+# the package's own guide gives it (`claude mcp add`; Codex's `codex mcp add`), for a run
+# that chose the extra and nothing else, with every agent the run sets up. Each reason not
+# to is one line. A failure warns and never fails the install: browser tools are optional,
+# and doctor's browser tools row is green either way. The agents' own commands are the
+# adapters' (`AgentAdapter.mcp_registration`), which tests/test_mcp_registration.py holds
+# these to.
 register_devtools_mcp() {
     extra_chosen chrome-devtools || return 0
     if [ "$WANT_AGENT" = 0 ]; then
         note "Chrome DevTools MCP not registered: --no-agent leaves Claude Code alone. To add it: $(devtools_mcp_add_shown)"
         return 0
     fi
+    wants_claude && register_devtools_mcp_claude
+    wants_codex && register_devtools_mcp_codex
+    return 0
+}
+
+# The guards every agent's registration shares, before its own command: $1 begins each note
+# and $2 is the command a dry run shows. Returns 1 once it has said why the add must not run
+# now: a dry run, no Node at the floor (install_node has warned, and the summary names the
+# extra), or no npx (_ensure_npx has).
+_devtools_mcp_unready() {
+    if [ "$DRY_RUN" = 1 ]; then
+        printf '  %swould run:%s %s\n' "$C_DIM" "$C_RESET" "$2"
+        return 1
+    fi
+    if ! _node_ok; then
+        note "$1 there is no Node $MIN_NODE_MAJOR.$MIN_NODE_MINOR+ to start it"
+        return 1
+    fi
+    if ! have npx; then
+        note "$1 there is no npx to start it"
+        return 1
+    fi
+    return 0
+}
+
+# Claude Code's. `claude mcp add` refuses a name it already has, so its answer is the check
+# behind the survey's, and nothing is ever registered twice.
+register_devtools_mcp_claude() {
     if [ "$DEVTOOLS_MCP" = registered ]; then
         note "Chrome DevTools MCP — already registered with Claude Code, left as it is"
         return 0
     fi
     DEVTOOLS_MCP=skipped
-    if [ "$DRY_RUN" = 1 ]; then
-        printf '  %swould run:%s %s\n' "$C_DIM" "$C_RESET" "$(devtools_mcp_add_shown)"
-        return 0
-    fi
-    if ! _node_ok; then
-        # install_node has warned, and the summary names the extra.
-        note "Chrome DevTools MCP not registered: there is no Node $MIN_NODE_MAJOR.$MIN_NODE_MINOR+ to start it"
-        return 0
-    fi
-    if ! have npx; then
-        # _ensure_npx has warned, and the summary names the extra.
-        note "Chrome DevTools MCP not registered: there is no npx to start it"
-        return 0
-    fi
+    _devtools_mcp_unready "Chrome DevTools MCP not registered:" "$(devtools_mcp_add_shown)" || return 0
     if ! have claude; then
         note "Chrome DevTools MCP not registered: Claude Code is not installed. Once it is: $(devtools_mcp_add_shown)"
         return 0
@@ -2155,6 +2363,96 @@ register_devtools_mcp() {
          Browser tools are optional; everything else works. To add it: $(devtools_mcp_add_shown)"
 }
 
+# Codex's. Its `mcp add` replaces a name it has instead of refusing it, so the survey's
+# answer is the only check, and what it found is left as the operator wrote it.
+register_devtools_mcp_codex() {
+    if [ "$DEVTOOLS_MCP_CODEX" = registered ]; then
+        note "Chrome DevTools MCP — already registered with Codex, left as it is"
+        return 0
+    fi
+    DEVTOOLS_MCP_CODEX=skipped
+    _devtools_mcp_unready "Chrome DevTools MCP not registered with Codex:" "$(devtools_mcp_codex_add_shown)" || return 0
+    if ! have codex; then
+        note "Chrome DevTools MCP not registered with Codex: Codex is not installed. Once it is: $(devtools_mcp_codex_add_shown)"
+        return 0
+    fi
+    step "Registering the Chrome DevTools MCP with Codex ($(shown_path "$(codex_config_toml)"))"
+    if _rd_out=$(codex mcp add "$DEVTOOLS_MCP_NAME" -- npx "$DEVTOOLS_MCP_PACKAGE" </dev/null 2>&1); then
+        DEVTOOLS_MCP_CODEX=registered
+        DEVTOOLS_MCP_CODEX_ADDED=1
+        good "Chrome DevTools MCP registered with Codex: npx $DEVTOOLS_MCP_PACKAGE"
+        return 0
+    fi
+    warn "could not register the Chrome DevTools MCP with Codex: $(printf '%s\n' "$_rd_out" | first_line)
+         Browser tools are optional; everything else works. To add it: $(devtools_mcp_codex_add_shown)"
+}
+
+# Codex, by the route its own docs give (CODEX_INSTALLER_URL), only when it is absent;
+# an installed one is moved only by --upgrade-all, through `codex update`. WARN-ONLY,
+# as Claude Code is: the CLI works without it.
+install_codex() {
+    wants_codex || return 0
+
+    case "$CODEX_ACTION" in
+        current)
+            good "Codex $CODEX_VERSION"
+            SKIPPED_LIST="$SKIPPED_LIST codex"
+            return 0
+            ;;
+        update)
+            step "Codex $CODEX_VERSION — letting its own updater run (--upgrade-all)"
+            _cx_was=$CODEX_VERSION
+            if run codex update; then
+                CODEX_VERSION=$(version_of_codex || true)
+                good "Codex $CODEX_VERSION"
+                if [ "$CODEX_VERSION" = "$_cx_was" ]; then
+                    SKIPPED_LIST="$SKIPPED_LIST codex"
+                else
+                    UPGRADED_LIST="$UPGRADED_LIST codex"
+                fi
+            else
+                note "codex update did not succeed — Codex $_cx_was stays; run codex update later"
+            fi
+            return 0
+            ;;
+    esac
+
+    step "Installing Codex"
+    if [ "$DRY_RUN" = 1 ]; then
+        printf '  %swould run:%s fetch %s | sh\n' "$C_DIM" "$C_RESET" "$CODEX_INSTALLER_URL"
+        return 0
+    fi
+    if ! have tar; then
+        warn "Codex's installer needs tar, which is not on this machine.
+         The CLI works; Codex is not installed. Install tar, then:
+         curl -fsSL $CODEX_INSTALLER_URL | sh"
+        return 0
+    fi
+    if ! fetch_into_shell "$CODEX_INSTALLER_URL" codex_installer_sh >/dev/null 2>&1; then
+        warn "the Codex installer failed. The CLI works; Codex is not installed. Install it
+         with: curl -fsSL $CODEX_INSTALLER_URL | sh  (https://learn.chatgpt.com/docs/codex/cli)"
+        return 0
+    fi
+    PATH="$HOME/.local/bin:$PATH"
+    export PATH
+    CODEX_VERSION=$(version_of_codex || true)
+    if [ -n "$CODEX_VERSION" ]; then
+        good "Codex $CODEX_VERSION"
+        INSTALLED_LIST="$INSTALLED_LIST codex"
+    else
+        warn "Codex installed but \`codex\` is not on PATH yet. Open a new shell."
+    fi
+}
+
+# The shell Codex's installer runs in, told nobody is there to answer. It asks on
+# /dev/tty whether to start Codex at the end, and whether to remove an npm or Homebrew
+# Codex it finds; under `curl … | sh` that is the user's terminal, and a yes to the
+# first would start Codex in the middle of this run. Its own variable answers no to
+# both. A function, so the assignment reaches that one `sh` alone.
+codex_installer_sh() {
+    CODEX_NON_INTERACTIVE=1 sh "$@"
+}
+
 # ---------------------------------------------------------------------------
 # 15  init (§3.4) — NEVER --reinit
 # ---------------------------------------------------------------------------
@@ -2169,15 +2467,17 @@ init_home() {
     step "Setting up $(aisquare_home_shown)"
 
     # --agent claude-code installs the six lifecycle hooks and ingests the
-    # CLAUDE.md of the config dir sessions from this shell read; without
-    # --no-onboard it also registers the project and seeds its facts.
+    # CLAUDE.md of the config dir sessions from this shell read (--agent codex: Codex's
+    # hooks in $CODEX_HOME/hooks.json, and its AGENTS.md); without --no-onboard it also
+    # registers the project and seeds its facts.
     #
     # NEVER --reinit. It is exactly the flag a script author reaches for to make
     # a step "clean", and here it resets config.toml and DISCARDS the role
     # bindings made with `team bind` — silently destroying user configuration on
     # every re-run.
     set -- init --local --yes
-    [ "$WANT_AGENT" = 1 ] && set -- "$@" --agent claude-code
+    wants_claude && set -- "$@" --agent claude-code
+    wants_codex && set -- "$@" --agent codex
     if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
         set -- "$@" "$PROJECT_DIR"
     else
@@ -2186,10 +2486,18 @@ init_home() {
 
     if [ "$DRY_RUN" = 1 ]; then
         printf '  %swould run:%s aisquare %s\n' "$C_DIM" "$C_RESET" "$*"
+        if wants_codex && ! wants_claude; then
+            printf '  %swould run:%s aisquare agents use codex\n' "$C_DIM" "$C_RESET"
+        fi
         return 0
     fi
     if ! run aisquare "$@"; then
         die "\`aisquare $*\` failed. Rerun with --verbose to see its output."
+    fi
+    # Codex alone: the agent launches use, which is Claude Code until told otherwise
+    # (the account order, `core.agent_adapters`). With both, Claude Code stays it.
+    if wants_codex && ! wants_claude; then
+        run aisquare agents use codex || die "\`aisquare agents use codex\` failed. Rerun with --verbose to see its output."
     fi
     if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
         good "$(aisquare_home_shown) set up, $PROJECT_DIR registered"
@@ -2212,14 +2520,15 @@ DOCTOR_AMBER=""
 # flags asked for. A row expected and not amber is good news: the caller asks
 # "nothing amber that we did not expect", never for an equal set.
 expected_amber() {
-    # In no order: callers ask membership (`is_expected_amber`), never the sequence.
+    # Sorted below, as doctor_amber's output is: callers ask membership (`is_expected_amber`).
     _exp=""
-    if [ "$WANT_AGENT" = 0 ]; then
+    if ! wants_claude; then
         # `--no-agent` asked for Claude Code to be left alone, and the run touches
         # none of it, so no claude-code state is one this run caused or could
         # change: not connected, a settings.json `agents connect` refuses, hooks
         # switched off, hooks running another aisquare. Each is the requested
-        # state; `summary` names it in the doctor's words, as information.
+        # state; `summary` names it in the doctor's words, as information. So
+        # is `--agent codex`, which asks for Codex alone.
         _exp="$_exp claude-code"
     fi
     if [ "$WANT_SYSTEM_DEPS" = 0 ]; then
@@ -2232,11 +2541,19 @@ expected_amber() {
         # provisioning run with that flag failed its caller, always.
         _exp="$_exp gh"
     fi
+    # `sandbox-path` is the shell's state, not the install's: PATH names a directory of
+    # the project this ran in (an activated virtualenv), which a sandboxed Codex agent
+    # launched there may write. The doctor says so; this run neither caused nor can
+    # change it, so it is information, not a failure (review r13 of #113, finding 1).
+    _exp="$_exp sandbox-path"
     _exp="$_exp $RELEASE_ERA_AMBER"
     if [ "$WANT_SYSTEM_DEPS" = 0 ]; then
         _exp="$_exp tmux"
     fi
-    printf '%s' "$_exp"
+    # Sorted here, as doctor_amber's output is, rather than kept in order by hand: the
+    # release's rows are one block that `sandbox-path` falls in the middle of.
+    # shellcheck disable=SC2086  # the words are the point
+    printf '%s\n' $_exp | sort | tr '\n' ' ' | sed 's/ $//'
 }
 
 # True when $1 is one of the names `expected_amber` returns.
@@ -2283,8 +2600,8 @@ listed_words() {
 # printed "claude-code hooks installed", wired nothing and exited 0, and a run
 # whose hooks could not be written listed nothing (review of #257). The other
 # rows stay this folder's: harness is about its project.
-# Under --no-agent the script wires nothing, so claude-code stays this folder's
-# too: the row `aisquare doctor` shows here.
+# Under --no-agent, or an --agent that leaves Claude Code out, the script wires none
+# of it, so claude-code stays this folder's too: the row `aisquare doctor` shows here.
 #
 # `/` is asked only where this folder's answer could differ from it, and that is
 # a second full doctor otherwise spent on one row it already has (review of #257):
@@ -2295,7 +2612,7 @@ listed_words() {
 doctor_json() {
     _dj_here=$(aisquare --json doctor 2>/dev/null | tr '{' '\n' || true)
     _dj_row=$(printf '%s\n' "$_dj_here" | grep '"name": *"claude-code"' || true)
-    if [ -z "$_dj_row" ] || [ "$WANT_AGENT" = 0 ] || ! _folder_may_load_a_repo_plugin; then
+    if [ -z "$_dj_row" ] || ! wants_claude || ! _folder_may_load_a_repo_plugin; then
         printf '%s' "$_dj_here"
         return 0
     fi
@@ -2446,6 +2763,28 @@ _doctor_fix() {
     _doctor_row "$1" | sed -n 's/.*"fix": *"\([^"\\]*\(\\.[^"\\]*\)*\)".*/\1/p'
 }
 
+# Whether every amber `codex` row in DOCTOR_RAW is the step only the user can take:
+# aisquare's hooks are installed and Codex has not yet been told to trust them
+# (`Codex: unverified in <home>`, services/diagnostics.py). Codex gives one row per
+# home, so each is read; false with no amber row at all.
+codex_awaits_trust_only() {
+    _cx_amber=$(_doctor_row codex | grep -e '"status": *"warn"' -e '"status": *"fail"' || true)
+    [ -n "$_cx_amber" ] || return 1
+    if printf '%s\n' "$_cx_amber" | grep -v '"detail": *"Codex: unverified in ' >/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+# Whether DOCTOR_RAW's codex rows show aisquare's hooks in a Codex home: any row but
+# the two a Codex this home never connected reads as (not detected, not selected).
+codex_row_connected() {
+    _cx_rows=$(_doctor_row codex)
+    [ -n "$_cx_rows" ] || return 1
+    printf '%s\n' "$_cx_rows" |
+        grep -v -e 'not detected on this machine' -e 'AISquare integration not selected' >/dev/null
+}
+
 # A JSON string's body ($1) as the text it encodes, for printing (RFC 8259 §7).
 #
 # In this shell alone, because nothing else can be counted on here. The doctor
@@ -2562,6 +2901,15 @@ _actionable_fix() {
         # and `agents connect` makes a never-started ~/.claude itself. Every amber
         # claude-code row this script did not expect is unexpected, exits 2, and
         # `summary` prints the doctor's own detail and fix for it (review of #257).
+        codex)
+            # The one step this script leaves to the user on purpose: Codex runs hooks
+            # only once they are trusted, and nothing here may trust them for anyone
+            # (the doctor's wording). Only for rows that say exactly that ("unverified");
+            # any other amber codex row is unexpected, and the doctor has its fix.
+            if codex_awaits_trust_only; then
+                printf '%s' "run codex (sign in if it asks), open /hooks and trust aisquare's hooks"
+            fi
+            ;;
         *) printf '' ;;
     esac
 }
@@ -2575,6 +2923,8 @@ summary() {
     [ -n "$SKIPPED_LIST" ] && note "already current:$SKIPPED_LIST"
     [ "$DEVTOOLS_MCP_ADDED" = 1 ] &&
         note "registered: the $DEVTOOLS_MCP_NAME MCP with Claude Code — to undo: claude mcp remove -s user $DEVTOOLS_MCP_NAME"
+    [ "$DEVTOOLS_MCP_CODEX_ADDED" = 1 ] &&
+        note "registered: the $DEVTOOLS_MCP_NAME MCP with Codex — to undo: codex mcp remove $DEVTOOLS_MCP_NAME"
 
     if [ "$DRY_RUN" = 1 ]; then
         say ""
@@ -2591,6 +2941,10 @@ summary() {
     IFS=$NL
     for _check in $DOCTOR_AMBER; do
         IFS=$_su_ifs
+        # Once each: Codex gives one row per home, so its name can come twice.
+        if listed "$_expected$NL$_actionable$NL$_unexpected" "$_check"; then
+            continue
+        fi
         if is_expected_amber "$_check"; then
             _expected="$_expected$NL$_check"
             continue
@@ -2623,18 +2977,18 @@ summary() {
             note "             limit; they resume by themselves (aisquare doctor says until when)."
         fi
         if listed "$_expected" claude-code; then
-            # Information, not an instruction: under --no-agent no state of
-            # Claude Code is this run's to change, so the doctor's fix is not
-            # printed. Asked in this folder (doctor_json), so the doctor run
-            # here shows the same row.
+            # Information, not an instruction: under --no-agent, or --agent codex, no
+            # state of Claude Code is this run's to change, so the doctor's fix is not
+            # printed. Asked in this folder (doctor_json), so the doctor run here shows
+            # the same row.
             _cc_said=$(_json_text "$(_doctor_detail claude-code)")
             if [ -n "$_cc_said" ]; then
-                note "  claude-code — left alone by --no-agent; aisquare doctor here says:"
+                note "  claude-code — left alone by $(agent_flag_shown); aisquare doctor here says:"
                 note "             $_cc_said"
             else
                 # A detail that could not be read off the payload (a `{` in a
                 # path splits it): named where it can be read in full.
-                note "  claude-code — left alone by --no-agent; aisquare doctor here shows its state."
+                note "  claude-code — left alone by $(agent_flag_shown); aisquare doctor here shows its state."
             fi
         fi
         if listed "$_expected" tmux || listed "$_expected" gh; then
@@ -2793,14 +3147,18 @@ have to be handed to sh explicitly):
 
 Options
   -y, --yes            Never prompt, and do not launch the UI at the end.
-      --no-agent       Skip Claude Code.
+      --agent NAME     Coding agent to install and connect: claude-code (the
+                       default), codex, or both. Repeat it to name both.
+      --no-agent       Skip coding agent installation and hooks.
       --no-system-deps Skip tmux, gh and git, and ask about no optional extra.
                        An extra named with --with still installs, with the
                        package manager and sudo.
       --with EXTRA     Install an optional extra without asking. One for now:
                        chrome-devtools (Node 22.12+, and the Chrome DevTools
-                       MCP registered with Claude Code at user scope; undo
-                       with: claude mcp remove -s user chrome-devtools).
+                       MCP registered with each agent the run sets up: Claude
+                       Code at user scope, Codex in its config.toml; undo with:
+                       claude mcp remove -s user chrome-devtools, or
+                       codex mcp remove chrome-devtools).
                        Without it each extra is asked about, defaulting to
                        no; --yes asks nothing.
       --project DIR    Register DIR as the project (default: $PWD if a git repo).
@@ -2841,10 +3199,11 @@ Exit codes
   1  a fatal step failed — uv, or aisquare-cli itself
   2  installed, but a check is amber for a reason this script did not expect,
      or an optional extra you chose did not install: Node or npx for
-     --with chrome-devtools. Its Claude Code registration only warns.
+     --with chrome-devtools. Its registration with an agent only warns.
 
 Not installed, on purpose: explainability tracing (off unless asked for), and
-any credential — `claude` and `gh auth login` do their own.
+any credential — `claude`, `codex` and `gh auth login` do their own. Codex runs
+aisquare's hooks once you trust them in its /hooks menu.
 USAGE
 }
 
@@ -2852,6 +3211,12 @@ parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             -y | --yes) ASSUME_YES=1 ;;
+            --agent)
+                [ $# -ge 2 ] || die "--agent needs claude-code, codex or both"
+                want_agent "$2"
+                shift
+                ;;
+            --agent=*) want_agent "${1#--agent=}" ;;
             --no-agent) WANT_AGENT=0 ;;
             --no-system-deps) WANT_SYSTEM_DEPS=0 ;;
             --no-project) WANT_PROJECT=0 ;;
@@ -2903,6 +3268,28 @@ parse_args() {
         esac
         shift
     done
+    if [ "$AGENT_NAMED" = 1 ] && [ "$WANT_AGENT" = 0 ]; then
+        die "--agent and --no-agent ask for opposite things; pass one of them"
+    fi
+}
+
+# One --agent value. The first replaces the default (Claude Code); each adds its
+# agent, so `--agent claude-code --agent codex` and `--agent both` ask for both.
+want_agent() {
+    if [ "$AGENT_NAMED" = 0 ]; then
+        AGENT_NAMED=1
+        WANT_CLAUDE=0
+        WANT_CODEX=0
+    fi
+    case "$1" in
+        claude-code) WANT_CLAUDE=1 ;;
+        codex) WANT_CODEX=1 ;;
+        both)
+            WANT_CLAUDE=1
+            WANT_CODEX=1
+            ;;
+        *) die "unknown coding agent: $1 (use claude-code, codex or both)" ;;
+    esac
 }
 
 # Which project to register (§4): $PWD when it is a git repo, and nothing
@@ -2961,7 +3348,7 @@ main() {
     install_gh
     install_git
     install_extras
-    install_claude
+    install_agent
     register_devtools_mcp
     init_home
     run_doctor

@@ -594,27 +594,30 @@ def test_accounts_trust_trusts_the_repository_on_every_account_at_once(
 
     human = runner.invoke(app, ["accounts", "trust", str(sub)])
     assert human.exit_code == 0
-    head = f"✓ {root} on every account that has started (it covers {os.path.realpath(sub)})"
+    head = f"✓ {root} on every account that can hold it (it covers {os.path.realpath(sub)})"
     assert head in human.stdout
     assert "account 3: already trusted" in human.stdout
 
 
-def test_accounts_trust_heads_its_report_with_the_accounts_that_have_started(
+def test_accounts_trust_heads_its_report_with_the_accounts_that_can_hold_it(
     three: tuple[ClaudeAccount, ...], tmp_path: Path, runner: CliRunner
 ) -> None:
     """Final gate NIT 2: the heading said '✓ <key> on every account' over a row that said
-    'account 3: skipped': an account Claude Code never started on is given nothing."""
+    'account 3: skipped': an account Claude Code never started on is given nothing. It then
+    said '… on every account that has started', and a Codex home that never started is given
+    the table, in a config.toml made for it (SMOKE7 of #113): every account that can hold
+    it."""
     _plain, _second, third = three
     core.claude_json_path(third).unlink()  # never started
     folder = tmp_path / "work"
     folder.mkdir()
     result = runner.invoke(app, ["accounts", "trust", str(folder)])
     assert result.exit_code == 0, result.output
-    assert f"✓ {_key(folder)} on every account that has started\n" in result.stdout
+    assert f"✓ {_key(folder)} on every account that can hold it\n" in result.stdout
     assert "  · account 3: skipped" in result.stdout
     synced = runner.invoke(app, ["accounts", "trust", "--sync"])
     assert synced.exit_code == 0, synced.output
-    assert "✓ every trusted folder on every account that has started\n" in synced.stdout
+    assert "✓ every trusted folder on every account that can hold it\n" in synced.stdout
     assert "  · account 3: skipped" in synced.stdout
 
 

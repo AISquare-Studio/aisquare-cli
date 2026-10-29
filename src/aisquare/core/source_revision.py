@@ -26,6 +26,7 @@ from pathlib import Path
 
 from aisquare.core.paths import aisquare_home
 from aisquare.core.spawn import git_env
+from aisquare.core.workspace import git_argv
 
 #: Build output, whether or not a project remembered to gitignore it: a first ``pytest``
 #: run must not change the identity by writing ``__pycache__``. Applied to UNTRACKED files
@@ -61,7 +62,7 @@ def _git(root: Path, *args: str, timeout: float = 30) -> subprocess.CompletedPro
     answer; "could not list" is a failure)."""
     try:
         return subprocess.run(
-            ["git", "-C", str(root), *args],
+            git_argv("-C", str(root), *args),
             stdin=subprocess.DEVNULL,  # a tool's git must not hold an MCP server's protocol pipe
             capture_output=True,
             timeout=timeout,
@@ -142,6 +143,21 @@ def source_root_for(project_root: Path, cwd: Path | None = None) -> Path:
         return top
     if start.is_relative_to(project_root):
         return project_root
+    for directory in (start, *start.parents):
+        if any((directory / marker).exists() for marker in (".git", ".hg", ".aisquare")):
+            return directory
+    return start
+
+
+def checkout_of(start: Path) -> Path:
+    """The checkout ``start`` is in, asked of the files alone: git's top for it, else the
+    nearest directory with a marker (``.git``, ``.hg``, ``.aisquare``), else ``start``. For a
+    process that cannot ask the board which project a directory is in (an agent's sandbox,
+    where the store is read-only): the source it fingerprints is the tree it runs in."""
+    start = start.resolve()
+    top = _toplevel(start)
+    if top is not None:
+        return top
     for directory in (start, *start.parents):
         if any((directory / marker).exists() for marker in (".git", ".hg", ".aisquare")):
             return directory

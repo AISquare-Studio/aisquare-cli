@@ -497,6 +497,19 @@ def test_metrics_show_is_clean_with_nothing_recorded(
     assert "No turns recorded yet" in result.stdout
 
 
+@pytest.mark.parametrize("command", [["metrics", "show"], ["metrics", "tokens"], ["log"]])
+def test_an_empty_listing_names_every_agent_it_can_connect(
+    isolated_home: Path, runner: CliRunner, command: list[str]
+) -> None:
+    """Codex is read for turns, tokens and prompts as Claude Code is (SCOPE #113 274, L7):
+    the empty listing's hint names both, never Claude Code alone."""
+    result = runner.invoke(app, command)
+    assert result.exit_code == 0, result.output
+    said = " ".join(result.stdout.split())
+    for agent in ("claude-code", "codex"):
+        assert f"aisquare agents connect {agent}" in said, said
+
+
 # --- hot path -----------------------------------------------------------------
 
 

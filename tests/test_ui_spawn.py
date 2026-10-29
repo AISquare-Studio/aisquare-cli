@@ -23,6 +23,7 @@ import asyncio
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Callable, Coroutine, Iterator, Sequence
@@ -53,7 +54,7 @@ from textual.widgets import (
 from aisquare.cli.ui import app as app_module
 from aisquare.cli.ui import spawn as spawn_module
 from aisquare.cli.ui.app import FleetApp
-from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested
+from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested, args_hint
 from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
 from aisquare.cli.ui.sidebar import (
     AddProject,
@@ -65,11 +66,13 @@ from aisquare.cli.ui.sidebar import (
 from aisquare.cli.ui.spawn import (
     LABEL_RULE,
     NO_TASK,
+    AgentKey,
     PickTargetRequested,
     SpawnDialog,
     dice_label,
     role_choices,
 )
+from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views.accounts import AccountsView
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import codenames, experimental, harness, personas
@@ -77,19 +80,22 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
 from aisquare.core.ids import new_task_id
 from aisquare.core.store import store_session
-from aisquare.core.tmux import Completed
+from aisquare.core.tmux import Completed, TmuxServer, WindowInfo
 from aisquare.models import (
     AccountsOverview,
     ClaudeAccount,
     ClaudeAccountStatus,
     ClaudeIdentity,
     ClaudeInstall,
+    ClaudeUsage,
     FleetAgent,
     FleetAgentStatus,
     ProjectInfo,
     TeamSession,
     TeamTask,
+    UsageWindow,
 )
+from aisquare.services import agent_launch, model_memory
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
@@ -234,6 +240,9 @@ UNTOUCHED: Kwargs = {
     "task_id": None,
     "worktree": None,
     "permission_mode": None,
+    "sandbox": None,
+    "approval_policy": None,
+    "agent": None,
     "binary": None,
     "prompt": None,
     "agent_args": [],
@@ -315,6 +324,7 @@ def drive(
     *,
     accounts: Callable[[], AccountsOverview] | None = None,
     presets: dict[str, str] | None = None,
+    size: tuple[int, int] = SIZE,
     defaults: Any = None,
     projects: Sequence[ProjectInfo] | None = None,
 ) -> T:
@@ -324,7 +334,7 @@ def drive(
         host = Host(
             project, accounts=accounts, presets=presets, defaults=defaults, projects=projects
         )
-        async with host.run_test(size=SIZE) as pilot:
+        async with host.run_test(size=size) as pilot:
             await settle(pilot)
             dialog = host.screen
             assert isinstance(dialog, SpawnDialog)
@@ -616,6 +626,10 @@ def test_a_bad_label_disables_spawn_and_shows_the_rule(git_project: ProjectInfo)
         # before its validation had run (windows-latest, CI run 40253680877; and 2 of 50
         # runs under load on a Mac).
         seen: list[Any] = [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
+        # Each value is read back once its Changed has been handled: a single pause returns
+        # with that message still queued on a slow runner (CI run 40428675826, py3.12: the
+        # button still read disabled for "manager" after "coder-auth" was set), as
+        # ``settle_page`` says of any one pause.
         label_input(dialog).value = "Bad Label!"
         await settle(pilot)
         seen += [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
@@ -773,6 +787,9 @@ def test_spawn_sends_exactly_the_chosen_values_with_the_agent_args_shlex_split(
                 "task_id": task.id,
                 "worktree": True,
                 "permission_mode": "plan",
+                "sandbox": None,
+                "approval_policy": None,
+                "agent": None,
                 "binary": "claude2",
                 "prompt": "start from the failing test",
                 "agent_args": ["--model", "opus", "--append-system-prompt", "be brief"],
@@ -1116,7 +1133,11 @@ def test_the_label_follows_the_role_and_says_which_rung_picked(git_project: Proj
     work = _account(3, alias="work", position=1)
 
     def defaults(
-        project: ProjectInfo, role: str, args: list[str], model: str | None = None
+        project: ProjectInfo,
+        role: str,
+        args: list[str],
+        model: str | None = None,
+        agent: str | None = None,
     ) -> accounts_service.LaunchDefault:
         asked.append((project.id, role))
         if role == "reviewer":
@@ -1176,10 +1197,14 @@ def test_a_model_in_the_extra_args_is_the_family_the_label_picks_by(
     reads: list[list[str]] = []
 
     def counted(
-        project: ProjectInfo, role: str, args: list[str], model: str | None = None
+        project: ProjectInfo,
+        role: str,
+        args: list[str],
+        model: str | None = None,
+        agent: str | None = None,
     ) -> accounts_service.LaunchDefault:
         reads.append(list(args))
-        return spawn_module.read_launch_default(project, role, args, model)
+        return spawn_module.read_launch_default(project, role, args, model, agent)
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
         field = dialog.query_one("#spawn-args", Input)
@@ -1210,7 +1235,11 @@ def test_the_captains_dialog_says_what_the_captain_runs_on(spawns: SpawnRecorder
     asked: list[tuple[str, str]] = []
 
     def defaults(
-        project: ProjectInfo, role: str, args: list[str], model: str | None = None
+        project: ProjectInfo,
+        role: str,
+        args: list[str],
+        model: str | None = None,
+        agent: str | None = None,
     ) -> accounts_service.LaunchDefault:
         asked.append((project.id, role))
         work = _account(2, alias="work", position=1)
@@ -1611,9 +1640,10 @@ def test_the_fields_read_role_hand_off_and_account_then_advanced_who_runs_it_the
 
     basic, folded = drive(git_project, scenario)
     # The owner's three (tsk_01m5mm2sz23b): the role, the teammate it comes from with its
-    # How row, the account. Then, folded, who runs it — the bind, the binary — and as whom.
+    # How row, the account. Then, folded, who runs it — the bind, the agent, the binary —
+    # and as whom.
     assert basic == ["Role", "Hand off from", "How", "Account"]
-    assert folded[:4] == ["Bind", "Binary", "Persona", "Label"]
+    assert folded[:5] == ["Bind", "Agent", "Binary", "Persona", "Label"]
 
 
 def test_the_persona_select_lists_none_and_the_catalogue_with_the_description_below(
@@ -1849,7 +1879,9 @@ def test_new_account_from_the_picker_opens_the_accounts_page_and_starts_its_add_
     register(tmp_path / "alpha", project_id="prj_a")
     started: list[object] = []
     monkeypatch.setattr(
-        AccountsView, "begin_claude_sign_in", lambda self, slot: started.append(slot)
+        AccountsView,
+        "begin_claude_sign_in",
+        lambda self, slot, agent=None: started.append((slot, agent)),
     )
 
     async def scenario(pilot: Pilot[None], app: RecordingFleetApp) -> str | None:
@@ -1859,7 +1891,9 @@ def test_new_account_from_the_picker_opens_the_accounts_page_and_starts_its_add_
         return app.content.current
 
     assert drive_app(scenario) == "accounts"
-    assert started == [None]  # a fresh slot's sign-in, the page's own flow
+    # A fresh slot's sign-in, the page's own flow; a request that names no agent adds the
+    # default agent's (the page's ``None``).
+    assert started == [(None, None)]
 
 
 def test_a_persona_this_project_lacks_still_shows_and_says_the_spawn_refuses_it(
@@ -1970,9 +2004,10 @@ NO_CHANGE: Kwargs = {
     "persona": None,
     "label": None,
     "prompt": None,
+    "to_agent": None,
 }
-"""What a hand-off sends for a form that shows the teammate's own: its role, account and persona.
-Its ``agent_id``, the row the form shows, is sent as well, and is each test's own."""
+"""What a hand-off sends for a form that shows the teammate's own: its role, account, persona
+and agent. Its ``agent_id``, the row the form shows, is sent as well, and is each test's own."""
 
 
 def test_the_hand_off_field_lists_the_open_teammates_and_none_is_todays_spawn(
@@ -2104,6 +2139,38 @@ def test_start_fresh_and_a_changed_role_are_sent(
     assert sent["persona"] is None and sent["mode"] == "fork"
 
 
+@pytest.mark.parametrize("size", [(80, 24), (200, 50)])
+def test_start_fresh_shows_beside_the_how_radios_and_a_click_checks_it(
+    git_project: ProjectInfo,
+    hand_offs: HandOffRecorder,
+    teammates: list[FleetAgentStatus],
+    size: tuple[int, int],
+) -> None:
+    """SMOKE8 #127: each RadioButton's own ``width: 1fr`` stretched the How RadioSet over
+    the row, so Start fresh sat past the dialog's right edge, unseen and unclickable. It
+    is on screen inside the dialog, on the How row, and a click on it checks it."""
+    teammates.append(teammate(git_project))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> None:
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        fresh = dialog.query_one("#spawn-fresh", Checkbox)
+        box = dialog.query_one("#spawn-box").region
+        row = dialog.query_one("#spawn-how-row").region
+        assert box.contains_region(fresh.region) and row.contains_region(fresh.region)
+        x, y = fresh.region.offset
+        assert dialog.get_widget_at(x + 1, y + 1)[0] is fresh
+        assert await pilot.click("#spawn-fresh")
+        await settle(pilot)
+        assert fresh.value
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+
+    drive(git_project, scenario, size=size)
+    [(_, _, sent)] = hand_offs.calls
+    assert sent["fresh"] is True and sent["mode"] == "fork"
+
+
 @pytest.mark.needs_captain
 def test_the_captains_dialog_has_no_hand_off(
     git_project: ProjectInfo, teammates: list[FleetAgentStatus]
@@ -2147,6 +2214,632 @@ def test_account_set_to_this_shells_is_sent_as_this_shells(
     [(_, _, sent)] = hand_offs.calls
     assert sent["mode"] == ("take_over" if take_over else "fork")
     assert sent["account"] == fleet_service.THIS_SHELL_ACCOUNT
+
+
+# --- the agent the launch starts (SCOPE #113 0.8.2, A6) ------------------------------------
+
+
+def agents_overview(*slots: tuple[int, str]) -> AccountsOverview:
+    """An accounts overview with ``(slot, agent)`` per account, each signed in."""
+    return AccountsOverview(
+        claude=ClaudeInstall(installed=True, binary="/usr/bin/claude"),
+        accounts=[
+            ClaudeAccountStatus(
+                account=ClaudeAccount(slot=slot, config_dir=Path(f"/accounts/{slot}"), agent=agent),
+                label=f"account {slot}",
+                identity=ClaudeIdentity(email=f"slot{slot}@example.com"),
+                signed_in=True,
+            )
+            for slot, agent in slots
+        ],
+    )
+
+
+MIXED = (2, "claude-code"), (5, "codex")
+"""One Claude Code slot and one Codex slot: slots are one ladder across the agents."""
+
+
+def offered(dialog: SpawnDialog, name: str) -> list[str]:
+    return [str(value) for _prompt, value in select(dialog, name)._options]
+
+
+def test_the_agent_select_offers_that_agents_accounts_and_the_spawn_names_both(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [
+            [str(prompt) for prompt, _ in select(dialog, "agent")._options],
+            offered(dialog, "account"),
+            dialog.query_one("#spawn-binary", Input).placeholder,
+        ]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        seen += [offered(dialog, "account"), dialog.query_one("#spawn-binary", Input).placeholder]
+        select(dialog, "account").value = "5"
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    seen = drive(git_project, scenario, accounts=lambda: agents_overview(*MIXED))
+    assert seen[0] == ["(role's: Claude Code)", "Claude Code", "Codex"]
+    assert seen[1:3] == [["", "2"], "claude"]  # the role's agent: Claude Code's slot alone
+    assert seen[3:] == [["", "5"], "codex"]  # Codex picked: its slot, its binary
+    [(_, role, kwargs)] = spawns.calls
+    assert role == "coder" and kwargs == {**UNTOUCHED, "agent": "codex", "account": "5"}
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude-code"])
+def test_the_permission_controls_are_the_launch_agents_own_and_sent_in_its_words(
+    agent: str, git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """Codex's permission is a sandbox and an approval policy (``sandbox_permissions``),
+    Claude Code's a mode: only the launch agent's show, only they are sent, and the line
+    under them is what that agent would be passed."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "agent").value = agent
+        await settle(pilot)
+        rows = [
+            dialog.query_one(f"#spawn-{name}-row").display
+            for name in ("permission", "sandbox", "approval")
+        ]
+        if agent == "codex":
+            select(dialog, "sandbox").value = "read-only"
+            select(dialog, "approval").value = "on-request"
+        else:
+            select(dialog, "permission").value = "plan"
+        await settle(pilot)
+        line = shown(dialog.query_one("#spawn-launch", Static))
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return [rows, line]
+
+    rows, line = drive(git_project, scenario)
+    [(_, _, kwargs)] = spawns.calls
+    if agent == "codex":
+        assert rows == [False, True, True]
+        assert (kwargs["sandbox"], kwargs["approval_policy"]) == ("read-only", "on-request")
+        assert kwargs["permission_mode"] is None
+        assert "--ask-for-approval on-request" in line and "its read_only sandbox" in line
+    else:
+        assert rows == [True, False, False]
+        assert kwargs["permission_mode"] == "plan"
+        assert kwargs["sandbox"] is None and kwargs["approval_policy"] is None
+        assert "--permission-mode plan" in line
+    assert kwargs["agent"] == agent
+
+
+def test_one_permission_for_every_agent_replaces_the_agents_own_controls(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[bool]:
+        select(dialog, "agent").value = "codex"
+        select(dialog, "sandbox").value = "read-only"  # chosen, then replaced by the one value
+        await settle(pilot)
+        select(dialog, "intent").value = "workspace:auto"
+        await settle(pilot)
+        rows = [
+            dialog.query_one(f"#spawn-{name}-row").display
+            for name in ("permission", "sandbox", "approval")
+        ]
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return rows
+
+    assert drive(git_project, scenario) == [False, False, False]
+    [(_, _, kwargs)] = spawns.calls
+    assert kwargs["permission_mode"] == "workspace:auto"  # `fleet spawn --permission-mode`
+    assert kwargs["sandbox"] is None and kwargs["approval_policy"] is None
+
+
+def test_the_extra_args_example_is_the_picked_agents_own_model_flag(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """SMOKE9 N1 of #113: the example read ``e.g. --model opus``, a Claude Code model, with
+    Codex picked. It is the picked agent's own ``model_args``, naming no agent's model."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        field = dialog.query_one("#spawn-args", Input)
+        seen = [str(field.placeholder)]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        return [*seen, str(field.placeholder)]
+
+    shown = drive(git_project, scenario)
+    assert shown == [args_hint("claude-code"), args_hint("codex")]
+    assert all("opus" not in hint and hint.startswith("e.g. --model") for hint in shown), shown
+
+
+def test_the_roles_own_agent_is_named_and_followed_and_sent_as_none(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    settings_service.bind_role("coder", agent="codex")
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        agent = select(dialog, "agent")
+        seen = [
+            agent.value,
+            str(agent._options[0][0]),
+            offered(dialog, "account"),
+            dialog.query_one("#spawn-sandbox-row").display,
+        ]
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    seen = drive(git_project, scenario, accounts=lambda: agents_overview(*MIXED))
+    assert seen == ["", "(role's: Codex)", ["", "5"], True]
+    assert spawns.calls == [(git_project.id, "coder", UNTOUCHED)]  # the role decides
+
+
+def test_typing_a_binary_never_asks_its_agent_on_the_ui_thread(
+    git_project: ProjectInfo, spawns: SpawnRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r17 of #113, finding 11: the Binary field asked ``agent_launch.resolve`` (the
+    config and the store) on the UI thread for each new prefix, so a locked store stalled
+    every key. It is asked in a worker once the field rests, and the Agent field follows."""
+    real = agent_launch.resolve
+    asked: list[tuple[str, bool]] = []
+
+    def locked_store(role: str = "coder", **kwargs: Any) -> Any:
+        if kwargs.get("binary"):
+            asked.append((kwargs["binary"], threading.current_thread() is threading.main_thread()))
+            time.sleep(0.5)  # the store's lock
+        return real(role, **kwargs)
+
+    monkeypatch.setattr(agent_launch, "resolve", locked_store)
+    typed = "/opt/bin/codex"
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> str:
+        dialog.query_one("#spawn-binary", Input).focus()
+        await pilot.press(*typed)
+        await settle(pilot)
+        return str(select(dialog, "agent")._options[0][0])
+
+    assert drive(git_project, scenario) == "(role's: Codex)"
+    assert asked and not any(on_ui for _, on_ui in asked), asked
+    assert len(asked) < len(typed), "once per pause, not per key"
+    assert asked[-1][0] == typed
+
+
+def _two_agents_codex_on_top(monkeypatch: pytest.MonkeyPatch) -> tuple[int, int]:
+    """A Claude Code account and a Codex one above it, both installed: an unpinned launch runs
+    Codex by the order, which takes a usage read to know (``accounts.pick = "headroom"``)."""
+    import shutil
+
+    from tests.test_one_priority_order_across_agents import _claude, _codex
+
+    claude, codex = _claude("c@example.com"), _codex("x@example.com")
+    accounts_service.move(str(codex.slot), "top")
+    found = {"claude": "/bin/claude", "codex": "/bin/codex"}
+    real = shutil.which
+    monkeypatch.setattr(
+        shutil, "which", lambda name, *a, **k: found[name] if name in found else real(name, *a, **k)
+    )
+    return claude.slot, codex.slot
+
+
+def _usage_read_held(
+    monkeypatch: pytest.MonkeyPatch, slots: tuple[int, int]
+) -> tuple[threading.Event, threading.Event, list[int], list[int]]:
+    """``cached_usage`` held until the test lets it go: ``(started, release, threads, ui)``,
+    the id of the thread of each read in ``threads``. A read on a thread named in ``ui`` (the
+    test's own, the UI's) is answered at once, so a dialog that wrongly reads there fails
+    the test quickly instead of hanging it."""
+    started, release = threading.Event(), threading.Event()
+    threads: list[int] = []
+    ui: list[int] = []
+
+    def held(accounts: Any, **_: Any) -> dict[int, ClaudeUsage]:
+        threads.append(threading.get_ident())
+        started.set()
+        if threading.get_ident() not in ui:
+            release.wait(10)
+        window = UsageWindow(name="session", minutes=300, used_percent=10.0)
+        return {a.slot: ClaudeUsage(available=True, windows=(window,)) for a in accounts}
+
+    monkeypatch.setattr(accounts_service, "cached_usage", held)
+    monkeypatch.setattr(accounts_service, "read_usage", lambda accounts, **_: held(accounts))
+    return started, release, threads, ui
+
+
+def test_opening_the_dialog_reads_no_usage_on_the_ui_thread_and_says_it_is_picking(
+    git_project: ProjectInfo,
+    fake_home: Path,
+    spawns: SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #14, M2: ``compose`` asked ``agent_launch.resolve`` for the role's agent on the
+    UI thread, and with accounts of two agents that reads their usage, up to ten seconds on a
+    cold cache. It asks in a worker: the dialog opens at once with ``(role's: picking…)`` and
+    *Spawn* waiting, and fills in when the read answers. The read here is held until released;
+    one made on the UI thread is recorded (it is not held, so the failure is quick)."""
+    slots = _two_agents_codex_on_top(monkeypatch)
+    started, release, threads, ui = _usage_read_held(monkeypatch, slots)
+
+    async def run() -> tuple[list[Any], list[Any], int]:
+        host = Host(git_project, accounts=lambda: agents_overview(*MIXED))
+        ui_thread = threading.get_ident()
+        ui.append(ui_thread)
+        async with host.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            dialog = host.screen
+            assert isinstance(dialog, SpawnDialog)
+            held = [
+                str(select(dialog, "agent")._options[0][0]),
+                submit(dialog).disabled,
+                shown(dialog.query_one("#spawn-launch", Static)),
+                dialog.query_one("#spawn-permission-row").display,
+                offered(dialog, "account"),
+            ]
+            assert await asyncio.to_thread(started.wait, 10), "the worker never read usage"
+            release.set()
+            await settle(pilot)
+            filled = [
+                str(select(dialog, "agent")._options[0][0]),
+                submit(dialog).disabled,
+                dialog.query_one("#spawn-sandbox-row").display,
+                offered(dialog, "account"),
+            ]
+            return held, filled, ui_thread
+
+    try:
+        held, filled, ui_thread = asyncio.run(run())
+    finally:
+        release.set()
+
+    assert held[0] == "(role's: picking…)"
+    assert held[1] is True, "Spawn waits for the agent its controls follow"
+    assert "picking…" in held[2]
+    assert held[3] is False, "no permission controls for an agent not yet known"
+    assert held[4] == [""], "no account of an agent not yet known"
+    assert threads and ui_thread not in threads, "usage was read on the UI thread"
+    assert filled == ["(role's: Codex)", False, True, ["", "5"]]
+
+
+def test_a_picked_agent_needs_no_wait_for_the_roles_own(
+    git_project: ProjectInfo,
+    fake_home: Path,
+    spawns: SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An Agent chosen up front is the launch's agent whatever the role's turns out to be: the
+    form is complete and *Spawn* is not held by the read still out for the ``(role's: …)``."""
+    slots = _two_agents_codex_on_top(monkeypatch)
+    started, release, _threads, ui = _usage_read_held(monkeypatch, slots)
+
+    async def run() -> list[Any]:
+        host = Host(
+            git_project, accounts=lambda: agents_overview(*MIXED), presets={"agent": "claude-code"}
+        )
+        ui.append(threading.get_ident())
+        async with host.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            dialog = host.screen
+            assert isinstance(dialog, SpawnDialog)
+            await asyncio.to_thread(started.wait, 10)
+            seen = [select(dialog, "agent").value, submit(dialog).disabled]
+            release.set()
+            await settle(pilot)
+            return seen
+
+    try:
+        seen = asyncio.run(run())
+    finally:
+        release.set()
+
+    assert seen == ["claude-code", False]
+
+
+def test_a_role_and_binary_already_being_asked_are_not_asked_a_second_time(
+    git_project: ProjectInfo,
+    fake_home: Path,
+    spawns: SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The key (role, binary, model) is asked in one worker: a second ask for it while the first is
+    out (the Binary field resting on the same text again, a role picked twice) would start a
+    worker that replaces the first and reads the same usage again (tester-14's survivor)."""
+    slots = _two_agents_codex_on_top(monkeypatch)
+    started, release, _threads, ui = _usage_read_held(monkeypatch, slots)
+    asked: list[AgentKey] = []
+    real = SpawnDialog._ask_role_agent
+
+    def counting(
+        self: SpawnDialog, key: AgentKey, settle: float, project: ProjectInfo
+    ) -> tuple[str, AgentKey, str] | None:
+        asked.append(key)
+        return real(self, key, settle, project)
+
+    monkeypatch.setattr(SpawnDialog, "_ask_role_agent", counting)
+
+    async def run() -> list[Any]:
+        host = Host(git_project, accounts=lambda: agents_overview(*MIXED))
+        ui.append(threading.get_ident())
+        async with host.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            dialog = host.screen
+            assert isinstance(dialog, SpawnDialog)
+            assert await asyncio.to_thread(started.wait, 10), "the first ask never read usage"
+            key = dialog._current_agent_key()
+            for _ in range(3):
+                dialog._ask_agent_of(key[0], key[1])
+            await pilot.pause()
+            release.set()
+            await settle(pilot)
+            dialog._ask_agent_of(key[0], key[1])  # answered now: kept, never asked again
+            await settle(pilot)
+            return [list(asked), key, str(select(dialog, "agent")._options[0][0])]
+
+    try:
+        asked_once, key, shown_agent = asyncio.run(run())
+    finally:
+        release.set()
+
+    assert asked_once == [key], "one ask for the key, however often it was asked for"
+    assert shown_agent == "(role's: Codex)"
+
+
+def test_a_preset_account_brings_its_agent_when_the_accounts_land_after_the_roles_agent(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """The other order of ``_agent_of_the_role_landed`` (which adopts the owner of a preset
+    account once the accounts are known): the role's agent answers first and the accounts are
+    read after it, and the Codex slot the Personas tab picked still starts the form on Codex."""
+    gate = threading.Event()
+
+    def late() -> AccountsOverview:
+        gate.wait(10)
+        return agents_overview(*MIXED)
+
+    async def run() -> list[Any]:
+        host = Host(git_project, accounts=late, presets={"account": "5"})
+        async with host.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            dialog = host.screen
+            assert isinstance(dialog, SpawnDialog)
+            for _ in range(200):
+                if dialog._role_agents:
+                    break
+                await pilot.pause(0.05)
+            assert dialog._role_agents, "the role's agent answered first"
+            before = select(dialog, "agent").value
+            gate.set()
+            await settle(pilot)
+            return [before, select(dialog, "agent").value]
+
+    try:
+        before, after = asyncio.run(run())
+    finally:
+        gate.set()
+
+    assert before != "codex", "nothing knew the slot's agent yet"
+    assert after == "codex"
+
+
+def test_the_closed_agent_field_names_the_roles_agent_once_it_lands(
+    git_project: ProjectInfo, spawns: SpawnRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#43 reopen (tester-43, out of scope then): the role's agent is asked in a worker, and
+    the closed Agent field showed ``(role's: picking…)`` after it landed, its options already
+    saying ``(role's: Claude Code)``: the options were set again around the same value, which
+    redraws nothing. Held until the field has been seen picking, then let go."""
+    gate = threading.Event()
+    real = SpawnDialog._ask_role_agent
+
+    def held(
+        self: SpawnDialog, key: AgentKey, settle: float, project: ProjectInfo
+    ) -> tuple[str, AgentKey, str] | None:
+        gate.wait(10)
+        return real(self, key, settle, project)
+
+    monkeypatch.setattr(SpawnDialog, "_ask_role_agent", held)
+
+    def closed(dialog: SpawnDialog) -> str:
+        return shown(select(dialog, "agent").query_one("SelectCurrent #label", Static))
+
+    async def run() -> list[str]:
+        host = Host(git_project)
+        async with host.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            dialog = host.screen
+            assert isinstance(dialog, SpawnDialog)
+            before = closed(dialog)
+            gate.set()
+            await settle(pilot)
+            return [before, closed(dialog), str(select(dialog, "agent")._options[0][0])]
+
+    try:
+        seen = asyncio.run(run())
+    finally:
+        gate.set()
+
+    assert seen == ["(role's: picking…)", "(role's: Claude Code)", "(role's: Claude Code)"]
+
+
+def test_a_failed_ask_never_leaves_the_form_waiting_for_an_agent(
+    git_project: ProjectInfo, spawns: SpawnRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_resolve_role_agent`` answers for everything it can catch; a worker that fails anyway
+    still ends the wait, on Claude Code, rather than leave *Spawn* disabled for good."""
+
+    def broken(self: SpawnDialog, key: AgentKey, settle: float, project: ProjectInfo) -> None:
+        raise RuntimeError("the worker fell over")
+
+    monkeypatch.setattr(SpawnDialog, "_ask_role_agent", broken)
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        return [str(select(dialog, "agent")._options[0][0]), submit(dialog).disabled]
+
+    assert drive(git_project, scenario) == ["(role's: Claude Code)", False]
+
+
+def test_a_preset_agent_is_honoured_and_a_preset_account_brings_its_agent(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    async def preset_agent(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen = [select(dialog, "agent").value, offered(dialog, "account")]
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    seen = drive(
+        git_project,
+        preset_agent,
+        accounts=lambda: agents_overview(*MIXED),
+        presets={"agent": "codex", "persona": "skeptic"},
+    )
+    assert seen == ["codex", ["", "5"]]
+    [(_, _, kwargs)] = spawns.calls
+    assert kwargs["agent"] == "codex" and kwargs["persona"] == "skeptic"
+    spawns.calls.clear()
+
+    async def preset_account(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen = [select(dialog, "agent").value, select(dialog, "account").value]
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    # The Personas tab opens the dialog with the picked account alone: a Codex slot is
+    # Codex's, so the form starts Codex rather than refuse the slot for Claude Code.
+    seen = drive(
+        git_project,
+        preset_account,
+        accounts=lambda: agents_overview(*MIXED),
+        presets={"account": "5"},
+    )
+    assert seen == ["codex", "5"]
+    [(_, _, kwargs)] = spawns.calls
+    assert (kwargs["agent"], kwargs["account"]) == ("codex", "5")
+
+
+def test_a_picked_account_brings_its_agent_and_a_picked_bind_its_own(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        dialog.apply_target(account="5")
+        await settle(pilot)
+        seen: list[Any] = [select(dialog, "agent").value, select(dialog, "account").value]
+        dialog.apply_target(role="coder2", agent="claude-code", binary="claude")
+        await settle(pilot)
+        seen += [select(dialog, "agent").value, select(dialog, "account").value]
+        return seen
+
+    seen = drive(git_project, scenario, accounts=lambda: agents_overview(*MIXED))
+    # The Codex slot goes with Codex; back on Claude Code it is no option, so this shell's.
+    assert seen == ["codex", "5", "claude-code", ""]
+
+
+def test_the_accounts_are_read_once_off_the_ui_thread_whatever_the_agent_or_role(
+    git_project: ProjectInfo,
+) -> None:
+    """A Claude slot's identity is its .claude.json, which can be tens of MB: read on the
+    event loop on every change of role or agent, it froze the dialog."""
+    readers: list[threading.Thread] = []
+
+    def accounts() -> AccountsOverview:
+        readers.append(threading.current_thread())
+        return agents_overview(*MIXED)
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        for role in ("reviewer", "tester", "coder"):
+            select(dialog, "role").value = role
+            await settle(pilot)
+        for agent in ("codex", "claude-code"):
+            select(dialog, "agent").value = agent
+            await settle(pilot)
+        return [str(prompt) for prompt, _ in select(dialog, "account")._options]
+
+    labels = drive(git_project, scenario, accounts=accounts)
+    assert len(readers) == 1 and threading.main_thread() not in readers
+    assert labels == ["(this shell's)", "2 · account 2 · slot2@example.com"]
+
+
+def test_a_codex_teammate_hands_off_on_its_own_agent_and_accounts_until_another_is_picked(
+    git_project: ProjectInfo,
+    hand_offs: HandOffRecorder,
+    teammates: list[FleetAgentStatus],
+) -> None:
+    """Its own agent, named, and its accounts; the Agent stays the owner's to change (task
+    #15: a hand-off across agents), so it is not locked."""
+    mate = teammate(git_project, slot=5)
+    teammates.append(
+        mate.model_copy(update={"agent": mate.agent.model_copy(update={"agent": "codex"})})
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        seen: list[Any] = [
+            select(dialog, "agent").value,
+            select(dialog, "agent").disabled,
+            select(dialog, "account").value,
+            offered(dialog, "account"),
+        ]
+        select(dialog, "from").value = ""  # (none): the plain form comes back as it was
+        await settle(pilot)
+        seen += [select(dialog, "agent").value, offered(dialog, "account")]
+        return seen
+
+    seen = drive(git_project, scenario, accounts=lambda: agents_overview(*MIXED))
+    assert seen == ["codex", False, "5", ["", "5"], "", ["", "2"]]
+
+
+@pytest.mark.parametrize("take_over", [False, True])
+def test_another_agent_picked_for_a_hand_off_starts_it_fresh_there_with_the_brief(
+    git_project: ProjectInfo,
+    hand_offs: HandOffRecorder,
+    teammates: list[FleetAgentStatus],
+    take_over: bool,
+) -> None:
+    """Task #15: a Codex teammate handed off onto Claude Code. The Account offers Claude
+    Code's accounts, Start fresh is checked and locked (no conversation moves between
+    agents), the note says the brief goes instead, and the hand-off sends the agent. Its own
+    agent picked again gives Start fresh back as the owner left it."""
+    mate = teammate(git_project, slot=5)
+    teammates.append(
+        mate.model_copy(update={"agent": mate.agent.model_copy(update={"agent": "codex"})})
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        if take_over:
+            dialog.query_one("#spawn-take-over", RadioButton).value = True
+            await settle(pilot)
+        fresh = dialog.query_one("#spawn-fresh", Checkbox)
+        select(dialog, "agent").value = "claude-code"
+        await settle(pilot)
+        seen: list[Any] = [
+            offered(dialog, "account"),
+            fresh.value,
+            fresh.disabled,
+            note(dialog, "#spawn-how-note"),
+        ]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        seen += [fresh.value, fresh.disabled]
+        select(dialog, "agent").value = "claude-code"
+        await settle(pilot)
+        select(dialog, "account").value = "2"
+        await settle(pilot)
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        if take_over:
+            await pilot.click("#take-over-yes")
+            await settle(pilot)
+        return seen
+
+    seen = drive(git_project, scenario, accounts=lambda: agents_overview(*MIXED))
+    accounts, checked, locked, said, *given_back = seen
+    assert accounts == ["", "2"] and (checked, locked) == (True, True)
+    assert said is not None and "Claude Code" in said
+    assert "a conversation does not move between agents" in said and "brief" in said
+    assert given_back == [False, False]
+    [(_, source, sent)] = hand_offs.calls
+    assert source == "coder-1"
+    assert (sent["to_agent"], sent["fresh"], sent["account"]) == ("claude-code", True, "2")
+    assert sent["mode"] == ("take_over" if take_over else "fork")
 
 
 # --- review of #240, R2-m5: the captain's label in the dialog ---------------------------------
@@ -2251,6 +2944,77 @@ def test_with_no_role_the_empty_persona_says_plain_claude_not_its_role_alone(
     assert persona == ""
     assert without == "(plain Claude: no role, no persona)"
     assert with_role == back == "(no persona — the agent runs as its role alone)"  # the control
+
+
+@pytest.mark.parametrize(
+    ("agent", "plain"), [("codex", "Codex"), ("claude-code", "Claude")], ids=["codex", "claude"]
+)
+def test_the_role_less_note_names_the_agent_it_starts_not_claude(
+    agent: str, plain: str, git_project: ProjectInfo
+) -> None:
+    """Role *(none)* with Agent = Codex said "plain Claude", main's wording (review r23 of
+    #113, 6). It follows the Agent field, picked after the role or before it, and the
+    role's own agent while the field is blank; Claude Code's reads as it always did."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "role").value = spawn_module.NO_ROLE
+        await settle(pilot)
+        seen: list[Any] = [note(dialog, "#spawn-persona-description")]  # the role's own agent
+        select(dialog, "agent").value = agent  # the Agent field changes under a role-less form
+        await settle(pilot)
+        seen.append(note(dialog, "#spawn-persona-description"))
+        select(dialog, "role").value = "coder"
+        await settle(pilot)
+        seen.append(note(dialog, "#spawn-persona-description"))  # the control: a role speaks
+        select(dialog, "role").value = spawn_module.NO_ROLE
+        await settle(pilot)
+        seen.append(note(dialog, "#spawn-persona-description"))  # role-less again, agent kept
+        return seen
+
+    blank, picked, with_role, back = drive(git_project, scenario)
+    assert blank == "(plain Claude: no role, no persona)"  # the role's agent: Claude Code's
+    assert picked == back == f"(plain {plain}: no role, no persona)"
+    assert with_role == "(no persona — the agent runs as its role alone)"
+
+
+def test_the_role_less_note_follows_the_binary_typed_and_cleared_asked_or_cached(
+    git_project: ProjectInfo,
+) -> None:
+    """The ui-tester on 874aeff6 (r23 of #113, 6): Role *(none)*, Binary ``codex`` typed — the
+    note said "plain Codex" once the ask landed — and the Binary cleared, the launch back on
+    Claude Code (``launch_agent``, ``_plain_agent``), the note stayed "plain Codex". A
+    Binary whose answer is cached follows the agent at once (``_binary_changed``), which
+    never described the persona; only an Agent pick or an answer from the worker did. Both
+    directions are pinned, the first asked of the worker and the others read from the cache."""
+    plain = "(plain {}: no role, no persona)"
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        binary = dialog.query_one("#spawn-binary", Input)
+
+        def state() -> tuple[str | None, str | None, str]:
+            return (
+                note(dialog, "#spawn-persona-description"),
+                dialog.launch_agent(),
+                dialog._plain_agent(),
+            )
+
+        select(dialog, "role").value = spawn_module.NO_ROLE
+        await settle(pilot)
+        seen: list[Any] = [state()]  # the role's agent: Claude Code's
+        for typed in ("codex", "", "codex", ""):  # the first from the worker, the rest cached
+            binary.value = typed
+            await settle(pilot)
+            seen.append((typed, state()))
+        return seen
+
+    first, *steps = drive(git_project, scenario)
+    assert first == (plain.format("Claude"), "claude-code", "Claude")
+    assert steps == [
+        ("codex", (plain.format("Codex"), "codex", "Codex")),
+        ("", (plain.format("Claude"), "claude-code", "Claude")),  # cached: not yet described
+        ("codex", (plain.format("Codex"), "codex", "Codex")),  # cached too
+        ("", (plain.format("Claude"), "claude-code", "Claude")),
+    ]
 
 
 def test_a_role_change_re_describes_the_note_under_the_owners_own_empty_persona(
@@ -2658,7 +3422,11 @@ def test_a_switch_reads_the_no_account_label_again_for_the_new_project(
     work = _account(3, alias="work", position=1)
 
     def defaults(
-        project: ProjectInfo, role: str, args: list[str], model: str | None
+        project: ProjectInfo,
+        role: str,
+        args: list[str],
+        model: str | None,
+        agent: str | None = None,
     ) -> accounts_service.LaunchDefault:
         asked.append((project.id, role))
         if project.id == other_project.id:
@@ -2875,3 +3643,352 @@ def test_the_header_and_the_manager_refusal_name_the_project_by_its_nickname(
     assert options == ["Docs site", "Shared board"]
     assert "Shared board · ruby-fox" in second and "plain" not in second
     assert refusal == "Shared board already has a manager — one per project"
+
+
+# --- Codex beside 0.9.1's Spawn dialog (SCOPE #113 091, items 2, 9 and 11) ------------------
+
+
+def model_fields(dialog: SpawnDialog) -> tuple[str, str]:
+    """What Model and Effort hold: the model's text and the effort's value."""
+    return dialog.query_one("#spawn-model", Input).value, str(select(dialog, "effort").value)
+
+
+def test_model_and_effort_follow_the_agent_and_a_codex_pick_opens_the_next_codex_form(
+    git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 2: the fields showed Claude Code's last pick for a Codex agent, and what was typed
+    there was inert. They show the agent's own pick and follow an Agent pick as they follow a
+    role (a value typed in stays); the blank names what Codex is passed (``model_args``), never
+    Claude Code's ``opus``. A Codex spawn is sent its own pick, which ``fleet.spawn`` passes as
+    ``--model gpt-x`` and keeps for Codex alone (``tests/test_codex_fleet_parity.py``, the
+    service half); the next form on Codex opens on it, and on Claude Code on Claude Code's."""
+    model_memory.remember(model="opus", effort="xhigh")  # Claude Code's
+    sent: list[dict[str, Any]] = []
+
+    def spawn(project: ProjectInfo, role: str, **kwargs: Any) -> fleet_service.SpawnReceipt:
+        sent.append(kwargs)
+        model_memory.remember(model=kwargs["model"], effort=kwargs["effort"], agent=kwargs["agent"])
+        return receipt_for(project)
+
+    monkeypatch.setattr(fleet_service, "spawn", spawn)
+
+    async def pick(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [model_fields(dialog)]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        seen += [model_fields(dialog), dialog.query_one("#spawn-model", Input).placeholder]
+        dialog.query_one("#spawn-model", Input).value = "gpt-x"
+        select(dialog, "effort").value = "high"
+        await pilot.pause()
+        select(dialog, "agent").value = "claude-code"
+        await settle(pilot)
+        seen.append(model_fields(dialog))
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        submit(dialog).press()
+        await settle(pilot)
+        return seen
+
+    async def reopen(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [model_fields(dialog)]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        seen.append(model_fields(dialog))
+        submit(dialog).press()
+        await settle(pilot)
+        return seen
+
+    claude, codex, blank, typed = drive(git_project, pick)
+    assert claude == ("opus", "xhigh") and codex == ("", "")
+    assert "opus" not in blank and "--model MODEL" in blank, blank
+    assert typed == ("gpt-x", "high"), "what the owner typed stays when the agent changes"
+    assert [(k["agent"], k["model"], k["effort"]) for k in sent] == [("codex", "gpt-x", "high")]
+    assert drive(git_project, reopen) == [("opus", "xhigh"), ("gpt-x", "high")]
+    # Untouched, the second Codex spawn is sent no choice: the service runs Codex's pick.
+    assert [(k["model"], k["effort"]) for k in sent[1:]] == [(None, None)]
+
+
+def test_effort_offers_the_levels_of_the_agent_the_form_follows(
+    git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE11's observation: the Effort list for Codex was Claude Code's, without
+    ``minimal``. It offers the followed agent's own levels (``AgentAdapter.effort_levels``):
+    Codex's ``minimal`` to ``ultra``, Claude Code's scale and ``ultracode``. ``minimal`` is
+    sent, kept as Codex's pick and opens the next Codex form; switched to Claude Code, which
+    does not take it, the field shows Claude Code's pick."""
+    model_memory.remember(effort="xhigh")  # Claude Code's
+    sent: list[dict[str, Any]] = []
+
+    def spawn(project: ProjectInfo, role: str, **kwargs: Any) -> fleet_service.SpawnReceipt:
+        sent.append(kwargs)
+        model_memory.remember(model=kwargs["model"], effort=kwargs["effort"], agent=kwargs["agent"])
+        return receipt_for(project)
+
+    monkeypatch.setattr(fleet_service, "spawn", spawn)
+
+    async def pick(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [offered(dialog, "effort")]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        seen.append(offered(dialog, "effort"))
+        select(dialog, "effort").value = "minimal"
+        await pilot.pause()
+        select(dialog, "agent").value = "claude-code"
+        await settle(pilot)
+        seen += [offered(dialog, "effort"), model_fields(dialog)[1]]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        select(dialog, "effort").value = "minimal"
+        await pilot.pause()
+        submit(dialog).press()
+        await settle(pilot)
+        return seen
+
+    async def reopen(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> str:
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        return model_fields(dialog)[1]
+
+    claude, codex, back, kept = drive(git_project, pick)
+    assert claude == ["", "low", "medium", "high", "xhigh", "max", "ultracode"]
+    assert codex == ["", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+    assert (back, kept) == (claude, "xhigh"), "Claude Code takes no minimal: its pick shows"
+    assert [(k["agent"], k["effort"]) for k in sent] == [("codex", "minimal")]
+    assert model_memory.remembered(agent="codex").effort == "minimal"
+    assert drive(git_project, reopen) == "minimal"
+
+
+@pytest.mark.parametrize("effort", ["minimal", "ultra"])
+def test_a_codex_only_effort_rides_the_sign_in_round_trip_when_codex_is_the_roles(
+    git_project: ProjectInfo, spawns: SpawnRecorder, effort: str
+) -> None:
+    """Review r30 of #113, n1: *+ New account* reopens the form from ``form_state()``, which
+    carries the Agent only when one was picked. The role's Codex, left at the role's, came
+    back with an Effort checked against the default agent's levels (Claude Code's), so a
+    level Codex alone takes (``minimal``, ``ultra``) was dropped for the pick. It is checked
+    against the agent the reopened form follows, once that is known, and sent."""
+    settings_service.bind_role("coder", agent="codex")
+
+    async def chosen(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> dict[str, Any]:
+        select(dialog, "effort").value = effort
+        await pilot.pause()
+        return dialog.form_state()
+
+    state = drive(git_project, chosen)
+    assert state == {"role": "coder", "effort": effort}, "the role's agent: no Agent carried"
+
+    async def reopened(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> str:
+        shown = model_fields(dialog)[1]
+        submit(dialog).press()
+        await settle(pilot)
+        return shown
+
+    assert drive(git_project, reopened, presets=state) == effort
+    assert spawns.calls == [(git_project.id, "coder", {**UNTOUCHED, "effort": effort})]
+
+
+def test_an_effort_owed_from_a_sign_in_is_dropped_by_an_agent_that_does_not_take_it(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """n1's other half: the same ``minimal`` reopened on a role whose agent is Claude Code,
+    which does not take it, opens on Claude Code's pick and is not sent, as an Agent switch
+    drops it (:func:`test_effort_offers_the_levels_of_the_agent_the_form_follows`)."""
+    model_memory.remember(effort="xhigh")  # Claude Code's
+
+    async def reopened(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> str:
+        shown = model_fields(dialog)[1]
+        submit(dialog).press()
+        await settle(pilot)
+        return shown
+
+    assert drive(git_project, reopened, presets={"role": "coder", "effort": "minimal"}) == "xhigh"
+    assert spawns.calls == [(git_project.id, "coder", UNTOUCHED)]
+
+
+def test_an_effort_the_owner_picks_while_the_roles_agent_is_asked_beats_one_owed(
+    git_project: ProjectInfo, spawns: SpawnRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """n1's guard: an owed Effort waits for the role's agent, asked in a worker. A level the
+    owner picks meanwhile is the owner's newer choice, and Codex's answer does not put the
+    owed ``minimal`` over it."""
+    settings_service.bind_role("coder", agent="codex")
+    gate = threading.Event()
+    real = SpawnDialog._ask_role_agent
+
+    def held(
+        self: SpawnDialog, key: AgentKey, settle: float, project: ProjectInfo
+    ) -> tuple[str, AgentKey, str] | None:
+        gate.wait(10)
+        return real(self, key, settle, project)
+
+    monkeypatch.setattr(SpawnDialog, "_ask_role_agent", held)
+
+    async def run() -> list[str]:
+        host = Host(git_project, presets={"role": "coder", "effort": "minimal"})
+        async with host.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            dialog = host.screen
+            assert isinstance(dialog, SpawnDialog)
+            picking = str(select(dialog, "agent")._options[0][0])
+            select(dialog, "effort").value = "low"
+            await pilot.pause()
+            gate.set()
+            await settle(pilot)
+            seen = [picking, str(select(dialog, "agent")._options[0][0]), model_fields(dialog)[1]]
+            submit(dialog).press()
+            await settle(pilot)
+            return seen
+
+    try:
+        seen = asyncio.run(run())
+    finally:
+        gate.set()
+
+    assert seen == ["(role's: picking…)", "(role's: Codex)", "low"]
+    assert spawns.calls == [(git_project.id, "coder", {**UNTOUCHED, "effort": "low"})]
+
+
+def test_a_roles_pin_shown_for_codex_is_its_own_arguments_never_claude_codes(
+    git_project: ProjectInfo,
+) -> None:
+    """Item 2: a role's pin is shown in the words of the agent the form follows: Claude Code's
+    ``extra_args``, which a Codex spawn never passes, are not shown for Codex; its own
+    ``agent_args`` are, read as Codex reads them (``-m``, ``model_reasoning_effort``)."""
+    configure_role(
+        "reviewer",
+        extra_args=["--model", "haiku", "--effort", "low"],
+        agent_args={"codex": ["-m", "gpt-role", "-c", 'model_reasoning_effort="medium"']},
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "role").value = "reviewer"
+        await settle(pilot)
+        model = dialog.query_one("#spawn-model", Input)
+        seen: list[Any] = [model_fields(dialog)]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        return [*seen, model_fields(dialog), model.placeholder]
+
+    claude, codex, codex_blank = drive(git_project, scenario)
+    assert claude == ("haiku", "low")
+    assert codex == ("gpt-role", "medium")
+    assert "gpt-role" in codex_blank and "haiku" not in codex_blank, codex_blank
+
+
+def test_the_remote_control_row_shows_for_an_agent_that_has_it_alone(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """Item 9: Claude Code's ``--remote-control`` (``capabilities.remote_control``) was offered
+    for every agent. The row shows for Claude Code alone, and a switch turned on before the
+    agent became Codex is not sent: the role's default, which the launch says of."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[bool]:
+        await open_advanced(pilot)
+        row = dialog.query_one("#spawn-remote-row")
+        seen = [row.display]
+        dialog.query_one("#spawn-remote", Switch).value = True
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        seen.append(row.display)
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    assert drive(git_project, scenario) == [True, False]
+    [(_, _, kwargs)] = spawns.calls
+    assert kwargs == {**UNTOUCHED, "agent": "codex"}
+
+
+class AccountsFleetApp(RecordingFleetApp):
+    """``RecordingFleetApp`` whose accounts reader answers ``slots`` as they are when read."""
+
+    def __init__(self, slots: list[tuple[int, str]]) -> None:
+        super().__init__()
+        self._accounts = lambda: agents_overview(*slots)
+
+
+def test_new_account_from_a_codex_form_signs_codex_in_and_reopens_the_form_on_its_slot(
+    tmp_path: Path, fleet: dict[str, list[FleetAgentStatus]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 11: *+ New account* from a Spawn form on Codex opened Claude Code's sign-in (the
+    shell asked for one whatever the form ran), so the slot that landed was Claude Code's and
+    the form came back on an account its agent refuses. The request carries the form's
+    agent: Codex's sign-in opens (``codex login`` in a new Codex slot), and its landing reopens
+    the form on Codex with that slot selected."""
+    project = register(tmp_path / "alpha", project_id="prj_a")
+    slots = [(2, "claude-code")]
+    codex = ClaudeAccount(
+        slot=5, config_dir=tmp_path / "codex-accounts" / "5", agent="codex", managed=True
+    )
+    begun: list[tuple[int | None, str]] = []
+    opened: list[str] = []
+    monkeypatch.setattr(accounts_view, "LOGIN_POLL_SECONDS", 3600.0)  # the tick is the test's
+    monkeypatch.setattr(
+        fleet_service,
+        "server",
+        lambda config=None: TmuxServer(PRIVATE_SOCKET, binary=sys.executable),
+    )
+    monkeypatch.setattr(accounts_service, "cached_usage", lambda accounts, **_: {})
+    monkeypatch.setattr(accounts_service, "read_usage", lambda accounts, **_: {})
+
+    def begin(slot: int | None, *, agent: str) -> ClaudeAccount:
+        begun.append((slot, agent))
+        return codex
+
+    def open_window(account: ClaudeAccount, server: TmuxServer, **_: Any) -> WindowInfo:
+        opened.append(account.agent)
+        return WindowInfo(
+            session=accounts_service.SIGN_IN_SESSION,
+            window_id="@7",
+            name="account-5",
+            pane_id="%7",
+            dead=False,
+            dead_status=None,
+            current_command="codex",
+            activity=False,
+        )
+
+    def complete(account: ClaudeAccount) -> ClaudeAccountStatus:
+        slots.append((account.slot, account.agent))
+        return agents_overview((account.slot, account.agent)).accounts[0]
+
+    monkeypatch.setattr(accounts_service, "begin_sign_in", begin)
+    monkeypatch.setattr(accounts_service, "open_sign_in_window", open_window)
+    monkeypatch.setattr(
+        accounts_service,
+        "sign_in_landed",
+        lambda account, since=None: ClaudeIdentity(email="x@example.com"),
+    )
+    monkeypatch.setattr(accounts_service, "complete_sign_in", complete)
+
+    async def run() -> tuple[str, str, str]:
+        app = AccountsFleetApp(slots)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await settle(pilot)
+            await pilot.click(spawn_button(app))
+            dialog = await wait_for_screen(pilot, SpawnDialog)
+            await settle(pilot)
+            await open_advanced(pilot)
+            select(dialog, "agent").value = "codex"
+            await settle(pilot)
+            await pilot.click("#spawn-pick")
+            await wait_for_screen(pilot, AttachTargetScreen)
+            await pilot.click("#picker-new-account")
+            await settle(pilot)
+            await settle_until(app, lambda: app.content.current == "accounts")
+            view = app.query_one("#accounts", AccountsView)
+            assert view.login is not None, "no sign-in window was opened"
+            view._poll_login()  # the timer's tick, taken by hand: the login landed
+            back = await wait_for_screen(pilot, SpawnDialog)
+            await settle(pilot)
+            assert back is not dialog and back.project.id == project.id
+            return (
+                str(select(back, "agent").value),
+                str(select(back, "account").value),
+                back.launch_agent() or "",
+            )
+
+    agent, account, launches = asyncio.run(run())
+    assert begun == [(None, "codex")], "a fresh Codex slot, not Claude Code's"
+    assert opened == ["codex"], "the Codex login window opened"
+    assert (agent, account, launches) == ("codex", "5", "codex")

@@ -84,7 +84,7 @@ def test_connect_not_installed_fails(runner: CliRunner, monkeypatch: pytest.Monk
     # The suite's agent home has no ~/.claude, and here no `claude` is on PATH either
     # (with one, connect makes the directory: test_agent_adapters.py). Cursor, the old
     # example here, is refused as not connectable before presence is asked.
-    monkeypatch.setattr(agents, "claude_on_path", lambda: None)
+    monkeypatch.setattr(agents, "on_path", lambda name: None)
     result = runner.invoke(app, ["agents", "connect", "claude-code"])
     assert result.exit_code == 1
     assert "not installed" in result.output

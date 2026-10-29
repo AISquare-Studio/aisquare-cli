@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from aisquare.core.agent_adapters import claude_transcript, transcripts
 from aisquare.services import transcript as transcript_service
 from aisquare.services.transcript import (
     MAX_LINE,
@@ -289,13 +290,13 @@ def test_sub_agent_and_injected_records_are_not_the_conversation(tmp_path: Path)
 def _counting(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """Count the records the walk parses: the measure of how much of the file it read."""
     parsed: list[int] = []
-    real = transcript_service._parse_transcript_line
+    real = transcripts.parse_line
 
     def counted(raw: bytes) -> dict[str, Any] | None:
         parsed.append(len(raw))
         return real(raw)
 
-    monkeypatch.setattr(transcript_service, "_parse_transcript_line", counted)
+    monkeypatch.setattr(claude_transcript, "parse_line", counted)
     return parsed
 
 

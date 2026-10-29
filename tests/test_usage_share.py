@@ -718,7 +718,7 @@ def test_a_command_starts_one_shipper_when_due_and_none_for_half_an_hour(
     first = sharing.start_background_ship(NOW)
     second = sharing.start_background_ship(NOW + timedelta(minutes=5))
     third = sharing.start_background_ship(NOW + timedelta(minutes=31))
-    usage_share._schedule(NOW + timedelta(minutes=31))  # a shipment went through
+    usage_share._reschedule(NOW + timedelta(minutes=31))  # a shipment went through
     fourth = sharing.start_background_ship(NOW + timedelta(hours=2))
 
     assert (first, second, third, fourth) == (True, False, True, False)

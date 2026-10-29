@@ -33,10 +33,11 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli
+from aisquare.core import launch_seal
 from aisquare.core import tmux as tmux_module
 from aisquare.core.store import store_session
 from aisquare.core.tmux import _SEP, CHECK_SOCKET_SUFFIX, Completed, TmuxError, TmuxServer
-from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
+from aisquare.models import FleetAgent, FleetAgentStatus, LaunchSpec, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_needs, remote_server
 from aisquare.services.remote_server import (
@@ -89,6 +90,34 @@ def _seed(project: ProjectInfo, label: str, pane_id: str, born: datetime, **kw: 
     )
     with store_session() as store:
         store.upsert_fleet_agent(row)
+    return _recorded(row)
+
+
+def _recorded(row: FleetAgent) -> FleetAgent:
+    """``row`` with what its spawn writes outside the store: its launch record and where its
+    window is (``core.launch_seal``), which Remote's keys and screens place it by
+    (``fleet.placed_row``)."""
+    record = launch_seal.LaunchRecord(
+        id=row.id,
+        project_id=row.project_id,
+        project_root=str(row.cwd),
+        role=row.role,
+        agent=row.agent or "claude-code",
+        binary=row.binary,
+        cwd=str(row.cwd),
+        spec=LaunchSpec(binary=row.binary),
+        label=row.label,
+    )
+    assert launch_seal.write(record) is None
+    window = launch_seal.WindowPlace(
+        tmux_socket=row.tmux_socket,
+        pane_id=row.pane_id,
+        socket_path=str(row.socket_path) if row.socket_path is not None else None,
+        boot_id=row.boot_id,
+        created_at=row.created_at,
+        server_started_at=row.server_started_at,
+    )
+    assert launch_seal.placed(row.id, window) is None
     return row
 
 
@@ -246,6 +275,47 @@ def test_send_keys_types_nothing_into_a_pane_not_running_the_agent(
         live_writes().handlers["send-keys"]({"agent": "coder-1", "text": "yes", "enter": True})
     assert (refused.value.status, refused.value.error) == (409, "not_agent")
     assert refused.value.message == "coder-1's pane is not running the agent — nothing was sent"
+    assert tmux.sent == []
+
+
+# --- a row its launch record does not vouch for ------------------------------------------
+
+
+@pytest.mark.parametrize("tampered", ["its pane rewritten", "no launch record"])
+def test_send_keys_types_nothing_where_only_the_store_says_the_agent_is(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, tampered: str
+) -> None:
+    """The store is the sandbox's to write before its broker, so no store column says where
+    Remote types (``fleet.placed_row``, review r5 of #113, finding 1): a row pointed at
+    another pane of the user's, or one no launch record places, is 409 ``not_agent`` and
+    nothing is typed, its own pane included. The control first: the row as its spawn wrote it
+    takes the key."""
+    tmux = _serving(monkeypatch, Tmux(OLDER))
+    send = live_writes().handlers["send-keys"]
+    assert send({"agent": "coder-1", "keys": ["1"]})[0]["sent"] is True
+    tmux.sent.clear()
+    if tampered == "its pane rewritten":
+        with store_session() as store:
+            row = store.get_fleet_agent("agt_coder-1")
+            assert row is not None
+            store.upsert_fleet_agent(row.model_copy(update={"pane_id": "%7"}))
+    else:
+        unrecorded = FleetAgent(
+            id="agt_coder-2",
+            project_id=project.id,
+            label="coder-2",
+            role="coder",
+            pane_id="%7",
+            cwd=project.root,
+            created_at=BORN,
+        )
+        with store_session() as store:  # in the store alone, as a sandbox could write it
+            store.upsert_fleet_agent(unrecorded)
+    label = "coder-1" if tampered == "its pane rewritten" else "coder-2"
+    with pytest.raises(RequestError) as refused:
+        send({"agent": label, "text": "yes", "enter": True})
+    assert (refused.value.status, refused.value.error) == (409, "not_agent")
+    assert refused.value.message.endswith("— nothing was done"), refused.value.message
     assert tmux.sent == []
 
 
@@ -800,7 +870,7 @@ def _replace(project: ProjectInfo, pane_id: str = "%2") -> FleetAgent:
     )
     with store_session() as store:
         store.upsert_fleet_agent(row)
-    return row
+    return _recorded(row)
 
 
 @pytest.mark.parametrize(

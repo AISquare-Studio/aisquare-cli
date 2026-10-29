@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from aisquare.core.spawn import git_env
+from aisquare.core.workspace import git_argv
 
 GIT_BUDGET_SECONDS = 2.0
 """Total wall clock one capture (or one project_ref) may spend in git."""
@@ -242,7 +243,7 @@ def _git(root: Path, *args: str, timeout: float) -> str | None:
     """
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), *args],
+            git_argv("-C", str(root), *args),
             capture_output=True,
             text=True,
             encoding="utf-8",

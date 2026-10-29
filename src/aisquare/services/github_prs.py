@@ -29,6 +29,7 @@ from typing import Any
 
 from aisquare.core import paths
 from aisquare.core.spawn import git_env, untraced_env
+from aisquare.core.workspace import git_argv
 
 _GH_TIMEOUT = 30.0
 """Seconds one ``gh`` call may take before it is given up on."""
@@ -73,7 +74,7 @@ def repo_of(root: Path) -> str | None:
     (no git, no ``origin``, or not GitHub)."""
     try:
         done = subprocess.run(
-            ["git", "-C", str(root), "remote", "get-url", "origin"],
+            git_argv("-C", str(root), "remote", "get-url", "origin"),
             capture_output=True,
             text=True,
             timeout=10,

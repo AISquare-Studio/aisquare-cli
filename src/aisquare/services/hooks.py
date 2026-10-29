@@ -26,15 +26,26 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from aisquare.core import agents as agents_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import code_index, harness, insights, orchestrator, paths, selfcli, transcripts
+from aisquare.core import (
+    code_index,
+    harness,
+    insights,
+    launch_seal,
+    orchestrator,
+    paths,
+    selfcli,
+)
 from aisquare.core import spawn as spawn_core
 from aisquare.core.config import AccountsSettings, load_config
-from aisquare.core.injection import build_block, claude_md_files, without_loaded_preferences
+from aisquare.core.injection import build_block, without_loaded_preferences
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.workspace import active_project
 from aisquare.models import ClaudeAccount, FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession
@@ -45,6 +56,9 @@ from aisquare.services import explainability as explainability_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services import project as project_service
 from aisquare.services import team as team_service
+
+if TYPE_CHECKING:
+    from aisquare.core.agent_adapters.types import AgentTranscript
 
 
 def record_trace_join(session_id: str | None) -> str | None:
@@ -87,18 +101,44 @@ def session_start_context(
     transcript_path: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    agent: str = "claude-code",
+    native_session_id: str | None = None,
+    account: str | None = None,
+    config_dir: Path | None = None,
 ) -> str:
-    """Context to inject at Claude Code ``SessionStart`` (empty if nothing useful)."""
+    """Context to inject at an agent's ``SessionStart`` (empty if nothing useful).
+
+    ``config_dir`` is the home the session runs on (the hook's ``--config-dir``), whose
+    instruction files the agent loads itself; else the agent's own as this shell names it."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
     began = datetime.now(tz=UTC)  # the row's started_at: when the hook was entered
     record_trace_join(session_id)
+    adapter = recorded_adapter(agent)
+    if session_id:
+        _observe(session_id, agent, native_session_id, transcript_path, account)
+    # One store session for the launch's binding and the context's reads: each session a hook
+    # opens takes the store's lock again, on every agent's start (review of #259, round 20).
     with store_session() as store:
+        if session_id:
+            from aisquare.core.agent_sessions import bind_launch_session, own_process
+
+            bind_launch_session(
+                store,
+                session_id,
+                started=True,
+                source=source,
+                own=own_process(adapter) if adapter is not None else None,
+            )
         project = active_project(store, cwd)
         entries = store.entries(project_id=project.id)
         recorded = project_service.tracked(store, project)
         stored = store.get_project(project.id) is not None
-    # Not what Claude Code loads itself: a CLAUDE.md section `agents connect` imported
-    # rode every request twice.
-    entries = without_loaded_preferences(entries, claude_md_files(cwd))
+    # Not what the agent loads itself: a CLAUDE.md section `agents connect` imported rode
+    # every request of Claude Code's twice, an AGENTS.md one Codex's (SCOPE #113 274, L3).
+    if adapter is not None:
+        home = config_dir or adapter.config_dir(agents_core.home(), os.environ)
+        entries = without_loaded_preferences(entries, adapter.instruction_files(home, cwd))
     _refresh_code_index(project)
     block = build_block(entries, project) if entries else ""
     team_block = (
@@ -109,6 +149,9 @@ def session_start_context(
             transcript_path=transcript_path,
             model=model,
             effort=effort,
+            agent=agent,
+            native_session_id=native_session_id,
+            account=account,
             reserve=len(block) + 2 if block else 0,
         )
         if session_id
@@ -139,6 +182,41 @@ def session_start_context(
 
 #: The session start's requirements block (``briefs.session_requirements``), whole.
 _REQUIREMENTS_BLOCK = re.compile(r"\n<aisquare-requirements>\n.*?\n</aisquare-requirements>", re.S)
+
+
+def _observe(
+    session_id: str,
+    agent: str,
+    native_session_id: str | None,
+    transcript_path: str | None,
+    account: str | None,
+) -> None:
+    """What the agent handed this hook of its session, for its fleet row's launch record
+    (``core.launch_seal.observe``): written there only from a process outside any
+    sandbox, and only for the row's own session. Never raises: the record is a
+    replay's, never the hook's to fail over."""
+    with suppress(Exception):
+        from aisquare.core.agent_adapters import recorded_adapter
+        from aisquare.core.agent_sessions import own_process
+
+        adapter = recorded_adapter(agent)
+        launch_seal.observe(
+            session_id,
+            agent=agent,
+            native=native_session_id or session_id,
+            transcript=transcript_path,
+            home=account or _home_of(agent),
+            own=own_process(adapter) if adapter is not None else None,
+        )
+
+
+def _home_of(agent: str) -> str | None:
+    """The config dir this hook's agent runs under, as its launch exported it."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(agent)
+    value = os.environ.get(adapter.home_env, "").strip() if adapter is not None else ""
+    return value or None
 
 
 def _session_start_ci(
@@ -197,13 +275,25 @@ def prompt_submitted(
     transcript_path: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    agent: str = "claude-code",
+    native_session_id: str | None = None,
+    account: str | None = None,
+    source: str = "claude-code",
 ) -> str:
     """Record a submitted prompt; return the team delta to add to context."""
-    retrieved = capture_prompt(prompt, cwd, session_id=session_id)
+    retrieved = capture_prompt(prompt, cwd, session_id=session_id, source=source)
     if session_id is None:
         return retrieved
+    _observe(session_id, agent, native_session_id, transcript_path, account)
     delta = team_service.hook_prompt_heartbeat(
-        session_id, cwd, transcript_path=transcript_path, model=model, effort=effort
+        session_id,
+        cwd,
+        transcript_path=transcript_path,
+        model=model,
+        effort=effort,
+        agent=agent,
+        native_session_id=native_session_id,
+        account=account,
     )
     return "\n\n".join(part for part in (delta, retrieved) if part)
 
@@ -214,6 +304,7 @@ def session_ended(
     session_id: str | None = None,
     reason: str | None = None,
     transcript_path: str | None = None,
+    agent: str | None = None,
 ) -> None:
     """Retire the session from the orchestrator and, unless it is a fleet agent's
     ``/clear`` (``reason``), release its claims — see ``team.hook_session_end``.
@@ -227,7 +318,7 @@ def session_ended(
         team_service.hook_session_end(session_id, cwd, reason=reason)
     finally:
         metrics_service.record_usage(
-            session_id, transcript_path, cwd, trigger="session_end", ended=True
+            session_id, transcript_path, cwd, trigger="session_end", ended=True, agent=agent
         )
 
 
@@ -236,10 +327,12 @@ def turn_stopped(
     *,
     session_id: str | None = None,
     stop_hook_active: bool = False,
+    model: str | None = None,
+    effort: str | None = None,
     last_message: str | None = None,
     permission_mode: str | None = None,
     transcript_path: str | None = None,
-    effort: str | None = None,
+    agent: str | None = None,
 ) -> team_service.StopDecision | None:
     """Mark the session as waiting for input, and close this turn's metrics row.
 
@@ -252,14 +345,27 @@ def turn_stopped(
     itself, and otherwise starts its worker. Off by default; never costs the turn its row.
 
     The turn's token usage is read off ``transcript_path`` from where the last
-    record stopped, and lands on the row ``close_turn`` closed. And a fleet agent's model and
-    effort as the turn ran them (``effort``: the payload's ``effort.level``), which a ``/model``
-    may have changed: :func:`remember_the_model`.
+    record stopped, by ``agent``'s reader, and lands on the row ``close_turn`` closed. And a
+    fleet agent's model and effort as the turn ran them (``effort``: the payload's
+    ``effort.level``), which a ``/model`` may have changed: :func:`remember_the_model`.
     """
     if session_id is None:
         return None
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    # An agent whose models are AISquare's to choose has its model and effort observed off its
+    # transcript (:func:`remember_the_model`), and a transcript that says nothing changes
+    # nothing; another agent's Stop reports them (Codex's rollout), recorded as reported.
+    owner = recorded_adapter(agent)
+    reported = owner is not None and not owner.capabilities.model_ladders
     try:
-        decision = team_service.hook_stop(session_id, cwd, stop_hook_active=stop_hook_active)
+        decision = team_service.hook_stop(
+            session_id,
+            cwd,
+            stop_hook_active=stop_hook_active,
+            model=model if reported else None,
+            effort=effort if reported else None,
+        )
     finally:
         remember_the_model(session_id, transcript_path, effort=effort)
         # After the team update, never before: a metrics failure must not cost the
@@ -270,20 +376,26 @@ def turn_stopped(
         # errors too.
         trace_id = metrics_service.close_turn(session_id)
         metrics_service.record_usage(
-            session_id, transcript_path, cwd, trigger="stop", trace_id=trace_id
+            session_id, transcript_path, cwd, trigger="stop", trace_id=trace_id, agent=agent
         )
     # Last, and it swallows its own errors too: auto-mode refusals in the
     # transcript's tail put the row in attention with one board line (#150).
     auto_mode.record_refusals(session_id)
     if decision is None:
         _arm_auto_stop(session_id)
-        with contextlib.suppress(Exception):  # an optimisation may never cost a Stop
-            quiet_compact.arm(
-                session_id,
-                last_message=last_message,
-                permission_mode=permission_mode,
-                detach=_detach,
-            )
+        from aisquare.core.agent_adapters import recorded_adapter
+
+        # Only an agent with a command that compacts it (`capabilities.compact`): what the
+        # quiet compaction types.
+        kind = recorded_adapter(agent)
+        if kind is not None and kind.capabilities.compact is not None:
+            with contextlib.suppress(Exception):  # an optimisation may never cost a Stop
+                quiet_compact.arm(
+                    session_id,
+                    last_message=last_message,
+                    permission_mode=permission_mode,
+                    detach=_detach,
+                )
         # The turn is over: a decision keeps it going, and mid-turn is no place to move it.
         check_before_limit(session_id, transcript_path=transcript_path)
     return decision
@@ -381,8 +493,11 @@ def turn_failed(
     error: str | None = None,
     message: str | None = None,
     details: str | None = None,
+    notice: claude_accounts_core.LimitNotice | None = None,
+    hand_over: bool = True,
     transcript_path: str | None = None,
     cwd: Path | None = None,
+    agent: str | None = None,
 ) -> None:
     """The turn ended on an API error (Claude Code's ``StopFailure``), not a Stop (#146).
 
@@ -406,6 +521,11 @@ def turn_failed(
     find headroom leaves the agent limited, its own wait intact, and says so on
     the board — which is the ``wait`` behaviour, and correct.
 
+    Codex has no ``StopFailure``: its hooks read the limit off the end of the
+    session's rollout and come here with the ``notice`` already read
+    (``services.agent_events``). ``hand_over=False`` records the limit without
+    moving the agent — a session that is ending has nothing left to move.
+
     One switch per limit (#277): whether the hand-over will run is decided BEFORE the
     board write (:func:`_plan_hand_over`), so the ``limited`` line can say the fleet is
     moving the agent and wake no manager; woken, a manager following its cycle switched
@@ -415,19 +535,37 @@ def turn_failed(
     """
     if session_id is None:
         return
-    plan = _plan_hand_over(session_id, error=error, message=message)
+    plan = _plan_hand_over(session_id, error=error, message=message, notice=notice)
+    if plan is not None and plan.go and not hand_over:
+        plan = _HandOverPlan(plan.agent, go=False)
     try:
-        failure = team_service.hook_stop_failure(
-            session_id,
-            error=error,
-            message=message,
-            details=details,
-            handing_over=plan is not None and plan.go,
+        failure = (
+            team_service.hook_stop_failure(
+                session_id,
+                error=error,
+                message=message,
+                details=details,
+                handing_over=plan is not None and plan.go,
+            )
+            if notice is None
+            else team_service.hook_stop_failure(
+                session_id,
+                error=error,
+                message=message,
+                details=details,
+                notice=notice,
+                handing_over=plan is not None and plan.go,
+            )
         )
     finally:
         trace_id = metrics_service.close_turn(session_id)
         metrics_service.record_usage(
-            session_id, transcript_path, cwd, trigger="stop_failure", trace_id=trace_id
+            session_id,
+            transcript_path,
+            cwd,
+            trigger="stop_failure",
+            trace_id=trace_id,
+            agent=agent,
         )
     # A re-fire for the same window (Claude Code does that) is not a second
     # hand-over: the first worker is at work, or has already moved the agent.
@@ -446,7 +584,11 @@ class _HandOverPlan:
 
 
 def _plan_hand_over(
-    session_id: str, *, error: str | None, message: str | None
+    session_id: str,
+    *,
+    error: str | None,
+    message: str | None,
+    notice: claude_accounts_core.LimitNotice | None = None,
 ) -> _HandOverPlan | None:
     """Whether a ``rate_limit`` on ``session_id`` will be handed over — asked before the board
     write, so the ``limited`` line can say so — and the limit mark it leaves either way.
@@ -458,7 +600,8 @@ def _plan_hand_over(
     """
     if (error or "").strip() != "rate_limit" or not orchestrator.team_enabled():
         return None
-    notice = claude_accounts_core.parse_limit_notice(message, now=datetime.now(tz=UTC))
+    if notice is None:  # Codex's is read off its rollout (``services.agent_events``)
+        notice = claude_accounts_core.parse_limit_notice(message, now=datetime.now(tz=UTC))
     with store_session() as store:
         session = store.get_session(session_id)
         if session is None:
@@ -498,9 +641,22 @@ def _plan_hand_over(
                 f"{settings.wait_if_reset_within_minutes} min — waiting for the reset instead "
                 "of switching",
             )
+    # A row with no agent recorded is Claude Code's, as its launch record says
+    # (`recorded_adapter`): asked of every agent's accounts, a signed-in Codex one started a
+    # worker that could only refuse (review r16 of #113, 3/8).
+    from aisquare.core.agent_adapters import DEFAULT_AGENT
+    from aisquare.services import handoff  # lazy: only a limit reads it, never every hook
+
+    whose = agent.agent or DEFAULT_AGENT
     # One account: `wait`, with no board note on every limit that it is. A registry
-    # that cannot be read is no answer, and goes on to the worker, which says so.
-    return _HandOverPlan(agent, go=claude_accounts_service.somewhere_to_hand_over(leaving))
+    # that cannot be read is no answer, and goes on to the worker, which says so. An
+    # account of another installed agent is one to go to while `cross_agent_handover`
+    # is on: the worker crosses once every own account is read full (task #15).
+    return _HandOverPlan(
+        agent,
+        go=claude_accounts_service.somewhere_to_hand_over(leaving, agent=whose)
+        or handoff.somewhere_across(leaving, whose),
+    )
 
 
 def _hand_over_if_configured(failure: team_service.TurnFailure, plan: _HandOverPlan) -> None:
@@ -510,7 +666,7 @@ def _hand_over_if_configured(failure: team_service.TurnFailure, plan: _HandOverP
     if not plan.go:
         return
     window = failure.notice.window if failure.notice is not None else "usage"
-    argv = selfcli.argv_for(
+    argv = selfcli.isolated_argv_for(
         ["--quiet", "hook", "hand-over", session.id, "--reason", f"{window} limit"]
     )
     try:
@@ -661,7 +817,7 @@ the account reads under the line, those windows have reset, or the agent runs el
 class _TurnEnd:
     """The turn end a before-limit look started from: when, and how long the transcript was.
     Anything the agent began after it — a prompt stamped (``prompted_at``), a record written
-    (``transcripts.activity_since``) — means it is no longer at that safe point."""
+    (``AgentTranscript.activity_since``) — means it is no longer at that safe point."""
 
     at: datetime
     transcript: Path | None
@@ -701,19 +857,20 @@ class _TurnEnd:
             offset = None
         return cls(datetime.now(tz=UTC), transcript, offset)
 
-    def begun_since(self, session: TeamSession) -> bool:
+    def begun_since(self, session: TeamSession, reader: AgentTranscript | None) -> bool:
         """Whether ``session`` began a turn after this turn end, or is about to: its prompt
         stamped since (``UserPromptSubmit``), or its transcript grown by a prompt, a notice, a
-        queued message taken or the agent's own words, or a message queued and not yet taken.
-        A typed prompt reaches the transcript only once its hook has passed, so for one the
-        stamp comes first; a queued message or a task's notice is on disk at once. No
+        queued message taken or the agent's own words, or a message queued and not yet taken,
+        as its agent's ``reader`` reads it (``AgentTranscript.activity_since``). A typed
+        prompt reaches the transcript only once its hook has passed, so for one the stamp
+        comes first; a queued message or a task's notice is on disk at once. No reader,
         transcript or offset to read cannot say it has not: it has."""
         if session.prompted_at is not None and session.prompted_at > self.at:
             return True
-        if self.transcript is None or self.offset is None:
+        if reader is None or self.transcript is None or self.offset is None:
             return True
         try:
-            return transcripts.activity_since(self.transcript, self.offset)
+            return reader.activity_since(self.transcript, self.offset)
         except OSError:
             return True
 
@@ -729,6 +886,9 @@ class _BeforeLimitAgent:
     slot: int
     family: str | None
     transcript: Path | None
+    reader: AgentTranscript
+    """Its agent's transcript reader (:func:`_reader_of`), which says whether the turn end
+    is still a safe point."""
 
 
 def check_before_limit(session_id: str, *, transcript_path: str | None = None) -> None:
@@ -750,8 +910,9 @@ def check_before_limit(session_id: str, *, transcript_path: str | None = None) -
     :data:`HANDOVER_COOLDOWN` or looked at within it, an account the cache reads under the
     line (or over it with every window over it resetting within
     ``wait_if_reset_within_minutes``), a crossing ``warn`` has named, background work its turn
-    left running (``transcript.background_running``: an ``/exit`` would kill it), or when the
-    cache says no other account is under the line (``claude_accounts.room_on_record``).
+    left running (its agent's ``AgentTranscript.background_work``: an ``/exit`` would kill it;
+    an agent whose adapter has no transcript reader is never moved early), or when the cache
+    says no other account of its agent is under the line (``claude_accounts.room_on_record``).
 
     An extra on the turn end, never part of it: it swallows its own failures, said on stderr,
     so a Stop is never reported as lost for it.
@@ -788,12 +949,19 @@ def _before_limit_agent(
             return None  # a hand-typed session is the operator's to move
         if harness.base_role(agent.role) in _NOT_MOVED_EARLY:
             return None
+        reader = _reader_of(agent)
+        if reader is None:
+            # Whether its turn end is a safe point is read off its transcript: an agent
+            # whose adapter has no reader is never moved early, as a transcript that cannot
+            # be read counts as background work running.
+            return None
         if team_service.fleet_paused(store, agent):
             return None
         if _auto_stop_has_it(store, agent, session):
             return None
     named = agent.launch_spec is not None and agent.launch_spec.account_pinned
-    if claude_accounts_service.account_pin(agent.role, named=named) is not None:
+    pin = claude_accounts_service.account_pin(agent.role, named=named, agent=_agent_of(agent))
+    if pin is not None:
         return None
     slot = claude_accounts_service.leaving_slot(agent.account_slot, session.account)
     if slot is None:
@@ -805,7 +973,26 @@ def _before_limit_agent(
         slot,
         harness.model_family(session.model),
         _transcript_of(session, transcript_path),
+        reader,
     )
+
+
+def _agent_of(agent: FleetAgent) -> str:
+    """The id of the agent ``agent`` runs: its row's, the default agent's for a row from
+    before adapters (``recorded_adapter``)."""
+    from aisquare.core.agent_adapters import DEFAULT_AGENT
+
+    return agent.agent or DEFAULT_AGENT
+
+
+def _reader_of(agent: FleetAgent) -> AgentTranscript | None:
+    """The transcript reader of the agent ``agent`` runs (``AgentAdapter.transcript_reader``),
+    which says whether its turn end is a safe point; ``None`` for an agent this install does
+    not know, or one with no reader."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(agent.agent)
+    return adapter.transcript_reader if adapter is not None else None
 
 
 def _auto_stop_has_it(store: ContextStore, agent: FleetAgent, session: TeamSession) -> bool:
@@ -832,15 +1019,18 @@ def _transcript_of(session: TeamSession, given: str | None) -> Path | None:
     return None
 
 
-def _background_work(transcript: Path | None, since: datetime) -> bool:
-    """Whether the agent's turn left background work running (a ``run_in_background`` Bash, a
-    background subagent) that an ``/exit`` would kill; ``since`` is the start of the process
-    running it, its fleet row's. A transcript that cannot be read cannot say it left none: it
-    counts as running."""
-    if transcript is None:
+def _background_work(
+    reader: AgentTranscript | None, transcript: Path | None, since: datetime
+) -> bool:
+    """Whether the agent's turn left background work running that an ``/exit`` would kill (a
+    ``run_in_background`` Bash or a background subagent of Claude Code's, an exec session of
+    Codex's), as its agent's ``reader`` reads it (``AgentTranscript.background_work``);
+    ``since`` is the start of the process running it, its fleet row's. No reader, or a
+    transcript that cannot be read, cannot say it left none: it counts as running."""
+    if reader is None or transcript is None:
         return True
     try:
-        return bool(transcripts.background_running(transcript, since=since))
+        return bool(reader.background_work(transcript, since))
     except OSError:
         return True
 
@@ -896,13 +1086,13 @@ def _worth_a_look(
         return None
     if settings.before_limit == "warn" and _warned(warned, found.slot):
         return None
-    if _background_work(found.transcript, agent.created_at):
+    if _background_work(found.reader, found.transcript, agent.created_at):
         return None  # its next turn end, once the work has reported, asks again
     turn_end = _TurnEnd.now(found.transcript)
-    if turn_end.begun_since(found.session):
+    if turn_end.begun_since(found.session, found.reader):
         return None  # a message queued during the turn starts the next one now
     if line is not None and not claude_accounts_service.room_on_record(
-        found.slot, switch_at=settings.switch_at, family=found.family
+        found.slot, switch_at=settings.switch_at, family=found.family, agent=_agent_of(agent)
     ):
         return None  # every other account is over the line: no read, no worker
     with store_session() as store:
@@ -947,7 +1137,10 @@ def before_limit_worker(session_id: str) -> None:
     The cool-down the hook claimed is given back when it ends on what the next turn end can
     decide from the cache — the agent busy again, background work started, the account under
     the line or about to reset — and kept when a read failed or no account had room, so a
-    failing endpoint or a full fleet is asked at most once a cool-down per agent.
+    failing endpoint or a full fleet is asked at most once a cool-down per agent. An account
+    whose reading is read off its own home (Codex's, ``AgentAccounts.network_usage`` off) is
+    never in the cache, so the next turn end could not decide it: under the line, it keeps
+    the cool-down too, and such an agent is looked at once a cool-down, not at every turn end.
     """
     settings = claude_accounts_service.accounts_settings()
     if settings.before_limit == "off" or not orchestrator.team_enabled():
@@ -962,7 +1155,7 @@ def before_limit_worker(session_id: str) -> None:
     agent = found.agent
     if datetime.now(tz=UTC) - agent.created_at < HANDOVER_COOLDOWN:
         return  # started or moved within the cool-down: the hook would not have asked
-    if _background_work(found.transcript, agent.created_at):
+    if _background_work(found.reader, found.transcript, agent.created_at):
         _give_back(agent)
         return
     line = claude_accounts_service.line_reading(
@@ -971,7 +1164,8 @@ def before_limit_worker(session_id: str) -> None:
     if line is None:
         return  # no live reading: the cool-down is spent, so a failing read is not retried
     if not line.over or line.lifts_within(settings.wait_if_reset_within_minutes):
-        _give_back(agent)
+        if claude_accounts_core.kind(line.account.agent).network_usage:
+            _give_back(agent)  # the cache now holds the reading the next turn end decides on
         return
     with store_session() as store:
         warned = store.ui_state(_key(_WARNED_KEY, agent))
@@ -982,6 +1176,7 @@ def before_limit_worker(session_id: str) -> None:
         project=found.project,
         exclude=(found.slot,),
         automatic=True,
+        agent=_agent_of(agent),
         family=found.family,
         max_age=claude_accounts_service.PICK_MAX_AGE_SECONDS,
     )
@@ -1042,9 +1237,9 @@ def _still_waiting(session_id: str, turn_end: _TurnEnd) -> Callable[[], None]:
         found = _before_limit_agent(session_id)
         if found is None:
             raise _StartedATurn(session_id)
-        if turn_end.begun_since(found.session):
+        if turn_end.begun_since(found.session, found.reader):
             raise _StartedATurn(session_id, prompted=True)
-        if _background_work(found.transcript, found.agent.created_at):
+        if _background_work(found.reader, found.transcript, found.agent.created_at):
             raise _StartedATurn(session_id)
 
     return check
@@ -1065,33 +1260,43 @@ def _still_idle_after_mark(session_id: str, turn_end: _TurnEnd) -> Callable[[], 
         with store_session() as store:
             session = store.get_session(session_id)
             agent = store.fleet_agent_for_session(session_id)
-        if session is None or agent is None or turn_end.begun_since(session):
+        reader = _reader_of(agent) if agent is not None else None
+        if session is None or agent is None or turn_end.begun_since(session, reader):
             raise _StartedATurn(session_id, prompted=True)
         shown = _pane_shows(agent)
         if shown != "idle":
             raise _StartedATurn(session_id, prompted=shown == "busy")
-        if _background_work(_transcript_of(session, None), agent.created_at):
+        if _background_work(reader, _transcript_of(session, None), agent.created_at):
             raise _StartedATurn(session_id)
 
     return check
 
 
 def _pane_shows(agent: FleetAgent) -> str:
-    """``idle``: Claude Code's input box drawn and idle at its prompt. ``busy``: the box drawn
-    under a spinner or ``esc to interrupt`` — a turn, a prompt's hook included. ``unknown``: no
-    capture, a dialog, no box; one look, which fails closed to anything but ``idle``."""
-    from aisquare.core import claude_screen
+    """``idle``: the agent's prompt drawn and idle (``AgentScreen.ready``; Claude Code's input
+    box with no spinner above it). ``busy``: the prompt drawn under a turn, a prompt's hook
+    included (``AgentScreen.drawn``). ``unknown``: no capture, a dialog, no prompt; one look,
+    which fails closed to anything but ``idle``.
+
+    Read by the pane's own agent through ``captain.screen``, the escapes ``capture-pane -e``
+    keeps stripped first: Codex draws its composer and its footer styled (``\\x1b[1m?\\x1b[0m
+    for shortcuts``, measured on 0.164.0), and its readers, handed the rows as captured, read
+    its idle prompt as no prompt at all, so a Codex row was never moved before its limit
+    (#39's reopen, board seq 4202)."""
     from aisquare.services import fleet as fleet_service  # lazy, as in `hand_over`
+    from aisquare.services.captain import screen as pane_screen
 
     try:
         lines = fleet_service.server_of(agent).capture(agent.pane_id).lines
     except Exception:
         return "unknown"
-    if claude_screen.box_idle(lines):
+    if pane_screen.ready(agent, lines):
         return "idle"
-    return (
-        "busy" if claude_screen.input_box_at(claude_screen.tail(lines)) is not None else "unknown"
-    )
+    # Its blank rows dropped, as main read the box (`claude_screen.tail`): a footer drawn with
+    # a gap in it counted the gap against its rows, and a turn read as no prompt at all
+    # (review r28 of #113, n2).
+    shown = [row for row in pane_screen.strip_escapes(lines) if row.strip()]
+    return "busy" if pane_screen.drawn(agent, shown) else "unknown"
 
 
 def hand_over(
@@ -1204,6 +1409,8 @@ def hand_over(
                 store.touch_session(session.id, state="working")
         _give_back(agent)
         return
+    except fleet_service.LaunchRefused:
+        return  # its reason is on the board already, once for the row
     except fleet_service.FleetError as exc:
         # The manager's to act on (#277): the refusal names `fleet switch` or the reset.
         team_service.hook_handover_failed(
@@ -1237,7 +1444,13 @@ def hand_over(
         )
 
 
-def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | None = None) -> str:
+def capture_prompt(
+    prompt: str | None,
+    cwd: Path | None,
+    *,
+    session_id: str | None = None,
+    source: str = "claude-code",
+) -> str:
     """Record the prompt, consult CI, open this turn's row.
 
     Three steps, deliberately separated. The store is opened for the prompt
@@ -1291,7 +1504,7 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
                 return ""
             project_service.capture(store, project)
             if text is not None:
-                store.add_prompt(text, project.id, source="claude-code")
+                store.add_prompt(text, project.id, source=source)
         if text is not None:
             insights.record_prompt(text, session_id=session_id, project_id=project.id)
     except Exception as exc:  # never disrupt the session to record it — but say what it cost

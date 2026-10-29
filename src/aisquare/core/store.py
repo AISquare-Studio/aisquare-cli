@@ -30,11 +30,12 @@ import sys
 import time
 import uuid
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime, timedelta
+from functools import wraps
 from pathlib import Path
 from types import EllipsisType
-from typing import Any, Literal, NamedTuple, Protocol
+from typing import Any, Concatenate, Literal, NamedTuple, ParamSpec, Protocol, TypeVar
 
 from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
@@ -65,6 +66,7 @@ from aisquare.models import (
     TurnUsage,
     UsageSample,
     UsageTurnRow,
+    UsageWindow,
 )
 
 _SCHEMA_V1 = """
@@ -534,11 +536,47 @@ def _index_task_numbers(connection: sqlite3.Connection) -> None:
 # Python that must run before a migration's statements, inside its transaction,
 # keyed by the version being upgraded FROM. Kept apart from _MIGRATIONS so the
 # scripts stay plain SQL that executescript and _statements build identically.
+def _has_table(connection: sqlite3.Connection, table: str) -> bool:
+    query = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
+    return connection.execute(query, (table,)).fetchone() is not None
+
+
+#: The two triggers v42 makes (#113), each ``IF NOT EXISTS``.
+_TEAM_META_TRIGGERS = """
+CREATE TRIGGER IF NOT EXISTS team_meta_insert_time AFTER INSERT ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+CREATE TRIGGER IF NOT EXISTS team_meta_update_time AFTER UPDATE OF value ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+"""
+
+
+def _date_team_meta_writes(connection: sqlite3.Connection) -> None:
+    """v41 → v42 (#113): the triggers that date every insert and change of a ``team_meta``
+    row. A trigger cannot be made on a table that is not there, and a store that lacks
+    ``team_meta`` still opens, for the doctor to name what it lacks."""
+    if _has_table(connection, "team_meta"):
+        for statement in _statements(_TEAM_META_TRIGGERS):
+            connection.execute(statement)
+
+
+def _redate_team_meta(connection: sqlite3.Connection) -> None:
+    """v42 → v43 (#113): the rows #113's dogfooded v16 left dated 0, dated now."""
+    if _has_table(connection, "team_meta"):
+        connection.execute(
+            "UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
+            "WHERE updated_at = 0"
+        )
+
+
 _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
     11: _retire_v1_metric_table,
     12: _converge_v11_fork,
     25: _index_board_stamps,
     29: _index_task_numbers,
+    41: _date_team_meta_writes,
+    42: _redate_team_meta,
 }
 
 
@@ -740,11 +778,6 @@ def _number_unnumbered_tasks(connection: sqlite3.Connection) -> None:
         raise
 
 
-def _has_table(connection: sqlite3.Connection, table: str) -> bool:
-    query = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
-    return connection.execute(query, (table,)).fetchone() is not None
-
-
 #: The board of a ``fleet_agent`` row that recorded none: that of the session bound to it,
 #: the one its hooks registered on, else its own project's. The one answer for the v32
 #: backfill (:func:`_board_existing_agents`) and for every read of a row written with no
@@ -773,6 +806,98 @@ def _board_existing_agents(connection: sqlite3.Connection) -> None:
     connection.execute(f"UPDATE fleet_agent SET board = {_UNRECORDED_BOARD} WHERE board IS NULL")
 
 
+def _adopt_claude_code_identity(connection: sqlite3.Connection) -> None:
+    """v40 → v41's backfill (#113): the sessions and fleet agents Claude Code made say so.
+
+    Runs right after ``team_session.native_session_id`` is added (``agent`` is added just
+    before it), in the same transaction, and only then (:data:`_BACKFILLS`). A session
+    with an account and a Claude Code transcript was Claude Code's, and its id is the one
+    Claude Code assigned.
+    """
+    connection.execute(
+        "UPDATE team_session SET agent = 'claude-code', native_session_id = id "
+        "WHERE account IS NOT NULL AND transcript_path LIKE '%/projects/%.jsonl'"
+    )
+
+
+def _adopt_claude_code_fleet_agents(connection: sqlite3.Connection) -> None:
+    """v40 → v41's backfill (#113): a fleet agent started as ``claude`` is Claude Code's."""
+    connection.execute("UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude'")
+
+
+#: The agent a usage row from before v47 is given when nothing says whose it was, in a store
+#: that recorded an agent whose usage is not shared: one no install knows, so the row is
+#: counted locally and never shared (``services.usage_stats.shared_usage``). A sweep that
+#: reads the session on writes its agent over it (``record_usage``).
+UNATTRIBUTED_USAGE_AGENT = "unattributed"
+
+
+def _column_values(connection: sqlite3.Connection, table: str, column: str) -> set[str]:
+    """The distinct values ``table.column`` holds, none where either is missing."""
+    if not _has_table(connection, table):
+        return set()
+    if column not in {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}:
+        return set()
+    query = f"SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL"
+    return {str(row[0]) for row in connection.execute(query)}
+
+
+def _attribute_usage_sessions(connection: sqlite3.Connection) -> None:
+    """v46 → v47's backfill (#113, review r28 m1): the agent of each usage row from before
+    the column. Its session's (``team_session.agent``: a Stop records a row under the board's
+    id for its session), else the agent whose transcript roots hold its transcript
+    (``claude_accounts.transcript_home``, by the path alone: the file may be gone).
+
+    A share needs a positive attribution. A row neither gives keeps NULL, which reads as the
+    default agent's, only in a store that never recorded an agent whose usage is not shared
+    (every release's: they ran Claude Code alone, and a release that shares the store still
+    writes NULL); in any other it is :data:`UNATTRIBUTED_USAGE_AGENT`, never shared.
+
+    Runs right after ``usage_session.agent`` is added, in the same transaction, and only then
+    (:data:`_BACKFILLS`); and again on the rows still NULL whenever the sharing path builds a
+    batch (:meth:`SqliteStore.attribute_usage_agents`), since a store can be stamped v47 with
+    none of this run, or be given a NULL row by an older build after it ran.
+    """
+    # Lazy: the adapters, and the account modules they read, are no import of the store's.
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    if "agent" in {row[1] for row in connection.execute("PRAGMA table_info(team_session)")}:
+        connection.execute(
+            "UPDATE usage_session SET agent = (SELECT session.agent FROM team_session AS session"
+            " WHERE session.id = usage_session.session_id) WHERE agent IS NULL"
+        )
+    rows = connection.execute(
+        "SELECT session_id, transcript_path FROM usage_session"
+        " WHERE agent IS NULL AND transcript_path IS NOT NULL"
+    ).fetchall()
+    for session_id, transcript_path in rows:
+        named = accounts_core.transcript_home(Path(transcript_path))
+        if named is not None:
+            connection.execute(
+                "UPDATE usage_session SET agent = ? WHERE session_id = ?", (named[0], session_id)
+            )
+    recorded = set().union(
+        *(
+            _column_values(connection, table, "agent")
+            for table in ("team_session", "fleet_agent", "agent_account", "usage_session")
+        )
+    )
+    if any(
+        (adapter := recorded_adapter(agent)) is None or not adapter.capabilities.usage_shared
+        for agent in recorded
+    ):
+        connection.execute(
+            "UPDATE usage_session SET agent = ? WHERE agent IS NULL", (UNATTRIBUTED_USAGE_AGENT,)
+        )
+
+
+def _date_team_meta(connection: sqlite3.Connection) -> None:
+    """v41 → v42's backfill (#113): the ``team_meta`` rows from before the column are
+    dated now, so the launch-metadata cleanup gives them a full retention period."""
+    connection.execute("UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER)")
+
+
 #: Backfills that belong to a column, keyed ``(table, column)``. Each runs in the
 #: transaction that adds its column, right after the ALTER, and only when the
 #: column was actually added: by its step on the ladder or by
@@ -786,6 +911,10 @@ _BACKFILLS: dict[tuple[str, str], Callable[[sqlite3.Connection], None]] = {
     ("project_explainability", "api_url"): _bind_keys_to_their_destinations,
     ("team_task", "number"): _number_existing_tasks,
     ("fleet_agent", "board"): _board_existing_agents,
+    ("team_session", "native_session_id"): _adopt_claude_code_identity,
+    ("fleet_agent", "agent"): _adopt_claude_code_fleet_agents,
+    ("team_meta", "updated_at"): _date_team_meta,
+    ("usage_session", "agent"): _attribute_usage_sessions,
 }
 
 # v14: ``project forget`` — a tombstone on the registration, in the same spirit as
@@ -1154,7 +1283,6 @@ CREATE INDEX IF NOT EXISTS usage_turn_session ON usage_turn (session_id, seq);
 # (:func:`_converge_by_presence`) adds the column, the ladder runs v35's ``IF NOT EXISTS``
 # script, and this step finds its columns in place.
 _SCHEMA_V36 = ""
-
 # v37, P1 WS-2 (#279): who caused a board event (``team_event.actor``) and its details as
 # JSON (``team_event.meta``), so a manager's own stop wakes nobody and an exit says its
 # status. Both columns are nullable and in :data:`_PRODUCTS`, added only where absent, so a
@@ -1256,6 +1384,104 @@ CREATE TABLE IF NOT EXISTS feature_use (
 
 CREATE INDEX IF NOT EXISTS usage_turn_recorded ON usage_turn (recorded_at);
 """
+
+# v41-v46 (#113): the coding-agent steps. That line stamped them 15-17 while it was in
+# flight (the note above _SCHEMA_V15), then 26-29 once it took main's v25, then 33-36
+# once it took 0.8.1's 26-32, then 34-38 once it took 0.8.2's v33 (the persona columns),
+# then 36-41 once it took #274's v34 (``fleet_agent.ended_by``) and v35 (the usage
+# tables), then 37-42 once it took #295's v36 (the first-message columns), then 38-43
+# once it took #296's v37 (``team_event.actor`` and ``meta``); 0.9.0's v38 (P2-W6's parent
+# manager columns) and v39 (work briefs) took the numbers under these, and 0.9.1's v40
+# (Usage & stats) the next, so they come after them, renumbered once more.
+# Idempotent like every step from v15 on: the columns are in :data:`_PRODUCTS`, their
+# backfills in :data:`_BACKFILLS`, the triggers are ``IF NOT EXISTS`` and the tables and
+# their indexes too. A store #113's line stamped 26-29 ran
+# none of 0.8.1's v26-v29 under those numbers, one it stamped 33-36 has no persona
+# columns, one it stamped 34-38 has neither ``ended_by`` nor the usage tables, one it
+# stamped 36-41 has no first-message columns, one it stamped 37-42 has no event actor,
+# one it stamped 38-43 has neither P2-W6's columns nor ``brief``, and one it stamped
+# 40-45 (a store of this line from before 0.9.1) has neither of 0.9.1's tables
+# (``repo_profile``, ``feature_use``) nor the four usage columns: the presence pass
+# (:func:`_converge_by_presence`) finds those columns, tables and indexes absent and
+# applies them, with their backfills (task numbers among them), before the ladder goes on
+# from its stamp; and these steps, whose products it holds already, add nothing to it but
+# the v43 repair of rows dated 0, which converges.
+#
+# v41: native coding-agent identity, independent of runtime session IDs.
+# ``team_session.agent`` and ``native_session_id`` and ``fleet_agent.agent`` are the
+# whole step, so the script is empty; their backfill
+# (:func:`_adopt_claude_code_identity`) marks the rows Claude Code made.
+_SCHEMA_V41 = ""
+# v42: when each ``team_meta`` row was last written, for the launch-metadata cleanup.
+# The column, ``team_meta.updated_at``, is in :data:`_PRODUCTS`, and its backfill
+# (:func:`_date_team_meta`) dates the rows that predate it; the triggers, made in
+# Python where the table is (:func:`_date_team_meta_writes`, in :data:`_PREPARE`), date
+# every later insert and change of value.
+_SCHEMA_V42 = ""
+# v43: #113 stamped 17 for this repair while the native-agent branch was being
+# dogfooded: its v16 stores made before that step's backfill was added hold rows
+# dated 0. An UPDATE of those rows only, where the table is (:func:`_redate_team_meta`):
+# a store that meets it twice converges.
+_SCHEMA_V43 = ""
+# v44: the arrangement of OTHER agents' account slots (Codex's, t3). The slots are
+# directories like Claude Code's (``core.claude_accounts``: one ladder numbers every
+# agent's, so ``slot`` alone is the key), and this table is ``claude_account`` for
+# them, plus the agent: an alias, a rank among that agent's slots, a default PER
+# AGENT (the partial unique index is on ``agent``) and a disabled flag. A table of
+# its own rather than rows in ``claude_account``: that one's single-default index
+# would allow one default for the whole machine, and a build from before this step
+# reconciles ``claude_account`` against Claude Code's directories alone — it would
+# prune every Codex row it met, on any machine where two builds share the store.
+# Aliases are unique across the two tables by the service (``set_alias`` checks the
+# other agent's before writing); within this one, by the index. The default flag is
+# retired the way ``claude_account``'s is (0.9.0, #406): rank 1 of the one order (v46) is
+# the machine default, so a flag a store still carries is folded into the order on the
+# next read (:meth:`SqliteStore.promote_retired_agent_account_default`) and cleared.
+_SCHEMA_V44 = """
+CREATE TABLE IF NOT EXISTS agent_account (
+    slot        INTEGER PRIMARY KEY,
+    agent       TEXT NOT NULL,
+    config_dir  TEXT NOT NULL,
+    alias       TEXT,
+    position    INTEGER NOT NULL,
+    is_default  INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+    disabled    INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+    created_at  TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS agent_account_alias ON agent_account (alias)
+    WHERE alias IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS agent_account_default ON agent_account (agent)
+    WHERE is_default = 1;
+"""
+# v45: every window a usage reading has (``claude_usage.windows``, the ``UsageWindow`` list as
+# JSON), so the five-minute cache serves an agent whose windows are not Claude Code's five
+# hours and week (a daily quota per model) what it read. The column is the whole step, so
+# the script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps NULL, which
+# reads as its session and week columns say, as every row did.
+_SCHEMA_V45 = ""
+# v46: ONE priority order over every agent's accounts (owner, PR #113): a rank per slot,
+# whatever agent the slot is (``slot`` alone is the key, as v44 says). The per-agent
+# ``position`` columns stay, and are kept in step with it, for the builds before this step
+# that share the store. A table of its own, not a column on the two registries: an older
+# build reconciles those and would never write a rank for the slots it adds, while a slot
+# with no rank here is simply ranked last by the service, which seeds the table on its
+# first read (``services.claude_accounts._ranked``: the default agent's accounts first,
+# so nothing changes on upgrade) since the default agent is the user's config, not the
+# store's.
+_SCHEMA_V46 = """
+CREATE TABLE IF NOT EXISTS account_rank (
+    slot  INTEGER PRIMARY KEY,
+    rank  INTEGER NOT NULL
+);
+"""
+# v47: the agent whose session a usage row is (``usage_session.agent``, its adapter's id), so
+# the opt-in usage share keeps the agents its consent names (``AgentCapabilities.usage_shared``)
+# and leaves the rest out, while the local stats count every one. The column is the whole
+# step, so the script is empty: it is in :data:`_PRODUCTS`. A row from before it is given its
+# session's agent, else its transcript's (:func:`_attribute_usage_sessions`): this branch
+# recorded Codex rows before the column (review r28 of #113, m1). One neither names keeps
+# NULL, which reads as the default agent's, only where the store never recorded another.
+_SCHEMA_V47 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1298,6 +1524,13 @@ _MIGRATIONS = (
     _SCHEMA_V38,
     _SCHEMA_V39,
     _SCHEMA_V40,
+    _SCHEMA_V41,
+    _SCHEMA_V42,
+    _SCHEMA_V43,
+    _SCHEMA_V44,
+    _SCHEMA_V45,
+    _SCHEMA_V46,
+    _SCHEMA_V47,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1384,6 +1617,21 @@ _PRODUCTS: dict[int, _Products] = {
             ("usage_turn", "source", "TEXT"),
         ),
     ),
+    40: _Products(
+        columns=(
+            ("team_session", "agent", "TEXT"),
+            ("team_session", "native_session_id", "TEXT"),
+            ("fleet_agent", "agent", "TEXT"),
+        )
+    ),
+    41: _Products(
+        ("team_meta_insert_time", "team_meta_update_time"),
+        (("team_meta", "updated_at", "INTEGER NOT NULL DEFAULT 0"),),
+    ),
+    43: _Products(("agent_account", "agent_account_alias", "agent_account_default")),
+    44: _Products(columns=(("claude_usage", "windows", "TEXT"),)),
+    45: _Products(("account_rank",)),
+    46: _Products(columns=(("usage_session", "agent", "TEXT"),)),
 }
 
 _PROJECT_COLUMNS = (
@@ -1448,11 +1696,12 @@ in the wall-clock median. Older than this it stays open and is excluded
 instead, which is what an unfinished turn is."""
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
-    "transcript_path, account, model, effort, limit_resets_at, persona, prompted_at"
+    "transcript_path, account, model, effort, limit_resets_at, agent, native_session_id, "
+    "persona, prompted_at"
 )
 _USAGE_COLUMNS = (
     "slot, fetched_at, session_percent, session_resets_at, week_percent, week_resets_at, "
-    "token_fingerprint"
+    "token_fingerprint, windows"
 )
 #: How long usage readings are kept — long enough for a weekly window's history.
 _USAGE_RETENTION = timedelta(days=7)
@@ -1467,7 +1716,7 @@ _FLEET_AGENT_FIELDS = (
     "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
     "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
     "account_slot", "launch_spec", "socket_path", "boot_id", "server_started_at", "branch",
-    "board", "persona", "ended_by", "first_prompt", "first_prompt_at",
+    "board", "agent", "persona", "ended_by", "first_prompt", "first_prompt_at",
 )  # fmt: skip
 _FLEET_AGENT_COLUMNS = ", ".join(_FLEET_AGENT_FIELDS)
 
@@ -1495,6 +1744,9 @@ _FLEET_AGENT_READ_SESSIONLESS = _read_list(
     _FLEET_AGENT_FIELDS, {"board": _FLEET_AGENT_BOARD_SESSIONLESS}
 )
 _CLAUDE_ACCOUNT_COLUMNS = "slot, config_dir, alias, position, is_default, disabled, created_at"
+_AGENT_ACCOUNT_COLUMNS = (
+    "slot, agent, config_dir, alias, position, is_default, disabled, created_at"
+)
 
 
 class AmbiguousIdError(LookupError):
@@ -1520,6 +1772,7 @@ def is_the_home(root: Path) -> bool:
 class ContextStore(Protocol):
     """Everything the service layer needs from persistent context storage."""
 
+    def transaction(self) -> AbstractContextManager[None]: ...
     def add(self, entry: ContextEntry) -> ContextEntry: ...
     def get(self, ref: str) -> ContextEntry | None: ...
     def entries(
@@ -1562,6 +1815,7 @@ class ContextStore(Protocol):
     ) -> list[PromptRecord]: ...
     def team_active(self, project_id: str) -> bool: ...
     def upsert_session(self, session: TeamSession) -> TeamSession: ...
+    def adopt_session(self, provisional_id: str, native_id: str, lease_until: datetime) -> None: ...
     def get_session(
         self, session_id: str, *, project_ids: Collection[str] | None = None
     ) -> TeamSession | None: ...
@@ -1581,14 +1835,12 @@ class ContextStore(Protocol):
     def touch_session(
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None: ...
+    def set_session_model(self, session_id: str, model: str | None, effort: str | None) -> None: ...
     def replace_session_state(self, session_id: str, expected: str, state: str) -> bool: ...
     def mark_handover(self, session_id: str, *, held_after: datetime) -> bool: ...
     def mark_attention(self, session_id: str) -> bool: ...
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None: ...
     def set_transcript_path(self, session_id: str, transcript_path: str) -> None: ...
-    def set_session_model(
-        self, session_id: str, *, model: str | None, effort: str | None
-    ) -> None: ...
     def unmark_handover(self, session_id: str, state: str) -> None: ...
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
     def release_claims(self, session_id: str) -> list[TeamTask]: ...
@@ -1650,7 +1902,7 @@ class ContextStore(Protocol):
     def usage_transcripts(self) -> dict[str, str]: ...
     def fleet_activity(
         self, since: datetime, until: datetime
-    ) -> tuple[list[tuple[datetime, str]], list[datetime]]: ...
+    ) -> tuple[list[tuple[datetime, str, str | None]], list[tuple[datetime, str | None]]]: ...
     def usage_turn_count(self) -> int: ...
     def unattributed_usage(self, limit: int = 5_000) -> list[SessionUsage]: ...
     def attribute_usage(
@@ -1661,6 +1913,7 @@ class ContextStore(Protocol):
         account_type: str | None,
         repo_id: str | None,
     ) -> None: ...
+    def attribute_usage_agents(self) -> None: ...
     def repo_profiles(self) -> dict[str, RepoProfile]: ...
     def save_repo_profile(self, profile: RepoProfile) -> None: ...
     def add_feature_uses(self, counts: Mapping[tuple[str, str], int]) -> None: ...
@@ -1669,7 +1922,12 @@ class ContextStore(Protocol):
     ) -> list[tuple[str, str, int]]: ...
     def get_meta(self, key: str) -> str | None: ...
     def set_meta(self, key: str, value: str) -> None: ...
-    def delete_meta(self, key: str) -> None: ...
+    def touch_meta(self, key: str) -> None: ...
+    def set_meta_once(self, key: str, value: str) -> bool: ...
+    def compare_meta(self, key: str, expected: str, value: str) -> bool: ...
+    def delete_meta(self, key: str, *, expected: str | None = None) -> bool: ...
+    def clear_native_launch(self, launch_id: str) -> int: ...
+    def expire_native_launches(self, before: float) -> int: ...
     def list_meta(self, prefix: str) -> dict[str, str]: ...
     def add_signal_events(
         self, writes: Sequence[tuple[TeamEvent, str, dict[str, Any]]]
@@ -1725,6 +1983,7 @@ class ContextStore(Protocol):
         since_seq: int | None = None,
         kind: str | None = None,
         task_id: str | None = None,
+        to_role: str | None = None,
         exclude_kinds: Collection[str] = (),
         limit: int = 30,
     ) -> list[TeamEvent]: ...
@@ -1769,6 +2028,7 @@ class ContextStore(Protocol):
     def fleet_manager_board(self, project_id: str) -> str | None: ...
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None: ...
     def fleet_session_ids(self) -> set[str]: ...
+    def land_fleet_session(self, agent_id: str) -> bool: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
     def replace_ui_state(self, key: str, expected: str | None, value: str | None) -> bool: ...
@@ -1855,7 +2115,20 @@ class ContextStore(Protocol):
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None: ...
     def set_claude_account_disabled(self, slot: int, disabled: bool) -> None: ...
     def order_claude_accounts(self, slots: Sequence[int]) -> None: ...
+    # Other agents' account registry (v44): the same arrangement, per agent.
+    def agent_accounts(self, agent: str) -> list[ClaudeAccountRecord]: ...
+    def upsert_agent_account(
+        self, agent: str, slot: int, config_dir: Path
+    ) -> ClaudeAccountRecord: ...
+    def delete_agent_accounts(self, agent: str, slots: Sequence[int]) -> int: ...
+    def set_agent_account_alias(self, agent: str, slot: int, alias: str | None) -> None: ...
+    def set_agent_account_disabled(self, agent: str, slot: int, disabled: bool) -> None: ...
+    def order_agent_accounts(self, agent: str, slots: Sequence[int]) -> None: ...
+    # One priority order over every agent's slots (v46).
+    def account_ranks(self) -> dict[int, int]: ...
+    def rank_accounts(self, slots: Sequence[int]) -> None: ...
     def promote_retired_claude_account_default(self) -> int | None: ...
+    def promote_retired_agent_account_default(self, agent: str) -> int | None: ...
     # Usage readings (v16, #146): the history behind "how fast is this window filling".
     def add_usage_sample(self, sample: UsageSample) -> None: ...
     def usage_samples(self, slot: int, *, since: datetime) -> list[UsageSample]: ...
@@ -1923,6 +2196,7 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         label=row["label"],
         role=row["role"],
         binary=row["binary"],
+        agent=row["agent"],
         tmux_socket=row["tmux_socket"],
         pane_id=row["pane_id"],
         session_id=row["session_id"],
@@ -1944,6 +2218,28 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         ended_by=row["ended_by"],
         first_prompt=row["first_prompt"],
         first_prompt_at=_maybe_dt(row["first_prompt_at"]),
+    )
+
+
+#: The session a launch bound to a fleet row at its start (#113), as a column a listing
+#: reads beside the row (:func:`_row_to_bound_fleet_agent`): one query for the whole list,
+#: where :meth:`SqliteStore._bound_fleet_agent` asks ``team_meta`` once per row.
+_FLEET_AGENT_BINDING = (
+    "(SELECT value FROM team_meta WHERE key = 'fleet-session:' || fleet_agent.id) "
+    "AS bound_session_id"
+)
+
+
+def _row_to_bound_fleet_agent(row: sqlite3.Row) -> FleetAgent:
+    """A row read with :data:`_FLEET_AGENT_BINDING`, as ``_bound_fleet_agent`` reads one: the
+    row's own session first, since the launch's binding is the session it started with, and a
+    row moves off that (a ``/clear``) only in its own column (``adopt_fleet_agent_session``)."""
+    agent = _row_to_fleet_agent(row)
+    bound = row["bound_session_id"]
+    return (
+        agent.model_copy(update={"session_id": bound})
+        if bound and agent.session_id is None
+        else agent
     )
 
 
@@ -2011,9 +2307,14 @@ def _maybe_dt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
+#: The key of a task event's ``meta`` that names the agent of the launch it was written in,
+#: when no session does (``services.team``'s task writes): what ``fleet_activity`` gives a
+#: task marked done there without ``--as`` (tester-42b on #42).
+LAUNCH_AGENT_META = "launch_agent"
+
 _SESSION_USAGE_COLUMNS = (
     "session_id, project_id, transcript_path, state, usage, turns, total_tokens, weighted, "
-    "cost_usd, started_at, updated_at, ended_at, account_slot, account_type, repo_id"
+    "cost_usd, started_at, updated_at, ended_at, account_slot, account_type, repo_id, agent"
 )
 _TURN_USAGE_COLUMNS = (
     "id, session_id, project_id, trace_id, seq, trigger, recorded_at, usage, total_tokens, "
@@ -2052,6 +2353,7 @@ def _row_to_session_usage(row: sqlite3.Row) -> SessionUsage:
         account_slot=row["account_slot"],
         account_type=row["account_type"],
         repo_id=row["repo_id"],
+        agent=row["agent"],
     )
 
 
@@ -2135,6 +2437,8 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         account=row["account"],
         model=row["model"],
         effort=row["effort"],
+        agent=row["agent"],
+        native_session_id=row["native_session_id"],
         limit_resets_at=_maybe_dt(row["limit_resets_at"]),
         persona=row["persona"],
         prompted_at=_maybe_dt(row["prompted_at"]),
@@ -2150,7 +2454,19 @@ def _row_to_usage_sample(row: sqlite3.Row) -> UsageSample:
         week_percent=row["week_percent"],
         week_resets_at=_maybe_dt(row["week_resets_at"]),
         token_fingerprint=row["token_fingerprint"],
+        windows=_usage_windows(row["windows"]),
     )
+
+
+def _usage_windows(raw: str | None) -> tuple[UsageWindow, ...] | None:
+    """A sample's windows as v45 keeps them; ``None`` for a row from before (or one this
+    build cannot read), which its session and week columns describe."""
+    if raw is None:
+        return None
+    try:
+        return tuple(UsageWindow.model_validate(window) for window in json.loads(raw))
+    except (ValueError, TypeError):
+        return None
 
 
 def _row_to_task(row: sqlite3.Row) -> TeamTask:
@@ -2293,6 +2609,23 @@ def _scope_filter(
     return [f"{pool_col} = 'user'"], []
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _session_write(
+    method: Callable[Concatenate[SqliteStore, _P], _R],
+) -> Callable[Concatenate[SqliteStore, _P], _R]:
+    """Serialize alias resolution with session adoption, including in-flight MCP writes."""
+
+    @wraps(method)
+    def write(self: SqliteStore, /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with self.transaction():
+            return method(self, *args, **kwargs)
+
+    return write
+
+
 #: When each table's rows last touched a project, keyed by the table it reads
 #: (:meth:`SqliteStore.project_activity`).
 _ACTIVITY = {
@@ -2311,6 +2644,7 @@ class SqliteStore:
     def __init__(self, connection: sqlite3.Connection, *, names: Collection[str]) -> None:
         """``names``: the store's tables and indexes, as :func:`_migrate` read them opening it."""
         self._conn = connection
+        self._transaction_depth = 0
         self._layout_depth = 0  # open :meth:`layout_change` blocks
         # The SELECT list of a ``fleet_agent`` read on this store. A row that recorded no board
         # reads its session's (:data:`_FLEET_AGENT_READ`), a subquery on ``team_session``,
@@ -2323,6 +2657,49 @@ class SqliteStore:
         sessions = "team_session" in names
         self._fleet_agent_read = _FLEET_AGENT_READ if sessions else _FLEET_AGENT_READ_SESSIONLESS
         self._fleet_agent_board = _FLEET_AGENT_BOARD if sessions else _FLEET_AGENT_BOARD_SESSIONLESS
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Own the outer commit, including all nested writes and read-backs.
+
+        Inside a :meth:`layout_change` block it nests in that block's transaction, which
+        commits. Anywhere else a transaction already open is one a statement that failed
+        left behind: rolled back first, so nothing of it lands with this one (the next
+        commit made such a write land anyway, review of the #205 fold, A1).
+        """
+        outer = self._transaction_depth == 0
+        if outer and self._conn.in_transaction:
+            if self._layout_depth:
+                outer = False
+            else:
+                self._conn.rollback()
+        savepoint = f"aisquare_write_{self._transaction_depth}"
+        self._conn.execute("BEGIN IMMEDIATE" if outer else f"SAVEPOINT {savepoint}")
+        self._transaction_depth += 1
+        try:
+            yield
+            if outer:
+                self._conn.commit()
+            else:
+                self._conn.execute(f"RELEASE {savepoint}")
+        except BaseException:
+            if outer:
+                self._conn.rollback()
+            else:
+                self._conn.execute(f"ROLLBACK TO {savepoint}")
+                self._conn.execute(f"RELEASE {savepoint}")
+            raise
+        finally:
+            self._transaction_depth -= 1
+
+    def _commit(self) -> None:
+        if not self._transaction_depth:
+            self._conn.commit()
+
+    def _rollback(self) -> None:
+        """A writer's rollback, unless a :meth:`transaction` block owns it (and rolls back)."""
+        if not self._transaction_depth:
+            self._conn.rollback()
 
     def add(self, entry: ContextEntry) -> ContextEntry:
         self._conn.execute(
@@ -2339,7 +2716,7 @@ class SqliteStore:
                 entry.deleted_at.isoformat() if entry.deleted_at else None,
             ),
         )
-        self._conn.commit()
+        self._commit()
         return entry
 
     def get(self, ref: str) -> ContextEntry | None:
@@ -2407,7 +2784,7 @@ class SqliteStore:
                 entry.id,
             ),
         )
-        self._conn.commit()
+        self._commit()
         updated = self.get(entry.id)
         assert updated is not None  # just updated, not deleted
         return updated
@@ -2417,7 +2794,7 @@ class SqliteStore:
         if entry is None:
             raise KeyError(entry_id)
         self._conn.execute("UPDATE entry SET deleted_at = ? WHERE id = ?", (_now_iso(), entry.id))
-        self._conn.commit()
+        self._commit()
 
     def promote(self, entry_id: str) -> ContextEntry:
         entry = self.get(entry_id)
@@ -2431,7 +2808,7 @@ class SqliteStore:
             "UPDATE entry SET pool = 'user', project_id = NULL, updated_at = ? WHERE id = ?",
             (_now_iso(), entry.id),
         )
-        self._conn.commit()
+        self._commit()
         promoted = self.get(entry.id)
         assert promoted is not None  # just updated, not deleted
         return promoted
@@ -2474,7 +2851,7 @@ class SqliteStore:
                 _now_iso(),
             ),
         )
-        self._conn.commit()
+        self._commit()
 
     def onboard_project(
         self, project: ProjectInfo, *, codename: str | None = None, explicit: bool = False
@@ -2531,7 +2908,7 @@ class SqliteStore:
                 codename,
             ),
         )
-        self._conn.commit()
+        self._commit()
         return self._written_project(project.id)
 
     def _written_project(self, project_id: str) -> ProjectInfo:
@@ -2666,7 +3043,7 @@ class SqliteStore:
             "WHERE id = ? AND forgotten_at IS NULL",
             (_now_iso(), project_id),
         )
-        self._conn.commit()
+        self._commit()
         if cursor.rowcount != 1:
             raise KeyError(project_id)
 
@@ -2704,7 +3081,8 @@ class SqliteStore:
             ).fetchall()
         ]
         removed: dict[str, int] = {}
-        with self._conn:  # one BEGIN…COMMIT: a purge is whole or it is nothing
+        with self.transaction():  # one BEGIN…COMMIT: a purge is whole or it is nothing
+            removed["team_meta"] = self._purge_team_meta(project_id, sessions)
             self._owe_revocation(project_id)
             for table, column in self._tables_referencing_project():
                 cursor = self._conn.execute(
@@ -2730,7 +3108,6 @@ class SqliteStore:
             # The repository's cached profile (its root and remote) goes with it; not counted
             # in ``removed``, which names the tables a purge reports.
             self._conn.execute("DELETE FROM repo_profile WHERE repo_id = ?", (project_id,))
-            removed["team_meta"] = self._purge_team_meta(project_id, sessions)
             # The tombstone: the transcripts outlive the rows, and the next sweep would read them
             # again. Written last, so the purge above does not delete it.
             self._conn.execute(
@@ -2779,19 +3156,52 @@ class SqliteStore:
         """Delete the ``team_meta`` rows keyed by the project or by its sessions.
 
         Inside the caller's transaction, in statements of at most
-        :data:`_META_BATCH` sessions each (one term per :data:`_SESSION_META_KINDS` and
-        one for its continuations): one statement per purge was the shape SQLite refused at
-        500 sessions.
+        :data:`_META_BATCH` sessions each (its keys, one per :data:`_SESSION_META_KINDS` and
+        its continuation prompt, in one ``IN``, one glob each for its continuations, its
+        agent events and its launch and fleet sightings, and the bindings whose value is
+        one of them): one statement per purge was the shape SQLite refused at 500 sessions.
+        The fleet rows' keys go with the rows (:func:`_fleet_meta_terms`), so it reads
+        them before the caller deletes the rows.
         """
+        own, globs = _project_meta_term(project_id)
         removed = self._conn.execute(
-            "DELETE FROM team_meta WHERE key GLOB ? OR key GLOB ?",
+            f"DELETE FROM team_meta WHERE key = ? OR key GLOB ? OR {own}",
             (
-                f"signal/{_glob_escape(project_id)}/*",
+                f"coding-agent:{project_id}",
                 # the processes that run this board's sessions (``services.mcp_host``)
                 f"host/{_glob_escape(project_id)}/*",
+                *globs,
             ),
         ).rowcount
-        for where, params in _session_meta_terms(sessions):
+        for key, raw in self.list_meta("native-launch:").items():
+            try:
+                marker = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(marker, dict) and marker.get("project_id") == project_id:
+                removed += self._clear_native_launch(key.removeprefix("native-launch:"))
+        for start in range(0, len(sessions), _META_BATCH):
+            batch = sessions[start : start + _META_BATCH]
+            # Binding values carry the canonical session ID; never match an
+            # unrelated metadata value just because it contains the same text.
+            # Read before the bindings themselves go (`_session_meta_terms`).
+            launches = self._conn.execute(
+                "SELECT key FROM team_meta WHERE key GLOB 'launch-session:*' AND value IN ("
+                + ",".join("?" for _ in batch)
+                + ")",
+                batch,
+            ).fetchall()
+            for launch in launches:
+                removed += self._clear_native_launch(
+                    str(launch["key"]).removeprefix("launch-session:")
+                )
+        agents = [
+            str(row["id"])
+            for row in self._conn.execute(
+                "SELECT id FROM fleet_agent WHERE project_id = ?", (project_id,)
+            ).fetchall()
+        ]
+        for where, params in (*_session_meta_terms(sessions), *_fleet_meta_terms(agents)):
             removed += self._conn.execute(f"DELETE FROM team_meta WHERE {where}", params).rowcount
         return removed
 
@@ -2804,8 +3214,12 @@ class SqliteStore:
 
         The board is its ``team_task``, ``team_event``, ``team_session`` and ``brief`` rows
         (the next brief is #1 again, as the next task is), and in
-        ``team_meta`` its signals (``signal/<id>/*``) and the keys of the sessions that go
-        (:func:`_session_meta_terms`: the nudge debounce, the continuation counters, …).
+        ``team_meta`` its own keys (:data:`_PROJECT_META`: its signals, a nudge owed its
+        manager, the marks of the broker refusals it was told), the keys of the sessions that
+        go (:func:`_session_meta_terms`: the nudge debounce, the continuation counters, the
+        launch and fleet bindings to them, …) and of the fleet rows that go
+        (:func:`_fleet_meta_terms`: a spawn's first message, the row's binding, its stop's
+        mark, its launch record's refusal).
         The ``ui_state`` rows the before-limit hand-over keeps per label
         (:data:`_FLEET_LABEL_STATE`) go with them, counted with the ``team_meta`` keys: the
         next fleet reuses a label (``coder-1``), and a stale "warned" row would hide its first
@@ -2816,7 +3230,12 @@ class SqliteStore:
         process overwrites its own when it next registers. ``host_of`` needs the session's
         row as well as the key, and the row goes here, so a live solo session's own MCP
         server cannot prove itself until its next SessionStart or UserPromptSubmit writes
-        the record again, whether the key stayed or not. Narrow, and it heals itself.
+        the record again, whether the key stayed or not. Narrow, and it heals itself. So do
+        ``coding-agent:<project id>``, the project's choice of agent, a setting as its
+        registration is, and a launch's native-telemetry keys (``native-launch:``,
+        ``native-event:``, ``native-provider:``): its receiver's dedup, which it clears as it
+        exits (:meth:`clear_native_launch`) and :meth:`expire_native_launches` reaps. A purge
+        takes both.
 
         The fleet is its ``fleet_agent`` rows, and a live one refuses the reset
         (``ValueError``): asked under the write lock, so an agent a spawn recorded after the
@@ -2845,7 +3264,13 @@ class SqliteStore:
                     "SELECT id FROM team_session WHERE project_id = ?", (project_id,)
                 ).fetchall()
             ]
-            signals = ("key GLOB ?", (f"signal/{_glob_escape(project_id)}/*",))
+            agents = [
+                str(row["id"])
+                for row in self._conn.execute(
+                    "SELECT id FROM fleet_agent WHERE project_id = ?", (project_id,)
+                ).fetchall()
+            ]
+            signals = _project_meta_term(project_id)
             labels = (
                 " OR ".join(["key GLOB ?"] * len(_FLEET_LABEL_STATE)),
                 tuple(f"{prefix}{_glob_escape(project_id)}:*" for prefix in _FLEET_LABEL_STATE),
@@ -2853,7 +3278,11 @@ class SqliteStore:
             return [
                 *(
                     ("team_meta", where, params)
-                    for where, params in (signals, *_session_meta_terms(sessions))
+                    for where, params in (
+                        signals,
+                        *_session_meta_terms(sessions),
+                        *_fleet_meta_terms(agents),
+                    )
                 ),
                 ("ui_state", *labels),
             ]
@@ -2866,9 +3295,13 @@ class SqliteStore:
                 )
                 for table, where in scope
             }
-            counts["team_meta"] = sum(
-                int(self._conn.execute(count.format(table, where), params).fetchone()[0])
-                for table, where, params in meta()
+            # Each key once: a row's binding is its row's key and its session's value both.
+            counts["team_meta"] = len(
+                {
+                    (table, str(row[0]))
+                    for table, where, params in meta()
+                    for row in self._conn.execute(f"SELECT key FROM {table} WHERE {where}", params)
+                }
             )
             return counts
         removed: dict[str, int] = {}
@@ -2928,7 +3361,7 @@ class SqliteStore:
                 "UPDATE project SET linked_repos = ? WHERE id = ?",
                 (json.dumps([*project.linked_repos, repo]), project_id),
             )
-            self._conn.commit()
+            self._commit()
         updated = self.get_project(project_id)
         assert updated is not None  # just confirmed it exists
         return updated
@@ -2953,7 +3386,7 @@ class SqliteStore:
                 record.created_at.isoformat(),
             ),
         )
-        self._conn.commit()
+        self._commit()
         return record
 
     def recent_prompts(
@@ -3002,24 +3435,88 @@ class SqliteStore:
         ).fetchone()
         return row is not None
 
+    def _canonical_session_id(self, session_id: str) -> str:
+        return self.get_meta(f"session-alias:{session_id}") or session_id
+
+    @_session_write
+    def adopt_session(self, provisional_id: str, native_id: str, lease_until: datetime) -> None:
+        """Atomically adopt a local MCP row; keep a retired alias for late callers."""
+        if not provisional_id.startswith("mcp:local:") or native_id.startswith("mcp:"):
+            raise ValueError("Only a local provisional session can be adopted by a native session")
+        if self._canonical_session_id(provisional_id) != provisional_id:
+            return  # Already adopted; a later native thread must not steal its work.
+        source = self.get_session(provisional_id)
+        target = self.get_session(native_id)
+        if source is None or target is None or source.project_id != target.project_id:
+            return
+        for table, column in (
+            ("team_task", "claimed_by"),
+            ("team_task", "created_by"),
+            ("team_event", "session_id"),
+            ("metric", "session_id"),
+            ("fleet_agent", "session_id"),
+        ):
+            self._conn.execute(
+                f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
+                (native_id, provisional_id),
+            )
+        self._conn.execute(
+            "UPDATE team_task SET claim_expires_at = ? WHERE claimed_by = ? AND status = 'doing'",
+            (lease_until.isoformat(), native_id),
+        )
+        for key, value in self.list_meta(f"signal/{source.project_id}/").items():
+            try:
+                state = json.loads(value)
+            except ValueError:
+                continue
+            if isinstance(state, dict) and state.get("session_id") == provisional_id:
+                state["session_id"] = native_id
+                self._conn.execute(
+                    "UPDATE team_meta SET value = ? WHERE key = ?", (json.dumps(state), key)
+                )
+        self._conn.execute(
+            "UPDATE team_session SET label = COALESCE(label, ?), focus = COALESCE(focus, ?), "
+            "started_at = MIN(started_at, ?), cursor = MIN(cursor, ?) WHERE id = ?",
+            (source.label, source.focus, source.started_at.isoformat(), source.cursor, native_id),
+        )
+        self._conn.execute(
+            "UPDATE team_session SET ended_at = ?, last_seen_at = ? WHERE id = ?",
+            (_now_iso(), _now_iso(), provisional_id),
+        )
+        self._conn.execute(
+            "INSERT INTO team_meta (key, value) VALUES (?, ?)",
+            (f"session-alias:{provisional_id}", native_id),
+        )
+
+    @_session_write
     def upsert_session(self, session: TeamSession) -> TeamSession:
         """Insert the session, or revive/refresh it if the id is already known.
+
+        A revived row's state is replaced, a hand-over's mark included: ``waiting`` for a
+        session given as at its prompt (a Claude Code start), otherwise ``working``.
 
         A known session keeps the board it first registered on, and its cursor, as on
         main: the captain line's move to another board (#230's fix 2b) repaired the
         wrong-board sessions of #230's own hub rule, which hub rule A retired, and
         shipped a change to main's semantics unpinned (review of #240, F4).
         """
+        canonical = self._canonical_session_id(session.id)
+        if canonical != session.id:
+            stored = self.get_session(canonical)
+            assert stored is not None
+            return stored  # A delayed MCP upsert must not resurrect the provisional row.
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
-            "state = 'working', "
+            "state = CASE excluded.state WHEN 'waiting' THEN 'waiting' ELSE 'working' END, "
             "transcript_path = COALESCE(excluded.transcript_path, transcript_path), "
             "account = COALESCE(excluded.account, account), "
             "model = COALESCE(excluded.model, model), "
             "effort = COALESCE(excluded.effort, effort), "
+            "agent = COALESCE(excluded.agent, agent), "
+            "native_session_id = COALESCE(excluded.native_session_id, native_session_id), "
             "persona = COALESCE(excluded.persona, persona), "
             "prompted_at = COALESCE(excluded.prompted_at, prompted_at)",
             (
@@ -3038,11 +3535,13 @@ class SqliteStore:
                 session.model,
                 session.effort,
                 session.limit_resets_at.isoformat() if session.limit_resets_at else None,
+                session.agent,
+                session.native_session_id,
                 session.persona,
                 session.prompted_at.isoformat() if session.prompted_at else None,
             ),
         )
-        self._conn.commit()
+        self._commit()
         stored = self.get_session(session.id)
         assert stored is not None  # just upserted
         return stored
@@ -3051,7 +3550,9 @@ class SqliteStore:
         self, session_id: str, *, project_ids: Collection[str] | None = None
     ) -> TeamSession | None:
         """The session ``session_id`` names, an id or an id prefix; with ``project_ids``, among
-        the sessions of those boards only, ambiguity included (:func:`_on_boards`)."""
+        the sessions of those boards only, ambiguity included (:func:`_on_boards`). A local
+        MCP id a native session adopted reads as that session (:meth:`adopt_session`)."""
+        session_id = self._canonical_session_id(session_id)
         scope, boards = _on_boards(project_ids)
         row = self._conn.execute(
             f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id = ?{scope}",
@@ -3105,6 +3606,7 @@ class SqliteStore:
         sessions = {row["id"]: _row_to_session(row) for row in rows}
         return sorted(sessions.values(), key=lambda session: session.last_seen_at, reverse=True)
 
+    @_session_write
     def update_session(
         self,
         session_id: str,
@@ -3126,11 +3628,12 @@ class SqliteStore:
                 session.id,
             ),
         )
-        self._conn.commit()
+        self._commit()
         updated = self.get_session(session.id)
         assert updated is not None  # just updated
         return updated
 
+    @_session_write
     def touch_session(
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None:
@@ -3162,8 +3665,15 @@ class SqliteStore:
         (:meth:`upsert_session`, the resumed agent) and ``switch`` or ``restart``
         taking its mark back (:meth:`unmark_handover`) replace it. The rest of
         the heartbeat still lands.
+
+        ``last_seen_at`` never goes back: a notice leaves it one microsecond past its event
+        (:meth:`_seen_after_its_attention_event`), and a heartbeat in the same tick that wrote
+        the tick would step it back to the event's instant, where the needs feed reads the
+        notice after it as a first one again.
         """
-        sets, params = ["last_seen_at = ?", "ended_at = NULL"], [_now_iso()]
+        session_id = self._canonical_session_id(session_id)
+        sets = ["last_seen_at = ?", "ended_at = NULL"]
+        params = [self._seen_not_before_its_stamp(session_id)]
         if cursor is not None:
             sets.append("cursor = ?")
             params.append(str(cursor))
@@ -3174,7 +3684,25 @@ class SqliteStore:
             f"UPDATE team_session SET {', '.join(sets)} WHERE id = ?",
             (*params, session_id),
         )
-        self._conn.commit()
+        self._commit()
+
+    @_session_write
+    def set_session_model(self, session_id: str, model: str | None, effort: str | None) -> None:
+        """The model and effort a session's turn reported, on a session that exists: each one
+        given replaces the old (a mid-session change is recorded), one not given keeps it.
+
+        :meth:`upsert_session` records them when a session starts, and an agent whose start
+        names no effort (Codex: its turn's effort is read off the rollout at a prompt and a
+        stop) records it here.
+        """
+        if model is None and effort is None:
+            return
+        self._conn.execute(
+            "UPDATE team_session SET model = COALESCE(?, model), effort = COALESCE(?, effort) "
+            "WHERE id = ?",
+            (model, effort, self._canonical_session_id(session_id)),
+        )
+        self._commit()
 
     def replace_session_state(self, session_id: str, expected: str, state: str) -> bool:
         """Set ``state`` on a session whose state is still ``expected`` — and nothing else.
@@ -3192,7 +3720,7 @@ class SqliteStore:
             "UPDATE team_session SET state = ? WHERE id = ? AND state = ?",
             (state, session_id, expected),
         )
-        self._conn.commit()
+        self._commit()
         return cursor.rowcount == 1
 
     def mark_handover(self, session_id: str, *, held_after: datetime) -> bool:
@@ -3216,9 +3744,10 @@ class SqliteStore:
             "WHERE id = ? AND NOT (state = 'switching' AND last_seen_at > ?)",
             (_now_iso(), session_id, held_after.astimezone(UTC).isoformat()),
         )
-        self._conn.commit()
+        self._commit()
         return cursor.rowcount == 1
 
+    @_session_write
     def mark_attention(self, session_id: str) -> bool:
         """Flip a session into the attention state, atomically.
 
@@ -3234,7 +3763,12 @@ class SqliteStore:
 
         Never over a hand-over's mark (:meth:`touch_session`): no transition, so
         no bell either, for an agent ``fleet switch`` is exiting.
+
+        The second statement stamps ``last_seen_at`` AFTER the session's newest
+        ``attention`` event (:meth:`_seen_after_its_attention_event`): the needs feed
+        reads "a later notice came" as ``last_seen_at > event.created_at``.
         """
+        session_id = self._canonical_session_id(session_id)
         cursor = self._conn.execute(
             "UPDATE team_session SET state = 'attention', last_seen_at = ? "
             "WHERE id = ? AND state NOT IN ('attention', 'switching')",
@@ -3242,10 +3776,52 @@ class SqliteStore:
         )
         self._conn.execute(
             "UPDATE team_session SET last_seen_at = ?, ended_at = NULL WHERE id = ?",
-            (_now_iso(), session_id),
+            (self._seen_after_its_attention_event(session_id), session_id),
         )
-        self._conn.commit()
+        self._commit()
         return cursor.rowcount == 1
+
+    def _seen_not_before_its_stamp(self, session_id: str) -> str:
+        """Now, and never before the stamp the session's row already has (a notice's, a
+        microsecond past its event: see :meth:`_seen_after_its_attention_event`)."""
+        stamp = datetime.now(tz=UTC)
+        seen = self._conn.execute(
+            "SELECT last_seen_at FROM team_session WHERE id = ?", (session_id,)
+        ).fetchone()
+        if seen is not None:
+            stamp = max(stamp, datetime.fromisoformat(seen["last_seen_at"]))
+        return stamp.isoformat()
+
+    def _seen_after_its_attention_event(self, session_id: str) -> str:
+        """Now, and never the instant of the session's newest ``attention`` event since it was
+        last seen, nor before the stamp the row already has.
+
+        A turn's first notice leaves the event, and each later one moves ``last_seen_at`` past
+        it: that order is what tells the second of two parallel permission prompts, or an MCP
+        server's form, from the first (``remote_needs._needs_later_notice``). Two notices that
+        read the same tick of the clock (Windows' ticks every 15 ms) tied, and the second was
+        taken for the first, its card naming the first call's prompt. One microsecond past the
+        event keeps the order the clock could not. Only the events at or after the session's
+        last stamp are asked for: a range of the ``(project_id, created_at)`` index, a few
+        rows, on the hook's path.
+
+        That range starts past the event once the second notice has stamped the row, so a
+        third notice in the same tick asks for no event, and the tick's own reading would
+        write the stamp back to the event's instant: the row's stamp is the floor for that."""
+        stamp = datetime.now(tz=UTC)
+        seen = self._conn.execute(
+            "SELECT project_id, last_seen_at FROM team_session WHERE id = ?", (session_id,)
+        ).fetchone()
+        if seen is not None:
+            stamp = max(stamp, datetime.fromisoformat(seen["last_seen_at"]))
+            newest = self._conn.execute(
+                "SELECT MAX(created_at) FROM team_event WHERE project_id = ? AND session_id = ? "
+                "AND kind = 'attention' AND created_at >= ?",
+                (seen["project_id"], session_id, seen["last_seen_at"]),
+            ).fetchone()[0]
+            if newest is not None:
+                stamp = max(stamp, datetime.fromisoformat(newest) + timedelta(microseconds=1))
+        return stamp.isoformat()
 
     def set_transcript_path(self, session_id: str, transcript_path: str) -> None:
         """Point the row at the transcript its agent writes, and touch nothing else (P0-W3b).
@@ -3257,18 +3833,6 @@ class SqliteStore:
         self._conn.execute(
             "UPDATE team_session SET transcript_path = ? WHERE id = ?",
             (transcript_path, session_id),
-        )
-        self._conn.commit()
-
-    def set_session_model(self, session_id: str, *, model: str | None, effort: str | None) -> None:
-        """The model and effort the session runs now, as a turn end read them
-        (``services.model_memory.observe``); ``None`` keeps what the row holds. Touches nothing
-        else, as :meth:`set_transcript_path`: ``upsert_session`` would set the row ``working``.
-        """
-        self._conn.execute(
-            "UPDATE team_session SET model = COALESCE(?, model), effort = COALESCE(?, effort) "
-            "WHERE id = ?",
-            (model, effort, session_id),
         )
         self._conn.commit()
 
@@ -3288,7 +3852,7 @@ class SqliteStore:
             "limit_resets_at = ?, last_seen_at = ?, ended_at = NULL WHERE id = ?",
             (resets_at.isoformat() if resets_at is not None else None, _now_iso(), session_id),
         )
-        self._conn.commit()
+        self._commit()
 
     def unmark_handover(self, session_id: str, state: str) -> None:
         """``fleet switch`` or ``restart`` takes its hand-over mark back: its stop has ended.
@@ -3301,8 +3865,9 @@ class SqliteStore:
             "UPDATE team_session SET state = ? WHERE id = ? AND state = 'switching'",
             (state, session_id),
         )
-        self._conn.commit()
+        self._commit()
 
+    @_session_write
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]:
         """Mark the session ended; optionally release its claims.
 
@@ -3323,6 +3888,7 @@ class SqliteStore:
         next write rolled back discarded it without a word (review of the #205
         fold, A1).
         """
+        session_id = self._canonical_session_id(session_id)
         now = _now_iso()
         try:
             released = self._doing_claims(session_id)
@@ -3332,9 +3898,9 @@ class SqliteStore:
                 "UPDATE team_session SET ended_at = ?, last_seen_at = ? WHERE id = ?",
                 (now, now, session_id),
             )
-            self._conn.commit()
+            self._commit()
         except Exception:
-            self._conn.rollback()
+            self._rollback()
             raise
         return released
 
@@ -3348,9 +3914,10 @@ class SqliteStore:
         its ``ended_at``; the claims are what is owed (review of #135, second
         round, finding 5).
         """
+        session_id = self._canonical_session_id(session_id)
         released = self._doing_claims(session_id)
         self._release_doing_claims(session_id, _now_iso())
-        self._conn.commit()
+        self._commit()
         return released
 
     def _doing_claims(self, session_id: str) -> list[TeamTask]:
@@ -3369,6 +3936,7 @@ class SqliteStore:
             (now, session_id),
         )
 
+    @_session_write
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]:
         """Add a task; a duplicate ``(project_id, key)`` returns the existing one.
 
@@ -3395,15 +3963,15 @@ class SqliteStore:
                 task.status,
                 task.role,
                 json.dumps(task.needs),
-                task.claimed_by,
+                self._canonical_session_id(task.claimed_by) if task.claimed_by else None,
                 task.claim_expires_at.isoformat() if task.claim_expires_at else None,
-                task.created_by,
+                self._canonical_session_id(task.created_by) if task.created_by else None,
                 task.created_at.isoformat(),
                 task.updated_at.isoformat(),
             ),
         )
         created = cursor.rowcount == 1
-        self._conn.commit()
+        self._commit()
         row = self._conn.execute(
             f"SELECT {_TASK_COLUMNS} FROM team_task WHERE project_id = ? AND key = ?",
             (task.project_id, task.key),
@@ -3483,6 +4051,7 @@ class SqliteStore:
         ).fetchone()
         return bool(row[0])
 
+    @_session_write
     def claim_task(self, task_id: str, session_ref: str, lease_until: datetime) -> bool:
         """Atomically claim a task; exactly one concurrent claimer wins.
 
@@ -3494,18 +4063,25 @@ class SqliteStore:
             "claim_expires_at = ?, updated_at = ? "
             "WHERE id = ? AND (status IN ('todo', 'blocked') "
             "OR (status = 'doing' AND claim_expires_at < ?))",
-            (session_ref, lease_until.isoformat(), _now_iso(), task_id, _now_iso()),
+            (
+                self._canonical_session_id(session_ref),
+                lease_until.isoformat(),
+                _now_iso(),
+                task_id,
+                _now_iso(),
+            ),
         )
-        self._conn.commit()
+        self._commit()
         return cursor.rowcount == 1
 
+    @_session_write
     def renew_leases(self, session_id: str, lease_until: datetime) -> None:
         """Extend the claim lease on everything this session is working on."""
         self._conn.execute(
             "UPDATE team_task SET claim_expires_at = ? WHERE claimed_by = ? AND status = 'doing'",
-            (lease_until.isoformat(), session_id),
+            (lease_until.isoformat(), self._canonical_session_id(session_id)),
         )
-        self._conn.commit()
+        self._commit()
 
     def set_task_status(self, task_id: str, status: TaskStatus) -> TeamTask:
         task = self.get_task(task_id)
@@ -3524,7 +4100,7 @@ class SqliteStore:
                 "UPDATE team_task SET status = ?, updated_at = ? WHERE id = ?",
                 (status, _now_iso(), task.id),
             )
-        self._conn.commit()
+        self._commit()
         updated = self.get_task(task.id)
         assert updated is not None  # just updated
         return updated
@@ -3543,7 +4119,7 @@ class SqliteStore:
             "claim_expires_at = NULL, updated_at = ? WHERE id = ? AND status = 'doing'",
             (_now_iso(), task.id),
         )
-        self._conn.commit()
+        self._commit()
         if cursor.rowcount != 1:
             raise ValueError(f"task {task.id} is {task.status}, not doing — nothing to release")
         updated = self.get_task(task.id)
@@ -3566,7 +4142,7 @@ class SqliteStore:
             "WHERE id = ? AND status IN ('doing', 'review', 'blocked', 'done')",
             (_now_iso(), task.id),
         )
-        self._conn.commit()
+        self._commit()
         if cursor.rowcount != 1:
             raise ValueError(
                 f"task {task.id} is {task.status} — reopen a doing/review/blocked/done task"
@@ -3683,7 +4259,7 @@ class SqliteStore:
         self._conn.execute(
             f"INSERT INTO metric ({_METRIC_COLUMNS}) VALUES ({placeholders})", values
         )
-        self._conn.commit()
+        self._commit()
         return metric
 
     def close_turn(self, session_id: str, *, ended_at: datetime) -> TurnMetric | None:
@@ -3720,7 +4296,7 @@ class SqliteStore:
             "UPDATE metric SET ended_at = ?, wall_ms = ? WHERE trace_id = ? AND ended_at IS NULL",
             (ended_at.isoformat(), wall_ms, row["trace_id"]),
         )
-        self._conn.commit()
+        self._commit()
         if cursor.rowcount == 0:
             return None
         closed = self._conn.execute(
@@ -3782,7 +4358,7 @@ class SqliteStore:
         the further turn rows of a scan that read several (the sweep's), written with
         ``turn``.
 
-        The account and repository the session ran in are written once known and never
+        The account, repository and agent the session ran in are written once known and never
         unset: a later record that does not know them leaves what an earlier one did.
         """
         values = (
@@ -3797,14 +4373,14 @@ class SqliteStore:
             session.updated_at.isoformat(),
             session.ended_at.isoformat() if session.ended_at else None,
         )
-        attribution = (session.account_slot, session.account_type, session.repo_id)
+        attribution = (session.account_slot, session.account_type, session.repo_id, session.agent)
         try:
             if previous_state is None:
                 cursor = self._conn.execute(
                     "INSERT INTO usage_session (project_id, transcript_path, state, usage, turns, "
                     "total_tokens, weighted, cost_usd, updated_at, ended_at, session_id, "
-                    "started_at, account_slot, account_type, repo_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "started_at, account_slot, account_type, repo_id, agent) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT (session_id) DO NOTHING",
                     (*values, session.session_id, session.started_at.isoformat(), *attribution),
                 )
@@ -3813,8 +4389,8 @@ class SqliteStore:
                     "UPDATE usage_session SET project_id = ?, transcript_path = ?, state = ?, "
                     "usage = ?, turns = ?, total_tokens = ?, weighted = ?, cost_usd = ?, "
                     "updated_at = ?, ended_at = ?, account_slot = COALESCE(?, account_slot), "
-                    "account_type = COALESCE(?, account_type), repo_id = COALESCE(?, repo_id) "
-                    "WHERE session_id = ? AND state = ?",
+                    "account_type = COALESCE(?, account_type), repo_id = COALESCE(?, repo_id), "
+                    "agent = COALESCE(?, agent) WHERE session_id = ? AND state = ?",
                     (*values, *attribution, session.session_id, previous_state),
                 )
             if cursor.rowcount == 0:
@@ -3902,7 +4478,7 @@ class SqliteStore:
         where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         rows = self._conn.execute(
             "SELECT t.session_id, COALESCE(s.repo_id, t.project_id) AS repo_id, t.recorded_at, "
-            "t.usage, s.account_slot, s.account_type "
+            "t.usage, s.account_slot, s.account_type, s.agent "
             "FROM usage_turn t LEFT JOIN usage_session s ON s.session_id = t.session_id "
             f"{where}ORDER BY t.recorded_at, t.id",
             tuple(params),
@@ -3915,29 +4491,45 @@ class SqliteStore:
                 usage=_json_object(row["usage"]),
                 account_slot=row["account_slot"],
                 account_type=row["account_type"],
+                agent=row["agent"],
             )
             for row in rows
         ]
 
     def fleet_activity(
         self, since: datetime, until: datetime
-    ) -> tuple[list[tuple[datetime, str]], list[datetime]]:
-        """What the fleet did in ``[since, until)``: ``(started, role)`` of each agent started,
-        and when each task was marked done. Counts are all the usage sharing wants of it: no
-        label, task, project or text leaves this method."""
+    ) -> tuple[list[tuple[datetime, str, str | None]], list[tuple[datetime, str | None]]]:
+        """What the fleet did in ``[since, until)``: ``(started, role, agent)`` of each agent
+        started, and ``(when, agent)`` of each task marked done, its agent the one of the
+        session that marked it (its fleet agent's, else the session's own), else that of the
+        launch it was marked in (:data:`LAUNCH_AGENT_META`: a Codex agent's ``task done`` with
+        no ``--as``, in its shell or through its broker, is Codex's; tester-42b on #42);
+        ``None`` for one neither names, a human's at the shell. Counts and agent ids are all the
+        usage sharing wants of it (its ``shared_only`` keeps the agents whose usage is shared):
+        no label, task, project or text leaves this method."""
         low, high = since.astimezone(UTC).isoformat(), until.astimezone(UTC).isoformat()
         agents = [
-            (datetime.fromisoformat(row["created_at"]), str(row["role"]))
+            (datetime.fromisoformat(row["created_at"]), str(row["role"]), row["agent"])
             for row in self._conn.execute(
-                "SELECT created_at, role FROM fleet_agent WHERE created_at >= ? AND created_at < ?",
+                "SELECT created_at, role, agent FROM fleet_agent"
+                " WHERE created_at >= ? AND created_at < ?",
                 (low, high),
             ).fetchall()
         ]
         done = [
-            datetime.fromisoformat(row["created_at"])
+            (
+                datetime.fromisoformat(row["created_at"]),
+                row["agent"] or _json_object(row["meta"]).get(LAUNCH_AGENT_META) or None,
+            )
             for row in self._conn.execute(
-                "SELECT created_at FROM team_event WHERE kind = 'task_done' "
-                "AND created_at >= ? AND created_at < ?",
+                "SELECT event.created_at, event.meta, COALESCE("
+                "(SELECT fleet.agent FROM fleet_agent AS fleet"
+                " WHERE fleet.session_id = event.session_id AND fleet.agent IS NOT NULL"
+                " ORDER BY fleet.created_at DESC LIMIT 1),"
+                " (SELECT session.agent FROM team_session AS session"
+                " WHERE session.id = event.session_id)) AS agent"
+                " FROM team_event AS event WHERE event.kind = 'task_done'"
+                " AND event.created_at >= ? AND event.created_at < ?",
                 (low, high),
             ).fetchall()
         ]
@@ -3984,6 +4576,21 @@ class SqliteStore:
             (account_slot, account_type, repo_id, session_id),
         )
         self._conn.commit()
+
+    def attribute_usage_agents(self) -> None:
+        """Give each usage row that names no agent the one v47's backfill would, and write
+        it back (:func:`_attribute_usage_sessions`): what the sharing path asks before it
+        builds a batch, so a row is shared by the same rule whether that backfill ran or not.
+        A store a v47 build migrated before the backfill existed never ran it, and a build
+        from before v47 that shares the store still writes NULL (tester-42 on #42, (c) and
+        (d)). In one transaction; one that fails is rolled back and raises, and no batch is
+        built from rows it did not attribute."""
+        try:
+            _attribute_usage_sessions(self._conn)
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
 
     def repo_profiles(self) -> dict[str, RepoProfile]:
         """Every repository profile, by repo id."""
@@ -4075,11 +4682,7 @@ class SqliteStore:
             "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
-        self._conn.commit()
-
-    def delete_meta(self, key: str) -> None:
-        self._conn.execute("DELETE FROM team_meta WHERE key = ?", (key,))
-        self._conn.commit()
+        self._commit()
 
     def list_meta(self, prefix: str) -> dict[str, str]:
         """Every ``team_meta`` entry under ``prefix``, key → value."""
@@ -4089,6 +4692,117 @@ class SqliteStore:
         ).fetchall()
         return {str(row["key"]): str(row["value"]) for row in rows}
 
+    def touch_meta(self, key: str) -> None:
+        """Refresh retention for an existing fact without changing its value."""
+        self._conn.execute(
+            "UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
+            "WHERE key = ?",
+            (key,),
+        )
+        self._commit()
+
+    def set_meta_once(self, key: str, value: str) -> bool:
+        """Atomically record the first observation, including before a fleet row exists."""
+        cursor = self._conn.execute(
+            "INSERT INTO team_meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING",
+            (key, value),
+        )
+        self._commit()
+        return cursor.rowcount == 1
+
+    def compare_meta(self, key: str, expected: str, value: str) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE team_meta SET value = ? WHERE key = ? AND value = ?", (value, key, expected)
+        )
+        self._commit()
+        return cursor.rowcount == 1
+
+    def delete_meta(self, key: str, *, expected: str | None = None) -> bool:
+        clause = " AND value = ?" if expected is not None else ""
+        args = (key, expected) if expected is not None else (key,)
+        cursor = self._conn.execute("DELETE FROM team_meta WHERE key = ?" + clause, args)
+        self._commit()
+        return cursor.rowcount == 1
+
+    def _clear_native_launch(self, launch_id: str) -> int:
+        return self._conn.execute(
+            "DELETE FROM team_meta WHERE key = ? OR key GLOB ? OR key GLOB ?",
+            (
+                f"native-launch:{launch_id}",
+                _glob_prefix(f"native-event:{launch_id}:"),
+                _glob_prefix(f"native-provider:{launch_id}:"),
+            ),
+        ).rowcount
+
+    def clear_native_launch(self, launch_id: str) -> int:
+        """Drop transient native dedup/provider facts when their receiver exits."""
+        with self.transaction():
+            return self._clear_native_launch(launch_id)
+
+    def expire_native_launches(self, before: float) -> int:
+        """Reap crashed receivers and metadata from releases without lifecycle markers."""
+        removed = 0
+        with self.transaction():
+            for key, raw in self.list_meta("native-launch:").items():
+                try:
+                    marker = json.loads(raw)
+                    seen = marker.get("seen_at") if isinstance(marker, dict) else None
+                except ValueError:
+                    seen = None
+                if not isinstance(seen, (int, float)) or seen < before:
+                    removed += self._clear_native_launch(key.removeprefix("native-launch:"))
+            # Old versions had no marker, timestamp or owner to retain. These
+            # are only retry caches; queued insight records remain in outbox.
+            removed += self._conn.execute(
+                "DELETE FROM team_meta WHERE "
+                "(key GLOB 'native-event:*' OR key GLOB 'native-provider:*') "
+                "AND NOT EXISTS (SELECT 1 FROM team_meta AS marker WHERE marker.key = "
+                "'native-launch:' || substr(substr(team_meta.key, instr(team_meta.key, ':') + 1), "
+                "1, instr(substr(team_meta.key, instr(team_meta.key, ':') + 1), ':') - 1))"
+            ).rowcount
+            # Active sessions retain exact MCP/fleet joins even on long runs.
+            # Ended or abandoned sessions retain replay protection for the TTL.
+            cutoff = datetime.fromtimestamp(before, UTC).isoformat()
+            live = {
+                row["id"]
+                for row in self._conn.execute(
+                    "SELECT id FROM team_session WHERE ended_at IS NULL AND last_seen_at >= ?",
+                    (cutoff,),
+                )
+            }
+            active_panes = {
+                row["key"].replace("-session:", "-seen:", 1) + ":"
+                for row in self._conn.execute(
+                    "SELECT key, value, updated_at FROM team_meta "
+                    "WHERE key GLOB 'launch-session:*' "
+                    "OR key GLOB 'fleet-session:*'"
+                )
+                # SessionStart can refresh the binding before its session row.
+                # Keep older replay history while that refreshed pane is live.
+                if row["value"] in live or row["updated_at"] == 0 or row["updated_at"] >= before
+            }
+            rows = self._conn.execute(
+                "SELECT key, value FROM team_meta WHERE updated_at > 0 AND updated_at < ? AND ("
+                "key GLOB 'agent-event:*' OR key GLOB 'launch-session:*' OR "
+                "key GLOB 'launch-seen:*' OR key GLOB 'fleet-session:*' OR "
+                "key GLOB 'fleet-seen:*')",
+                (before,),
+            ).fetchall()
+            for row in rows:
+                key = row["key"]
+                if key.startswith("agent-event:"):
+                    active = any(key.startswith(f"agent-event:{session}:") for session in live)
+                elif "-seen:" in key:
+                    active = any(key.startswith(prefix) for prefix in active_panes)
+                else:
+                    active = row["value"] in live
+                if not active:
+                    removed += self._conn.execute(
+                        "DELETE FROM team_meta WHERE key = ?", (key,)
+                    ).rowcount
+        return removed
+
+    @_session_write
     def add_signal_events(
         self, writes: Sequence[tuple[TeamEvent, str, dict[str, Any]]]
     ) -> list[TeamEvent]:
@@ -4106,21 +4820,25 @@ class SqliteStore:
         #259, round 34, 5/10).
         """
         written: list[TeamEvent] = []
-        with self._conn:  # one BEGIN…COMMIT for every statement
-            for event, meta_key, meta_value in writes:
-                cursor = self._conn.execute(
-                    "INSERT INTO team_event (id, project_id, session_id, kind, text, "
-                    "task_id, to_role, created_at, actor, meta) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    _event_values(event),
+        for event, meta_key, meta_value in writes:
+            if event.session_id:
+                event = event.model_copy(
+                    update={"session_id": self._canonical_session_id(event.session_id)}
                 )
-                stamped = {**meta_value, "seq": cursor.lastrowid}
-                self._conn.execute(
-                    "INSERT INTO team_meta (key, value) VALUES (?, ?) "
-                    "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                    (meta_key, json.dumps(stamped)),
-                )
-                written.append(event.model_copy(update={"seq": cursor.lastrowid}))
+                meta_value = {**meta_value, "session_id": event.session_id}
+            cursor = self._conn.execute(
+                "INSERT INTO team_event (id, project_id, session_id, kind, text, "
+                "task_id, to_role, created_at, actor, meta) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                _event_values(event),
+            )
+            stamped = {**meta_value, "seq": cursor.lastrowid}
+            self._conn.execute(
+                "INSERT INTO team_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (meta_key, json.dumps(stamped)),
+            )
+            written.append(event.model_copy(update={"seq": cursor.lastrowid}))
         return written
 
     def _insert_event(self, event: TeamEvent) -> TeamEvent:
@@ -4318,13 +5036,18 @@ class SqliteStore:
                     )
         return stored
 
+    @_session_write
     def add_team_event(self, event: TeamEvent) -> TeamEvent:
+        if event.session_id:
+            event = event.model_copy(
+                update={"session_id": self._canonical_session_id(event.session_id)}
+            )
         cursor = self._conn.execute(
             "INSERT INTO team_event (id, project_id, session_id, kind, text, "
             "task_id, to_role, created_at, actor, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             _event_values(event),
         )
-        self._conn.commit()
+        self._commit()
         return event.model_copy(update={"seq": cursor.lastrowid})
 
     def get_event(self, event_id: str) -> TeamEvent | None:
@@ -4367,6 +5090,7 @@ class SqliteStore:
         since_seq: int | None = None,
         kind: str | None = None,
         task_id: str | None = None,
+        to_role: str | None = None,
         exclude_kinds: Collection[str] = (),
         limit: int = 30,
     ) -> list[TeamEvent]:
@@ -4377,10 +5101,11 @@ class SqliteStore:
         past that seq, so a client tracking the last seq it saw never skips
         events (the MCP ``team_log`` contract). Rides the ``(project_id,
         seq)`` index; ``since_iso`` compares stored ISO-8601 UTC strings
-        lexicographically (uniform format by construction). ``session_id`` is
-        exact — prefix resolution is the service layer's job. ``exclude_kinds``
-        leaves those kinds out INSIDE the query, so a window stays ``limit``
-        long however many of them the board holds (the captain's audit lines).
+        lexicographically (uniform format by construction). ``session_id`` and
+        ``to_role`` (the role or label a note is addressed to) are exact — prefix
+        resolution is the service layer's job. ``exclude_kinds`` leaves those kinds out
+        INSIDE the query, so a window stays ``limit`` long however many of them the board
+        holds (the captain's audit lines).
         """
         clauses = ["project_id = ?"]
         params: list[str | int] = [project_id]
@@ -4399,6 +5124,9 @@ class SqliteStore:
         if task_id is not None:
             clauses.append("task_id = ?")
             params.append(task_id)
+        if to_role is not None:
+            clauses.append("to_role = ?")
+            params.append(to_role)
         if exclude_kinds:
             # In the query, not after it: a window of N filtered AFTER the LIMIT
             # comes back short on a board where the excluded kind is common.
@@ -4553,7 +5281,7 @@ class SqliteStore:
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo:
         """Give a project its fleet codename (unique: the index raises on a clash)."""
         self._conn.execute("UPDATE project SET codename = ? WHERE id = ?", (codename, project_id))
-        self._conn.commit()
+        self._commit()
         project = self.get_project(project_id)
         if project is None:
             raise KeyError(project_id)
@@ -4583,6 +5311,16 @@ class SqliteStore:
             "SELECT codename FROM project WHERE codename IS NOT NULL"
         ).fetchall()
         return {str(row["codename"]) for row in rows}
+
+    def _bound_fleet_agent(self, row: sqlite3.Row) -> FleetAgent:
+        """The row, with the session its launch bound at session start (#113) where the row
+        has none: a native id known only once the agent starts. A row spawned on a minted
+        id keeps it, and moves only with its claims (``adopt_fleet_agent_session``)."""
+        agent = _row_to_fleet_agent(row)
+        if agent.session_id is not None:
+            return agent
+        bound = self.get_meta(f"fleet-session:{agent.id}")
+        return agent.model_copy(update={"session_id": bound}) if bound else agent
 
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent:
         """Insert a fleet agent, or update the mutable facts of one already known.
@@ -4617,9 +5355,14 @@ class SqliteStore:
             if unless_stopped is not None
             else "WHERE true "  # INSERT … SELECT … ON CONFLICT needs a WHERE to parse
         )
+        # A row with no session of its own takes the one its launch bound already
+        # (`fleet-session:<id>`): its agent may start before the spawn records it, and the
+        # column is then what `land_fleet_session` would have made it (SMOKE11, 5B).
         cursor = self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, "
+            "COALESCE(?, (SELECT value FROM team_meta WHERE key = 'fleet-session:' || ?)), "
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
             f"{guard}"
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
@@ -4637,6 +5380,7 @@ class SqliteStore:
                 agent.tmux_socket,
                 agent.pane_id,
                 agent.session_id,
+                agent.id,
                 str(agent.cwd),
                 int(agent.worktree),
                 agent.task_id,
@@ -4651,6 +5395,7 @@ class SqliteStore:
                 agent.server_started_at.isoformat() if agent.server_started_at else None,
                 agent.branch,
                 agent.board if agent.board is not None else agent.project_id,
+                agent.agent,
                 agent.persona,
                 agent.ended_by,
                 agent.first_prompt,
@@ -4658,7 +5403,7 @@ class SqliteStore:
                 *((unless_stopped,) if unless_stopped is not None else ()),
             ),
         )
-        self._conn.commit()
+        self._commit()
         if cursor.rowcount == 0:
             return None
         stored = self.get_fleet_agent(agent.id)
@@ -4755,10 +5500,10 @@ class SqliteStore:
         try:
             yield
             if self._layout_depth == 1:
-                self._conn.commit()
+                self._commit()
         except BaseException:
             if self._layout_depth == 1:
-                self._conn.rollback()
+                self._rollback()
             raise
         finally:
             self._layout_depth -= 1
@@ -4766,7 +5511,7 @@ class SqliteStore:
     def _commit_layout(self) -> None:
         """A layout writer's commit, unless a :meth:`layout_change` block makes it."""
         if not self._layout_depth:
-            self._conn.commit()
+            self._commit()
 
     def project_groups(self) -> list[ProjectGroup]:
         rows = self._conn.execute(
@@ -5290,7 +6035,7 @@ class SqliteStore:
     def settle_revocation(self, key_uid: str) -> bool:
         """The server confirmed the key is revoked: nothing is owed for it any more."""
         cursor = self._conn.execute("DELETE FROM pending_revocation WHERE key_uid = ?", (key_uid,))
-        self._conn.commit()
+        self._commit()
         return cursor.rowcount > 0
 
     def note_revocation_failure(self, key_uid: str, reason: str) -> None:
@@ -5298,7 +6043,7 @@ class SqliteStore:
         self._conn.execute(
             "UPDATE pending_revocation SET last_error = ? WHERE key_uid = ?", (reason, key_uid)
         )
-        self._conn.commit()
+        self._commit()
 
     # --- UI state (#144) ---------------------------------------------------------------
 
@@ -5318,7 +6063,7 @@ class SqliteStore:
                 "updated_at = excluded.updated_at",
                 (key, value, _now_iso()),
             )
-        self._conn.commit()
+        self._commit()
 
     def replace_ui_state(self, key: str, expected: str | None, value: str | None) -> bool:
         """Compare-and-set: write ``value`` under ``key`` (``None`` forgets it) only while the
@@ -5355,16 +6100,16 @@ class SqliteStore:
         ).fetchall()
         if len(rows) > 1:
             raise AmbiguousIdError(ref)
-        return _row_to_fleet_agent(rows[0]) if rows else None
+        return self._bound_fleet_agent(rows[0]) if rows else None
 
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]:
         clause = " AND ended_at IS NULL" if live_only else ""
         rows = self._conn.execute(
-            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
+            f"SELECT {self._fleet_agent_read}, {_FLEET_AGENT_BINDING} FROM fleet_agent "
             f"WHERE project_id = ?{clause} ORDER BY created_at, id",
             (project_id,),
         ).fetchall()
-        return [_row_to_fleet_agent(row) for row in rows]
+        return [_row_to_bound_fleet_agent(row) for row in rows]
 
     def live_fleet_agents(self) -> list[FleetAgent]:
         """Every live fleet row, in every project, forgotten ones' included, oldest first.
@@ -5374,10 +6119,10 @@ class SqliteStore:
         ran one query per project ever registered, captured directories included, and a
         spawn asks it twice (review of #259, round 4)."""
         rows = self._conn.execute(
-            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
+            f"SELECT {self._fleet_agent_read}, {_FLEET_AGENT_BINDING} FROM fleet_agent "
             "WHERE ended_at IS NULL ORDER BY created_at, id"
         ).fetchall()
-        return [_row_to_fleet_agent(row) for row in rows]
+        return [_row_to_bound_fleet_agent(row) for row in rows]
 
     def fleet_label_heads(self, project_id: str | None = None) -> list[FleetAgent]:
         """Every live fleet row, and the newest row of each label, live or ended, in every
@@ -5399,14 +6144,14 @@ class SqliteStore:
         for one project, once per project and again per row (final delta review, n5)."""
         scope, args = ("WHERE project_id = ?", (project_id,)) if project_id else ("", ())
         rows = self._conn.execute(
-            f"SELECT {self._fleet_agent_read} FROM fleet_agent WHERE id IN ("
-            "SELECT id FROM (SELECT id, ended_at, ROW_NUMBER() OVER ("
+            f"SELECT {self._fleet_agent_read}, {_FLEET_AGENT_BINDING} FROM fleet_agent "
+            "WHERE id IN (SELECT id FROM (SELECT id, ended_at, ROW_NUMBER() OVER ("
             "PARTITION BY project_id, label ORDER BY created_at DESC, id DESC) AS newest "
             f"FROM fleet_agent {scope}) WHERE ended_at IS NULL OR newest = 1) "
             "ORDER BY created_at, id",
             args,
         ).fetchall()
-        return [_row_to_fleet_agent(row) for row in rows]
+        return [_row_to_bound_fleet_agent(row) for row in rows]
 
     def fleet_live_counts(self, since: datetime) -> dict[str, int]:
         """Project id → its live rows, for every project with a live row or one that ended at
@@ -5433,11 +6178,11 @@ class SqliteStore:
         ``since`` compares as the stored ISO-8601 UTC strings do.
         """
         rows = self._conn.execute(
-            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
+            f"SELECT {self._fleet_agent_read}, {_FLEET_AGENT_BINDING} FROM fleet_agent "
             "WHERE project_id = ? AND ended_at >= ? ORDER BY created_at, id",
             (project_id, since.astimezone(UTC).isoformat()),
         ).fetchall()
-        return [_row_to_fleet_agent(row) for row in rows]
+        return [_row_to_bound_fleet_agent(row) for row in rows]
 
     def fleet_agent_boards(self, project_id: str, *, live_only: bool = False) -> list[str]:
         """Every board one of the project's rows recorded, live or ended (``live_only``: live),
@@ -5500,7 +6245,9 @@ class SqliteStore:
         scanning: this runs on the session-start hook AND on every ``task next``,
         including the plain CLI ones that have no fleet row at all and paid for
         the whole list to find that out (review of #116, round 3). It walks the live
-        rows alone, through the partial ``fleet_agent_live_label`` index.
+        rows alone, through the partial ``fleet_agent_live_label`` index. A row whose own
+        column is empty is the session its launch bound, as :meth:`_bound_fleet_agent`
+        reads it (an agent whose native id binds at its start).
 
         Not filtered on the session's project: under ``AISQUARE_TEAM_HUB`` the session is
         on the hub's board while its row is in the project it was spawned in, and the
@@ -5516,20 +6263,45 @@ class SqliteStore:
         """
         row = self._conn.execute(
             f"SELECT {self._fleet_agent_read} FROM fleet_agent "
-            "WHERE session_id = ? AND ended_at IS NULL "
+            "WHERE ended_at IS NULL AND (session_id = ? OR "
+            "(session_id IS NULL AND (SELECT value FROM team_meta "
+            "WHERE key = 'fleet-session:' || fleet_agent.id) = ?)) "
             "ORDER BY created_at DESC, id DESC LIMIT 1",
-            (session_id,),
+            (session_id, session_id),
         ).fetchone()
-        return _row_to_fleet_agent(row) if row is not None else None
+        return self._bound_fleet_agent(row) if row is not None else None
 
     def fleet_session_ids(self) -> set[str]:
         """Every session id a fleet row has recorded, live or ended, in any project: the
         conversations the fleet already owns, which ``fleet adopt`` neither lists nor takes
-        (#290). An ended row comes back with ``fleet restart``, not by adoption."""
+        (#290). An ended row comes back with ``fleet restart``, not by adoption. A row whose
+        own column is empty is the session its launch bound (``fleet-session:<id>``), as
+        :meth:`_bound_fleet_agent` reads it: a Codex row spawned before its landing wrote the
+        column (:meth:`land_fleet_session`) has its thread there alone, which ``fleet adopt
+        --list`` listed and a second row took once it stopped (SMOKE11, 5B)."""
         rows = self._conn.execute(
-            "SELECT DISTINCT session_id FROM fleet_agent WHERE session_id IS NOT NULL"
+            "SELECT DISTINCT COALESCE(session_id, (SELECT value FROM team_meta "
+            "WHERE key = 'fleet-session:' || fleet_agent.id)) AS owned FROM fleet_agent "
+            "WHERE owned IS NOT NULL"
         ).fetchall()
         return {str(row[0]) for row in rows}
+
+    def land_fleet_session(self, agent_id: str) -> bool:
+        """Write the session the launch bound to live row ``agent_id`` (``fleet-session:<id>``,
+        an agent whose native id binds at its start: Codex's) into the row's own column, where
+        it has none, as a row spawned on a minted id holds its own from its spawn: whatever
+        reads the column reads it then, ``fleet_session_ids`` among them (SMOKE11, 5B).
+        ``False`` when nothing was written: no such live row, one with a session of its own,
+        or no binding."""
+        cursor = self._conn.execute(
+            "UPDATE fleet_agent SET session_id = "
+            "(SELECT value FROM team_meta WHERE key = 'fleet-session:' || fleet_agent.id) "
+            "WHERE id = ? AND session_id IS NULL AND ended_at IS NULL AND EXISTS "
+            "(SELECT 1 FROM team_meta WHERE key = 'fleet-session:' || fleet_agent.id)",
+            (agent_id,),
+        )
+        self._commit()
+        return cursor.rowcount == 1
 
     def adopt_fleet_agent_session(
         self, agent_id: str, previous: str | None, session_id: str, lease_until: datetime
@@ -5551,17 +6323,28 @@ class SqliteStore:
         ``fleet stop`` and from every other hook, so the row must still be the
         one that was read — ended, or taken by somebody else in between, and
         nothing moves. A targeted UPDATE, never a whole-row write, for the same
-        reason (a stale snapshot written back resurrected a stopped agent).
+        reason (a stale snapshot written back resurrected a stopped agent). A row
+        whose own column is empty is the session its launch bound
+        (``fleet-session:<id>``, an agent whose native id binds at its start), as
+        :meth:`_bound_fleet_agent` reads it, and moves into the column.
         """
         try:
             cursor = self._conn.execute(
                 "UPDATE fleet_agent SET session_id = ? "
-                "WHERE id = ? AND ended_at IS NULL AND session_id IS ?",
+                "WHERE id = ? AND ended_at IS NULL AND COALESCE(session_id, "
+                "(SELECT value FROM team_meta WHERE key = 'fleet-session:' || fleet_agent.id)) "
+                "IS ?",
                 (session_id, agent_id, previous),
             )
             if cursor.rowcount != 1:
-                self._conn.rollback()
+                self._rollback()
                 return False
+            # The launch's binding follows the row it names, so it always says which
+            # session the row is now; nothing else moves it (``agent_sessions``).
+            self._conn.execute(
+                "UPDATE team_meta SET value = ? WHERE key = 'fleet-session:' || ?",
+                (session_id, agent_id),
+            )
             if previous is not None:
                 # Every claim the old id holds moves; the LEASE is stamped on the
                 # ``doing`` ones alone. Stamped on a review or blocked task too,
@@ -5578,9 +6361,9 @@ class SqliteStore:
                     (session_id, _now_iso(), lease_until.isoformat(), previous, *statuses),
                 )
         except Exception:
-            self._conn.rollback()
+            self._rollback()
             raise
-        self._conn.commit()
+        self._commit()
         return True
 
     def retire_fleet_assignments(self, task_id: str) -> int:
@@ -5601,7 +6384,7 @@ class SqliteStore:
             "UPDATE fleet_agent SET task_id = NULL WHERE task_id = ? AND ended_at IS NULL",
             (task_id,),
         )
-        self._conn.commit()
+        self._commit()
         return cursor.rowcount
 
     def fleet_agent_by_label(
@@ -5619,7 +6402,7 @@ class SqliteStore:
             "LIMIT 1",
             (project_id, label),
         ).fetchone()
-        return _row_to_fleet_agent(row) if row is not None else None
+        return self._bound_fleet_agent(row) if row is not None else None
 
     def end_fleet_agent(
         self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
@@ -5671,7 +6454,7 @@ class SqliteStore:
             "WHERE id = ? AND ended_at IS NULL",
             (_now_iso(), exit_status, ended_by, agent_id),
         )
-        self._conn.commit()
+        self._commit()
         if cursor.rowcount == 0:
             return None
         return self.get_fleet_agent(agent_id)
@@ -5744,7 +6527,7 @@ class SqliteStore:
             "ON CONFLICT (slot) DO UPDATE SET config_dir = excluded.config_dir",
             (slot, str(config_dir), _now_iso()),
         )
-        self._conn.commit()
+        self._commit()
         row = self._conn.execute(
             f"SELECT {_CLAUDE_ACCOUNT_COLUMNS} FROM claude_account WHERE slot = ?", (slot,)
         ).fetchone()
@@ -5774,7 +6557,7 @@ class SqliteStore:
         if deleted:
             self.order_claude_accounts([])  # close the gaps the rows leave; commits all of it
         else:
-            self._conn.commit()
+            self._commit()
         return deleted
 
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None:
@@ -5783,18 +6566,18 @@ class SqliteStore:
             "UPDATE claude_account SET alias = ? WHERE slot = ?", (alias, slot)
         )
         if cursor.rowcount != 1:
-            self._conn.rollback()
+            self._rollback()
             raise KeyError(slot)
-        self._conn.commit()
+        self._commit()
 
     def set_claude_account_disabled(self, slot: int, disabled: bool) -> None:
         cursor = self._conn.execute(
             "UPDATE claude_account SET disabled = ? WHERE slot = ?", (int(disabled), slot)
         )
         if cursor.rowcount != 1:
-            self._conn.rollback()
+            self._rollback()
             raise KeyError(slot)
-        self._conn.commit()
+        self._commit()
 
     def order_claude_accounts(self, slots: Sequence[int]) -> None:
         """Rewrite the positions: ``slots`` first, in that order, then everything else as it was.
@@ -5813,7 +6596,98 @@ class SqliteStore:
             self._conn.execute(
                 "UPDATE claude_account SET position = ? WHERE slot = ?", (position, slot)
             )
-        self._conn.commit()
+        self._commit()
+
+    # --- other agents' account registry (v44) ---------------------------------------------------
+    #
+    # ``claude_account``'s methods above, for the rows of one other agent: the same
+    # one-statement writes, the default and the alias refused by the indexes.
+
+    def agent_accounts(self, agent: str) -> list[ClaudeAccountRecord]:
+        """``agent``'s registered slots in priority order (position, then slot)."""
+        rows = self._conn.execute(
+            f"SELECT {_AGENT_ACCOUNT_COLUMNS} FROM agent_account WHERE agent = ? "
+            "ORDER BY position, slot",
+            (agent,),
+        ).fetchall()
+        return [_row_to_claude_account(row) for row in rows]
+
+    def upsert_agent_account(self, agent: str, slot: int, config_dir: Path) -> ClaudeAccountRecord:
+        """Register ``slot`` at the END of ``agent``'s order, or refresh its directory."""
+        self._conn.execute(
+            f"INSERT INTO agent_account ({_AGENT_ACCOUNT_COLUMNS}) VALUES (?, ?, ?, NULL, "
+            "COALESCE((SELECT MAX(position) FROM agent_account WHERE agent = ?), 0) + 1, "
+            "0, 0, ?) "
+            "ON CONFLICT (slot) DO UPDATE SET config_dir = excluded.config_dir, "
+            "agent = excluded.agent",
+            (slot, agent, str(config_dir), agent, _now_iso()),
+        )
+        self._commit()
+        row = self._conn.execute(
+            f"SELECT {_AGENT_ACCOUNT_COLUMNS} FROM agent_account WHERE slot = ?", (slot,)
+        ).fetchone()
+        assert row is not None  # just written
+        return _row_to_claude_account(row)
+
+    def delete_agent_accounts(self, agent: str, slots: Sequence[int]) -> int:
+        """Forget several of ``agent``'s slots; the order is renumbered once, after."""
+        deleted = 0
+        for slot in slots:
+            cursor = self._conn.execute(
+                "DELETE FROM agent_account WHERE agent = ? AND slot = ?", (agent, slot)
+            )
+            deleted += cursor.rowcount
+        if deleted:
+            self.order_agent_accounts(agent, [])  # close the gaps; commits all of it
+        else:
+            self._commit()
+        return deleted
+
+    def set_agent_account_alias(self, agent: str, slot: int, alias: str | None) -> None:
+        """Name a slot (``None`` unnames it). A taken alias raises ``sqlite3.IntegrityError``."""
+        cursor = self._conn.execute(
+            "UPDATE agent_account SET alias = ? WHERE agent = ? AND slot = ?", (alias, agent, slot)
+        )
+        if cursor.rowcount != 1:
+            self._rollback()
+            raise KeyError(slot)
+        self._commit()
+
+    def set_agent_account_disabled(self, agent: str, slot: int, disabled: bool) -> None:
+        cursor = self._conn.execute(
+            "UPDATE agent_account SET disabled = ? WHERE agent = ? AND slot = ?",
+            (int(disabled), agent, slot),
+        )
+        if cursor.rowcount != 1:
+            self._rollback()
+            raise KeyError(slot)
+        self._commit()
+
+    def order_agent_accounts(self, agent: str, slots: Sequence[int]) -> None:
+        """``slots`` first, in that order, then the rest of ``agent``'s as they were; 1..n."""
+        current = [record.slot for record in self.agent_accounts(agent)]
+        wanted = list(dict.fromkeys(slot for slot in slots if slot in current))
+        rest = [slot for slot in current if slot not in wanted]
+        for position, slot in enumerate([*wanted, *rest], start=1):
+            self._conn.execute(
+                "UPDATE agent_account SET position = ? WHERE agent = ? AND slot = ?",
+                (position, agent, slot),
+            )
+        self._commit()
+
+    # --- one priority order over every agent's slots (v46) ----------------------------------
+
+    def account_ranks(self) -> dict[int, int]:
+        """Each ranked slot's place in the one order, 1 first."""
+        rows = self._conn.execute("SELECT slot, rank FROM account_rank").fetchall()
+        return {int(row[0]): int(row[1]) for row in rows}
+
+    def rank_accounts(self, slots: Sequence[int]) -> None:
+        """The whole order: ``slots`` ranked 1..n (first mention wins), every other row dropped."""
+        self._conn.execute("DELETE FROM account_rank")
+        for rank, slot in enumerate(dict.fromkeys(slots), start=1):
+            self._conn.execute("INSERT INTO account_rank (slot, rank) VALUES (?, ?)", (slot, rank))
+        self._commit()
 
     def promote_retired_claude_account_default(self) -> int | None:
         """Move the slot the retired ``is_default`` flag names to rank 1 and clear the flag.
@@ -5862,12 +6736,46 @@ class SqliteStore:
         self._conn.commit()
         return promoted
 
+    def promote_retired_agent_account_default(self, agent: str) -> int | None:
+        """:meth:`promote_retired_claude_account_default` for ``agent``'s slots: the flag
+        ``agent_account.is_default`` (store v44, one per agent) a build before the one order
+        across agents set, folded into ``agent``'s own order as its first, and cleared.
+
+        Rank 1 of the one order is the machine default whatever its agent, so no agent has a
+        default of its own; the service puts the slot ahead of the agent's other accounts in
+        that order too (``services.claude_accounts._ranked``). Keyed on the data, idempotent,
+        one transaction; the slot moved, or ``None`` when no flag was set.
+        """
+        row = self._conn.execute(
+            "SELECT slot FROM agent_account WHERE agent = ? AND is_default = 1 LIMIT 1",
+            (agent,),
+        ).fetchone()
+        if row is None:
+            return None
+        promoted = int(row[0])
+        cleared = self._conn.execute(
+            "UPDATE agent_account SET is_default = 0 WHERE slot = ? AND is_default = 1",
+            (promoted,),
+        )
+        if cleared.rowcount != 1:
+            self._conn.rollback()
+            return None
+        current = [record.slot for record in self.agent_accounts(agent)]  # under the lock
+        order = [promoted, *(slot for slot in current if slot != promoted)]
+        for position, slot in enumerate(order, start=1):
+            self._conn.execute(
+                "UPDATE agent_account SET position = ? WHERE agent = ? AND slot = ?",
+                (position, agent, slot),
+            )
+        self._conn.commit()
+        return promoted
+
     # --- usage readings (v16, #146) ------------------------------------------------------------
 
     def add_usage_sample(self, sample: UsageSample) -> None:
         """Record one reading and drop this slot's readings older than :data:`_USAGE_RETENTION`."""
         self._conn.execute(
-            f"INSERT INTO claude_usage ({_USAGE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO claude_usage ({_USAGE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 sample.slot,
                 sample.fetched_at.isoformat(),
@@ -5876,13 +6784,16 @@ class SqliteStore:
                 sample.week_percent,
                 sample.week_resets_at.isoformat() if sample.week_resets_at else None,
                 sample.token_fingerprint,
+                None
+                if sample.windows is None
+                else json.dumps([w.model_dump(mode="json") for w in sample.windows]),
             ),
         )
         self._conn.execute(
             "DELETE FROM claude_usage WHERE slot = ? AND fetched_at < ?",
             (sample.slot, (sample.fetched_at - _USAGE_RETENTION).isoformat()),
         )
-        self._conn.commit()
+        self._commit()
 
     def usage_samples(self, slot: int, *, since: datetime) -> list[UsageSample]:
         """This slot's readings taken at or after ``since``, oldest first."""
@@ -5897,7 +6808,7 @@ class SqliteStore:
         """Drop every reading of ``slot``: a removed account's history must not rate the
         next occupant's window (review of #205, third round). Returns the count."""
         cursor = self._conn.execute("DELETE FROM claude_usage WHERE slot = ?", (slot,))
-        self._conn.commit()
+        self._commit()
         return int(cursor.rowcount)
 
     # --- per-project settings (v15) ---------------------------------------------------------
@@ -5917,13 +6828,13 @@ class SqliteStore:
             "value = excluded.value, set_at = excluded.set_at",
             (project_id, key, value, _now_iso()),
         )
-        self._conn.commit()
+        self._commit()
 
     def clear_project_setting(self, project_id: str, key: str) -> bool:
         cursor = self._conn.execute(
             "DELETE FROM project_setting WHERE project_id = ? AND key = ?", (project_id, key)
         )
-        self._conn.commit()
+        self._commit()
         return cursor.rowcount == 1
 
     def project_settings(self, key: str) -> dict[str, str]:
@@ -6047,16 +6958,79 @@ end that last started a before-limit move, the crossing a ``warn`` has named
 clears a project's (:meth:`SqliteStore.reset_project`)."""
 
 
+_SESSION_BINDINGS: tuple[str, ...] = ("launch-session:", "fleet-session:", "session-alias:")
+"""The ``team_meta`` keys whose VALUE is a session: a launch's and a fleet row's binding to the
+session they run (``core.agent_sessions``, keyed by launch id and by row id) and an MCP row's
+alias (``session-alias:<provisional id>``)."""
+
+_FLEET_META: tuple[str, ...] = (
+    "first-prompt:",
+    "fleet-session:",
+    "fleet-stopped:",
+    "launch-refused:",
+)
+"""The ``team_meta`` keys kept per fleet row as ``<prefix><agent id>``: what a spawn's first
+message was given as (``services.fleet.FIRST_PROMPT_META``), the row's session binding, the
+mark the stop that ended the row took (``services.fleet._end_store_ended``) and the reason of
+the launch record's refusal its board was last told (``services.fleet._say_refused``). They
+go with the row (:func:`_fleet_meta_terms`): nothing else expires a ``first-prompt:``,
+``fleet-stopped:`` or ``launch-refused:`` key."""
+
+_PROJECT_META: tuple[str, ...] = ("signal/{}/*", "nudge-owed:{}", "broker-refused:{}:*")
+"""The ``team_meta`` keys kept per project, as GLOBs of its id: its signals, the nudge a board
+write owed its manager (``services.fleet.NUDGE_OWED``) and the once-per-launch-and-kind marks
+of the broker refusals its board was told (``services.store_broker.record_refusal``). A reset
+and a purge clear them (:func:`_project_meta_term`)."""
+
+
 def _session_meta_terms(sessions: Sequence[str]) -> Iterator[tuple[str, tuple[str, ...]]]:
     """``(where, params)`` matching the ``team_meta`` keys of ``sessions``: each of
-    :data:`_SESSION_META_KINDS`, and its continuation counters. In statements of at most
-    :data:`_META_BATCH` sessions each, as SQLite refuses an expression tree past 1000 terms."""
+    :data:`_SESSION_META_KINDS` and the continuation prompt, the continuation counters,
+    agent events and launch and fleet sightings a session leaves, and the keys whose value
+    names it (:data:`_SESSION_BINDINGS`). In statements of at most :data:`_META_BATCH`
+    sessions each: the keys are one ``IN`` and the globs OR'd beside it, as one term per key
+    passed SQLite's expression depth (1000) at a full batch."""
+    bound = " OR ".join(f"key GLOB '{prefix}*'" for prefix in _SESSION_BINDINGS)
     for start in range(0, len(sessions), _META_BATCH):
         batch = sessions[start : start + _META_BATCH]
-        keys = [f"{kind}:{sid}" for sid in batch for kind in _SESSION_META_KINDS]
-        globs = [f"continuations:{_glob_escape(sid)}:*" for sid in batch]
-        clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
+        keys = [
+            f"{kind}:{sid}"
+            for sid in batch
+            for kind in (*_SESSION_META_KINDS, "continuation-prompt")
+        ]
+        globs = [
+            pattern
+            for sid in batch
+            for pattern in (
+                f"continuations:{_glob_escape(sid)}:*",
+                f"agent-event:{_glob_escape(sid)}:*",
+                f"launch-seen:*:{_glob_escape(sid)}",
+                f"fleet-seen:*:{_glob_escape(sid)}",
+            )
+        ]
+        clauses = [f"key IN ({','.join('?' for _ in keys)})"] + ["key GLOB ?"] * len(globs)
+        clauses.append(f"(({bound}) AND value IN ({','.join('?' for _ in batch)}))")
+        yield " OR ".join(clauses), (*keys, *globs, *batch)
+
+
+def _fleet_meta_terms(agents: Sequence[str]) -> Iterator[tuple[str, tuple[str, ...]]]:
+    """``(where, params)`` matching the ``team_meta`` keys of the fleet rows ``agents``: each
+    of :data:`_FLEET_META`, and the sightings under the row's token (``fleet-seen:<id>:*``), in
+    statements of at most :data:`_META_BATCH` rows each, as :func:`_session_meta_terms`."""
+    for start in range(0, len(agents), _META_BATCH):
+        batch = agents[start : start + _META_BATCH]
+        keys = [f"{prefix}{agent}" for agent in batch for prefix in _FLEET_META]
+        globs = [f"fleet-seen:{_glob_escape(agent)}:*" for agent in batch]
+        clauses = [f"key IN ({','.join('?' for _ in keys)})"] + ["key GLOB ?"] * len(globs)
         yield " OR ".join(clauses), (*keys, *globs)
+
+
+def _project_meta_term(project_id: str) -> tuple[str, tuple[str, ...]]:
+    """``(where, params)`` matching the ``team_meta`` keys of :data:`_PROJECT_META` that are
+    ``project_id``'s, its id taken as itself (:func:`_glob_escape`)."""
+    escaped = _glob_escape(project_id)
+    globs = tuple(pattern.format(escaped) for pattern in _PROJECT_META)
+    return " OR ".join(["key GLOB ?"] * len(globs)), globs
 
 
 class GroupSettings(NamedTuple):
@@ -6195,6 +7169,36 @@ class StoreUnopenable(sqlite3.DatabaseError):
     """
 
 
+def is_unreachable_error(exc: BaseException) -> bool:
+    """True when this process may not write the store: SQLite could not open the file
+    (``SQLITE_CANTOPEN``, how an agent's sandbox that leaves the aisquare home out answers
+    every board call, a read included: Codex 0.162.1) or may only read it
+    (``SQLITE_READONLY``, a directory without write permission). Nothing in the file is
+    damaged, so moving it aside would cost the board's history for nothing. A
+    :class:`StoreUnopenable` is judged by the error it wraps."""
+    cause = exc.__cause__ if isinstance(exc, StoreUnopenable) and exc.__cause__ else exc
+    code = getattr(cause, "sqlite_errorcode", None)
+    if code is not None:
+        return code & 0xFF in (sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_READONLY)
+    text = str(exc).lower()
+    return "unable to open database file" in text or "readonly database" in text
+
+
+def store_recovery(exc: BaseException) -> str:
+    """The recovery for a store that would not open: :func:`damaged_store_recovery`,
+    unless the store was out of reach rather than damaged (:func:`is_unreachable_error`)."""
+    if not is_unreachable_error(exc):
+        return damaged_store_recovery()
+    return (
+        f"Leave it where it is: nothing in it is damaged, and this process may not write "
+        f"{paths.db_path().parent}. Inside an agent's sandbox, where the store is read-only, "
+        f"its board calls go through its launch's broker: an agent `aisquare fleet` or "
+        f"`aisquare launch` started has one (restart it if it says the broker is not "
+        f"running); otherwise run the command outside the sandbox (an approval), or give "
+        f"the directory back its permissions"
+    )
+
+
 def damaged_store_recovery() -> str:
     """The one recovery for a corrupt store, worded once and shared.
 
@@ -6225,9 +7229,7 @@ def damaged_store_message(exc: sqlite3.Error) -> str:
     via ``_fail_team`` — and three copies of a sentence is how doctor's
     remediation drifted from a working one in the first place.
     """
-    return (
-        f"the context store cannot be opened: {paths.db_path()} ({exc}). {damaged_store_recovery()}"
-    )
+    return f"the context store cannot be opened: {paths.db_path()} ({exc}). {store_recovery(exc)}"
 
 
 def damaged_data_message(exc: sqlite3.Error) -> str:

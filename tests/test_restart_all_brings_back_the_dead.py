@@ -52,6 +52,7 @@ def _ready(server: FakeTmux, monkeypatch: pytest.MonkeyPatch) -> None:
     first poll. Its first message, the hand-off or resume line with the dead team in it, rides
     its command line (P0-W1a); :func:`_first_lines` reads it, typed or not."""
     original = server.spawn_window
+    monkeypatch.setattr(fleet_service, "_started_since", lambda session_id, launched: True)
 
     def ready(*args: Any, **kwargs: Any) -> WindowInfo:
         window = original(*args, **kwargs)

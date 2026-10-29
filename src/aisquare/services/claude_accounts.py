@@ -16,23 +16,34 @@ way the login "landed" when the directory holds what a signed-in Claude Code
 writes there (on macOS, with the token in its Keychain item) —
 :func:`sign_in_landed` — and nothing here ever writes those files. What the
 accounts SHARE is the exception, and touches no login: a folder's trust entry
-in ``.claude.json``, and (opt-in) ``settings.json`` as a link to the plain
-claude's (:func:`share_for_launch`, ``core.claude_sharing``).
+(each agent's in its own file, ``AgentAccounts.trust``: ``.claude.json``,
+``core.claude_sharing``; a Codex ``config.toml``, ``core.codex_sharing``), and
+(opt-in) ``settings.json`` as a link to the plain claude's (:func:`share_for_launch`).
 
 **Usage is best effort, on purpose.** The percentages come from the endpoint
-Claude Code's own ``/usage`` reads (:data:`USAGE_URL`), called with the access
+Claude Code's own ``/usage`` reads (``core.USAGE_URL``), called with the access
 token the account's stored login holds (``core.stored_login``: the credentials
 file, or on macOS the login Keychain). It is not a documented API: it
 answered on 2026-09-09 with Claude Code 2.1.266 and its shape is recorded in
 ``tests/test_claude_accounts.py``, and the day it changes an account's row says
 ``usage unavailable`` with the reason while everything else on the page keeps
 working. It is never called from a hook or on any path a session pays for.
+
+**Codex accounts are slots on the same ladder** (``core.claude_accounts``), and
+every question here takes the slot's agent into account: a launch's account
+must be its role's agent's (:func:`choose` refuses a Claude slot for a Codex
+role, naming both), the machine and project defaults are one PER AGENT, the
+headroom pick compares one agent's accounts, and a Codex account's usage is
+read OFFLINE from its own sessions' rollouts (``core.codex_accounts``) — no
+request is ever made for it. Its sign-in is ``codex login`` in the slot's
+``CODEX_HOME`` (a *Log in* over an ``auth.json`` still there waits for new tokens:
+:func:`login_fingerprint`), its folder trust is shared between Codex slots, and its
+arrangement lives in ``agent_account`` (store v29).
 """
 
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import os
 import shutil
@@ -52,14 +63,16 @@ from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing as sharing
 from aisquare.core import paths, tls
+from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters.types import FolderTrust, SharePart, trusted_by
 from aisquare.core.config import AccountsSettings, FleetSettings, load_config, save_config
-from aisquare.core.harness import MODEL_FAMILIES, model_family
 from aisquare.core.names import name_key
 from aisquare.core.spawn import untraced_env
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import TmuxServer, WindowInfo
-from aisquare.core.version import __version__
 from aisquare.models import (
+    SESSION_WINDOW,
+    WEEK_WINDOW,
     AccountsOverview,
     ClaudeAccount,
     ClaudeAccountRecord,
@@ -76,16 +89,12 @@ from aisquare.models import (
     UsageSample,
     UsageTrend,
     WeekReset,
+    session_and_week,
 )
 from aisquare.services import agents as agents_service
 from aisquare.services import install_route
 from aisquare.services import settings as settings_service
 from aisquare.statusline import FLEET_FILE as STATUSLINE_FLEET_FILE
-
-USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-"""What Claude Code's ``/usage`` reads; ``anthropic-beta: oauth-2025-04-20`` is required."""
-OAUTH_BETA = "oauth-2025-04-20"
-USAGE_TIMEOUT_SECONDS = 10.0
 
 SIGN_IN_SESSION = "asq-accounts"
 """The fleet server's tmux session that hosts sign-in windows (one window per attempt)."""
@@ -111,7 +120,11 @@ class NoSuchAccount(AccountsError):
 
 
 class ClaudeNotInstalled(AccountsError):
-    pass
+    """The agent the account belongs to is not installed (Claude Code, or Codex)."""
+
+
+class WrongAgent(NoSuchAccount):
+    """A reference names an account of another agent than the one launching."""
 
 
 def _now() -> datetime:
@@ -121,15 +134,14 @@ def _now() -> datetime:
 # --- what is on this machine ----------------------------------------------------------
 
 
-def install() -> ClaudeInstall:
-    """Whether ``claude`` is on PATH, and which version (read from the install layout)."""
-    binary = shutil.which("claude")
-    if binary is None:
+def install(agent: str = AGENT) -> ClaudeInstall:
+    """Whether the agent's binary is on PATH, and which version its install layout names
+    (``AgentAdapter.layout_version``: no process is started)."""
+    adapter = get_adapter(agent)
+    found = shutil.which(adapter.binary)
+    if found is None:
         return ClaudeInstall(installed=False)
-    # Lazy: diagnostics imports this module for its doctor line.
-    from aisquare.services.diagnostics import claude_code_version
-
-    return ClaudeInstall(installed=True, binary=binary, version=claude_code_version(binary))
+    return ClaudeInstall(installed=True, binary=found, version=adapter.layout_version(found))
 
 
 def describe(account: ClaudeAccount) -> ClaudeAccountStatus:
@@ -138,16 +150,21 @@ def describe(account: ClaudeAccount) -> ClaudeAccountStatus:
     A token the Keychain would not show (locked, refused) is ``unreadable``: neither a
     missing one, which would offer a log-in that cannot help, nor one to use.
     """
-    login = core.stored_login(account)
-    creds = login.credentials
+    from aisquare.core import agents as agent_core
+
+    home = core.agent_config_dir(account)
+    context = agent_core.inspect_context(account.agent, home, read_documents=False)
+    _readiness, detail = agent_core.integration_readiness(account.agent, home)
+    kind = core.kind(account.agent)
     return ClaudeAccountStatus(
         account=account,
         label=core.label(account),
         identity=core.identity(account),
         signed_in=core.signed_in(account),
-        token_state="unreadable" if login.unreadable is not None else core.token_state(creds),
-        subscription=core.subscription_label(creds),
+        token_state=kind.token_state(account),
+        subscription=kind.subscription(account),
         hooks_installed=_hooks_installed(account),
+        detail=" ".join(filter(None, [detail, *context.notes])),
     )
 
 
@@ -155,9 +172,22 @@ def _hooks_installed(account: ClaudeAccount) -> bool:
     """Whether aisquare runs in this slot: the one shared answer, which never raises.
 
     So a slot reads as the doctor's row and ``agents status`` read it, and a
-    settings.json that cannot be read is "not installed" rather than a crash.
+    settings.json that cannot be read is "not installed" rather than a crash: the one
+    "connected?" answer (``core.agents.connected``, the plugin route included). An agent
+    that runs a hook only once it is trusted (``capabilities.requires_hook_trust``) is read
+    by its hooks file alone, every hook in it (``core.agents.hooks_installed``: Codex's
+    ``hooks.json``, which Codex then asks the operator to trust once): its plugin's hooks
+    are trusted apart from them.
     """
-    return agents_service.claude_code_connected(account.config_dir)
+    from aisquare.core import agents as agent_core
+
+    home = core.agent_config_dir(account)
+    try:
+        if get_adapter(account.agent).capabilities.requires_hook_trust:
+            return agent_core.hooks_installed(account.agent, home)
+        return agent_core.connected(account.agent, home)
+    except Exception:
+        return False
 
 
 def overview() -> AccountsOverview:
@@ -165,10 +195,14 @@ def overview() -> AccountsOverview:
 
     "Offline" still holds: the registry is a local SQLite read. A store that
     cannot be opened costs the ARRANGEMENT (order, aliases, disabled flags)
-    and never the listing — see :func:`list_accounts`.
+    and never the listing — see :func:`list_accounts`. ``installs`` has every
+    agent with account slots; Claude Code's is ``claude`` too, as it always was.
     """
+    installs = {agent: install(agent) for agent in core.account_agents()}
     return AccountsOverview(
-        claude=install(), accounts=[describe(account) for account in list_accounts()]
+        claude=installs.get(AGENT) or install(),
+        accounts=[describe(account) for account in list_accounts()],
+        installs=installs,
     )
 
 
@@ -190,6 +224,13 @@ def overview() -> AccountsOverview:
 
 PROJECT_ACCOUNT_KEY = "claude_account"
 """The ``project_setting`` key holding a project's default account (a slot number)."""
+
+
+def project_account_key(agent: str = AGENT) -> str:
+    """The ``project_setting`` key of ``agent``'s project default: one per agent, Claude
+    Code's the one it always was (``AgentAccounts.legacy_slots``)."""
+    return PROJECT_ACCOUNT_KEY if core.kind(agent).legacy_slots else f"{agent}_account"
+
 
 ChoiceSource = Literal["flag", "role binding", "project default", "headroom", "preferred"]
 
@@ -235,15 +276,125 @@ class AccountChoice:
 
 
 def _arranged(store: ContextStore) -> list[ClaudeAccount]:
-    """Every slot on disk, folded with its registry row, in priority order.
+    """Every slot on disk, folded with its registry row, in the ONE priority order.
 
     Reconciles as it reads (see the section comment): rows are created for new
     slots and dropped for vanished ones, so the table can never describe an
-    account that is not there.
+    account that is not there. Each agent's rows keep its own ranking
+    (``claude_account``, ``agent_account``), and :func:`_ranked` lays all of them
+    in one order across agents (store v45): ``position`` is the place in it.
     """
-    # A machine default an older build set becomes rank 1, once (#8 on the board).
-    store.promote_retired_claude_account_default()
-    on_disk = {account.slot: account for account in core.list_accounts()}
+    promoted = _promote_retired_defaults(store)
+    listed = core.list_accounts()
+    arranged: list[ClaudeAccount] = []
+    for agent in core.account_agents():
+        mine = [a for a in listed if a.agent == agent]
+        if core.kind(agent).legacy_slots:
+            arranged.extend(_arranged_claude(store, mine))
+        else:
+            arranged.extend(_arranged_agent(store, agent, mine))
+    return _ranked(store, arranged, promoted)
+
+
+def _promote_retired_defaults(store: ContextStore) -> list[int]:
+    """Fold a machine default an older build flagged into the order, once (#8 on the board).
+
+    Rank 1 IS the machine default now, for every agent's accounts: a flag Claude Code's
+    registry (``claude_account.is_default``) or another agent's (``agent_account``, store
+    v43) still carries moves its slot to the top of that agent's own order and is cleared.
+    The slots moved are returned for :func:`_ranked`, which puts them ahead of their
+    agent's other accounts in the one order too.
+    """
+    promoted: list[int] = []
+    for agent in core.account_agents():
+        slot = (
+            store.promote_retired_claude_account_default()
+            if core.kind(agent).legacy_slots
+            else store.promote_retired_agent_account_default(agent)
+        )
+        if slot is not None:
+            promoted.append(slot)
+    return promoted
+
+
+def default_agent() -> str:
+    """The user's coding agent (``[agents] default``), else the built-in default; never raises."""
+    try:
+        chosen = load_config().agents.default
+    except Exception:
+        chosen = None
+    return chosen if chosen in core.account_agents() else AGENT
+
+
+def _ranked(
+    store: ContextStore, arranged: Sequence[ClaudeAccount], promoted: Sequence[int] = ()
+) -> list[ClaudeAccount]:
+    """``arranged`` (each agent's slots in its own order) in the one order across agents.
+
+    The ranked slots by their rank, then any slot with none (added by a build before
+    store v45, or just now) after them, each agent's in its own order. A store that has
+    ranked nothing yet (one coming from v44 or older) is seeded with the user's coding
+    agent's accounts first and every other agent's after, as they were listed, so the
+    order starts where the user's agent already led (owner, PR #113): an unpinned launch that
+    order alone decided keeps its agent, one a setting below it decided (``[agents] default``,
+    ``AISQUARE_CODING_AGENT``) may not. ``promoted`` are the slots a retired default flag
+    just moved to the top of their own agent's order (:func:`_promote_retired_defaults`);
+    each goes ahead of that agent's first account in the order, so the account a launch of
+    that agent took before is the one it takes after.
+    Written only when it changed.
+
+    Once any rank exists the per-agent ``position`` columns are not read again: they are what
+    an older build writes when it reorders a store it shares with this one, and that reorder
+    is dropped, not merged (review r23 of #113, nit). The ranks are the one order.
+    """
+    ranks = store.account_ranks()
+    if ranks:
+        known = sorted((a for a in arranged if a.slot in ranks), key=lambda a: ranks[a.slot])
+        order = [*known, *(a for a in arranged if a.slot not in ranks)]
+        for slot in promoted:
+            mover = next((a for a in order if a.slot == slot), None)
+            if mover is None:
+                continue
+            order.remove(mover)
+            at = next((i for i, a in enumerate(order) if a.agent == mover.agent), len(order))
+            order.insert(at, mover)
+    else:
+        first = default_agent()
+        order = sorted(arranged, key=lambda a: a.agent != first)
+    slots = [a.slot for a in order]
+    if ranks != {slot: rank for rank, slot in enumerate(slots, start=1)}:
+        store.rank_accounts(slots)
+    return [a.model_copy(update={"position": rank}) for rank, a in enumerate(order, start=1)]
+
+
+def _arranged_agent(
+    store: ContextStore, agent: str, listed: Sequence[ClaudeAccount]
+) -> list[ClaudeAccount]:
+    """:func:`_arranged_claude`, for another agent's slots and its own table."""
+    on_disk = {account.slot: account for account in listed}
+    rows = {record.slot: record for record in store.agent_accounts(agent)}
+    for slot in sorted(on_disk):
+        if slot not in rows:
+            rows[slot] = store.upsert_agent_account(agent, slot, on_disk[slot].config_dir)
+    vanished = [slot for slot in rows if slot not in on_disk]
+    if vanished:
+        store.delete_agent_accounts(agent, vanished)
+        rows = {record.slot: record for record in store.agent_accounts(agent)}
+    return [
+        on_disk[record.slot].model_copy(
+            update={
+                "alias": record.alias,
+                "position": record.position,
+                "disabled": record.disabled,
+            }
+        )
+        for record in sorted(rows.values(), key=lambda r: (r.position, r.slot))
+    ]
+
+
+def _arranged_claude(store: ContextStore, listed: Sequence[ClaudeAccount]) -> list[ClaudeAccount]:
+    """Claude Code's slots folded with ``claude_account``, as :func:`_arranged` always did."""
+    on_disk = {account.slot: account for account in listed}
     rows: dict[int, ClaudeAccountRecord] = {
         record.slot: record for record in store.claude_accounts()
     }
@@ -271,7 +422,7 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
 
 
 def _read_registry(
-    project: ProjectInfo | None = None,
+    project: ProjectInfo | None = None, *, agent: str = AGENT
 ) -> tuple[list[ClaudeAccount], str | None, int | None]:
     """The arranged list, the reason the registry was not read, and ``project``'s default slot.
 
@@ -284,13 +435,13 @@ def _read_registry(
         with store_session() as store:
             accounts = _arranged(store)
             raw = (
-                store.project_setting(project.id, PROJECT_ACCOUNT_KEY)
+                store.project_setting(project.id, project_account_key(agent))
                 if project is not None
                 else None
             )
     except sqlite3.Error as exc:
         return core.list_accounts(), f"accounts registry unreadable ({exc})", None
-    return accounts, None, int(raw) if raw is not None and raw.isdigit() else None
+    return accounts, None, core.slot_number(raw) if raw is not None else None
 
 
 def _read_arranged() -> tuple[list[ClaudeAccount], str | None]:
@@ -323,47 +474,119 @@ def list_accounts() -> list[ClaudeAccount]:
     return accounts
 
 
-def resolve(ref: str | int) -> ClaudeAccount:
+def resolve(ref: str | int, *, agent: str | None = None) -> ClaudeAccount:
     """A slot by number, by alias, or by the email it is signed in as.
 
     The three spellings cannot collide: a slot is all digits, an email has an
     ``@``, and an alias is never all digits and has no ``@``
     (``core.normalise_alias``). Lookups are case-insensitive, an alias's
-    included: ``Work`` is stored as typed and ``--account work`` finds it.
+    included: ``Work`` is stored as typed and ``--account work`` finds it. ``agent``
+    is the agent the account is FOR: an account of another one is refused
+    (:class:`WrongAgent`), and an email signed in on both is read as that agent's.
     """
     accounts, note = _read_arranged()
-    return _resolve_in(accounts, ref, note=note)
+    return _resolve_in(accounts, ref, note=note, agent=agent)
 
 
 def _resolve_in(
-    accounts: Sequence[ClaudeAccount], ref: str | int, *, note: str | None = None
+    accounts: Sequence[ClaudeAccount],
+    ref: str | int,
+    *,
+    note: str | None = None,
+    agent: str | None = None,
 ) -> ClaudeAccount:
     """:func:`resolve` against an arranged list already in hand.
 
     ``choose`` reads the registry ONCE and resolves the flag and the binding
     against that read; before, every rung reopened the store and re-ran the
     reconcile upsert, two or three times per launch (review of #205, finding 12).
+
+    The same person is often signed in to Claude Code AND Codex with one email,
+    so an email matches ``agent``'s account first, and with no ``agent`` one
+    signed in on two agents is refused as ambiguous rather than guessed.
     """
+    account = _find_in(accounts, ref, note=note, agent=agent)
+    if agent is not None and account.agent != agent:
+        raise WrongAgent(
+            f"{core.label(account)} (slot {account.slot}) is a "
+            f"{core.agent_label(account.agent)} account, and this launch runs "
+            f"{core.agent_label(agent)} — name a {core.agent_label(agent)} account "
+            "(see: aisquare accounts)"
+        )
+    return account
+
+
+def _whose(agent: str | None, accounts: Sequence[ClaudeAccount]) -> str:
+    """``Claude`` / ``Codex`` in a not-found message (``AgentAccounts.noun``): the agent
+    asked for, else the word of the one agent a machine has accounts of, as every message
+    here always said of Claude's; ``such`` with several."""
+    if agent is None:
+        agents = {a.agent for a in accounts}
+        if len(agents) > 1:
+            return "such"
+        agent = next(iter(agents), AGENT)
+    return core.kind(agent).noun
+
+
+def _signed_in_as(
+    accounts: Sequence[ClaudeAccount], email: str, agent: str | None
+) -> ClaudeAccount | None:
+    """The first account signed in as ``email`` — ``agent``'s before any other's.
+
+    Read lazily, first match wins, as it always was: a ``.claude.json`` can be
+    tens of MB, and a lookup stops at the account it finds. Only with no
+    ``agent`` on a machine with several agents' accounts is every agent's first
+    match read, and two are refused as ambiguous.
+    """
+
+    def matches(account: ClaudeAccount) -> bool:
+        identity = core.identity(account)
+        return identity is not None and identity.email.lower() == email
+
+    if agent is not None or len({a.agent for a in accounts}) <= 1:
+        ordered = sorted(accounts, key=lambda a: a.agent != agent) if agent else accounts
+        return next((account for account in ordered if matches(account)), None)
+    first: dict[str, ClaudeAccount] = {}
+    for account in accounts:
+        if account.agent not in first and matches(account):
+            first[account.agent] = account
+    if len(first) > 1:
+        raise NoSuchAccount(
+            f"{email!r} is signed in to "
+            + " and ".join(f"{core.agent_label(a.agent)} (slot {a.slot})" for a in first.values())
+            + " — name the slot instead; see: aisquare accounts"
+        )
+    return next(iter(first.values()), None)
+
+
+def _find_in(
+    accounts: Sequence[ClaudeAccount],
+    ref: str | int,
+    *,
+    note: str | None,
+    agent: str | None,
+) -> ClaudeAccount:
     text = str(ref).strip()
-    if text.isdigit():
-        account = next((a for a in accounts if a.slot == int(text)), None)
+    whose = _whose(agent, accounts)
+    number = core.slot_number(text)
+    if number is not None:
+        account = next((a for a in accounts if a.slot == number), None)
         if account is None:
-            raise NoSuchAccount(f"no Claude account in slot {text} — see: aisquare accounts")
+            raise NoSuchAccount(f"no {whose} account in slot {text} — see: aisquare accounts")
         return account
     wanted = text.lower()
     if "@" not in wanted:
         by_alias = next((a for a in accounts if _same_alias(a.alias, text)), None)
         if by_alias is not None:
             return by_alias
-    for account in accounts:
-        identity = core.identity(account)
-        if identity is not None and identity.email.lower() == wanted:
-            return account
+    found = _signed_in_as(accounts, wanted, agent)
+    if found is not None:
+        return found
     if "@" in wanted:
-        raise NoSuchAccount(f"no Claude account is signed in as {text!r} — see: aisquare accounts")
+        raise NoSuchAccount(f"no {whose} account is signed in as {text!r} — see: aisquare accounts")
     detail = f" ({note})" if note else ""
     raise NoSuchAccount(
-        f"no Claude account is called {text!r} — not a slot, an alias or a signed-in email"
+        f"no {whose} account is called {text!r} — not a slot, an alias or a signed-in email"
         f"{detail}; see: aisquare accounts"
     )
 
@@ -395,6 +618,9 @@ def slot_of(config_dir: str | Path) -> int | None:
     """Which slot a Claude config directory IS: a managed slot's number, 1 for the plain
     claude's directory, ``None`` for a directory the CLI does not own (a hand-made layout).
 
+    A Codex home answers the same way — a managed Codex slot's number, or 0 for the
+    plain codex's home — since one ladder numbers both agents' slots.
+
     A reader, not a decider: ``services.team.session_account`` records the
     directory a session runs under from its transcript path, and this turns it
     back into the slot a hand-over (#146) is leaving.
@@ -405,12 +631,13 @@ def slot_of(config_dir: str | Path) -> int | None:
     straight the variable made an aliased slot 1 ``.claude`` on the board
     those hooks render (review of #205, fifth round).
     """
-    managed = core.managed_slot(config_dir)
+    managed = core.managed_slot(config_dir, None)
     if managed is not None:
         return managed
     try:
-        if Path(config_dir).resolve() == core.default_config_dir().resolve():
-            return core.DEFAULT_SLOT
+        for agent in core.account_agents():
+            if Path(config_dir).resolve() == core.plain_home(agent).resolve():
+                return core.kind(agent).plain_slot
     except (OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11 and 3.12
         return None
     return None
@@ -434,10 +661,18 @@ def choose(
     exclude: Iterable[int] = (),
     spread: bool | None = None,
     fetch: Fetch | None = None,
+    agent: str = AGENT,
+    pick: AgentPick | None = None,
     family: str | None = None,
     max_age: float | None = None,
 ) -> AccountChoice:
     """THE account resolver: which Claude account a launch runs under, and why.
+
+    ``agent`` is the launching role's agent (Claude Code unless said): every rung
+    answers with an account OF THAT AGENT. A flag or binding naming another
+    agent's account is refused naming both (:class:`WrongAgent`); the project
+    and machine defaults are that agent's own, and headroom compares only its
+    accounts.
 
     The ladder, top rung wins::
 
@@ -473,6 +708,12 @@ def choose(
     usage through the cache, a minute deep (:data:`PICK_MAX_AGE_SECONDS`); a
     hand-over (``spread=True``) reads it live.
 
+    ``pick`` is the launch's agent rung's answer (:func:`agent_pick`): an account of
+    ``agent`` it chose by headroom across agents is the headroom rung's answer, with no
+    second usage read, unless a limit mark shuts it to ``family`` (that rung ran before
+    the model was known), when the headroom rung reads as usual; every rung above it
+    still wins.
+
     ``family`` is the launch's model family (``services.fleet.spawn_runs``), for the
     headroom rung's per-family weeks and limit marks (#277). ``max_age`` is how deep a
     launch's headroom rung reads the cache, :data:`PICK_MAX_AGE_SECONDS` when unsaid: a
@@ -485,18 +726,22 @@ def choose(
     ``[accounts]`` settings are read once per call (finding 12).
     """
     skip = frozenset(exclude)  # once: an iterator would be spent by its first reader
-    accounts, registry_note, project_slot = _read_registry(project)
+    accounts, registry_note, project_slot = _read_registry(project, agent=agent)
     if explicit is not None:
-        return AccountChoice(_resolve_in(accounts, explicit, note=registry_note), "flag")
+        return AccountChoice(
+            _resolve_in(accounts, explicit, note=registry_note, agent=agent), "flag"
+        )
     notes: list[str] = []
     bound, note = _role_binding_ref(role)
     if note is not None:
         notes.append(note)
     if bound:
         try:
-            account: ClaudeAccount | None = _resolve_in(accounts, bound, note=registry_note)
+            account: ClaudeAccount | None = _resolve_in(
+                accounts, bound, note=registry_note, agent=agent
+            )
         except NoSuchAccount as exc:
-            if registry_note is None:
+            if registry_note is None or isinstance(exc, WrongAgent):
                 raise NoSuchAccount(
                     f"the role binding for {role!r} names account {bound!r}: {exc}"
                 ) from exc
@@ -526,7 +771,7 @@ def choose(
     if project is not None:
         slot = project_slot
         if slot is not None:
-            preferred = next((a for a in accounts if a.slot == slot), None)
+            preferred = next((a for a in accounts if a.slot == slot and a.agent == agent), None)
             if preferred is None:
                 raise NoSuchAccount(
                     f"the default account of {project.root.name or project.id} is slot {slot}, "
@@ -548,16 +793,26 @@ def choose(
     # project default still win over it, and so does a hand-over, whose whole point is to
     # move the agent elsewhere: any ``spread`` is one (choose_for_handover reads headroom
     # itself, then falls back here with ``spread=False``).
-    hand_written = _binding_names_a_directory(role)
+    hand_written = _binding_names_a_directory(role, agent)
     if hand_written and spread is None:
         return AccountChoice(None, None, notes)
     settings = accounts_settings()
     by_headroom = spread if spread is not None else settings.pick == "headroom"
+    chosen = pick.account if pick is not None else None
+    if (
+        by_headroom
+        and chosen is not None
+        and chosen.agent == agent
+        and chosen.slot not in skip
+        and not _marked(chosen, family)
+    ):
+        notes.extend(pick.notes if pick is not None else ())
+        return AccountChoice(chosen, "headroom", notes)
     if by_headroom:
         # A hand-over reads live; a launch through the cache, a minute deep unless told.
         depth = PICK_MAX_AGE_SECONDS if max_age is None else max_age
         picked, more = headroom_choice(
-            accounts,
+            [a for a in accounts if a.agent == agent],
             switch_at=settings.switch_at,
             exclude=skip,
             fetch=fetch,
@@ -575,7 +830,9 @@ def choose(
             return AccountChoice(picked, "headroom", notes)
     if hand_written:  # a hand-over that found no room: rank 1 is still a silent default
         return AccountChoice(None, None, notes)
-    preferred = preferred_account(accounts, skip, notes)
+    # Rank 1 of the one order, among this launch's agent's accounts: with the agent left
+    # to the order it is the top account's agent, so the launch's agent and rank 1 agree.
+    preferred = preferred_account([a for a in accounts if a.agent == agent], skip, notes)
     if preferred is not None:
         return AccountChoice(preferred, "preferred", notes)
     return AccountChoice(None, None, notes)
@@ -589,27 +846,43 @@ class LaunchDefault:
 
     choice: AccountChoice
     bound_directory: bool = False
-    """Nothing was chosen because the role's binding sets ``CLAUDE_CONFIG_DIR`` by hand,
-    which the launch keeps (#9): it runs on that directory, not on this shell's."""
+    """Nothing was chosen because the role's binding sets its agent's directory by hand
+    (Claude Code's ``CLAUDE_CONFIG_DIR``, Codex's ``CODEX_HOME``), which the launch keeps
+    (#9): it runs on that directory, not on this shell's."""
 
 
 def launch_default(
-    role: str | None, *, project: ProjectInfo | None = None, family: str | None = None
+    role: str | None,
+    *,
+    project: ProjectInfo | None = None,
+    family: str | None = None,
+    agent: str = AGENT,
+    pick: AgentPick | None = None,
 ) -> LaunchDefault:
     """:func:`choose` with no flag, as ``fleet spawn`` asks it for ``role`` in ``project``.
 
     For showing, not launching: its headroom rung reads the shared cache five minutes deep
     (:data:`USAGE_MAX_AGE_SECONDS`, the status line's depth), so a form that shows it sends
     no request the status line would not. The launch itself reads a minute deep and can
-    pick another account when a window moved since. Raises :class:`NoSuchAccount` as the
-    launch would.
+    pick another account when a window moved since. ``agent`` and ``pick`` are the launch's
+    agent and its agent rung's answer (:func:`agent_pick`), as ``choose`` takes them. Raises
+    :class:`NoSuchAccount` as the launch would.
     """
-    choice = choose(None, role=role, project=project, family=family, max_age=USAGE_MAX_AGE_SECONDS)
-    return LaunchDefault(choice, choice.account is None and _binding_names_a_directory(role))
+    choice = choose(
+        None,
+        role=role,
+        project=project,
+        agent=agent,
+        pick=pick,
+        family=family,
+        max_age=USAGE_MAX_AGE_SECONDS,
+    )
+    return LaunchDefault(choice, choice.account is None and _binding_names_a_directory(role, agent))
 
 
-def _binding_names_a_directory(role: str | None) -> bool:
-    """Whether ``role``'s binding sets Claude Code's directory itself (``env`` or ``env_files``).
+def _binding_names_a_directory(role: str | None, agent: str = AGENT) -> bool:
+    """Whether ``role``'s binding sets ``agent``'s directory itself (``env`` or ``env_files``):
+    Claude Code's ``CLAUDE_CONFIG_DIR`` or scratch directory, Codex's ``CODEX_HOME``.
 
     An unreadable config names nothing: the binding is not applied either, so the
     preferred rung is all that is left to decide (``harness.resolve_profile``).
@@ -622,7 +895,11 @@ def _binding_names_a_directory(role: str | None) -> bool:
         return False
     if profile is None:
         return False
-    return any(var in profile.env or var in profile.env_files for var in core.LAUNCH_VARS)
+    accounts = core.kind(agent)
+    return any(
+        var in profile.env or var in profile.env_files
+        for var in (accounts.home_env, *accounts.extra_env)
+    )
 
 
 def preferred_account(
@@ -658,21 +935,28 @@ def preferred_account(
 # both show the message as-is.
 
 
-def set_default(ref: str | None, *, project: ProjectInfo | None = None) -> ClaudeAccount | None:
+def set_default(
+    ref: str | None, *, project: ProjectInfo | None = None, agent: str | None = None
+) -> ClaudeAccount | None:
     """Make ``ref`` ``project``'s default and return it (``None`` clears) — or, with no
-    project, move ``ref`` to rank 1, which is what the machine default is.
+    project, move ``ref`` to rank 1 of the one order, which is what the machine default is.
 
     A project default is stored as the SLOT NUMBER, resolved now: the project
     table is ours, and a number cannot go stale the way a typed alias could.
     ``remove`` clears every project default that names the slot it removes. The
     machine's cannot be cleared: some account is always first in the order.
+
+    A project's default is PER AGENT: ``ref``'s account sets its own agent's, and a clear
+    clears ``agent``'s (Claude Code's unless named). Given both, ``ref`` must be an
+    account of ``agent``. The machine's is one, whatever agent rank 1 is.
     """
     if project is None and ref is None:
         raise AccountsError(
             "the machine default is rank 1 of the priority order and cannot be cleared — "
             "reorder instead: aisquare accounts move <slot|alias|email> top"
         )
-    account = resolve(ref) if ref is not None else None
+    account = resolve(ref, agent=agent) if ref is not None else None
+    whose = account.agent if account is not None else agent or AGENT
     if account is not None and account.disabled:
         # Accepted silently, the default was a rung `choose` skipped on every
         # launch, and only doctor said so (review of #205, third round).
@@ -688,36 +972,40 @@ def set_default(ref: str | None, *, project: ProjectInfo | None = None) -> Claud
                 if account is None:
                     # A delete, which needs no row: registering the directory first
                     # brought a forgotten project back (review of #168, round 2).
-                    store.clear_project_setting(project.id, PROJECT_ACCOUNT_KEY)
+                    store.clear_project_setting(project.id, project_account_key(whose))
                 else:
                     # Choosing the account a project launches under is choosing the
                     # project (#139): it is listed from now on, as after a `context
                     # add --project` there. Clearing that choice adds nothing.
                     store.onboard_project(project)
-                    store.set_project_setting(project.id, PROJECT_ACCOUNT_KEY, str(account.slot))
+                    store.set_project_setting(
+                        project.id, project_account_key(whose), str(account.slot)
+                    )
             elif account is not None:
-                # order_claude_accounts ignores an unknown slot, so a slot removed since
+                # The rank writers ignore an unknown slot, so a slot removed since
                 # resolve() would print "moved to rank 1" over an order nothing changed.
                 if account.slot not in arranged:
                     raise KeyError(account.slot)
-                store.order_claude_accounts([account.slot])
+                _rank_first(store, [account])
     except KeyError as exc:
-        raise NoSuchAccount(_vanished(account)) from exc
+        raise NoSuchAccount(_vanished(account, whose)) from exc
     except sqlite3.Error as exc:
         raise AccountsUnreadable(f"the accounts registry cannot be written ({exc})") from exc
     return account
 
 
-def _vanished(account: ClaudeAccount | None) -> str:
-    """The store refused a slot the reconcile had just seen: removed underneath us."""
+def _vanished(account: ClaudeAccount | None, agent: str = AGENT) -> str:
+    """The store refused a slot the reconcile had just seen: removed underneath us. Worded
+    by the slot's own agent (``AgentAccounts.noun``), as every not-found message here is."""
     slot = account.slot if account is not None else "?"
+    noun = core.kind(account.agent if account is not None else agent).noun
     return (
-        f"no Claude account in slot {slot} any more — it was removed meanwhile; "
+        f"no {noun} account in slot {slot} any more — it was removed meanwhile; "
         "see: aisquare accounts"
     )
 
 
-def project_default(project: ProjectInfo) -> ClaudeAccount | None:
+def project_default(project: ProjectInfo, *, agent: str = AGENT) -> ClaudeAccount | None:
     """The account ``project`` defaults to, or ``None`` when it has none (or it vanished).
 
     One guarded store open for the slot and the list it is looked up in
@@ -725,16 +1013,24 @@ def project_default(project: ProjectInfo) -> ClaudeAccount | None:
     with a directory scan of its own (review of #205, fourth round). An
     unreadable store reads as no default, as it always did.
     """
-    accounts, _note, slot = _read_registry(project)
+    accounts, _note, slot = _read_registry(project, agent=agent)
     if slot is None:
         return None
-    return next((a for a in accounts if a.slot == slot), None)
+    return next((a for a in accounts if a.slot == slot and a.agent == agent), None)
 
 
-def machine_default() -> ClaudeAccount | None:
-    """What a launch runs under when nothing more specific says: :func:`preferred_account`."""
+def machine_default(agent: str | None = None) -> ClaudeAccount | None:
+    """What a launch runs under when nothing more specific says: :func:`preferred_account`.
+
+    Rank 1 of the one order, whatever agent it is; ``agent`` asks for that agent's own
+    (its first account in the order that can run a launch), as a launch pinned to it takes.
+    """
     accounts, note = _read_arranged()
-    return None if note is not None else preferred_account(accounts)
+    if note is not None:
+        return None
+    return preferred_account(
+        [a for a in accounts if agent is None or a.agent == agent] if agent else accounts
+    )
 
 
 def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
@@ -753,11 +1049,15 @@ def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
                 other.slot != account.slot and _same_alias(other.alias, normalised)
                 for other in arranged
             ):
+                # Every agent's slots are arranged here: one name, one account, across all.
                 raise AccountsError(
                     f"the alias {normalised!r} is already taken — see: aisquare accounts"
                 )
             try:
-                store.set_claude_account_alias(account.slot, normalised)
+                if core.kind(account.agent).legacy_slots:
+                    store.set_claude_account_alias(account.slot, normalised)
+                else:
+                    store.set_agent_account_alias(account.agent, account.slot, normalised)
             except sqlite3.IntegrityError as exc:
                 raise AccountsError(
                     f"the alias {normalised!r} is already taken — see: aisquare accounts"
@@ -776,7 +1076,10 @@ def set_disabled(ref: str, disabled: bool) -> ClaudeAccount:
         with store_session() as store:
             _arranged(store)
             try:
-                store.set_claude_account_disabled(account.slot, disabled)
+                if core.kind(account.agent).legacy_slots:
+                    store.set_claude_account_disabled(account.slot, disabled)
+                else:
+                    store.set_agent_account_disabled(account.agent, account.slot, disabled)
             except KeyError as exc:
                 raise NoSuchAccount(_vanished(account)) from exc
             return next(a for a in _arranged(store) if a.slot == account.slot)
@@ -792,38 +1095,56 @@ def reorder(refs: Sequence[str]) -> list[ClaudeAccount]:
     per ``↑`` (review of #205, third round).
     """
     accounts, note = _read_arranged()
-    slots = [_resolve_in(accounts, ref, note=note).slot for ref in refs]
-    return _write_order(slots)
+    return _write_order([_resolve_in(accounts, ref, note=note) for ref in refs])
 
 
-def _write_order(slots: Sequence[int]) -> list[ClaudeAccount]:
+def _write_order(order: Sequence[ClaudeAccount]) -> list[ClaudeAccount]:
+    """``order``'s slots first, in that order, in the one order across agents (the rest
+    keep theirs after them), and each agent's of them first in its own ranking."""
     try:
         with store_session() as store:
-            _arranged(store)
-            store.order_claude_accounts(slots)
+            _rank_first(store, order)
             return _arranged(store)
     except sqlite3.Error as exc:
         raise AccountsUnreadable(f"the accounts registry cannot be written ({exc})") from exc
+
+
+def _rank_first(store: ContextStore, order: Sequence[ClaudeAccount]) -> None:
+    """:func:`_write_order` in a store already open: what :func:`set_default` moves to rank 1."""
+    current = _arranged(store)
+    wanted = [a.slot for a in order]
+    store.rank_accounts([*wanted, *(a.slot for a in current if a.slot not in wanted)])
+    for agent in dict.fromkeys([AGENT, *(a.agent for a in order)]):
+        slots = [a.slot for a in order if a.agent == agent]
+        if core.kind(agent).legacy_slots:
+            store.order_claude_accounts(slots)
+        elif slots:
+            store.order_agent_accounts(agent, slots)
 
 
 Direction = Literal["up", "down", "top", "bottom"]
 
 
 def move(ref: str, direction: Direction) -> list[ClaudeAccount]:
-    """Move one slot a step (or all the way) in the priority order — one read, one write."""
+    """Move one slot a step (or all the way) in the priority order — one read, one write.
+
+    In the one order across agents: a Codex account moves past a Claude account as past
+    another Codex one, and the agent of the account on top is the agent a launch that
+    nothing pins runs (:func:`agent_pick`).
+    """
     accounts, note = _read_arranged()
     account = _resolve_in(accounts, ref, note=note)
-    order = [a.slot for a in accounts]
-    index = order.index(account.slot)
+    order = list(accounts)
+    index = next(at for at, a in enumerate(order) if a.slot == account.slot)
     order.pop(index)
     if direction == "up":
-        order.insert(max(index - 1, 0), account.slot)
+        order.insert(max(index - 1, 0), account)
     elif direction == "down":
-        order.insert(min(index + 1, len(order)), account.slot)
+        order.insert(min(index + 1, len(order)), account)
     elif direction == "top":
-        order.insert(0, account.slot)
+        order.insert(0, account)
     else:
-        order.append(account.slot)
+        order.append(account)
     return _write_order(order)
 
 
@@ -837,9 +1158,13 @@ def forget_arrangement(slot: int) -> None:
     """
     with contextlib.suppress(sqlite3.Error), store_session() as store:
         store.delete_claude_account(slot)
-        for project_id, value in store.project_settings(PROJECT_ACCOUNT_KEY).items():
-            if value == str(slot):
-                store.clear_project_setting(project_id, PROJECT_ACCOUNT_KEY)
+        for agent in core.account_agents():
+            if not core.kind(agent).legacy_slots:
+                store.delete_agent_accounts(agent, [slot])
+            key = project_account_key(agent)
+            for project_id, value in store.project_settings(key).items():
+                if value == str(slot):
+                    store.clear_project_setting(project_id, key)
         # The readings too: keyed on the slot alone, they would rate the next
         # occupant's first window against this login's history (third round).
         store.delete_usage_samples(slot)
@@ -867,134 +1192,8 @@ def _http_get(
         return int(exc.code), bytes(exc.read() or b""), sent
 
 
-def _window(raw: Any) -> tuple[float | None, datetime | None]:
-    """One window's percent USED and its reset; a non-null ``locked_reason`` reads 100 %: the
-    endpoint says the window refuses requests, whatever its figure (#277)."""
-    if not isinstance(raw, dict):
-        return None, None
-    percent = raw.get("utilization")
-    resets = raw.get("resets_at")
-    when: datetime | None = None
-    if isinstance(resets, str) and resets:
-        try:
-            when = datetime.fromisoformat(resets)
-        except ValueError:
-            when = None
-    value = float(percent) if isinstance(percent, int | float) else None
-    if raw.get("locked_reason") is not None:
-        value = 100.0
-    return value, when
-
-
-def _retry_after(headers: Mapping[str, str], now: datetime) -> float | None:
-    """The seconds an answer's ``Retry-After`` asks to wait — a number, or an HTTP date —
-    clamped to [1 s, :data:`RETRY_AFTER_MAX_SECONDS`]; ``None`` when it sent none we read."""
-    raw = next((value for key, value in headers.items() if key.lower() == "retry-after"), None)
-    if raw is None or not raw.strip():
-        return None
-    seconds: float | None
-    try:
-        seconds = float(raw.strip())
-    except ValueError:
-        from email.utils import parsedate_to_datetime
-
-        try:
-            when = parsedate_to_datetime(raw.strip())
-        except (TypeError, ValueError):
-            return None
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=UTC)
-        seconds = (when - now).total_seconds()
-    if seconds != seconds:  # NaN
-        return None
-    return min(RETRY_AFTER_MAX_SECONDS, max(1.0, seconds))
-
-
-_FAMILY_WEEK = "seven_day_"
-"""The prefix of a per-family weekly window in the usage payload: ``seven_day_opus``…"""
-_FAMILIES = frozenset(MODEL_FAMILIES.values())
+_FAMILIES = core.MODEL_FAMILY_NAMES
 """The model families a per-family window or limit can name (``opus``, ``sonnet``…)."""
-_SESSION_KINDS = frozenset({"session", "five_hour"})
-_WEEK_KINDS = frozenset({"weekly", "weekly_all", "week", "seven_day"})
-_SCOPED_KIND = "weekly_scoped"
-"""The ``limits[]`` kind of a per-family week (P0-W0, Claude Code 2.1.309): its
-``scope.model.display_name`` names the family ("Fable", "Opus")."""
-
-
-def _fuller(a: float | None, b: float | None) -> float | None:
-    return b if a is None else a if b is None else max(a, b)
-
-
-@dataclass(frozen=True)
-class _Limit:
-    """One ``limits[]`` entry: its kind, percent USED, the model family a ``weekly_scoped``
-    entry is scoped to (``None`` otherwise, or when the name is no family), and its reset."""
-
-    kind: str
-    percent: float
-    family: str | None = None
-    resets_at: datetime | None = None
-
-
-def _family_weeks(payload: Mapping[str, Any]) -> tuple[dict[str, float], dict[str, datetime]]:
-    """Every per-family week in ``payload``, keyed by family, the fuller figure winning.
-
-    Two places can say it. ``limits[]`` entries of kind ``weekly_scoped``, scoped to a
-    model by ``scope.model.display_name``, are where the endpoint really sends it (P0-W0:
-    every ``seven_day_<family>`` key was null). A top-level ``seven_day_<family>`` window
-    is read too, but only for a known family: ``seven_day_breakdown`` and its like are
-    ``seven_day_*`` dicts that are no window (#277, P0-W3c). A ``limits[]`` kind named
-    after a family (``opus``, ``seven_day_opus``) counts as that family's week as well.
-    """
-    percents: dict[str, float] = {}
-    resets: dict[str, datetime] = {}
-    for key, raw in payload.items():
-        family = key.removeprefix(_FAMILY_WEEK)
-        if not key.startswith(_FAMILY_WEEK) or family not in _FAMILIES:
-            continue
-        percent, when = _window(raw)
-        if percent is not None:
-            percents[family] = percent
-        if when is not None:
-            resets[family] = when
-    for limit in _limits(payload):
-        named = limit.kind.removeprefix(_FAMILY_WEEK)
-        scoped = limit.family or (named if named in _FAMILIES else None)
-        if scoped is None:
-            continue
-        percents[scoped] = max(percents.get(scoped, limit.percent), limit.percent)
-        if limit.resets_at is not None and scoped not in resets:
-            resets[scoped] = limit.resets_at
-    return percents, resets
-
-
-def _limits(payload: Mapping[str, Any]) -> list[_Limit]:
-    """``limits[]`` as :class:`_Limit`: an entry without a string kind or a number is
-    skipped — the field is undocumented, and an unknown shape costs it, never the reading."""
-    raw = payload.get("limits")
-    found: list[_Limit] = []
-    for entry in raw if isinstance(raw, list) else []:
-        if not isinstance(entry, dict):
-            continue
-        kind, percent = entry.get("kind"), entry.get("percent", entry.get("utilization"))
-        if not isinstance(kind, str) or not isinstance(percent, int | float):
-            continue
-        family = _scoped_family(entry) if kind.lower() == _SCOPED_KIND else None
-        _percent, when = _window({"resets_at": entry.get("resets_at")})
-        found.append(_Limit(kind.lower(), float(percent), family, when))
-    return found
-
-
-def _scoped_family(entry: Mapping[str, Any]) -> str | None:
-    """The family a ``weekly_scoped`` entry's ``scope.model.display_name`` names, or ``None``."""
-    scope = entry.get("scope")
-    model = scope.get("model") if isinstance(scope, dict) else None
-    name = model.get("display_name") if isinstance(model, dict) else None
-    return model_family(name) if isinstance(name, str) else None
-
-
-def _limit_of(payload: Mapping[str, Any], kinds: frozenset[str]) -> float | None:
-    return max((limit.percent for limit in _limits(payload) if limit.kind in kinds), default=None)
 
 
 # --- why there is no reading, and what to do about it --------------------------------------------
@@ -1004,11 +1203,40 @@ def _limit_of(payload: Mapping[str, Any], kinds: frozenset[str]) -> float | None
 # Accounts page shows the two on hover over its '!', and `accounts usage` beside the
 # reason: neither works out the cause or the fix from the reason's words.
 
-_LOG_IN = "press Log in (in a terminal: aisquare accounts run {slot}, then /login)"
-_REFRESH_TOKEN = (
-    "press Log in, or open a session on this account (aisquare accounts run {slot}): "
-    "Claude Code refreshes the token"
-)
+
+def _log_in(agent: str | None = None) -> str:
+    """How a slot of ``agent`` (Claude Code's when ``None``) is signed in: *Log in* on its
+    row, or in a terminal ``aisquare accounts run <slot>`` with the agent's own sign-in
+    command after it (``AgentAccounts.sign_in_args``: Codex's ``login``, as the doctor's
+    accounts row says it), else with what to type once its TUI opens (``relogin``: Claude
+    Code's ``/login``). Never another agent's remedy (SCOPE #113 091, item 17)."""
+    accounts = core.kind(agent or core.AGENT)
+    run = "aisquare accounts run {slot}"
+    if accounts.sign_in_args():
+        run = " ".join((run, *accounts.sign_in_args()))
+    elif accounts.relogin:
+        run = f"{run}, then {accounts.relogin}"
+    return f"press Log in (in a terminal: {run})"
+
+
+def _refresh_token(agent: str | None = None) -> str:
+    """How a slot of ``agent`` whose token expired or was refused gets a fresh one: the agent
+    refreshes it in a session on that slot."""
+    return (
+        "press Log in, or open a session on this account (aisquare accounts run {slot}): "
+        f"{core.agent_label(agent or core.AGENT)} refreshes the token"
+    )
+
+
+_LOG_IN = _log_in()
+_REFRESH_TOKEN = _refresh_token()
+_SIGN_IN_FIXES: dict[UsageCause, Callable[[str | None], str]] = {
+    UsageCause.not_signed_in: _log_in,
+    UsageCause.token_missing: _log_in,
+    UsageCause.token_expired: _refresh_token,
+    UsageCause.token_rejected: _refresh_token,
+}
+"""The causes whose fix names the agent: its sign-in, its token refresh (:func:`usage_fix`)."""
 _THEN_REFRESH = "then ↻ Refresh usage (or --refresh)"
 
 USAGE_FIXES: dict[UsageCause, str | None] = {
@@ -1036,9 +1264,9 @@ USAGE_FIXES: dict[UsageCause, str | None] = {
 """What to do about each cause, ``{slot}`` and ``{at}`` filled in by :func:`usage_fix`; ``None``
 where nothing done on this machine helps, which :data:`NO_FIX` says."""
 
-TLS_BUNDLE_REASON = "TLS: the CA bundle could not be loaded"
+TLS_BUNDLE_REASON = core.TLS_BUNDLE_REASON
 """Why there is no reading when ``SSL_CERT_FILE`` / ``SSL_CERT_DIR`` will not load (#403)."""
-TLS_CERT_REASON = "TLS certificate could not be verified"
+TLS_CERT_REASON = core.TLS_CERT_REASON
 """Why there is no reading when the endpoint's certificate did not verify (#403)."""
 
 NO_FIX = "fix: none from here, the next read tries again by itself"
@@ -1046,11 +1274,17 @@ NO_FIX = "fix: none from here, the next read tries again by itself"
 
 
 def usage_fix(
-    cause: UsageCause, *, slot: int | None = None, until: datetime | None = None
+    cause: UsageCause,
+    *,
+    slot: int | None = None,
+    until: datetime | None = None,
+    agent: str | None = None,
 ) -> str | None:
     """What to do about ``cause`` on slot ``slot`` (:data:`USAGE_FIXES`): ``until`` is a rate
-    limit's end, ``reads resume at 14:32 by themselves``."""
-    fix = USAGE_FIXES[cause]
+    limit's end, ``reads resume at 14:32 by themselves``. A sign-in's or a token's fix is the
+    slot's agent's own (``agent``, Claude Code's when ``None``: :data:`_SIGN_IN_FIXES`)."""
+    own = _SIGN_IN_FIXES.get(cause)
+    fix = own(agent) if own is not None and agent is not None else USAGE_FIXES[cause]
     if fix is None:
         return None
     at = f"at {until.astimezone().strftime('%H:%M')} " if until is not None else ""
@@ -1058,16 +1292,22 @@ def usage_fix(
 
 
 def unreadable_usage(
-    cause: UsageCause, reason: str, *, slot: int | None = None, **fields: Any
+    cause: UsageCause,
+    reason: str,
+    *,
+    slot: int | None = None,
+    agent: str | None = None,
+    **fields: Any,
 ) -> ClaudeUsage:
     """A reading with nothing to show: ``reason`` says what is wrong, and ``cause`` and its
-    fix (:func:`usage_fix`) are stamped here, the one place they are."""
+    fix (:func:`usage_fix`, in the words of the slot's ``agent``) are stamped here, the one
+    place they are."""
     until = fields.get("rate_limited_until")
     return ClaudeUsage(
         available=False,
         reason=reason,
         cause=cause,
-        fix=usage_fix(cause, slot=slot, until=until),
+        fix=usage_fix(cause, slot=slot, until=until, agent=agent),
         **fields,
     )
 
@@ -1094,22 +1334,8 @@ def explain_usage(reading: ClaudeUsage) -> str:
     return f"{reading.reason or 'unavailable'}; {fix_line(reading)}"
 
 
-_EXPIRED = "the stored token has expired"
-_REJECTED = "the token was rejected (HTTP 401)"
-_KEYCHAIN_CAUSES: dict[core.KeychainProblem, tuple[UsageCause, str | None]] = {
-    "locked": (UsageCause.keychain_locked, core.KEYCHAIN_LOCKED_REASON),
-    "refused": (UsageCause.keychain_refused, core.KEYCHAIN_REFUSED_REASON),
-    "timeout": (UsageCause.keychain_timeout, None),
-    "failed": (UsageCause.keychain_failed, None),
-}
-"""A Keychain's kind of refusal as a reading's cause, and its reason when the core's words
-carry a fix of their own (``None``: its words stand)."""
-
-
-def _no_login_reason() -> str:
-    if core.keychain_platform():
-        return "no login in the Keychain or a credentials file — not signed in"
-    return "no credentials file — not signed in"
+_EXPIRED = core.TOKEN_EXPIRED_REASON
+_no_login_reason = core.no_login_reason
 
 
 def usage_problem(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> ClaudeUsage | None:
@@ -1120,13 +1346,17 @@ def usage_problem(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> C
     then the reading's own cause (a 401, a locked Keychain, the endpoint). The page's
     '!' and its tooltip, and ``accounts usage``, are drawn from it alone.
     """
-    slot = status.account.slot
+    slot, agent = status.account.slot, status.account.agent
     if status.identity is None:
-        return unreadable_usage(UsageCause.not_signed_in, "not signed in", slot=slot)
+        return unreadable_usage(UsageCause.not_signed_in, "not signed in", slot=slot, agent=agent)
     if not status.signed_in:
-        return unreadable_usage(UsageCause.token_missing, _no_login_reason(), slot=slot)
+        return unreadable_usage(
+            UsageCause.token_missing, _no_login_reason(), slot=slot, agent=agent
+        )
     if status.token_state == "expired":
-        return unreadable_usage(UsageCause.token_expired, _EXPIRED, slot=slot, needs_login=True)
+        return unreadable_usage(
+            UsageCause.token_expired, _EXPIRED, slot=slot, agent=agent, needs_login=True
+        )
     if reading is not None and not reading.available:
         return reading
     return None
@@ -1137,95 +1367,39 @@ def usage(
 ) -> ClaudeUsage:
     """The account's five-hour and seven-day windows, or why they cannot be read.
 
-    Every window the endpoint sends is read (#277): the per-family weeks
-    (``seven_day_opus``, ``seven_day_sonnet``: :attr:`ClaudeUsage.family_week_percent`),
-    the ``limits[]`` entries, folded into the window of their kind as the fuller figure,
-    and a ``locked_reason``, which reads that window 100 % used. Keys it does not know
-    are ignored.
+    Claude Code's are read from the endpoint (``core.endpoint_usage``): the token,
+    from where Claude Code keeps it (``core.stored_login``: the credentials file,
+    or on macOS the login Keychain), goes to ``core.USAGE_URL`` only, through
+    ``fetch`` (:func:`_http_get` unless given); a token that has already expired
+    is not sent at all, because Claude Code refreshes it on the account's next
+    session and this module never does. A Keychain that would not show the token
+    says why (locked, refused), and asks for no log-in. No reason ever carries
+    the token.
 
-    Reads the token where Claude Code keeps it (``core.stored_login``: the
-    credentials file, or on macOS the login Keychain) and sends it to
-    :data:`USAGE_URL` only; a token that has already expired is not sent at all,
-    because Claude Code refreshes it on the account's next session and this
-    module never does. A Keychain that would not show the token says why
-    (locked, refused), and asks for no log-in. No reason ever carries the token.
+    Another agent's come from its adapter's accounts slot: Codex's from the
+    newest reading its own sessions recorded (``core.codex_accounts.usage``),
+    with no request at all — ``fetch`` is never called for it.
+    Claude Code's reading carries the per-family weeks too (#277:
+    :attr:`ClaudeUsage.family_week_percent`), and folds ``limits[]`` and a
+    ``locked_reason`` into its windows.
     """
-    slot = account.slot
-    login = core.stored_login(account)
-    creds = login.credentials
-    if creds is None:
-        if login.unreadable is None:
-            return unreadable_usage(UsageCause.token_missing, _no_login_reason(), slot=slot)
-        cause, said = _KEYCHAIN_CAUSES[login.problem or "failed"]
-        return unreadable_usage(cause, said or login.unreadable, slot=slot)
-    if creds.expired(now):
-        return unreadable_usage(UsageCause.token_expired, _EXPIRED, slot=slot, needs_login=True)
-    headers = {
-        "Authorization": f"Bearer {creds.access_token}",
-        "anthropic-beta": OAUTH_BETA,
-        "Accept": "application/json",
-        "User-Agent": f"aisquare-cli/{__version__}",
-    }
-    try:
-        answer = (fetch or _http_get)(USAGE_URL, headers, USAGE_TIMEOUT_SECONDS)
-    except OSError as exc:  # URLError, a refused connection, a timeout
-        # #403's two TLS failures, each with its own cause: the fix is tls.BUNDLE_FIX /
-        # tls.CERT_HINT (USAGE_FIXES), shown beside the reason, not inside it.
-        if isinstance(exc, tls.CABundleError):
-            return unreadable_usage(UsageCause.tls_bundle, TLS_BUNDLE_REASON, slot=slot)
-        if tls.cert_failure(exc):
-            return unreadable_usage(UsageCause.tls_cert, TLS_CERT_REASON, slot=slot)
-        return unreadable_usage(
-            UsageCause.unreachable,
-            f"could not reach the usage endpoint ({type(exc).__name__})",
-            slot=slot,
+    # The clock is this module's (``_now``), which a test or a caller pins: the adapter reads
+    # a 429's wait, a token's expiry and a rollout's age against it, not against its own.
+    moment = now or _now()
+    reading = core.kind(account.agent).usage(account, now=moment, fetch=fetch or _http_get)
+    if reading.available and reading.fetched_at is None:
+        reading = reading.model_copy(update={"fetched_at": moment})
+    if reading.cause is not None and reading.fix is None:
+        # The adapter set the kind of what went wrong; the fix for it is this module's one
+        # table (:data:`USAGE_FIXES`), whichever agent's reading it is.
+        fix = usage_fix(
+            reading.cause,
+            slot=account.slot,
+            until=reading.rate_limited_until,
+            agent=account.agent,
         )
-    status, body = answer[0], answer[1]
-    answered: Mapping[str, str] = answer[2] if len(answer) == 3 else {}
-    wait = _retry_after(answered, now or _now())
-    if status == 429 or (status == 503 and wait is not None):
-        # Not a login problem: the wait is recorded by `read_usage` (F1 of #400).
-        moment = now or _now()
-        return unreadable_usage(
-            UsageCause.rate_limited,
-            f"HTTP {status} from the usage endpoint — rate-limited",
-            slot=slot,
-            rate_limited=True,
-            rate_limited_until=moment + timedelta(seconds=wait) if wait is not None else None,
-        )
-    if status == 401:
-        return unreadable_usage(UsageCause.token_rejected, _REJECTED, slot=slot, needs_login=True)
-    if status != 200:
-        return unreadable_usage(
-            UsageCause.http_error, f"HTTP {status} from the usage endpoint", slot=slot
-        )
-    try:
-        payload: Any = json.loads(body)
-    except ValueError:
-        return unreadable_usage(
-            UsageCause.bad_answer, "the usage endpoint did not answer with JSON", slot=slot
-        )
-    if not isinstance(payload, dict):
-        return unreadable_usage(
-            UsageCause.bad_answer, "the usage endpoint answered in an unknown shape", slot=slot
-        )
-    session_percent, session_resets = _window(payload.get("five_hour"))
-    week_percent, week_resets = _window(payload.get("seven_day"))
-    if session_percent is None and week_percent is None:
-        return unreadable_usage(
-            UsageCause.bad_answer, "the usage endpoint answered without the two windows", slot=slot
-        )
-    family_percent, family_resets = _family_weeks(payload)
-    return ClaudeUsage(
-        available=True,
-        session_percent=_fuller(session_percent, _limit_of(payload, _SESSION_KINDS)),
-        session_resets_at=session_resets,
-        week_percent=_fuller(week_percent, _limit_of(payload, _WEEK_KINDS)),
-        week_resets_at=week_resets,
-        family_week_percent=family_percent,
-        family_week_resets_at=family_resets,
-        fetched_at=now or _now(),
-    )
+        reading = reading.model_copy(update={"fix": fix})
+    return reading
 
 
 # --- usage over time, and picking by headroom (#146) ---------------------------------------------
@@ -1273,10 +1447,12 @@ def accounts_settings() -> AccountsSettings:
         return AccountsSettings()
 
 
-def somewhere_to_hand_over(leaving: int | None = None) -> bool:
+def somewhere_to_hand_over(leaving: int | None = None, *, agent: str | None = None) -> bool:
     """Whether a hand-over of an agent on slot ``leaving`` has an account to go to: an
     enabled, signed-in one other than ``leaving``. Not knowing which slot the agent is on
-    (``None``), two such accounts, so that one is not the agent's.
+    (``None``), two such accounts, so that one is not the agent's. Given ``agent`` (the
+    row's), only that agent's accounts count, as :func:`choose_for_handover` picks only
+    among them: a Codex agent's limit is no hand-over to a Claude Code account.
 
     Where the registry cannot be read, the answer comes from the slot directories it falls
     back to: which accounts are enabled is not known, but a disabled flag only takes an
@@ -1298,7 +1474,11 @@ def somewhere_to_hand_over(leaving: int | None = None) -> bool:
     if accounts is None:
         return True
     usable = [
-        account.slot for account in accounts if not account.disabled and core.signed_in(account)
+        account.slot
+        for account in accounts
+        if not account.disabled
+        and (agent is None or account.agent == agent)
+        and core.signed_in(account)
     ]
     if leaving is None:
         return len(usable) >= 2
@@ -1338,6 +1518,16 @@ _FAMILY_KEY = "usage-family:{slot}"
 history has no columns for (:func:`_record_sample`, :func:`_with_family_weeks`)."""
 
 
+def _recorded(account: ClaudeAccount) -> bool:
+    """Whether a reading of ``account`` is a sample worth keeping for a trend.
+
+    A network reading is a moment of its own. A Codex reading is the newest one
+    its sessions wrote, read again on every tick until the next turn writes
+    another: kept, it would be the same sample once a minute, a rate of zero.
+    """
+    return core.kind(account.agent).network_usage
+
+
 def _record_sample(
     store: ContextStore, account: ClaudeAccount, result: ClaudeUsage, now: datetime | None
 ) -> None:
@@ -1361,6 +1551,7 @@ def _record_sample(
         week_percent=result.week_percent,
         week_resets_at=result.week_resets_at,
         token_fingerprint=_token_fingerprint(account),
+        windows=result.windows,
     )
     store.add_usage_sample(sample)
     families = None
@@ -1413,17 +1604,29 @@ def _with_family_weeks(
 
 
 def _token_fingerprint(account: ClaudeAccount, now: datetime | None = None) -> str | None:
-    """Which login a reading belongs to: the :func:`login_fingerprint` of the token
-    :func:`usage` would send, or ``None`` when it would send none — no credentials file,
-    or, given ``now``, a token already expired at ``now``.
+    """Which login a reading belongs to, the five-minute cache's key per agent and account:
+    for Claude Code, the :func:`login_fingerprint` of the token :func:`usage` would send,
+    ``None`` with none to send (no credentials, or, given ``now``, a token already expired
+    at ``now``); for another agent whose usage leaves the machine (``network_usage``), the
+    fingerprint its accounts slot answers (``AgentAccounts.login_fingerprint``). ``None``
+    for an agent whose usage is read from its own home (Codex's): read on every call, it
+    is never served from the cache.
 
     Read when the reading is recorded, a few milliseconds after the fetch sent it: a
     token swapped in between is a race no surface could act on.
     """
-    creds = core.credentials(account)
-    if creds is None or (now is not None and creds.expired(now)):
+    accounts = core.kind(account.agent)
+    if not accounts.network_usage:
         return None
-    return _login_digest(creds)
+    creds = core.credentials(account)
+    if creds is not None:
+        return None if now is not None and creds.expired(now) else _login_digest(creds)
+    if accounts.legacy_slots:
+        return None  # Claude Code's with no token to send
+    try:
+        return accounts.login_fingerprint(account)
+    except core.LoginUnreadable:
+        return None
 
 
 def usage_trend(
@@ -1518,7 +1721,7 @@ def describe_trend(trend: UsageTrend | None) -> str:
 # the last good reading beside it (`cached_usage`), and a headroom pick decides
 # by it only while it is fresh (`headroom_choice`).
 
-RETRY_AFTER_MAX_SECONDS = 6 * 3600.0
+RETRY_AFTER_MAX_SECONDS = core.RETRY_AFTER_MAX_SECONDS
 """The longest ``Retry-After`` honoured: a header asking for days is a broken header."""
 USAGE_BACKOFF_FIRST_SECONDS = 60.0
 """The wait after a 429 that named none: one minute, doubled for each 429 in a row."""
@@ -1719,7 +1922,7 @@ def read_usage(
     The one fetcher behind every usage surface — a hand-over's pick and
     ``doctor --live`` call it directly, everything else through
     :func:`cached_usage` (review of #205, finding 11): four accounts and a slow
-    endpoint cost one ``USAGE_TIMEOUT_SECONDS``, not four. A reader that raises
+    endpoint cost one ``core.USAGE_TIMEOUT_SECONDS``, not four. A reader that raises
     costs its own slot a reading, never the others'.
 
     The threads only fetch; every answered reading is then recorded in ONE
@@ -1772,7 +1975,9 @@ def read_usage(
                         f"usage read failed ({type(exc).__name__})",
                         slot=slot,
                     )
-    answered = [account for account in asked if readings[account.slot].available]
+    answered = [
+        account for account in asked if readings[account.slot].available and _recorded(account)
+    ]
     cleared = [account.slot for account in answered if account.slot in backoffs]
     started = {
         account.slot: _next_backoff(
@@ -1908,21 +2113,26 @@ def _recorded_usage(
                 if not taken:
                     continue
                 newest = taken[-1]
-                resets = (newest.session_resets_at, newest.week_resets_at)
-                if current and any(when is not None and when <= now for when in resets):
+                # Every window it read (v44); a row from before, the endpoint's two, each
+                # read or not.
+                windows = (
+                    newest.windows
+                    if newest.windows is not None
+                    else session_and_week(
+                        newest.session_percent,
+                        newest.session_resets_at,
+                        newest.week_percent,
+                        newest.week_resets_at,
+                        every=True,
+                    )
+                )
+                if current and any(w.resets_at is not None and w.resets_at <= now for w in windows):
                     continue
                 found[account.slot] = _with_family_weeks(
                     store,
                     account.slot,
                     newest,
-                    ClaudeUsage(
-                        available=True,
-                        session_percent=newest.session_percent,
-                        session_resets_at=newest.session_resets_at,
-                        week_percent=newest.week_percent,
-                        week_resets_at=newest.week_resets_at,
-                        fetched_at=newest.fetched_at,
-                    ),
+                    ClaudeUsage(available=True, windows=windows, fetched_at=newest.fetched_at),
                     now,
                 )
     except sqlite3.Error:
@@ -2081,11 +2291,60 @@ def _has_reset(reading: ClaudeUsage, now: datetime) -> bool:
     """Whether any window of ``reading`` has reset by ``now``, a family week included (review
     of #401, m2): the figure is over."""
     resets = (
-        reading.session_resets_at,
-        reading.week_resets_at,
+        *(window.resets_at for window in reading.windows),
         *reading.family_week_resets_at.values(),
     )
     return any(when is not None and when <= now for when in resets)
+
+
+def _floor(reading: ClaudeUsage, now: datetime) -> ClaudeUsage | None:
+    """What ``reading`` still proves at ``now``: only the windows it names a reset for that
+    has not come yet, a family week included. Usage only rises until its window resets, so
+    the figure of such a window is a floor under the account's now, however old the reading;
+    a window that has reset (or names no reset) says nothing of the new one. ``None`` when
+    no window is left."""
+    windows = tuple(w for w in reading.windows if w.resets_at is not None and w.resets_at > now)
+    weeks = {f: when for f, when in reading.family_week_resets_at.items() if when > now}
+    if not windows and not weeks:
+        return None
+    return reading.model_copy(
+        update={
+            "windows": windows,
+            "family_week_resets_at": weeks,
+            "family_week_percent": {
+                f: percent for f, percent in reading.family_week_percent.items() if f in weeks
+            },
+        }
+    )
+
+
+def _floor_words(reading: ClaudeUsage | None, family: str | None, now: datetime) -> str:
+    """Why ``reading`` still proves a floor at ``now``, in a note's words: ``and no window has
+    reset since`` while every window it names still stands, else the window that holds the
+    floor, the one that limits among those left (a ``family`` week included): ``in its week,
+    which has not reset since`` when the five hours did (review r23 of #113, tester-23's
+    observation ii). A window that reset reads 0 % with no reset time in an offline reading
+    (Codex's), so it is told by being missing from the floor, not by a reset in the past."""
+    held = _floor(reading, now) if reading is not None else None
+    if reading is None or held is None:
+        return "and no window has reset since"
+    if len(held.windows) == len(reading.windows) and len(held.family_week_resets_at) == len(
+        reading.family_week_resets_at
+    ):
+        return "and no window has reset since"
+    limiting = held.limiting
+    own = held.family_week_percent.get(family) if family is not None else None
+    if own is not None and (limiting is None or own >= (limiting.used_percent or 0.0)):
+        name = f"{family} week"
+    elif limiting is None:
+        return "and no window has reset since"
+    elif limiting.name == SESSION_WINDOW:
+        name = "five-hour window"
+    elif limiting.name == WEEK_WINDOW:
+        name = "week"
+    else:
+        name = f"{limiting.name} window"
+    return f"in its {name}, which has not reset since"
 
 
 def _without_reset_windows(reading: ClaudeUsage, now: datetime) -> ClaudeUsage:
@@ -2093,10 +2352,14 @@ def _without_reset_windows(reading: ClaudeUsage, now: datetime) -> ClaudeUsage:
     describes a window that is over, so it is shown as reset (``reset 1h ago``, the reset
     time kept), never as the old figure with ``resets now`` (review of #408, MAJ-1)."""
     update: dict[str, Any] = {}
-    for window in ("session", "week"):
-        when = getattr(reading, f"{window}_resets_at")
-        if when is not None and when <= now:
-            update[f"{window}_percent"] = None
+    emptied = tuple(
+        window.model_copy(update={"used_percent": None})
+        if window.resets_at is not None and window.resets_at <= now
+        else window
+        for window in reading.windows
+    )
+    if emptied != reading.windows:
+        update["windows"] = emptied
     over = {
         family
         for family, when in reading.family_week_resets_at.items()
@@ -2210,30 +2473,29 @@ def describe_age(fetched_at: datetime, *, now: datetime | None = None) -> str:
 
 
 def headroom_percent(reading: ClaudeUsage, family: str | None = None) -> float | None:
-    """How full an account reads for a pick: the FULLER of its two windows, or ``None``.
+    """How full an account reads for a pick: the window that limits it, or ``None``
+    (``ClaudeUsage.ranked_percent``).
 
     Given the agent's model ``family`` (``core.harness.model_family``), that family's
     week counts too (#277): an Opus limit refuses an Opus agent exactly as a weekly one
     does, and refuses no other family's.
 
-    A weekly limit refuses requests exactly as a five-hour one does, and an
-    account that has spent its week builds no five-hour usage, so its
-    five-hour window reads near 0 % once that window rolls over. Ranked on the
-    five-hour window alone it was the account with the most room: the
-    automatic hand-over moved an agent that had just hit its weekly limit back
-    onto an account that had hit its own, the first request was refused, and
-    the hand-over cooldown then kept the agent parked until a reset days away
-    (final review of #203, accounts F1). ``None`` when the five-hour window was
-    not read, which the pick skips as it always has; the seven-day window only
-    ever makes an account read fuller.
+    The FULLEST of the windows it has, percent used. A weekly limit refuses requests
+    exactly as a five-hour one does, and an account that has spent its week builds no
+    five-hour usage, so its five-hour window reads near 0 % once that window rolls over.
+    Ranked on the five-hour window alone it was the account with the most room: the
+    automatic hand-over moved an agent that had just hit its weekly limit back onto an
+    account that had hit its own, the first request was refused, and the hand-over
+    cooldown then kept the agent parked until a reset days away (final review of #203,
+    accounts F1). The windows are the ones its plan HAS: a Codex plan can have a weekly
+    window and no five-hour one (measured on a business plan), an agent of daily
+    per-model quotas a window per model. ``None`` while its shortest window went unread
+    (Claude Code's endpoint answering without the five-hour one), which the pick skips as
+    it always has.
     """
-    if not reading.available or reading.session_percent is None:
-        return None
-    used = reading.session_percent
-    if reading.week_percent is not None:
-        used = max(used, reading.week_percent)
+    used = reading.ranked_percent
     own = reading.family_week_percent.get(family) if family is not None else None
-    return used if own is None else max(used, own)
+    return used if used is None or own is None else max(used, own)
 
 
 def describe_headroom(
@@ -2244,25 +2506,30 @@ def describe_headroom(
 
     Every figure says USED, and what is left is spelled out beside it: an agent
     read a bare ``40%`` as the room remaining and rationed an account that had
-    plenty. The five-hour figure leads, as it does on the page; the weekly one
-    is named only when it is what ranks the account, so a note never shows a
+    plenty. The shortest window's figure leads, as it does on the page, named unless it is
+    the five-hour ``session`` (``account 2 week 30% used`` for a plan with a week alone);
+    the window that limits is named only when it is another one, so a note never shows a
     low number beside an account the pick passed over without saying why.
     """
     name = core.label(account)
-    session = reading.session_percent
-    if session is None:
+    first = reading.windows[0] if reading.windows else None
+    if first is None or first.used_percent is None or headroom_percent(reading) is None:
         return name
     left = percent_left(reading, family)
     spare = "" if left is None else f"{left:.0f}% left"
-    week = reading.week_percent
+    lead = "" if first.name == SESSION_WINDOW else f"{first.name} "
+    limiting = reading.limiting
     own = reading.family_week_percent.get(family) if family is not None else None
-    if own is not None and own > session and (week is None or own > week):
+    fullest = limiting.used_percent if limiting is not None else None
+    if own is not None and own > (first.used_percent or 0) and (fullest is None or own > fullest):
         detail = f"{family} week {own:.0f}% used" + (f", {spare}" if spare else "")
-        return f"{name} {session:.0f}% used ({detail})"
-    if week is not None and week > session:
-        detail = f"week {week:.0f}% used" + (f", {spare}" if spare else "")
-        return f"{name} {session:.0f}% used ({detail})"
-    return f"{name} {session:.0f}% used" + (f" ({spare})" if spare else "")
+        return f"{name} {lead}{first.used_percent:.0f}% used ({detail})"
+    if limiting is not None and limiting != first and limiting.used_percent != first.used_percent:
+        detail = f"{limiting.name} {limiting.used_percent:.0f}% used" + (
+            f", {spare}" if spare else ""
+        )
+        return f"{name} {lead}{first.used_percent:.0f}% used ({detail})"
+    return f"{name} {lead}{first.used_percent:.0f}% used" + (f" ({spare})" if spare else "")
 
 
 HEADROOM_GOOD_ABOVE = 50.0
@@ -2274,7 +2541,7 @@ HEADROOM_LOW_FROM = 5.0
 
 
 def percent_left(reading: ClaudeUsage, family: str | None = None) -> float | None:
-    """The share of an account LEFT for a pick: ``100 - max(session used, week used)``, 0-100
+    """The share of an account LEFT for a pick: ``100 -`` the window that limits it, 0-100
     (and the ``family`` week's, given one: :func:`headroom_percent`)."""
     used = headroom_percent(reading, family)
     return None if used is None else min(100.0, max(0.0, 100.0 - used))
@@ -2304,15 +2571,18 @@ def fleet_headroom(
     The formula, as the help screen quotes it:
 
     - an account is **usable** when it is enabled and has a readable reading
-      (signed in, token accepted, the five-hour window read);
-    - its share **left** is ``100 - max(session % used, week % used)`` — the
-      fuller window decides, as it does for a pick (:func:`headroom_percent`);
+      (signed in, token accepted, its shortest window read: Claude Code's five hours, the
+      week of a Codex plan with no five-hour window);
+    - its share **left** is ``100 - max(session % used, week % used)``, over every window
+      it has — the window that limits it decides, as it does for a pick
+      (:func:`headroom_percent`);
     - the fleet's **percent left** is the mean of ``left`` over the usable
       accounts, and **usable** is how many there are;
     - **needs login** counts the accounts whose token has expired or was
       rejected (``ClaudeUsage.needs_login``);
-    - **session by slot** is each usable account's five-hour window, percent
-      USED, as read — what the agent rows show beside an agent's account;
+    - **limit by slot** is each usable account's window that limits, percent USED,
+      as read (``ClaudeUsage.limiting``: the five-hour one unless another is fuller) —
+      what the agent rows and the info line show beside an agent's account;
     - the **level**: ``good`` over 50 % left, ``fair`` 25-50 %, ``low`` 5-25 %,
       ``critical`` under 5 % (but above 0), ``empty`` at 0 % or with no usable
       account, ``unknown`` while no enabled account has been read yet;
@@ -2337,20 +2607,20 @@ def fleet_headroom(
     if not read:
         return HeadroomSummary(level="unknown")
     left_by_slot: dict[int, float] = {}
-    session_by_slot: dict[int, float] = {}
+    used_by_slot: dict[int, float] = {}
     week_left: dict[int, float] = {}
     resets: list[tuple[datetime, int]] = []
     taken: list[datetime] = []
     oldest = (now or _now()) - timedelta(seconds=USAGE_MAX_AGE_SECONDS)
     for account in enabled:
         reading = readings.get(account.slot)
-        left = percent_left(reading) if reading is not None else None
-        if reading is None or left is None or reading.session_percent is None:
+        used = headroom_percent(reading) if reading is not None else None
+        if reading is None or used is None:
             continue
         if is_kept(reading) and (reading.fetched_at is None or reading.fetched_at < oldest):
             continue
-        left_by_slot[account.slot] = left
-        session_by_slot[account.slot] = reading.session_percent
+        left_by_slot[account.slot] = min(100.0, max(0.0, 100.0 - used))
+        used_by_slot[account.slot] = used
         if reading.week_percent is not None:
             week_left[account.slot] = max(0.0, 100.0 - reading.week_percent)
             if reading.week_resets_at is not None:
@@ -2367,7 +2637,7 @@ def fleet_headroom(
         usable=len(left_by_slot),
         needs_login=needs_login,
         left_by_slot=left_by_slot,
-        session_by_slot=session_by_slot,
+        limit_by_slot=used_by_slot,
         fetched_at=min(taken, default=None),
         week_left_by_slot=week_left,
         week_percent_left=sum(week_left.values()) / len(week_left) if week_left else None,
@@ -2376,6 +2646,17 @@ def fleet_headroom(
             WeekReset(slot=soonest[1], resets_at=soonest[0]) if soonest is not None else None
         ),
     )
+
+
+def limit_by_slot(summaries: Iterable[HeadroomSummary]) -> dict[int, float]:
+    """Slot → its window that limits, percent USED, across every agent's summary, as the
+    agent rows and info lines show it: one :func:`fleet_headroom` per agent (a Codex
+    account's room is nothing to a Claude Code agent), and slots are one ladder, so no two
+    agents share one."""
+    union: dict[int, float] = {}
+    for summary in summaries:
+        union.update(summary.limit_by_slot)
+    return union
 
 
 def summary_sentence(
@@ -2409,6 +2690,7 @@ def summary_sentence(
 def read_fleet_headroom(
     accounts: Sequence[ClaudeAccount] | None = None,
     *,
+    agent: str = AGENT,
     max_age: float = USAGE_MAX_AGE_SECONDS,
     force: bool = False,
     now: datetime | None = None,
@@ -2416,14 +2698,16 @@ def read_fleet_headroom(
 ) -> HeadroomSummary:
     """:func:`fleet_headroom` over the enabled, signed-in accounts, read via :func:`cached_usage`.
 
-    ``accounts`` defaults to the arranged list; a slot that is not signed in is
-    never fetched, and with none signed in the level is ``empty``.
+    ``accounts`` defaults to ``agent``'s accounts in the arranged list (Claude Code's: the
+    status line's dot is the room left across the Claude accounts); a slot that is not
+    signed in is never fetched, and with none signed in the level is ``empty``.
     """
-    candidates = [
-        account
-        for account in (list_accounts() if accounts is None else accounts)
-        if not account.disabled and core.signed_in(account)
-    ]
+    listed = (
+        [account for account in list_accounts() if account.agent == agent]
+        if accounts is None
+        else accounts
+    )
+    candidates = [account for account in listed if not account.disabled and core.signed_in(account)]
     readings = cached_usage(candidates, max_age=max_age, force=force, now=now, fetch=fetch)
     summary = fleet_headroom(candidates, readings, now=now)
     write_statusline_fleet(summary, candidates, now=now)
@@ -2640,11 +2924,17 @@ def statusline_sites(
     command back as it was. A settings file two accounts share (``[accounts] share``
     links it) is acted on once. One account's failure is its row's ``error``; the rest go on.
     """
-    chosen = [account for account in list_accounts() if slots is None or account.slot in slots]
+    # The agents whose account holds a ``settings.json`` of this shape (Claude Code's): another
+    # agent's home has none to write a status line into.
+    chosen = [
+        account
+        for account in list_accounts()
+        if core.kind(account.agent).shares_settings and (slots is None or account.slot in slots)
+    ]
     sites: list[StatuslineSite] = []
     seen: dict[str, int] = {}
     for account in chosen:
-        path = account.config_dir / "settings.json"
+        path = account.config_dir / get_adapter(account.agent).settings_name
         key = os.path.realpath(path)
         base = {"slot": account.slot, "account": core.label(account), "settings_path": str(path)}
         if key in seen:
@@ -2821,6 +3111,18 @@ A hand-over after a limit still reads live (:func:`choose_for_handover`); one be
 limit (``[accounts] before_limit``) reads this deep, as a launch does."""
 
 
+@dataclass(frozen=True)
+class HeadroomDecision:
+    """:func:`headroom_decision`'s answer: the account, the notes, and whether a reading
+    decided it."""
+
+    account: ClaudeAccount | None
+    notes: list[str]
+    measured: bool = True
+    """``False`` when ``account`` was taken with no reading to go by: an account that could
+    not be measured keeps its place (``unread_keeps_place``), it is not a full one."""
+
+
 def headroom_choice(
     accounts: Sequence[ClaudeAccount],
     *,
@@ -2833,6 +3135,35 @@ def headroom_choice(
     family: str | None = None,
     prefer: str = "priority",
 ) -> tuple[ClaudeAccount | None, list[str]]:
+    """The account with headroom, and the notes that say how it was picked
+    (:func:`headroom_decision`, an account that cannot be read skipped)."""
+    decision = headroom_decision(
+        accounts,
+        switch_at=switch_at,
+        exclude=exclude,
+        fetch=fetch,
+        now=now,
+        least_bad=least_bad,
+        max_age=max_age,
+        family=family,
+        prefer=prefer,
+    )
+    return decision.account, decision.notes
+
+
+def headroom_decision(
+    accounts: Sequence[ClaudeAccount],
+    *,
+    switch_at: int,
+    exclude: Iterable[int] = (),
+    fetch: Fetch | None = None,
+    now: datetime | None = None,
+    least_bad: bool = True,
+    max_age: float | None = None,
+    family: str | None = None,
+    prefer: str = "priority",
+    unread_keeps_place: bool = False,
+) -> HeadroomDecision:
     """The account with headroom, and the notes that say how it was picked.
 
     ``family`` is the agent's model family, when known: that family's week counts
@@ -2862,11 +3193,28 @@ def headroom_choice(
     skipped and named; ``None`` when nothing could be measured, so the
     caller's next rung decides.
 
-    An account the usage endpoint asked to wait (F1 of #400) is not asked
-    again, by a launch or a hand-over: the pick decides by its newest reading
-    recorded in the last :data:`USAGE_MAX_AGE_SECONDS`, and says so, or skips
-    it with a note naming the wait when that reading is older or missing. The
-    cache's older figure, shown on the page with its age, is never picked by.
+    ``unread_keeps_place`` is the launch's AGENT rung's rule (:func:`agent_pick`, review
+    of #14, M1): an account that could not be read is *unmeasured*, not *full*, so it keeps
+    its place in the order and only an account measured over the line, or one a limit mark
+    or a spent family week shuts, gives its place to a later one. The expired token that
+    an idle Claude Code account normally reads (a session on it refreshes it) must not hand
+    the launch to another agent. ``measured`` on the answer says which kind of account was
+    taken. ``prefer = "reset-soonest"`` compares the readings it has: an unmeasured account
+    ahead of them is not passed over for a measured one, and is not preferred either.
+
+    An account the usage endpoint asked to wait (F1 of #400), or whose last read failed,
+    is not asked again, by a launch or a hand-over: the pick decides by its newest reading
+    recorded inside the pick's own window (``max_age``: :data:`PICK_MAX_AGE_SECONDS` for a
+    launch, :data:`USAGE_MAX_AGE_SECONDS` for a hand-over's live read), and says so, with
+    its age. An older one is no live figure and is never picked by, with one exception that
+    usage only rising within a window makes sound: a kept reading OVER the ``switch_at``
+    line with no window reset since is a floor, so the account counts as full and is
+    passed over (the note gives the reading's age). Any other old reading, one under the
+    line or from before a reset, leaves the account unread (skipped, or, for the launch's
+    agent rung, keeping its place: ``unread_keeps_place``). An agent that reads its usage
+    offline (Codex's, off its rollout) has readings of that kind always, and its age is the
+    age of the rollout record it was read from: over the line with no window reset since,
+    it counts as full the same way.
     """
     skip = set(exclude)
     candidates = [
@@ -2875,7 +3223,7 @@ def headroom_choice(
         if not account.disabled and account.slot not in skip and core.signed_in(account)
     ]
     if not candidates:
-        return None, [_NOTHING_TO_PICK]
+        return HeadroomDecision(None, [_NOTHING_TO_PICK])
     moment = now or _now()
     marks = limit_marks(now=moment)
     notes: list[str] = []
@@ -2888,15 +3236,23 @@ def headroom_choice(
             notes.append(f"headroom: {core.label(account)} skipped — {mark.describe(now=moment)}")
     if not open_ones:
         notes.append("headroom: every account is at a limit it named — the default decides")
-        return None, notes
+        return HeadroomDecision(None, notes)
     candidates = open_ones
     if max_age is None:
         readings = read_usage(candidates, now=now, fetch=fetch)
     elif len(candidates) == 1 and least_bad:
-        return candidates[0], [*notes, *_over_the_line(candidates[0], switch_at, now=now)]
+        return HeadroomDecision(
+            candidates[0], [*notes, *_over_the_line(candidates[0], switch_at, now=now)]
+        )
     else:
         readings = cached_usage(candidates, max_age=max_age, now=now, fetch=fetch)
     readings = dict(readings)
+    window = timedelta(seconds=max_age if max_age is not None else USAGE_MAX_AGE_SECONDS)
+    full_by_age: set[int] = set()
+    # The accounts counted as full by a reading too old to be the figure now (a kept reading's
+    # floor, an offline reading past the window, `full_by_age` the first kind): at least that
+    # used, not exactly, which the every-account-is-over-the-line answer must not forget.
+    floors: set[int] = set()
     # A kept reading — the last good figure a failed read shows (F1 of #400), or a slot the
     # endpoint asked to wait — is never taken for a live one: the pick decides by it only
     # while it is inside the pick's own window and neither window has reset since, and
@@ -2911,7 +3267,6 @@ def headroom_choice(
     ]
     if kept:
         moment = now or _now()
-        window = timedelta(seconds=max_age if max_age is not None else USAGE_MAX_AGE_SECONDS)
         tokens = {
             account.slot: token
             for account in kept
@@ -2941,6 +3296,22 @@ def headroom_choice(
                     f"{describe_age(taken, now=moment)}"
                 )
                 continue
+            bound = _floor(last, moment) if last is not None else None
+            at_least = headroom_percent(bound, family) if bound is not None else None
+            if bound is not None and taken is not None and at_least and at_least >= switch_at:
+                # Usage only rises within a window: what this reading showed of a window that
+                # has not reset since is a floor, so an account over the line then is over it
+                # now, however old the reading (a floor is no live figure, but it is enough to
+                # know the account is full). An older reading UNDER the line says nothing of
+                # now, and falls to the rule below: unread.
+                readings[account.slot] = bound
+                full_by_age.add(account.slot)
+                notes.append(
+                    f"headroom: {core.label(account)} {why} — its reading from "
+                    f"{describe_age(taken, now=moment)} is over the {switch_at}%-used line "
+                    f"{_floor_words(last, family, moment)}, so it counts as full"
+                )
+                continue
             if taken is None and not is_kept(reading):
                 continue  # a bare failure with nothing on record: its own reason says it all
             if taken is None:
@@ -2963,7 +3334,7 @@ def headroom_choice(
                 rate_limited=reading.rate_limited,
                 rate_limited_until=reading.rate_limited_until,
             )
-    measured: list[tuple[ClaudeAccount, float]] = []
+    measured: list[tuple[ClaudeAccount, float | None]] = []
     for account in candidates:
         reading = readings[account.slot]
         percent = headroom_percent(reading, family)
@@ -2974,42 +3345,93 @@ def headroom_choice(
             notes.append(f"headroom: {core.label(account)} skipped — its {family} week is spent")
         elif percent is not None:
             measured.append((account, percent))
+            recorded = reading.fetched_at
+            if (
+                percent >= switch_at
+                and recorded is not None
+                and recorded < moment - window
+                and account.slot not in full_by_age
+            ):
+                # An agent that reads its usage offline (Codex: its rollout's newest record)
+                # has no live figure to wait for: a window that has not reset since is a
+                # floor under the account now, whatever the age the reading says.
+                floors.add(account.slot)
+                notes.append(
+                    f"headroom: {core.label(account)} — its reading from "
+                    f"{describe_age(recorded, now=moment)} is over the {switch_at}%-used line "
+                    f"{_floor_words(reading, family, moment)}, so it counts as full"
+                )
+        elif unread_keeps_place:
+            measured.append((account, None))
+            notes.append(
+                f"headroom: {core.label(account)} could not be read — "
+                f"{reading.reason or 'no reading'}; unmeasured is not full, so it keeps its place"
+            )
         else:
             notes.append(
                 f"headroom: {core.label(account)} skipped — {reading.reason or 'no reading'}"
             )
     if not measured:
         notes.append("headroom: no account's usage could be read — the default decides")
-        return None, notes
-    summary = " · ".join(describe_headroom(a, readings[a.slot], family) for a, _pct in measured)
-    under_line = [a for a, pct in measured if pct < switch_at]
-    if prefer == "reset-soonest" and len(under_line) > 1:
+        return HeadroomDecision(None, notes)
+    summary = " · ".join(
+        describe_headroom(a, readings[a.slot], family)
+        if pct is not None
+        else f"{core.label(a)} unread"
+        for a, pct in measured
+    )
+    under_line = [(a, pct) for a, pct in measured if pct is None or pct < switch_at]
+    first_under = under_line[0] if under_line else None
+    read_under = [a for a, pct in under_line if pct is not None]
+    if (
+        prefer == "reset-soonest"
+        and len(read_under) > 1
+        and first_under is not None
+        and first_under[1] is not None
+    ):
         never = datetime.max.replace(tzinfo=UTC)
-        soonest = min(under_line, key=lambda a: readings[a.slot].week_resets_at or never)
-        if soonest is not under_line[0]:
+        soonest = min(read_under, key=lambda a: readings[a.slot].week_resets_at or never)
+        if soonest is not first_under[0]:
             notes.append(
                 f"headroom: {summary} — {core.label(soonest)}'s week resets first of those "
                 f"under the {switch_at}%-used line (prefer = reset-soonest)"
             )
-            return soonest, notes
-    under = under_line[0] if under_line else None
-    if under is not None:
+            return HeadroomDecision(soonest, notes)
+    if first_under is not None:
+        under, under_percent = first_under
         notes.append(
             f"headroom: {summary} — {core.label(under)} is first under the {switch_at}%-used line"
+            if under_percent is not None
+            else f"headroom: {summary} — {core.label(under)} is first in the order and no "
+            f"account measured over the {switch_at}%-used line is ahead of it"
         )
-        return under, notes
+        return HeadroomDecision(under, notes, measured=under_percent is not None)
     if not least_bad:
         notes.append(
             f"headroom: {summary} — every account is over the {switch_at}%-used line; "
             "nothing to switch to"
         )
-        return None, notes
-    least, pct = min(measured, key=lambda pair: pair[1])
+        return HeadroomDecision(None, notes)
+    # A floor is a lower bound of use, not a figure: a live reading beats it however the two
+    # compare (before a floor counted, it was unread and the live one won), and the floors
+    # compete among themselves only when no account has a live reading (review r23 of #113,
+    # tester-23's observation i).
+    floors |= full_by_age
+    over = [(a, p) for a, p in measured if p is not None]
+    live = [(a, p) for a, p in over if a.slot not in floors]
+    least, pct = min(live or over, key=lambda pair: pair[1])
+    left = max(0, 100 - pct)
+    taken_at = readings[least.slot].fetched_at
+    if least.slot in floors and taken_at is not None:
+        age = describe_age(taken_at, now=moment)
+        room = f"has the most room by its reading from {age} ({left:.0f}% left at most)"
+    else:
+        room = f"has the most room ({left:.0f}% left)"
     notes.append(
         f"headroom: {summary} — every account is over the {switch_at}%-used line; "
-        f"{core.label(least)} has the most room ({max(0, 100 - pct):.0f}% left)"
+        f"{core.label(least)} {room}"
     )
-    return least, notes
+    return HeadroomDecision(least, notes)
 
 
 def _over_the_line(account: ClaudeAccount, switch_at: int, *, now: datetime | None) -> list[str]:
@@ -3035,6 +3457,196 @@ def _over_the_line(account: ClaudeAccount, switch_at: int, *, now: datetime | No
     ]
 
 
+@dataclass(frozen=True)
+class AgentPick:
+    """Which agent, and which of its accounts, the one priority order puts first.
+
+    From :func:`choose_any`: ``agent`` is the picked account's, and both are ``None`` when
+    no account is usable or none could be measured. From :func:`agent_pick` (a launch's
+    agent rung), ``account`` may be ``None`` with ``agent`` set: the order chose the agent,
+    no reading decided the account, and :func:`choose` finds it by its ladder, whose last
+    rung is rank 1 of that agent's accounts.
+    """
+
+    agent: str | None
+    account: ClaudeAccount | None
+    notes: tuple[str, ...] = ()
+
+
+def usable_accounts(
+    accounts: Sequence[ClaudeAccount],
+    *,
+    exclude: Iterable[int] = (),
+    agents: Iterable[str] | None = None,
+    which: Callable[[str], str | None] | None = None,
+) -> list[ClaudeAccount]:
+    """``accounts``, in their order, that a launch could run on: enabled, signed in, not in
+    ``exclude``, of an agent in ``agents`` (every agent with account slots when ``None``)
+    whose binary is on ``PATH`` (``which``, ``shutil.which`` by default, asked once per
+    agent)."""
+    find = which if which is not None else shutil.which
+    skip = set(exclude)
+    allowed = None if agents is None else set(agents)
+    installed: dict[str, bool] = {}
+
+    def on_path(agent: str) -> bool:
+        if agent not in installed:
+            installed[agent] = find(get_adapter(agent).binary) is not None
+        return installed[agent]
+
+    return [
+        account
+        for account in accounts
+        if not account.disabled
+        and account.slot not in skip
+        and (allowed is None or account.agent in allowed)
+        and on_path(account.agent)
+        and core.signed_in(account)
+    ]
+
+
+def choose_any(
+    *,
+    exclude: Iterable[int] = (),
+    agents: Iterable[str] | None = None,
+    live: bool = False,
+    least_bad: bool = True,
+    fetch: Fetch | None = None,
+    which: Callable[[str], str | None] | None = None,
+    family: str | None = None,
+) -> AgentPick:
+    """The best account of ANY agent: the first in the one priority order with headroom.
+
+    Candidates are :func:`usable_accounts` (``exclude`` a hand-over's account, ``agents``
+    the agents allowed); the rule is :func:`headroom_choice`'s, with ``[accounts]
+    switch_at`` and ``prefer`` (#295: ``reset-soonest`` takes, of those under the line,
+    the one whose week resets first): the first under the line, else the least used when
+    ``least_bad``, read in one round for every candidate, now when ``live`` (a hand-over)
+    or through the one-minute cache. An account with a limit mark still in force is
+    skipped unread; given the agent's model ``family``, so is one whose week for that
+    family is spent or marked (#295's per-family windows). No role, project or flag rung:
+    what pins an agent or an account is the caller's. Both ``None`` when nothing is
+    usable or nothing could be read.
+    """
+    accounts, note = _read_arranged()
+    if note is not None:
+        return AgentPick(None, None, (note,))
+    candidates = usable_accounts(accounts, exclude=exclude, agents=agents, which=which)
+    if not candidates:
+        return AgentPick(None, None, (_NOTHING_TO_PICK,))
+    settings = accounts_settings()
+    picked, notes = headroom_choice(
+        candidates,
+        switch_at=settings.switch_at,
+        fetch=fetch,
+        least_bad=least_bad,
+        max_age=None if live else PICK_MAX_AGE_SECONDS,
+        family=family,
+        prefer=settings.prefer,
+    )
+    if picked is None:
+        return AgentPick(None, None, tuple(notes))
+    return AgentPick(picked.agent, picked, tuple(notes))
+
+
+def account_agent(ref: str | None, *, role: str | None = None) -> str | None:
+    """The agent of the account ``ref`` names (a launch's ``--account``), else of the one
+    ``role``'s binding names: naming an account names its agent, so a launch that nothing
+    else pins runs it there (``services.agent_launch.resolve``). ``None`` when neither names
+    an account that exists: :func:`choose` says why, as it always did. Never raises, and
+    makes no store on a machine that has none.
+
+    A role's binding to a DISABLED account names no agent: :func:`choose` skips it with a
+    note and goes on, and so does the agent, to the order (review of #14, nit 6). The
+    flag's account is the operator's own word and is taken as named, as ``choose`` does."""
+    try:
+        wanted = ref if ref is not None else _role_binding_ref(role)[0]
+        if not wanted:
+            return None
+        accounts = _read_arranged()[0] if paths.db_path().exists() else core.list_accounts()
+        account = _resolve_in(accounts, wanted)
+        return None if ref is None and account.disabled else account.agent
+    except Exception:
+        return None
+
+
+def agent_pick(
+    *,
+    fetch: Fetch | None = None,
+    which: Callable[[str], str | None] | None = None,
+    measure: bool = True,
+    family: str | None = None,
+) -> AgentPick:
+    """The agent a launch that nothing pins runs: the agent of the best usable account.
+
+    A launch's agent rung (``services.agent_launch.resolve``, below ``--agent``, a role's
+    binding, a binary and the project's default). Usable accounts of one agent alone
+    decide it with no usage read, and leave the account to :func:`choose`. Across agents,
+    with ``[accounts] pick = "headroom"``, the rule is :func:`headroom_decision`'s with
+    ``unread_keeps_place``: the first account in the order that is not measured over the
+    ``switch_at`` line or marked at a limit gives the agent, and when a reading put it
+    there, the account too, which :func:`choose` then takes (one usage read for both).
+
+    An account whose usage cannot be read (an expired token, an unreachable endpoint: the
+    state an account idle for hours normally reads, a session on it refreshes it) is
+    unmeasured, not full: it keeps its place, so a lower agent's account never takes the
+    launch from it (review of #14, M1; rank 1 is the machine default whatever its
+    reading, #406). The account within that agent is then :func:`choose`'s, by its
+    ladder: a measured account of the same agent may still go first, else rank 1 of it.
+
+    With nothing measured, with ``pick = "default"`` or with ``measure=False`` (a display of
+    the agent, which reads no usage), the first usable account's agent, and ``account`` is
+    left to :func:`choose`, whose last rung is that same first account. ``agent=None`` when no
+    account is usable, the registry cannot be read, or this machine has no store yet:
+    the launch's fallbacks decide (the user's coding agent under App settings).
+
+    ``family`` is the model family the launch runs on an agent of AISquare's model ladders
+    (``services.fleet.spawn_runs``), when it is known: its week and its limit marks weigh the
+    accounts as :func:`choose`'s headroom rung weighs them (#277), so an account whose week
+    of that family is spent is not the pick this rung hands :func:`choose`, which took it
+    (review r28 of #113, M1: the Spawn dialog's label named spare, the spawn ran on work).
+    Only those agents' accounts record family weeks or family marks, so the one family
+    weighs no other agent's account. A launch that names a model of one agent's never asks
+    this rung (``agent_launch.resolve``'s ``model`` rung: review r29 of #113, m1), and one
+    that names a model no agent claims asks it with ``measure=False``.
+    """
+    if not paths.db_path().exists():
+        return AgentPick(None, None)
+    accounts, note = _read_arranged()
+    if note is not None:
+        return AgentPick(None, None, (note,))
+    candidates = usable_accounts(accounts, which=which)
+    if not candidates:
+        return AgentPick(None, None)
+    first = candidates[0]
+    if len({account.agent for account in candidates}) == 1:
+        return AgentPick(first.agent, None)
+    settings = accounts_settings()
+    if not measure or settings.pick != "headroom":
+        return AgentPick(first.agent, None, (f"{core.label(first)} is first in the order",))
+    decision = headroom_decision(
+        candidates,
+        switch_at=settings.switch_at,
+        fetch=fetch,
+        max_age=PICK_MAX_AGE_SECONDS,
+        family=family,
+        prefer=settings.prefer,
+        unread_keeps_place=True,
+    )
+    picked, notes = decision.account, decision.notes
+    if picked is None:
+        return AgentPick(first.agent, None, (*notes, f"{core.label(first)} is first in the order"))
+    if not decision.measured:
+        return AgentPick(picked.agent, None, tuple(notes))
+    return AgentPick(picked.agent, picked, tuple(notes))
+
+
+def _marked(account: ClaudeAccount, family: str | None) -> bool:
+    """Whether a limit mark still in force shuts ``account`` to an agent of ``family``: the
+    launch's agent rung picked before the model was known, so a family's mark is read here."""
+    return any(mark.blocks(family) for mark in limit_marks().get(account.slot, []))
+
+
 def choose_for_handover(
     explicit: str | None = None,
     *,
@@ -3043,10 +3655,14 @@ def choose_for_handover(
     exclude: Iterable[int],
     automatic: bool = False,
     fetch: Fetch | None = None,
+    agent: str = AGENT,
     family: str | None = None,
     max_age: float | None = None,
 ) -> AccountChoice:
     """The target of a hand-over: HEADROOM FIRST; the ladder only when nothing can be measured.
+
+    Among ``agent``'s accounts (the agent being moved): a Codex agent moves to a
+    Codex account, read offline from its rollouts.
 
     ``family`` is the agent's model family (its session's model), so an account whose
     week for that family is spent, or that refused it with that family's limit, is no
@@ -3079,7 +3695,7 @@ def choose_for_handover(
     """
     skip = frozenset(exclude)  # read three times below: never an iterator
     if explicit is not None:
-        return choose(explicit, role=role, project=project, exclude=skip, fetch=fetch)
+        return choose(explicit, role=role, project=project, exclude=skip, fetch=fetch, agent=agent)
     accounts, registry_note = _read_for_handover()
     if registry_note is not None:
         return AccountChoice(None, None, [registry_note])
@@ -3087,7 +3703,7 @@ def choose_for_handover(
     notes: list[str] = []
     settings = accounts_settings()
     picked, more = headroom_choice(
-        accounts,
+        [a for a in accounts if a.agent == agent],
         switch_at=settings.switch_at,
         exclude=skip,
         fetch=fetch,
@@ -3102,7 +3718,14 @@ def choose_for_handover(
     if automatic:
         return AccountChoice(None, None, notes)
     fallback = choose(
-        None, role=role, project=project, exclude=skip, spread=False, fetch=fetch, family=family
+        None,
+        role=role,
+        project=project,
+        exclude=skip,
+        spread=False,
+        fetch=fetch,
+        agent=agent,
+        family=family,
     )
     # The ladder's rungs read no marks: on a hand-over they are not a choice someone made for
     # THIS move, and with every other account marked the machine default moved the agent
@@ -3221,14 +3844,20 @@ def line_reading(
 
 
 def room_on_record(
-    leaving: int, *, switch_at: int, family: str | None = None, now: datetime | None = None
+    leaving: int,
+    *,
+    switch_at: int,
+    family: str | None = None,
+    agent: str = AGENT,
+    now: datetime | None = None,
 ) -> bool:
-    """Whether an account other than ``leaving`` may take an agent of ``family``, by what is on
-    record alone (nothing is asked): ``False`` only when every candidate the automatic pick
-    would weigh (:func:`choose_for_handover`) is known not to — at a limit mark for the family,
-    its family week spent, or its live reading on record at or over ``switch_at`` — or the
-    registry cannot be read, when that pick takes nothing. A candidate with no live reading on
-    record may: only a read can say, and that is the worker's.
+    """Whether an account of ``agent`` other than ``leaving`` may take an agent of ``family``,
+    by what is on record alone (nothing is asked): ``False`` only when every candidate the
+    automatic pick would weigh (:func:`choose_for_handover`, among the agent's own accounts) is
+    known not to — at a limit mark for the family, its family week spent, or its live reading
+    on record at or over ``switch_at`` — or the registry cannot be read, when that pick takes
+    nothing. A candidate with no live reading on record may: only a read can say, and that is
+    the worker's.
 
     A hook's question (F2 of #400): with every other account over the line, a turn end then
     reads none of them, however long that lasts, where a pick a minute deep re-read each one a
@@ -3242,7 +3871,8 @@ def room_on_record(
     candidates = [
         account
         for account in accounts
-        if not account.disabled
+        if account.agent == agent
+        and not account.disabled
         and account.slot != leaving
         and core.signed_in(account)
         and not any(mark.blocks(family) for mark in marks.get(account.slot, []))
@@ -3261,12 +3891,13 @@ def room_on_record(
     return False
 
 
-def account_pin(role: str | None, *, named: bool) -> str | None:
+def account_pin(role: str | None, *, named: bool, agent: str = AGENT) -> str | None:
     """Why an agent of ``role`` stays on its account whatever its usage reads, or ``None``.
 
     ``named`` is its launch's ``--account`` (``LaunchSpec.account_pinned``). Then the role's
     binding to an account (``team bind <role> --account``), and a binding that sets
-    ``CLAUDE_CONFIG_DIR`` by hand, which no default overrides (#9). A hand-over after a limit
+    ``agent``'s directory by hand (Claude Code's ``CLAUDE_CONFIG_DIR``, Codex's
+    ``CODEX_HOME``), which no default overrides (#9). A hand-over after a limit
     still moves each of them; ``[accounts] before_limit``, which acts on none (F2 of #400),
     asks here. A config that cannot be read pins nothing, as it binds nothing.
     """
@@ -3275,38 +3906,70 @@ def account_pin(role: str | None, *, named: bool) -> str | None:
     bound, _note = _role_binding_ref(role)
     if bound:
         return f"bound to account {bound}"
-    if _binding_names_a_directory(role):
-        return "its binding sets CLAUDE_CONFIG_DIR"
+    if _binding_names_a_directory(role, agent):
+        return f"its binding sets {core.kind(agent).home_env}"
     return None
 
 
 # --- signing in -------------------------------------------------------------------------
 
 
-def begin_sign_in(slot: int | None) -> ClaudeAccount:
-    """The account a sign-in is about: a fresh slot when ``slot`` is ``None``.
+def not_installed(agent: str = AGENT) -> ClaudeNotInstalled:
+    """The refusal for a missing agent, with the command that installs it."""
+    return ClaudeNotInstalled(
+        f"{core.agent_label(agent)} is not installed — install it first: "
+        f"{core.kind(agent).install_command}"
+    )
 
-    Refuses without Claude Code, before making a directory nothing could use.
+
+def begin_sign_in(slot: int | None, *, agent: str = AGENT) -> ClaudeAccount:
+    """The account a sign-in is about: a fresh slot of ``agent`` when ``slot`` is ``None``.
+
+    Refuses without the agent installed, before making a directory nothing could use.
     """
-    if not install().installed:
-        raise ClaudeNotInstalled(
-            f"Claude Code is not installed — install it first: {core.INSTALL_COMMAND}"
-        )
+    whose = agent
+    if slot is not None:
+        found = core.find_account(slot)
+        whose = found.agent if found is not None else agent
+    if not install(whose).installed:
+        raise not_installed(whose)
     if slot is None:
-        return core.create_account()
+        return core.create_account(agent)
     account = core.find_account(slot)
     if account is None:
-        raise NoSuchAccount(f"no Claude account in slot {slot} — see: aisquare accounts")
+        raise NoSuchAccount(
+            f"no {_whose(agent, core.list_accounts())} account in slot {slot} — "
+            "see: aisquare accounts"
+        )
     return account
 
 
 def sign_in_command(account: ClaudeAccount) -> list[str]:
-    """What a sign-in window runs: our own ``accounts run``, so one place sets the environment."""
-    return [sys.executable, "-m", "aisquare", "accounts", "run", str(account.slot)]
+    """What a sign-in window runs: our own ``accounts run``, so one place sets the environment.
+
+    With the agent's own sign-in arguments after the slot: none for Claude Code,
+    whose first session signs in; ``login`` for Codex (``accounts run <n> login``
+    is ``codex login`` in the slot's home).
+    """
+    return [
+        sys.executable,
+        "-m",
+        "aisquare",
+        "accounts",
+        "run",
+        str(account.slot),
+        *core.kind(account.agent).sign_in_args(),
+    ]
 
 
 CARRIED_VARS = (paths.HOME_ENV_VAR, core.CONFIG_DIR_VAR, core.TMPDIR_VAR)
 """What decides which directory a slot IS: the aisquare home, and the default's two variables."""
+
+
+def carried_vars(agent: str = AGENT) -> tuple[str, ...]:
+    """:data:`CARRIED_VARS` for a window of ``agent``: the home, and that agent's variables."""
+    accounts = core.kind(agent)
+    return (paths.HOME_ENV_VAR, accounts.home_env, *accounts.extra_env)
 
 
 def carry_environment(
@@ -3314,6 +3977,7 @@ def carry_environment(
     environ: Mapping[str, str] | None = None,
     *,
     cwd: Path | None = None,
+    agent: str = AGENT,
 ) -> tuple[list[str], dict[str, str]]:
     """``command`` and the variables to set so a tmux window sees THIS process's slots.
 
@@ -3338,15 +4002,19 @@ def carry_environment(
       hand-over worker, a manager on slot 2 spawning) has them naming that
       slot, and carried as they stood, ``launch --account 1`` in the window
       kept them and ran on the slot (review of #205, sixth round).
+
+    ``agent`` is whose window it is: a Codex window carries ``CODEX_HOME`` (the
+    plain codex's, by the same rule) in place of Claude Code's two.
     """
     source = os.environ if environ is None else environ
     view = {
         paths.HOME_ENV_VAR: source.get(paths.HOME_ENV_VAR, ""),
-        **core.plain_environment(source),
+        **core.plain_environment(source, agent=agent),
     }
+    carried = carried_vars(agent)
     base = Path.cwd() if cwd is None else cwd
     to_set: dict[str, str] = {}
-    for var in CARRIED_VARS:
+    for var in carried:
         value = view.get(var, "").strip()
         if value:
             path = paths.expand_user(Path(value))
@@ -3354,7 +4022,7 @@ def carry_environment(
             # as this shell holds it: expanding it raised, and joined to the cwd it named a
             # directory there for the window's claude to make (review of #257).
             to_set[var] = value if paths.names_no_home(path) else str((base / path).absolute())
-    to_unset = [var for var in CARRIED_VARS if var not in to_set]
+    to_unset = [var for var in carried if var not in to_set]
     argv = list(command)
     if to_unset:
         env_binary = shutil.which("env") or "/usr/bin/env"
@@ -3369,7 +4037,7 @@ def sign_in_window_command(
     cwd: Path | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     """The sign-in window's command and variables: ``accounts run <slot>``, this process's view."""
-    return carry_environment(sign_in_command(account), environ, cwd=cwd)
+    return carry_environment(sign_in_command(account), environ, cwd=cwd, agent=account.agent)
 
 
 def open_sign_in_window(
@@ -3381,6 +4049,9 @@ def open_sign_in_window(
     config: FleetSettings | None = None,
 ) -> WindowInfo:
     """Start a Claude Code session for ``account`` in the fleet's tmux server, detached.
+
+    For a Codex account the window runs ``codex login`` in the slot's home instead
+    (:func:`sign_in_command`), which writes ``auth.json`` and exits.
 
     The UI renders the window in a pane and polls :func:`sign_in_landed`; the
     working directory is the home directory, exactly what a fresh terminal
@@ -3411,13 +4082,15 @@ def open_sign_in_window(
     )
 
 
-class LoginUnreadable(AccountsError):
+class LoginUnreadable(AccountsError, core.LoginUnreadable):
     """The stored login could not be read (a locked or refusing Keychain): a sign-in window
     opened over it could not tell the login it was opened over from a new one."""
 
 
 def login_fingerprint(account: ClaudeAccount) -> str | None:
-    """A digest of the stored login (its token and expiry), or ``None`` when none is stored.
+    """A digest of the stored login, or ``None`` when none is stored: the account's agent's
+    (``AgentAccounts.login_fingerprint``: Claude Code's token and expiry, Codex's
+    ``auth.json`` tokens).
 
     So a sign-in window opened to RE-authenticate an account can tell the login
     it was opened over from a fresh one: an expired or rejected token is still
@@ -3427,41 +4100,54 @@ def login_fingerprint(account: ClaudeAccount) -> str | None:
     would not say raises :class:`LoginUnreadable` with its reason: ``None`` there
     would let the login already stored count as the new one at the first poll.
     """
-    login = core.stored_login(account, fresh=True)
-    if login.unreadable is not None:
-        raise LoginUnreadable(login.unreadable)
-    return _login_digest(login.credentials) if login.credentials is not None else None
+    try:
+        return core.kind(account.agent).login_fingerprint(account)
+    except core.LoginUnreadable as exc:
+        raise LoginUnreadable(str(exc)) from exc
 
 
 def _login_digest(creds: core.ClaudeCredentials) -> str:
-    """:func:`login_fingerprint` of credentials already read (the usage cache's key too)."""
-    stamp = creds.expires_at.isoformat() if creds.expires_at is not None else ""
-    return hashlib.sha256(f"{creds.access_token}\0{stamp}".encode()).hexdigest()
+    """:func:`login_fingerprint` of Claude Code credentials already read (the usage cache's
+    key too)."""
+    return core.login_digest(creds)
 
 
 def sign_in_landed(account: ClaudeAccount, *, since: str | None = None) -> ClaudeIdentity | None:
-    """Who the directory is now signed in as, once Claude Code has stored its login.
+    """Who the directory is now signed in as, once the agent has stored its login.
 
     ``since`` is :func:`login_fingerprint` as the window opened, for a re-auth:
     the login lands only once the stored one is a different login (a refreshed
-    or new token), not the expired or rejected one the window was opened over.
-    Read afresh, as :func:`login_fingerprint` is, and once. A store that would not
-    say (a Keychain locked mid-window) is no landing: the window keeps waiting.
+    or new token), not the expired or rejected one the window was opened over —
+    Claude Code's, or the ``auth.json`` a Codex ``login`` writes over. Read afresh,
+    as :func:`login_fingerprint` is, and once. A store that would not say (a
+    Keychain locked mid-window) is no landing: the window keeps waiting.
     """
     identity = core.identity(account)
     if identity is None:
         return None
-    creds = core.stored_login(account, fresh=True).credentials
-    if creds is None:  # none stored, or the Keychain would not say
+    try:
+        stored = core.kind(account.agent).login_fingerprint(account)
+    except core.LoginUnreadable:
         return None
-    if since is not None and _login_digest(creds) == since:
+    if stored is None or (since is not None and stored == since):
         return None
     return identity
 
 
 def complete_sign_in(account: ClaudeAccount) -> ClaudeAccountStatus:
-    """Wire the newly signed-in directory like any other: aisquare's hooks into its settings."""
-    agents_service.connect(AGENT, account.config_dir)
+    """Wire the newly signed-in directory like any other: aisquare's hooks into its settings.
+
+    ``agents connect <agent> --config-dir <slot>``'s own call, for the slot's agent, in
+    the config dir it reads there (``core.agent_config_dir``).
+    """
+    try:
+        agents_service.connect(account.agent, core.agent_config_dir(account))
+    except (ValueError, OSError) as exc:
+        # Login has already landed. Keep the account and report the partial
+        # success through both the terminal and the Accounts page.
+        return describe(account).model_copy(
+            update={"hooks_installed": False, "detail": f"Signed in; hook setup failed: {exc}"}
+        )
     return describe(account)
 
 
@@ -3509,8 +4195,8 @@ def remove(account: ClaudeAccount, *, notes: list[str] | None = None) -> Path:
     """
     if not account.managed:
         raise AccountsError(
-            "slot 1 is the plain claude of this machine, not an account the CLI added — "
-            "sign out of it inside Claude Code (/logout) instead"
+            f"slot {account.slot} is the {core.label(account)} of this machine, not an "
+            f"account the CLI added — sign out of it {core.kind(account.agent).sign_out} instead"
         )
     identity = core.identity(account)  # read before the rename moves the directory
     # The alias too, from the registry itself: a caller holding a plain
@@ -3520,13 +4206,15 @@ def remove(account: ClaudeAccount, *, notes: list[str] | None = None) -> Path:
     )
     # The directory is leaving either way; a settings.json we cannot parse is not a stop.
     with contextlib.suppress(Exception):
-        agents_service.disconnect(AGENT, account.config_dir)
+        agents_service.disconnect(account.agent, core.agent_config_dir(account))
     moved = core.remove_account(account)
     # After the rename, never before: the number is free again the moment the
     # directory moves, and a default or alias left behind would be inherited by
     # whatever `add` puts in that slot next.
     forget_arrangement(account.slot)
-    _retarget_bindings(account.slot, alias, identity.email if identity is not None else None, notes)
+    # Only an email can stand in for the slot: an API-key login reads `API key`.
+    email = identity.email if identity is not None and "@" in identity.email else None
+    _retarget_bindings(account.slot, alias, email, notes)
     return moved
 
 
@@ -3619,11 +4307,9 @@ def run_session(
     reset to the default in the child. Main thread only (a signal handler
     cannot be set elsewhere), and the previous disposition is restored after.
     """
-    found = install()
+    found = install(account.agent)
     if not found.installed or found.binary is None:
-        raise ClaudeNotInstalled(
-            f"Claude Code is not installed — install it first: {core.INSTALL_COMMAND}"
-        )
+        raise not_installed(account.agent)
     previous: Any = None
     on_main_thread = threading.current_thread() is threading.main_thread()
     if on_main_thread:
@@ -3643,12 +4329,14 @@ def run_session(
 
 @dataclass(frozen=True)
 class TrustChange:
-    """What sharing folder trust did to one account's ``.claude.json``."""
+    """What sharing folder trust did to one account's trust file (``.claude.json``, a
+    Codex ``config.toml``)."""
 
     account: ClaudeAccount
     outcome: Literal["trusted", "already", "skipped", "failed"]
     """``trusted``: entries were written (:attr:`folders`); ``already``: nothing was
-    missing; ``skipped``: Claude Code never started there; ``failed``: :attr:`reason`."""
+    missing; ``skipped``: the agent never started there (Claude Code's); ``failed``:
+    :attr:`reason`."""
     folders: tuple[str, ...] = ()
     reason: str | None = None
 
@@ -3687,48 +4375,53 @@ def share_for_launch(
     *,
     account: ClaudeAccount | None = None,
     env: Mapping[str, str] | None = None,
+    agent: str = AGENT,
 ) -> list[str]:
     """Share into the account a launch in ``folder`` runs on what ``[accounts]`` says to.
 
     Right before ``aisquare launch`` replaces itself with the agent, and before ``fleet
     spawn`` opens its window (so the receipt carries the note). The account is ``account``
-    when the launch chose one, else the one whose ``.claude.json`` the launch's ``env``
-    leads Claude Code to (default: this process's), and nothing is done for a directory
-    that is no account of ours. ``folder`` defaults to the working directory; a spawn
-    whose worktree is not made yet passes the scope it will have
-    (:func:`core.claude_sharing.worktree_scope`).
+    when the launch chose one, else the one whose home the launch's ``env`` leads ``agent``
+    to (default: this process's), and nothing is done for a directory that is no account
+    of ours. ``folder`` defaults to the working directory; a spawn whose worktree is not
+    made yet passes the scope it will have (:func:`core.claude_sharing.worktree_scope`).
 
-    - ``share_trust``: when no entry trusts the folder there and another account's does,
-      that entry is copied (:func:`core.claude_sharing.grant_trust`). Trust nobody gave is
-      never written: Claude Code asks, and ``fleet ls`` says the agent waits for it.
-    - ``share_settings``: a managed account's ``settings.json`` becomes a link to the plain
-      claude's, its own kept beside it (:func:`share_settings`).
+    - ``share_trust``: when no entry decides the folder there and another account of the
+      same agent's trusts it, that entry is copied, by the agent's accounts slot
+      (``trust``: Claude Code's ``.claude.json``, ``core.claude_sharing``; Codex's
+      ``config.toml``, ``core.codex_sharing``). Trust nobody gave is never written, nor
+      over an account's own no: the agent asks, and ``fleet ls`` says it waits.
+    - ``share_settings``: a managed Claude Code account's ``settings.json`` becomes a link
+      to the plain claude's, its own kept beside it (:func:`share_settings`); Codex's
+      settings are its own.
 
     The notes say what changed, or why it could not; a launch is never refused for it.
     """
+    whose = account.agent if account is not None else agent
     try:
         knobs = accounts_settings()
         if not (knobs.share_trust or knobs.share_settings or knobs.share):
             return []
-        accounts = list_accounts()
+        trust = core.kind(whose).trust if whose in core.account_agents() else None
+        accounts = _agent_accounts(whose)
         if len(accounts) < 2:
             return []  # one account: no trust to copy from, no plain claude's settings to link
         target = (
             next((one for one in accounts if one.slot == account.slot), account)
             if account is not None
-            else _account_of_env(os.environ if env is None else env, accounts)
+            else _account_of_env(os.environ if env is None else env, accounts, whose)
         )
         if target is None:
             return []
         notes: list[str] = []
-        if knobs.share_trust:
-            scope = (
+        if knobs.share_trust and trust is not None:
+            base = (
                 folder
                 if isinstance(folder, sharing.TrustScope)
                 else sharing.trust_scope(Path.cwd() if folder is None else folder)
             )
-            notes += _share_trust_into(target, scope, accounts)
-        if knobs.share_settings and target.managed:
+            notes += _share_trust_into(target, trust.scope(base), accounts, trust)
+        if knobs.share_settings and core.kind(whose).shares_settings and target.managed:
             notes += _share_settings_into(target)
         notes += _share_parts_into(target)
         return notes
@@ -3736,49 +4429,62 @@ def share_for_launch(
         return [f"nothing was shared into this launch's account ({exc})"]
 
 
+def _agent_accounts(agent: str) -> list[ClaudeAccount]:
+    """:func:`list_accounts`' accounts of ``agent``: the ones its folder trust is shared
+    between, each agent's in its own file (``AgentAccounts.trust``)."""
+    return [account for account in list_accounts() if account.agent == agent]
+
+
+def _claude_code_accounts() -> list[ClaudeAccount]:
+    """:func:`list_accounts`' Claude Code accounts: the only ones ``settings.json`` is
+    shared between (the plain claude's)."""
+    return _agent_accounts(AGENT)
+
+
 def _account_of_env(
-    env: Mapping[str, str], accounts: Sequence[ClaudeAccount]
+    env: Mapping[str, str], accounts: Sequence[ClaudeAccount], agent: str = AGENT
 ) -> ClaudeAccount | None:
-    """The account whose ``.claude.json`` a Claude Code started with ``env`` reads, if ours."""
-    config = env.get(core.CONFIG_DIR_VAR, "").strip()
-    wanted = (
-        paths.expand_user(Path(config)) / ".claude.json"
-        if config
-        else core.home_config_dir().with_name(".claude.json")
-    )
-    return next((one for one in accounts if _same_path(core.claude_json_path(one), wanted)), None)
+    """The account whose home ``agent`` started with ``env`` reads, if ours: its accounts
+    slot's answer (``AgentAccounts.launched_account``; Claude Code's by the ``.claude.json``
+    it reads, the plain one's beside its directory)."""
+    return core.kind(agent).launched_account(env, accounts)
 
 
-def _same_path(a: Path, b: Path) -> bool:
-    return os.path.realpath(a) == os.path.realpath(b)
+def _decided(records: Mapping[str, bool], scope: sharing.TrustScope) -> bool:
+    """Whether an entry of ``records`` decides ``scope``'s folder: trusted, or the human's no
+    on that account (Codex's ``untrusted``), which no share overrides."""
+    return any(key in records for key in scope.covering)
 
 
 def _share_trust_into(
-    target: ClaudeAccount, scope: sharing.TrustScope, accounts: Sequence[ClaudeAccount]
+    target: ClaudeAccount,
+    scope: sharing.TrustScope,
+    accounts: Sequence[ClaudeAccount],
+    trust: FolderTrust,
 ) -> list[str]:
     """Copy an entry of ``scope`` into ``target`` from the first account with one."""
     name = core.label(target)
     try:
-        own = sharing.read_claude_json(core.claude_json_path(target))
+        own = trust.read(target)
     except sharing.NotStartedYet:
         return []  # its first run asks for a login before any folder
     except sharing.SharingError as exc:
-        return [_trust_not_shared(name, scope, exc)]
-    if sharing.trusted_by(own, scope) is not None:
+        return [_trust_not_shared(target, scope, exc)]
+    if _decided(own, scope):
         return []
     for other in accounts:
         if other.slot == target.slot:
             continue
         try:
-            key = sharing.trusted_by(sharing.read_claude_json(core.claude_json_path(other)), scope)
+            key = trusted_by(trust.read(other), scope)
         except sharing.SharingError:
             continue
         if key is None:
             continue
         try:
-            sharing.grant_trust(core.claude_json_path(target), key)
+            trust.grant(target, key)
         except sharing.SharingError as exc:
-            return [_trust_not_shared(name, scope, exc)]
+            return [_trust_not_shared(target, scope, exc)]
         return [SharedNote(f"{key} is trusted on {core.label(other)} — now on {name} too")]
     return []
 
@@ -3792,60 +4498,93 @@ def trust_command(folder: Path | None) -> str:
     return install_route.command_line(["aisquare", "accounts", "trust", str(folder)])
 
 
-def _trust_not_shared(name: str, scope: sharing.TrustScope, exc: Exception) -> str:
+def _trust_not_shared(target: ClaudeAccount, scope: sharing.TrustScope, exc: Exception) -> str:
     return (
-        f"folder trust could not be shared into {name}: {exc} — approve Claude Code's "
-        f"question there once, or `{trust_command(scope.folder)}`"
+        f"folder trust could not be shared into {core.label(target)}: {exc} — approve "
+        f"{core.agent_label(target.agent)}'s question there once, or "
+        f"`{trust_command(scope.folder)}`"
     )
+
+
+def _trusting_agents() -> list[tuple[str, FolderTrust]]:
+    """Every agent with account slots that records folder trust, with its records' slot."""
+    return [
+        (agent, trust)
+        for agent in core.account_agents()
+        if (trust := core.kind(agent).trust) is not None
+    ]
 
 
 def trust_everywhere(folder: Path) -> tuple[sharing.TrustScope, list[TrustChange]]:
     """Trust ``folder`` on every account at once — ``aisquare accounts trust <dir>``.
 
-    The entry written is the one Claude Code's own yes there would write (the canonical
-    repository root, else the folder: :attr:`~core.claude_sharing.TrustScope.key`). An
-    account any entry already trusts it on is left as it is. The human's own command, so
+    Each agent's accounts in its own file (``AgentAccounts.trust``). The entry written is
+    the one the agent's own yes there would write (the canonical repository root, else the
+    folder: :attr:`~core.claude_sharing.TrustScope.key`). An account any entry already
+    trusts it on is left as it is; one whose entry says no to it (Codex's ``untrusted``) is
+    left too, and reported, as that is the human's to change. The human's own command, so
     ``[accounts] share_trust`` is not consulted.
     """
-    scope = sharing.trust_scope(folder)
+    base = sharing.trust_scope(folder)
     changes: list[TrustChange] = []
-    for account in list_accounts():
-        path = core.claude_json_path(account)
-        try:
-            if sharing.trusted_by(sharing.read_claude_json(path), scope) is not None:
-                changes.append(TrustChange(account, "already"))
+    for agent, trust in _trusting_agents():
+        scope = trust.scope(base)
+        for account in _agent_accounts(agent):
+            try:
+                records = trust.read(account)
+                if trusted_by(records, scope) is not None:
+                    changes.append(TrustChange(account, "already"))
+                    continue
+                if _decided(records, scope):
+                    said = next(key for key in scope.covering if key in records)
+                    raise sharing.SharingError(
+                        f"its {trust.file_name} says not to trust {said} — change it there"
+                    )
+                written = trust.grant(account, scope.key)
+            except sharing.NotStartedYet as exc:
+                changes.append(TrustChange(account, "skipped", reason=str(exc)))
                 continue
-            written = sharing.grant_trust(path, scope.key)
-        except sharing.NotStartedYet as exc:
-            changes.append(TrustChange(account, "skipped", reason=str(exc)))
-            continue
-        except sharing.SharingError as exc:
-            changes.append(TrustChange(account, "failed", reason=str(exc)))
-            continue
-        changes.append(TrustChange(account, "trusted", folders=tuple(written)))
-    return scope, changes
+            except sharing.SharingError as exc:
+                changes.append(TrustChange(account, "failed", reason=str(exc)))
+                continue
+            changes.append(TrustChange(account, "trusted", folders=tuple(written)))
+    return base, changes
 
 
 def sync_trust() -> tuple[list[TrustChange], int]:
-    """Copy every folder any account trusts into every account — ``accounts trust --sync``.
+    """Copy every folder an account trusts into every account of its agent —
+    ``accounts trust --sync``.
 
     Folders that no longer exist are not copied; their count comes back beside the
-    changes. An account that another entry already trusts a folder on is not given its
-    entry too. One write per account.
+    changes. An account whose own entry already decides a folder (trusted, or the human's
+    no) is not given another. One write per account, or one per folder for an account whose
+    file refuses one of them, which keeps the rest (:func:`_grant_each`).
     """
-    accounts = list_accounts()
-    read: dict[int, dict[str, Any] | sharing.SharingError] = {}
+    changes: list[TrustChange] = []
+    gone: set[str] = set()
+    for agent, trust in _trusting_agents():
+        made, missing = _sync_agent(_agent_accounts(agent), trust)
+        changes += made
+        gone |= missing
+    return changes, len(gone)
+
+
+def _sync_agent(
+    accounts: Sequence[ClaudeAccount], trust: FolderTrust
+) -> tuple[list[TrustChange], set[str]]:
+    """:func:`sync_trust` among one agent's accounts: the changes, and the folders gone."""
+    read: dict[int, dict[str, bool] | sharing.SharingError] = {}
     every: dict[str, None] = {}
     for account in accounts:
         try:
-            data = sharing.read_claude_json(core.claude_json_path(account))
+            records = trust.read(account)
         except sharing.SharingError as exc:
             read[account.slot] = exc
             continue
-        read[account.slot] = data
-        every.update(dict.fromkeys(sharing.trusted_folders(data)))
+        read[account.slot] = records
+        every.update(dict.fromkeys(key for key, yes in records.items() if yes))
     folders = [key for key in every if os.path.isdir(key)]
-    scopes = [(key, sharing.trust_scope(Path(key))) for key in folders]
+    scopes = [(key, trust.scope(sharing.trust_scope(Path(key)))) for key in folders]
     changes: list[TrustChange] = []
     for account in accounts:
         found = read[account.slot]
@@ -3855,17 +4594,40 @@ def sync_trust() -> tuple[list[TrustChange], int]:
             )
             changes.append(TrustChange(account, outcome, reason=str(found)))
             continue
-        missing = [key for key, scope in scopes if sharing.trusted_by(found, scope) is None]
+        missing = [key for key, scope in scopes if not _decided(found, scope)]
         if not missing:
             changes.append(TrustChange(account, "already"))
             continue
         try:
-            written = sharing.grant_trust(core.claude_json_path(account), *missing)
+            written = trust.grant(account, *missing)
         except sharing.SharingError as exc:
-            changes.append(TrustChange(account, "failed", reason=str(exc)))
+            changes += _grant_each(account, trust, missing, exc)
             continue
         changes.append(TrustChange(account, "trusted", folders=tuple(written)))
-    return changes, len(every) - len(folders)
+    return changes, set(every) - set(folders)
+
+
+def _grant_each(
+    account: ClaudeAccount, trust: FolderTrust, keys: Sequence[str], refused: sharing.SharingError
+) -> list[TrustChange]:
+    """``keys`` granted on ``account`` one at a time, once the grant of them all was
+    ``refused`` (the file left as it was): what one folder's entry refuses keeps the others.
+    A Codex ``config.toml`` with a ``[projects."<key>"]`` table of its own for one of them
+    and no ``trust_level`` failed the whole account, every other folder with it (review r16
+    of #113, 4/8). What was written, then what was not; ``refused`` alone when nothing was."""
+    written: list[str] = []
+    reasons: dict[str, None] = {}
+    for key in keys:
+        try:
+            written += trust.grant(account, key)
+        except sharing.SharingError as exc:
+            reasons[str(exc)] = None
+    if not written:
+        return [TrustChange(account, "failed", reason=str(refused))]
+    changes = [TrustChange(account, "trusted", folders=tuple(written))]
+    if reasons:
+        changes.append(TrustChange(account, "failed", reason="; ".join(reasons)))
+    return changes
 
 
 def settings_source() -> Path:
@@ -3897,7 +4659,7 @@ def settings_overview() -> tuple[Path, str | None, list[SettingsChange]]:
     source = settings_source()
     held = [
         SettingsChange(account, sharing.settings_state(account, source))
-        for account in list_accounts()
+        for account in _claude_code_accounts()
         if account.managed
     ]
     return source, settings_refusal(source), held
@@ -3912,7 +4674,9 @@ def share_settings(*, now: datetime | None = None) -> tuple[Path, list[SettingsC
     if refusal is not None:
         raise AccountsError(refusal)
     moment = now or _now()
-    return source, [_link_settings(one, source, moment) for one in list_accounts() if one.managed]
+    return source, [
+        _link_settings(one, source, moment) for one in _claude_code_accounts() if one.managed
+    ]
 
 
 def _link_settings(account: ClaudeAccount, source: Path, now: datetime) -> SettingsChange:
@@ -3951,7 +4715,7 @@ def unshare_settings() -> tuple[Path, list[SettingsChange]]:
     """
     source = settings_source()
     changes: list[SettingsChange] = []
-    for account in list_accounts():
+    for account in _claude_code_accounts():
         if not account.managed:
             continue
         try:
@@ -3964,7 +4728,12 @@ def unshare_settings() -> tuple[Path, list[SettingsChange]]:
     return source, changes
 
 
-# --- [accounts] share: memory, skills, agents, commands, CLAUDE.md, plugins (P2-W7) -------
+# --- [accounts] share: what an agent's accounts have in common (P2-W7; its adapter's parts) --
+#
+# Which parts an agent shares is its adapter's (``AgentAccounts.share_parts``: Claude Code's
+# memory, skills, agents, commands, CLAUDE.md and plugins; Codex's AGENTS.md and skills); that
+# a linked part is linked, and a merged one merged, is the same for every agent
+# (``core.account_sharing``). One switch names a part, and applies to every agent that has it.
 
 
 @dataclass(frozen=True)
@@ -3972,7 +4741,7 @@ class PartChange:
     """What ``accounts share`` did to one part on one account, or what it holds there."""
 
     account: ClaudeAccount
-    part: sharing.SharePart
+    part: str
     outcome: Literal[
         "linked",
         "already",
@@ -3999,142 +4768,201 @@ class PartChange:
         }
 
 
-def shared_memory_root() -> Path:
+def share_part_names() -> list[str]:
+    """Every part any agent with accounts shares, by name, each once, in the order the
+    agents are registered and declare them."""
+    return list(
+        dict.fromkeys(
+            part.name for agent in core.account_agents() for part in core.kind(agent).share_parts
+        )
+    )
+
+
+def _part_of(agent: str, name: str) -> SharePart | None:
+    return next((part for part in core.kind(agent).share_parts if part.name == name), None)
+
+
+def entry_dir(account: ClaudeAccount) -> Path:
+    """The folder ``account``'s agent keeps its entries in (``AgentAccounts.config_dir``)."""
+    return core.kind(account.agent).config_dir(account.config_dir)
+
+
+def plain_entry_dir(agent: str) -> Path:
+    """The same, for the plain home of ``agent``: what its managed accounts link to."""
+    return core.kind(agent).config_dir(core.default_account(agent=agent).config_dir)
+
+
+def merged_part(agent: str) -> str | None:
+    """The name of the part ``agent``'s accounts share by merging (Claude Code's ``memory``,
+    the fake agent's ``scratch``), or ``None`` for an agent that shares none that way."""
+    return next((p.name for p in core.kind(agent).share_parts if p.how == "merge"), None)
+
+
+def _memory_agent() -> str | None:
+    """The agent whose accounts share a merged part, if any (one: Claude Code's)."""
+    return next((a for a in core.account_agents() if core.kind(a).memory is not None), None)
+
+
+def shared_memory_root(agent: str | None = None) -> Path:
     """Where ``memory`` keeps each project's auto memory: under the aisquare home, outside
     every ``.claude`` path on purpose (anthropics/claude-code#98044: since 2.1.280 every
-    auto-memory write prompts when it lands under a linked ``.claude`` directory)."""
-    return paths.aisquare_home() / "claude-shared" / "memory"
+    auto-memory write prompts when it lands under a linked ``.claude`` directory).
+    ``agent`` defaults to the one that has such a part."""
+    whose = agent or _memory_agent()
+    memory = core.kind(whose).memory if whose is not None else None
+    if memory is None:
+        raise ValueError("no agent here shares its memory")
+    return paths.aisquare_home() / memory.root_name / "memory"
 
 
-def memory_settings_args(cwd: Path) -> list[str]:
-    """``--settings`` pointing Claude Code's auto memory at the shared directory for the
-    project in ``cwd``, when ``[accounts] share`` names ``memory``; else nothing.
-
-    ``autoMemoryDirectory`` is read from any settings scope, ``--settings`` included
-    (Claude Code, Memory). Every launch gets it, the plain claude's too, so all of them
-    read and write one directory per project."""
+def shared_memory_directory(agent: str, cwd: Path) -> Path | None:
+    """The directory ``[accounts] share = ["memory"]`` gives a launch of ``agent`` in ``cwd``
+    for its auto memory, or ``None`` (the part is off, or ``agent`` has no such part). Every
+    launch gets it, the plain home's too, so all of them read and write one directory per
+    project; the launch hands it over by ``AgentAccounts.memory.apply``."""
     try:
-        if "memory" not in accounts_settings().share:
-            return []
+        memory = core.kind(agent).memory if agent in core.account_agents() else None
+        if memory is None:
+            return None
+        if merged_part(agent) not in accounts_settings().share:
+            return None
+        return shared_memory_root(agent) / memory.key(cwd)
     except Exception:  # an unreadable config shares nothing
-        return []
-    directory = shared_memory_root() / sharing.memory_key(cwd)
-    return ["--settings", json.dumps({"autoMemoryDirectory": str(directory)})]
+        return None
 
 
 def share_status() -> list[PartChange]:
-    """What every account holds for every part: the linked parts per managed slot, and
-    ``memory`` as on (``shared``) or off (``none``) for the machine."""
+    """What every account holds for every part its agent shares: the linked parts per
+    managed slot, and a merged part (``memory``) as on (``shared``) or off (``none``) for
+    the machine."""
     knobs = accounts_settings()
-    source = core.default_account().config_dir
     held: list[PartChange] = []
     for account in list_accounts():
-        for part in sharing.SHARE_PARTS:
-            if part == "memory":
-                held.append(
-                    PartChange(account, part, "shared" if "memory" in knobs.share else "none")
+        for part in core.kind(account.agent).share_parts:
+            if part.how == "merge":
+                state: PartChange = PartChange(
+                    account, part.name, "shared" if part.name in knobs.share else "none"
                 )
             elif account.managed:
-                held.append(
-                    PartChange(account, part, sharing.part_state(account.config_dir, part, source))
+                state = PartChange(
+                    account,
+                    part.name,
+                    sharing.part_state(entry_dir(account), part, plain_entry_dir(account.agent)),
                 )
+            else:
+                continue
+            held.append(state)
     return held
 
 
-def enable_share(
-    parts: Sequence[sharing.SharePart], *, now: datetime | None = None
-) -> list[PartChange]:
-    """Turn ``parts`` on: write them into ``[accounts] share`` and apply them now.
+def enable_share(parts: Sequence[str], *, now: datetime | None = None) -> list[PartChange]:
+    """Turn ``parts`` on: write them into ``[accounts] share`` and apply them now, to every
+    agent that has them.
 
     Linked parts link every managed slot's entry (its own kept beside it); one linked
     anywhere else is refused and left as it is. ``memory`` merges every account's
     ``projects/<key>/memory/`` into the shared directory the first time it is turned on
     (nothing overwritten; a file that differs is kept as ``<name>.slot<N>.md``).
-    Idempotent: a part already on changes nothing.
+    Idempotent: a part already on changes nothing. A part no agent here shares is a
+    ``ValueError``.
     """
+    unknown = [name for name in parts if name not in share_part_names()]
+    if unknown:
+        raise ValueError(f"no account here shares {', '.join(unknown)}")
     config = load_config()
-    first_memory = "memory" in parts and "memory" not in config.accounts.share
+    fresh = [name for name in parts if name not in config.accounts.share]
     config.accounts.share = list(dict.fromkeys([*config.accounts.share, *parts]))
     save_config(config)
     moment = now or _now()
-    source = core.default_account().config_dir
     changes: list[PartChange] = []
-    for part in parts:
-        if part == "memory":
-            changes += _merge_memory() if first_memory else []
-            continue
-        for account in list_accounts():
-            if account.managed:
-                changes.append(_link_part(account, part, source, moment))
+    for name in parts:
+        for agent in core.account_agents():
+            part = _part_of(agent, name)
+            if part is None:
+                continue
+            if part.how == "merge":
+                changes += _merge_memory(agent) if name in fresh else []
+                continue
+            for account in _agent_accounts(agent):
+                if account.managed:
+                    changes.append(_link_part(account, part, plain_entry_dir(agent), moment))
     return changes
 
 
-def disable_share(parts: Sequence[sharing.SharePart]) -> list[PartChange]:
+def disable_share(parts: Sequence[str]) -> list[PartChange]:
     """Turn ``parts`` off: out of ``[accounts] share``, and every linked entry back to the
     slot's own copy (the one :func:`enable_share` kept), exactly as it was. ``memory``
     stops being passed to launches; the shared directory stays where it is."""
     config = load_config()
     config.accounts.share = [part for part in config.accounts.share if part not in parts]
     save_config(config)
-    source = core.default_account().config_dir
     changes: list[PartChange] = []
-    for part in parts:
-        if part == "memory":
-            continue
-        for account in list_accounts():
-            if not account.managed:
+    for name in parts:
+        for agent in core.account_agents():
+            part = _part_of(agent, name)
+            if part is None or part.how == "merge":
                 continue
-            was = sharing.part_state(account.config_dir, part, source)
-            if was != "shared":  # nothing of ours to undo: say what it holds
-                changes.append(PartChange(account, part, was))
-                continue
-            try:
-                restored = sharing.unlink_part(account.config_dir, part, source)
-            except OSError as exc:
-                changes.append(PartChange(account, part, "failed", exc.strerror or str(exc)))
-                continue
-            if restored is not None:
-                changes.append(PartChange(account, part, "restored", restored.name))
-            else:
-                changes.append(PartChange(account, part, "unlinked"))
+            source = plain_entry_dir(agent)
+            for account in _agent_accounts(agent):
+                if not account.managed:
+                    continue
+                here = entry_dir(account)
+                was = sharing.part_state(here, part, source)
+                if was != "shared":  # nothing of ours to undo: say what it holds
+                    changes.append(PartChange(account, name, was))
+                    continue
+                try:
+                    restored = sharing.unlink_part(here, part, source)
+                except OSError as exc:
+                    changes.append(PartChange(account, name, "failed", exc.strerror or str(exc)))
+                    continue
+                if restored is not None:
+                    changes.append(PartChange(account, name, "restored", restored.name))
+                else:
+                    changes.append(PartChange(account, name, "unlinked"))
     return changes
 
 
 def _link_part(
-    account: ClaudeAccount, part: sharing.SharePart, source: Path, now: datetime
+    account: ClaudeAccount, part: SharePart | str, source: Path, now: datetime
 ) -> PartChange:
-    if sharing.part_state(account.config_dir, part, source) == "shared":
-        return PartChange(account, part, "already")
+    """Link ``account``'s entry for ``part`` (a part of its agent's, or its name) to the plain
+    home's ``source``; what happened."""
+    found = _part_of(account.agent, part) if isinstance(part, str) else part
+    name = part if isinstance(part, str) else part.name
+    if found is None:
+        return PartChange(account, name, "refused", f"{core.label(account)} shares no {name}")
+    here = entry_dir(account)
     try:
-        kept = sharing.link_part(account.config_dir, part, source, now=now)
+        if sharing.part_state(here, found, source) == "shared":
+            return PartChange(account, name, "already")
+        kept = sharing.link_part(here, found, source, now=now)
     except sharing.SharingError as exc:
-        return PartChange(account, part, "refused", str(exc))
+        return PartChange(account, name, "refused", str(exc))
     except OSError as exc:
-        return PartChange(account, part, "failed", exc.strerror or str(exc))
-    return PartChange(account, part, "linked", kept.name if kept is not None else None)
+        return PartChange(account, name, "failed", exc.strerror or str(exc))
+    return PartChange(account, name, "linked", kept.name if kept is not None else None)
 
 
-def _merge_memory() -> list[PartChange]:
+def _merge_memory(agent: str) -> list[PartChange]:
     """Every account's per-project memory into the shared root, once (:func:`enable_share`)."""
-    root = shared_memory_root()
+    memory = core.kind(agent).memory
+    merged = merged_part(agent)
+    if memory is None or merged is None:
+        return []
+    root = shared_memory_root(agent)
     changes: list[PartChange] = []
-    accounts = list_accounts()
-    keys = sorted(
-        {
-            memory.parent.name
-            for account in accounts
-            for memory in (account.config_dir / "projects").glob("*/memory")
-            if memory.is_dir()
-        }
-    )
-    for key in keys:
+    accounts = _agent_accounts(agent)
+    held = {account.slot: memory.projects(account) for account in accounts}
+    for key in sorted({key for projects in held.values() for key in projects}):
         sources = [
-            (f"slot{account.slot}", account.config_dir / "projects" / key / "memory")
+            (f"slot{account.slot}", held[account.slot][key])
             for account in accounts
+            if key in held[account.slot]
         ]
         by_label = {f"slot{account.slot}": account for account in accounts}
         for label, note in sharing.merge_memory(sources, root / key):
-            changes.append(PartChange(by_label[label], "memory", "merged", f"{key}: {note}"))
+            changes.append(PartChange(by_label[label], merged, "merged", f"{key}: {note}"))
     return changes
 
 
@@ -4142,17 +4970,21 @@ def _share_parts_into(target: ClaudeAccount) -> list[str]:
     """``[accounts] share`` at a launch: link the parts ``target`` does not have yet (a slot
     made after they were turned on), saying what changed or why it could not."""
     knobs = accounts_settings()
-    linked = [part for part in knobs.share if part in sharing.LINKED_PARTS]
+    linked = [
+        part
+        for part in core.kind(target.agent).share_parts
+        if part.how == "link" and part.name in knobs.share
+    ]
     if not linked or not target.managed:
         return []
-    source = core.default_account().config_dir
     notes: list[str] = []
     for part in linked:
-        change = _link_part(target, part, source, _now())
+        change = _link_part(target, part, plain_entry_dir(target.agent), _now())
         name = core.label(target)
         if change.outcome == "linked":
             kept = f" (its own kept as {change.detail})" if change.detail else ""
-            notes.append(SharedNote(f"{name} now shares the plain claude's {part}{kept}"))
+            plain = core.kind(target.agent).plain_label
+            notes.append(SharedNote(f"{name} now shares the {plain}'s {part.name}{kept}"))
         elif change.outcome in ("refused", "failed"):
-            notes.append(f"{part} is not shared into {name}: {change.detail}")
+            notes.append(f"{part.name} is not shared into {name}: {change.detail}")
     return notes

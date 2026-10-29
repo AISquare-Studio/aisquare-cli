@@ -197,7 +197,11 @@ def test_the_model_field_is_the_family_the_account_label_reads(
     reads: list[tuple[list[str], str | None]] = []
 
     def counted(
-        project: ProjectInfo, role: str, args: list[str], model: str | None = None
+        project: ProjectInfo,
+        role: str,
+        args: list[str],
+        model: str | None = None,
+        agent: str | None = None,
     ) -> accounts_service.LaunchDefault:
         reads.append((list(args), model))
         return accounts_service.LaunchDefault(accounts_service.AccountChoice(None, None))
@@ -230,7 +234,12 @@ def test_the_account_label_reads_the_family_the_spawn_runs(
     families: list[str | None] = []
 
     def launch_default(
-        role: str | None, *, project: ProjectInfo | None = None, family: str | None = None
+        role: str | None,
+        *,
+        project: ProjectInfo | None = None,
+        family: str | None = None,
+        agent: str | None = None,
+        pick: accounts_service.AgentPick | None = None,
     ) -> accounts_service.LaunchDefault:
         families.append(family)
         return accounts_service.LaunchDefault(accounts_service.AccountChoice(None, None))

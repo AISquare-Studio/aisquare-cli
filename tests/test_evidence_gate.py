@@ -33,6 +33,7 @@ from aisquare.services import command_reports as reports
 from aisquare.services import context as context_service
 from aisquare.services import fleet as fleet_service
 from tests.projects import add_project
+from tests.wall_clock import after_the_tick
 
 CODER = "cccc3333-0000-0000-0000-000000000000"
 
@@ -1523,6 +1524,7 @@ def test_prune_says_how_many_reports_it_kept_for_evidence(runner: CliRunner) -> 
     cited = _run(_py("print('ok')"), task=task)
     _record(brief, task, cited)
     _run(_py("print('loose')"))
+    after_the_tick()  # `--days 0` prunes what is OLDER than now: not a report of this tick
 
     text = runner.invoke(app, ["reports", "prune", "--keep", "0", "--days", "0"])
     assert text.exit_code == 0, text.output

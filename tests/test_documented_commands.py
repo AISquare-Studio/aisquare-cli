@@ -114,6 +114,9 @@ DOCUMENTED = (
     # belongs here. Trivially stable today; listed because the resolution rule
     # is the rule, not because this command is likely to drift.
     ".github/ISSUE_TEMPLATE/bug_report.md",
+    # The Codex plugin's own README (the owner's decision of 2026-10-27: the pages of this line
+    # that `docs/` held back move into code): its commands are steps a reader types.
+    "plugins/codex/README.md",
 )
 
 #: Directories the staleness sweep never enters. Everything else under the repo
@@ -226,7 +229,7 @@ _SEQUENCERS = re.compile(r"\s*(?:&&|\|\||;)\s*")
 #: `exec` is how a wrapper hands the process over. `aisquare-runner` and
 #: `.../aisquare/file.env` do not match: the name must be followed by a space
 #: or the end of the segment.
-_INVOCATION_HEAD = re.compile(r"^(?:exec\s+)?(\S*/)?aisquare(?=\s|$)")
+_INVOCATION_HEAD = re.compile(r"^(?:exec\s+)?(\S*/)?(?:aisquare|asq)(?=\s|$)")
 
 
 def _as_invocation(segment: str) -> str | None:
@@ -727,6 +730,12 @@ def test_typer_is_the_instrument_not_the_help_renderer() -> None:
 #: quietly — a silent skip makes this file read as covering everything while
 #: covering less, which is worse than not having it.
 _NOT_AN_INVOCATION = (
+    ("a tmux command whose socket is named asq", re.compile(r"^\s*tmux\s+-L\s+asq\b")),
+    ("a tree of CLI commands, not a shell invocation", re.compile(r"^\s*[│├└]")),
+    (
+        "the line `asq exec` prints about its report, not a command",
+        re.compile(r"^\s*\[asq report "),
+    ),
     # `…/aisquare` with a WORD after it is an invocation by absolute path, not a
     # path. Without the lookahead this reason silently swallowed a cron
     # wrapper's `exec /usr/local/bin/aisquare explainability ship --strict`.
@@ -777,6 +786,11 @@ CENSUS = {
     # the two quickstarts and the plain-command block, with the `uv tool install`
     # line and the installer URL as the two classified mentions.
     "README.md": (5, 2),
+    # Measured 2026-10-14 on the day the page was written: three fenced commands
+    # (`remember`, `doctor`, `agents disconnect codex`) and six classified mentions
+    # (`aisquare-cli` and `aisquare@aisquare-cli` in the `codex plugin` and `uv tool
+    # install` lines).
+    "plugins/codex/README.md": (3, 6),
 }
 
 
@@ -806,7 +820,7 @@ def test_every_aisquare_mention_is_classified(document: str) -> None:
     unexplained: list[str] = []
     classified = 0
     for number, line in _shell_lines(text):
-        if "aisquare" not in line or number in extracted:
+        if not re.search(r"aisquare|\basq\b", line) or number in extracted:
             continue
         if any(pattern.search(line) for _reason, pattern in _NOT_AN_INVOCATION):
             classified += 1
@@ -1236,3 +1250,13 @@ def _leaf_chains() -> list[list[str]]:
 
     walk(_root(), [])
     return found
+
+
+@pytest.mark.parametrize("binary", ["aisquare", "asq", "/usr/local/bin/asq"])
+def test_agent_document_aliases_reach_command_validation(binary: str) -> None:
+    lines = _from_text("fixture.md", f"```sh\n{binary} definitelynotacommand\n```\n")
+    assert len(lines) == 1
+    assert lines[0].text == "aisquare definitelynotacommand"
+    assert _unknown_commands(lines)
+    valid = _from_text("fixture.md", f"```sh\n{binary} agents list\n```\n")
+    assert valid and not _unknown_commands(valid)

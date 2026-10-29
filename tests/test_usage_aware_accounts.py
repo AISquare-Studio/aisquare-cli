@@ -81,6 +81,28 @@ WEEKLY_LIMIT_DAYS_OUT = (
     f"You've hit your weekly limit · resets {_WEEKDAY} {_CLOCK} (America/Toronto)"
 )
 API_KEY_429 = "API Error: Request rejected (429) · this may be a temporary capacity issue."
+#: Claude Code's own limit notices, from the binaries: each version's StopFailure payload for
+#: each window that refused (``limit_notices_<version>.json`` says how they were made).
+CLAUDE_CODE_FIXTURES = Path(__file__).parent / "fixtures" / "claude_code"
+NOTICE_VERSIONS = ("2.1.311", "2.1.312")
+WINDOW_OF_CLAIM = {
+    "five_hour": "session",
+    "seven_day": "weekly",
+    "seven_day_opus": "opus",
+    "seven_day_sonnet": "sonnet",
+}
+"""The window a limit mark keeps for each ``representative-claim`` the stub refused with."""
+
+
+def claude_code_notice(version: str, claim: str) -> tuple[dict[str, Any], datetime]:
+    """Claude Code ``version``'s StopFailure payload for a ``claim`` limit, and when it was
+    recorded (the clock its reset is relative to)."""
+    document = json.loads(
+        (CLAUDE_CODE_FIXTURES / f"limit_notices_{version}.json").read_text(encoding="utf-8")
+    )
+    assert document["version"] == version
+    notice = document["notices"][claim]
+    return notice["payload"], datetime.fromisoformat(notice["recorded_at"])
 
 
 # --------------------------------------------------------------------------- helpers
@@ -198,6 +220,50 @@ def test_the_limit_message_is_read_for_its_window_and_its_reset(
         assert notice.resets_at == datetime(2026, 9, 13, 19, 45, tzinfo=UTC)
     else:
         assert notice.resets_at == resets_utc  # 12:30am has passed today → tomorrow
+
+
+@pytest.mark.parametrize("version", NOTICE_VERSIONS)
+@pytest.mark.parametrize("claim", list(WINDOW_OF_CLAIM))
+def test_claude_codes_own_notices_read_for_their_window_and_reset_in_either_version(
+    version: str, claim: str
+) -> None:
+    """SMOKE11 1c: 2.1.312 calls the five-hour window ``5-hour`` (``You've hit your 5-hour limit
+    · resets 6:08am (America/Toronto)``; 2.1.311 said ``session limit``), and a window of
+    letters alone read none, so the hook kept no mark and no reset and the hand-over never
+    crossed. Either version's notice reads as the ``session`` window now. The week's and a
+    model's are dated, more than a day out (``resets Nov 1 at 2:09am``), in both versions,
+    and they read with their reset too: read as a weekday was, they kept none, so no mark.
+    The stub refused for three hours (the five-hour window) or four days (a week), and the
+    notice names the minute."""
+    payload, recorded = claude_code_notice(version, claim)
+
+    notice = core.parse_limit_notice(payload["last_assistant_message"], now=recorded)
+
+    assert notice is not None and notice.window == WINDOW_OF_CLAIM[claim]
+    ahead = timedelta(hours=3) if claim == "five_hour" else timedelta(days=4)
+    assert notice.resets_at == (recorded + ahead).replace(second=0, microsecond=0)
+
+
+@pytest.mark.parametrize(
+    ("when", "resets_utc"),
+    [
+        ("Jan 2 at 2am", datetime(2027, 1, 2, 7, 0, tzinfo=UTC)),  # next year's, read in December
+        ("Jan 2, 2027 at 2:30am", datetime(2027, 1, 2, 7, 30, tzinfo=UTC)),
+        ("Jan 3, 2026 at 2am", datetime(2026, 1, 3, 7, 0, tzinfo=UTC)),  # named, not the nearest
+        ("Dec 31, 2:09pm", datetime(2026, 12, 31, 19, 9, tzinfo=UTC)),  # dates with no "at"
+        ("Dec 29 at 11pm", datetime(2026, 12, 30, 4, 0, tzinfo=UTC)),  # just past: not a year on
+        ("Feb 30 at 2am", None),  # no such day
+    ],
+)
+def test_a_dated_reset_is_that_day_in_the_year_it_names_or_the_nearest(
+    when: str, resets_utc: datetime | None
+) -> None:
+    december = datetime(2026, 12, 30, 12, 0, tzinfo=UTC)  # 07:00 in Toronto (EST)
+    notice = core.parse_limit_notice(
+        f"You've hit your weekly limit · resets {when} (America/Toronto)", now=december
+    )
+    assert notice is not None and notice.window == "weekly"
+    assert notice.resets_at == resets_utc
 
 
 def test_text_after_the_zone_costs_neither_the_window_nor_the_reset() -> None:
@@ -484,6 +550,27 @@ def test_claude_codes_routine_notices_leave_a_parked_or_handed_over_row_as_it_is
 # --------------------------------------------------------------------------- the hand-over decision
 
 
+def test_a_hand_over_its_launch_record_refuses_is_said_on_the_board_once(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner
+) -> None:
+    """The usage-limit hand-over of a row with no launch record (``core.launch_seal``) that
+    the census of the fleet before records did not find (``fleet.take_census``) is refused
+    before anything is stopped; the reason is on the board once, said by the switch, not
+    again by the hand-over's own line, and not again at the next limit."""
+    _session(work, "sess-fleet")
+    fleet_service.take_census()  # taken before the row was written
+    _fleet_row(work, "agt_unrecorded", "coder-db", "sess-fleet")
+    for _ in range(2):
+        with store_session() as store:
+            store.mark_limited("sess-fleet", None)
+        assert runner.invoke(app, ["hook", "hand-over", "sess-fleet"]).exit_code == 0
+
+    said = [text for _, text in _events(work) if "no launch record was written" in text]
+    assert len(said) == 1 and said[0].startswith("coder-db: cannot switch it — "), said
+    assert not any("not switched" in text for _, text in _events(work))
+    assert _state("sess-fleet")[0] == "limited"
+
+
 def _fleet_row(project: ProjectInfo, agent_id: str, label: str, session_id: str) -> None:
     with store_session() as store:
         store.upsert_fleet_agent(
@@ -550,8 +637,10 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
     _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
     assert len(started) == 1
     argv = started[0]
-    assert argv[:4] == selfcli.argv_for([])  # this interpreter, -P, -m aisquare
-    assert argv[4:] == ["--quiet", "hook", "hand-over", "sess-fleet", "--reason", "weekly limit"]
+    # This interpreter, -E -P -m aisquare: the hook that starts it runs for a sandboxed
+    # agent, outside its sandbox, in its environment (review r14 of #113, finding 4).
+    assert argv[:5] == selfcli.isolated_argv_for([])
+    assert argv[5:] == ["--quiet", "hook", "hand-over", "sess-fleet", "--reason", "weekly limit"]
 
     # …one that lifts within the wait window does not (the note says why)…
     soon = (datetime.now().astimezone() + timedelta(minutes=5)).strftime("%I:%M%p").lstrip("0")
@@ -656,6 +745,50 @@ def test_with_no_other_account_a_limit_starts_no_hand_over_and_posts_nothing_of_
         store.touch_session("sess-fleet", state="working")
     _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
     assert len(started) == 1
+
+
+def test_a_row_with_no_agent_recorded_counts_no_codex_account_as_somewhere_to_go(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r16 of #113, 3/8: a row from before adapters records no agent, and is Claude
+    Code's (``recorded_adapter``, the switch's launch record). The hook asked
+    ``somewhere_to_hand_over`` with that ``None``, which counts every agent's accounts: a
+    signed-in Codex one started a worker whose pick, among Claude Code's, could only refuse
+    and post "not switched" at each limit, and Remote held the limit's push 90 s for it."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    mine = _slot("work@example.com", "tok-work")
+    codex = core.create_account("codex")
+    (codex.config_dir / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "sk-test"}))
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_legacy", "coder-db", "sess-fleet")
+    with store_session() as store:
+        row = store.fleet_agent_for_session("sess-fleet")
+        assert row is not None and row.agent is None, "the premise: no agent recorded"
+        store.upsert_fleet_agent(row.model_copy(update={"account_slot": mine.slot}))
+    assert service.somewhere_to_hand_over(mine.slot), "the premise: every agent's, the Codex"
+
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+
+    assert started == []
+    now = datetime.now(UTC)
+    with store_session() as store:
+        session = store.get_session("sess-fleet")
+        row = store.fleet_agent_for_session("sess-fleet")
+    assert isinstance(session, TeamSession) and row is not None
+    status = FleetAgentStatus(agent=row, state="limited", session=session)
+    (card,) = remote_needs.needs_from_agent(
+        status,
+        None,
+        project=work,
+        events=[],
+        now=now,
+        accounts=AccountsSettings(on_limit="switch"),
+        hands_over=remote_needs.live_needs_sources().hands_over,
+    )
+    assert card.kind == "limited"
+    assert card.push_after == card.since, "no other Claude account: pushed at once"
 
 
 def test_with_the_registry_unreadable_a_limit_still_reaches_the_worker_that_says_why(
@@ -1503,10 +1636,10 @@ def test_one_launch_reads_the_registry_and_the_settings_once(
     real_read = service._read_registry
 
     def counted_read(
-        project: ProjectInfo | None = None,
+        project: ProjectInfo | None = None, *, agent: str = core.AGENT
     ) -> tuple[list[ClaudeAccount], str | None, int | None]:
         reads.append(1)
-        return real_read(project)
+        return real_read(project, agent=agent)
 
     loads: list[int] = []
     real_settings = service.accounts_settings

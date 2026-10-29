@@ -15,14 +15,28 @@ from typing import Any, TypeVar
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.content import Content
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
-from textual.widgets import Button, Collapsible, Input, Select, Static, Switch, TabbedContent
+from textual.widgets import (
+    Button,
+    Collapsible,
+    Input,
+    Label,
+    Select,
+    Static,
+    Switch,
+    TabbedContent,
+)
+from textual.widgets._tooltip import Tooltip
 
 from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.views.app_settings import (
     AGENT_ADVANCED,
     AGENT_TAB,
+    CROSS_AGENT_TIP,
+    FALLBACK_AGENT_TIP,
+    ON_LIMIT_MODES,
     PREFERENCES_ADVANCED,
     PREFERENCES_TAB,
     REMOTE_TAB,
@@ -31,6 +45,7 @@ from aisquare.cli.ui.views.app_settings import (
     UiSettingsChanged,
 )
 from aisquare.core import paths
+from aisquare.core.agent_adapters import adapters
 from aisquare.core.config import AppConfig, load_config, overrides, save_config
 from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
@@ -119,12 +134,13 @@ def test_settings_saves_a_changed_permission_mode_to_config_toml() -> None:
     assert on_disk["coder"]["permission_mode"] == "plan"  # the bytes, not the widget
     assert on_disk["coder"]["worktree"] is True  # the role's table whole, for older builds
     assert load_config().fleet.roles["coder"].worktree is True  # untouched fields survive
-    # The role's table whole, WS-1's tool policy at its defaults included (an older build
-    # ignores a key it does not know).
+    # The role's table whole, each agent's own arguments (#113) and WS-1's tool policy at
+    # its defaults included (an older build ignores a key it does not know).
     assert on_disk["manager"] == {
         "permission_mode": "auto",
         "worktree": False,
         "extra_args": [],
+        "agent_args": {},
         "remote_control": False,
         "deny_tools": [],
         "allow_tools": [],
@@ -407,6 +423,71 @@ def test_settings_switches_what_the_accounts_share() -> None:
     assert _config_toml()["accounts"] == {"share_trust": False, "share_settings": True}
 
 
+def test_settings_switches_the_hand_over_across_agents_off_and_on() -> None:
+    """``cross_agent_handover`` (on by default, task #15) is a switch in the accounts section:
+    off, Save writes it and nothing else; the form reopens on what the file holds."""
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> bool:
+        await pilot.pause()
+        shown = host.query_one("#accounts-cross-agent", Switch).value
+        host.query_one("#accounts-cross-agent", Switch).value = False
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return shown
+
+    assert drive(scenario) is True  # the default
+    assert _config_toml()["accounts"] == {"cross_agent_handover": False}
+    assert load_config().accounts.cross_agent_handover is False
+
+    async def reopened(pilot: Pilot[None], host: AppHost) -> bool:
+        await pilot.pause()
+        return host.query_one("#accounts-cross-agent", Switch).value
+
+    assert drive(reopened) is False
+
+
+def test_the_hand_off_across_agents_switch_says_the_conversation_goes_to_the_other_vendor() -> None:
+    """The default is on (the owner's call, r22 of #113), so the switch says what it sends and
+    where: on its label and on the switch itself."""
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[str, str, str]:
+        await pilot.pause()
+        switch = host.query_one("#accounts-cross-agent", Switch)
+        label = switch.parent.query_one(Label) if switch.parent is not None else switch
+        return str(switch.tooltip), str(label.tooltip), str(label.render())
+
+    switch_tip, label_tip, text = drive(scenario)
+
+    assert text == "hand off across agents"
+    assert switch_tip == label_tip == CROSS_AGENT_TIP
+    for said in ("conversation", "that agent's vendor", "scrubbed", "Off:"):
+        assert said in CROSS_AGENT_TIP
+
+
+@pytest.mark.parametrize("tip", [CROSS_AGENT_TIP, FALLBACK_AGENT_TIP], ids=["cross", "fallback"])
+def test_a_tooltip_renders_the_words_it_is_written_in(tip: str) -> None:
+    """Textual reads a tooltip as markup: ``[redaction]`` rendered as nothing, and the
+    sentence "scrubbed out first ( level)" reached the user (tester on #15). What
+    ``Tooltip.update`` renders is the sentence, word for word."""
+
+    class Host(App[None]):
+        def compose(self) -> ComposeResult:
+            yield Tooltip()
+
+    async def render() -> str:
+        host = Host()
+        async with host.run_test() as pilot:
+            shown = host.query_one(Tooltip)
+            shown.update(tip)
+            await pilot.pause()
+            visual = shown.visual
+            assert isinstance(visual, Content)
+            return visual.plain
+
+    assert asyncio.run(render()) == tip
+    assert "[" not in tip, "no square bracket in a tooltip: Textual reads it as markup"
+
+
 def test_settings_switch_the_daily_release_check_off_and_on() -> None:
     """``[updates] check`` (on by default) is a switch of its own; Save writes it alone."""
 
@@ -669,12 +750,12 @@ def test_a_role_named_like_a_fixed_field_neither_takes_its_id_nor_takes_the_form
         return ids
 
     ids = drive(scenario)
-    from aisquare.cli.ui.views.app_settings import ROLE_ID_PREFIX, role_widget_id
+    from aisquare.cli.ui.views.app_settings import ROLE_ID_PREFIX, ROLE_SELECTS, role_widget_id
 
     assert len(ids) == len(set(ids)), "one field per id, on the whole form"
     assert {wid for wid in ids if wid.startswith(ROLE_ID_PREFIX)} == {
         role_widget_id(kind, role)
-        for kind in ("perm", "worktree", "persona", "acct")
+        for kind in ("perm", "worktree", "persona", "acct", *ROLE_SELECTS)
         for role in roles
     }, "the prefix is the roles' alone"
     saved = load_config().fleet
@@ -720,6 +801,16 @@ def test_role_names_modes_and_bindings_written_by_hand_are_shown_as_text_not_mar
     assert saved.fleet.max_agents_per_project == 5
     assert saved.fleet.roles["a[/b]c"].permission_mode == "x[/y]", "the hand edit stands"
     assert saved.team.profiles["a[/b]c"].account == "w[/z]"
+
+
+def test_the_usage_limit_choices_name_no_agent() -> None:
+    """SCOPE #113, 0.8.1 item 19: *wait* read "Claude Code continues by itself", which a
+    Codex agent does not (it waits for its next prompt). The choice is every agent's."""
+    said = " ".join(label for label, _value in ON_LIMIT_MODES)
+    for adapter in adapters():
+        assert adapter.label not in said, adapter.label
+        assert adapter.binary not in said.split(), adapter.binary
+    assert [value for _label, value in ON_LIMIT_MODES] == ["wait", "switch"]
 
 
 # --- the persona per role (#201) ------------------------------------------------------------
@@ -1305,6 +1396,7 @@ FOLDED = {
         "#native-teams",
         "#accounts-switch-at",
         "#accounts-wait-minutes",
+        "#accounts-cross-agent",
         "#accounts-share-trust",
         "#accounts-share-settings",
         "#agent-settings-note",

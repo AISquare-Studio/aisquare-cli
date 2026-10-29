@@ -172,7 +172,7 @@ def start_fresh(
         # Inside the try: its read opens the store, and a store locked past its busy timeout
         # after the stop lost the report of what was stopped (review of #429, round 5).
         _confirm_down(project, report, planned.sessions, stopped=stopped)
-        found, trees, tips = _held_now(project, report, branches=branches)
+        found, trees, tips, unplaced = _held_now(project, report, branches=branches)
         if _uncovered(found, discard):
             later = planned.model_copy(
                 update={"unpushed": found, "worktrees": trees, "fleet_branches": tips}
@@ -182,6 +182,9 @@ def start_fresh(
             project, trees, force=bool(found)
         )
         report.kept += kept
+        # A tree no launch record places is not removed, and goes unnamed once its row does:
+        # said as reap says it (review r28 of #113, m3).
+        report.kept += unplaced
         if branches:
             report.branches_deleted, kept = fleet_service.delete_fleet_branches(project, tips)
             report.kept += kept
@@ -309,10 +312,11 @@ def _confirm_down(
 
 def _held_now(
     project: ProjectInfo, report: FreshReport, *, branches: bool
-) -> tuple[list[FreshUnpushed], list[Path], dict[str, str]]:
+) -> tuple[list[FreshUnpushed], list[Path], dict[str, str], list[FreshKept]]:
     """What the project's trees and (with ``branches``) its fleet branches hold that no
     remote has, read again once its fleet is stopped, when nothing runs there to add to it:
-    the work found, the trees, and the branches' tips. Read from the rows as they are now,
+    the work found, the trees, the branches' tips, and the trees no launch record places,
+    which stay, with why (``fleet.unplaced_trees_kept``). Read from the rows as they are now,
     so a tree an agent started since the plan is asked about too.
 
     A row live again is :class:`FreshIncomplete`, before any tree is touched: an agent a
@@ -332,7 +336,11 @@ def _held_now(
         )
     trees = fleet_service.fleet_trees(project, rows)
     tips = fleet_service.fleet_branch_tips(project, rows) if branches else {}
-    return fleet_service.unpushed_work(project, trees, tips), trees, tips
+    unplaced = [
+        FreshKept(path=tree, reason=why)
+        for tree, why in fleet_service.unplaced_trees_kept(project, rows)
+    ]
+    return fleet_service.unpushed_work(project, trees, tips), trees, tips, unplaced
 
 
 def _uncovered(found: Sequence[FreshUnpushed], discard: Discard) -> list[FreshUnpushed]:

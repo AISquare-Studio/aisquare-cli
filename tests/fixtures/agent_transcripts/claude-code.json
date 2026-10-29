@@ -1,0 +1,582 @@
+{
+  "about": "Claude Code 2.1.292+ session JSONL, in the shapes tests/test_remote_transcript_tail.py records.",
+  "moments": {
+    "permission": {
+      "records": [
+        {
+          "type": "user",
+          "uuid": "u1",
+          "timestamp": "2026-10-19T18:40:00.000Z",
+          "message": {
+            "role": "user",
+            "content": "deploy it"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a1",
+          "timestamp": "2026-10-19T18:40:05.000Z",
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Pushing."
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a2",
+          "timestamp": "2026-10-19T18:40:06.000Z",
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_bash",
+                "name": "Bash",
+                "input": {
+                  "command": "git push --force",
+                  "description": "Push"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "newest": "assistant_tool",
+        "pending": [
+          [
+            "toolu_bash",
+            "Bash",
+            "tool"
+          ]
+        ],
+        "mark": "git push --force"
+      }
+    },
+    "question": {
+      "records": [
+        {
+          "type": "user",
+          "uuid": "u1",
+          "timestamp": "2026-10-19T18:40:00.000Z",
+          "message": {
+            "role": "user",
+            "content": "set up the cache"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a1",
+          "timestamp": "2026-10-19T18:40:05.000Z",
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_ask",
+                "name": "AskUserQuestion",
+                "input": {
+                  "questions": [
+                    {
+                      "header": "Cache",
+                      "question": "Which store should the cache use?",
+                      "multiSelect": false,
+                      "options": [
+                        {
+                          "label": "Redis",
+                          "description": "shared"
+                        },
+                        {
+                          "label": "SQLite",
+                          "description": "local"
+                        },
+                        {
+                          "label": "none",
+                          "description": "no cache"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "newest": "assistant_tool",
+        "pending": [
+          [
+            "toolu_ask",
+            "AskUserQuestion",
+            "question"
+          ]
+        ],
+        "options": 3
+      }
+    },
+    "interrupted": {
+      "records": [
+        {
+          "type": "user",
+          "uuid": "u1",
+          "timestamp": "2026-10-19T18:40:00.000Z",
+          "message": {
+            "role": "user",
+            "content": "deploy it"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a1",
+          "timestamp": "2026-10-19T18:40:05.000Z",
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_bash",
+                "name": "Bash",
+                "input": {
+                  "command": "git push --force",
+                  "description": "Push"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "r1",
+          "timestamp": "2026-10-19T18:40:09.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_bash",
+                "content": "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.",
+                "is_error": true
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "u2",
+          "timestamp": "2026-10-19T18:40:09.000Z",
+          "message": {
+            "role": "user",
+            "content": "[Request interrupted by user for tool use]"
+          }
+        }
+      ],
+      "expect": {
+        "newest": "interrupted",
+        "pending": []
+      }
+    },
+    "asked": {
+      "records": [
+        {
+          "type": "user",
+          "uuid": "u1",
+          "timestamp": "2026-10-19T18:40:00.000Z",
+          "message": {
+            "role": "user",
+            "content": "tidy the tests"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a1",
+          "timestamp": "2026-10-19T18:40:30.000Z",
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Done. Shall I push?"
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "newest": "assistant_text",
+        "pending": [],
+        "last_text_end": "Shall I push?"
+      }
+    }
+  },
+  "usage": [
+    {
+      "what": "a turn in Claude Code 2.1.309's shapes (main's core.usage docstring and tests/test_usage.py): aisquare's SessionStart hook, a reply streamed as two lines of one message id, an aisquare lookup through Bash, an Edit, a last reply",
+      "records": [
+        {
+          "type": "attachment",
+          "timestamp": "2026-10-23T09:59:59.000Z",
+          "attachment": {
+            "type": "hook_success",
+            "hookName": "SessionStart",
+            "hookEvent": "SessionStart",
+            "command": "/usr/local/bin/asq hook session-start",
+            "content": "<aisquare-context>\n# Context (via aisquare)\n\n## Project: alpha\n- Use uv run.\n</aisquare-context>"
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-10-23T10:00:00.000Z",
+          "message": {
+            "role": "user",
+            "content": "Fix the failing test"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-10-23T10:00:01.000Z",
+          "message": {
+            "id": "msg_1",
+            "model": "claude-opus-5-5",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": ""
+              }
+            ],
+            "usage": {
+              "input_tokens": 2,
+              "cache_creation_input_tokens": 2183,
+              "cache_read_input_tokens": 43431,
+              "output_tokens": 136,
+              "cache_creation": {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 2183
+              }
+            }
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-10-23T10:00:01.100Z",
+          "message": {
+            "id": "msg_1",
+            "model": "claude-opus-5-5",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "Bash",
+                "input": {
+                  "command": "aisquare repo map"
+                }
+              }
+            ],
+            "usage": {
+              "input_tokens": 2,
+              "cache_creation_input_tokens": 2183,
+              "cache_read_input_tokens": 43431,
+              "output_tokens": 136,
+              "cache_creation": {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 2183
+              }
+            }
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-10-23T10:00:02.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": "src/app.py\n"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-10-23T10:00:03.000Z",
+          "message": {
+            "id": "msg_2",
+            "model": "claude-opus-5-5",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_2",
+                "name": "Edit",
+                "input": {
+                  "file_path": "src/app.py",
+                  "old_string": "a",
+                  "new_string": "b"
+                }
+              }
+            ],
+            "usage": {
+              "input_tokens": 3,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 45614,
+              "output_tokens": 210,
+              "cache_creation": {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-10-23T10:00:04.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_2",
+                "content": "edited"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-10-23T10:00:05.000Z",
+          "message": {
+            "id": "msg_3",
+            "model": "claude-opus-5-5",
+            "content": [
+              {
+                "type": "text",
+                "text": "Fixed."
+              }
+            ],
+            "usage": {
+              "input_tokens": 1,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 45800,
+              "output_tokens": 40,
+              "cache_creation": {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 0
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "models": {
+          "claude-opus-5-5": {
+            "requests": 3,
+            "input": 6,
+            "cache_write_5m": 0,
+            "cache_write_1h": 2183,
+            "cache_read": 134845,
+            "output": 386,
+            "priced": true,
+            "cost_usd": 0.052177
+          }
+        },
+        "tools": {
+          "Bash": 1,
+          "Edit": 1
+        },
+        "lookup_calls": 1,
+        "injected_chars": 96,
+        "first_edit": {
+          "edited": true,
+          "tokens": 91579,
+          "tool_calls": 1
+        }
+      }
+    }
+  ],
+  "turn_end": [
+    {
+      "what": "a turn ended with a Bash it put in the background still running, then Claude Code's own records at the idle prompt",
+      "records": [
+        {
+          "type": "user",
+          "timestamp": "2026-10-26T09:00:00.000Z",
+          "message": {
+            "role": "user",
+            "content": "run the suite"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-10-26T09:00:04.000Z",
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "Bash",
+                "input": {
+                  "command": "make test",
+                  "run_in_background": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-10-26T09:00:05.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": "Running in the background: b1."
+              }
+            ]
+          },
+          "toolUseResult": {
+            "stdout": "",
+            "stderr": "",
+            "backgroundTaskId": "b1"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-10-26T09:00:06.000Z",
+          "message": {
+            "id": "m2",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "It runs in the background."
+              }
+            ]
+          }
+        },
+        {
+          "type": "system",
+          "subtype": "stop_hook_summary",
+          "timestamp": "2026-10-26T09:00:07.000Z"
+        },
+        {
+          "type": "system",
+          "subtype": "turn_duration",
+          "timestamp": "2026-10-26T09:00:07.000Z"
+        }
+      ],
+      "turn_end": 4,
+      "expect": {
+        "background": [
+          "b1"
+        ],
+        "begun": false
+      }
+    },
+    {
+      "what": "its final <task-notification> queued and taken: the work is over and a turn begins on it",
+      "records": [
+        {
+          "type": "user",
+          "timestamp": "2026-10-26T09:00:00.000Z",
+          "message": {
+            "role": "user",
+            "content": "run the suite"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-10-26T09:00:04.000Z",
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "Bash",
+                "input": {
+                  "command": "make test",
+                  "run_in_background": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-10-26T09:00:05.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": "Running in the background: b1."
+              }
+            ]
+          },
+          "toolUseResult": {
+            "stdout": "",
+            "stderr": "",
+            "backgroundTaskId": "b1"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-10-26T09:00:06.000Z",
+          "message": {
+            "id": "m2",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "It runs in the background."
+              }
+            ]
+          }
+        },
+        {
+          "type": "system",
+          "subtype": "stop_hook_summary",
+          "timestamp": "2026-10-26T09:00:07.000Z"
+        },
+        {
+          "type": "system",
+          "subtype": "turn_duration",
+          "timestamp": "2026-10-26T09:00:07.000Z"
+        },
+        {
+          "type": "queue-operation",
+          "operation": "enqueue",
+          "timestamp": "2026-10-26T09:00:30.000Z",
+          "content": "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>"
+        },
+        {
+          "type": "queue-operation",
+          "operation": "dequeue",
+          "timestamp": "2026-10-26T09:00:30.000Z"
+        }
+      ],
+      "turn_end": 4,
+      "expect": {
+        "background": [],
+        "begun": true
+      }
+    }
+  ]
+}

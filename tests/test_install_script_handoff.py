@@ -45,6 +45,8 @@ from types import ModuleType
 
 import pytest
 
+from tests.install_flags import DRY
+
 if sys.platform == "win32":  # pragma: no cover - the POSIX installer's own tests
     pytest.skip("install.sh is a POSIX shell script", allow_module_level=True)
 
@@ -59,8 +61,6 @@ PYPI_URL = "https://pypi.org/pypi/aisquare-cli/json"
 #: The release the served installer is stamped to. Not the tree's own version,
 #: so nothing here moves when pyproject.toml does.
 STAMP = "7.7.7"
-#: The flags of a run that ends quickly and changes nothing.
-DRY = ("--dry-run", "--yes", "--no-project", "--no-agent", "--no-system-deps")
 
 
 def _load_stamper() -> ModuleType:

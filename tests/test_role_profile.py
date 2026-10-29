@@ -30,6 +30,7 @@ from typer.testing import CliRunner
 from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core import harness, paths
+from aisquare.core.agent_adapters import claude_code
 from aisquare.core.config import (
     FLEET_DENY_TOOLS,
     ExplainabilitySettings,
@@ -235,7 +236,9 @@ class TestLaunchWiring:
         result = runner.invoke(app, ["launch", "coder", "-p", "go"])
 
         assert result.exit_code == 0, result.output
-        assert spy["argv"] == ["claude", "--model", "opus", *policy_args("coder"), "-p", "go"]
+        # The role's own flags (its tool policy) lead, as `launch` composes every agent's
+        # (`agent_launch.prepare_arguments`, #113); the binding's, then the forwarded ones.
+        assert spy["argv"] == ["claude", *policy_args("coder"), "--model", "opus", "-p", "go"]
 
     def test_the_lines_own_model_and_effort_replace_the_bindings(
         self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
@@ -548,7 +551,7 @@ class TestLaunchHonoursTheBoundBinary:
     def test_a_bound_bin_is_what_gets_executed(
         self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
     ) -> None:
-        _bind("coder", bin="claude-wrapper")
+        _bind("coder", agent="claude-code", bin="claude-wrapper")
         result = runner.invoke(app, ["launch", "coder"])
 
         assert result.exit_code == 0, result.output
@@ -558,7 +561,7 @@ class TestLaunchHonoursTheBoundBinary:
     def test_command_flag_still_overrides_the_binding(
         self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
     ) -> None:
-        _bind("coder", bin="from-config")
+        _bind("coder", agent="claude-code", bin="from-config")
         result = runner.invoke(app, ["launch", "coder", "--command", "from-flag"])
 
         assert result.exit_code == 0, result.output
@@ -578,7 +581,7 @@ class TestLaunchHonoursTheBoundBinary:
     ) -> None:
         # A bare "not on your PATH" sends the reader hunting through flag, env
         # and config to work out which of them picked the thing that is absent.
-        _bind("coder", bin="nowhere-to-be-found")
+        _bind("coder", agent="claude-code", bin="nowhere-to-be-found")
         monkeypatch.setattr(shutil, "which", lambda _cmd: None)
         result = runner.invoke(app, ["launch", "coder"])
 
@@ -590,7 +593,7 @@ class TestLaunchHonoursTheBoundBinary:
         self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
     ) -> None:
         # The invariant the defect broke: two entry points, one answer.
-        _bind("coder", bin="claude-wrapper")
+        _bind("coder", agent="claude-code", bin="claude-wrapper")
         assert harness.resolve_binary("coder").binary == "claude-wrapper"
         runner.invoke(app, ["launch", "coder"])
         assert spy["argv"][0] == harness.resolve_binary("coder").binary
@@ -616,7 +619,7 @@ class TestTracingReadsTheBoundBinaryNotTheFlag:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _tracing_on(monkeypatch)
-        _bind("coder", bin="my-agent-wrapper")
+        _bind("coder", agent="claude-code", bin="my-agent-wrapper")
 
         result = runner.invoke(app, ["launch", "coder"])
 
@@ -805,7 +808,16 @@ class TestEnvFiles:
             done = subprocess.run(
                 ["sh", "-c", command], env=shell, capture_output=True, check=False, timeout=120
             )  # bytes: text mode would read a CR in the value as a newline
-            return done.returncode, done.stdout.decode(), done.stderr.decode()
+            # The line runs `aisquare launch` (#113), whose banner names what it starts, and
+            # which says the role's tool policy is withheld for a binary no agent's name runs
+            # (P1 WS-1): any other line on stderr (a `cat:`) is one this test refuses.
+            said = done.stderr.decode().splitlines(keepends=True)
+            err = "".join(
+                line
+                for line in said
+                if not line.startswith("Launching ") and " withheld: " not in line
+            )
+            return done.returncode, done.stdout.decode(), err
 
         assert paste() == (0, f"[{TOKEN}]", ""), "the value as launch reads it, no CR"
         # Review of #259, round 3: a token saved with a byte-order mark (PowerShell 5.1's
@@ -1102,7 +1114,7 @@ class TestToolPolicy:
         assert "withheld" in note and "'aider' is not claude" in note and "Edit" in note
 
     def test_names_cuts_the_skill_descriptions_and_full_leaves_them(self) -> None:
-        assert _policy("coder").args[-2:] == ["--settings", harness.SKILL_NAMES_SETTINGS]
+        assert _policy("coder").args[-2:] == ["--settings", claude_code.SKILL_NAMES_SETTINGS]
         assert "--settings" not in _policy("manager").args
 
     def test_names_is_withheld_beside_a_settings_already_given(self) -> None:

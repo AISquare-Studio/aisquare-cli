@@ -30,6 +30,7 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 
 from aisquare.core.spawn import git_env
+from aisquare.core.workspace import git_argv
 from aisquare.models import RepoTraits
 
 #: The most tracked files read; a repository beyond it is ``xl`` whatever the rest says.
@@ -154,7 +155,7 @@ def git_output(root: Path, *args: str) -> bytes | None:
     """``git -C root args`` standard output, or ``None`` when git fails, is missing or is slow."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), *args],
+            git_argv("-C", str(root), *args),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=_GIT_TIMEOUT_S,

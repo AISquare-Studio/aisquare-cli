@@ -265,6 +265,7 @@ class Ambient:
             "TMPDIR": str(temp),  # the step's `mktemp -d` is made here, and goes with the test
             "AISQUARE_HOME": str(temp / "aisquare-home"),
             "CLAUDE_CONFIG_DIR": str(temp / "claude-config"),
+            "CODEX_HOME": str(temp / "codex-config"),
             "CLAUDE_CODE_TMPDIR": str(temp / "claude-tmp"),
             "FAKE_PROXY_PORT": str(self.port),
             "FAKE_STATUS": status,

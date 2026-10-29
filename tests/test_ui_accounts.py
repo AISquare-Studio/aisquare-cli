@@ -315,8 +315,9 @@ def cells(view: AccountsView, slot: int) -> dict[str, str]:
 
 
 def line(view: AccountsView, slot: int) -> str:
-    """The row's non-empty cells, two spaces apart: one string to search."""
-    return "  ".join(text for text in cells(view, slot).values() if text)
+    """The row's non-empty cells but its agent's (the table's column every row fills, which
+    the Codex rows' tests read), two spaces apart: one string to search."""
+    return "  ".join(text for key, text in cells(view, slot).items() if text and key != "agent")
 
 
 def why(view: AccountsView, slot: int) -> str:
@@ -1654,7 +1655,7 @@ def _script_claude_sign_in(
     )
     account.config_dir.mkdir(parents=True)
 
-    def begin(slot: int | None) -> ClaudeAccount:
+    def begin(slot: int | None, *, agent: str = core.AGENT) -> ClaudeAccount:
         seen["begin"] = slot
         return account
 
@@ -2326,7 +2327,9 @@ def test_the_row_starts_with_its_arrows_ends_with_its_plan_and_has_no_default_or
         view = await open_accounts(pilot)
         header = view.query_one(accounts_view.AccountsHeader)
         titles = [shown(cell) for cell in header.query(".cell").results(Static)]
-        first = row(view, 2)
+        # The row is a line of cells and arranging buttons, and under it each of the windows
+        # an agent of daily per-model quotas has (``windows_text``).
+        first = row(view, 2).query_one(".account-line")
         # The row's columns as drawn, left to right: each child's column class.
         drawn = [
             next(c[4:] for c in child.classes if c.startswith("col-"))
@@ -3365,7 +3368,7 @@ def _columns_at(view: AccountsView) -> dict[str, list[tuple[int, int]]]:
     every button's, by id stem, so the columns of buttons (*↑*, *↓*, *Log in*) and the
     arranging buttons are held to the same rule (``header-up`` is the header's ``↑`` over the
     *↑* buttons, ``header-login`` its gap over *Log in*)."""
-    header = view.query_one("#claude-header")
+    header = view.query_one("#accounts-header")
     lines: dict[str, list[tuple[int, int]]] = {
         "header": [
             (cell.region.x, cell.region.width)
@@ -3378,10 +3381,11 @@ def _columns_at(view: AccountsView) -> dict[str, list[tuple[int, int]]]:
             (cell.region.x, cell.region.width) for cell in header.query(f".col-{key}")
         ]
     for account_row in view.rows():
+        line = account_row.query_one(".account-line")  # its cells; its windows go under it
         spans = [
             (cell.region.x, cell.region.width)
             for cell in account_row.query(".cell")
-            if cell.parent is account_row and not isinstance(cell, Button) and cell.display
+            if cell.parent is line and not isinstance(cell, Button) and cell.display
         ]
         lines[f"row {account_row.slot}"] = spans
         for button in account_row.query(Button):
@@ -3401,26 +3405,29 @@ def _with_the_problem_span(header: list[tuple[int, int]]) -> list[tuple[int, int
 
 
 @pytest.mark.parametrize("size", [(100, 40), (140, 40), (240, 40)], ids=["100", "140", "240"])
+@pytest.mark.parametrize("agents", ["one", "both"])
 def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
-    no_network: dict[str, Any], size: tuple[int, int]
+    no_network: dict[str, Any], size: tuple[int, int], agents: str
 ) -> None:
     """The human: "the usage of daily and weekly although correct is rendered as a string
     making it very messy, instead put it into a neat table so everything is well aligned".
     Measured, not looked at: every column starts at the same x on the header and on every
     row, at its fixed width, one line high; a long name or email ends in "…" rather than
     wrapping or pushing the next column; the name's field, open, covers the name's cell and
-    moves nothing; scrolled sideways, the header moves with the rows."""
+    moves nothing; scrolled sideways, the header moves with the rows. Of one agent's accounts
+    and of both (the mark and its header are the second's alone)."""
     no_network["usage"] = _table_usage
+    frame = _table_frame if agents == "one" else _mixed_frame
 
     async def run() -> dict[str, Any]:
-        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_table_frame)
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=frame)
         async with app.run_test(size=size) as pilot:
             await settle(app)
             view = await open_accounts(pilot)
             await settle_until(app, lambda: painted(view, 1, 2, 4))
             out: dict[str, Any] = {"closed": _columns_at(view)}
             out["heights"] = [r.region.height for r in view.rows()]
-            out["header"] = [shown(c) for c in view.query_one("#claude-header").query(Static)]
+            out["header"] = [shown(c) for c in view.query_one("#accounts-header").query(Static)]
             out["name 2"] = row(view, 2).cell("name").render_line(0).text
             out["email 2"] = row(view, 2).cell("email").render_line(0).text
             name_box = row(view, 2).query_one(".col-name").region
@@ -3430,10 +3437,13 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
             await pilot.press("escape")
             # The field is closed and the page quiet before the table is scrolled: a scroll made
             # while the closing was still being laid out was undone by it (scroll_x back at 0
-            # for good, in 3 runs of 120 under load at 100 and 140 columns).
+            # for good, in 3 runs of 120 under load at 100 and 140 columns). The key is handled
+            # when the app gets to it, which under load is after `press` returns: the marks are
+            # read once the field has closed and given its mark back.
             await settle_until(app, lambda: not row(view, 2).renaming, group=_NO_WORKER)
             await settle_page(app, group=_NO_WORKER)
-            table = view.query_one("#claude-table")
+            out["marks"] = [row(view, slot).cell("agent").display for slot in (1, 2, 3, 4)]
+            table = view.query_one("#accounts-table")
             out["scrolls"] = table.max_scroll_x
             table.scroll_to(x=table.max_scroll_x, animate=False, immediate=True)
             # Settled until the columns have moved, which is what is read next, not paused for
@@ -3468,7 +3478,10 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
     starts = [x for x, _ in closed["header"]]
     assert starts == sorted(starts) and len(set(starts)) == len(starts)  # left to right
     assert out["heights"] == [1, 1, 1, 1]  # never wrapped onto a second line
-    assert out["header"][:3] == ["↑", "↓", "#"]  # the arrows first (#8 on the board)
+    # The arrows first (#8 on the board); the agent is the first word of the name's column.
+    title = "agent name" if agents == "both" else "name"  # the mark is a second agent's
+    assert out["header"][:4] == ["↑", "↓", "#", title]
+    assert out["marks"] == [agents == "both"] * 4  # a closed rename gives it back, or not
     assert out["header"][5:8] == ["session used", "week used", ""]  # USED; Log in
     assert out["header"][8:] == ["session resets", "week resets", "plan"]  # the plan last
     assert out["name 2"].rstrip().endswith("…") and out["email 2"].rstrip().endswith("…")
@@ -3505,7 +3518,7 @@ def test_an_expired_rows_mark_and_log_in_are_on_screen_at_160_columns_unscrolled
             await settle(app)
             view = await open_accounts(pilot)
             await settle_until(app, lambda: painted(view, 1, 2, 4))
-            table = view.query_one("#claude-table")
+            table = view.query_one("#accounts-table")
             seen = table.scrollable_content_region
             expired = row(view, 4)  # slot 4: the token expired
             mark = expired.cell(accounts_view.PROBLEM_COLUMN.key)
@@ -3530,6 +3543,175 @@ def test_an_expired_rows_mark_and_log_in_are_on_screen_at_160_columns_unscrolled
     offered_here, login_seen, on_screen, gap = out["login"]
     assert offered_here and login_seen and on_screen
     assert gap == 1  # right beside the usage cells: one cell apart
+
+
+def _mixed_frame() -> AccountsOverview:
+    """:func:`_table_frame` with its last slot a Codex one: both agents in the one table."""
+    frame = _table_frame()
+    last = frame.accounts[-1]
+    codex = last.account.model_copy(update={"agent": "codex"})
+    accounts = [*frame.accounts[:-1], last.model_copy(update={"account": codex})]
+    return frame.model_copy(update={"accounts": accounts})
+
+
+def test_every_button_of_a_row_is_on_screen_at_200_columns_unscrolled(
+    no_network: dict[str, Any],
+) -> None:
+    """The ui-tester at 200x50 (board seq 3673): the agent column made the table 179 cells wide,
+    the page scrolled 16 sideways and *Disable* read "Di" (main's was 4 over). The agent is the
+    first word of the name's column now, and the columns are measured, not looked at: with
+    the sidebar at its default width the table is no wider than the 163 cells the page
+    shows, nothing scrolls, and every button of every row, *Remove* last, ends at or before
+    the screen's last column."""
+    no_network["usage"] = _table_usage
+
+    async def run() -> dict[str, Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_mixed_frame)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 4))
+            table = view.query_one("#accounts-table")
+            buttons = [b for each in view.rows() for b in each.query(Button) if b.visible]
+            seen = table.scrollable_content_region
+            return {
+                "screen": app.size.width,
+                "sidebar": app.sidebar.outer_size.width,
+                "scrolls": table.max_scroll_x,
+                "width": (table.virtual_size.width, seen.width),
+                "right": max(b.region.right for b in buttons),
+                "whole": all(seen.contains_region(b.region) for b in buttons),
+                "labels": {str(b.label) for b in buttons},
+                "marks": {slot: shown(row(view, slot).cell("agent")) for slot in (1, 4)},
+                "marked": [row(view, slot).cell("agent").display for slot in (1, 2, 3, 4)],
+                "tip": str(row(view, 4).cell("agent").tooltip),
+            }
+
+    out = asyncio.run(run())
+    assert out["sidebar"] == 30 and out["screen"] == 200
+    assert {"Disable", "Enable", "Remove"} <= out["labels"]
+    assert out["right"] <= out["screen"]
+    table_width, shown_width = out["width"]
+    assert out["scrolls"] == 0 and table_width <= shown_width and out["whole"]
+    assert out["marks"] == {1: "Cl", 4: "Co"} and out["tip"] == "Codex"
+    assert out["marked"] == [True] * 4  # rows mounted into a table of both agents carry the mark
+
+
+def test_a_machines_names_keep_their_16_cells_until_a_second_agent_marks_the_rows(
+    no_network: dict[str, Any],
+) -> None:
+    """The ui-tester on 874aeff6 (r23 of #113): a Claude-only machine's names fell from 16 cells
+    to 13 (the agent's mark and its space share the column), so a 16-character alias that
+    0.9.0 showed whole read ``Cl abcdefghijkl…`` and the CHANGELOG said nothing of it. With
+    one agent's accounts there is no mark and no "agent" in the header: the names have their
+    16 cells. With both the mark is back and the name has 13, a longer one ends in ``…`` and
+    is whole in its tooltip, and the CHANGELOG says so (the cells it names are measured here,
+    not copied). At 200x50 either way nothing scrolls and the last button ends on screen."""
+    no_network["usage"] = _table_usage
+    sixteen, fourteen, thirteen = "abcdefghijklmnop", "abcdefghijklmn", "abcdefghijklm"
+    aliases = {1: sixteen, 2: fourteen, 3: thirteen}
+    one = _overview(
+        *(
+            _arranged(_status(slot, f"{slot}@example.com"), alias=alias, position=slot)
+            for slot, alias in aliases.items()
+        )
+    )
+    last = one.accounts[-1]
+    codex = last.account.model_copy(update={"agent": "codex"})
+    both = _overview(*one.accounts[:-1], last.model_copy(update={"account": codex}))
+    frames = [one]
+
+    async def look(app: FleetApp, view: AccountsView) -> dict[str, Any]:
+        buttons = [b for each in view.rows() for b in each.query(Button) if b.visible]
+        seen = view.query_one("#accounts-table").scrollable_content_region
+        return {
+            "header": shown(view.query_one("#accounts-header").query_one(".col-name", Static)),
+            "cells": row(view, 1).cell("name").region.width,
+            "marks": {
+                slot: (row(view, slot).cell("agent").display, shown(row(view, slot).cell("agent")))
+                for slot in aliases
+            },
+            "drawn": {
+                slot: row(view, slot).cell("name").render_line(0).text.rstrip() for slot in aliases
+            },
+            "tips": {slot: str(row(view, slot).cell("name").tooltip) for slot in aliases},
+            "scrolls": view.query_one("#accounts-table").max_scroll_x,
+            "right": (max(b.region.right for b in buttons), app.size.width),
+            "whole": all(seen.contains_region(b.region) for b in buttons),
+        }
+
+    async def swap(app: FleetApp, view: AccountsView, frame: AccountsOverview) -> dict[str, Any]:
+        frames[0] = frame
+        app.refresh_accounts()
+        await accounts_read(app)
+        await settle(app)
+        return await look(app, view)
+
+    async def run() -> list[dict[str, Any]]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: frames[0])
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 3))
+            first = await look(app, view)
+            marked = await swap(app, view, both)  # a Codex account is added: the rows mark
+            return [first, marked, await swap(app, view, one)]  # …and removed: they unmark
+
+    alone, marked, alone_again = asyncio.run(run())
+    name_column = next(column for column in accounts_view.COLUMNS if column.key == "name")
+    assert alone_again == alone  # the mark follows the accounts the table lists, no row remounted
+    for table in (alone, marked):
+        assert table["scrolls"] == 0 and table["whole"], table
+        assert table["right"][0] <= table["right"][1], table["right"]
+        for slot, alias in aliases.items():
+            assert table["tips"][slot].startswith(f"{alias} — "), table["tips"][slot]
+            assert "double-click" in table["tips"][slot]
+    # One agent's accounts: 0.9.0's table, the name whole in its 16 cells.
+    assert alone["header"] == "name" and alone["cells"] == name_column.width == 16
+    assert {shown_ for shown_, _ in alone["marks"].values()} == {False}
+    assert alone["drawn"] == aliases
+    # Both: the mark, its space and 13 cells of name; the longer ones cut, the tooltip whole.
+    assert marked["header"] == "agent name"
+    assert marked["marks"] == {1: (True, "Cl"), 2: (True, "Cl"), 3: (True, "Co")}
+    assert marked["cells"] == 13 == name_column.width - len("Cl") - 1
+    assert marked["drawn"] == {1: sixteen[:12] + "…", 2: fourteen[:12] + "…", 3: thirteen}
+    changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
+    flat = " ".join(changelog.split("\n## [0.9.0]", 1)[0].replace("**", "").split())
+    assert f"With both agents the name has {marked['cells']} cells, not {alone['cells']}" in flat
+    assert "there is no mark and the names keep the 16 cells 0.9.0's had" in flat
+
+
+def test_a_frame_while_a_name_is_renamed_leaves_the_mark_under_the_open_field(
+    no_network: dict[str, Any],
+) -> None:
+    """The field covers the whole name column, the mark included (``open_rename``), and "a frame
+    never touches what is being typed": the repaint a frame brings must not show the mark
+    again over it. Closed, the mark is back."""
+    no_network["usage"] = _table_usage
+
+    async def run() -> list[Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_mixed_frame)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 4))
+            await rename(pilot, 2)
+            seen: list[Any] = [row(view, 2).cell("agent").display]
+            app.refresh_accounts()  # a frame, and the usage read after it, mid-rename
+            await accounts_read(app)
+            await settle(app)
+            seen += [row(view, 2).cell("agent").display, field(view, 2).display]
+            await pilot.press("escape")
+            seen.append(row(view, 2).cell("agent").display)
+            return seen
+
+    assert asyncio.run(run()) == [False, False, True, True]
+
+
+def test_an_agents_mark_is_the_shortest_start_of_its_label_no_other_agent_shares() -> None:
+    """The first word of the name's column: two letters, more only for agents that share
+    them, and never a name taken from the agent's id."""
+    assert accounts_view.agent_marks() == {"claude-code": "Cl", "codex": "Co"}
 
 
 def _painted(app: FleetApp) -> list[str]:
@@ -3588,7 +3770,7 @@ def test_an_unreadable_account_shows_one_mark_across_its_usage_and_says_why_on_h
             await settle(app)
             view = await open_accounts(pilot)
             await settle_until(app, lambda: painted(view, 1, 2, 3))
-            header = view.query_one("#claude-header")
+            header = view.query_one("#accounts-header")
             session = header.query_one(".col-session").region
             week = header.query_one(".col-week").region
             painted_rows = {slot: _painted(app)[row(view, slot).region.y] for slot in (1, 2, 3, 4)}
@@ -3612,7 +3794,7 @@ def test_an_unreadable_account_shows_one_mark_across_its_usage_and_says_why_on_h
                 "why": why(view, 3),
                 "kept": cells(view, 2)["session"],
                 "after": after,
-                "scroll": view.query_one("#claude-table").scroll_x,
+                "scroll": view.query_one("#accounts-table").scroll_x,
                 "header": [shown(cell) for cell in header.query(Static)][:3],
             }
 
@@ -3657,7 +3839,7 @@ def test_log_in_again_reads_whole_on_screen_at_160_columns_unscrolled(
             await settle(app)
             view = await open_accounts(pilot)
             await settle_until(app, lambda: painted(view, 1, 2, 4))
-            table = view.query_one("#claude-table")
+            table = view.query_one("#accounts-table")
             login = row(view, 1).query_one("#account-login-1", Button)
             line = "".join(login.render_line(y).text for y in range(login.region.height))
             return {
@@ -3713,7 +3895,7 @@ def test_408s_cells_and_login_read_whole_with_301s_update_row_in_the_sidebar(
             await settle(app)
             view = await open_accounts(pilot)
             await settle_until(app, lambda: "33%" in cells(view, 1)["session"])
-            table = view.query_one("#claude-table")
+            table = view.query_one("#accounts-table")
             session = row(view, 1).cell("session")
             login = row(view, 1).query_one("#account-login-1", Button)
             login.focus()
@@ -3762,7 +3944,7 @@ def test_every_button_can_be_reached_at_any_width(
             await settle(app)
             view = await open_accounts(pilot)
             await settle_until(app, lambda: painted(view, 1, 2, 4))
-            table = view.query_one("#claude-table")
+            table = view.query_one("#accounts-table")
             unreachable: list[str] = []
             reached = 0
             for account_row in view.rows():

@@ -30,7 +30,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import paths
+from aisquare.core import launch_seal, paths
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetSettings
 from aisquare.core.ids import new_agent_id
@@ -38,7 +38,7 @@ from aisquare.core.store import store_session
 from aisquare.core.terminal import outer_terminal
 from aisquare.core.tmux import PaneFacts, SocketAnswer, TmuxError, TmuxServer, TmuxUnavailable
 from aisquare.core.workspace import project_id_for
-from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, ProjectInfo
+from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, LaunchSpec, ProjectInfo
 from aisquare.services import diagnostics, install_route
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
@@ -186,13 +186,41 @@ def _agent(
     )
 
 
+def _recorded(agent: FleetAgent) -> FleetAgent:
+    """``agent`` with what its spawn writes outside the store: its launch record and where
+    its window is (``core.launch_seal``), which the doctor, as the fleet, asks by."""
+    record = launch_seal.LaunchRecord(
+        id=agent.id,
+        project_id=agent.project_id,
+        project_root=str(agent.cwd),
+        role=agent.role,
+        agent=agent.agent or "claude-code",
+        binary="claude",
+        cwd=str(agent.cwd),
+        spec=LaunchSpec(binary="claude"),
+    )
+    assert launch_seal.write(record) is None
+    window = launch_seal.WindowPlace(
+        tmux_socket=agent.tmux_socket,
+        pane_id=agent.pane_id,
+        socket_path=str(agent.socket_path) if agent.socket_path is not None else None,
+        boot_id=agent.boot_id,
+        created_at=agent.created_at,
+        server_started_at=agent.server_started_at,
+    )
+    assert launch_seal.placed(agent.id, window) is None
+    return agent
+
+
 def _seed(root: Path, *agents: FleetAgent) -> ProjectInfo:
-    """A registered project at ``root`` with these ``fleet_agent`` rows — real store, temp home."""
+    """A registered project at ``root`` with these ``fleet_agent`` rows — real store, temp home
+    — each with the launch record its spawn wrote (:func:`_recorded`)."""
     project = ProjectInfo(id=project_id_for(root.resolve()), root=root.resolve(), linked_repos=[])
     with store_session() as store:
         store.ensure_project(project)
         for agent in agents:
             store.upsert_fleet_agent(agent)
+            _recorded(agent)
     return project
 
 
@@ -537,6 +565,31 @@ def test_fleet_check_warns_when_a_live_row_has_no_pane(home: Path, tmp_path: Pat
     assert check.fix and "aisquare fleet reap" in check.fix
 
 
+def test_fleet_check_asks_about_a_row_only_where_its_launch_record_places_it(
+    home: Path, tmp_path: Path
+) -> None:
+    """Review r7 of #113: the doctor asks a row's pane as the fleet does, where its launch
+    record places it (``fleet.resolve_place``), never at the row's own ``pane_id``, which
+    a sandboxed agent writes. A row rewritten to a gone pane is not called stale, and a row
+    no record places is asked about nowhere: ``fleet reap``, which this check prescribes,
+    cannot act on either."""
+    project = _seed(tmp_path / "repo")
+    manager = _agent(project.id, "manager", "%1")
+    coder = _agent(project.id, "coder-1", "%2")
+    _seed(tmp_path / "repo", manager, coder)
+    with store_session() as store:
+        store.upsert_fleet_agent(manager.model_copy(update={"pane_id": "%7"}))  # rewritten
+    launch_seal._path(coder.id).unlink()  # spawned before records were kept
+    server = FakeServer(
+        sessions=("asq-amber-otter",), panes={"%1": _facts("%1"), "%2": None, "%7": None}
+    )
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert "pane is gone" not in check.detail, check.detail
+    assert check.fix is None or "fleet reap" not in check.fix
+
+
 def test_fleet_check_counts_a_row_older_than_its_server_as_gone(home: Path, tmp_path: Path) -> None:
     """Review of the #203 final-round fixes, F4: the check asked tmux about a row's pane
     by id alone. After a reboot the next server hands the same ids out again, so a row
@@ -638,7 +691,7 @@ def test_fleet_check_does_not_call_a_server_whose_socket_file_is_gone_not_runnin
     assert "listener" in server.asked
     # Negative control: a row from another boot cannot be running, socket file or not.
     with store_session() as store:
-        store.upsert_fleet_agent(coder.model_copy(update={"boot_id": "an-earlier-boot"}))
+        store.upsert_fleet_agent(_recorded(coder.model_copy(update={"boot_id": "an-earlier-boot"})))
 
     check = diagnostics._check_fleet(lambda socket: server)
 
@@ -1552,6 +1605,32 @@ def test_the_fleet_server_row_warns_about_a_seats_identity_on_the_server(tmp_pat
     )
 
 
+def test_the_fleet_server_row_names_an_agents_process_identity_pinned_on_the_server(
+    tmp_path: Path,
+) -> None:
+    """SCOPE #113 0.8.2, A12: a server started from inside an agent's tool shell pins that
+    agent's process identity for every window opened there (``core.spawn.
+    agent_identity_env_vars``): Codex's ``CODEX_THREAD_ID``, set only in its tools' shells,
+    and Claude Code's ``CLAUDE_PID``. A ``codex`` started by hand in such a window takes
+    itself for that thread's child. Always foreign, so always a warning naming each."""
+    server = FakeServer(absent=False, socket="asqui")
+    server.scripted = {
+        ("show-environment", "-g"): (
+            "AISQUARE_HOME=/h\nCODEX_THREAD_ID=019a2b3c-4d5e-7f60-8a1b-000000000001\n"
+            "CLAUDE_PID=31337\n"
+        )
+    }
+
+    check = _server_env_row(server, (tmp_path,))
+
+    assert check.status is CheckStatus.warn
+    assert "CODEX_THREAD_ID=019a2b3c-4d5e-7f60-8a1b-000000000001" in check.detail
+    assert "CLAUDE_PID=31337" in check.detail
+    assert check.fix is not None
+    assert "set-environment -gu CODEX_THREAD_ID" in check.fix
+    assert "set-environment -gu CLAUDE_PID" in check.fix
+
+
 def test_the_fleet_server_row_reaches_the_real_doctor_after_the_fleet_terminal() -> None:
     names = [check.name for check in diagnostics.doctor()]
     assert names.index("fleet terminal") < names.index("fleet server env"), names
@@ -1605,6 +1684,35 @@ def test_doctor_warns_on_a_binding_whose_tmpdir_cannot_be_written(tmp_path: Path
     assert row.status == CheckStatus.warn
     assert "tester" in row.detail and "CLAUDE_CODE_TMPDIR" in row.detail
     assert str(missing) in row.detail and "not writable" in row.detail
+
+
+def test_doctor_warns_on_a_binding_whose_codex_home_has_no_hooks(tmp_path: Path) -> None:
+    """SCOPE #113 091, item 14: every agent's home is asked, by its own variable and its own
+    "connected" answer. A role bound with ``CODEX_HOME`` at a home without aisquare's hooks
+    runs Codex sessions the board never hears of: a warning whose fix connects Codex there;
+    a connected one is fine. Only ``CLAUDE_CONFIG_DIR`` was read before."""
+    from aisquare.core import agents as agent_core
+
+    bare, hooked = tmp_path / "codex-bare", tmp_path / "codex-hooked"
+    bare.mkdir()
+    hooked.mkdir()
+    agent_core.install_hooks("codex", hooked)
+    _bound("coder", CODEX_HOME=str(bare))
+    _bound("reviewer", CODEX_HOME=str(hooked))
+
+    (row,) = diagnostics._check_role_bindings()
+    assert row.status == CheckStatus.warn
+    assert "coder: CODEX_HOME" in row.detail and str(bare) in row.detail
+    assert "no aisquare hooks" in row.detail and "reviewer" not in row.detail
+    connect = ["aisquare", "agents", "connect", "codex", "--config-dir", str(bare)]
+    assert row.fix is not None and install_route.command_line(connect) in row.fix
+    assert "aisquare team bind coder --unset CODEX_HOME" in row.fix
+    assert "claude-code" not in row.fix, "Codex's home is connected as Codex's"
+
+    _bound("coder", CODEX_HOME=str(hooked))
+    (row,) = diagnostics._check_role_bindings()
+    assert row.status == CheckStatus.ok, row.detail
+    assert f"coder → {hooked}" in row.detail and f"reviewer → {hooked}" in row.detail
 
 
 def test_doctor_reads_a_binding_as_a_launch_expands_it(

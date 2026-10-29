@@ -19,6 +19,7 @@ from aisquare.models import ProjectInfo
 from aisquare.services import diagnostics
 from aisquare.services import project as project_service
 from aisquare.services.captain import state as captain_state
+from tests.wall_clock import after_the_tick
 
 
 def test_a_captured_only_prune_keeps_the_home_board_and_takes_a_scratch_directory(
@@ -27,6 +28,7 @@ def test_a_captured_only_prune_keeps_the_home_board_and_takes_a_scratch_director
     home = captain_state.home_project()  # the captain's board, captured as its first use does
     with store_session() as store:
         store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))
+    after_the_tick()  # "older than 0 days": not a directory touched in this very tick
 
     plan = project_service.prune_candidates(missing=False, worktrees=False, captured_older_than=0)
 
@@ -40,6 +42,7 @@ def test_doctor_counts_no_home_board_among_the_captured_directories(tmp_path: Pa
     with store_session() as store:
         store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))
         captured = [project.id for project in store.captured_projects()]
+    after_the_tick()
 
     [check] = diagnostics._check_captured_projects()
 

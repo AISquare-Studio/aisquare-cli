@@ -614,6 +614,7 @@ def emit_agents(agents: list[AgentInfo]) -> None:
     table.add_column("AGENT")
     table.add_column("DETECTED")
     table.add_column("CONNECTED")
+    table.add_column("INTEGRATION")
     table.add_column("HOOKS IN")
     table.add_column("CONTEXT")
     for agent in agents:
@@ -622,10 +623,14 @@ def emit_agents(agents: list[AgentInfo]) -> None:
             agent.name,
             "yes" if agent.detected else "no",
             "yes" if agent.connected else "no",
+            agent.readiness.replace("_", " "),
             _hook_sites(agent),
             context,
         )
     stdout_console().print(table)
+    for agent in agents:
+        if agent.detected and agent.detail:
+            stdout_console().print(f"{agent.name}: {agent.detail}", markup=False)
 
 
 def _hook_sites(agent: AgentInfo) -> str:
@@ -677,15 +682,23 @@ def emit_connected(connection: AgentConnection) -> None:
     noun = "entry" if connection.imported == 1 else "entries"
     imported = f"imported {connection.imported} {noun}"
     if connection.hooks_off is not None:
+        from aisquare.core import agents as agent_core
+
+        spec = agent_core.spec(connection.name)
         stdout_console().print(
             f"hooks installed for {connection.name}, but switched off — {imported}"
         )
         stderr_console().print(
-            f'note: {connection.hooks_off} sets "disableAllHooks": true, so Claude Code runs '
-            "none of its hooks, aisquare's included — remove that key to turn them on"
+            f"note: {connection.hooks_off} sets "
+            f"{agent_core.HOOKS_OFF_SETTINGS.get(connection.name, 'every hook off')}, so "
+            f"{spec.label if spec else connection.name} runs none of its hooks, aisquare's "
+            "included — remove that key to turn them on",
+            markup=False,
         )
-        return
-    stdout_console().print(f"✓ connected {connection.name} — hooks installed; {imported}")
+    else:
+        stdout_console().print(f"✓ connected {connection.name} — hooks installed; {imported}")
+    if connection.detail:
+        stdout_console().print(connection.detail, markup=False)
 
 
 def emit_onboard(report: OnboardReport) -> None:
@@ -717,15 +730,24 @@ def emit_onboard(report: OnboardReport) -> None:
         console.print(f"  - {entry.text}")
 
 
+def connect_hint() -> str:
+    """What an empty prompt, turn or token listing tells the user to run: ``agents connect``
+    for every agent whose hooks aisquare installs (Claude Code, Codex), never one by name."""
+    from aisquare.core.agent_adapters import adapters
+
+    hooked = [adapter.id for adapter in adapters() if adapter.capabilities.hooks]
+    return "Connect your coding agent: " + " or ".join(
+        f"aisquare agents connect {agent}" for agent in hooked
+    )
+
+
 def emit_prompts(prompts: list[PromptRecord]) -> None:
     """Render captured prompt history — a JSON array under ``--json``, a table otherwise."""
     if get_state().json_output:
         typer.echo(json.dumps([prompt.model_dump(mode="json") for prompt in prompts]))
         return
     if not prompts:
-        stdout_console().print(
-            "No prompts captured yet. Connect Claude Code: aisquare agents connect claude-code"
-        )
+        stdout_console().print(f"No prompts captured yet. {connect_hint()}")
         return
     table = Table(show_header=True, header_style="bold")
     table.add_column("WHEN", no_wrap=True)
@@ -746,9 +768,7 @@ def emit_metrics_summary(summary: MetricsSummary) -> None:
         return
     console = stdout_console()
     if not summary.turns:
-        console.print(
-            "No turns recorded yet. Connect Claude Code: aisquare agents connect claude-code"
-        )
+        console.print(f"No turns recorded yet. {connect_hint()}")
         return
 
     table = Table(show_header=True, header_style="bold")
@@ -799,7 +819,7 @@ def emit_token_summary(summary: TokenSummary) -> None:
     if not summary.sessions:
         console.print(
             "No session usage recorded yet — it is read off the transcript at each Stop. "
-            "Connect Claude Code: aisquare agents connect claude-code"
+            + connect_hint()
         )
         return
     table = Table(show_header=True, header_style="bold")
@@ -833,7 +853,11 @@ def emit_token_summary(summary: TokenSummary) -> None:
         "cost-weighted = input + 1.25 x cache write + 0.1 x cache read + output at the "
         "model's output/input price ratio"
     )
-    console.print(f"prices as of {summary.prices_as_of}: {summary.prices_source}")
+    for listed in summary.price_lists or [
+        {"agent": "", "as_of": summary.prices_as_of, "source": summary.prices_source}
+    ]:
+        whose = f"{listed['agent']} " if listed["agent"] else ""
+        console.print(f"{whose}prices as of {listed['as_of']}: {listed['source']}")
     if summary.unpriced_models:
         console.print(
             f"⚠ {summary.unpriced_tokens:,} tokens on unpriced models "

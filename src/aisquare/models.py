@@ -13,7 +13,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 _SIGNAL_TEXT = re.compile(r"^([a-z0-9][a-z0-9._-]*): (\S+)(?: \(was (\S+)\))?$")
 """The anchored serialization of a signal event's text: ``name: value`` with
@@ -22,6 +22,12 @@ tokens at set time, so the decode is exact — never substring matching."""
 
 Pool = Literal["user", "project"]
 """Where context lives: the global user pool or the current project pool."""
+
+
+def _default_binary() -> str:
+    from aisquare.core.agent_adapters import default_binary  # lazy: the adapters import us
+
+    return default_binary()
 
 
 class ExportFormat(StrEnum):
@@ -96,6 +102,13 @@ class AgentInfo(BaseModel):
     detected: bool = False
     config_paths: list[Path] = Field(default_factory=list)
     connected: bool = False
+    readiness: str = "not_connected"
+    detail: str = ""
+    route: str | None = None
+    """How aisquare reaches the sessions of the directory a session from this shell reads
+    (``core.agents.hook_route``): ``hooks``, the agent's own hooks file; ``plugin``,
+    aisquare's plugin for it; ``both``, the plugin standing down beside those hooks; or
+    ``None``, neither."""
     sites: list[AgentHookSite] = Field(default_factory=list)
     """Every config dir this agent was connected in, with that dir's hook health."""
 
@@ -222,17 +235,24 @@ class PromptRecord(BaseModel):
 
 
 class ClaudeAccount(BaseModel):
-    """One Claude Code login the CLI can launch: a numbered slot over a config directory.
+    """One coding-agent login the CLI can launch: a numbered slot over a home directory.
 
     Slot 1 is the machine's default — whatever a plain ``claude`` in this shell
     uses (``CLAUDE_CONFIG_DIR`` when set, ``~/.claude`` otherwise) — and is never
     a directory of ours. Every other slot is a directory the CLI created and
     owns, launched by pointing ``CLAUDE_CONFIG_DIR`` and ``CLAUDE_CODE_TMPDIR``
     at it.
+
+    Codex logins are slots too (``agent="codex"``): slot 0 is the plain ``codex``
+    (``CODEX_HOME``, else ``~/.codex``), and a managed one is a directory under
+    ``codex-accounts`` launched with ``CODEX_HOME`` pointing at it. One ladder
+    numbers the managed slots of both agents, so a number names one account.
     """
 
     slot: int
     config_dir: Path
+    agent: str = "claude-code"
+    """The coding agent whose login this is (``core.agent_adapters`` id)."""
     tmp_dir: Path | None = None
     """The account's own ``CLAUDE_CODE_TMPDIR``; ``None`` for the default slot."""
     managed: bool = False
@@ -275,7 +295,11 @@ class ClaudeAccountRecord(BaseModel):
 
 
 class ClaudeIdentity(BaseModel):
-    """Who a Claude Code config directory is signed in as, read from its ``.claude.json``."""
+    """Who a Claude Code config directory is signed in as, read from its ``.claude.json``.
+
+    For a Codex home, the claims of the id token ``auth.json`` holds (never the token);
+    an API-key login has no email and reads ``API key``.
+    """
 
     email: str
     organization: str | None = None
@@ -284,6 +308,62 @@ class ClaudeIdentity(BaseModel):
 
 def _left(used: float | None) -> float | None:
     return None if used is None else min(100.0, max(0.0, 100.0 - used))
+
+
+SESSION_WINDOW = "session"
+"""The shorter of the two windows Claude Code's ``/usage`` reads (five hours) and Codex's
+primary rate limit: what the Accounts page's ``session`` columns show."""
+WEEK_WINDOW = "week"
+"""The longer (seven days), and Codex's secondary: the Accounts page's ``week`` columns."""
+SESSION_MINUTES = 5 * 60
+WEEK_MINUTES = 7 * 24 * 60
+
+
+class UsageWindow(BaseModel):
+    """One rate-limit window of an account (``ClaudeUsage.windows``): what it is called, how
+    long it is, how much of it is USED (0-100, ``None`` where it went unread) and when it
+    resets. Claude Code's are the five-hour ``session`` and the seven-day ``week``; an agent
+    of daily per-model quotas has one per model (``pro daily``, 1440 minutes)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    minutes: int | None = None
+    used_percent: float | None = None
+    resets_at: datetime | None = None
+
+
+def session_and_week(
+    session_percent: float | None,
+    session_resets_at: datetime | None,
+    week_percent: float | None,
+    week_resets_at: datetime | None,
+    *,
+    every: bool = False,
+) -> tuple[UsageWindow, ...]:
+    """The :data:`SESSION_WINDOW` and :data:`WEEK_WINDOW` of a reading in those four fields,
+    each only where it says something (a percent, or a reset), or both with ``every``: a
+    reading that asks for both (Claude Code's endpoint) and got neither of one has that one
+    unread."""
+    windows = (
+        UsageWindow(
+            name=SESSION_WINDOW,
+            minutes=SESSION_MINUTES,
+            used_percent=session_percent,
+            resets_at=session_resets_at,
+        ),
+        UsageWindow(
+            name=WEEK_WINDOW,
+            minutes=WEEK_MINUTES,
+            used_percent=week_percent,
+            resets_at=week_resets_at,
+        ),
+    )
+    return tuple(
+        window
+        for window in windows
+        if every or window.used_percent is not None or window.resets_at is not None
+    )
 
 
 class UsageCause(StrEnum):
@@ -317,14 +397,21 @@ class UsageCause(StrEnum):
 
 
 class ClaudeUsage(BaseModel):
-    """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them.
+    """One account's rate-limit windows (:attr:`windows`), as its agent's own reader takes
+    them: Claude Code's ``/usage`` endpoint, a Codex account's newest ``token_count`` its
+    sessions recorded (``core.codex_accounts.usage``: the shorter window is ``session``,
+    the longer ``week``, and ``fetched_at`` is when that session recorded it), an agent of
+    daily per-model quotas one window per model.
 
     Every percentage here is percent USED (0-100), never the share left: 40
     means 40 % used and 60 % left. An agent on a fresh install read the bare
     ``session_percent`` as what remained and rationed an account that was
     nearly empty, so the JSON carries both sides under names that say which:
     ``*_used_percent`` and ``*_left_percent`` (``session_percent`` and
-    ``week_percent`` stay, for the readers that already know them).
+    ``week_percent`` stay, for the readers that already know them). They are views of
+    :attr:`windows`: the window of that name's, ``None`` where the reading has none. A
+    reading given those fields instead of ``windows`` holds the windows they say
+    (:func:`session_and_week`).
     """
 
     available: bool
@@ -338,18 +425,15 @@ class ClaudeUsage(BaseModel):
     needs_login: bool = False
     """Signed in, but the stored token has expired or was rejected: a session on the
     account refreshes it. False for every other reason nothing could be read."""
-    session_percent: float | None = None
-    """The rolling five-hour window: percent USED (0-100)."""
-    session_resets_at: datetime | None = None
-    week_percent: float | None = None
-    """The rolling seven-day window: percent USED (0-100)."""
-    week_resets_at: datetime | None = None
+    windows: tuple[UsageWindow, ...] = ()
+    """The account's windows, shortest first: those its plan has, each read or not."""
     family_week_percent: dict[str, float] = Field(default_factory=dict)
     """The per-family weeks (``seven_day_opus`` → ``opus``…): percent USED (0-100). Such a
     limit applies only to requests to that model family (#277), so a pick counts it for an
-    agent of that family alone (``services.claude_accounts.headroom_percent``). Live
-    readings only: the cache keeps the two shared windows, and a spent family week is
-    remembered as a limit mark instead (``remember_limit``)."""
+    agent of that family alone (``services.claude_accounts.headroom_percent``) and it is not
+    one of :attr:`windows`, every one of which limits every request. Live readings only:
+    the cache keeps the shared windows, and a spent family week is remembered as a limit
+    mark instead (``remember_limit``)."""
     family_week_resets_at: dict[str, datetime] = Field(default_factory=dict)
     """When each family week resets, where the endpoint said."""
     fetched_at: datetime | None = None
@@ -384,6 +468,84 @@ class ClaudeUsage(BaseModel):
         (review of #408, n3)."""
         return self.rate_limited or self.last_failed_reason is not None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _session_and_week(cls, data: Any) -> Any:
+        """``session_percent=``/``week_percent=`` (and their resets), as every reading was
+        given before :attr:`windows`, are those windows."""
+        named = ("session_percent", "session_resets_at", "week_percent", "week_resets_at")
+        if not isinstance(data, dict) or not any(key in data for key in named):
+            return data
+        data = dict(data)
+        given = [data.pop(key, None) for key in named]
+        data.setdefault("windows", session_and_week(*given))
+        return data
+
+    @model_validator(mode="after")
+    def _shortest_first(self) -> ClaudeUsage:
+        ordered = tuple(sorted(self.windows, key=lambda w: (w.minutes is None, w.minutes or 0)))
+        if ordered != self.windows:
+            object.__setattr__(self, "windows", ordered)
+        return self
+
+    def window(self, name: str) -> UsageWindow | None:
+        """The window called ``name``, or ``None`` when the reading has none."""
+        return next((window for window in self.windows if window.name == name), None)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def limiting(self) -> UsageWindow | None:
+        """The window that limits: the most used of those read (the shorter on a tie), or
+        ``None`` with none read. What the agent rows, the info line, a pick, the Accounts
+        page and ``accounts usage`` go by, and the JSON says: a weekly or a daily limit
+        refuses requests exactly as a five-hour one does."""
+        read = [window for window in self.windows if window.used_percent is not None]
+        return max(read, key=lambda window: window.used_percent or 0.0, default=None)
+
+    @property
+    def own_windows(self) -> tuple[UsageWindow, ...]:
+        """Every window, when one is called other than ``session`` and ``week`` (an agent of
+        daily per-model quotas), for the listings to show each by its name; ``()`` for a
+        reading their session and week columns show whole (Claude Code's, Codex's)."""
+        named = {SESSION_WINDOW, WEEK_WINDOW}
+        return self.windows if any(w.name not in named for w in self.windows) else ()
+
+    @property
+    def ranked_percent(self) -> float | None:
+        """How full the account reads for a pick: :attr:`limiting`'s percent USED, or
+        ``None`` while its shortest window went unread (a reading Claude Code's endpoint
+        answered without its five-hour window, which the pick skips as it always has)."""
+        if not self.available or not self.windows or self.windows[0].used_percent is None:
+            return None
+        limiting = self.limiting
+        return None if limiting is None else limiting.used_percent
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def session_percent(self) -> float | None:
+        """The rolling five-hour window: percent USED (0-100)."""
+        window = self.window(SESSION_WINDOW)
+        return None if window is None else window.used_percent
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def session_resets_at(self) -> datetime | None:
+        window = self.window(SESSION_WINDOW)
+        return None if window is None else window.resets_at
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def week_percent(self) -> float | None:
+        """The rolling seven-day window: percent USED (0-100)."""
+        window = self.window(WEEK_WINDOW)
+        return None if window is None else window.used_percent
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def week_resets_at(self) -> datetime | None:
+        window = self.window(WEEK_WINDOW)
+        return None if window is None else window.resets_at
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def session_used_percent(self) -> float | None:
@@ -410,7 +572,7 @@ class ClaudeUsage(BaseModel):
 
 
 class UsageSample(BaseModel):
-    """One reading of an account's two windows, kept so a rate can be computed (#146).
+    """One reading of an account's windows, kept so a rate can be computed (#146).
 
     Written by ``services.claude_accounts``' recording readers whenever usage
     is fetched — the Accounts page's minute tick, ``accounts usage``, a headroom
@@ -428,6 +590,10 @@ class UsageSample(BaseModel):
     """Which token took the reading: a fingerprint of it (never the token), so the
     five-minute cache serves a reading only to the login that took it. ``None`` on a
     reading recorded before it was kept (schema v28)."""
+    windows: tuple[UsageWindow, ...] | None = None
+    """Every window of the reading (schema v40), so the cache serves an agent whose windows
+    are not a session and a week (a daily quota per model) what it read. ``None`` on a
+    reading recorded before it was kept: its session and week fields are all it had."""
 
 
 class UsageTrend(BaseModel):
@@ -469,10 +635,11 @@ class HeadroomSummary(BaseModel):
     needs_login: int = 0
     """Signed-in accounts whose token has expired or was rejected: a session on each fixes it."""
     left_by_slot: dict[int, float] = Field(default_factory=dict)
-    """Each usable account's share LEFT, ``100 - max(session used, week used)``."""
-    session_by_slot: dict[int, float] = Field(default_factory=dict)
-    """Each usable account's five-hour window, percent USED — never the weekly one: what
-    the sidebar's agent rows and the agent info line show beside an agent's account."""
+    """Each usable account's share LEFT, ``100 -`` its window that limits."""
+    limit_by_slot: dict[int, float] = Field(default_factory=dict)
+    """Each usable account's window that limits (``ClaudeUsage.limiting``: the five-hour one
+    unless another, the week, a model's daily quota, is fuller), percent USED: what the
+    sidebar's agent rows and the agent info line show beside an agent's account."""
     fetched_at: datetime | None = None
     """The OLDEST reading behind the figure: the summary is no staler than this."""
     week_left_by_slot: dict[int, float] = Field(default_factory=dict)
@@ -538,10 +705,14 @@ class StatuslineSite(BaseModel):
 
 
 class AdoptableConversation(BaseModel):
-    """A Claude Code conversation on one of the CLI's accounts that no fleet row owns (#290):
-    what ``fleet adopt --list`` shows and ``fleet adopt`` takes."""
+    """A coding agent's conversation on one of the CLI's accounts that no fleet row owns
+    (#290): what ``fleet adopt --list`` shows and ``fleet adopt`` takes."""
 
     session_id: str
+    """The agent's own id for it, which ``fleet adopt`` takes (Claude Code's is the board's
+    too; Codex's is its thread id, which ``codex resume`` names)."""
+    agent: str = "claude-code"
+    """The agent whose conversation it is (``core.agent_adapters`` id): the one it resumes on."""
     transcript_path: str
     slot: int
     """The account whose config dir holds the transcript: the one it resumes on."""
@@ -555,7 +726,7 @@ class AdoptableConversation(BaseModel):
     first_prompt: str | None = None
     """The first thing the user typed, cut to a line."""
     held_by: int | None = None
-    """The pid of a live ``claude`` still holding the session; ``None`` when none does."""
+    """The pid of a live process still holding the session; ``None`` when none does."""
 
 
 class ClaudeAccountStatus(BaseModel):
@@ -574,11 +745,12 @@ class ClaudeAccountStatus(BaseModel):
     subscription: str | None = None
     """The plan the credentials file names (``max``, ``team``, …), when it does."""
     hooks_installed: bool = False
+    detail: str = ""
     usage: ClaudeUsage | None = None
 
 
 class ClaudeInstall(BaseModel):
-    """Whether Claude Code is on this machine, and which one."""
+    """Whether a coding agent (Claude Code unless named) is on this machine, and which one."""
 
     installed: bool
     binary: str | None = None
@@ -586,10 +758,12 @@ class ClaudeInstall(BaseModel):
 
 
 class AccountsOverview(BaseModel):
-    """The Claude side of the Accounts page in one read: the install and every slot."""
+    """The Accounts page in one read: the installs and every slot."""
 
     claude: ClaudeInstall
     accounts: list[ClaudeAccountStatus] = Field(default_factory=list)
+    installs: dict[str, ClaudeInstall] = Field(default_factory=dict)
+    """Every agent with account slots, by adapter id — Claude Code's is ``claude`` too."""
 
 
 # --- Collective Intelligence: the vocabularies both layers share --------------
@@ -831,6 +1005,10 @@ class SessionUsage(BaseModel):
     """The repository the session ran in, by working directory (``core.workspace.project_id_for``
     of its root) — whatever ``project_id`` is, which a pinned project overrides. ``None`` for
     a row from before it was recorded: ``project_id`` then stands for it."""
+    agent: str | None = None
+    """The agent whose session it is (its adapter's id): what the opt-in usage share keeps or
+    leaves out (``AgentCapabilities.usage_shared``). ``None`` for a row from before it was
+    recorded, which reads as the default agent's: no release before it recorded another's."""
 
 
 class TurnUsage(BaseModel):
@@ -885,6 +1063,11 @@ class TokenSummary(BaseModel):
     median_tool_calls_before_edit: int | None = None
     prices_as_of: str = ""
     prices_source: str = ""
+    """The list ``prices_as_of`` dates: the one agent's whose table priced these sessions'
+    models, else the default agent's (Claude Code's, as before #113's lane 274-L2)."""
+    price_lists: list[dict[str, str]] = Field(default_factory=list)
+    """Every agent's price list that priced a model here (``AgentAdapter.price_table``):
+    ``agent`` (its label), ``as_of`` and ``source``; a mixed team's has one per agent."""
 
 
 # --- local usage stats: Settings ▸ Usage & stats, ``aisquare metrics stats`` ------------
@@ -906,6 +1089,8 @@ class UsageTurnRow(BaseModel):
     usage: dict[str, Any] = Field(default_factory=dict)
     account_slot: int | None = None
     account_type: str | None = None
+    agent: str | None = None
+    """Its session's agent (``SessionUsage.agent``)."""
 
 
 class TokenCounts(BaseModel):
@@ -1143,6 +1328,8 @@ class TeamSession(BaseModel):
     """One live agent session on the orchestrator (id = the agent's session id)."""
 
     id: str
+    agent: str | None = None
+    native_session_id: str | None = None
     project_id: str
     role: str = "unassigned"
     label: str | None = None
@@ -1542,6 +1729,8 @@ class AgentConnection(BaseModel):
     name: str
     hooks_installed: bool = False
     imported: int = 0
+    readiness: str = "configured"
+    detail: str = ""
     hooks_off: Path | None = None
     """The settings file the hooks went into, when it switches every hook off
     (``"disableAllHooks": true``): they are installed, and Claude Code runs none of them
@@ -1745,7 +1934,10 @@ class FleetAgent(BaseModel):
     label: str
     """Unique among the project's LIVE agents; an ended agent frees its label."""
     role: str
-    binary: str = "claude"
+    binary: str = Field(default_factory=lambda: _default_binary())
+    """The executable its window runs; the default agent's (``agent_adapters.
+    default_binary``) on a row that names none."""
+    agent: str | None = None
     tmux_socket: str = "asq"
     pane_id: str
     session_id: str | None = None
@@ -1817,9 +2009,11 @@ class FleetAgentStatus(BaseModel):
     session: TeamSession | None = None
     tmux_session: str | None = None
     socket_at: Path | None = None
-    """Where the agent's server is asked (``tmux -S``), worked out once with the listing's
-    config (``services.fleet.socket_at``); ``None`` when it is asked by its socket's name
-    (``tmux -L``). Carried so the UI's panes and attach line read it off the frame."""
+    """Where the agent's server is asked (``tmux -S``), as its launch record places it
+    (``services.fleet.resolve_place``), worked out once with the listing's config; ``None``
+    when it is asked by its socket's name (``tmux -L``), and for a row no record places,
+    whose pane is not shown. Carried so the UI's panes and attach line read it off the
+    frame."""
     held: bool = False
     """The listing held the row as another server's (``services.fleet.ANOTHER_SERVER``): a
     server answers at its socket, and it is not the one the row was started on, which may

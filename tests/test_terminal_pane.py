@@ -305,7 +305,15 @@ def fake() -> FakeTmux:
 # --- rendering ----------------------------------------------------------------------------
 
 
-def test_renders_text_and_sgr_colour(fake: FakeTmux, tmp_path: Path) -> None:
+def test_renders_text_and_sgr_colour(
+    fake: FakeTmux,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This test asserts colour; an automation shell's NO_COLOR would deliberately
+    # make Textual map the same ANSI cells to greyscale.
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
     async def drive() -> tuple[list[str], Style, Style, Style]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
@@ -5579,16 +5587,17 @@ def test_agent_view_stop_says_a_release_the_store_refused(
 
     async def drive() -> list[tuple[str, str]]:
         host = ViewHost()
-        # Recorded at the call: the dialog notifies and then dismisses, and its callback
-        # runs ahead of the queued toast, so the screen's toasts can still be [] (seq 381).
-        told = toast_log.record_severity(host)
         async with host.run_test(size=(80, 12)) as pilot:
+            # What the dialog said, as it said it: it notifies, then dismisses, but the toast
+            # is a message on the app's queue and the dismiss a callback the app runs before
+            # its next one, so on windows-latest the dismiss was seen with no toast yet.
+            said = toast_log.record_severities(host)
             await pilot.pause()
             host.push_screen(StopAgentScreen(project, working), callback=closed.append)
             await pilot.pause()
             await pilot.click("#stop-confirm")
             await wait_until(pilot, lambda: len(closed) == 1)
-            return told
+            return said
 
     said = run(drive())
     assert closed == [working.agent]  # dismissed with the receipt's row, as a clean stop is

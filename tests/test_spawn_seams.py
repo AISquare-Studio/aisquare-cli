@@ -228,7 +228,7 @@ def test_every_seam_that_runs_in_the_git_environment_is_ruled_stripped() -> None
         if function is not None and "env=git_env()" in inspect.getsource(function):
             in_git_env.append(key)
 
-    assert len(in_git_env) == 8, in_git_env
+    assert len(in_git_env) == 9, in_git_env  # main's eight and `handoff._git`, the brief's (#15)
     assert [key for key in in_git_env if not SEAMS[key].strips_identity] == []
 
 
@@ -282,6 +282,9 @@ def test_the_strip_covers_everything_a_traced_launch_exports() -> None:
         explainability.PIPELINE_ID_ENV_VAR,
         explainability.TRACE_AGENT_NAME_ENV_VAR,
         explainability.RUN_TRACE_ID_ENV_VAR,
+        "AISQUARE_LAUNCH_ID",
+        "AISQUARE_LAUNCH_AGENT",
+        "AISQUARE_FLEET_AGENT",
     )
     assert tuple(IDENTITY_ENV_VARS) == (*TRACING_ENV_VARS, *MARKER_ENV_VARS)
 

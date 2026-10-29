@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Literal
 
 from aisquare.core import claude_screen as screen
-from aisquare.core import harness, paths
+from aisquare.core import paths
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import (
     TmuxError,
@@ -151,18 +151,18 @@ def discard_prompt_file(path: Path) -> None:
         path.unlink()
 
 
-def first_prompt_way(binary: str, *, claude_code: bool, setting: str) -> Way:
-    """How ``binary``'s first message reaches it: on the command line for Claude Code (a
-    row a hook or a resume shows to be Claude Code, or a Claude-shaped name,
-    ``harness.is_default_agent``), typed for any other binary, and typed for every agent
-    under ``[fleet] first_prompt = "type"``."""
+def first_prompt_way(*, positional: bool, setting: str) -> Way:
+    """How an agent's first message reaches it: on the command line for one that takes it as
+    its argument (``capabilities.positional_prompt``: Claude Code's ``claude -- "<prompt>"``,
+    measured in P0-W0, and Codex's ``codex -- "<prompt>"``), typed for any other, and typed
+    for every agent under ``[fleet] first_prompt = "type"``."""
     if setting == "type":
         return "typed"
-    return "argv" if claude_code or harness.is_default_agent(binary) else "typed"
+    return "argv" if positional else "typed"
 
 
 def argv_tail(text: str) -> list[str]:
-    """``text`` as Claude Code's positional prompt: after ``--``, without which a prompt that
+    """``text`` as the agent's positional prompt: after ``--``, without which a prompt that
     starts with ``-`` is read as an option and Claude Code exits (P0-W0)."""
     return ["--", text]
 
@@ -283,6 +283,7 @@ def deliver_typed(
     guard: float | None = None,
     re_press: tuple[float, ...] = RE_PRESS,
     last_wait: float = LAST_WAIT,
+    gap: float = ENTER_GAP,
 ) -> Delivered:
     """Paste ``text`` into a ready pane, check it is in the input box, press Enter, and see a
     turn start; press Enter again only while it provably did not.
@@ -303,7 +304,8 @@ def deliver_typed(
        until it holds the text (:func:`holds`). A box that by then holds something else —
        a human typed between the guard and the paste — is never pressed: the delivery is
        ``refused``, as by the guard (a tell is filed as a note, a nudge waits).
-    3. :data:`ENTER_GAP`, then Enter as its own tmux call.
+    3. ``gap`` (:data:`ENTER_GAP` unless given: the fleet gives Codex's longer one), then
+       Enter as its own tmux call.
     4. Acknowledge: ``acked()`` (the agent's ``UserPromptSubmit``), asked every
        :data:`ACK_POLL`. With no ``acked`` (an agent without hooks), the box no longer
        holding the text is the screen's word that it was sent.
@@ -346,7 +348,7 @@ def deliver_typed(
                     return Delivered(TellResult("no", why), None, 0, refused=why, in_box=True)
                 break
             sleep(RENDER_POLL)
-    sleep(ENTER_GAP)
+    sleep(gap)
     presses = 0
     stopped: str | None = None
     for wait in (*re_press, last_wait):
@@ -639,8 +641,12 @@ def type_then_enter(
     press: str,
     done: str = "typed into its pane at its prompt",
     what: str = "the text",
+    gap: float = 0.0,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> TellResult | PaneWrite:
-    """Paste ``text`` (``what``) at the prompt in ``label``'s pane, then press Enter: how every
+    """Paste ``text`` (``what``) at the prompt in ``label``'s pane, then press Enter, ``gap``
+    seconds later as a key of its own (``services.fleet._KEY_GAP``: Codex takes keys that
+    arrive in one burst for a paste, Enter included): how every
     message is typed into an agent, by :func:`tell`, a spawn's prompt (:func:`_type_prompt`)
     and the remote's paste (``remote_actions.action_paste``).
 
@@ -650,10 +656,12 @@ def type_then_enter(
     ``done``, or :func:`pasted_unsent` (``press``). The three wrote paste, Enter and
     :func:`pasted_unsent` out each in words of its own (review of #259, round 11, 12/13).
     """
-    wrote = pane_writes(
-        (what, lambda: server.paste(pane_id, text)),
-        ("Enter", lambda: server.send_keys(pane_id, "Enter")),
-    )
+
+    def enter() -> None:
+        sleep(gap)
+        server.send_keys(pane_id, "Enter")
+
+    wrote = pane_writes((what, lambda: server.paste(pane_id, text)), ("Enter", enter))
     if wrote.typed == "yes":
         return TellResult("yes", done)
     return pasted_unsent(wrote, label, press=press) if wrote.went else wrote

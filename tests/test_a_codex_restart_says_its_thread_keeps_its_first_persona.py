@@ -1,0 +1,113 @@
+"""A restart that resumes a Codex thread says its system seam keeps its first persona.
+
+SCOPE #113 0.8.2, A3's replay rule (``capabilities.resume_keeps_system_prompt``): measured on
+0.162.1, ``codex resume <id>`` keeps the ``developer_instructions`` of the thread's first
+turn and ignores a new one. So a restart of a Codex row whose persona changed since its
+launch (``persona attach``) passes the new persona to a seam that drops it: it reaches the
+agent through the session-start briefing alone, and the receipt says so
+(``services.personas.resume_seam_note``). One whose persona is the one its launch passed
+says nothing. The seam is the THREAD's: its first launch's persona rides with the session
+across each resume (``SessionFacts.seam_persona``), so every later resume says it again
+(SMOKE8: the second restart said nothing, its record naming the attached persona), and a
+fresh thread's seam is the persona its own launch passed.
+
+On the fleet's fake tmux, with Codex's hooks as 0.162.1 sends them.
+"""
+
+from __future__ import annotations
+
+from aisquare.core import launch_seal
+from aisquare.models import TeamTask
+from aisquare.services import fleet as fleet_service
+from tests import test_codex_account_switch as switch_suite
+from tests import test_codex_fleet_parity as codex_suite
+from tests import test_fleet_service as fleet_suite
+from tests.test_codex_fleet_parity import THREAD_ONE, THREAD_TWO, Codex, _rollout
+
+# The suites' fixtures, bound here so pytest finds them for this module's tests.
+tmux = fleet_suite.tmux
+clock = fleet_suite.clock
+claude_on_path = fleet_suite.claude_on_path
+repo = fleet_suite.repo
+project = fleet_suite.project
+codex_on_path = switch_suite.codex_on_path
+codex_agent = codex_suite.codex_agent
+
+SEAM = "Codex resumes the thread with the system prompt it began with"
+
+
+def test_a_codex_restart_after_a_persona_attach_says_the_briefing_carries_it(
+    codex_agent: tuple[Codex, TeamTask],
+) -> None:
+    codex, _ = codex_agent
+    _rollout(codex, THREAD_ONE)
+    codex.start(THREAD_ONE)
+    fleet_service.attach_persona(codex.project, codex.agent.label, "skeptic")
+
+    receipt = fleet_service.restart(codex.project, codex.agent.label)
+
+    assert receipt.resumed is True
+    said = [note for note in receipt.notes if SEAM in note]
+    assert said == [
+        f"persona skeptic: {SEAM}, so its system seam keeps its first persona — skeptic "
+        "reaches it through the session-start briefing"
+    ], receipt.notes
+
+    # The resumed thread's own start hook, which merges into the replacement's record.
+    codex.agent = receipt.started
+    codex.become()
+    codex.start(THREAD_ONE, source="resume")
+    record = launch_seal.read(codex.agent.id)
+    again = fleet_service.restart(codex.project, codex.agent.label)
+
+    assert again.resumed is True
+    assert [note for note in again.notes if SEAM in note] == said, "the seam still holds none"
+    assert not isinstance(record, str) and record.session is not None
+    kept = record.session.model_dump()
+    assert (kept["native_id"], kept.get("seam_persona")) == (THREAD_ONE, ""), "merged, kept"
+
+    fresh = fleet_service.restart(codex.project, codex.agent.label, fresh=True)
+    codex.agent = fresh.started
+    codex.become()
+    _rollout(codex, THREAD_TWO)
+    codex.start(THREAD_TWO)
+    after = fleet_service.restart(codex.project, codex.agent.label)
+
+    assert after.resumed is True
+    assert not [note for note in after.notes if SEAM in note], "its launch passed skeptic"
+
+
+def test_a_codex_restart_that_drops_its_persona_says_its_seam_keeps_it(
+    codex_agent: tuple[Codex, TeamTask],
+) -> None:
+    """Review r17 of #113, finding 10: a thread begun as skeptic and resumed with no persona
+    (a take-over to *(none)*) still holds skeptic in its system seam, and the row says none."""
+    codex, _ = codex_agent
+    _rollout(codex, THREAD_ONE)
+    codex.start(THREAD_ONE)
+    fleet_service.attach_persona(codex.project, codex.agent.label, "skeptic")
+    began = fleet_service.restart(codex.project, codex.agent.label, fresh=True)
+    codex.agent = began.started
+    codex.become()
+    _rollout(codex, THREAD_TWO)
+    codex.start(THREAD_TWO)
+
+    receipt = fleet_service.restart(codex.project, codex.agent.label, persona="")
+
+    assert receipt.resumed is True and receipt.started.persona is None
+    assert [note for note in receipt.notes if SEAM in note] == [
+        f"no persona: {SEAM}, so its system seam keeps skeptic — restart it with --fresh to drop it"
+    ], receipt.notes
+
+
+def test_a_codex_restart_with_the_persona_its_launch_passed_says_nothing_of_its_seam(
+    codex_agent: tuple[Codex, TeamTask],
+) -> None:
+    codex, _ = codex_agent
+    _rollout(codex, THREAD_ONE)
+    codex.start(THREAD_ONE)
+
+    receipt = fleet_service.restart(codex.project, codex.agent.label)
+
+    assert receipt.resumed is True
+    assert not [note for note in receipt.notes if SEAM in note], receipt.notes

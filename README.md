@@ -11,7 +11,7 @@ plain words, and it runs the coders, testers and reviewers for you.**
 Type `asq` and you get a full-screen, mouse-driven view: your projects on the
 left, and on the right a **manager** agent you task in prose — it plans, spawns
 coders, testers and reviewers, and loops until the goal is met. Click any of
-them and you are inside its *real* Claude Code session, typing at it directly.
+them and you are inside its *real* Claude Code or Codex session, typing at it directly.
 Nothing is relayed or re-rendered as a chat.
 
 Underneath, agents get a **memory** that persists across sessions — your
@@ -33,7 +33,8 @@ aisquare remember --user "prefer pytest over unittest"
 
 `init` registers the repo you run it in and wires Claude Code's hooks, so every
 new session starts with what you told it to remember. `aisquare context list`
-shows what is in scope.
+shows what is in scope. To install from inside Codex instead, see
+[the Codex plugin](https://github.com/AISquare-Studio/aisquare-cli/blob/main/plugins/codex/README.md).
 
 ## Quickstart 2: the full fleet
 
@@ -118,8 +119,10 @@ backed by one SQLite file: no daemon, no cloud dependency. Sign in with
 
 - macOS, Linux, or Windows through WSL2.
 - Python 3.11+ if you install by hand (the one-liner brings its own 3.13).
-- [Claude Code](https://claude.com/claude-code) for the agents, and tmux 3.2+
-  for the fleet.
+- [Claude Code](https://claude.com/claude-code) or
+  [Codex](https://learn.chatgpt.com/docs/codex/cli) (CLI 0.162.1 or newer;
+  tested on 0.162.1 and 0.164.0) for
+  the agents, either or both, and tmux 3.2+ for the fleet.
 - Node 22.12+, optional, for browser tools like the Chrome DevTools MCP; the one-liner
   offers both, Node and the MCP registered with Claude Code (`--with chrome-devtools`
   installs them without asking). aisquare itself never runs Node.

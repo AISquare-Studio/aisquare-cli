@@ -117,6 +117,24 @@ def reset_cache() -> None:
     _config.cache_clear()
 
 
+def token_count(value: object) -> int:
+    """An OTLP count as a nonnegative signed 64-bit integer, or unknown (zero).
+
+    JSON exporters may encode integers as strings. Refuse booleans, fractional
+    counts, non-finite numbers and overflow before passing data to an OTel SDK.
+    Also used during replay so an older spool cannot poison future drains.
+    """
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return 0
+    try:
+        parsed = int(value)
+    except (ValueError, OverflowError):
+        return 0
+    if isinstance(value, float) and parsed != value:
+        return 0
+    return parsed if 0 <= parsed < 2**63 else 0
+
+
 def run_key(session_id: str | None) -> str | None:
     """The Run these insights belong in — the launcher's answer, then ours.
 

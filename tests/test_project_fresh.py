@@ -36,7 +36,7 @@ from typer.core import TyperGroup
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import paths
+from aisquare.core import launch_seal, paths
 from aisquare.core.entries import new_entry
 from aisquare.core.ids import new_agent_id, new_event_id, new_task_id
 from aisquare.core.orchestrator import FLEET_AGENT_ENV_VAR, team_project
@@ -475,6 +475,40 @@ def test_discard_unpushed_removes_the_tree_and_branches_deletes_its_branch_local
     assert _branches(alpha.root) == ["main", "mine"]
 
 
+@pytest.mark.parametrize("at", ["its-tree", "the-root"])
+def test_a_tree_no_launch_record_places_is_kept_and_said_as_reap_says_it(
+    at: str, runner: CliRunner, tmp_path: Path, spawned: list[tuple[str, str, dict[str, Any]]]
+) -> None:
+    """An ended row whose launch record is gone (``Unplaced``) names no tree the reset may
+    remove (``fleet_trees``), and its row goes with the board: the tree stays on disk, and the
+    report says so and why, in reap's words, never in silence (review r28 of #113, m3). A row
+    whose store ``cwd`` names the project's root names no tree kept: the root is no tree."""
+    alpha = _add(tmp_path / "alpha", "alpha-x")
+    _git("init", "-q", "-b", "main", cwd=alpha.root)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=alpha.root)
+    tree = tmp_path / "trees" / "coder-1"
+    _git("worktree", "add", "-q", "-b", "fleet/alpha-x/coder-1", str(tree), cwd=alpha.root)
+    cwd = tree if at == "its-tree" else alpha.root
+    fleet_service.take_census()  # before the row: a row spawned since, with no record
+    with store_session() as store:
+        row = store.upsert_fleet_agent(_agent(alpha, "coder-1", cwd=cwd, worktree=True))
+        store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
+    assert isinstance(fleet_service.resolve_place(row), fleet_service.Unplaced), "the fixture"
+
+    result = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    said = " ".join(result.output.split())
+    kept = [line for line in result.output.splitlines() if "⚠ kept" in line]
+    if at == "its-tree":
+        assert f"⚠ kept {tree} — no launch record places coder-1: " in said, said
+    else:
+        assert kept == [], kept
+    assert tree.is_dir() and alpha.root.is_dir()
+    with store_session() as store:
+        assert [row.label for row in store.fleet_agents(alpha.id)] == ["manager"], "row gone"
+
+
 # --- the CLI -------------------------------------------------------------------------------
 
 
@@ -721,6 +755,7 @@ def test_a_dead_pane_and_a_stray_process_go_and_only_the_new_managers_window_sta
     srv = fleet_service.server()
     session = fleet_service.session_name("alpha-x")
     srv.run("new-session", "-d", "-s", session, "-n", "coder-1", "sleep 600")
+    _indexed(alpha, srv, session)
     srv.run("set-option", "-g", "remain-on-exit", "on")
     # The manager's window runs until the panes are listed, then is killed: a command that
     # ended first left a dead pane with no #{pane_pid}, and the listing below came short of a
@@ -987,6 +1022,7 @@ def test_m1_a_project_with_nothing_to_stop_is_not_refused_inside_the_fleet_serve
     assert fresh_service.plan(alpha).sessions == []
 
     srv.run("new-session", "-d", "-s", fleet_service.session_name("alpha-x"), "sleep 600")
+    _indexed(alpha, srv, fleet_service.session_name("alpha-x"))
     with pytest.raises(fresh_service.FreshRefused) as refused:
         fresh_service.plan(alpha)
     assert refused.value.code == "inside_fleet"
@@ -1135,6 +1171,7 @@ def test_n2_a_session_tmux_cannot_be_asked_refuses_the_reset_with_nothing_touche
     just in case, passed over the failure and listed none: the stop was skipped, a tree
     removed under its running process and the board cleared. It refuses, nothing touched."""
     alpha, _, _, _ = two  # its manager's row ended: no live row
+    _index(alpha, "$41", fleet_service.session_name("alpha-x"))  # the session its spawn made
 
     def unasked(self: TmuxServer, name: str) -> bool:
         raise TmuxError("error connecting to /private/tmp/tmux-501/asq (Permission denied)")
@@ -1344,6 +1381,29 @@ def test_a_commit_made_while_the_dialog_was_open_is_refused_with_nothing_stopped
 # --- review round 4 on #429 (#5) -----------------------------------------------------------
 
 
+def _index(project: ProjectInfo, session_id: str, name: str) -> None:
+    """``name`` as a spawn of ``project`` indexed the session it made
+    (``launch_seal.add_project_session``): where a reset and a shutdown look for a project's
+    sessions, by tmux's id, never by a name built from its codename."""
+    placed = launch_seal.add_project_session(
+        project.id,
+        launch_seal.SessionPlace(
+            tmux_socket=fleet_service.settings().tmux_socket,
+            session_id=session_id,
+            name=name,
+            created_at=datetime.now(tz=UTC),
+        ),
+    )
+    assert placed is None, placed
+
+
+def _indexed(project: ProjectInfo, srv: TmuxServer, session: str) -> None:
+    """:func:`_index` for a session standing on the test's own tmux server."""
+    listed = srv.run("list-sessions", "-F", "#{session_id} #{session_name}")
+    ids = dict(line.split(" ", 1)[::-1] for line in listed.splitlines())
+    _index(project, ids[session], session)
+
+
 def _stray_session(tmp_path: Path) -> tuple[ProjectInfo, TmuxServer, str, int]:
     """Alpha with no live row, and its session standing with the process a row recorded as
     died left running in it, on the test's own tmux server."""
@@ -1359,6 +1419,7 @@ def _stray_session(tmp_path: Path) -> tuple[ProjectInfo, TmuxServer, str, int]:
             _agent(alpha, "coder-1", pane_id=pane, tmux_socket=fleet_service.settings().tmux_socket)
         )
         store.end_fleet_agent(row.id, exit_status=None, ended_by="died")
+    _indexed(alpha, srv, session)
     return alpha, srv, session, int(pid)
 
 
@@ -1372,26 +1433,19 @@ _NEEDS_TMUX = pytest.mark.skipif(
 
 
 @_NEEDS_TMUX
-def test_n2_a_session_tmux_stops_answering_for_during_the_stop_is_never_said_to_have_ended(
+def test_n2_a_session_the_stop_did_not_take_down_is_never_said_to_have_ended(
     tmp_path: Path,
     spawned: list[tuple[str, str, dict[str, Any]]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """N2 (round 4), path 1: has-session stops answering between the plan and the stop's
-    kill phase, which passes over a session it asked just in case. "Neither killed nor
-    failed" was read as gone: the report said the session ended, and the reset went on
-    beside it and its running process. The strict read after the stop decides: it stands,
-    or cannot be told of, so nothing is removed and the board stays."""
+    """N2 (round 4), path 1: the stop passes over a session (here it kills nothing). "Neither
+    killed nor failed" was read as gone: the report said the session ended, and the reset went
+    on beside it and its running process. The strict read after the stop decides: it stands,
+    so nothing is removed and the board stays."""
     alpha, srv, session, stray = _stray_session(tmp_path)
-    real_shutdown = fleet_service.shutdown
-    real_ask = TmuxServer.has_session_or_raise
 
-    def shutdown(project: ProjectInfo, **kwargs: Any) -> fleet_service.ShutdownReport:
-        monkeypatch.setattr(TmuxServer, "has_session_or_raise", _denied)
-        try:
-            return real_shutdown(project, **kwargs)
-        finally:
-            monkeypatch.setattr(TmuxServer, "has_session_or_raise", real_ask)
+    def shutdown(project: ProjectInfo, **_: Any) -> fleet_service.ShutdownReport:
+        return fleet_service.ShutdownReport()  # its kill phase passed over the session
 
     monkeypatch.setattr(fleet_service, "shutdown", shutdown)
     tasks = len(_rows(alpha.id)["team_task"])
@@ -1407,23 +1461,22 @@ def test_n2_a_session_tmux_stops_answering_for_during_the_stop_is_never_said_to_
 
 
 @_NEEDS_TMUX
-def test_n2_a_session_the_plans_just_in_case_ask_misses_is_still_stopped(
+def test_n2_a_session_the_plan_cannot_ask_about_refuses_before_any_stop(
     tmp_path: Path,
     spawned: list[tuple[str, str, dict[str, Any]]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """N2 (round 4), path 2: has-session answers the strict listing, then fails for the
-    plan's just-in-case ask, which passes over it: the plan listed none, no stop ran, and the
-    reset went on over the session and its process. The stop runs for what the strict read
-    saw, and the strict read after it decides; here tmux cannot answer it, so nothing is
-    removed."""
+    """N2 (round 4), path 2: has-session answers the first listing, then fails for the plan's
+    own. The plan reads every session its project's spawns indexed strictly (none is passed
+    over "just in case"), so a session it cannot ask about is a refusal, before any stop and
+    with nothing removed."""
     alpha, srv, session, stray = _stray_session(tmp_path)
     real_ask = TmuxServer.has_session_or_raise
     asks: list[str] = []
 
     def flaky(self: TmuxServer, name: str) -> bool:
         asks.append(name)
-        if len(asks) == 1:  # the strict listing's ask answers…
+        if len(asks) == 1:  # the first listing's ask answers…
             return real_ask(self, name)
         return _denied(self, name)  # …and every one after it fails
 
@@ -1432,16 +1485,17 @@ def test_n2_a_session_the_plans_just_in_case_ask_misses_is_still_stopped(
 
     def shutdown(project: ProjectInfo, **_: Any) -> fleet_service.ShutdownReport:
         stopped.append(project.id)
-        return fleet_service.ShutdownReport()  # its kill phase passed over the session too
+        return fleet_service.ShutdownReport()
 
     monkeypatch.setattr(fleet_service, "shutdown", shutdown)
     tasks = len(_rows(alpha.id)["team_task"])
 
-    with pytest.raises(fresh_service.FreshIncomplete) as incomplete:
+    with pytest.raises(fresh_service.FreshRefused) as refused:
         fresh_service.start_fresh(alpha)
 
-    assert stopped == [alpha.id], "the stop ran for the session the strict read saw"
-    assert f"tmux could not say whether {session} stands" in str(incomplete.value)
+    assert refused.value.code == "fleet_error"
+    assert "could not list the fleet's sessions" in str(refused.value)
+    assert stopped == [], "refused before any stop"
     monkeypatch.setattr(TmuxServer, "has_session_or_raise", real_ask)
     assert srv.has_session(session) and _alive(stray)
     assert len(_rows(alpha.id)["team_task"]) == tasks and spawned == []

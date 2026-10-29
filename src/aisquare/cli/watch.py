@@ -206,12 +206,15 @@ def _session_lines(
             text.append(f"  {label}", style="cyan dim")
         if session.model:
             text.append(f"  {session.model}", style="dim cyan")
-            off = harness.model_mismatch(session.role, session.model)
+            off = harness.model_mismatch(session.role, session.model, agent=session.agent)
             if off:
                 # A model the owner chose for it is off no ladder (#16): asked only for a
                 # session off its ladder, never on every tick.
                 off = harness.model_mismatch(
-                    session.role, session.model, chosen=model_memory.chosen_models(session)
+                    session.role,
+                    session.model,
+                    agent=session.agent,
+                    chosen=model_memory.chosen_models(session),
                 )
             if off:
                 text.append("  ⚠ off-ladder", style="bold yellow")

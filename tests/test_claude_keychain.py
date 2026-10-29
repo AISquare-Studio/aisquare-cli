@@ -888,12 +888,24 @@ def test_on_linux_securestorage_leaves_the_config_dirs_file_as_it_was(
 
 
 @POSIX_ONLY
-def test_asq_never_asks_a_locked_keychain_again_by_itself(keychain: FakeKeychain) -> None:
+def test_asq_never_asks_a_locked_keychain_again_by_itself(
+    keychain: FakeKeychain, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The tester's concern: a locked login Keychain in a desktop session may put its unlock
     dialog up on each read. In a real asq, every tick of the shell's accounts read and the
     sidebar's headroom reads the slot from the memo after the first refusal; opening the
-    Accounts page and ↻ Refresh usage ask again, once each."""
+    Accounts page and ↻ Refresh usage ask again, once each.
+
+    Main's count, from zero: [1, 2, 3, 3]. CI showed it one over at every step ([2, 3, 4, 4]:
+    runs 40416527291 on py3.11 and 40421137157 on py3.12, one leg in five), and 37fa636f let the
+    first refusal take two asks to hide it. That was a real second ask: ``read_keychain`` looked,
+    asked and only then kept what it was told, and the shell's frame and the headroom it triggers
+    are threads, so two readers of a cold item both asked (r24 1; it is one ask in flight per
+    item now, ``test_two_readers_of_a_cold_keychain_item_ask_it_once``). Who asked, and when, is
+    in the failure."""
     import asyncio
+    import time
+    import traceback
 
     from aisquare.cli.ui.app import FleetApp
     from tests.test_ui_accounts import accounts_read, open_accounts, settle
@@ -902,6 +914,21 @@ def test_asq_never_asks_a_locked_keychain_again_by_itself(keychain: FakeKeychain
     _identity(two, "two@example.com")
     wanted = core.keychain_service(two)
     keychain.put(wanted, exit=36, stderr="User interaction is not allowed.")
+
+    started = time.monotonic()
+    askers: list[str] = []
+    ask = core._ask_keychain
+
+    def recording(service: str, account: str) -> core.KeychainRead:
+        if service == wanted:
+            frames = [f.name for f in traceback.extract_stack()[:-1] if "aisquare" in f.filename]
+            askers.append(
+                f"{time.monotonic() - started:.2f}s {threading.current_thread().name} "
+                f"{' > '.join(frames[-5:])}"
+            )
+        return ask(service, account)
+
+    monkeypatch.setattr(core, "_ask_keychain", recording)
 
     def asked() -> int:
         return sum(1 for call in keychain.calls() if call[call.index("-s") + 1] == wanted)
@@ -935,4 +962,120 @@ def test_asq_never_asks_a_locked_keychain_again_by_itself(keychain: FakeKeychain
             await pilot.pause()
         return counts
 
-    assert asyncio.run(run()) == [1, 2, 3, 3]
+    counts = asyncio.run(run())
+
+    assert counts == [1, 2, 3, 3], f"asks at each step: {counts}; who asked: {askers}"
+
+
+def _slow_ask(
+    monkeypatch: pytest.MonkeyPatch, answer: core.KeychainRead
+) -> tuple[list[str], threading.Event, threading.Event, list[int]]:
+    """``_ask_keychain`` held open: it notes that it was entered, waits to be released, and
+    answers ``answer``. Returns the entries (by thread), the event set on each entry, the
+    one that releases it, and the most asks in flight at once."""
+    entered: list[str] = []
+    in_flight = [0, 0]  # now, most
+    guard = threading.Lock()
+    some = threading.Event()
+    release = threading.Event()
+
+    def ask(service: str, account: str) -> core.KeychainRead:
+        with guard:
+            entered.append(threading.current_thread().name)
+            in_flight[0] += 1
+            in_flight[1] = max(in_flight)
+        some.set()
+        release.wait(5)
+        with guard:
+            in_flight[0] -= 1
+        return answer
+
+    monkeypatch.setattr(core, "_ask_keychain", ask)
+    return entered, some, release, in_flight
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        core.KeychainRead(found=False, unreadable=LOCKED),
+        core.KeychainRead(
+            found=True,
+            credentials=core.ClaudeCredentials("sk-x", None, None, None),
+        ),
+    ],
+    ids=["a refusal", "a login"],
+)
+def test_two_readers_of_a_cold_keychain_item_ask_it_once(
+    answer: core.KeychainRead, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """r24 1: the second reader waits for the first's answer and takes it from the memo, so a
+    locked login Keychain shows its unlock dialog once at startup, not once per thread."""
+    core.forget_keychain_reads()
+    entered, some, release, _ = _slow_ask(monkeypatch, answer)
+    reads: list[core.KeychainRead] = []
+    first = threading.Thread(target=lambda: reads.append(core.read_keychain("svc", "me")))
+    second = threading.Thread(target=lambda: reads.append(core.read_keychain("svc", "me")))
+
+    first.start()
+    assert some.wait(5), "the first reader never asked"
+    second.start()
+    # Long enough for a second reader with no lock to have reached its own ask.
+    second.join(0.3)
+    assert entered == [first.name], (
+        f"the second reader asked while the first's ask was open: {entered}"
+    )
+    release.set()
+    first.join(5)
+    second.join(5)
+
+    assert len(entered) == 1 and reads == [answer, answer]
+    core.forget_keychain_reads()
+
+
+def test_a_forced_read_asks_after_the_one_in_flight_and_never_beside_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``fresh`` is for after an unlock: it asks again, but one ask at a time per item."""
+    core.forget_keychain_reads()
+    answer = core.KeychainRead(found=False, unreadable=LOCKED)
+    entered, some, release, in_flight = _slow_ask(monkeypatch, answer)
+    first = threading.Thread(target=lambda: core.read_keychain("svc", "me"))
+    forced = threading.Thread(target=lambda: core.read_keychain("svc", "me", fresh=True))
+
+    first.start()
+    assert some.wait(5)
+    forced.start()
+    forced.join(0.3)
+    assert len(entered) == 1, "the forced read asked beside the one in flight"
+    release.set()
+    first.join(5)
+    forced.join(5)
+
+    assert len(entered) == 2 and in_flight[1] == 1, (entered, in_flight)
+    core.forget_keychain_reads()
+
+
+def test_the_reads_of_different_keychain_items_do_not_wait_for_each_other(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core.forget_keychain_reads()
+    entered, some, release, in_flight = _slow_ask(
+        monkeypatch, core.KeychainRead(found=False, unreadable=LOCKED)
+    )
+    one = threading.Thread(target=lambda: core.read_keychain("svc-one", "me"))
+    other = threading.Thread(target=lambda: core.read_keychain("svc-two", "me"))
+
+    one.start()
+    assert some.wait(5)
+    other.start()
+    deadline = threading.Event()
+    for _ in range(100):  # the second item's ask is entered while the first's is open
+        if len(entered) == 2:
+            break
+        deadline.wait(0.05)
+    release.set()
+    one.join(5)
+    other.join(5)
+
+    assert len(entered) == 2 and in_flight[1] == 2, (entered, in_flight)
+    core.forget_keychain_reads()

@@ -1,13 +1,19 @@
 """The guided first run behind the Welcome page: what this machine has, and the fleet it starts.
 
 Roadmap 9.2. The Welcome view walks a new user from an empty home to a manager
-and two coders in three steps: a project, Claude Code installed and connected,
-then the fleet. What the view needs to ASK of the machine is here, as data, and
-so is the one thing it DOES that no other service did for it: start the fleet.
-Adding a project is ``services.onboarding`` (``init`` then ``doctor``, as the
-Onboard view runs them), and connecting Claude Code is the doctor's own
+and two coders in three steps: a project, the coding agent installed and
+connected, then the fleet. What the view needs to ASK of the machine is here, as
+data, and so is the one thing it DOES that no other service did for it: start the
+fleet. Adding a project is ``services.onboarding`` (``init`` then ``doctor``, as
+the Onboard view runs them), and connecting the agent is the doctor's own
 one-click fix (``onboarding.KNOWN_FIXES``), so neither has a second
 implementation here.
+
+The coding agent is the one ``fleet.spawn`` would start the manager on
+(``agent_launch.resolve``): Claude Code unless something chose another, and on a
+machine where only another agent is installed (Codex alone), that one
+(:func:`fleet_agent`). Claude Code's step is :func:`probe_claude`, as it always
+was; another agent's reads the same facts its own way (:func:`probe_fleet`).
 
 Like ``services.onboarding``, this module never raises: every probe takes its
 seams as parameters, so a test hands in fakes, and one that fails answers with
@@ -19,13 +25,16 @@ Two rules shape :func:`start_fleet`:
 - **It never types into an agent it starts.** No ``prompt=`` reaches
   ``fleet.spawn`` (:class:`Spawner` has no such parameter, so mypy holds this as
   well as the tests). A folder Claude Code has not seen makes it ask, once,
-  whether to trust the folder, and the fleet's prompt typing decides when the
-  agent is ready from the pane's foreground process, not from its screen. #240's
-  captain work measured that typing into that question picks "No, exit". The user
-  answers it in the manager's pane, and the coders start after that, from their
+  whether to trust the folder. #240's captain work measured that typing into that
+  question picks "No, exit"; ``fleet.spawn`` now types a prompt into Claude Code
+  only once its ``SessionStart`` has come, past the question, and files it as a
+  board note when that does not come in time, which would leave the manager's
+  first job a note behind a dialog. So the user answers it in the manager's pane,
+  and the coders start after that, from their
   own button. A coder whose window is gone is not started but restarted
   (:class:`Restarter`), as the agent view's Restart does it, and restart types its
-  own line: that coder has run in its folder before.
+  own line: that coder has run in its folder before. Codex asks the same question
+  of a new folder, so the rule holds for it as it does for Claude Code.
 - **It is idempotent.** It never starts a second manager, and it tops the coders
   up to :data:`CODERS` rather than adding two more each time it runs.
 """
@@ -36,7 +45,7 @@ import dataclasses
 import os
 import shutil
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -44,12 +53,15 @@ from typing import Literal, Protocol
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import config as config_core
-from aisquare.core import harness, selfcli
+from aisquare.core import harness, orchestrator, paths, selfcli
 from aisquare.core import tmux as tmux_core
+from aisquare.core.agent_adapters import adapters, get_adapter
+from aisquare.core.agent_adapters.types import AgentAdapter, InstallRoute, executable_name
 from aisquare.core.store import store_session
-from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
+from aisquare.models import ClaudeAccount, FleetAgent, FleetAgentStatus, ProjectInfo
+from aisquare.services import agent_launch, diagnostics, onboarding
 from aisquare.services import agents as agents_service
-from aisquare.services import diagnostics, onboarding
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services.onboarding import FixCommand, FixResult, PathVerdict, Runner
 
@@ -57,57 +69,64 @@ CODERS = 2
 """How many coders the Welcome page starts beside the manager."""
 
 FLEET_ROLE = "manager"
-"""The role whose binary the Claude Code step looks for: the first agent Welcome starts."""
+"""The role whose agent step 2 looks for: the first agent Welcome starts."""
+
+CODER_ROLE = "coder"
 
 CANDIDATE_LIMIT = 4
 """How many registered projects step 1 offers beside the directory ``asq`` started in."""
 
-BREW_COMMAND = "brew install --cask claude-code"
-"""Claude Code's Homebrew cask, offered on macOS after the native installer."""
-
-CONNECT_ARGV: tuple[str, ...] = ("agents", "connect", "claude-code")
+CONNECT_ARGV: tuple[str, ...] = ("agents", "connect", accounts_core.AGENT)
 """The doctor's one-click Connect, as ``onboarding.KNOWN_FIXES`` lists it."""
+
+CHOOSABLE_SOURCES = frozenset({"default", "user"})
+"""The ``agent_launch.resolve`` rungs a user default decides: with the agent chosen by
+nothing more specific (a role binding, the project, the environment), step 2 may offer
+another installed agent and save the pick as the user default (``agents use``)."""
 
 
 def _why(exc: BaseException) -> str:
     return str(exc) or type(exc).__name__
 
 
-# --------------------------------------------------------------------------- Claude Code
+# --------------------------------------------------------------------------- the coding agent
 
 
-@dataclass(frozen=True)
-class InstallRoute:
-    """One way to install Claude Code: how it is installed, and the command a terminal runs."""
+def install_routes(
+    platform: str | None = None, *, agent: str = accounts_core.AGENT
+) -> tuple[InstallRoute, ...]:
+    """``agent``'s install commands for ``platform`` (default: this one), best first: its
+    adapter's ``install_routes``, those offered there.
 
-    how: str
-    command: str
-
-
-def install_routes(platform: str | None = None) -> tuple[InstallRoute, ...]:
-    """Claude Code's install commands for ``platform`` (default: this one), best first.
-
-    The native installer comes first: it is what ``install.sh`` runs and the layout
-    ``diagnostics.claude_code_version`` reads first. npm comes last everywhere,
-    because it needs a Node.js the machine may not have. On Windows the fleet
-    runs inside WSL2, where tmux is, so the one route is the installer run there.
+    Each adapter lists its own installer first (what ``install.sh`` runs, and the layout
+    the version probes read first) and npm last, because it needs a Node.js the machine
+    may not have. On Windows the fleet runs inside WSL2, where tmux is, so the one route
+    is the adapter's best, run there.
     """
     where = platform if platform is not None else sys.platform
-    native = InstallRoute("installer", accounts_core.INSTALL_COMMAND)
-    npm = InstallRoute("npm", accounts_core.INSTALL_ALTERNATIVE)
+    routes = get_adapter(agent).install_routes
     if where == "win32":
-        return (InstallRoute("inside WSL2", accounts_core.INSTALL_COMMAND),)
-    if where == "darwin":
-        return (native, InstallRoute("Homebrew", BREW_COMMAND), npm)
-    return (native, npm)
+        return (InstallRoute("inside WSL2", routes[0].command),)
+    return tuple(route for route in routes if not route.platforms or where in route.platforms)
+
+
+def agent_label(agent: str) -> str:
+    """``Claude Code`` / ``Codex``; the id itself for an agent no adapter knows."""
+    try:
+        return get_adapter(agent).label
+    except ValueError:
+        return agent
 
 
 @dataclass(frozen=True)
 class ClaudeState:
-    """What step 2 shows: the agent the fleet launches, where it is, and whether it is wired."""
+    """What step 2 shows: the coding agent the fleet launches, where it is, and whether it is
+    wired. Named for the agent it first described; every agent's step 2 is one of these
+    (:attr:`agent`), with Claude Code's own fields at their defaults for another
+    (:data:`AgentState` is the same class)."""
 
     wanted: str
-    """What a fleet launch starts: ``claude``, or the override the user set."""
+    """What a fleet launch starts: ``claude`` or ``codex``, or the override the user set."""
     source: str
     """Which rung chose it (``harness.BinaryResolution.source``): ``default``, ``env``…"""
     binary: str | None = None
@@ -137,21 +156,75 @@ class ClaudeState:
     """``None`` when this probe did not look (the periodic one skips it)."""
     problem: str | None = None
     """A probe that failed, in words; whatever it could not read is left at its default."""
+    agent: str = accounts_core.AGENT
+    """The adapter the fleet starts the manager on (``core.agent_adapters``)."""
+    chosen_by: str = "default"
+    """Which rung of ``agent_launch.resolve`` chose :attr:`agent` (``role``, ``project``,
+    ``user``…); ``default`` when nothing did."""
+    switch: str | None = None
+    """Another agent's setting that switches every hook off, as its doctor row names it
+    (``core.agents.HooksSwitch``: Codex's ``hooks = false`` under ``[features]``, in a
+    file or the manager's launch arguments). Connect cannot change it either."""
+    trust_pending: bool = False
+    """aisquare's hooks are in place and the agent has not run them yet because it runs
+    hooks only once the user trusts them (Codex's ``/hooks``): not a blocker, Codex asks
+    in the manager's pane, but the one step no button can take."""
+    home: Path | None = None
+    """The agent's home the fleet launches with (``CODEX_HOME``), for another agent."""
+    account: str | None = None
+    """The account whose login :attr:`signed_in` read, as the Accounts page labels it."""
+    account_slot: int | None = None
+    """That account's slot: what step 2's *Sign in* opens on the Accounts page."""
+    installed: tuple[str, ...] = ()
+    """Every agent whose binary is on ``PATH``, in registration order."""
+    choosable: bool = False
+    """Nothing more specific than the user default chose :attr:`agent`
+    (:data:`CHOOSABLE_SOURCES`): step 2 may offer the other installed agents."""
+    inferred: bool = False
+    """Nothing chose :attr:`agent`: it is the only agent installed, and Claude Code (the
+    default) is not. Starting the fleet saves it as the user default
+    (:func:`start_on_agent`), so the coders the manager spawns land on it too."""
 
     @property
     def found(self) -> bool:
         return self.binary is not None
 
     @property
-    def is_claude(self) -> bool:
-        """Whether the fleet launches Claude Code itself rather than a binary the user chose."""
-        return harness.is_default_agent(self.wanted)
+    def native(self) -> bool:
+        """Whether the fleet launches the agent's own binary rather than one the user chose."""
+        try:
+            return executable_name(self.wanted) == get_adapter(self.agent).binary
+        except ValueError:
+            return False
+
+    @property
+    def label(self) -> str:
+        return agent_label(self.agent)
+
+    @property
+    def switched_off(self) -> bool:
+        """A setting switches every hook off: Connect cannot change it."""
+        return self.hooks_off is not None or self.switch is not None
+
+    @property
+    def others(self) -> tuple[str, ...]:
+        """The installed agents step 2 offers in place of :attr:`agent`, when it may."""
+        if not self.choosable:
+            return ()
+        if self.chosen_by == "default" and len(self.installed) > 1:
+            return self.installed  # nothing saved yet: each pick is saved, this one too
+        return tuple(agent for agent in self.installed if agent != self.agent)
 
     @property
     def ready(self) -> bool:
         """Installed and connected: what step 3 waits for. Signing in is not required here,
-        because Claude Code asks for it the first time it starts."""
+        because Claude Code asks for it the first time it starts, and so does Codex; nor is
+        Codex's trust in its hooks, which it asks for in the manager's pane."""
         return self.found and self.connected
+
+
+AgentState = ClaudeState
+"""Step 2's state for any agent (:class:`ClaudeState`, named for the first one)."""
 
 
 def _connected_default(cwd: Path | None = None) -> bool:
@@ -242,14 +315,15 @@ def _probe_claude(
         resolution = harness.resolve_binary(FLEET_ROLE)
     except Exception as exc:  # a config that will not parse costs the override, not the step
         problems.append(f"could not read the agent binding: {_why(exc)}")
-        resolution = harness.BinaryResolution(binary=harness.DEFAULT_AGENT_BINARY, source="default")
+        resolution = harness.BinaryResolution(binary=harness.default_binary(), source="default")
     try:
         binary = which(resolution.binary)
     except Exception as exc:
         problems.append(f"could not look for {resolution.binary}: {_why(exc)}")
         binary = None
     version = None
-    if binary is not None and harness.is_default_agent(resolution.binary):
+    own = executable_name(resolution.binary) == get_adapter(accounts_core.AGENT).binary
+    if binary is not None and own:  # its own binary, not a stand-in the user chose
         version = diagnostics.claude_code_version(binary)
     manager_only = False
     try:
@@ -320,25 +394,302 @@ def _probe_claude(
     )
 
 
-def connect_fix() -> FixCommand:
-    """The doctor's Connect, taken from ``onboarding.KNOWN_FIXES`` — what one click may run."""
-    known = next(k for k in onboarding.KNOWN_FIXES if k.argv == CONNECT_ARGV)
-    return FixCommand(
-        check="claude-code",
-        argv=known.argv,
-        scope=known.scope,
-        source=f"aisquare {' '.join(known.argv)}",
+@dataclass(frozen=True)
+class AgentChoice:
+    """The coding agent Welcome starts the fleet on, and how it came to be that one."""
+
+    agent: str
+    source: str
+    """The ``agent_launch.resolve`` rung that chose it; ``default`` when nothing did."""
+    installed: tuple[str, ...] = ()
+    inferred: bool = False
+    """Nothing chose it: it is the one agent installed (see :class:`ClaudeState`)."""
+    problem: str | None = None
+
+    @property
+    def choosable(self) -> bool:
+        return self.source in CHOOSABLE_SOURCES
+
+
+def installed_agents(*, which: Callable[[str], str | None] = shutil.which) -> tuple[str, ...]:
+    """Every registered agent whose binary is on ``PATH``, in registration order."""
+    found: list[str] = []
+    for adapter in adapters():
+        try:
+            if which(adapter.binary) is not None:
+                found.append(adapter.id)
+        except Exception:  # a PATH that cannot be searched finds nothing
+            continue
+    return tuple(found)
+
+
+def fleet_agent(
+    cwd: Path | None = None, *, which: Callable[[str], str | None] = shutil.which
+) -> AgentChoice:
+    """The agent ``fleet.spawn`` would start the manager on in ``cwd``; never raises.
+
+    ``agent_launch.resolve``'s answer (a role binding, the project's, the user
+    default…), with one rung of Welcome's own beneath them all: when nothing chose
+    an agent, the binary is the default one and Claude Code is not installed while
+    another agent is, that agent (the first, in registration order). A Codex-only
+    machine is offered Codex rather than an install command for an agent it does not
+    use; :func:`start_on_agent` saves that pick as the user default.
+    """
+    installed = installed_agents(which=which)
+    try:
+        selected = agent_launch.resolve(FLEET_ROLE, cwd=cwd)
+    except Exception as exc:  # the launch would refuse too; step 2 says why
+        return AgentChoice(
+            accounts_core.AGENT,
+            "default",
+            installed,
+            problem=f"could not decide the coding agent: {_why(exc)}",
+        )
+    agent, source = selected.adapter.id, selected.source
+    unchosen = source == "default" and selected.binary.source == "default"
+    if unchosen and agent not in installed and installed:
+        return AgentChoice(installed[0], source, installed, inferred=True)
+    return AgentChoice(agent, source, installed)
+
+
+def probe_fleet(
+    *,
+    sign_in: bool = True,
+    which: Callable[[str], str | None] = shutil.which,
+    cwd: Path | None = None,
+) -> ClaudeState:
+    """Step 2's answer: the agent the fleet starts (:func:`fleet_agent`), probed. Never raises.
+
+    Claude Code is :func:`probe_claude`, unchanged; another agent is read its own
+    way (:func:`_probe_agent`). Either carries what was installed and whether
+    step 2 may offer another agent.
+    """
+    with config_core.one_load():
+        choice = fleet_agent(cwd, which=which)
+        if get_adapter(choice.agent).capabilities.own_doctor_check:
+            # The doctor's dedicated check (Claude Code's): its plugin route, its hooks'
+            # program, the coders' folder.
+            state = _probe_claude(
+                sign_in=sign_in,
+                which=which,
+                connected=None,
+                signed_in=None,
+                hooks_off=None,
+                refusal=None,
+                cwd=cwd,
+            )
+        else:
+            state = _probe_agent(get_adapter(choice.agent), sign_in=sign_in, which=which, cwd=cwd)
+    problem = "; ".join(filter(None, (choice.problem, state.problem))) or None
+    return dataclasses.replace(
+        state,
+        chosen_by=choice.source,
+        installed=choice.installed,
+        choosable=choice.choosable,
+        inferred=choice.inferred,
+        problem=problem,
     )
 
 
-def connect(*, run: Runner = selfcli.run) -> FixResult:
-    """``aisquare --json agents connect claude-code``, exactly as the doctor's button runs it.
+def _probe_agent(
+    adapter: AgentAdapter,
+    *,
+    sign_in: bool,
+    which: Callable[[str], str | None],
+    cwd: Path | None,
+) -> ClaudeState:
+    """:func:`probe_claude` for an agent other than Claude Code, from the same shared answers
+    the doctor's row for it reads (``core.agents``). Starts no process; never raises.
 
-    An npm or Homebrew Claude Code that has never started has no ``~/.claude`` yet;
-    ``agents connect`` makes it when ``claude`` is on PATH, for every caller
-    (``services.agents``), so this is the doctor's fix and nothing else.
+    The binary and home are the ones the manager's launch would use
+    (``agent_launch.resolve`` with this agent): the home of the account it would
+    launch on (``claude_accounts.choose``), which the launch sets over the binding's
+    and the shell's, else theirs. Connected is aisquare's full hook set in that home
+    (``integration_readiness``), naming programs that can start; a switch that turns
+    every hook off (in its config or the manager's arguments) is named instead, and a
+    home whose hook file cannot be read is a refusal Connect cannot change. Trust is
+    the agent's own step (Codex: ``unverified`` until the user trusts the hooks in
+    ``/hooks`` and one runs). Signed in is that account's login, read from its files,
+    never over the network.
     """
-    return onboarding.apply_fix(connect_fix(), None, run=run)
+    problems: list[str] = []
+    home: Path | None
+    args: list[str] = []
+    try:
+        selected = agent_launch.resolve(FLEET_ROLE, agent=adapter.id, cwd=cwd)
+        wanted, home = selected.binary.binary, selected.config_dir
+        args = [
+            *selected.profile.args,
+            *fleet_service.role_settings(FLEET_ROLE).agent_args.get(adapter.id, []),
+        ]
+    except Exception as exc:  # the launch would refuse too; the rest is still worth reading
+        problems.append(f"could not read the agent binding: {_why(exc)}")
+        wanted, home = adapter.binary, agent_core.ambient_hook_dir(adapter.id)
+    chosen: ClaudeAccount | None = None
+    answered = adapter.accounts is not None
+    if answered:
+        try:
+            chosen = _manager_choice(adapter.id, cwd)
+        except Exception as exc:  # the launch would refuse too (a binding to a removed slot)
+            problems.append(f"could not read the manager's account: {_why(exc)}")
+            answered = False
+    if chosen is not None:
+        # The manager runs on this account's home, whatever the binding or the shell
+        # name (`claude_accounts.apply_launch_env`): its hooks are the ones it gets.
+        home = chosen.config_dir
+    try:
+        binary = which(wanted)
+    except Exception as exc:
+        problems.append(f"could not look for {wanted}: {_why(exc)}")
+        binary = None
+    version = _agent_version(adapter, binary) if binary is not None else None
+    connected = trust = False
+    switch: str | None = None
+    refused: str | None = None
+    if home is not None:
+        try:
+            off = agent_core.hooks_switch(adapter.id, home, args)
+            if off is not None:
+                switch = str(off)
+            else:
+                state, detail = agent_core.integration_readiness(adapter.id, home)
+                if state == "unreadable":
+                    refused = detail or f"cannot read {home / adapter.settings_name}"
+                connected = state in {"configured", "observed", "unverified"}
+                trust = state == "unverified"
+                plugin = agent_core.plugin_of(adapter.id)
+                install = plugin.installed(home) if plugin is not None else None
+                if install is not None and not agent_core.hook_commands(adapter.id, home):
+                    # The aisquare plugin is this home's route (none of its own hooks for
+                    # the plugin to stand down beside): connected through it, and its hooks
+                    # wait for the same trust. Connect would install a second route.
+                    connected, trust = True, not install.trusted
+                elif connected and not agent_core.hooks_can_start(adapter.id, home):
+                    problems.append(
+                        "aisquare's hooks name a program that does not exist or cannot start"
+                    )
+                    connected = trust = False
+        except Exception as exc:
+            problems.append(f"could not read the hooks: {_why(exc)}")
+            connected = trust = False
+    signed: bool | None = None
+    account: str | None = None
+    slot: int | None = None
+    if sign_in and binary is not None and answered:
+        login = chosen if chosen is not None else accounts_core.default_account(agent=adapter.id)
+        try:
+            signed = accounts_core.signed_in(login)
+            account, slot = accounts_core.label(login), login.slot
+        except Exception as exc:
+            problems.append(f"could not read the sign-in: {_why(exc)}")
+    return ClaudeState(
+        wanted=wanted,
+        source="default",
+        binary=binary,
+        version=version,
+        connected=connected,
+        refused=refused,
+        signed_in=signed,
+        problem="; ".join(problems) or None,
+        agent=adapter.id,
+        switch=switch,
+        trust_pending=trust,
+        home=home,
+        account=account,
+        account_slot=slot,
+    )
+
+
+def _agent_version(adapter: AgentAdapter, binary: str) -> str | None:
+    """The version the install's layout names (as the Accounts page reads it), else what
+    the binary prints for the adapter's ``version_args`` (``--version``), bounded; ``None``
+    when neither answers."""
+    try:
+        found = accounts_service.install(adapter.id)
+        if found.version and found.binary == binary:
+            return found.version
+    except Exception:
+        pass
+    return agent_core.hook_binary_version([binary, *adapter.version_args], timeout=5.0)
+
+
+def _manager_choice(agent: str, cwd: Path | None) -> ClaudeAccount | None:
+    """The account the manager's launch in ``cwd`` would run on: the one resolver's answer
+    (``claude_accounts.choose``: a binding, the project's default, the machine's); ``None``
+    when nothing chooses, and the launch keeps the binding's or the shell's home. The store
+    is asked only when there is one: on a machine that never ran aisquare, the shell's
+    first refresh makes it."""
+    if not paths.db_path().exists():
+        return None
+    project = orchestrator.team_project(cwd) if cwd is not None else None
+    return accounts_service.choose(None, role=FLEET_ROLE, project=project, agent=agent).account
+
+
+def sign_in_slot(state: ClaudeState) -> int:
+    """The slot step 2's *Sign in* opens on the Accounts page, ready to sign in.
+
+    The account the manager would launch on (:attr:`ClaudeState.account_slot`), else
+    the agent's plain home. A plain home this agent never ran in does not exist yet,
+    and the Accounts page lists it only once it does: it is made here, as the agent's
+    own sign-in and ``agents connect`` both make it.
+    """
+    if state.account_slot is not None:
+        found = accounts_core.find_account(state.account_slot)
+        if found is not None:
+            return found.slot
+    plain = accounts_core.default_account(agent=state.agent)
+    if not plain.config_dir.is_dir():
+        plain.config_dir.mkdir(parents=True, exist_ok=True)
+    return plain.slot
+
+
+class AgentNotSaved(RuntimeError):
+    """``agents use`` did not save the default agent; the message is the CLI's own."""
+
+
+def choose_agent(agent: str, *, run: Runner = selfcli.run) -> None:
+    """Save ``agent`` as the user default: ``aisquare --json agents use <agent>``, step 2's
+    pick. The command, not its function: a config write is the CLI's to make and to report
+    (tests/test_config_writes_stay_in_the_cli.py), as Connect is ``agents connect``."""
+    try:
+        result = run(["--json", "agents", "use", agent], cwd=None)
+    except Exception as exc:
+        raise AgentNotSaved(f"could not run aisquare agents use {agent}: {_why(exc)}") from exc
+    if not result.ok:
+        raise AgentNotSaved(onboarding.failure_reason(result, f"agents use {agent}"))
+
+
+def connect_fix(agent: str = accounts_core.AGENT, home: Path | None = None) -> FixCommand:
+    """The doctor's Connect for ``agent``, taken from ``onboarding.KNOWN_FIXES`` — what one
+    click may run. ``home`` is named (``--config-dir``) when it is not the one a session
+    from this shell reads: a role whose launch sets another ``CODEX_HOME``."""
+    known = next(k for k in onboarding.KNOWN_FIXES if k.agent and k.argv == CONNECT_ARGV[:2])
+    argv: tuple[str, ...] = (*known.argv, agent)
+    source = f"aisquare {' '.join(argv)}"
+    ambient = agent_core.ambient_hook_dir(agent)
+    if home is not None and (ambient is None or not _same_dir(home, ambient)):
+        argv = (*argv, "--config-dir", str(home))
+    return FixCommand(check=agent, argv=argv, scope=known.scope, source=source)
+
+
+def _same_dir(one: Path, other: Path) -> bool:
+    try:
+        return agent_core.dir_identity(one) == agent_core.dir_identity(other)
+    except OSError:
+        return one == other
+
+
+def connect(*, run: Runner = selfcli.run, state: ClaudeState | None = None) -> FixResult:
+    """``aisquare --json agents connect <agent>``, exactly as the doctor's button runs it.
+
+    Claude Code's unless ``state`` names another agent. An npm or Homebrew Claude
+    Code that has never started has no ``~/.claude`` yet; ``agents connect`` makes
+    it when ``claude`` is on PATH, for every caller (``services.agents``), and makes
+    a Codex home the same way, so this is the doctor's fix and nothing else.
+    """
+    if state is None:
+        return onboarding.apply_fix(connect_fix(), None, run=run)
+    return onboarding.apply_fix(connect_fix(state.agent, state.home), None, run=run)
 
 
 # --------------------------------------------------------------------------- tmux and gh
@@ -607,6 +958,7 @@ class Spawner(Protocol):
         *,
         label: str | None = None,
         worktree: bool | None = None,
+        agent: str | None = None,
     ) -> fleet_service.SpawnReceipt: ...
 
 
@@ -651,10 +1003,19 @@ NOT_GIT_NOTE = "not a git repository, so the coders work in the project folder (
 
 
 def _spawn(
-    spawn: Spawner, project: ProjectInfo, role: str, *, label: str | None, worktree: bool | None
+    spawn: Spawner,
+    project: ProjectInfo,
+    role: str,
+    *,
+    label: str | None,
+    worktree: bool | None,
+    coding_agent: str | None = None,
 ) -> FleetStep:
     try:
-        receipt = spawn(project, role, label=label, worktree=worktree)
+        if coding_agent is None:  # the ladder's choice, as `fleet spawn` with no --agent makes it
+            receipt = spawn(project, role, label=label, worktree=worktree)
+        else:
+            receipt = spawn(project, role, label=label, worktree=worktree, agent=coding_agent)
     except fleet_service.FleetError as exc:
         return FleetStep(label=label or role, role=role, outcome="refused", detail=_why(exc))
     except Exception as exc:  # a bug in the fleet path is a refusal to show, not a crash
@@ -730,8 +1091,13 @@ def start_fleet(
     live: LiveAgents | None = None,
     on_step: Callable[[FleetStep], None] | None = None,
     restart: Restarter | None = None,
+    agents: Mapping[str, str] | None = None,
 ) -> FleetStart:
     """Start the manager and top the coders up to ``coders``, one at a time; never raises.
+
+    ``agents`` names the coding agent per role (``manager``, ``coder``), passed to
+    ``fleet.spawn`` as its ``agent``; a role it does not name takes the ladder's
+    (``agent_launch.resolve``), as ``fleet spawn`` with no ``--agent`` does.
 
     A running manager (:data:`RUNNING`) is reported as ``running`` and never
     spawned again; running coders count toward ``coders``, so a second call
@@ -754,6 +1120,7 @@ def start_fleet(
     """
     spawner: Spawner = spawn if spawn is not None else fleet_service.spawn
     restarter: Restarter = restart if restart is not None else fleet_service.restart
+    chosen = dict(agents or {})
     steps: list[FleetStep] = []
 
     def done(step: FleetStep) -> bool:
@@ -783,7 +1150,16 @@ def start_fleet(
         existing = next((agent for agent in running if agent.role == "manager"), None)
         if existing is not None:
             done(FleetStep(existing.label, "manager", "running", existing.id, existing))
-        elif not done(_spawn(spawner, project, "manager", label=None, worktree=None)):
+        elif not done(
+            _spawn(
+                spawner,
+                project,
+                "manager",
+                label=None,
+                worktree=None,
+                coding_agent=chosen.get(FLEET_ROLE),
+            )
+        ):
             return FleetStart(tuple(steps))
     live_coders = [agent for agent in running if agent.role == "coder"]
     for agent in live_coders[:coders]:
@@ -809,9 +1185,61 @@ def start_fleet(
             done(FleetStep(label, "coder", "refused", reason))
             return FleetStart(tuple(steps))
         for label in _free_labels("coder", missing, held):
-            step = _spawn(spawner, project, "coder", label=label, worktree=None if git else False)
+            step = _spawn(
+                spawner,
+                project,
+                "coder",
+                label=label,
+                worktree=None if git else False,
+                coding_agent=chosen.get(CODER_ROLE),
+            )
             if not git and step.outcome == "started":
                 step = dataclasses.replace(step, notes=(NOT_GIT_NOTE, *step.notes))
             if not done(step):
                 break
     return FleetStart(tuple(steps))
+
+
+def start_on_agent(
+    project: ProjectInfo,
+    *,
+    manager: bool = True,
+    coders: int = CODERS,
+    which: Callable[[str], str | None] = shutil.which,
+    on_step: Callable[[FleetStep], None] | None = None,
+    run: Runner = selfcli.run,
+) -> FleetStart:
+    """:func:`start_fleet` on the agent step 2 showed for ``project`` (:func:`fleet_agent`).
+
+    Each role Welcome starts gets that agent, unless the role is bound to an agent
+    or an executable of its own (``team bind <role> --agent``/``--bin``,
+    ``AISQUARE_BIN_<ROLE>``: a mixed team), which ``fleet.spawn`` then resolves from
+    the binding. An agent no one chose (the one installed, see
+    :class:`AgentChoice`) is saved as the user default first, so the coders the
+    manager spawns later, and every launch after, land on it too; a save that fails
+    costs the default, never the start, and the manager's step says so.
+    """
+    choice = fleet_agent(project.root, which=which)
+    notes: tuple[str, ...] = ()
+    if choice.inferred:
+        try:
+            choose_agent(choice.agent, run=run)
+            notes = (f"{agent_label(choice.agent)} is now your default coding agent",)
+        except Exception as exc:
+            notes = (f"could not save {choice.agent} as your default agent: {_why(exc)}",)
+    try:
+        bound = {role for role, p in config_core.load_config().team.profiles.items() if p.agent}
+    except Exception:  # a config that will not parse binds nothing; spawn says why
+        bound = set()
+    # A role's own executable decides its family too: `team bind coder --bin claude`
+    # under a Codex default is Claude Code's coder, not a Codex one.
+    agents = {
+        role: choice.agent
+        for role in (FLEET_ROLE, CODER_ROLE)
+        if role not in bound and harness.resolve_binary(role).source == "default"
+    }
+    started = start_fleet(project, manager=manager, coders=coders, on_step=on_step, agents=agents)
+    if not notes or not started.steps:
+        return started
+    first, *rest = started.steps
+    return FleetStart((dataclasses.replace(first, notes=(*notes, *first.notes)), *rest))

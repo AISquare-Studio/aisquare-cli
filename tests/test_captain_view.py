@@ -360,7 +360,7 @@ def test_the_quick_action_types_nothing_into_a_fresh_captains_trust_dialog(
     said = drive(_whats_up)
     assert fake.typed == [] and fake.told == []
     assert any("nothing typed" in line and "trust its folder" in line for line in said), said
-    assert any("choose Yes, I trust this folder (once)" in line for line in said), said
+    assert any("trust it there (once)" in line for line in said), said
 
 
 @pytest.mark.needs_captain
@@ -927,8 +927,10 @@ def test_a_declared_captain_role_in_the_home_is_no_captain_in_the_ui(
     with store_session() as store:
         store.onboard_project(home, explicit=True)
     declared = _captain()
+    # Spawned as a role, in the home's own folder: not the captain's brain folder, which
+    # only `aisquare captain` gives a spawn (`fleet.is_the_captains_row`, #113).
     declared = declared.model_copy(
-        update={"agent": declared.agent.model_copy(update={"launch_spec": None})}
+        update={"agent": declared.agent.model_copy(update={"launch_spec": None, "cwd": home.root})}
     )
     script[home.id] = [declared]
 

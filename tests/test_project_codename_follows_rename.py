@@ -227,7 +227,7 @@ def test_a_project_with_no_codename_yet_is_given_its_names(
 def test_a_slug_another_project_holds_gets_a_suffix_and_the_owner_is_told(
     tmux: FakeTmux, project: ProjectInfo, tmp_path: Path
 ) -> None:
-    other = _repo(tmp_path, "elsewhere/aisquare-cli")
+    other = _repo(tmp_path, "elsewhere")
     fleet_service.rename_project(other, "Other checkout")
     fleet_service.rename(other, "aisquare-cli")
     notes: list[str] = []
@@ -267,17 +267,19 @@ def test_a_store_race_for_the_slug_walks_on_to_the_next(
     """Another process takes ``billing`` between the read and the write: the index refuses
     it, and the walk lands one suffix on."""
     other = _repo(tmp_path, "other")
-    real = SqliteStore.set_codename
+    real = SqliteStore.swap_codename
     raced: list[str] = []
 
-    def racing(store: SqliteStore, project_id: str, codename: str) -> ProjectInfo:
+    def racing(
+        store: SqliteStore, project_id: str, codename: str
+    ) -> tuple[str | None, ProjectInfo]:
         if project_id == project.id and not raced:
             raced.append(codename)
             real(store, other.id, codename)  # the other process wins
             raise sqlite3.IntegrityError("UNIQUE constraint failed: project.codename")
         return real(store, project_id, codename)
 
-    monkeypatch.setattr(SqliteStore, "set_codename", racing)
+    monkeypatch.setattr(SqliteStore, "swap_codename", racing)
     project_service.set_nickname(project, "Billing")
     assert fleet_service.follow_name(project).codename == "billing-2"
     assert raced == ["billing"] and _codename(other) == "billing"
@@ -355,16 +357,49 @@ def test_a_project_that_holds_an_old_codename_now_is_the_one_it_names(
     assert project_service.resolve("renamed").id == project.id
 
 
-def test_an_exact_codename_wins_over_another_checkouts_folder_name(
+def test_a_rename_never_takes_another_projects_folder_name(
     tmux: FakeTmux, project: ProjectInfo, tmp_path: Path
 ) -> None:
-    """Every checkout of a repository has its folder's name: renamed "AISquare CLI", one of
-    them is ``aisquare-cli``, and the hints printed for it say ``--project aisquare-cli``."""
+    """``--project billing`` names the project in ``~/work/billing``. Renamed "Billing",
+    another project taking ``billing`` as its codename took that reference from it with no
+    refusal (review of #456, 1): it gets ``billing-2``, and the owner is told why. So does
+    one of two checkouts of one repository, and ``--project aisquare-cli`` stays what it
+    was, ambiguous between them."""
+    billing = _repo(tmp_path, "work/billing")
+    notes: list[str] = []
+    renamed = fleet_service.rename_project(project, "Billing", notes=notes)
+    assert renamed.codename == "billing-2"
+    assert notes == [
+        "billing is another project's folder name (`--project billing` names it), so this "
+        "project's codename is billing-2"
+    ]
+    with store_session() as store:
+        assert [p.id for p in store.find_projects("billing")] == [billing.id]
+    assert project_service.resolve("billing-2").id == project.id
+    # Nor by hand: `fleet rename` refuses it, naming why.
+    with pytest.raises(FleetError, match="another project's folder name"):
+        fleet_service.rename(project, "billing")
+    # A project's own folder is no other's: clearing the name takes it.
+    assert fleet_service.rename_project(billing, "Payments").codename == "payments"
+    assert fleet_service.rename_project(billing, None).codename == "billing"
+    # Two checkouts of one repository: the renamed one is suffixed.
     twin = _repo(tmp_path, "ws6/aisquare-cli")
-    assert fleet_service.rename_project(project, "AISquare CLI").codename == "aisquare-cli"
-    assert project_service.resolve("aisquare-cli").id == project.id
-    assert fleet_service.resolve_project("aisquare-cli").id == project.id
-    assert project_service.resolve(str(twin.root)).id == twin.id, "the twin by its path"
+    _repo(tmp_path, "ws7/aisquare-cli")
+    assert fleet_service.rename_project(twin, "AISquare CLI").codename == "aisquare-cli-2"
+    with pytest.raises(ValueError, match="matches multiple projects"):
+        project_service.resolve("aisquare-cli")
+
+
+def test_an_exact_codename_wins_over_a_folder_named_after_it(
+    tmp_path: Path, project: ProjectInfo, tmux: FakeTmux
+) -> None:
+    """A folder added AFTER a project took its codename: every hint printed for the codename's
+    project says ``--project <codename>``, so the codename is the one it names."""
+    fleet_service.rename_project(project, "Ledger")
+    later = _repo(tmp_path, "elsewhere/ledger")
+    assert project_service.resolve("ledger").id == project.id
+    assert fleet_service.resolve_project("ledger").id == project.id
+    assert project_service.resolve(str(later.root)).id == later.id, "the other by its path"
 
 
 def test_a_forgotten_projects_old_codename_names_nothing_and_a_purge_takes_it(
@@ -501,3 +536,138 @@ def test_the_card_says_the_codename_when_its_name_does_not_give_it(
         assert f"fleet codename {codename} (tmux asq-{codename}, --project {codename})" in tooltip
     else:
         assert tooltip.startswith("no fleet codename yet")
+
+
+# --- review of #456: two renames at once, a spawn during one, fresh, the captain ----------
+
+
+def test_two_renames_at_once_leave_the_session_on_the_stored_codename_in_either_order(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #456, 2: two renames of one project (two quick card saves, or a card's and
+    the Settings tab's) finish their tmux halves in either order. Each learns which codename
+    it really replaced (``swap_codename``), and each renames the session toward the codename
+    stored when it runs, from whichever earlier name it still has, so the last one to finish
+    leaves session and row in step."""
+    fleet_service.spawn(project, "manager")
+    first = _codename(project)
+    with store_session() as store:
+        old_w1, w1 = store.swap_codename(project.id, "bar")  # W1 writes, tmux not told yet
+        old_w2, w2 = store.swap_codename(project.id, "baz")  # W2 writes after it
+    assert (old_w1, old_w2) == (first, "bar"), "each learns the codename it replaced"
+    fleet_service._codename_changed(w2, old_w2, [])  # W2's tmux half lands first
+    fleet_service._codename_changed(w1, old_w1, [])  # W1's lands last, with its stale view
+    assert set(tmux.sessions) == {"asq-baz"}
+    assert fleet_service.attach_argv(project)[-1] == "=asq-baz"
+
+
+def test_a_session_another_project_holds_now_is_never_taken_by_a_rename(
+    tmux: FakeTmux, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """A codename this project gave up and another took since names THAT project's session:
+    a later rename of this one moves its own session only."""
+    fleet_service.ensure_codename(project)
+    fleet_service.rename(project, "shared-name")
+    fleet_service.rename(project, "mine-now")
+    other = _repo(tmp_path, "other")
+    fleet_service.rename(other, "shared-name")
+    tmux.sessions["asq-shared-name"] = []  # the other project's agents
+    tmux.sessions["asq-mine-now"] = []
+    fleet_service.rename(project, "mine-later")
+    assert set(tmux.sessions) == {"asq-shared-name", "asq-mine-later"}
+
+
+def test_a_spawn_a_rename_lands_during_opens_its_window_in_the_renamed_session(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #456, 3: a card rename that lands while a spawn makes its tree renamed the
+    session under it, and the window opened under the codename read before started
+    ``asq-<old>`` anew, where ``attach`` and a scoped shutdown never looked."""
+    fleet_service.spawn(project, "manager")
+    old = _codename(project)
+    real = fleet_service._worktree_for
+
+    def renamed_meanwhile(*args: object, **kwargs: object) -> Path:
+        tree = real(*args, **kwargs)  # type: ignore[arg-type]
+        fleet_service.rename_project(project, "Mid spawn")
+        return tree
+
+    monkeypatch.setattr(fleet_service, "_worktree_for", renamed_meanwhile)
+    receipt = fleet_service.spawn(project, "coder")
+    assert receipt.tmux_session == "asq-mid-spawn"
+    assert set(tmux.sessions) == {"asq-mid-spawn"}, f"no asq-{old} made again"
+    assert receipt.agent.branch is not None and receipt.agent.branch.startswith(f"fleet/{old}/")
+
+
+def test_a_scoped_shutdown_and_fresh_look_in_a_session_left_under_an_old_codename(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Should a window still start under the old codename (the race's last gap), the
+    session it made is one ``project fresh`` and a scoped shutdown find."""
+    fleet_service.spawn(project, "manager")
+    old = _codename(project)
+    fleet_service.rename_project(project, "Renamed")
+    tmux.sessions[f"asq-{old}"] = []
+    found = fleet_service.project_sessions(_stored(project))
+    assert found is not None and {name.split(":")[-1] for name in found} == {
+        "asq-renamed",
+        f"asq-{old}",
+    }
+
+
+def test_fresh_takes_a_branch_left_under_a_codename_the_project_gave_up(
+    tmux: FakeTmux, project: ProjectInfo
+) -> None:
+    """Review of #456, 5: ``project fresh --branches`` matched ``fleet/<codename>/…`` under
+    the current codename only, and a ``fleet/<old>/…`` branch no row recorded was left for
+    a later spawn to carry on in."""
+    old = fleet_service.ensure_codename(project).codename
+    _git("branch", f"fleet/{old}/01abc-unrecorded", cwd=project.root)
+    _git("branch", "fleet/someone-else/01abc-not-ours", cwd=project.root)
+    fleet_service.rename_project(project, "Renamed")
+    tips = fleet_service.fleet_branch_tips(_stored(project), [])
+    assert set(tips) == {f"fleet/{old}/01abc-unrecorded"}
+
+
+def test_the_captains_ui_receiver_finds_a_project_by_a_codename_it_gave_up(
+    tmux: FakeTmux, project: ProjectInfo
+) -> None:
+    """Review of #456, nit 6: ``ui select_project <old codename>`` was refused, the one
+    resolver without the old codenames."""
+    from aisquare.cli.ui.app import FleetSnapshot
+    from aisquare.cli.ui.receiver import _project_matches
+
+    old = fleet_service.ensure_codename(project).codename
+    assert old is not None
+    renamed = fleet_service.rename_project(project, "Renamed")
+    snapshot = FleetSnapshot(projects=[renamed], agents={})
+    assert [p.id for p in _project_matches(snapshot, old)] == [project.id]
+    assert [p.id for p in _project_matches(snapshot, "renamed")] == [project.id]
+    assert _project_matches(snapshot, "never-was") == []
+
+
+def test_one_board_that_cannot_be_told_does_not_keep_the_others_from_the_note(
+    tmux: FakeTmux, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #456, nit 7: the notes went out under one ``try``, and a failure on the
+    first board skipped every board after it."""
+    from aisquare.services import team as team_service
+
+    fleet_service.ensure_codename(project)
+    monkeypatch.setattr(
+        SqliteStore, "fleet_agent_boards", lambda self, project_id, live_only=False: ["prj_hub"]
+    )
+    told: list[str] = []
+
+    def add_note(text: str, *, board_id: str | None = None, **kwargs: object) -> None:
+        if board_id == project.id:
+            raise sqlite3.OperationalError("database is locked")
+        told.append(str(board_id))
+
+    monkeypatch.setattr(team_service, "add_note", add_note)
+    notes: list[str] = []
+    fleet_service.rename_project(project, "Told", notes=notes)
+    assert told == ["prj_hub"]
+    assert notes == [
+        f"board {project.id} could not be told of the new codename (database is locked)"
+    ]

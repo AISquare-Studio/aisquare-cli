@@ -949,6 +949,13 @@ def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> 
         return assign(opened)
 
 
+def _stored_codename(project_id: str) -> str | None:
+    """The codename ``project_id``'s live row holds now, or ``None`` (no row, or none yet)."""
+    with store_session() as store:
+        row = store.get_project(project_id)
+    return row.codename if row is not None else None
+
+
 def _kept_codename(store: ContextStore, project: ProjectInfo) -> str | None:
     """The codename ``project``'s row holds, a forgotten one's included, or ``None`` when it
     has no row. A forget keeps the codename (its tombstone), and the windows its agents left
@@ -2102,17 +2109,22 @@ def fleet_trees(project: ProjectInfo, rows: Sequence[FleetAgent]) -> list[Path]:
 
 def fleet_branch_tips(project: ProjectInfo, rows: Sequence[FleetAgent]) -> dict[str, str]:
     """The local branches ``project fresh --branches`` deletes, with their tips: each
-    ``fleet/<codename>/…`` branch, and each other ``fleet/…`` one ``rows`` recorded (from
-    before a ``fleet rename``). Never a remote branch, nor any other local one; ``{}`` for a
-    project that is no git checkout. Raises :class:`FleetError` when git cannot be run."""
+    ``fleet/<codename>/…`` branch, under its codename or one it gave up at a rename that no
+    project holds now (:meth:`ContextStore.codename_aliases`), and each other ``fleet/…`` one
+    ``rows`` recorded. Under its current codename alone, a ``fleet/<old>/…`` branch no row
+    recorded was left, and a spawn for its task would carry on there (:func:`_carried_on`;
+    review of #456, 5). Never a remote branch, nor any other local one; ``{}`` for a project
+    that is no git checkout. Raises :class:`FleetError` when git cannot be run."""
     if not is_git_project(project.root):
         return {}
-    own = f"{_FLEET_BRANCH_PREFIX}{project.codename}/" if project.codename else None
+    with store_session() as store:
+        retired = store.codename_aliases(project.id)
+    own = tuple(f"{_FLEET_BRANCH_PREFIX}{name}/" for name in (project.codename, *retired) if name)
     recorded = {row.branch for row in rows if row.branch}
     return {
         branch: tip
         for branch, tip in (_fleet_branches(project.root) or {}).items()
-        if (own is not None and branch.startswith(own)) or branch in recorded
+        if (own and branch.startswith(own)) or branch in recorded
     }
 
 
@@ -2200,13 +2212,17 @@ def project_sessions(project: ProjectInfo) -> list[str] | None:
     found: list[str] = []
     for socket in _shutdown_sockets(targets, config):
         srv = _server_at(socket, config)
-        for name, _, _ in _fleet_sessions(srv, targets, socket=socket, config=config, every=False):
+        for name, _, expected in _fleet_sessions(
+            srv, targets, socket=socket, config=config, every=False
+        ):
             try:
                 if srv.has_session_or_raise(name):
                     found.append(f"{socket}:{name}")
             except TmuxUnavailable:
                 return []  # no usable tmux here: nothing could be stopped from here either
             except (TmuxError, OSError):
+                if name != session_name(project.codename) and not expected:
+                    continue  # a retired codename's, asked just in case
                 return None
     return found
 
@@ -3983,6 +3999,13 @@ def spawn(
         if settled is not None and os.path.realpath(cwd) == os.path.realpath(start):
             # Only for the folder it shared for: a restart's own tree can be elsewhere.
             env[claude_accounts_service.SHARED_ENV] = settled
+        # The codename asked again as the window opens: a rename (one gesture on a card) that
+        # landed during the tree work above renamed the session, and a window opened under
+        # the codename read before it started `asq-<old>` anew, where `attach` and a scoped
+        # `shutdown` never looked (review of #456, 3). The branch keeps the name it was given.
+        renamed = _stored_codename(project.id)
+        if renamed is not None and renamed != codename:
+            codename, tmux_session = renamed, session_name(renamed)
         try:
             # Every pair is this window's alone: `spawn_window` keeps them out of
             # the session environment, so a later spawn — or a window opened by hand
@@ -7478,14 +7501,25 @@ def _fleet_sessions(
     "``asq-a`` was already gone" for a socket it never lived on (review of
     #203, round 4). The ``--all`` prefix sweep lists what exists, so its
     entries are expected by construction.
+
+    A scoped one also asks, just in case, for the session of each codename the project gave
+    up at a rename that no project holds now (:meth:`ContextStore.codename_aliases`): an
+    agent spawned while the project was renamed can start in ``asq-<old>``, beside the
+    renamed session, and a scoped shutdown or ``project fresh`` that never looked there left
+    it running (review of #456, 3).
     """
     sessions: list[tuple[str, str | None, bool]] = []
+    retired: dict[str, list[str]] = {}
+    if not every and targets:
+        with store_session() as store:
+            retired = {p.id: store.codename_aliases(p.id) for p, _ in targets if p.codename}
     for project, agents in targets:
         if not project.codename:
             continue
         lived_here = any(_address(agent, config) == socket for agent in agents)
         if lived_here or socket == _Address(config.tmux_socket):
             sessions.append((session_name(project.codename), project.id, lived_here))
+            sessions += [(session_name(n), project.id, False) for n in retired.get(project.id, [])]
     named = {name for name, _, _ in sessions}
     if every:
         listed = [name for name in srv.sessions_or_raise() if name.startswith(SESSION_PREFIX)]
@@ -11014,11 +11048,15 @@ def rename(project: ProjectInfo, codename: str, *, notes: list[str] | None = Non
     with store_session() as store:
         store.onboard_project(project)
         current = store.get_project(project.id) or project
-        old = current.codename
-        if old == codename:
+        if current.codename == codename:
             return current
+        if codename in store.folder_names_in_use(project.id):
+            raise FleetError(
+                f"codename {codename!r} is another project's folder name: `--project "
+                f"{codename}` names that one, and would name this one instead — pick another"
+            )
         try:
-            updated = store.set_codename(project.id, codename)
+            old, updated = store.swap_codename(project.id, codename)
         except sqlite3.IntegrityError as exc:
             raise FleetError(f"codename {codename!r} is already taken by another project") from exc
     _codename_changed(updated, old, notes)
@@ -11031,11 +11069,19 @@ def follow_name(project: ProjectInfo, *, notes: list[str] | None = None) -> Proj
     card, the Settings tab) that comes after its nickname is written.
 
     The name is the one every list shows (:func:`project_service.display_name`): the
-    nickname, or the folder's once it is cleared. One another project holds as its
-    codename gets the first free suffix (``aisquare-cli-2``, :func:`codenames.first_free`),
-    and ``notes`` says whose it is. A name that gives no codename (``!!!``) leaves the
-    codename as it is, and ``notes`` says so. A project with no codename yet (no agent ever
-    ran there) is given this one, so its first agent is not named what its card is not.
+    nickname, or the folder's once it is cleared. One another project holds — as its
+    codename, or as its folder's name, which ``--project`` already names it by — gets the
+    first free suffix (``billing-2``, :func:`codenames.first_free`), and ``notes`` says whose
+    it is. Taken from a folder, ``--project billing`` would have moved from the project in
+    ``~/work/billing`` to this one, with no refusal (review of #456, 1). A name that gives
+    no codename (``!!!``) leaves the codename as it is, and ``notes`` says so. A project with
+    no codename yet (no agent ever ran there) is given this one, so its first agent is not
+    named what its card is not.
+
+    Two renames of one project at once (a card's and the Settings tab's, two quick card
+    renames) each re-read its codename before the walk and learn from the write which one
+    they replaced (:meth:`ContextStore.swap_codename`); the session follows whichever
+    codename is stored when each finishes (:func:`_codename_changed`).
 
     Never onboards: the nickname was written on the row as it is, captured or added. The
     tmux half fails open, as :func:`rename`'s does. ``FleetError`` when the project is not
@@ -11057,14 +11103,18 @@ def follow_name(project: ProjectInfo, *, notes: list[str] | None = None) -> Proj
                     f"`{project_service.fleet_command('rename', current)} <codename>` sets one"
                 )
             return current
-        old = current.codename
+        folders = store.folder_names_in_use(project.id)
         for _ in range(_CODENAME_RETRIES):
-            taken = store.codenames_in_use() - ({old} if old else set())
+            # Its own codename read again each time round: another rename of it may have
+            # written one since, and that one is this project's to keep, not taken.
+            row = store.get_project(project.id)
+            own = row.codename if row is not None else None
+            taken = (store.codenames_in_use() | folders) - ({own} if own else set())
             codename = codenames.first_free(wanted, taken)
-            if codename == old:
-                return current
+            if codename == own:
+                return row or current
             try:
-                updated = store.set_codename(project.id, codename)
+                old, updated = store.swap_codename(project.id, codename)
             except sqlite3.IntegrityError:
                 continue  # another process took it between the read and the write
             break
@@ -11074,20 +11124,18 @@ def follow_name(project: ProjectInfo, *, notes: list[str] | None = None) -> Proj
                 f"this walk tried was taken by another project while writing it "
                 f"({_CODENAME_RETRIES} attempts)"
             )
-        holder = (
-            next(
-                (
-                    p
-                    for p in store.list_projects(all=True, include_forgotten=True)
-                    if p.codename == wanted
-                ),
-                None,
+        holder = None
+        if codename != wanted:
+            listed = store.list_projects(all=True, include_forgotten=True)
+            holder = next((p for p in listed if p.codename == wanted), None)
+    if notes is not None and codename != wanted:
+        if holder is not None:
+            notes.append(f"{wanted} is {_name(holder)}'s codename, so this project's is {codename}")
+        elif wanted in folders:
+            notes.append(
+                f"{wanted} is another project's folder name (`--project {wanted}` names it), "
+                f"so this project's codename is {codename}"
             )
-            if codename != wanted
-            else None
-        )
-    if holder is not None and notes is not None:
-        notes.append(f"{wanted} is {_name(holder)}'s codename, so this project's is {codename}")
     _codename_changed(updated, old, notes)
     return updated
 
@@ -11124,15 +11172,26 @@ def _codename_changed(updated: ProjectInfo, old: str | None, notes: list[str] | 
     """
     if not old or not updated.codename or old == updated.codename:
         return
-    codename = updated.codename
     config = settings()
-    old_session, new_session = session_name(old), session_name(codename)
     home = project_id_for(paths.aisquare_home().resolve())
     with store_session() as store:
+        # The codename stored NOW, and every one the project had: two renames of it at once
+        # finish their tmux halves in either order, and the session follows the row whichever
+        # finishes last, from whichever earlier name it still has (review of #456, 2).
+        stored = store.get_project(updated.id, include_forgotten=True)
+        codename = (stored.codename if stored is not None else None) or updated.codename
+        # Never one another project holds now: that session is its own.
+        held = store.codenames_in_use() - {codename}
+        earlier = [
+            name
+            for name in dict.fromkeys([old, *store.codename_aliases(updated.id)])
+            if name != codename and name not in held
+        ]
         rows = store.fleet_agents(updated.id, live_only=False)
         boards = {updated.id, *store.fleet_agent_boards(updated.id, live_only=True)}
         if store.fleet_agents(home, live_only=True):
             boards.add(home)  # the captain's home board, while a captain reads it
+    new_session = session_name(codename)
     # Every server one of its rows lives on, an ended one's too (its window lingers and holds
     # the session, which `fleet attach` finds), and today's: renamed on today's alone, a
     # session on a socket the rows recorded elsewhere kept the old name, and `attach`, the
@@ -11140,29 +11199,52 @@ def _codename_changed(updated: ProjectInfo, old: str | None, notes: list[str] | 
     addresses = {_address(row, config) for row in rows} | {_Address(config.tmux_socket)}
     for address in sorted(addresses, key=lambda a: (a.name, str(a.path or ""))):
         srv = _server_at(address, config)
-        try:
-            if srv.has_session(old_session):
+        for old_session in map(session_name, earlier):
+            try:
+                if not srv.has_session(old_session):
+                    continue
+                if srv.has_session(new_session):
+                    # An agent started under the old name while the project was renamed (a
+                    # spawn that read the codename before the write): tmux will not merge two
+                    # sessions, and every reader also looks in the old one (`_fleet_sessions`).
+                    if notes is not None:
+                        notes.append(
+                            f"{old_session} still runs beside {new_session} on tmux "
+                            f"({address}) — an agent started in it while the project was "
+                            f"renamed. `fleet ls`, `tell`, `stop` and `reap` reach its agents "
+                            f"by pane id and a scoped `shutdown` stops both; "
+                            f"`{project_service.fleet_command('attach', updated)}` shows "
+                            f"{new_session}"
+                        )
+                    continue
                 srv.rename_session(old_session, new_session)
-        except TmuxError as exc:
-            if notes is not None:
-                flag = f"-L {address.name}" if address.path is None else f"-S {address.path}"
-                notes.append(
-                    f"the codename is {codename}, but tmux ({address}) could not be told "
-                    f"({exc}) — if a session named {old_session} is still running this "
-                    f"project's agents, `{project_service.fleet_command('attach', updated)}` "
-                    f"looks for {new_session} and will refuse until it is renamed: `tmux "
-                    f"{flag} rename-session -t ={old_session} {new_session}` does that, and "
-                    "renaming again will not (it renames from the stored codename, which is "
-                    "already the new one). `fleet ls`, `tell`, `stop` and `reap` are "
-                    "unaffected — they address panes by id"
-                )
-    text = f"project renamed: {old} → {codename}; --project {old} still works"
-    try:
-        for board in sorted(boards):
+            except TmuxError as exc:
+                with contextlib.suppress(TmuxError):
+                    if srv.has_session(new_session) and not srv.has_session(old_session):
+                        continue  # another rename of the project moved it meanwhile
+                if notes is not None:
+                    flag = f"-L {address.name}" if address.path is None else f"-S {address.path}"
+                    notes.append(
+                        f"the codename is {codename}, but tmux ({address}) could not be told "
+                        f"({exc}) — if a session named {old_session} is still running this "
+                        f"project's agents, "
+                        f"`{project_service.fleet_command('attach', updated)}` looks for "
+                        f"{new_session} and will refuse until it is renamed: `tmux {flag} "
+                        f"rename-session -t ={old_session} {new_session}` does that, and "
+                        "renaming again will not (it renames from the stored codename, which "
+                        "is already the new one). `fleet ls`, `tell`, `stop` and `reap` are "
+                        "unaffected — they address panes by id"
+                    )
+    text = f"project renamed: {old} → {updated.codename}; --project {old} still works"
+    for board in sorted(boards):
+        # One board's failure is that board's: the rest are still told (review of #456, 7).
+        try:
             _team().add_note(text, board_id=board)
-    except Exception as exc:  # team off, a store error: the rename stands
-        if notes is not None and not isinstance(exc, _team().TeamDisabledError):
-            notes.append(f"the board could not be told of the new codename ({exc})")
+        except _team().TeamDisabledError:
+            break  # team off: no board is read
+        except Exception as exc:  # a store error: the rename stands
+            if notes is not None:
+                notes.append(f"board {board} could not be told of the new codename ({exc})")
 
 
 def pause(project: ProjectInfo, *, session_ref: str | None = None) -> None:

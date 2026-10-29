@@ -1763,6 +1763,8 @@ class ContextStore(Protocol):
     def latest_seq(self, project_id: str) -> int: ...
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
+    def swap_codename(self, project_id: str, codename: str) -> tuple[str | None, ProjectInfo]: ...
+    def folder_names_in_use(self, project_id: str) -> set[str]: ...
     def codename_aliases(self, project_id: str) -> list[str]: ...
     def codename_alias_owners(self) -> dict[str, str]: ...
     def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo: ...
@@ -4593,14 +4595,23 @@ class SqliteStore:
     # --- fleet -----------------------------------------------------------------
 
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo:
-        """Give a project its fleet codename (unique: the index raises on a clash).
+        """Give a project its fleet codename (unique: the index raises on a clash), keeping the
+        one it replaced as an alias (:meth:`swap_codename`)."""
+        return self.swap_codename(project_id, codename)[1]
+
+    def swap_codename(self, project_id: str, codename: str) -> tuple[str | None, ProjectInfo]:
+        """Give a project its fleet codename, and say which one it REPLACED: read in the same
+        ``BEGIN IMMEDIATE`` transaction as the write, so two renames of one project at once
+        each learn the codename they really took over, not the one they read before.
 
         The one it held before, if any, is kept as its alias (``project_codename_alias``,
         :meth:`find_projects`), in the same transaction: the last project to give a codename
         up is the one it names; one taken back is its project's current codename again, and
-        no longer an alias.
+        no longer an alias. A clash with another project's codename raises
+        ``sqlite3.IntegrityError`` and writes nothing.
         """
         with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
             row = self._conn.execute(
                 "SELECT codename FROM project WHERE id = ?", (project_id,)
             ).fetchone()
@@ -4622,14 +4633,25 @@ class SqliteStore:
         project = self.get_project(project_id)
         if project is None:
             raise KeyError(project_id)
-        return project
+        return (str(old) if old is not None else None), project
+
+    def folder_names_in_use(self, project_id: str) -> set[str]:
+        """The directory names of every live project but ``project_id``: what
+        :meth:`find_projects` matches ``--project <name>`` against, so a codename that is one
+        of them would take that reference from the project it named."""
+        rows = self._conn.execute(
+            "SELECT name FROM project WHERE forgotten_at IS NULL AND id != ?", (project_id,)
+        ).fetchall()
+        return {str(row["name"]) for row in rows}
 
     def codename_aliases(self, project_id: str) -> list[str]:
-        """The codenames ``project_id`` gave up and no project has taken from it since as an
-        alias, newest first: its agents' ``fleet/<codename>/…`` branches from before a rename
-        are under them."""
+        """The codenames ``project_id`` gave up that no project holds now, newest first: its
+        agents' ``fleet/<codename>/…`` branches and lingering ``asq-<codename>`` sessions from
+        before a rename are under them. One another project has taken since is that
+        project's, its session and branches included, and is left out."""
         rows = self._conn.execute(
-            "SELECT codename FROM project_codename_alias WHERE project_id = ? "
+            "SELECT codename FROM project_codename_alias WHERE project_id = ? AND codename "
+            "NOT IN (SELECT codename FROM project WHERE codename IS NOT NULL) "
             "ORDER BY retired_at DESC, codename",
             (project_id,),
         ).fetchall()

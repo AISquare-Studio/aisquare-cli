@@ -1596,6 +1596,7 @@ def test_spawn_retries_the_label_when_the_live_index_trips(
         wanted: str | None = None,
         task_id: str | None = None,
         store: object = None,
+        replaces: str | None = None,
     ) -> str:
         calls.append(wanted)
         if len(calls) == 1:
@@ -1655,6 +1656,7 @@ def test_spawn_never_puts_a_second_live_agent_in_one_worktree(
         wanted: str | None = None,
         task_id: str | None = None,
         store: object = None,
+        replaces: str | None = None,
     ) -> str:
         if racing["on"]:
             racing["on"] = False
@@ -18211,6 +18213,7 @@ def test_the_auto_mode_evidence_is_read_before_the_window_starts(
         wanted: str | None = None,
         task_id: str | None = None,
         store: object = None,
+        replaces: str | None = None,
     ) -> str:
         calls.append(wanted)
         if len(calls) == 1:

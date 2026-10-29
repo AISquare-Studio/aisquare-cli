@@ -11,9 +11,10 @@ the pages it opens keep *⚙ Settings* highlighted in the sidebar. ↑/↓ move 
 the links, Enter or a click opens one.
 
 Under them, *Fleet*: *Restart all…* and *Stop all…*, for every running agent of every
-project (``views.fleet_bulk``). Each asks first, in a dialog that lists who. The action
-then runs off the UI thread, with a toast per agent as it is done and one that sums it
-up. Both buttons are greyed while it runs.
+project, and *Pause all…* and *Resume all…*, ``fleet pause --all`` and ``fleet resume --all``
+(``views.fleet_bulk``). Each asks first, in a dialog that lists who. The action then runs off
+the UI thread, with a toast per agent as it is done and one that sums it up. Every button is
+greyed while it runs.
 
 Remote control and the Captain box were sections of this page (#33). They live in App
 settings' tabs now, in its format, where the owner placed them (#41).
@@ -42,9 +43,14 @@ from aisquare.cli.ui.sidebar import (
     UsageStatsSelected,
     doctor_badge,
 )
-from aisquare.cli.ui.views.agent import AgentRestarted
 from aisquare.cli.ui.views.app_settings import AGENT_TAB, REMOTE_TAB
-from aisquare.cli.ui.views.fleet_bulk import BULK_WORKER, ConfirmBulk, named, summary_text
+from aisquare.cli.ui.views.fleet_bulk import (
+    BULK_WORKER,
+    ConfirmBulk,
+    agent_toast,
+    bulk_running,
+    report_toast,
+)
 from aisquare.services import fleet as fleet_service
 
 LINKS: tuple[tuple[str, str, str], ...] = (
@@ -68,11 +74,14 @@ LINKS: tuple[tuple[str, str, str], ...] = (
 FLEET_ACTIONS: tuple[tuple[fleet_service.BulkAction, str], ...] = (
     ("restart", "Restart all…"),
     ("stop", "Stop all…"),
+    ("pause", "Pause all…"),
+    ("resume", "Resume all…"),
 )
 """The Fleet section's buttons, ``#fleet-<action>-all``: each action and its label."""
 FLEET_ABOUT = (
     "every running agent in every project, or the managers alone; exited (💤) agents are "
-    "left as they are"
+    "left as they are. Pause keeps each agent's claim, worktree and session, and Resume "
+    "brings back exactly the paused ones"
 )
 
 
@@ -161,31 +170,33 @@ class SettingsHubView(VerticalScroll, can_focus=False):
 
     @property
     def bulk_running(self) -> bool:
-        """Whether a *Restart all* or *Stop all* this page started is still running."""
-        return any(
-            worker.node is self and worker.name == BULK_WORKER and not worker.is_finished
-            for worker in self.workers
-        )
+        """Whether a restart, stop, pause or resume of many agents is still running: this page's,
+        or a card's *Pause agents* the shell runs (:func:`~.fleet_bulk.bulk_running`)."""
+        return bulk_running(self.app)
 
     def _paint_fleet(self) -> None:
-        """Both Fleet buttons greyed while either action runs: one at a time, never two."""
+        """Every Fleet button greyed while any action runs: one at a time, never two."""
         busy = self.bulk_running
         for action, _ in FLEET_ACTIONS:
             self.query_one(f"#fleet-{action}-all", Button).disabled = busy
 
-    @on(Button.Pressed, "#fleet-restart-all")
-    def _restart_all(self, event: Button.Pressed) -> None:
+    @on(Button.Pressed, ".fleet-action")
+    def _fleet_action(self, event: Button.Pressed) -> None:
         event.stop()
-        self.ask("restart")
-
-    @on(Button.Pressed, "#fleet-stop-all")
-    def _stop_all(self, event: Button.Pressed) -> None:
-        event.stop()
-        self.ask("stop")
+        wanted = (event.button.id or "").removeprefix("fleet-").removesuffix("-all")
+        action = next((action for action, _ in FLEET_ACTIONS if action == wanted), None)
+        if action is not None:
+            self.ask(action)
 
     def ask(self, action: fleet_service.BulkAction) -> None:
         """The dialog for ``action``; on confirm, the action on what it showed."""
         if self.bulk_running:
+            self.notify(
+                "agents are being restarted, stopped, paused or resumed — wait for that first",
+                severity="warning",
+                timeout=5,
+                markup=False,
+            )
             return
 
         def confirmed(plan: fleet_service.BulkPlan | None) -> None:
@@ -206,7 +217,7 @@ class SettingsHubView(VerticalScroll, can_focus=False):
 
         def tell(receipt: fleet_service.BulkReceipt) -> None:
             with contextlib.suppress(Exception):
-                app.call_from_thread(self._agent_done, action, receipt)
+                app.call_from_thread(agent_toast, self, receipt, action)
 
         self.run_worker(
             lambda: fleet_service.bulk(
@@ -219,54 +230,13 @@ class SettingsHubView(VerticalScroll, can_focus=False):
         )
         self._paint_fleet()
 
-    def _agent_done(
-        self, action: fleet_service.BulkAction, receipt: fleet_service.BulkReceipt
-    ) -> None:
-        """One agent's toast, as it is done; a skip is named in the summary instead.
-
-        A restart is told as the agent view's own is, through :class:`AgentRestarted`: the
-        shell says it and moves the view to the new row only from the replaced row's view,
-        still on screen. From here, that is never, unless the user went there meanwhile.
-        """
-        result = receipt.result
-        if receipt.outcome == "failed":
-            self.notify(
-                f"could not {action} {named(receipt)}: {receipt.why}",
-                severity="error",
-                timeout=8,
-                markup=False,
-            )
-        elif isinstance(result, fleet_service.RestartReceipt):
-            self.post_message(AgentRestarted(result))
-        elif isinstance(result, fleet_service.StopReceipt):
-            self.notify(f"✓ stopped {named(receipt)}", timeout=5, markup=False)
-            if result.release_failed:
-                self.notify(
-                    f"claims: {result.release_failed}", severity="warning", timeout=8, markup=False
-                )
-
     @on(Worker.StateChanged)
     def _bulk_done(self, event: Worker.StateChanged) -> None:
         if event.worker.name != BULK_WORKER:
             return
         if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
             return
-        report = event.worker.result
-        if event.state is WorkerState.SUCCESS and isinstance(report, fleet_service.BulkReport):
-            failed = bool(report.of("failed") or report.unread)
-            self.notify(
-                summary_text(report),
-                severity="error" if failed else ("information" if report.ok else "warning"),
-                timeout=12 if not report.ok or report.of("skipped") else 6,
-                markup=False,
-            )
-        elif event.state is WorkerState.ERROR:
-            self.notify(
-                f"could not {self._action} every agent: {event.worker.error}",
-                severity="error",
-                timeout=8,
-                markup=False,
-            )
+        report_toast(self, event, self._action)
         self._paint_fleet()
         refresh = getattr(self.app, "refresh_data", None)
         if callable(refresh):

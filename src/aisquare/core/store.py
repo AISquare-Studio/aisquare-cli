@@ -1845,6 +1845,7 @@ class ContextStore(Protocol):
         self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
     ) -> FleetAgent | None: ...
     def mark_fleet_agent_stopped(self, agent_id: str) -> FleetAgent: ...
+    def mark_fleet_agent_paused(self, agent_id: str) -> FleetAgent | None: ...
     def forget_fleet_agent_server_start(self, agent_id: str, started: datetime) -> bool: ...
     def record_fleet_agent_branch(self, agent_id: str, branch: str | None) -> None: ...
     # The Claude account registry (v15, #145): the arrangement of the slots.
@@ -5658,7 +5659,8 @@ class SqliteStore:
     ) -> FleetAgent | None:
         """End a LIVE agent's row and return it; ``None`` when it was already ended.
 
-        ``ended_by`` is how (v34, #38): ``stopped`` on aisquare's word, ``died`` otherwise.
+        ``ended_by`` is how (v34, #38): ``stopped`` on aisquare's word, ``paused`` on
+        ``fleet pause``'s, ``died`` otherwise.
 
         The UPDATE is a compare-and-set on ``ended_at IS NULL``, for a caller that
         announces the end: every fleet read records a dead pane (#138), so two
@@ -5689,6 +5691,18 @@ class SqliteStore:
         if agent is None:
             raise KeyError(agent_id)
         return agent
+
+    def mark_fleet_agent_paused(self, agent_id: str) -> FleetAgent | None:
+        """Record an ENDED row as paused (``services.fleet.pause_agent``): one a listing
+        recorded as died while the pause's ``/exit`` took it down. Never over a stop, which
+        is the owner's word, nor on a live row; ``None`` when nothing was written."""
+        cursor = self._conn.execute(
+            "UPDATE fleet_agent SET ended_by = 'paused' WHERE id = ? AND ended_at IS NOT NULL "
+            "AND (ended_by IS NULL OR ended_by = 'died')",
+            (agent_id,),
+        )
+        self._conn.commit()
+        return self.get_fleet_agent(agent_id) if cursor.rowcount == 1 else None
 
     def forget_fleet_agent_server_start(self, agent_id: str, started: datetime) -> bool:
         """Clear a LIVE row's recorded server start while it is still ``started``; whether it did.

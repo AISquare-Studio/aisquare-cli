@@ -1548,15 +1548,19 @@ class AgentConnection(BaseModel):
     until that key goes. ``agents connect`` leaves the key alone. ``None`` otherwise."""
 
 
-EndedBy = Literal["stopped", "died"]
+EndedBy = Literal["stopped", "died", "paused"]
 """How a fleet agent's row ended (``FleetAgent.ended_by``, #38): ``stopped`` on aisquare's
 word — ``fleet stop``, Stop all, ``shutdown``, a hand-over's old row — or ``died``, a death
-a read or ``reap`` recorded that nobody asked for."""
-FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited", "lost", "unknown"]
+a read or ``reap`` recorded that nobody asked for. ``paused`` is ``fleet pause``'s: its
+process exited and its claims, label, worktree and transcript wait for ``fleet resume``."""
+FleetAgentState = Literal[
+    "working", "waiting", "attention", "limited", "exited", "lost", "paused", "unknown"
+]
 """What a fleet agent is doing, DERIVED at read time and never stored: a fresh
 ``TeamSession`` row wins (working / waiting / attention); otherwise the tmux
-pane's facts (exited with a status, or lost when the pane is gone); ``unknown``
-when neither source can answer."""
+pane's facts (exited with a status, or lost when the pane is gone); ``paused`` for the
+newest row of its label that ``fleet pause`` ended; ``unknown`` when neither source can
+answer."""
 
 FirstPromptState = Literal["pending", "acked", "unsent"]
 """Where a fleet agent's first message stands (:attr:`FleetAgent.first_prompt`)."""
@@ -1792,8 +1796,9 @@ class FleetAgent(BaseModel):
     ``[fleet.roles.<role>].persona``, else none."""
     ended_by: EndedBy | None = None
     """How the row ended (v34, #38): ``stopped`` when aisquare ended it on purpose, ``died``
-    when a read or ``reap`` recorded a death nobody asked for. ``None`` while it runs, and on
-    a row ended before the column, which is read by its exit status (Restart all)."""
+    when a read or ``reap`` recorded a death nobody asked for, ``paused`` when ``fleet pause``
+    exited it to be resumed. ``None`` while it runs, and on a row ended before the column,
+    which is read by its exit status (Restart all)."""
     first_prompt: FirstPromptState | None = None
     """Whether the first message it was given started a turn (P0-W1a, #122): ``pending``
     from the spawn until its ``UserPromptSubmit``, then ``acked``; ``unsent`` once a

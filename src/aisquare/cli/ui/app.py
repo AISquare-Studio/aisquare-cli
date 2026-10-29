@@ -76,9 +76,11 @@ from aisquare.cli.ui.groups import (
 )
 from aisquare.cli.ui.project_menu import (
     FRESH,
+    PAUSE,
     PIN,
     REMOVE,
     RENAME,
+    RESUME,
     SETTINGS,
     ConfirmRemove,
     ProjectMenu,
@@ -142,6 +144,15 @@ from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.app_settings import AppSettingsView, UiSettingsChanged
 from aisquare.cli.ui.views.captain import CaptainView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
+from aisquare.cli.ui.views.fleet_bulk import (
+    BULK_WORKER,
+    BulkAsked,
+    ConfirmBulk,
+    agent_toast,
+    applicable,
+    bulk_running,
+    report_toast,
+)
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.project import ProjectView
@@ -1114,6 +1125,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """Each project's last confirmed Start fresh, by id: what a reopened dialog ticks."""
         self._fresh_asked: dict[str, FreshChoice] = {}
         """The Start fresh dialogs to open with a run's extras ticked, by project id, once."""
+        self._bulk_action: fleet_service.BulkAction = "pause"
+        """What the shell's own :data:`BULK_WORKER` does (a card's pause or resume): the verb
+        of its error toast."""
         self.captain_on = experimental.captain_enabled()
         """The experimental captain, read at the start: off, there is no Start captain, captain
         row or captain view, and no ui receiver is started (:meth:`on_mount`). Settings'
@@ -1911,6 +1925,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.worker.name == PROJECT_FRESH_WORKER:
             self._project_freshened(event)
             return
+        if event.worker.name == BULK_WORKER:
+            self._bulk_done(event)
+            return
         if event.worker.name == FLEET_WORKER:
             self._fleet_read(event)
             return
@@ -2384,12 +2401,67 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 self.on_toggle_pin(TogglePin("project", project_id))
             elif choice == SETTINGS:
                 self.call_later(self._open_settings, project_id)
+            elif choice in (PAUSE, RESUME):
+                self.post_message(BulkAsked("pause" if choice == PAUSE else "resume", project_id))
             elif choice == FRESH:
                 self.post_message(StartFresh(project_id))
             elif choice == REMOVE:
                 self.push_screen(ConfirmRemove(project), confirmed)
 
-        self.push_screen(ProjectMenu(project, event.anchor), chosen)
+        agents = self.snapshot.agents.get(project_id) if self.snapshot else None
+        self.push_screen(ProjectMenu(project, event.anchor, applicable(agents)), chosen)
+
+    def on_bulk_asked(self, event: BulkAsked) -> None:
+        """*Pause agents…* / *Resume agents…*, from a card's menu or a Settings tab: ask
+        (:class:`ConfirmBulk`, which reads that project's agents), then ``fleet pause`` or
+        ``fleet resume`` of the project on what it showed, off the UI thread, a toast per agent
+        as it is done and one that sums it up — Settings ▸ Fleet's, for one project. Never
+        beside another restart, stop, pause or resume of many agents (``bulk_running``)."""
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        if bulk_running(self):
+            self.notify(
+                "agents are being restarted, stopped, paused or resumed — wait for that first",
+                severity="warning",
+                timeout=5,
+                markup=False,
+            )
+            return
+        action, target = event.action, project
+
+        def confirmed(plan: fleet_service.BulkPlan | None) -> None:
+            if plan is None or not plan.targets or bulk_running(self):
+                return
+
+            def tell(receipt: fleet_service.BulkReceipt) -> None:
+                with contextlib.suppress(Exception):  # a toast lost as asq quits, not an agent
+                    self.call_from_thread(agent_toast, self, receipt, action)
+
+            self._bulk_action = action
+            self.run_worker(
+                lambda: fleet_service.bulk(
+                    action,
+                    managers_only=plan.managers_only,
+                    shown=plan,
+                    on_receipt=tell,
+                    projects=[target],
+                ),
+                name=BULK_WORKER,
+                group=BULK_WORKER,
+                thread=True,
+                exit_on_error=False,
+            )
+
+        self.push_screen(ConfirmBulk(action, project), confirmed)
+
+    def _bulk_done(self, event: Worker.StateChanged) -> None:
+        """A card's pause or resume is done: its summary, and the frame read again."""
+        if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            return
+        report_toast(self, event, self._bulk_action)
+        self.refresh_data()
 
     def on_start_fresh(self, event: StartFresh) -> None:
         """*Start fresh…*, from a card's menu or a Settings tab: ask (:class:`ConfirmFresh`,
@@ -3450,8 +3522,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.doctor_scope = event.project_id
 
     async def action_quit(self) -> None:
-        """``q`` and ``ctrl+q``: quit, unless Settings ▸ Fleet's restart or stop of every agent
-        still runs, which is refused with a toast as Update and Uninstall refuse it.
+        """``q`` and ``ctrl+q``: quit, unless a restart, stop, pause or resume of many agents
+        (Settings ▸ Fleet's, a card's) still runs, which is refused with a toast as Update and
+        Uninstall refuse it.
 
         A quit cannot stop its thread: the screen went, ``asyncio.run`` joined the thread
         with the terminal blank for as long as the rest of the agents took, minutes for a
@@ -3662,7 +3735,7 @@ def _writing_workers() -> dict[str, str]:
         captain.VOICE_WORKER: "the captain's speaker switch",
         settings_remote.TOKEN_WORKER: "Settings ▸ Remote's save of the ngrok token",
         agent.RESTART_WORKER: "an agent's restart",
-        fleet_bulk.BULK_WORKER: "Settings ▸ Fleet's restart or stop of every agent",
+        fleet_bulk.BULK_WORKER: "a restart, stop, pause or resume of many agents",
         accounts.SIGN_OUT_WORKER: "an AISquare sign-out",
         accounts.COMPLETE_WORKER: "a Claude sign-in",
         accounts.ABANDON_WORKER: "a Claude sign-in's discard",

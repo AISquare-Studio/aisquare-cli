@@ -151,7 +151,8 @@ class SpawnAgent(Message):
     """*Spawn agent*, or the receiver's ``open_spawn``: the Spawn dialog.
 
     ``project_id`` is the project the dialog opens on — the sidebar's selection, which the
-    dialog's Project field can change — or ``None`` for the first project listed.
+    dialog's Project field can change — or ``None``: the open view's project, else the first
+    listed (the shell's to say: the sidebar does not know the view).
     """
 
     def __init__(self, project_id: str | None = None) -> None:
@@ -580,6 +581,12 @@ class Activatable(Static):
         on from this row, not from the one highlighted before the click.
         """
         self._post(self.message(), browsing=False)
+
+    @property
+    def opens_view(self) -> bool:
+        """Whether the row stands for a view (its message a :class:`ViewSelected`): the arrows
+        open it as they land on it, and its message follows whenever it takes the highlight."""
+        return isinstance(self.message(), ViewSelected)
 
     def arrive(self) -> None:
         """An arrow landed here: open the row's view, as a click would, the keyboard staying
@@ -2084,8 +2091,9 @@ class Sidebar(Vertical):
 
     def spawn_project_id(self) -> str | None:
         """The project *Spawn agent* opens on: the selected card's, or the selected agent's
-        project; else ``None`` (the first one listed). The captain's row, whose board is no
-        listed project, and a group, Settings or nothing selected, name none."""
+        project; else ``None``, and the shell opens it on the open view's project (else the
+        first listed). The captain's row, whose board is no listed project, and a group,
+        Settings, *Spawn agent* itself (reached by the arrows) or nothing selected name none."""
         kind, _, ident = (self.selected_key or "").partition(":")
         listed = {project.id for project in self.ordered_projects()}
         if kind == "project":
@@ -2101,11 +2109,26 @@ class Sidebar(Vertical):
     # --- selection ------------------------------------------------------------------
 
     def select(self, key: str | None) -> None:
-        """Put the one highlight on the row for ``key``; ``None`` highlights no row."""
+        """Put the one highlight on the row for ``key``; ``None`` highlights no row.
+
+        A key already highlighted costs nothing: an arrow selects its row, the row selects
+        itself as it posts its message, and the shell's answer selects it again — three
+        passes over every row (and a title lookup per card) for each key pressed.
+        """
+        if key == self.selected_key:
+            return
         self.selected_key = key
         if key is not None:
             self._anchor_key = key
         self._apply_selection()
+
+    def highlight_opens_a_view(self) -> bool:
+        """Whether the highlighted row stands for a view, so that its own message — posted as it
+        took the highlight — is on its way to open it (:attr:`Activatable.opens_view`)."""
+        key = self.selected_key
+        return key is not None and any(
+            row.selection_key == key and row.opens_view for row in self.query(Activatable)
+        )
 
     def _apply_selection(self) -> None:
         # Over EVERY row, the ones hidden in a folded card or group too: a row that kept
@@ -2260,8 +2283,10 @@ class Sidebar(Vertical):
 
         The binding is the sidebar's, not the row's — the rows are Statics with
         ``can_focus=False`` on purpose (see ``#projects`` above), so there is no
-        focused row to bind to. It acts on what is selected, which is what the
-        user sees highlighted and what the open view is showing.
+        focused row to bind to. It acts on the highlighted row: an agent's row the
+        arrows or a click put it on, whose view is the one open. With the highlight
+        on a row that opens no view (``+``, a group header, *Spawn agent*) while an
+        agent's view still shows, it does nothing — the key stops what is lit.
 
         The agent names its own project, so a row selected under one card cannot
         be stopped against another's ``ProjectInfo``.

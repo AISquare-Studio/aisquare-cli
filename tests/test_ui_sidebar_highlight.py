@@ -26,9 +26,10 @@ from textual.pilot import Pilot
 from textual.widgets import Button
 
 from aisquare.cli.ui.app import FleetApp
-from aisquare.cli.ui.sidebar import Disclosure, ProjectCard, ProjectTitle, StatusLine
+from aisquare.cli.ui.sidebar import Disclosure, ProjectCard, ProjectTitle, Sidebar, StatusLine
 from aisquare.cli.ui.spawn import SpawnDialog
 from aisquare.cli.ui.stop import StopAgentScreen
+from aisquare.core import feature_use
 from aisquare.core.store import store_session
 from aisquare.services import project_groups as groups_service
 from tests import test_ui_shell as ui_suite
@@ -307,8 +308,10 @@ def test_a_click_while_another_rows_view_is_being_built_is_not_lost(
     script["prj_a"] = [status("prj_a", "coder-1", "coder", "working")]
     real_show = FleetApp._show
 
-    async def show_then_click(app: FleetApp, view_id: str, factory: Any = None) -> None:
-        await real_show(app, view_id, factory)
+    async def show_then_click(
+        app: FleetApp, view_id: str, factory: Any = None, *, counted: bool = True
+    ) -> None:
+        await real_show(app, view_id, factory, counted=counted)
         if view_id == "agent-agt_a_coder-1":
             card_for(app, "prj_b").query_one(ProjectTitle).activate()  # beta clicked meanwhile
 
@@ -366,4 +369,182 @@ def test_the_arrows_open_settings_without_handing_the_hub_the_keys_and_enter_doe
         (["settings"], "settings-hub", "Sidebar"),
         (["settings"], "accounts", "Sidebar"),
         (["settings"], "settings-hub", Button.__name__),
+    ]
+
+
+# --- review of #458 -------------------------------------------------------------------------
+
+
+def test_spawn_agent_reached_by_the_arrows_opens_on_the_open_views_project(
+    tmp_path: Path, script: Script, captain_off: None
+) -> None:
+    """Arrowed onto, *Spawn agent* holds the highlight itself, so it names no project: the
+    dialog opened on the FIRST listed — alpha, folded away in its group — while beta's view
+    was the one open. It opens on the open view's project now, both when the walk passes a
+    folded group and when key repeat skipped the rows between (the reviewer's repro)."""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None), ("prj_c", "gamma", None))
+    with store_session() as store:
+        group, _ = groups_service.create_group(store, "later", ["prj_a"])
+        groups_service.set_collapsed(store, group.id, True)
+
+    async def spawn_from_the_highlight(pilot: Pilot[None], app: FleetApp) -> tuple[str, str]:
+        assert highlighted(app) == ["spawn-agent"], highlighted(app)
+        shown = str(app.content.current)
+        await pilot.press("enter")
+        await settle(app)
+        dialog = app.screen
+        assert isinstance(dialog, SpawnDialog), type(dialog).__name__
+        on = dialog.project.id
+        app.pop_screen()
+        await settle(app)
+        return shown, on
+
+    async def go(pilot: Pilot[None]) -> list[tuple[str, str]]:
+        app = fleet_app(pilot)
+        gamma = card_for(app, "prj_c").query_one(ProjectTitle)
+        await pilot.click(gamma)
+        await settle(app)
+        for _ in range(3):  # beta (opens), the folded group, Spawn agent
+            await pilot.press("up")
+            await settle(app)
+        walked = await spawn_from_the_highlight(pilot, app)
+        await pilot.click(gamma)
+        await settle(app)
+        for _ in range(3):  # the same three, before the shell reads any: beta never opens
+            app.sidebar.action_cursor_up()
+        await settle(app)
+        return [walked, await spawn_from_the_highlight(pilot, app)]
+
+    assert drive(go) == [("project-prj_b", "prj_b"), ("project-prj_c", "prj_c")]
+
+
+def test_an_arrow_onto_a_row_that_opens_nothing_mid_build_still_finishes_the_open(
+    tmp_path: Path, script: Script, captain_off: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A click on beta's agent, and ↑↑ while its view is being built: beta's title, then the
+    group's header, which opens nothing and sends no message. The agent's view is the one
+    left showing, so its open is finished — remembered, the Doctor scoped to it — under the
+    highlight the user moved; but its pane does not take the keyboard from the sidebar the
+    user is walking. Beta's title, passed over, builds nothing. (``_open_row`` dropped the
+    whole rest of the open: nothing remembered, the Doctor unscoped.)"""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
+    script["prj_b"] = [status("prj_b", "manager", "manager", "waiting")]
+    with store_session() as store:
+        group, _ = groups_service.create_group(store, "tools", ["prj_b"])
+    real_show = FleetApp._show
+
+    async def show_then_walk(
+        app: FleetApp, view_id: str, factory: Any = None, *, counted: bool = True
+    ) -> None:
+        await real_show(app, view_id, factory, counted=counted)
+        if view_id == "agent-agt_b_manager":
+            app.sidebar.action_cursor_up()  # beta's title…
+            app.sidebar.action_cursor_up()  # …and the group's header, while the view is built
+
+    monkeypatch.setattr(FleetApp, "_show", show_then_walk)
+
+    async def go(pilot: Pilot[None]) -> list[object]:
+        app = fleet_app(pilot)
+        app.sidebar.focus()
+        await pilot.pause()
+        row_for(app, "agt_b_manager").activate()  # a click on beta's agent
+        await settle(app)
+        with store_session() as store:
+            remembered = store.ui_state("fleet.selected")
+        try:
+            app.content.get_child_by_id("project-prj_b")
+            beta_built = True
+        except NoMatches:
+            beta_built = False
+        return [
+            highlighted(app),
+            str(app.content.current),
+            remembered,
+            app.doctor_scope,
+            type(app.focused).__name__,
+            beta_built,
+        ]
+
+    assert drive(go) == [
+        [f"group:{group.id}"],
+        "agent-agt_b_manager",
+        "agent:prj_b/agt_b_manager",
+        "prj_b",
+        "Sidebar",
+        False,
+    ]
+
+
+def test_rows_the_arrows_open_in_passing_are_not_counted_as_views_used(
+    tmp_path: Path, script: Script, captain_off: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manager's call on #77: a view the arrows open on their way past its row is no
+    use of it for the feature counts; Enter on the row and a click on it are."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "manager", "manager", "waiting")]
+    counted: list[str] = []
+
+    def record(name: str, **_: object) -> bool:
+        counted.append(name)
+        return True
+
+    monkeypatch.setattr(feature_use, "record", record)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], list[str]]:
+        app = fleet_app(pilot)
+        app.sidebar.focus()
+        await pilot.pause()
+        counted.clear()
+        for _ in range(4):  # add, Spawn agent, alpha (opens), its manager (opens)
+            await pilot.press("down")
+            await settle(app)
+        passing = [name for name in counted if name.startswith("tui.view.")]
+        await pilot.press("enter")  # the manager's row: its click
+        await settle(app)
+        entered = [name for name in counted if name.startswith("tui.view.")]
+        counted.clear()
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)
+        return passing, entered, [name for name in counted if name.startswith("tui.view.")]
+
+    passing, entered, clicked = drive(go)
+    assert passing == [], "the arrows' transit counted views"
+    assert entered == ["tui.view.agent"]
+    assert clicked == ["tui.view.project"]
+
+
+def test_an_arrow_paints_the_highlight_once(
+    tmp_path: Path, script: Script, captain_off: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One pass over the rows per key: the arrow selects its row, then the row (posting its
+    message) and the shell's answer ask for the same key, and each repainted every row and
+    looked up every card's title."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "manager", "manager", "waiting")]
+    passes: list[str | None] = []
+    real_apply = Sidebar._apply_selection
+
+    def apply(sidebar: Sidebar) -> None:
+        passes.append(sidebar.selected_key)
+        real_apply(sidebar)
+
+    monkeypatch.setattr(Sidebar, "_apply_selection", apply)
+
+    async def go(pilot: Pilot[None]) -> list[list[str | None]]:
+        app = fleet_app(pilot)
+        app.sidebar.focus()
+        await pilot.pause()
+        per_key: list[list[str | None]] = []
+        for _ in range(4):  # add, Spawn agent, alpha (opens), its manager (opens)
+            passes.clear()
+            await pilot.press("down")
+            await settle(app)
+            per_key.append(list(passes))
+        return per_key
+
+    assert drive(go) == [
+        ["add"],
+        ["spawn-agent"],
+        ["project:prj_a"],
+        ["agent:agt_a_manager"],
     ]

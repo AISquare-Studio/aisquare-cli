@@ -360,6 +360,9 @@ class FleetSnapshot:
     the shell — no card, no project page, no Doctor scope. Its agent, the captain, is
     in ``agents``, so selecting it resolves; :meth:`board` answers the home for the
     actions on that row."""
+    fleet_paused: frozenset[str] = frozenset()
+    """The projects whose ``fleet-paused`` signal reads on: their *Resume agents…* clears it,
+    even with no agent paused."""
 
     def project(self, project_id: str) -> ProjectInfo | None:
         """A listed project — never the home board.
@@ -417,6 +420,8 @@ class _FleetRead:
     captain_asked: bool = False
     """Whether the captain's part was read: the captain was on as the read began. One begun
     before Settings switched it on found nothing of it, which is not "no captain"."""
+    fleet_paused: frozenset[str] = frozenset()
+    """The projects whose ``fleet-paused`` signal reads on (``FleetSnapshot.fleet_paused``)."""
 
 
 def _read_frame(
@@ -474,6 +479,8 @@ def _read_fleet(
             listings = fleet_service.read_listings(store, projects, skip=folded)
             # A manager nudge a draft held back (P0-W2, #276), read in this frame's session.
             owed = fleet_service.deferred_nudge_targets(store)
+            # Which are fleet-paused, for their Resume (one read of the signals, any board).
+            fleet_paused = fleet_service.fleet_paused_projects(store, projects)
     except Exception as exc:  # the store is briefly unavailable — keep what is shown
         return _FleetRead(capturing, error=f"{type(exc).__name__}: {exc}")
     many = fleet_service.list_agents_many(listings)
@@ -492,7 +499,16 @@ def _read_fleet(
     # box is clear (P0-W2, #276); nothing is opened when nothing is owed.
     with contextlib.suppress(Exception):
         fleet_service.send_deferred_nudges(owed)
-    return _FleetRead(capturing, projects, groups, agents, notices, listings.live, home=home)
+    return _FleetRead(
+        capturing,
+        projects,
+        groups,
+        agents,
+        notices,
+        listings.live,
+        home=home,
+        fleet_paused=fleet_paused,
+    )
 
 
 def _why_unread(exc: BaseException) -> str:
@@ -1602,7 +1618,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             cards = {**read.agents, home.id: own} if home.id in read.agents else read.agents
             agents = {**read.agents, home.id: [*([captain] if captain is not None else []), *own]}
         self.store_error = None
-        self.snapshot = FleetSnapshot(read.projects, agents, read.notices, read.taken_at, home=home)
+        self.snapshot = FleetSnapshot(
+            read.projects,
+            agents,
+            read.notices,
+            read.taken_at,
+            home=home,
+            fleet_paused=read.fleet_paused,
+        )
         sidebar.show_notice(None)
         sidebar.show_captain(captain, notice=captain_notice)
         sidebar.show_projects(
@@ -1843,7 +1866,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 continue  # folded away and not read (#83) — not "none" either
             # ProjectView.show() is the MANAGER status renderer; the snapshot
             # goes through refresh_status, which picks the manager out of it.
-            project_view.refresh_status(snapshot.agents.get(fresh_project.id, []))
+            project_view.refresh_status(
+                snapshot.agents.get(fresh_project.id, []),
+                fleet_paused=fresh_project.id in snapshot.fleet_paused,
+            )
 
     # --- doctor -------------------------------------------------------------------------
 
@@ -2072,7 +2098,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         view = ProjectView(project, id=view_id, usage=self.session_usage)
         snapshot = self.snapshot
         if snapshot is not None and snapshot.notices.get(project.id) is None:
-            view.refresh_status(snapshot.agents.get(project.id, []))
+            view.refresh_status(
+                snapshot.agents.get(project.id, []),
+                fleet_paused=project.id in snapshot.fleet_paused,
+            )
         return view
 
     async def on_agent_selected(self, event: AgentSelected) -> None:
@@ -2409,7 +2438,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 self.push_screen(ConfirmRemove(project), confirmed)
 
         agents = self.snapshot.agents.get(project_id) if self.snapshot else None
-        self.push_screen(ProjectMenu(project, event.anchor, applicable(agents)), chosen)
+        signal_on = self.snapshot is not None and project_id in self.snapshot.fleet_paused
+        can = applicable(agents, fleet_paused=signal_on)
+        self.push_screen(ProjectMenu(project, event.anchor, can), chosen)
 
     def on_bulk_asked(self, event: BulkAsked) -> None:
         """*Pause agents…* / *Resume agents…*, from a card's menu or a Settings tab: ask
@@ -2432,7 +2463,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         action, target = event.action, project
 
         def confirmed(plan: fleet_service.BulkPlan | None) -> None:
-            if plan is None or not plan.targets or bulk_running(self):
+            if plan is None or not plan.acts or bulk_running(self):
                 return
 
             def tell(receipt: fleet_service.BulkReceipt) -> None:

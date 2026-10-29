@@ -147,14 +147,20 @@ class SettingsView(VerticalScroll):
         self.agents: list[FleetAgentStatus] | None = None
         """The project's agent rows as the shell's last frame listed them; ``None`` before
         the first."""
+        self.fleet_paused = False
+        """Whether the project's ``fleet-paused`` signal read on in that frame: Resume clears
+        it, with no agent paused too."""
         self._attach_painted: tuple[str, list[Span], StyleType] | None = None
         """The attach line as last painted: a frame that changes nothing repaints nothing.
         Its text, spans and style — ``Text``'s own ``==`` leaves the style out."""
 
-    def show_agents(self, agents: Sequence[FleetAgentStatus]) -> None:
+    def show_agents(
+        self, agents: Sequence[FleetAgentStatus], *, fleet_paused: bool = False
+    ) -> None:
         """The project's rows from the shell's frame: the attach line follows its session, and
-        Pause / Resume what they would act on."""
+        Pause / Resume what they would act on (``fleet_paused``: its signal reads on)."""
         self.agents = list(agents)
+        self.fleet_paused = fleet_paused
         try:
             line = self.query_one("#attach-line", Static)
         except NoMatches:  # not composed yet: compose reads self.agents
@@ -208,7 +214,7 @@ class SettingsView(VerticalScroll):
         attach = attach_line(self.agents)
         self._attach_painted = (attach.plain, attach.spans, attach.style)
         yield Static(attach, id="attach-line")
-        can = applicable(self.agents)
+        can = applicable(self.agents, fleet_paused=self.fleet_paused)
         with Horizontal(classes="row", id="pause-row"):
             yield Button("⏸ Pause agents…", id="pause-agents", disabled=not can["pause"])
             yield Button("▶ Resume agents…", id="resume-agents", disabled=not can["resume"])
@@ -240,8 +246,8 @@ class SettingsView(VerticalScroll):
         )
 
     def _paint_pause(self) -> None:
-        """Pause and Resume greyed where they would act on no agent (``applicable``)."""
-        can = applicable(self.agents)
+        """Pause and Resume greyed where they would act on nothing (``applicable``)."""
+        can = applicable(self.agents, fleet_paused=self.fleet_paused)
         for action in ("pause", "resume"):
             with contextlib.suppress(NoMatches):
                 self.query_one(f"#{action}-agents", Button).disabled = not can[action]

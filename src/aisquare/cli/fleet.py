@@ -758,6 +758,13 @@ def _emit_bulk(report: fleet_service.BulkReport, console: Console, *, as_json: b
         else:
             said = f"▶ the fleet-paused signal on {_display_name(project)} was cleared"
         console.print(said, markup=False)
+    for project, left in report.kept:
+        agents = f"{left} agent{'' if left == 1 else 's'} {'is' if left == 1 else 'are'}"
+        console.print(
+            f"⏸ {_display_name(project)} stays fleet-paused: {agents} still paused — "
+            f"`{project_service.fleet_command('resume', project)}` brings them back",
+            markup=False,
+        )
     if report.interrupted:
         console.print(f"⚠ {report.interrupted}", markup=False)
     released = sum(
@@ -858,10 +865,14 @@ def _bulk_json(report: fleet_service.BulkReport) -> dict[str, object]:
         "interrupted": report.interrupted,
     }
     if report.action in ("pause", "resume"):
-        # The projects whose `fleet-paused` signal it set or cleared.
+        # The projects whose `fleet-paused` signal it set or cleared, and a resume's that stay
+        # paused, with how many agents are still paused there.
         out["signals"] = [
             {"project": project_of(project), "paused": report.action == "pause"}
             for project in report.signals
+        ]
+        out["kept"] = [
+            {"project": project_of(project), "still_paused": left} for project, left in report.kept
         ]
     return out
 

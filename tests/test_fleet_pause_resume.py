@@ -1,24 +1,29 @@
 """Pause and resume the agents of a project, or of every project: ``fleet pause`` / ``resume``.
 
 A pause exits each running agent's Claude process as ``fleet stop`` does and keeps the rest of
-it — its row (``ended_by = "paused"``), label, role, task claim, worktree, account and
-transcript — and sets the project's ``fleet-paused`` signal. A resume clears the signal and
-starts exactly the paused agents again through ``fleet restart``: same label, its session
-resumed from its transcript, one carry-on line typed. Driven over the fleet's fake tmux
-(tests/test_fleet_service.py), with two projects, each with a manager and a coder.
+it — its row (``ended_by = "stopped"`` with ``paused_at``), label, role, task claim, worktree,
+account and transcript — and sets the project's ``fleet-paused`` signal. A resume clears the
+signal and starts exactly the paused agents again through ``fleet restart``: same label, its
+session resumed from its transcript, one carry-on line typed. Driven over the fleet's fake
+tmux (tests/test_fleet_service.py), with two projects, each with a manager and a coder.
 """
 
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, Literal
 
 import pytest
+from pydantic import TypeAdapter
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core import paths
+from aisquare.core import store as store_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
@@ -179,7 +184,8 @@ def test_pause_of_a_project_exits_its_agents_keeps_their_claims_and_sets_its_sig
         pane = fleet.agents[key].pane_id
         assert (pane, "literal", "/exit") in tmux.typed and pane in tmux.killed
         row = _row(fleet.agents[key].id)
-        assert row.ended_at is not None and row.ended_by == "paused"
+        assert row.ended_at is not None and row.paused_at is not None
+        assert row.ended_by == "stopped", "a value 0.9.1 reads (review of #457, M1)"
     # The claim stays with the paused coder's session: released by nothing.
     task = _task(fleet.tasks["alpha"])
     assert task.status == "doing" and task.claimed_by == coder.session_id
@@ -282,7 +288,7 @@ def test_resume_brings_each_paused_agent_back_under_its_label_with_its_session(
     # Resumed, a paused row is history, recorded as a stop: no `paused` row is left behind
     # for a reader that does not know the word (0.9.1, moved back to).
     with store_session() as store:
-        assert all(row.ended_by != "paused" for row in store.fleet_agents(fleet.alpha.id))
+        assert all(row.paused_at is None for row in store.fleet_agents(fleet.alpha.id))
 
 
 def test_a_paused_agent_with_no_transcript_starts_fresh_and_takes_its_claims_over(
@@ -361,13 +367,18 @@ def test_a_paused_agent_outlives_its_tmux_server_and_reap_server_down(
     assert report.lost == [] and report.ended == []
     assert coder.cwd not in report.worktrees_removed and coder.cwd.is_dir()
     row = _row(coder.id)
-    assert row.ended_by == "paused"
+    assert row.paused_at is not None
     task = _task(fleet.tasks["alpha"])
     assert task.status == "doing" and task.claimed_by == coder.session_id
     assert {s.agent.label: s.state for s in fleet_service.list_agents(fleet.alpha)} == {
         "manager": "paused",
         coder.label: "paused",
     }
+    # A reboot outlasts the 120-minute lease: the claim is still the paused coder's then.
+    later = (datetime.now(tz=UTC) + timedelta(hours=8)).isoformat()
+    monkeypatch.setattr(store_core, "_now_iso", lambda: later)
+    with store_session() as store:
+        assert not store.claim_task(task.id, "someone-else", datetime.now(tz=UTC))
 
 
 def test_reap_never_removes_a_paused_agents_clean_worktree(fleet: Fleet) -> None:
@@ -394,7 +405,7 @@ def test_restart_all_and_stop_all_leave_a_paused_agent(
     assert outcomes["alpha/manager"] == ("skipped", left)
     assert outcomes[_coder_label(fleet, "alpha")] == ("skipped", left)
     assert outcomes["beta/manager"] == ("done", None)
-    assert _row(fleet.agents["alpha/manager"].id).ended_by == "paused"
+    assert _row(fleet.agents["alpha/manager"].id).paused_at is not None
 
 
 def test_a_restart_lost_after_an_update_leaves_a_paused_agent(fleet: Fleet) -> None:
@@ -415,17 +426,58 @@ def test_a_spawn_does_not_take_a_paused_agents_label(fleet: Fleet) -> None:
         fleet_service.spawn(fleet.alpha, "manager")
 
 
-def test_stopping_a_paused_agent_ends_its_pause_for_good(fleet: Fleet) -> None:
+def test_the_owners_stop_of_a_paused_agent_ends_its_pause_for_good(fleet: Fleet) -> None:
+    """The human's own ``fleet stop <label>`` (no ``--as``, from a shell that is no fleet
+    window: ``user``) ends a pause: the row is recorded stopped, the claims it kept go back to
+    the board, the exit is announced, and a resume leaves it."""
     coder = fleet.agents[_coder_label(fleet, "alpha")]
     fleet_service.bulk("pause", projects=[fleet.alpha])
 
-    receipt = fleet_service.stop(fleet.alpha, coder.label)
+    stopped = CliRunner().invoke(
+        app, ["--json", "fleet", "stop", coder.label, "--project", fleet.alpha.id]
+    )
 
-    assert receipt.agent.ended_by == "stopped"
-    assert [t.id for t in receipt.released] == [fleet.tasks["alpha"].id]
+    assert stopped.exit_code == 0, stopped.output
+    assert json.loads(stopped.stdout)["claims_released"] == [fleet.tasks["alpha"].id]
+    row = _row(coder.id)
+    assert row.ended_by == "stopped" and row.paused_at is None
     assert _task(fleet.tasks["alpha"]).status == "todo"
+    assert [e for e in _events(fleet.alpha, "agent_exited") if "stopped by user" in e]
     again = fleet_service.bulk("resume", projects=[fleet.alpha])
     assert coder.label not in {r.agent.label for r in again.of("done")}
+
+
+def test_the_managers_stop_cycle_leaves_a_paused_agent(fleet: Fleet) -> None:
+    """Tester's reopen of #9 (seq 4902), as it was run: the coder claims #1, ``fleet pause -P
+    alpha``, ``fleet resume -P alpha --managers``, then the manager's own cycle line
+    (``harness``: an agent whose task is done → ``fleet stop <label> --as <its session>``).
+    It released #1, announced ``coder exited (0) — stopped by manager`` and ended the row,
+    so the next reap took its tree. Refused now: the pause is the owner's (A4, decision 1)."""
+    coder = fleet.agents[_coder_label(fleet, "alpha")]
+    runner = CliRunner()
+    ref = fleet.alpha.id
+    assert runner.invoke(app, ["fleet", "pause", "--project", ref]).exit_code == 0
+    resumed = runner.invoke(app, ["fleet", "resume", "--project", ref, "--managers"])
+    assert resumed.exit_code == 0, resumed.output
+    with store_session() as store:
+        manager = store.fleet_agent_by_label(ref, "manager")
+    assert manager is not None and manager.ended_at is None and manager.session_id is not None
+    exits_before = _events(fleet.alpha, "agent_exited")
+
+    stopped = runner.invoke(
+        app,
+        ["--json", "fleet", "stop", coder.label, "-P", ref, "--as", manager.session_id],
+    )
+
+    assert stopped.exit_code == 1, stopped.output
+    assert "paused by the owner" in json.loads(stopped.stdout)["detail"]
+    task = _task(fleet.tasks["alpha"])
+    assert task.status == "doing" and task.claimed_by == coder.session_id, "#1 not released"
+    assert _events(fleet.alpha, "task_released") == []
+    assert _events(fleet.alpha, "agent_exited") == exits_before, "no exit announced"
+    assert _row(coder.id).paused_at is not None and _states(fleet.alpha)[coder.label] == "paused"
+    assert fleet_service.is_paused(fleet.alpha), "its team is paused: the manager spawns nothing"
+    assert coder.cwd not in fleet_service.reap(fleet.alpha).worktrees_removed
 
 
 def test_restart_of_a_paused_label_resumes_it(fleet: Fleet) -> None:
@@ -447,7 +499,7 @@ def test_shutdown_still_clears_the_pause_signal(fleet: Fleet) -> None:
     fleet_service.shutdown(fleet.alpha)
 
     assert not fleet_service.is_paused(fleet.alpha)
-    assert _row(fleet.agents["alpha/manager"].id).ended_by == "paused"
+    assert _row(fleet.agents["alpha/manager"].id).paused_at is not None
 
 
 # --- the commands ---------------------------------------------------------------------
@@ -498,3 +550,186 @@ def test_fleet_ls_and_the_sidebar_show_a_paused_agent_as_paused(fleet: Fleet) ->
     row = agent_row_text(manager).plain
     assert STATE_CHIP["paused"][0] in row and "paused" in row and "exited" not in row
     assert STATE_CHIP["paused"] != STATE_CHIP["exited"]
+
+
+# --- review of #457 ---------------------------------------------------------------------
+
+#: ``EndedBy`` as 0.9.1 validates it: one row with any other value ended every fleet command
+#: there (M1).
+ENDED_BY_091: TypeAdapter[Any] = TypeAdapter(Literal["stopped", "died"] | None)
+
+
+def _raw_ended_by() -> list[object]:
+    connection = sqlite3.connect(str(paths.db_path()))
+    try:
+        return [row[0] for row in connection.execute("SELECT ended_by FROM fleet_agent")]
+    finally:
+        connection.close()
+
+
+def test_every_row_a_pause_a_resume_or_a_stop_writes_reads_under_0_9_1(fleet: Fleet) -> None:
+    """M1: a row ended ``paused`` made 0.9.1's ``fleet ls``, ``stop``, ``reap``, ``restart
+    --all`` and ``spawn`` fail validation, with no way back there but a hand edit. The pause
+    is ``paused_at``, a column 0.9.1 never reads; ``ended_by`` stays one it knows."""
+    coder = fleet.agents[_coder_label(fleet, "beta")]
+    fleet_service.bulk("pause")
+    paused = _raw_ended_by()
+    fleet_service.bulk("resume", projects=[fleet.alpha])
+    fleet_service.stop(fleet.beta, coder.label)  # the owner's: ends that pause for good
+
+    for value in [*paused, *_raw_ended_by()]:
+        ENDED_BY_091.validate_python(value)
+    assert "stopped" in paused
+    assert _row(coder.id).paused_at is None and _row(coder.id).ended_by == "stopped"
+    assert _states(fleet.beta)["manager"] == "paused", "beta's manager still paused"
+
+
+def test_a_paused_agents_claim_outlives_its_lease_until_the_resume(
+    fleet: Fleet, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m1: the owner decided claims are KEPT while paused, and a 120-minute lease lapsing let
+    any session claim the task. A pause holds the lease; a resume leases it again as usual."""
+    task = fleet.tasks["alpha"]
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    held = _task(task).claim_expires_at
+    assert held is not None and held > datetime.now(tz=UTC) + timedelta(days=365)
+
+    later = (datetime.now(tz=UTC) + timedelta(hours=3)).isoformat()  # past the lease
+    with monkeypatch.context() as m:
+        m.setattr(store_core, "_now_iso", lambda: later)
+        with store_session() as store:
+            taken = store.claim_task(task.id, "someone-else", datetime.now(tz=UTC))
+    assert (
+        taken is False
+        and _task(task).claimed_by == fleet.agents[_coder_label(fleet, "alpha")].session_id
+    )
+
+    report = fleet_service.bulk("resume", projects=[fleet.alpha])
+    started = _by_key(fleet, report.receipts)[_coder_label(fleet, "alpha")].result
+    assert isinstance(started, fleet_service.RestartReceipt)
+    resumed = _task(task)
+    assert resumed.claimed_by == started.started.session_id
+    assert resumed.claim_expires_at is not None
+    assert resumed.claim_expires_at < datetime.now(tz=UTC) + timedelta(days=1), "leased as usual"
+
+
+def test_a_managers_only_resume_leaves_the_project_paused_while_its_team_is(
+    fleet: Fleet,
+) -> None:
+    """m2: a ``--managers`` resume cleared the signal, and the manager came back free to
+    spawn beside a team still paused. The signal goes only when no agent stays paused."""
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+
+    managers = fleet_service.bulk("resume", managers_only=True, projects=[fleet.alpha])
+
+    assert [r.agent.label for r in managers.of("done")] == ["manager"]
+    assert fleet_service.is_paused(fleet.alpha), "the coder is still paused"
+    assert managers.signals == () and [(p.id, n) for p, n in managers.kept] == [(fleet.alpha.id, 1)]
+    everyone = fleet_service.bulk("resume", projects=[fleet.alpha])
+    assert not fleet_service.is_paused(fleet.alpha)
+    assert [p.id for p in everyone.signals] == [fleet.alpha.id] and everyone.kept == ()
+
+
+def test_a_resume_that_fails_leaves_the_project_paused(
+    fleet: Fleet, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m2: cleared before anyone starts, a resume whose coder then failed left the manager
+    spawning beside it. The signal is set again, and the report says why."""
+    coder = _coder_label(fleet, "alpha").split("/")[1]
+    real = fleet_service.restart
+
+    def refuses_the_coder(project: ProjectInfo, label: str, **kwargs: Any) -> Any:
+        if label == coder:
+            raise FleetError("refused for the test")
+        return real(project, label, **kwargs)
+
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    monkeypatch.setattr(fleet_service, "restart", refuses_the_coder)
+
+    report = fleet_service.bulk("resume", projects=[fleet.alpha])
+
+    assert _outcomes(fleet, report.receipts)[f"alpha/{coder}"][0] == "failed"
+    assert fleet_service.is_paused(fleet.alpha)
+    assert report.signals == () and [(p.id, n) for p, n in report.kept] == [(fleet.alpha.id, 1)]
+
+
+def test_an_agent_may_not_stop_a_paused_agent_and_the_owner_may(fleet: Fleet) -> None:
+    """m3: the manager's cycle (``fleet stop --as <its session>`` of an agent whose task is
+    done) ended the owner's pause, released its claims and announced its exit. Refused for an
+    agent's session; the owner's stop (``user``) ends it."""
+    coder = fleet.agents[_coder_label(fleet, "alpha")]
+    manager = fleet.agents["alpha/manager"]
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    assert manager.session_id is not None
+
+    with pytest.raises(FleetError, match="paused by the owner"):
+        fleet_service.stop(fleet.alpha, coder.label, actor=manager.session_id)
+    assert _row(coder.id).paused_at is not None
+    assert _task(fleet.tasks["alpha"]).claimed_by == coder.session_id
+    refused = CliRunner().invoke(
+        app,
+        ["--json", "fleet", "stop", coder.label, "--project", fleet.alpha.id, "--as", "x"],
+    )
+    assert refused.exit_code == 1 and "paused by the owner" in json.loads(refused.stdout)["detail"]
+
+    receipt = fleet_service.stop(fleet.alpha, coder.label, actor="user")
+    assert receipt.agent.paused_at is None and receipt.released
+
+
+def test_a_resume_ends_the_pause_of_an_agent_whose_task_closed(fleet: Fleet) -> None:
+    """m4: its task done while it was paused, the coder stayed paused for good: its label,
+    tree and branch held, listed however old. The resume ends its pause, releasing what it
+    kept and saying so, and reap may take its tree."""
+    key = _coder_label(fleet, "alpha")
+    coder = fleet.agents[key]
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    with store_session() as store:
+        store.set_task_status(fleet.tasks["alpha"].id, "done")
+    plan = fleet_service.bulk_plan("resume", projects=[fleet.alpha])
+    assert [row.closes for row in plan.rows if row.agent.id == coder.id] == ["task is done"]
+
+    report = fleet_service.bulk("resume", projects=[fleet.alpha])
+
+    receipt = _by_key(fleet, report.receipts)[key]
+    assert receipt.outcome == "skipped" and receipt.why is not None
+    assert "its pause was ended, not resumed" in receipt.why
+    assert _outcomes(fleet, report.receipts)["alpha/manager"] == ("done", None)
+    row = _row(coder.id)
+    assert row.paused_at is None and row.ended_by == "stopped"
+    assert coder.label not in _states(fleet.alpha), "no longer a paused agent"
+    assert not fleet_service.is_paused(fleet.alpha), "no agent is left paused"
+    assert coder.cwd in fleet_service.reap(fleet.alpha).worktrees_removed
+
+
+def test_a_pause_older_than_a_day_is_still_listed_kept_and_resumed(fleet: Fleet) -> None:
+    """n1: the overnight or reboot case, past the 24 h the listing keeps an ended row for."""
+    coder = fleet.agents[_coder_label(fleet, "alpha")]
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    long_ago = (datetime.now(tz=UTC) - timedelta(days=3)).isoformat()
+    connection = sqlite3.connect(str(paths.db_path()))
+    try:
+        connection.execute(
+            "UPDATE fleet_agent SET ended_at = ?, paused_at = ? WHERE paused_at IS NOT NULL",
+            (long_ago, long_ago),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert set(_states(fleet.alpha).values()) == {"paused"}
+    assert coder.cwd not in fleet_service.reap(fleet.alpha).worktrees_removed
+    plan = fleet_service.bulk_plan("resume", projects=[fleet.alpha])
+    assert {row.agent.label for row in plan.targets} == {"manager", coder.label}
+
+
+def test_a_resume_clears_a_signal_with_no_agent_paused(fleet: Fleet) -> None:
+    """n3: a signal-only pause (from an earlier version), or one a ``--managers`` resume left on:
+    the resume clears it with no agent to bring back."""
+    fleet_service.pause(fleet.alpha)  # the signal alone
+    plan = fleet_service.bulk_plan("resume", projects=[fleet.alpha])
+    assert plan.targets == [] and plan.acts and plan.fleet_paused == {fleet.alpha.id}
+
+    report = fleet_service.bulk("resume", projects=[fleet.alpha])
+
+    assert not fleet_service.is_paused(fleet.alpha)
+    assert [p.id for p in report.signals] == [fleet.alpha.id]

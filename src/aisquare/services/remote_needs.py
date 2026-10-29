@@ -2654,7 +2654,7 @@ def _needs_crashed(
     for row in ended:
         if row.ended_at is None or now - row.ended_at > CRASH_WINDOW:
             continue
-        if row.ended_by == "paused":
+        if row.paused_at is not None:
             continue  # `fleet pause` stopped it, to be resumed: no crash
         if row.label == MANAGER_LABEL or _board_of_row(row) == manager_board:
             continue
@@ -2742,7 +2742,7 @@ def _needs_manager_down(
 
     if manager is None or manager.ended_at is None or now - manager.ended_at > RECENTLY_ENDED:
         return []
-    if manager.ended_by == "paused":
+    if manager.paused_at is not None:
         return []  # `fleet pause` stopped it on purpose, for `fleet resume`
     if manager.exit_status not in (0, None):
         reason = f"the manager exited unexpectedly (exit {manager.exit_status})"

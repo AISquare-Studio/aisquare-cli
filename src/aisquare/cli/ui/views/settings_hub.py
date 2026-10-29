@@ -200,7 +200,7 @@ class SettingsHubView(VerticalScroll, can_focus=False):
             return
 
         def confirmed(plan: fleet_service.BulkPlan | None) -> None:
-            if plan is not None and plan.targets:
+            if plan is not None and plan.acts:
                 self._run_bulk(plan)
 
         self.app.push_screen(ConfirmBulk(action), confirmed)

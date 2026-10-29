@@ -5684,12 +5684,20 @@ PAUSED_DETAIL = "no process; its claims, worktree and session wait for fleet res
 """A paused agent's ``detail`` (:func:`_derive`): its claims, label, worktree and transcript
 are kept, and no process runs."""
 PAUSED_LEFT = "paused — fleet resume brings it back"
-"""Why a Restart all, a Stop all and a ``fleet pause`` leave a paused agent."""
+"""Why a Restart all, and the restart of the agents an update lost (``restart_leaves``), leave
+a paused agent. A Stop all and a ``fleet pause`` leave it by its state, ``paused``, as they
+leave an exited one by ``exited``."""
+PAUSED_LEASE = timedelta(days=36500)
+"""How far out a paused agent's claims are leased (:func:`pause_agent`): the owner decided they
+are kept while it is paused, and the 120-minute lease lapsing let any other session claim
+them. A hundred years, not a date at the end of the calendar, so a reader adding to a lease
+never overflows. The resumed session's first hook, or a fresh start's adoption of the claims,
+leases them again as any lease is (``renew_leases``)."""
 
 
 def _paused_row(agent: FleetAgent) -> bool:
-    """Whether ``fleet pause`` ended this row (``ended_by = "paused"``)."""
-    return agent.ended_at is not None and agent.ended_by == "paused"
+    """Whether ``fleet pause`` ended this row and its pause still holds (``paused_at``, v41)."""
+    return agent.ended_at is not None and agent.paused_at is not None
 
 
 def _paused_heads(rows: Iterable[FleetAgent]) -> dict[str, FleetAgent]:
@@ -6799,6 +6807,7 @@ def stop(
     actor: str | None = None,
     reason: str | None = None,
     ended_by: EndedBy = "stopped",
+    paused: bool = False,
 ) -> StopReceipt:
     """``/exit`` the agent named ``label``, wait ``grace`` seconds, then kill its window.
 
@@ -6833,7 +6842,8 @@ def stop(
     after it died is stopped. So is a row recorded as died with no window left, its label's
     newest, which is all the stop does to it (``StopReceipt.marked_only``). :func:`restart`
     ends a vanished pane's row here as ``died``, and a row already ended is handed back to
-    it as it is, window and all. ``paused`` is :func:`pause_agent`'s, under ``handover``.
+    it as it is, window and all. ``paused`` is :func:`pause_agent`'s, under ``handover``: the
+    row ends ``stopped`` with ``paused_at`` (v41) in the one statement that ends it.
 
     A PAUSED agent (:func:`_paused_heads`) has no process and no window: stopping it is the
     owner's word that it stays down. Its row is recorded stopped, the claims the pause kept
@@ -6841,9 +6851,11 @@ def stop(
     (:func:`_stop_a_paused_agent`); ``fleet resume`` leaves it from then on.
     """
     if not (handover or live_only) and ended_by == "stopped":
-        paused = _stop_a_paused_agent(project, label, agent_id=agent_id, actor=actor, reason=reason)
-        if paused is not None:
-            receipt, wakes = paused
+        unpaused = _stop_a_paused_agent(
+            project, label, agent_id=agent_id, actor=actor, reason=reason
+        )
+        if unpaused is not None:
+            receipt, wakes = unpaused
             if nudge and wakes:  # outside the store session, as `_stop_row` nudges
                 nudge_manager(
                     project.id, reason=f"{label} exited", board=_board_of_row(receipt.agent)
@@ -6905,6 +6917,7 @@ def stop(
         ended_by=ended_by,
         actor=actor,
         reason=reason,
+        paused=paused,
     )
 
 
@@ -6919,6 +6932,7 @@ def _stop_row(
     actor: str | None = None,
     reason: str | None = None,
     ended_by: EndedBy = "stopped",
+    paused: bool = False,
 ) -> StopReceipt:
     """``/exit`` the agent in ``agent``'s pane, wait ``grace`` seconds, then kill its window.
 
@@ -7106,7 +7120,9 @@ def _stop_row(
         # window earlier, in a connection of its own, neither closed the gap nor
         # paid for itself (round 5).
         _record_the_branch(store, agent)
-        ended = store.end_fleet_agent_if_live(agent.id, exit_status=exit_status, ended_by=ended_by)
+        ended = store.end_fleet_agent_if_live(
+            agent.id, exit_status=exit_status, ended_by=ended_by, paused=paused
+        )
         if ended is None:
             current = store.get_fleet_agent(agent.id)
             if current is not None and exited_here and not handover:
@@ -7166,6 +7182,11 @@ def _stop_row(
     return StopReceipt(ended, released, release_failed, withheld=handover)
 
 
+OWNER_ACTORS = frozenset({"user"})
+"""The actors that are the owner (:func:`acting_as`): asq, Remote, the captain on the owner's
+word, and a shell that is no fleet window. Only they end a pause with a stop."""
+
+
 def _stop_a_paused_agent(
     project: ProjectInfo,
     label: str,
@@ -7173,6 +7194,7 @@ def _stop_a_paused_agent(
     agent_id: str | None,
     actor: str | None,
     reason: str | None,
+    agent_may: bool = False,
 ) -> tuple[StopReceipt, bool] | None:
     """:func:`stop` of a PAUSED agent: its row recorded stopped, the claims its pause kept
     released, its exit announced; the receipt, and whether the exit wakes the manager. ``None``
@@ -7182,7 +7204,12 @@ def _stop_a_paused_agent(
     Asked first, with nothing live under the label: the row is the label's newest, read and
     marked in one store session, so a ``fleet resume`` that started it again meanwhile
     leaves a running agent, which this never releases the claims of (its resume keeps the
-    session id, and with it the claims)."""
+    session id, and with it the claims).
+
+    The pause is the owner's, and so is ending it: a stop an agent asks for (``actor`` a
+    session, ``fleet stop --as``, a manager's cycle) is refused, saying so, with nothing
+    changed. ``agent_may`` is a resume's own, for a paused agent whose task closed meanwhile
+    (:func:`bulk`): nothing is left of it to resume, whoever runs the resume."""
     with store_session() as store:
         if store.fleet_agent_by_label(project.id, label) is not None:
             return None  # a live row: `stop` stops it
@@ -7196,6 +7223,12 @@ def _stop_a_paused_agent(
         head = store.fleet_agent_by_label(project.id, row.label, live_only=False)
         if head is None or head.id != row.id:
             return None
+        if actor is not None and actor not in OWNER_ACTORS and not agent_may:
+            raise FleetError(
+                f"{row.label} was paused by the owner (`fleet pause`), and only they end a "
+                f"pause: `{project_service.fleet_command('resume', project)}` brings it back; "
+                "nothing was changed"
+            )
         stopped = store.mark_fleet_agent_stopped(row.id)
         released, failed = _release_or_say(store, stopped, why="agent stopped")
         wakes = _emit_exit(
@@ -9610,8 +9643,13 @@ def restart(
             # An agent that ended on its own: the owner's `fleet stop` of its 💤 row while
             # the replacement starts wins at the insert, as the guard above has it before
             # (last delta review, m3). Not a hand-over, whose own stop writes `stopped`, nor
-            # a row stopped already, which this restart was asked to bring back.
-            replaces=agent.id if handed_over is None and agent.ended_by != "stopped" else None,
+            # a row stopped already, which this restart was asked to bring back. A paused
+            # row is stopped and still guarded: the stop that ends its pause clears the mark.
+            replaces=(
+                agent.id
+                if handed_over is None and (agent.ended_by != "stopped" or paused)
+                else None
+            ),
             account_pinned=pinned and account is not None,
             model=model,
             effort=effort,
@@ -10238,9 +10276,11 @@ def pause_agent(
     Stopped as a hand-over stops it (:func:`_stop_row` with ``handover``): its session is
     marked first (:func:`_mark_handing_over`), so its own ``SessionEnd`` parks its claims
     rather than releasing them, and no ``agent_exited`` goes out: nothing finished, and no
-    manager is woken for it. The row ends as ``paused`` (``FleetAgent.ended_by``): its label,
-    worktree, branch, account, task and transcript stay. ``reap`` removes neither its tree nor
-    its branch, a spawn may not take its label (:func:`next_label`), a Restart all leaves it
+    manager is woken for it. The row ends ``stopped`` with ``paused_at`` (v41): its label,
+    worktree, branch, account, task and transcript stay, and its claims are leased for
+    :data:`PAUSED_LEASE`, so no other session claims them while it is paused. ``reap``
+    removes neither its tree nor its branch, a spawn may not take its label
+    (:func:`next_label`), a Restart all leaves it
     (:data:`PAUSED_LEFT`), and ``fleet resume`` — or ``fleet restart`` of the label — starts
     it again under its label, its session resumed (:func:`restart`). The session's presence
     is retired with its claims kept: a pane killed past the grace fires no ``SessionEnd``,
@@ -10258,9 +10298,7 @@ def pause_agent(
         # Refused when a hand-over holds it already (the mark is a compare-and-set).
         _mark_handing_over(project, agent, session, "pause", label)
     try:
-        receipt = stop(
-            project, label, handover=True, agent_id=agent.id, grace=grace, ended_by="paused"
-        )
+        receipt = stop(project, label, handover=True, agent_id=agent.id, grace=grace, paused=True)
     finally:
         # Taken back however the stop ends, as `restart` takes its own: the mark's one
         # reader, the old process's SessionEnd, has run by then or never will. A mark left on
@@ -10278,6 +10316,17 @@ def pause_agent(
             if current is not None and current.ended_at is None:
                 with suppress(sqlite3.Error):  # the board's courtesy; the claims stay either way
                     store.end_session(session.id, release_claims=False)
+            if _paused_row(ended):
+                try:
+                    # Kept while it is paused, however long (the owner's decision 1): its
+                    # 120-minute lease lapsing made them any session's to claim.
+                    store.renew_leases(session.id, _now() + PAUSED_LEASE)
+                except sqlite3.Error as exc:
+                    raise FleetError(
+                        f"{ended.label} is paused, but its claims' leases could not be held "
+                        f"({type(exc).__name__}: {exc}) — they lapse when their lease does, "
+                        "and another session may claim them then"
+                    ) from exc
         if _paused_row(ended):
             resume = project_service.fleet_command("resume", project)
             with suppress(Exception):  # the courtesy, not the record
@@ -10344,6 +10393,10 @@ class BulkRow:
     project: ProjectInfo
     status: FleetAgentStatus
     skip: str | None = None
+    closes: str | None = None
+    """A resume's: why it ends this paused agent's pause rather than resuming it — its task is
+    done or dropped, so nothing is left to resume. The pause ends as the owner's stop ends it,
+    its claims released, and ``reap`` may take its tree (review of #457, m4)."""
 
     @property
     def agent(self) -> FleetAgent:
@@ -10379,12 +10432,25 @@ class BulkPlan:
     for every project."""
     projects: tuple[ProjectInfo, ...] = ()
     """Every project the plan covers, with agents or not: a pause sets the ``fleet-paused``
-    signal of each, and a resume clears it (:func:`bulk`)."""
+    signal of each, and a resume clears it where it leaves no agent paused (:func:`bulk`)."""
+    paused: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    """A resume's: by project id, the row ids of every paused agent, whatever
+    ``managers_only`` drew. A project's signal is cleared only when the resume acts on each
+    of them (review of #457, m2)."""
+    fleet_paused: frozenset[str] = frozenset()
+    """A resume's: the ids of the projects whose ``fleet-paused`` signal reads on. A resume
+    clears one with no paused agent too: a signal-only pause from an earlier version."""
 
     @property
     def targets(self) -> list[BulkRow]:
         """The rows the action acts on."""
         return [row for row in self.rows if row.skip is None]
+
+    @property
+    def acts(self) -> bool:
+        """Whether confirming it does anything: an agent to act on, or, for a resume, a
+        ``fleet-paused`` signal to clear."""
+        return bool(self.targets) or (self.action == "resume" and bool(self.fleet_paused))
 
     def managers(self) -> BulkPlan:
         """The same read, the managers' rows alone: the dialog's *Managers only* switch,
@@ -10438,6 +10504,10 @@ class BulkReport:
     signals: tuple[ProjectInfo, ...] = ()
     """A pause's or a resume's: each project whose ``fleet-paused`` signal it set or cleared
     (:func:`bulk`). Empty with the board off, where no signal exists."""
+    kept: tuple[tuple[ProjectInfo, int], ...] = ()
+    """A resume's: each project it left ``fleet-paused``, with how many of its agents are
+    still paused (``--managers``, a resume that failed): its manager spawns nothing beside a
+    team that is not back (review of #457, m2)."""
 
     def of(self, outcome: BulkOutcome) -> list[BulkReceipt]:
         return [receipt for receipt in self.receipts if receipt.outcome == outcome]
@@ -10497,9 +10567,10 @@ def bulk_plan(
 
     A pause acts on the rows a stop acts on, and leaves the captain (:data:`THE_CAPTAIN`) and
     every paused agent besides. A resume acts on the paused agents alone (``paused``, the
-    listing's own state for them): every other row is left (:data:`NOT_PAUSED`), and so is
-    one whose task is done or dropped, as a restart leaves it. A pause takes each project's
-    manager first, as a stop does; a resume brings it back last, as a restart does.
+    listing's own state for them): every other row is left (:data:`NOT_PAUSED`). One whose
+    task is done or dropped is acted on all the same, to end its pause (``BulkRow.closes``);
+    a paused manager's is left, as a restart leaves it. A pause takes each project's manager
+    first, as a stop does; a resume brings it back last, as a restart does.
 
     ``projects`` keeps the plan to those projects (``fleet pause -P``, a card's menu), each
     covered whether or not it has a fleet row, or a registration: a pause sets its signal all
@@ -10537,6 +10608,7 @@ def bulk_plan(
                 for project in every
                 if project.id in with_rows and (project.id not in forgotten or project.id in live)
             ]
+        signalled = frozenset(_paused_projects(store, covered)) if action == "resume" else None
         own, own_session = _own_rows(store, acting_session)
     # Each project's label heads, from the one read above (`_label_heads` for one project):
     # read again per project, a plan asked the store 1 + N times (last delta review, n6).
@@ -10546,6 +10618,7 @@ def bulk_plan(
     rows: list[BulkRow] = []
     unread: list[tuple[ProjectInfo, str]] = []
     dead_teams: dict[str, tuple[FleetAgentStatus, ...]] = {}
+    paused_of: dict[str, frozenset[str]] = {}
     for project in covered:
         if project.id not in with_rows:
             continue  # no agent of it was ever started: its signal is all there is to it
@@ -10555,6 +10628,10 @@ def bulk_plan(
             if action == "restart":
                 statuses = [*statuses, *_dead_heads(statuses, label_heads)]
                 dead_teams[project.id] = tuple(_dead_of(statuses, label_heads))
+            if action == "resume":  # every paused agent, whatever `managers_only` draws (m2)
+                paused_of[project.id] = frozenset(
+                    status.agent.id for status in statuses if status.state == "paused"
+                )
             if managers_only:  # before the board is asked about any coder's task
                 statuses = [status for status in statuses if status.agent.role == "manager"]
             if action == "resume":
@@ -10576,10 +10653,18 @@ def bulk_plan(
         for status in statuses:
             agent = status.agent
             skip: str | None
+            closes: str | None = None
             if agent.id in own or (own_session is not None and agent.session_id == own_session):
                 skip = THIS_SESSION
             elif action == "resume":
-                skip = closed.get(agent.id) if status.state == "paused" else NOT_PAUSED
+                skip = None if status.state == "paused" else NOT_PAUSED
+                if skip is None and agent.id in closed:
+                    # Its task closed while it was paused: nothing is left to resume, and its
+                    # pause is ended (m4). A manager's is refused by `restart`, as before.
+                    if agent.label == MANAGER_LABEL:
+                        skip = closed[agent.id]
+                    else:
+                        closes = closed[agent.id]
             elif status.state not in PROCESS_STATES and action in ("stop", "pause"):
                 skip = status.state
             elif (
@@ -10595,10 +10680,25 @@ def bulk_plan(
                 skip = THE_CAPTAIN
             else:
                 skip = closed.get(agent.id)
-            rows.append(BulkRow(project, status, skip))
+            rows.append(BulkRow(project, status, skip, closes))
     return BulkPlan(
-        action, managers_only, tuple(rows), tuple(unread), dead_teams, only, tuple(covered)
+        action,
+        managers_only,
+        tuple(rows),
+        tuple(unread),
+        dead_teams,
+        only,
+        tuple(covered),
+        paused_of,
+        signalled or frozenset(),
     )
+
+
+def fleet_paused_projects(store: ContextStore, projects: Sequence[ProjectInfo]) -> frozenset[str]:
+    """The ids of ``projects`` whose ``fleet-paused`` signal reads on, read once through
+    ``store``: what asq's frame carries, so a project's *Resume agents…* clears a signal with
+    no agent paused (:func:`_paused_projects`)."""
+    return frozenset(_paused_projects(store, projects))
 
 
 def _paused_projects(store: ContextStore, every: Sequence[ProjectInfo]) -> set[str]:
@@ -10646,7 +10746,7 @@ def _left_dead(status: FleetAgentStatus, heads: Mapping[str, FleetAgent]) -> str
     if agent.ended_at is None:
         # Not recorded yet (a listing that could not write): its pane says how it ended.
         return ENDED_CLEANLY if status.detail == _exit_detail(0) else None
-    if agent.ended_by == "paused":
+    if _paused_row(agent):
         return PAUSED_LEFT  # `fleet resume`'s to bring back, never a Restart all's
     if agent.ended_by == "stopped":
         return STOPPED_ON_PURPOSE
@@ -10820,12 +10920,15 @@ def bulk(
     ``pause`` and ``resume`` are ``fleet pause`` and ``fleet resume``: a pause sets the
     ``fleet-paused`` signal of every project the plan covers (:attr:`BulkPlan.projects`)
     before it pauses any agent (:func:`pause_agent`), so a manager spawns nothing while its
-    team goes down; a resume clears it first, and then restarts each paused agent through
-    :func:`restart`, its team before its manager. A signal that cannot be written refuses
-    the run there (:class:`FleetError`, as :func:`pause` refuses it), before any agent is
-    touched; the projects whose signal was written are on the report
-    (:attr:`BulkReport.signals`). ``projects`` keeps it to those projects, as for
-    :func:`bulk_plan`.
+    team goes down; a resume clears it first where it brings back every paused agent of the
+    project (:func:`_resumes_clear`), and then restarts each paused agent through
+    :func:`restart`, its team before its manager. A project it leaves an agent paused in
+    stays fleet-paused (``--managers``; set again after a resume that failed), and is on the
+    report's ``kept``. A paused agent whose task closed meanwhile has its pause ended, not
+    resumed (:func:`_end_a_closed_pause`). A signal that cannot be written refuses the run
+    there (:class:`FleetError`, as :func:`pause` refuses it), before any agent is touched;
+    the projects whose signal was written are on the report (:attr:`BulkReport.signals`).
+    ``projects`` keeps it to those projects, as for :func:`bulk_plan`.
     """
     only = frozenset(project.id for project in projects) if projects is not None else None
     if shown is not None and (shown.action, shown.managers_only, shown.only) != (
@@ -10837,6 +10940,7 @@ def bulk(
     receipts: list[BulkReceipt] = []
     unread: tuple[tuple[ProjectInfo, str], ...] = ()
     signals: tuple[ProjectInfo, ...] = ()
+    kept: list[tuple[ProjectInfo, int]] = []
     doing = {"restart": "restarting", "stop": "stopping", "pause": "pausing"}.get(
         action, "resuming"
     )
@@ -10846,9 +10950,14 @@ def bulk(
             action, managers_only=managers_only, acting_session=acting_session, projects=projects
         )
         unread = now.unread
-        if action in ("pause", "resume"):
-            signals = _set_pauses(now.projects, on=action == "pause", session_ref=acting_session)
         rows = now.rows if shown is None else _as_shown(shown, now)
+        if action == "pause":
+            signals = _set_pauses(now.projects, on=True, session_ref=acting_session)
+        elif action == "resume":
+            # Cleared only where the resume leaves no agent paused (m2): the manager it brings
+            # back then spawns again, its team back beside it.
+            clear, kept = _resumes_clear(now, rows)
+            signals = _set_pauses(clear, on=False, session_ref=acting_session)
         for row in rows:
             named = f"{row.agent.label} ({_name(row.project)})"
             if row.skip is not None:
@@ -10868,13 +10977,70 @@ def bulk(
             where = f"after {named}"
             if on_receipt is not None:
                 on_receipt(receipt)
+        if action == "resume":
+            signals, kept = _pause_again_where_left(signals, kept, acting_session)
     except KeyboardInterrupt:
         said = f"interrupted {where}; the rest were left as they were"
         report = BulkReport(
-            action, managers_only, tuple(receipts), unread, interrupted=said, signals=signals
+            action,
+            managers_only,
+            tuple(receipts),
+            unread,
+            interrupted=said,
+            signals=signals,
+            kept=tuple(kept),
         )
         raise BulkInterrupted(report) from None
-    return BulkReport(action, managers_only, tuple(receipts), unread, signals=signals)
+    return BulkReport(
+        action, managers_only, tuple(receipts), unread, signals=signals, kept=tuple(kept)
+    )
+
+
+def _resumes_clear(
+    plan: BulkPlan, rows: Sequence[BulkRow]
+) -> tuple[list[ProjectInfo], list[tuple[ProjectInfo, int]]]:
+    """The projects whose ``fleet-paused`` signal a resume clears before it starts anyone, and
+    those it leaves paused, with how many agents stay paused: cleared only where the resume
+    acts on every paused agent of the project (:attr:`BulkPlan.paused`), a signal-only pause
+    from an earlier version with none included. ``--managers``, or a paused agent it leaves,
+    keeps the signal on (review of #457, m2). A project whose agents could not be read is
+    neither."""
+    unread = {project.id for project, _ in plan.unread}
+    acting: dict[str, set[str]] = {}
+    for row in rows:
+        if row.skip is None:
+            acting.setdefault(row.project.id, set()).add(row.agent.id)
+    clear: list[ProjectInfo] = []
+    kept: list[tuple[ProjectInfo, int]] = []
+    for project in plan.projects:
+        if project.id in unread:
+            continue
+        left = plan.paused.get(project.id, frozenset()) - acting.get(project.id, set())
+        if left:
+            kept.append((project, len(left)))
+        else:
+            clear.append(project)
+    return clear, kept
+
+
+def _pause_again_where_left(
+    cleared: Sequence[ProjectInfo], kept: list[tuple[ProjectInfo, int]], session_ref: str | None
+) -> tuple[tuple[ProjectInfo, ...], list[tuple[ProjectInfo, int]]]:
+    """After a resume: a project it cleared that still has a paused agent (its resume failed,
+    or it was paused again meanwhile) is fleet-paused again, and named among ``kept``: its
+    manager spawns nothing beside a team that is not back (m2). Never raises: the resume is
+    done, and a signal that cannot be set leaves it cleared, as it was."""
+    still: list[ProjectInfo] = []
+    for project in cleared:
+        with store_session() as store:
+            left = len(_paused_heads(store.fleet_label_heads(project.id)))
+        if left and orchestrator.team_enabled():
+            with suppress(FleetError):
+                pause(project, session_ref=session_ref)
+                kept.append((project, left))
+                continue
+        still.append(project)
+    return tuple(still), kept
 
 
 def _set_pauses(
@@ -10959,6 +11125,8 @@ def _bulk_one(
         elif action == "pause":
             _still_running(row)
             result = pause_agent(project, agent.label, agent_id=agent.id, actor=spawned_by)
+        elif action == "resume" and row.closes is not None:
+            return _end_a_closed_pause(row, actor=spawned_by)
         elif action == "resume":
             result = restart(
                 project,
@@ -11065,6 +11233,25 @@ def _still_to_restart(row: BulkRow) -> None:
                 ended.project_id, reason=f"{ended.label} exited", board=_board_of_row(ended)
             )
         raise NoSuchAgent(left)
+
+
+def _end_a_closed_pause(row: BulkRow, *, actor: str) -> BulkReceipt:
+    """A resume's turn for a paused agent whose task closed while it was paused
+    (:attr:`BulkRow.closes`): its pause ends as the owner's stop ends it — recorded stopped,
+    the claims it kept released, its exit announced — and the receipt says so, as a skip:
+    nothing was resumed. ``reap`` may take its tree from then on (review of #457, m4)."""
+    project, agent = row.project, row.agent
+    _still_paused(row)
+    ended = _stop_a_paused_agent(
+        project, agent.label, agent_id=agent.id, actor=actor, reason=row.closes, agent_may=True
+    )
+    if ended is None:
+        raise NoSuchAgent(NOT_PAUSED)
+    receipt, wakes = ended
+    if wakes:  # outside the store session, as every stop nudges
+        nudge_manager(project.id, reason=f"{agent.label} exited", board=_board_of_row(agent))
+    why = f"{row.closes}: its pause was ended, not resumed (its claims released)"
+    return BulkReceipt(project, agent, "skipped", why, result=receipt, dead=row.dead)
 
 
 def _still_paused(row: BulkRow) -> None:

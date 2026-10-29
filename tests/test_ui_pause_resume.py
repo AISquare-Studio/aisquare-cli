@@ -53,7 +53,11 @@ def _paused(project_id: str, label: str, role: str, *, minute: int = 0) -> Fleet
     """A scripted agent ``fleet pause`` stopped: its row ended as ``paused``."""
     running = status(project_id, label, role, "waiting", minute=minute)
     agent = running.agent.model_copy(
-        update={"ended_at": running.agent.created_at + timedelta(minutes=1), "ended_by": "paused"}
+        update={
+            "ended_at": running.agent.created_at + timedelta(minutes=1),
+            "ended_by": "stopped",
+            "paused_at": running.agent.created_at + timedelta(minutes=1),
+        }
     )
     return FleetAgentStatus(agent=agent, state="paused")
 
@@ -309,3 +313,35 @@ def test_the_settings_tab_has_pause_and_resume_that_ask_for_that_project(
     assert greyed == {"pause": False, "resume": True}, "nothing of alpha's is paused"
     assert title == "Pause the running agents of alpha?"
     assert acting_on_running.calls == [], "nothing is paused until it is confirmed"
+
+
+def test_a_signal_with_no_agent_paused_is_cleared_from_the_card(
+    acting_on_running: Paused, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #457, n3: a signal-only pause (an earlier version's), or one a ``--managers``
+    resume left on, greyed *Resume agents…*, and asq had no way to clear it."""
+    signalled = frozenset({"prj_a"})
+    monkeypatch.setattr(fleet_service, "fleet_paused_projects", lambda store, projects: signalled)
+    monkeypatch.setattr(fleet_service, "_paused_projects", lambda store, every: set(signalled))
+
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str | None, bool]], list[str], str]:
+        app = _app(pilot)
+        app.refresh_data()
+        await settle(app)
+        app.sidebar.open_menu("prj_a")
+        await settle(app)
+        options = [o for o in _options(pilot) if o[0] in ("pause", "resume")]
+        await _menu(pilot, "resume")
+        dialog = app.screen
+        assert isinstance(dialog, ConfirmBulk)
+        listed, label = _listed(dialog), str(_confirm(dialog).label)
+        _confirm(dialog).press()
+        await settle(app)
+        return options, listed, label
+
+    options, listed, label = drive(go)
+    assert options == [("pause", False), ("resume", False)], "both act: alpha runs, and is paused"
+    assert listed[0] == "no agent is paused; Resume clears the fleet-paused signal of alpha"
+    assert label == "Clear fleet-paused"
+    assert acting_on_running.signals == [("off", "prj_a")]
+    assert acting_on_running.calls == [], "no agent was started or stopped"

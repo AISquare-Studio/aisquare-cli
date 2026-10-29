@@ -416,6 +416,8 @@ class ProjectView(TabbedContent):
         for pane in panes:
             self.compose_add_child(pane)
         self._pending: list[FleetAgentStatus] | None = None
+        self._fleet_paused = False
+        """Whether the project's ``fleet-paused`` signal read on in the last frame."""
         """A snapshot pushed before the tabs mounted, applied at mount."""
 
     def refresh_project(self, project: ProjectInfo) -> None:
@@ -428,13 +430,17 @@ class ProjectView(TabbedContent):
         for settings in self.query(SettingsView):
             settings.show_project(project)
 
-    def refresh_status(self, agents: Sequence[FleetAgentStatus]) -> None:
+    def refresh_status(
+        self, agents: Sequence[FleetAgentStatus], *, fleet_paused: bool = False
+    ) -> None:
         """Take the shell's fresh snapshot of this project's agents.
 
-        The Manager tab shows the manager; the Settings tab, the tmux attach command. Safe
-        before mount: the snapshot waits for the tabs and lands then.
+        The Manager tab shows the manager; the Settings tab, the tmux attach command, and
+        Pause / Resume by what they would act on (``fleet_paused``: the project's signal
+        reads on). Safe before mount: the snapshot waits for the tabs and lands then.
         """
         tabs = self.query(ManagerTab)
+        self._fleet_paused = fleet_paused
         if not tabs:
             self._pending = list(agents)
             return
@@ -442,7 +448,7 @@ class ProjectView(TabbedContent):
         tab.show(manager_status(agents), exited=exited_manager(agents))
         tab.show_team(agents)
         for settings in self.query(SettingsView):
-            settings.show_agents(agents)
+            settings.show_agents(agents, fleet_paused=fleet_paused)
 
     def show_usage(self, usage: Mapping[int, float]) -> None:
         """The accounts' session use from the shell's slow headroom read, for the Manager tab."""
@@ -452,7 +458,7 @@ class ProjectView(TabbedContent):
     def on_mount(self) -> None:
         if self._pending is not None:
             pending, self._pending = self._pending, None
-            self.refresh_status(pending)
+            self.refresh_status(pending, fleet_paused=self._fleet_paused)
 
     @on(TeamStrip.Opened)
     def _open_board(self) -> None:

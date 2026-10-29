@@ -93,6 +93,9 @@ WILL_START = "will be started again"
 """A dead row a restart brings back (#38), after its state in the dialog's list."""
 WILL_RESUME = "will be resumed"
 """A paused row a resume brings back, after its state in the dialog's list."""
+WILL_END = "its pause will be ended, not resumed"
+"""A paused row whose task closed meanwhile, which a resume stops for good (its claims go back
+to the board) rather than resume: after its task's state in the dialog's list."""
 
 
 class BulkAsked(Message):
@@ -106,16 +109,19 @@ class BulkAsked(Message):
 
 
 def applicable(
-    agents: Sequence[FleetAgentStatus] | None,
+    agents: Sequence[FleetAgentStatus] | None, *, fleet_paused: bool = False
 ) -> dict[str, bool]:
     """Whether a pause and a resume would act on any of a project's ``agents``: a pause on one
-    with a process, a resume on a paused one. Both, when the agents are not known (``None``:
-    no frame yet, a collapsed group's member) — the dialog reads them and says."""
+    with a process, a resume on a paused one, or on the project's ``fleet-paused`` signal
+    when it reads on (``fleet_paused``), which a resume clears: a signal-only pause from an
+    earlier version, or one a ``--managers`` resume left on. Both, when the agents are not
+    known (``None``: no frame yet, a collapsed group's member) — the dialog reads them and
+    says."""
     if agents is None:
         return {"pause": True, "resume": True}
     return {
         "pause": any(status.state in fleet_service.PROCESS_STATES for status in agents),
-        "resume": any(status.state == "paused" for status in agents),
+        "resume": fleet_paused or any(status.state == "paused" for status in agents),
     }
 
 
@@ -141,7 +147,11 @@ def plan_text(plan: fleet_service.BulkPlan) -> Text:
     name is data, appended as text and never as markup.
     """
     text = Text()
-    if not plan.targets:
+    if not plan.targets and plan.acts:  # a resume with no agent paused: the signal alone
+        named = [project_name(p) for p in plan.projects if p.id in plan.fleet_paused]
+        text.append("no agent is paused; Resume clears the fleet-paused signal of ", style="bold")
+        text.append(", ".join(named) + "\n", style="bold")
+    elif not plan.targets:
         text.append(f"nothing to {plan.action}\n", style="bold")
     shown: str | None = None
     for row in plan.rows:
@@ -156,6 +166,8 @@ def plan_text(plan: fleet_service.BulkPlan) -> Text:
         if row.skip is not None:
             line.append(f" — left: {row.skip}")
             line.stylize("dim")
+        elif plan.action == "resume" and row.closes is not None:
+            line.append(f" — {row.closes}: {WILL_END}")
         elif plan.action == "resume":
             line.append(f" — {WILL_RESUME}")
         elif row.dead and plan.action == "restart":
@@ -288,6 +300,11 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
             return
         listing.update(plan_text(plan))
         count = len(plan.targets)
+        if count == 0 and plan.acts:  # a resume of the signal alone
+            confirm.label = "Clear fleet-paused"
+            confirm.refresh(layout=True)
+            confirm.disabled = False
+            return
         # Running and dead apart for a restart (#38); every agent a resume acts on is paused.
         dead = sum(1 for row in plan.targets if row.dead) if self.action == "restart" else 0
         verb = VERB[self.action]
@@ -306,7 +323,7 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
     def _confirm(self, event: Button.Pressed) -> None:
         event.stop()
         plan = self.shown()
-        if plan is not None and plan.targets:
+        if plan is not None and plan.acts:
             self.dismiss(plan)
 
     @on(Button.Pressed, "#bulk-cancel")
@@ -378,6 +395,9 @@ def summary_text(report: fleet_service.BulkReport) -> str:
     if report.signals:
         word = "fleet-paused" if report.action == "pause" else "no longer fleet-paused"
         parts.append(f"{word}: " + ", ".join(project_name(project) for project in report.signals))
+    if report.kept:
+        kept = [f"{project_name(project)} ({left} still paused)" for project, left in report.kept]
+        parts.append("still fleet-paused: " + ", ".join(kept))
     skipped = [f"{named(r)} — {r.why}" for r in report.of("skipped")]
     failed = [f"{named(r)} — {r.why}" for r in report.of("failed")]
     unread = [f"{project_name(project)} — {why}" for project, why in report.unread]

@@ -1548,19 +1548,19 @@ class AgentConnection(BaseModel):
     until that key goes. ``agents connect`` leaves the key alone. ``None`` otherwise."""
 
 
-EndedBy = Literal["stopped", "died", "paused"]
+EndedBy = Literal["stopped", "died"]
 """How a fleet agent's row ended (``FleetAgent.ended_by``, #38): ``stopped`` on aisquare's
-word — ``fleet stop``, Stop all, ``shutdown``, a hand-over's old row — or ``died``, a death
-a read or ``reap`` recorded that nobody asked for. ``paused`` is ``fleet pause``'s: its
-process exited and its claims, label, worktree and transcript wait for ``fleet resume``."""
+word — ``fleet stop``, Stop all, ``shutdown``, a hand-over's old row, ``fleet pause`` — or
+``died``, a death a read or ``reap`` recorded that nobody asked for. A pause is told apart by
+``FleetAgent.paused_at``, never by a value here: 0.9.1 reads every row with these two."""
 FleetAgentState = Literal[
     "working", "waiting", "attention", "limited", "exited", "lost", "paused", "unknown"
 ]
 """What a fleet agent is doing, DERIVED at read time and never stored: a fresh
 ``TeamSession`` row wins (working / waiting / attention); otherwise the tmux
 pane's facts (exited with a status, or lost when the pane is gone); ``paused`` for the
-newest row of its label that ``fleet pause`` ended; ``unknown`` when neither source can
-answer."""
+newest row of its label that ``fleet pause`` ended (``FleetAgent.paused_at``); ``unknown``
+when neither source can answer."""
 
 FirstPromptState = Literal["pending", "acked", "unsent"]
 """Where a fleet agent's first message stands (:attr:`FleetAgent.first_prompt`)."""
@@ -1796,9 +1796,8 @@ class FleetAgent(BaseModel):
     ``[fleet.roles.<role>].persona``, else none."""
     ended_by: EndedBy | None = None
     """How the row ended (v34, #38): ``stopped`` when aisquare ended it on purpose, ``died``
-    when a read or ``reap`` recorded a death nobody asked for, ``paused`` when ``fleet pause``
-    exited it to be resumed. ``None`` while it runs, and on a row ended before the column,
-    which is read by its exit status (Restart all)."""
+    when a read or ``reap`` recorded a death nobody asked for. ``None`` while it runs, and on
+    a row ended before the column, which is read by its exit status (Restart all)."""
     first_prompt: FirstPromptState | None = None
     """Whether the first message it was given started a turn (P0-W1a, #122): ``pending``
     from the spawn until its ``UserPromptSubmit``, then ``acked``; ``unsent`` once a
@@ -1809,6 +1808,11 @@ class FleetAgent(BaseModel):
     """When ``first_prompt`` last changed: given (``pending``), taken (``acked``), found
     not taken (``unsent``). An ``acked`` row's ``first_prompt_at - created_at`` is how long
     the agent took to start its first turn (doctor's ``fleet-delivery`` row)."""
+    paused_at: datetime | None = None
+    """When ``fleet pause`` ended the row (v41), its ``ended_by`` then ``stopped``: its claims,
+    label, worktree and transcript wait for ``fleet resume``. Cleared when the pause ends,
+    by a resume or a stop. A column 0.9.1 never reads, so it sees a stopped 💤 row; ``None``
+    for every row nothing paused."""
 
 
 class FleetAgentStatus(BaseModel):

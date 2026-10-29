@@ -7,10 +7,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 **Upgrading:**
-- No store migration: a paused agent is its row ended as `paused` (`fleet_agent.ended_by`).
-  **Before moving back to 0.9.1, resume or stop every paused agent**
-  (`aisquare fleet resume --all`, or `fleet stop <label>`): 0.9.1 cannot read a row ended
-  as `paused`. A resume or a stop records the row as stopped, which it can.
+- **The store migrates from v40 (0.9.1's) to v41 on first open, automatically, in one
+  step.** It adds one nullable column, `fleet_agent.paused_at`: when `fleet pause` ended
+  the row. Nothing is rewritten or dropped.
+- **Moving back to 0.9.1 is safe.** Its migrator treats a store at or past its own version
+  as current, and it never reads `paused_at`: a paused agent's row is `stopped`, a value it
+  knows, so 0.9.1 shows a paused agent as a stopped 💤 row, and Restart all leaves it. Its
+  `reap` may then remove a paused agent's worktree once nothing in it is unpushed; resume
+  paused agents before moving back if you want them back where they were.
 
 ### Added
 
@@ -19,38 +23,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a reboot or an OS update too. A pause exits each running agent's Claude process as
   `fleet stop` does (`/exit`, the grace, the window killed) and keeps everything else of
   it: its row, label, role, task claim, worktree, branch, account and transcript. Its
-  claims are parked on its session, as a hand-over parks them: nothing is released, and
-  no `agent_exited` goes out (the board says `agent_paused`, which wakes nobody). A resume
+  claims are parked on its session, as a hand-over parks them, and held however long it
+  stays paused (their lease no longer lapses): nothing is released, and no
+  `agent_exited` goes out (the board says `agent_paused`, which wakes nobody). A resume
   starts exactly the agents a pause stopped, each through `fleet restart`: under its label,
   its session resumed from its transcript (`claude --resume`) and one carry-on line typed,
   or, with no transcript, started fresh with the board's hand-off prompt, taking its claims
   over. An agent that exited without a pause stays 💤, and a second resume does nothing.
+  A paused agent whose task was done or dropped meanwhile is not resumed: the resume ends
+  its pause (its claims go back to the board, and `reap` may take its tree) and says so.
   - **asq:** Settings ▸ Fleet has *Pause all…* and *Resume all…* beside *Restart all…*
     and *Stop all…*, in the same dialog (who, by project; *Managers only*; Cancel
     focused), run off the UI thread with a toast per agent and one that sums it up. A
     project card's ⋯ menu has *Pause agents…* and *Resume agents…*, and so has the
     project's Settings tab: the same dialog for that project alone, the one that would
-    act on nobody greyed. A paused agent shows `⏯ paused` in the sidebar, and its view
-    offers *Resume*, and *Stop*, which ends the pause for good.
+    act on nothing greyed (*Resume* clears a `fleet-paused` signal with no agent paused
+    too). A paused agent shows `⏯ paused` in the sidebar, and its view offers *Resume*, and
+    *Stop*, which ends the pause for good.
   - A paused agent survives its tmux server: `fleet reap --server-down` after a reboot
     leaves it paused, its worktree and claims intact. `reap` removes neither its worktree
     nor its branch, a spawn does not take its label (a second manager is refused while
     the project's own is paused), and Restart all, Stop all and the restart of agents an
     update lost leave it.
-  - `fleet stop <label>` of a paused agent ends its pause: its row is recorded stopped, the
-    claims it kept go back to the board and its exit is announced. `fleet restart <label>`
-    resumes it, as `fleet resume` would.
+  - The owner's `fleet stop <label>` of a paused agent ends its pause: its row is recorded
+    stopped, the claims it kept go back to the board and its exit is announced. An agent's
+    (`--as <session>`, a manager's cycle) is refused: the pause is the owner's.
+    `fleet restart <label>` resumes it, as `fleet resume` would.
 
 ### Changed
 
 - **`fleet pause` and `fleet resume` pause and resume the agents, not only the signal.**
   `fleet pause [-P <project> | --group <group> | --all] [--managers]` sets the project's
   `fleet-paused` signal, as before, and then pauses every running agent of it, its
-  manager first, one line each, then a count; `fleet resume` clears the signal and
-  resumes the paused agents, the manager last. A signal that cannot be set or cleared
+  manager first, one line each, then a count; `fleet resume` resumes the paused agents,
+  the manager last, and clears the signal where no agent stays paused: `--managers`, or an
+  agent whose resume failed, leaves it on, and says so. A signal that cannot be set or cleared
   refuses the command before any agent is touched, as before; an agent that fails is its
   own line and exits 1. `--json` prints the report `restart --all` prints, with
-  `signals`. The manager's rule is unchanged: it spawns nothing while `fleet-paused` is
+  `signals` and `kept`. The manager's rule is unchanged: it spawns nothing while `fleet-paused` is
   on, and `fleet shutdown` still clears the signal. `fleet ls` shows a paused agent as
   `⏯ paused`.
 

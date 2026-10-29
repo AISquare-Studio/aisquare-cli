@@ -1256,6 +1256,14 @@ CREATE TABLE IF NOT EXISTS feature_use (
 
 CREATE INDEX IF NOT EXISTS usage_turn_recorded ON usage_turn (recorded_at);
 """
+# v41 (task #9, fleet pause/resume): ``fleet_agent.paused_at``, when ``fleet pause`` ended the
+# row, whose ``ended_by`` is then ``stopped``. The pause is this column and never a value of
+# ``ended_by`` of its own: 0.9.1 validates ``ended_by`` against ``stopped`` and ``died``, and
+# one row it could not read ended every fleet command there. 0.9.1 reads a store at or past its
+# own version as current, and never this column: it sees a paused agent as a stopped 💤 row.
+# Nullable and in :data:`_PRODUCTS`, so the step is the column alone.
+_SCHEMA_V41 = ""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1298,6 +1306,7 @@ _MIGRATIONS = (
     _SCHEMA_V38,
     _SCHEMA_V39,
     _SCHEMA_V40,
+    _SCHEMA_V41,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1384,6 +1393,7 @@ _PRODUCTS: dict[int, _Products] = {
             ("usage_turn", "source", "TEXT"),
         ),
     ),
+    40: _Products(columns=(("fleet_agent", "paused_at", "TEXT"),)),
 }
 
 _PROJECT_COLUMNS = (
@@ -1467,7 +1477,7 @@ _FLEET_AGENT_FIELDS = (
     "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
     "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
     "account_slot", "launch_spec", "socket_path", "boot_id", "server_started_at", "branch",
-    "board", "persona", "ended_by", "first_prompt", "first_prompt_at",
+    "board", "persona", "ended_by", "first_prompt", "first_prompt_at", "paused_at",
 )  # fmt: skip
 _FLEET_AGENT_COLUMNS = ", ".join(_FLEET_AGENT_FIELDS)
 
@@ -1842,7 +1852,12 @@ class ContextStore(Protocol):
     ) -> FleetAgent: ...
     def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent: ...
     def end_fleet_agent_if_live(
-        self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
+        self,
+        agent_id: str,
+        *,
+        exit_status: int | None = None,
+        ended_by: EndedBy,
+        paused: bool = False,
     ) -> FleetAgent | None: ...
     def mark_fleet_agent_stopped(self, agent_id: str) -> FleetAgent: ...
     def mark_fleet_agent_paused(self, agent_id: str) -> FleetAgent | None: ...
@@ -1945,6 +1960,7 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         ended_by=row["ended_by"],
         first_prompt=row["first_prompt"],
         first_prompt_at=_maybe_dt(row["first_prompt_at"]),
+        paused_at=_maybe_dt(row["paused_at"]),
     )
 
 
@@ -4607,20 +4623,22 @@ class SqliteStore:
         """:meth:`upsert_fleet_agent` for the row that brings ``replaces`` back: nothing is
         written, and ``None`` returned, when that row is recorded stopped by then. One
         statement, so an owner's ``fleet stop`` that lands at any point before the new row
-        exists wins (last delta review of #274, m3)."""
+        exists wins (last delta review of #274, m3). A paused row (``paused_at``) is stopped
+        and still the resume's to bring back; the stop that ends its pause clears the mark."""
         return self._upsert_fleet_agent(agent, replaces)
 
     def _upsert_fleet_agent(
         self, agent: FleetAgent, unless_stopped: str | None
     ) -> FleetAgent | None:
         guard = (
-            "WHERE NOT EXISTS (SELECT 1 FROM fleet_agent WHERE id = ? AND ended_by = 'stopped') "
+            "WHERE NOT EXISTS (SELECT 1 FROM fleet_agent "
+            "WHERE id = ? AND ended_by = 'stopped' AND paused_at IS NULL) "
             if unless_stopped is not None
             else "WHERE true "  # INSERT … SELECT … ON CONFLICT needs a WHERE to parse
         )
         cursor = self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
+            f"SELECT {', '.join('?' * len(_FLEET_AGENT_FIELDS))} "
             f"{guard}"
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
@@ -4656,6 +4674,7 @@ class SqliteStore:
                 agent.ended_by,
                 agent.first_prompt,
                 agent.first_prompt_at.isoformat() if agent.first_prompt_at else None,
+                agent.paused_at.isoformat() if agent.paused_at else None,
                 *((unless_stopped,) if unless_stopped is not None else ()),
             ),
         )
@@ -5655,12 +5674,18 @@ class SqliteStore:
         return updated
 
     def end_fleet_agent_if_live(
-        self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
+        self,
+        agent_id: str,
+        *,
+        exit_status: int | None = None,
+        ended_by: EndedBy,
+        paused: bool = False,
     ) -> FleetAgent | None:
         """End a LIVE agent's row and return it; ``None`` when it was already ended.
 
-        ``ended_by`` is how (v34, #38): ``stopped`` on aisquare's word, ``paused`` on
-        ``fleet pause``'s, ``died`` otherwise.
+        ``ended_by`` is how (v34, #38): ``stopped`` on aisquare's word, ``died`` otherwise.
+        ``paused`` is ``fleet pause``'s, with ``stopped``: ``paused_at`` is stamped in the same
+        statement (v41), so no reader finds the row ended and not yet paused.
 
         The UPDATE is a compare-and-set on ``ended_at IS NULL``, for a caller that
         announces the end: every fleet read records a dead pane (#138), so two
@@ -5668,10 +5693,11 @@ class SqliteStore:
         row may post ``agent_exited``. A re-read before the write left a statement
         for the other to land in (review of #138).
         """
+        now = _now_iso()
         cursor = self._conn.execute(
-            "UPDATE fleet_agent SET ended_at = ?, exit_status = ?, ended_by = ? "
+            "UPDATE fleet_agent SET ended_at = ?, exit_status = ?, ended_by = ?, paused_at = ? "
             "WHERE id = ? AND ended_at IS NULL",
-            (_now_iso(), exit_status, ended_by, agent_id),
+            (now, exit_status, ended_by, now if paused else None, agent_id),
         )
         self._conn.commit()
         if cursor.rowcount == 0:
@@ -5681,9 +5707,11 @@ class SqliteStore:
     def mark_fleet_agent_stopped(self, agent_id: str) -> FleetAgent:
         """Record an ENDED row as stopped on aisquare's word (#38): a 💤 row whose window
         ``fleet stop`` removed, which Restart all must then leave. A live row is untouched:
-        its end is written with how it ended."""
+        its end is written with how it ended. A paused row's pause ends with it
+        (``paused_at`` cleared): stopped for good, or resumed and history."""
         self._conn.execute(
-            "UPDATE fleet_agent SET ended_by = 'stopped' WHERE id = ? AND ended_at IS NOT NULL",
+            "UPDATE fleet_agent SET ended_by = 'stopped', paused_at = NULL "
+            "WHERE id = ? AND ended_at IS NOT NULL",
             (agent_id,),
         )
         self._conn.commit()
@@ -5694,12 +5722,13 @@ class SqliteStore:
 
     def mark_fleet_agent_paused(self, agent_id: str) -> FleetAgent | None:
         """Record an ENDED row as paused (``services.fleet.pause_agent``): one a listing
-        recorded as died while the pause's ``/exit`` took it down. Never over a stop, which
-        is the owner's word, nor on a live row; ``None`` when nothing was written."""
+        recorded as died while the pause's ``/exit`` took it down. ``stopped`` with
+        ``paused_at``, as a pause writes it (v41). Never over a stop, which is the owner's
+        word, nor on a live row; ``None`` when nothing was written."""
         cursor = self._conn.execute(
-            "UPDATE fleet_agent SET ended_by = 'paused' WHERE id = ? AND ended_at IS NOT NULL "
-            "AND (ended_by IS NULL OR ended_by = 'died')",
-            (agent_id,),
+            "UPDATE fleet_agent SET ended_by = 'stopped', paused_at = ? "
+            "WHERE id = ? AND ended_at IS NOT NULL AND (ended_by IS NULL OR ended_by = 'died')",
+            (_now_iso(), agent_id),
         )
         self._conn.commit()
         return self.get_fleet_agent(agent_id) if cursor.rowcount == 1 else None

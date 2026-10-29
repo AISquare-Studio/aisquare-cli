@@ -787,6 +787,44 @@ def test_adopt_run_from_a_shell_the_daemon_runs_still_counts_the_daemon(
     assert "quit it first" in _refused(7001)
 
 
+def test_adopt_run_from_a_codex_tuis_own_shell_names_that_tui(
+    codex_daemon: DaemonTable,
+) -> None:
+    """r33 2, the MANAGER DECISION: refuse (tester-51-final's table, its K12). A process an
+    agent's ``held_open`` recognises (any Codex) above adopt is never adopt's own, as Claude
+    Code's registry refuses a live session that runs adopt: what it holds open is a fact, and
+    dropping it lets adopt start a second writer. With the daemon holding the thread and the
+    socket unable to say, a TUI that runs adopt's shell is a possible client: named, "quit
+    it first", where adopt once dropped it and named the daemon, with its stop."""
+    processes, _holds = codex_daemon
+    me = os.getpid()
+    processes.append((7001, 1, CODEX_NATIVE))
+    processes.append((8800, 7001, "/bin/zsh -c aisquare fleet adopt"))
+    processes.append((me, 8800, f"python -m aisquare fleet adopt {THREAD}"))
+
+    assert "quit it first" in _refused(7001)
+
+
+@pytest.mark.parametrize("words", ["-c model=gpt-5.5", "exec adopt this thread"])
+def test_adopt_run_from_an_embedded_codexs_own_shell_names_that_codex(
+    codex_daemon: DaemonTable, words: str
+) -> None:
+    """r33 2, the MANAGER DECISION: refuse (tester-51-final's table, its K14, r33's N3).
+    Measured on 0.164.0, ``codex -s danger-full-access -c model=gpt-5.5`` and ``codex exec``
+    (embedded, no daemon started) run their tool shell as their direct child, the native
+    binary alone holding the rollout (``lsof``), and ``aisquare fleet adopt`` of that thread
+    run from that shell took it, a second writer beside the first. That Codex is never
+    adopt's own: refused, naming it, "quit it first", the daemon holding nothing."""
+    processes, holds = codex_daemon
+    holds[7001] = holds.pop(13090)
+    me = os.getpid()
+    processes.append((7001, 1, f"{CODEX_NATIVE} {words}"))
+    processes.append((8800, 7001, "/bin/zsh -c aisquare fleet adopt"))
+    processes.append((me, 8800, f"python -m aisquare fleet adopt {THREAD}"))
+
+    assert "quit it first" in _refused(7001)
+
+
 def test_a_codex_tui_of_another_home_is_never_named_as_this_daemons_client(
     codex_daemon: DaemonTable, daemon_sockets: dict[int, set[int]]
 ) -> None:

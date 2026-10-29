@@ -149,8 +149,10 @@ def _ancestors(
     processes: Sequence[Process], pid: int, *, until: Callable[[str], bool] | None = None
 ) -> set[int]:
     """``pid`` and every process above it, up to and never including one whose arguments
-    ``until`` stops at: the shell and the agent that run this command are no holder of the
-    session it adopts (review of #370)."""
+    ``until`` stops at: the shell that runs this command, and a program above it that no
+    agent's ``held_open`` recognises (a ``claude --resume <id>``), are no holder of the
+    session it adopts (review of #370); an agent's process that holds what it writes open
+    is (:func:`_holds_open`)."""
     parents = {child: (parent, args) for child, parent, args in processes}
     seen: set[int] = set()
     while pid and pid not in seen:
@@ -162,17 +164,21 @@ def _ancestors(
     return seen
 
 
-def _serves(args: str) -> bool:
-    """Whether the process run with ``args`` holds what it has open for the clients it serves
-    (an agent's ``AgentTranscript.held_open`` says ``clients``: Codex's managed app-server
-    daemon). Such a process runs the commands of every client attached to it, measured on
-    0.164.0 (r32's question): a shell command of a TUI's on the daemon was a child of the
-    daemon, whose parent was the TUI that had started it, another TUI. So it and those above
-    it are never this command's own (:func:`_ancestors`): from such a shell, the daemon's hold
-    and its other clients were dropped, and a thread it held read as free."""
+def _holds_open(args: str) -> bool:
+    """Whether the process run with ``args`` is one an agent's ``AgentTranscript.held_open``
+    recognises, whatever it answers: one of an agent whose writer holds what it writes open
+    (any Codex: a TUI, an ``exec``, one run embedded, its managed daemon). Such a process and
+    those above it are never this command's own (:func:`_ancestors`), as Claude Code's
+    registry refuses a live session that is (the MANAGER DECISION, r33): what it holds open
+    is a fact, not a word, and dropping it lets adopt start a second writer on a transcript
+    it still writes. Measured on 0.164.0, a Codex runs its tool shells as its own children
+    when embedded (``codex -c model=…``, no daemon: adopt run from one took the thread that
+    Codex held, the adopted ``codex resume`` beside it) and as the daemon's on its daemon,
+    whose parent is the TUI that had started it (r32's question: from such a shell, the
+    daemon's hold and its other clients were dropped)."""
     words = args.split()
     return any(
-        reader is not None and reader.held_open(words) == "clients"
+        reader is not None and reader.held_open(words) is not None
         for reader in (each.transcript_reader for each in adapters())
     )
 
@@ -196,8 +202,8 @@ def _fleet_panes() -> set[int]:
 
 class _Holders:
     """Who holds a conversation, read once for a listing: the registries, the processes this
-    command does not run under (a daemon it runs under, and those above it, still counting:
-    :func:`_serves`), and, for an agent whose writer holds its transcript open, what that
+    command does not run under (an agent's it runs under, and those above it, still counting:
+    :func:`_holds_open`), and, for an agent whose writer holds its transcript open, what that
     agent's processes hold (one read of the process table, asked of the first such
     conversation only)."""
 
@@ -206,7 +212,7 @@ class _Holders:
     ) -> None:
         self._registry = _registry_holders(accounts)
         listed = _process_args() if processes is None else processes
-        mine = _ancestors(listed, os.getpid(), until=_serves)
+        mine = _ancestors(listed, os.getpid(), until=_holds_open)
         self._listed = listed
         self._others = [(pid, args.split()) for pid, _parent, args in listed if pid not in mine]
         self._open: dict[str, tuple[list[tuple[int, HoldsOpen]], frozenset[str] | None]] = {}
@@ -309,8 +315,7 @@ def holder(
     id for it), or ``None``: the registry first, then a process of any agent's whose
     arguments name it (``AgentAdapter.adoptable``), then one of ``agent``'s that holds its
     transcript open where its writer does; never this command's own process or one above it,
-    short of a daemon that serves clients (:func:`_serves`), which runs every client's
-    commands."""
+    short of an agent's process that holds what it writes open (:func:`_holds_open`)."""
     adapter = recorded_adapter(agent) or default_adapter()
     return _Holders(accounts, processes).of(session_id, transcript, adapter)
 

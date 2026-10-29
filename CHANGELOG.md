@@ -108,20 +108,25 @@ adapter.**
     form that can be one, of any home (its TUI with no subcommand or a prompt, `resume`,
     `fork`, `--remote <addr>` whatever else it is given, `agents`, `app-server proxy`, each
     measured connected; read up to the prompt and never into it, and a subcommand's name
-    followed by what could be a prompt's words, past one of its own subcommands, read as a
-    prompt's, so `codex 'add a -c flag'` is a TUI, and so, the lesser harm, is `codex exec
-    fix the tests` or `codex review the diff`). So never, where the socket can say, one that
-    runs embedded (`-c`, `--search`, `--profile`, `--no-daemon`, `--strict-config`,
-    `--dangerously-bypass-hook-trust`, `exec` or `review`, measured: each holds its own
-    rollout) or runs no thread of the daemon's (an `app-server` of its own, an IDE's or
-    with `--listen`, `exec-server`, `login`, measured unconnected, and every other
-    subcommand, `execpolicy`, `tcp-tunnel` and `cloud-tasks` too), nor, where it cannot,
-    one of them whose words could not be a prompt's; each is named only when it holds this
-    rollout itself. Never a fleet agent, which shows its own thread. The daemon runs the
-    shell commands of every TUI on it (measured: a child of the daemon, whose parent is the
-    TUI that started it), so adopt run from such a shell still counts the daemon and those
-    above it, which it once dropped as its own and took a thread they held. Else the
-    daemon, saying it is Codex's background app-server, that it lets go
+    followed by what could be a prompt's words, past one of its own subcommands, or by one of
+    them alone, read as a prompt's, so `codex 'add a -c flag'` is a TUI, and so, the lesser
+    harm, is `codex exec fix the tests`, `codex review the diff` or `codex login status`; the
+    daemon's own words too, so `codex 'app-server daemon keeps dying'` is a TUI, never the
+    daemon). So never, where the socket can say, one that runs embedded (`-c`, `--search`,
+    `--profile`, `--no-daemon`, `--strict-config`, `--dangerously-bypass-hook-trust`, `exec`
+    or `review`, measured: each holds its own rollout) or runs no thread of the daemon's (an
+    `app-server` of its own, an IDE's or with `--listen`, `exec-server`, `login`, measured
+    unconnected, and every other subcommand, `execpolicy`, `tcp-tunnel` and `cloud-tasks`
+    too), nor, where it cannot, one of them whose words could not be a prompt's; each is
+    named only when it holds this rollout itself. Never a fleet agent, which shows its own
+    thread. A Codex runs its shell commands as its own children when embedded, and the
+    daemon those of every TUI on it, whose parent is the TUI that started it (both
+    measured), so adopt run from such a shell still counts that Codex, or the daemon, and
+    those above it: it once dropped them as its own and took a thread they held, a second
+    writer beside the first, as Claude Code's registry never does: it refuses a live session
+    even when that session runs adopt (a `claude --resume <id>` above adopt, which holds
+    nothing open, is still adopt's own). Else the daemon, saying it is Codex's background
+    app-server, that it lets go
     by itself about 30 idle minutes after its TUI quit (measured), and that `aisquare
     accounts run <slot> app-server daemon stop` (Codex's own stop, on the thread's account)
     stops it sooner. A process is Codex's by what it runs, never by a word in its arguments, so a

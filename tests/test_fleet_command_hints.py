@@ -195,7 +195,8 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ),
     ("services/fleet.py", "switch"): _FLEET_OP,
     ("services/fleet.py", "restart"): _FLEET_OP,
-    ("services/fleet.py", "rename"): "the project renamed, with its new codename",
+    ("services/fleet.py", "_codename_changed"): "the project renamed, with its new codename",
+    ("services/fleet.py", "follow_name"): "the project renamed, as its row holds it now",
     ("services/fleet.py", "attach_argv"): _FLEET_OP,
     ("services/hooks.py", "hand_over"): (
         "the limited agent's own row's project (``agent.project_id``), which the "

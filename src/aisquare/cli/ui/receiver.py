@@ -174,7 +174,12 @@ def _listed(names: list[str]) -> str:
 
 
 def _project_matches(snapshot: FleetSnapshot, ref: str) -> list[ProjectInfo]:
-    """Every listed project ``ref`` names: an exact id alone, else id prefix, codename or name.
+    """Every listed project ``ref`` names: an exact id alone, else the one whose codename it is,
+    else id prefix or name.
+
+    The codename before a name, as the store finds a ``--project`` (``find_projects``): a
+    project renamed takes its name's slug as its codename (``aisquare-cli``), which may be
+    another listed checkout's name too, and the codename is what the captain is given.
 
     Only ``snapshot.projects``, which never holds the captain's home board (T2) —
     ``FleetSnapshot.project`` keeps the same rule — so no ref reaches the home here.
@@ -183,12 +188,13 @@ def _project_matches(snapshot: FleetSnapshot, ref: str) -> list[ProjectInfo]:
     if exact:
         return exact
     folded = ref.casefold()
+    coded = [p for p in snapshot.projects if (p.codename or "").casefold() == folded]
+    if coded:
+        return coded
     return [
         project
         for project in snapshot.projects
-        if project.id.startswith(ref)
-        or (project.codename or "").casefold() == folded
-        or project_name(project).casefold() == folded
+        if project.id.startswith(ref) or project_name(project).casefold() == folded
     ]
 
 

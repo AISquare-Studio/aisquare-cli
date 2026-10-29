@@ -248,6 +248,9 @@ HEADROOM_SECONDS = 60.0
 goes to the network only for an account whose cached usage is over five minutes old."""
 PROJECT_REMOVE_WORKER = "project-remove"
 """The thread worker a card's *Remove from fleet…* forgets its project on (``project forget``)."""
+PROJECT_CODENAME_WORKER = "project-codename"
+"""The thread worker a card's rename gives the project its new codename and renames its tmux
+session on (``services.fleet.follow_name``), once the nickname is written."""
 PROJECT_FRESH_WORKER = "project-fresh"
 """The thread worker *Start fresh…* clears a project's board and fleet on (``project fresh``),
 one a project at a time (:func:`_fresh_group`)."""
@@ -262,6 +265,18 @@ dialog opens again on what the run found (``FleetApp._project_freshened``)."""
 def _fresh_group(project_id: str) -> str:
     """The worker group of a project's Start fresh: one run of it at a time."""
     return f"{PROJECT_FRESH_WORKER}:{project_id}"
+
+
+@dataclass(frozen=True)
+class _CodenameFollowed:
+    """What a card's rename did to the codename (:data:`PROJECT_CODENAME_WORKER`)."""
+
+    before: str | None
+    """The codename the project had when its nickname was written."""
+    after: ProjectInfo
+    """The project as the store has it now."""
+    notes: list[str]
+    """What :func:`fleet.follow_name` could not do, or chose: a suffix, a name that gives none."""
 
 
 _QUIT_POLL = 0.1
@@ -1911,6 +1926,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.worker.name == PROJECT_FRESH_WORKER:
             self._project_freshened(event)
             return
+        if event.worker.name == PROJECT_CODENAME_WORKER:
+            self._codename_followed(event)
+            return
         if event.worker.name == FLEET_WORKER:
             self._fleet_read(event)
             return
@@ -2337,11 +2355,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     # --- a card's name and menu ------------------------------------------------------------
 
     def on_rename_project(self, event: RenameProject) -> None:
-        """A card's name field was saved: write the nickname, as ``aisquare project rename``.
+        """A card's name field was saved: write the nickname, then the codename its name
+        gives, as ``aisquare project rename``.
 
-        On this thread, as every sidebar gesture's write is (:meth:`_layout`): one row,
-        and the card already says the new name. A refusal says why and reopens the
-        field with what was typed, to correct.
+        The nickname on this thread, as every sidebar gesture's write is (:meth:`_layout`):
+        one row, and the card already says the new name. A refusal says why and reopens the
+        field with what was typed, to correct. The codename and the tmux session in a
+        worker (:meth:`_follow_name`): it asks tmux and writes the boards, and the UI never
+        waits on either.
         """
         project = self.snapshot.project(event.project_id) if self.snapshot else None
         if project is None:
@@ -2359,6 +2380,64 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.sidebar.open_rename(project.id, event.typed)
             return
         self.post_message(ProjectRenamed(renamed))
+        self._follow_name(renamed)
+
+    def _follow_name(self, project: ProjectInfo) -> None:
+        """The codename half of a card's rename, off the UI thread (:func:`fleet.follow_name`);
+        :meth:`_codename_followed` says what it did. Per project and never ``exclusive``: a
+        cancelled worker's thread runs on regardless, and its answer would go unsaid."""
+        before = project.codename
+
+        def follow() -> _CodenameFollowed:
+            notes: list[str] = []
+            after = fleet_service.follow_name(project, notes=notes)
+            return _CodenameFollowed(before, after, notes)
+
+        self.run_worker(
+            follow,
+            name=PROJECT_CODENAME_WORKER,
+            group=f"{PROJECT_CODENAME_WORKER}:{project.id}",
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _codename_followed(self, event: Worker.StateChanged) -> None:
+        """A toast naming the codename a card's rename gave (and the old one that still
+        works), a warning for each note; a failure says the nickname stands and why the
+        codename did not follow it."""
+        if event.state is WorkerState.ERROR:
+            self.notify(
+                f"the name is saved, but the fleet codename was not changed: {event.worker.error}",
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
+            return
+        result = event.worker.result
+        if event.state is not WorkerState.SUCCESS or not isinstance(result, _CodenameFollowed):
+            return
+        after = result.after
+        if after.codename is not None and after.codename != result.before:
+            was = (
+                f" — was {result.before}, and --project {result.before} still works"
+                if result.before
+                else ""
+            )
+            self.notify(
+                f"✓ {project_service.display_name(after)} · fleet codename {after.codename} "
+                f"(tmux {fleet_service.session_name(after.codename)}){was}",
+                timeout=8,
+                markup=False,
+            )
+            self.post_message(ProjectRenamed(after))
+        elif after.codename is not None and not result.notes:
+            self.notify(
+                f"✓ {project_service.display_name(after)} · fleet codename {after.codename}",
+                timeout=5,
+                markup=False,
+            )
+        for note in result.notes:
+            self.notify(note, severity="warning", timeout=10, markup=False)
 
     def on_project_renamed(self, event: ProjectRenamed) -> None:
         """A nickname was written — a card, its menu, a Settings tab: every name says it now."""
@@ -3674,6 +3753,7 @@ def _writing_workers() -> dict[str, str]:
         CONSENT_WORKER: "the answer to the usage-sharing question",
         PROJECT_REMOVE_WORKER: "a project's removal",
         PROJECT_FRESH_WORKER: "a project's fresh start",
+        PROJECT_CODENAME_WORKER: "a project's new codename",
         REATTACH_WORKER: "the update's restart of the agents it kept",
         PRESS_WORKER: "the update's record of the running agents",
     }

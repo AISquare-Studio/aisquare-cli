@@ -1256,6 +1256,23 @@ CREATE TABLE IF NOT EXISTS feature_use (
 
 CREATE INDEX IF NOT EXISTS usage_turn_recorded ON usage_turn (recorded_at);
 """
+
+# v41: the codenames a project has given up. Renaming a project now renames its codename
+# (``services.fleet.follow_name``), and live agents were handed the old one in their start
+# packs and prompts (``--project earnest-hawk``), so it still names the project: one row a
+# retired codename, the project that last held it (:meth:`SqliteStore.set_codename` writes
+# it, :meth:`SqliteStore.find_projects` reads it after the current codenames). Additive: a
+# table and its index, both ``IF NOT EXISTS`` and in :data:`_PRODUCTS`; the foreign key
+# puts it among the tables a purge finds by the schema.
+_SCHEMA_V41 = """
+CREATE TABLE IF NOT EXISTS project_codename_alias (
+    codename   TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES project (id),
+    retired_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS project_codename_alias_project
+    ON project_codename_alias (project_id);
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1298,6 +1315,7 @@ _MIGRATIONS = (
     _SCHEMA_V38,
     _SCHEMA_V39,
     _SCHEMA_V40,
+    _SCHEMA_V41,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1384,6 +1402,7 @@ _PRODUCTS: dict[int, _Products] = {
             ("usage_turn", "source", "TEXT"),
         ),
     ),
+    40: _Products(("project_codename_alias", "project_codename_alias_project")),
 }
 
 _PROJECT_COLUMNS = (
@@ -1744,6 +1763,8 @@ class ContextStore(Protocol):
     def latest_seq(self, project_id: str) -> int: ...
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
+    def codename_aliases(self, project_id: str) -> list[str]: ...
+    def codename_alias_owners(self) -> dict[str, str]: ...
     def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo: ...
     def codenames_in_use(self) -> set[str]: ...
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
@@ -2623,19 +2644,40 @@ class SqliteStore:
         return found
 
     def find_projects(self, term: str) -> list[ProjectInfo]:
-        """The live projects ``term`` names: an id prefix, a directory name or a codename,
-        and only when none of those match, a nickname (exactly, case and all).
+        """The live projects ``term`` names: the one whose codename it is; else an id prefix
+        or a directory name; when none of those match, a codename the project gave up
+        (``project_codename_alias``); and only when none of those match, a nickname
+        (exactly, case and all).
 
-        The nickname comes last so that one a person types never takes a reference
-        that already worked: a nickname spelled like another project's codename or
-        folder leaves that one found, rather than both refused as ambiguous.
+        The codename first: it is unique, and it is what every printed ``--project`` says
+        (``services.project.fleet_command``). A project renamed takes its name's slug, and
+        one renamed "AISquare CLI" is ``aisquare-cli``, the folder of every other checkout of
+        that repository; matched with them, the hint printed for it named several projects
+        and was refused. The nickname comes last so that one a person types never takes a
+        reference that already worked: a nickname spelled like another project's codename or
+        folder leaves that one found, rather than both refused as ambiguous. A codename given
+        up comes after the current ones for the same reason: a project that holds it now is
+        the one it names, and the one that held it before is found by it only while no other
+        does — a live agent's ``--project earnest-hawk``, written before its project was
+        renamed, still reaches it.
         """
         rows = self._conn.execute(
-            f"SELECT {_PROJECT_COLUMNS} FROM project "
-            "WHERE forgotten_at IS NULL AND (id GLOB ? OR name = ? OR codename = ?) "
-            "ORDER BY name",
-            (_glob_prefix(term), term, term),
+            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE forgotten_at IS NULL AND codename = ?",
+            (term,),
         ).fetchall()
+        if not rows:
+            rows = self._conn.execute(
+                f"SELECT {_PROJECT_COLUMNS} FROM project "
+                "WHERE forgotten_at IS NULL AND (id GLOB ? OR name = ?) "
+                "ORDER BY name",
+                (_glob_prefix(term), term),
+            ).fetchall()
+        if not rows:
+            rows = self._conn.execute(
+                f"SELECT {_PROJECT_COLUMNS} FROM project WHERE forgotten_at IS NULL AND id IN "
+                "(SELECT project_id FROM project_codename_alias WHERE codename = ?)",
+                (term,),
+            ).fetchall()
         if not rows:
             rows = self._conn.execute(
                 f"SELECT {_PROJECT_COLUMNS} FROM project "
@@ -4551,13 +4593,55 @@ class SqliteStore:
     # --- fleet -----------------------------------------------------------------
 
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo:
-        """Give a project its fleet codename (unique: the index raises on a clash)."""
-        self._conn.execute("UPDATE project SET codename = ? WHERE id = ?", (codename, project_id))
-        self._conn.commit()
+        """Give a project its fleet codename (unique: the index raises on a clash).
+
+        The one it held before, if any, is kept as its alias (``project_codename_alias``,
+        :meth:`find_projects`), in the same transaction: the last project to give a codename
+        up is the one it names; one taken back is its project's current codename again, and
+        no longer an alias.
+        """
+        with self._conn:
+            row = self._conn.execute(
+                "SELECT codename FROM project WHERE id = ?", (project_id,)
+            ).fetchone()
+            old = row["codename"] if row is not None else None
+            self._conn.execute(
+                "UPDATE project SET codename = ? WHERE id = ?", (codename, project_id)
+            )
+            if old is not None and old != codename:
+                self._conn.execute(
+                    "INSERT INTO project_codename_alias (codename, project_id, retired_at) "
+                    "VALUES (?, ?, ?) ON CONFLICT (codename) DO UPDATE SET "
+                    "project_id = excluded.project_id, retired_at = excluded.retired_at",
+                    (old, project_id, datetime.now(UTC).isoformat()),
+                )
+            self._conn.execute(
+                "DELETE FROM project_codename_alias WHERE codename = ? AND project_id = ?",
+                (codename, project_id),
+            )
         project = self.get_project(project_id)
         if project is None:
             raise KeyError(project_id)
         return project
+
+    def codename_aliases(self, project_id: str) -> list[str]:
+        """The codenames ``project_id`` gave up and no project has taken from it since as an
+        alias, newest first: its agents' ``fleet/<codename>/…`` branches from before a rename
+        are under them."""
+        rows = self._conn.execute(
+            "SELECT codename FROM project_codename_alias WHERE project_id = ? "
+            "ORDER BY retired_at DESC, codename",
+            (project_id,),
+        ).fetchall()
+        return [str(row["codename"]) for row in rows]
+
+    def codename_alias_owners(self) -> dict[str, str]:
+        """Every codename given up → the project that last held it, for a reader that matches
+        many references at once (the watcher's sources) as :meth:`find_projects` would."""
+        rows = self._conn.execute(
+            "SELECT codename, project_id FROM project_codename_alias"
+        ).fetchall()
+        return {str(row["codename"]): str(row["project_id"]) for row in rows}
 
     def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo:
         """Name a project as a person sees it, or clear that name with ``None``.

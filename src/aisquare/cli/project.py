@@ -25,6 +25,7 @@ from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import ContextStore, GroupSettings, store_session
 from aisquare.core.workspace import find_project_root, project_id_for
 from aisquare.models import FreshCounts, FreshPlan, FreshReport, ProjectGroup, ProjectInfo
+from aisquare.services import fleet as fleet_service
 from aisquare.services import fresh as fresh_service
 from aisquare.services import install_route
 from aisquare.services import parent as parent_service
@@ -179,27 +180,50 @@ def rename(
         bool, typer.Option("--clear", help="Drop the nickname: the folder's name shows again.")
     ] = False,
 ) -> None:
-    """Give a project a nickname — what the sidebar and the lists call it.
+    """Give a project a nickname — what the sidebar and the lists call it — and its fleet
+    codename the slug of it.
 
-    Free text, like naming a browser tab: what you are doing there. The codename
-    (`fleet rename`) still names its tmux session and branches.
+    Free text, like naming a browser tab: what you are doing there. The codename names the
+    project's tmux session and `--project`: "Billing v2" makes it billing-v2 (billing-v2-2
+    when another project has that), and its tmux session asq-billing-v2. --clear gives
+    both back to the folder's name. The old codename still finds the project, and its
+    board is told; branches and worktrees keep their names. `fleet rename` sets a codename
+    of your own.
     """
     if nickname is None and not clear:
         fail("pass a nickname, or --clear", error="usage")
     if nickname is not None and clear:
         fail("pass a nickname or --clear, not both", error="usage")
     target = _project_ref(project) if project is not None else project_service.info()
+    notes: list[str] = []
     try:
-        renamed = project_service.set_nickname(target, nickname)
+        followed = fleet_service.rename_project(target, nickname, notes=notes)
     except ValueError as exc:
         fail(str(exc), error="bad_nickname", ref=target.id)
     except KeyError:
         fail(str(project_service.NotAdded(target)), error="not_found", ref=target.id)
-    emit_project_action(
+    if get_state().json_output:
+        typer.echo(json.dumps({**json.loads(followed.model_dump_json()), "notes": notes}))
+        return
+    console = stdout_console()
+    console.print(
         f"✓ {project_service.display_name(target)} is now called "
-        f"{project_service.display_name(renamed)}",
-        renamed,
+        f"{project_service.display_name(followed)}",
+        markup=False,  # a nickname is text, not markup
     )
+    if followed.codename and followed.codename != target.codename:
+        was = (
+            f", was {target.codename} (--project {target.codename} still works)"
+            if target.codename
+            else ""
+        )
+        console.print(
+            f"  fleet codename: {followed.codename} "
+            f"(tmux {fleet_service.session_name(followed.codename)}){was}",
+            markup=False,
+        )
+    for note in notes:
+        console.print(f"  ⚠ {note}", markup=False)
 
 
 @app.command("onboard")

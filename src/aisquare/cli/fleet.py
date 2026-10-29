@@ -1418,10 +1418,15 @@ def reap(
 
 @app.command("rename")
 def rename(
-    codename: Annotated[str, typer.Argument(help="New codename, e.g. amber-otter.")],
+    codename: Annotated[str, typer.Argument(help="New codename, e.g. amber-otter or billing-v2.")],
     project: ProjectRef = None,
 ) -> None:
-    """Set the project's fleet codename (and rename its tmux session to match)."""
+    """Set the project's fleet codename (and rename its tmux session to match).
+
+    Lowercase letters and digits in words joined by '-', starting with a letter, at most 24
+    characters. `project rename` sets it from the project's name instead. The old codename
+    still finds the project, and its board is told; branches and worktrees keep their names.
+    """
     target = _project(project)
     notes: list[str] = []
     try:

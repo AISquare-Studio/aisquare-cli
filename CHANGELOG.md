@@ -6,6 +6,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+**Upgrading:**
+- **The store migrates from v40 (0.9.1's) to v41 on first open, automatically, in one
+  step.** It adds one table, `project_codename_alias` (the codenames a renamed project
+  gave up), and its index. Nothing is rewritten or dropped. 0.9.1 opens a v41 store as
+  current and leaves the table alone; `--project <old codename>` then finds nothing there.
+
+### Changed
+
+- **Renaming a project renames its fleet codename and tmux session too.** Saving a card's
+  name (double-click, F2 or the menu's *Rename*), the Settings tab's nickname, or `aisquare
+  project rename "AISquare CLI"` sets the codename to the name's slug, `aisquare-cli`
+  (lowercased, accents folded, at most 24 characters), and renames the session
+  `asq-earnest-hawk` → `asq-aisquare-cli` on every tmux server the project's agents use.
+  Clearing the name takes the slug of the folder's name. A slug another project holds gets
+  the next free suffix (`aisquare-cli-2`), and you are told whose it is. A name with no
+  letter to slug (`!!!`) saves the nickname and leaves the codename, saying so. The card's
+  rename saves the name at once and does the codename and tmux half in the background; a
+  toast names the new codename. If that half fails, the name is still saved and the toast
+  says why. Projects that are never renamed keep their generated `adjective-animal`
+  codename.
+- **The old codename still works.** `--project earnest-hawk` finds the project after a
+  rename, unless another project now holds `earnest-hawk` as its codename, in which case
+  that project is found. A rename posts one note, "project renamed: earnest-hawk →
+  aisquare-cli; --project earnest-hawk still works", on each board the project's agents
+  read (and the captain's, while one is live), so a live manager learns the new name on its
+  next turn. Hints printed after the rename use the new codename. Branches
+  (`fleet/earnest-hawk/…`) and worktrees keep their names. A coder spawned again for a
+  task carries on in that task's branch under the old codename. Open panes stay attached.
+  A watcher source that names the old codename still reaches the project.
+- **A card shows the codename when its name does not give it.** A generated codename that
+  was never renamed, one set with `fleet rename`, or a suffixed one appears dim under the
+  name (`· earnest-hawk`), after the directory when that is shown too. The name's tooltip
+  shows the codename, its tmux session and `--project` either way.
+- **`aisquare fleet rename` accepts any codename of that shape** (`billing-v2`, not only
+  `amber-otter`): lowercase letters and digits in words joined by `-`, starting with a
+  letter, at most 24 characters. It keeps the old codename working and tells the boards,
+  as a project rename does.
+- **An exact codename now wins over a folder name in `--project`.** A codename matched
+  together with another checkout's folder name (two clones of `aisquare-cli`) was refused
+  as ambiguous. Now it names the project that holds the codename. The captain's `ui` actions
+  follow the same rule.
+
 ## [0.9.1] - 2026-10-27
 
 **Usage & stats: what every Claude Code session on this machine spent, by day,

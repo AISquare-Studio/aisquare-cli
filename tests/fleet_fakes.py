@@ -8,10 +8,13 @@ nothing the sidebar shows. :func:`list_agents_as` scripts all three from one fak
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Sequence
+from pathlib import Path
 
 import pytest
 
+from aisquare.core.config import FleetSettings
 from aisquare.core.store import ContextStore
+from aisquare.core.tmux import Completed, TmuxServer
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 
@@ -48,3 +51,43 @@ def list_agents_as(monkeypatch: pytest.MonkeyPatch, fake: Fake) -> None:
     monkeypatch.setattr(fleet_service, "list_agents", fake)
     monkeypatch.setattr(fleet_service, "read_listings", read)
     monkeypatch.setattr(fleet_service, "list_agents_many", many)
+
+
+class SessionsOnly(TmuxServer):
+    """A fleet tmux server that holds named sessions and nothing else, and runs no tmux: what
+    a project rename asks (``has_session``, ``rename_session``) in a UI test, whose guards
+    refuse every real tmux command."""
+
+    def __init__(self, sessions: Collection[str] = ()) -> None:
+        super().__init__("asq-test-sessions", runner=self._refused)
+        self.sessions = set(sessions)
+        self.renamed: list[tuple[str, str]] = []
+
+    @staticmethod
+    def _refused(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        raise AssertionError(f"SessionsOnly ran tmux: {list(argv)}")
+
+    def at(self, path: Path | None) -> TmuxServer:
+        return self
+
+    def has_session(self, name: str) -> bool:
+        return name in self.sessions
+
+    def rename_session(self, old: str, new: str) -> None:
+        self.sessions.discard(old)
+        self.sessions.add(new)
+        self.renamed.append((old, new))
+
+
+def tmux_sessions_as(
+    monkeypatch: pytest.MonkeyPatch, sessions: Collection[str] = ()
+) -> SessionsOnly:
+    """Every fleet server the service asks for is one :class:`SessionsOnly` holding
+    ``sessions``."""
+    fake = SessionsOnly(sessions)
+
+    def factory(config: FleetSettings | None = None) -> TmuxServer:
+        return fake
+
+    monkeypatch.setattr(fleet_service, "server", factory)
+    return fake

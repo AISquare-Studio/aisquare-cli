@@ -26,6 +26,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core.names import slug
 from aisquare.core.store import FLEET_RENAMED, SqliteStore, store_session
 from aisquare.core.tmux import TmuxError
 from aisquare.models import FleetAgent, LaunchSpec, ProjectInfo
@@ -105,6 +106,13 @@ def test_text_that_leaves_under_two_letters_or_digits_is_refused_with_the_rule(
         label_from_text(typed, "coder")
     assert LABEL_RULE in str(refused.value)
     assert "at least two letters or digits" in str(refused.value)
+
+
+def test_a_label_is_the_shared_slug_of_the_text_when_that_starts_with_a_letter() -> None:
+    """One rule with the project's codename (``core.names.slug``): the same text makes the same
+    name in both, ``Søren board`` and ``Straße`` included."""
+    for typed in ("Søren board", "Straße", "Café ✨ review", "Login Fix", "x" * 40 + " tail"):
+        assert label_from_text(typed, "coder") == slug(typed, max_len=24)
 
 
 def test_whatever_is_typed_is_a_label_or_refused() -> None:
@@ -265,6 +273,38 @@ def test_two_renames_at_once_never_leave_two_live_rows_with_one_label(
     assert labels == {"login-fix", "login-fix-2"}
 
 
+def test_a_worktree_spawn_that_loses_its_label_to_a_relabel_removes_the_tree_it_made(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The spawn picked ``login-fix`` from a snapshot taken before a relabel took it, and made
+    its tree at ``<worktree_dir>/login-fix``. The winner works in ``coder-1``'s tree, so the
+    refusal names it and where it works, and the tree the spawn made goes with its window."""
+    renamed = fleet_service.spawn(project, "coder", label="coder-1", worktree=True).agent
+    fleet_service.relabel(project, "coder-1", "login fix")
+    trees = project.root / fleet_service.settings().worktree_dir
+    real = fleet_service.next_label
+    stale = {"once": True}
+
+    def snapshot_from_before(*args: Any, **kwargs: Any) -> str:
+        if stale.pop("once", False):
+            return "login-fix"
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_service, "next_label", snapshot_from_before)
+    with pytest.raises(FleetError) as refused:
+        fleet_service.spawn(project, "coder", worktree=True)
+
+    said = str(refused.value)
+    assert f"login-fix ({renamed.id}) holds it now and works in {renamed.cwd}" in said
+    assert "the agent that won the label works there" not in said, said
+    assert f"the worktree it made at {trees / 'login-fix'} was removed; spawn again" in said
+    assert not (trees / "login-fix").exists()
+    assert str(trees / "login-fix") not in _git("worktree", "list", cwd=project.root)
+    assert tmux.killed == ["%2"], "its window went too"
+    assert renamed.cwd.is_dir(), "the winner's own tree is untouched"
+    assert _live(project) == [("login-fix", renamed.id)]
+
+
 def test_a_spawn_racing_a_rename_never_shares_its_label(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -398,6 +438,29 @@ def test_a_view_pinned_to_the_row_still_finds_it_after_a_rename(
     fleet_service.relabel(project, "coder-1", "login fix")
     stopped = fleet_service.stop(project, "coder-1", force=True, agent_id=coder.id)
     assert stopped.agent.id == coder.id and stopped.agent.ended_at is not None
+
+
+def test_two_quick_relabels_leave_the_rows_label_on_the_window(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI's and the sidebar's relabels of one agent finish their tmux calls out of order:
+    the second lands while the first is asking tmux, and the first's call lands last."""
+    coder = _coder(project, label="coder-1")
+    real = tmux.rename_window
+    asked: list[str] = []
+
+    def out_of_order(pane_id: str, name: str) -> None:
+        asked.append(name)
+        if len(asked) == 1:
+            fleet_service.relabel(project, "login-fix", "auth work")  # lands first
+        real(pane_id, name)
+
+    monkeypatch.setattr(tmux, "rename_window", out_of_order)
+    fleet_service.relabel(project, "coder-1", "login fix")
+
+    assert _row(coder.id).label == "auth-work"
+    assert tmux.window_name(coder.pane_id) == "auth-work", asked
+    assert asked == ["login-fix", "auth-work", "auth-work"], "named again once it saw the change"
 
 
 def test_the_tmux_rename_fails_open_with_a_note(
@@ -541,6 +604,11 @@ def test_a_renamed_worktree_agent_keeps_its_tree_through_restart_spawn_stop_and_
     assert fresh.label != "coder-1" and fresh.cwd != tree
     asked = fleet_service.spawn(project, "coder", label="coder-1", worktree=True)
     assert asked.agent.label == "coder-1-2" and asked.agent.cwd == trees / "coder-1-2"
+    # `fleet ls` shows no coder-1: the note names who holds it, under the name it lists.
+    assert (
+        f"label 'coder-1' is the worktree login-fix still works in ({tree}) — using 'coder-1-2'"
+        in asked.notes
+    ), asked.notes
 
     # Stopped, then reaped: the tree is found by the row and handled.
     fleet_service.stop(project, "login-fix", force=True)
@@ -643,16 +711,18 @@ def test_the_cli_json_is_the_label_it_had_and_has(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _faked(monkeypatch, RelabelReceipt(_agent("login-fix"), "coder-1", "login-fix", []))
-    result = runner.invoke(app, ["--json", "fleet", "relabel", "coder-1", "Login Fix"])
+    result = runner.invoke(app, ["--json", "fleet", "relabel", "coder-1", "Login", "Fix!"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert {k: payload[k] for k in ("label", "was", "asked", "changed", "notes")} == {
+    assert {k: payload[k] for k in ("label", "was", "wanted", "typed", "changed", "notes")} == {
         "label": "login-fix",
         "was": "coder-1",
-        "asked": "login-fix",
+        "wanted": "login-fix",  # the label the text became
+        "typed": "Login Fix!",  # the text as given
         "changed": True,
         "notes": [],
     }
+    assert "asked" not in payload
     assert payload["agent"]["id"] == "agt_1"
 
 

@@ -336,6 +336,35 @@ def test_the_managers_row_offers_no_rename_and_f2_says_why(
     assert relabels.calls == []
 
 
+def test_the_tooltip_the_second_click_and_f2_ask_one_rule(
+    tmp_path: Path, script: Script, relabels: Relabels, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``fleet_service.relabel_refusal`` decides all three: the tooltip never offers what a
+    second click or F2 would refuse."""
+    _team(script, tmp_path)
+    monkeypatch.setattr(
+        fleet_service,
+        "relabel_refusal",
+        lambda agent: "refused for this test" if agent.id == CODER else None,
+    )
+
+    async def go(pilot: Pilot[None]) -> tuple[object, bool, bool, str]:
+        app = fleet_app(pilot)
+        row = row_for(app, CODER)
+        tip = row.tooltip
+        await _double_click(pilot, row)
+        double = _field(app) is None
+        app.sidebar.focus()
+        await pilot.press("f2")
+        return tip, double, _field(app) is None, await _toasts(app)
+
+    tip, double, f2, toasts = drive(go, notifications=True)
+    assert tip is None, "no rename offered"
+    assert double and f2, "neither gesture opens a field"
+    assert "not renamed: refused for this test" in toasts
+    assert relabels.calls == []
+
+
 def test_one_field_at_a_time_across_cards_and_rows(
     tmp_path: Path, script: Script, relabels: Relabels
 ) -> None:

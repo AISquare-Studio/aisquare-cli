@@ -1460,9 +1460,10 @@ def relabel(
     """Rename a running agent: its label everywhere and its tmux window (not the project's
     codename — that is `fleet rename`). Its worktree and branch stay where they are."""
     target = _project(project)
+    typed = " ".join(name)
     try:
         receipt = fleet_service.relabel(
-            target, label, " ".join(name), actor=fleet_service.acting_as(as_session)
+            target, label, typed, actor=fleet_service.acting_as(as_session)
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
@@ -1470,7 +1471,8 @@ def relabel(
         payload = {
             "label": receipt.agent.label,
             "was": receipt.old,
-            "asked": receipt.wanted,
+            "wanted": receipt.wanted,  # the label `typed` became, before any suffix
+            "typed": typed,
             "changed": receipt.changed,
             "agent": receipt.agent.model_dump(mode="json"),
             "notes": receipt.notes,

@@ -957,6 +957,9 @@ class AgentRow(Activatable):
         """What the name field said when it opened: leaving it so is no change."""
         self._field: AgentLabelInput | None = None
         self._preview: Static | None = None
+        self._tipped: FleetAgent | None = None
+        """The row the tooltip was last decided for: a frame that changed nothing of it asks
+        nothing again."""
         self._tip()
 
     def show(self, status: FleetAgentStatus) -> None:
@@ -966,12 +969,13 @@ class AgentRow(Activatable):
 
     def _tip(self) -> None:
         """The rename gesture, on a row that offers one: not the manager's, not the captain's,
-        not an ended agent's (``relabel_refusal``, asked by its role alone, on every frame)."""
+        not an ended agent's. ``relabel_refusal``, the one rule a second click and F2 ask too,
+        so the tooltip never offers what they refuse — asked again only when the row changed."""
         agent = self.status.agent
-        offered = agent.role not in ("manager", fleet_service.CAPTAIN_ROLE) and (
-            agent.ended_at is None
-        )
-        tip = RENAME_TIP if offered else None
+        if agent == self._tipped:
+            return
+        self._tipped = agent
+        tip = RENAME_TIP if fleet_service.relabel_refusal(agent) is None else None
         if self.tooltip != tip:
             self.tooltip = tip
 

@@ -52,9 +52,12 @@ adapter.**
 - On a machine with Codex alone, every step has a Codex path:
   `install.sh --agent codex`, Welcome, a manager and two coders on Codex,
   restart, switch, tell, stop, accounts and usage limits.
-- What each Claude Code feature does on Codex, as observed in eight live smoke
-  tests (the last, SMOKE8, on 0.8.2's personas, captain, Spawn dialog, info line,
-  hand-off and `--all` on Codex 0.164.0 and 0.162.1) and the live tests on the
+- What each Claude Code feature does on Codex, as observed in eleven live smoke
+  tests (SMOKE8 on 0.8.2's personas, captain, Spawn dialog, info line, hand-off and
+  `--all` on Codex 0.164.0 and 0.162.1; the last, SMOKE11, 13/13 on Codex 0.164.0
+  beside Claude Code 2.1.312, on the order across agents, the hand-off both ways,
+  `before_limit`, `fleet adopt`, the MCP row, the Spawn dialog, a spawn's arguments
+  and model, and usage sharing staying Claude Code's) and the live tests on the
   real Codex 0.164.0 and 0.162.1, is
   the parity matrix (*Parity with Claude Code* in #113's description).
 - Main's 0.9.0 is merged (the P2 train, #401's release, the snapshot removal and the
@@ -73,8 +76,9 @@ adapter.**
   moved to `core.agent_adapters.claude_usage` carries main's `scan_turns`.
   - **Through the adapter**, tested on Codex: a headroom pick or rank 1 never overrides a
     hand-written `CODEX_HOME` binding, as it does not a `CLAUDE_CONFIG_DIR` one; a Codex
-    Stop's tokens are in Usage & stats; a Codex agent counts as its role in the anonymous
-    counts, which name no agent; the label cap is 24 for every agent; `project fresh` stops
+    Stop's tokens are in Usage & stats; a Codex agent counts as its role in the local
+    counts and in no shared one (usage sharing is Claude Code's, below); the label cap
+    is 24 for every agent; `project fresh` stops
     what the launch records index, whatever the agent; the captain's owner gate wraps the
     tools, not an agent; a persona import runs the manager's own agent, Codex's `exec`
     included, under main's cancel loop; a Codex row with no login shows the one `!` and

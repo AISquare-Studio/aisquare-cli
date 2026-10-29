@@ -17,6 +17,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   next free suffix (`login-fix-2`), and you are told. From then on the agent is that label
   everywhere: `fleet tell`, `stop`, `restart`, `switch`, the board's lines and its tmux
   window. The old label finds nothing, and its refusal says what the agent is called now.
+  An ended agent whose label the rename takes keeps its row, listed as `~login-fix` by
+  `fleet ls --all`, and no restart by label brings it back.
   An `agent_renamed` line on the board tells the manager. The agent keeps its worktree and
   branch, as they are: its restart, stop and reap find them by the row. The manager and
   the captain keep their labels, no agent can take `manager` or `captain`, and an agent

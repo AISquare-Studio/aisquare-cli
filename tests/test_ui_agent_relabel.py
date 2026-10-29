@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 from textual import events
+from textual.geometry import Offset
 from textual.pilot import Pilot
 from textual.widgets import Static
 
@@ -191,6 +192,63 @@ def test_a_second_click_on_the_row_renames_the_agent_and_enter_saves_in_a_worker
     assert relabels.calls == [("prj_a", "coder-1", "Login fix", {"actor": "user"})]
     assert relabels.threads and relabels.threads[0] != threading.main_thread().ident
     assert "coder-1 is now login-fix" in str(seen["toasts"])
+
+
+def test_a_zero_gap_double_click_still_opens_the_field(
+    tmp_path: Path, script: Script, relabels: Relabels
+) -> None:
+    """Press, release, press, release in one write, as a fast hand or a trackpad's tap-tap
+    sends them: the second click opens the field while the first one's view is still being
+    shown, and the view must not take the keys from it once it is (``_focus_pane``)."""
+    _team(script, tmp_path)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, bool]:
+        app = fleet_app(pilot)
+        row = row_for(app, CODER)
+        x, y = row.region.offset + Offset(1, 0)
+        for kind in (events.MouseDown, events.MouseUp, events.MouseDown, events.MouseUp):
+            app.post_message(kind(None, x, y, 0, 0, 1, False, False, False, screen_x=x, screen_y=y))
+        await settle(app)
+        await pilot.pause()
+        await settle(app)
+        field = _field(app)
+        return (
+            isinstance(app.current_view(), AgentView),
+            field is not None,
+            field is not None and app.focused is field,
+        )
+
+    view, opened, focused = drive(go)
+    assert view, "the first click opened the agent"
+    assert opened and focused, "the second click's field is open and keeps the keys"
+    assert relabels.calls == [], "nothing saved by a blur"
+
+
+def test_the_preview_follows_a_frame_that_takes_the_label(
+    tmp_path: Path, script: Script, relabels: Relabels
+) -> None:
+    """``→ login-fix`` while it is free; a frame that brings a live ``login-fix`` says
+    ``→ login-fix-2`` at once, with nothing typed since."""
+    _team(script, tmp_path)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str]:
+        app = fleet_app(pilot)
+        await _double_click(pilot, row_for(app, CODER))
+        await pilot.press(*"login", "space", *"fix")
+        before = _preview(app)
+        script["prj_a"] = [
+            *script["prj_a"],
+            status("prj_a", "login-fix", "tester", "working", minute=2),
+        ]
+        await refreshed(app)
+        field = _field(app)
+        assert field is not None
+        return before, _preview(app), field.value
+
+    before, after, typed = drive(go)
+    assert before == "→ login-fix"
+    assert after == "→ login-fix-2 (login-fix is taken)"
+    assert typed == "login fix", "the field itself untouched"
 
 
 def test_the_rename_never_blocks_the_ui_while_it_writes(

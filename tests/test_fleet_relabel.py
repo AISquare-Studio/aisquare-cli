@@ -32,6 +32,7 @@ from aisquare.core.tmux import TmuxError
 from aisquare.models import FleetAgent, LaunchSpec, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
+from aisquare.services.captain import actions as captain_actions
 from aisquare.services.fleet import (
     LABEL,
     LABEL_RULE,
@@ -428,6 +429,100 @@ def test_the_hint_is_gone_once_another_agent_takes_the_old_label(
         fleet_service.tell(project, "coder-1", "hello")
     assert "renamed" not in str(refused.value), "coder-1 is the newer agent's label now"
     assert _row(newer.id).ended_at is not None
+
+
+def _taken_from_an_ended_agent(project: ProjectInfo) -> tuple[FleetAgent, FleetAgent]:
+    """The tester's repro (#4911): a coder spawned FIRST, then a tester labelled ``login-fix``,
+    stopped — an ended row of ``login-fix`` started after the coder's — then the coder
+    renamed ``login-fix``. Returns (coder, tester) as they are after the rename."""
+    coder = _coder(project, label="coder-1")
+    tester = fleet_service.spawn(project, "tester", label="login-fix", worktree=False).agent
+    fleet_service.stop(project, "login-fix", force=True)
+    assert _row(tester.id).created_at > coder.created_at, "the case a spawn never makes"
+    fleet_service.relabel(project, "coder-1", "login fix")
+    return _row(coder.id), _row(tester.id)
+
+
+def test_a_label_taken_from_an_ended_agent_is_the_renamed_agents_for_every_lookup(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The label's ended rows from before the rename are another agent's history: retired,
+    every newest-row lookup of ``login-fix`` is the renamed coder's, live or ended."""
+    coder, tester = _taken_from_an_ended_agent(project)
+    assert tester.label == "~login-fix" and tester.ended_at is not None
+    with store_session() as store:
+        assert store.fleet_agent_by_label(project.id, "login-fix", live_only=False).id == coder.id  # type: ignore[union-attr]
+    # The captain's and the remote's reads go by that lookup too (captain/actions._role_of).
+    assert captain_actions._role_of(project, "login-fix") == "coder"
+
+    # Restart from the agent view, pinned to the row: the coder, not "another agent now".
+    pinned = fleet_service.restart(project, "login-fix", agent_id=coder.id)
+    assert (pinned.replaced.id, pinned.started.role) == (coder.id, "coder")
+    # Restart by label (the CLI): the coder again, under its own label, no `-2` anywhere.
+    by_label = fleet_service.restart(project, "login-fix")
+    assert by_label.replaced.id == pinned.started.id
+    assert (by_label.started.label, by_label.started.role) == ("login-fix", "coder")
+    # A take-over by label moves the coder, the row its label names.
+    taken = fleet_service.hand_off(project, "login-fix", mode="take_over")
+    assert taken.source.id == by_label.started.id
+    assert (taken.started.agent.label, taken.started.agent.role) == ("login-fix", "coder")
+    # Stopped, then restarted by label: the coder comes back, the tester stays down.
+    fleet_service.stop(project, "login-fix", force=True)
+    back = fleet_service.restart(project, "login-fix")
+    assert back.replaced.id == taken.started.agent.id and back.started.role == "coder"
+
+    assert [(label, _row(agent_id).role) for label, agent_id in _live(project)] == [
+        ("login-fix", "coder")
+    ]
+    assert _row(tester.id).ended_at is not None and _row(tester.id).label == "~login-fix"
+
+
+def test_once_the_renamed_agent_ends_the_label_heads_are_its_own(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """After the renamed agent ends, its row and the tester's (started later) are both ended:
+    the head of ``login-fix`` — what Restart all, the dead-team line and a restart by label
+    read — is the coder's, and the retired row heads nothing."""
+    coder, _ = _taken_from_an_ended_agent(project)
+    tmux.die(coder.pane_id, 137)  # killed: Restart all brings a dead one back
+    fleet_service.list_agents(project)  # records the death
+    assert _row(coder.id).ended_at is not None
+
+    with store_session() as store:
+        heads = {row.label: row.id for row in store.fleet_label_heads(project.id)}
+        newest = store.fleet_agent_by_label(project.id, "login-fix", live_only=False)
+    assert heads == {"login-fix": coder.id}, heads
+    assert newest is not None and newest.id == coder.id
+    assert [status.agent.id for status in fleet_service.dead_team(project)] == [coder.id]
+    assert fleet_service.restart(project, "login-fix").started.role == "coder"
+
+
+def test_stop_by_label_removes_the_renamed_agents_window_not_the_retired_ones(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """``stop``'s ended fallback (a 💤 row's lingering window) by the label: the renamed
+    agent's. The retired row's window goes only when that row is named by its id."""
+    coder = _coder(project, label="coder-1")
+    tester = fleet_service.spawn(project, "tester", label="login-fix", worktree=False).agent
+    tmux.die(tester.pane_id, 0)  # exits on its own: its window lingers
+    fleet_service.list_agents(project)
+    fleet_service.relabel(project, "coder-1", "login fix")
+    tmux.die(coder.pane_id, 0)
+    fleet_service.list_agents(project)
+
+    fleet_service.stop(project, "login-fix")
+    assert tmux.killed == [coder.pane_id], "the coder's last screen, not the tester's"
+    fleet_service.stop(project, "~login-fix", agent_id=tester.id)
+    assert tmux.killed == [coder.pane_id, tester.pane_id]
+
+
+def test_a_retired_row_is_not_restarted_under_the_label_it_lost(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    _, tester = _taken_from_an_ended_agent(project)
+    with pytest.raises(FleetError, match="a rename gave its label, 'login-fix', to another"):
+        fleet_service.restart(project, tester.label, agent_id=tester.id)
+    assert [label for label, _ in _live(project)] == ["login-fix"]
 
 
 def test_a_view_pinned_to_the_row_still_finds_it_after_a_rename(

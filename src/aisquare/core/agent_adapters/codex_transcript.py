@@ -224,17 +224,18 @@ class CodexTranscript:
         Measured on 0.164.0 (#47's reopen), a no-argument ``codex`` starts two, both run from
         ``<CODEX_HOME>/packages/app-server-daemon/releases/<version>/bin/codex`` and both
         living on after ``/exit``: ``app-server --listen unix://… --managed-daemon``, which
-        holds the rollout, and ``app-server daemon pid-update-loop``, which holds none.
-        ``session`` for a form that can be the daemon's client (:func:`_runs_as`): its TUI
-        (no subcommand, a prompt, ``resume``, ``fork``, and ``--remote <ADDR>`` whatever
-        else it is given) and ``agents`` and ``app-server proxy``, each measured connected to
-        the daemon's socket. ``alone`` for any other, never the daemon's client: one that
-        runs embedded (a fleet Codex's ``-c`` overrides, ``exec``, ``review``), which holds
-        its rollout itself, and one that runs no thread of the daemon's (``app-server`` of its
-        own, ``exec-server``, ``login`` and every other subcommand, ``execpolicy``,
-        ``tcp-tunnel`` and ``cloud-tasks`` too). Each holds what it has open from its first
-        prompt on for as long as its session lives (``lsof`` on 0.164.0,
-        ``core.process_table``)."""
+        holds the rollout, and ``app-server daemon pid-update-loop``, which holds none. A
+        Codex run from elsewhere reads so by the daemon's words (:func:`_daemons`), and adopt
+        asks the daemon's socket about it all the same (r34). ``session`` for a form that can
+        be the daemon's client (:func:`_runs_as`): its TUI (no subcommand, a prompt,
+        ``resume``, ``fork``, and ``--remote <ADDR>`` whatever else it is given) and
+        ``agents`` and ``app-server proxy``, each measured connected to the daemon's socket.
+        ``alone`` for any other, never the daemon's client: one that runs embedded (a fleet
+        Codex's ``-c`` overrides, ``exec``, ``review``), which holds its rollout itself, and
+        one that runs no thread of the daemon's (``app-server`` of its own, ``exec-server``,
+        ``login`` and every other subcommand, ``execpolicy``, ``tcp-tunnel`` and
+        ``cloud-tasks`` too). Each holds what it has open from its first prompt on for as long
+        as its session lives (``lsof`` on 0.164.0, ``core.process_table``)."""
         from aisquare.core.agent_adapters.codex import CodexAdapter
 
         image = process_executable(args)
@@ -306,8 +307,9 @@ _ROLLOUT_NAME = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)\.jsonl
 _APP_SERVER = "app-server"
 _DAEMON = "daemon"
 _MANAGED_DAEMON = "--managed-daemon"
-"""The subcommand, its ``daemon`` subcommand and the flag of the app-server daemon Codex
-manages itself (0.164.0, ``ps`` in SMOKE11 and #47's reopen), which a ``codex`` with no
+_PID_UPDATE_LOOP = "pid-update-loop"
+"""The subcommand, its ``daemon`` subcommand, the flag and the loop of the app-server daemon
+Codex manages itself (0.164.0, ``ps`` in SMOKE11 and #47's reopen), which a ``codex`` with no
 arguments starts and attaches its TUI to: ``app-server … --managed-daemon`` and ``app-server
 daemon pid-update-loop``."""
 _DAEMON_KEEPS = "about 30 idle minutes later"
@@ -427,13 +429,14 @@ _DAEMON_COMMANDS = frozenset(
         "disable-remote-control",
         "stop",
         "version",
-        "pid-update-loop",
+        _PID_UPDATE_LOOP,
         "help",
     }
 )
 """``app-server daemon``'s own subcommands, as ``codex completion bash`` lists them (0.164.0,
-``codex__app__server__daemon``): ``daemon`` followed by none of them is a prompt's word
-(:func:`_daemons`)."""
+``codex__app__server__daemon``): ``daemon`` followed by none of them is a prompt's word, and
+one of them but :data:`_PID_UPDATE_LOOP` as the last word is a prompt's as well, as a
+subcommand's own is (:func:`_daemons`)."""
 _FLAGS = frozenset({_MANAGED_DAEMON})
 """The options known to take no value (``codex completion bash`` completes none for them):
 the word after one is never its value (:func:`_could_be_prompt`), so ``codex 'app-server
@@ -470,19 +473,22 @@ def _runs_as(words: Sequence[str]) -> HoldsOpen:
     (``capabilities.value_options``); the first word that is neither is the subcommand, or
     else a prompt's, which ends the reading.
 
-    ``clients`` for the daemon's own (:func:`_daemons`: ``app-server daemon stop``,
-    ``app-server … --managed-daemon``, never a prompt that starts so). ``alone`` for an
-    option of :data:`_EMBEDDED` (``--config=…``, ``-c…`` and ``-p…`` too) before the
-    prompt, unless :data:`_REMOTE` is too, and for a subcommand of
-    :data:`_COMMANDS` that is not one of those that can be the daemon's client
-    (:data:`_RESUMES`, :data:`_CLIENTS`, ``app-server`` :data:`_PROXY`). ``session`` for
-    those, for no subcommand, and for a first word that is none (a prompt). A subcommand's
-    name followed by a word that could be a prompt's (:func:`_could_be_prompt`) reads as a
-    prompt too: ``codex 'exec the tests'`` and ``codex exec the tests`` list alike, and the
-    TUI the first is, is a possible client (the MANAGER DECISION: naming a Codex the human
-    started, "quit it first", is the lesser harm; telling them to stop the daemon under an
-    open TUI breaks their conversation). So is ``--remote <ADDR>`` with an option of
-    :data:`_EMBEDDED`, measured connected (the MANAGER DECISION, #51's reopen)."""
+    ``alone`` for an option of :data:`_EMBEDDED` (``--config=…``, ``-c…`` and ``-p…`` too)
+    before the prompt, unless :data:`_REMOTE` is too, whatever follows it: the managed daemon
+    never runs with one (r34). Else ``clients`` for the daemon's own words with nothing after
+    them that could be a prompt's (:func:`_daemons`: ``app-server … --managed-daemon``,
+    ``app-server daemon pid-update-loop``, ``app-server daemon stop -c …``), which a TUI whose
+    prompt is exactly those reads as too; never ``app-server daemon stop`` alone, which reads
+    as a prompt's as well (r34); ``alone`` for a subcommand of :data:`_COMMANDS` that is not
+    one of those that can be the daemon's client (:data:`_RESUMES`, :data:`_CLIENTS`,
+    ``app-server`` :data:`_PROXY`). ``session`` for those, for no subcommand, and for a first
+    word that is none (a prompt). A subcommand's name followed by a word that could be a
+    prompt's (:func:`_could_be_prompt`) reads as a prompt too: ``codex 'exec the tests'`` and
+    ``codex exec the tests`` list alike, and the TUI the first is, is a possible client (the
+    MANAGER DECISION: naming a Codex the human started, "quit it first", is the lesser harm;
+    telling them to stop the daemon under an open TUI breaks their conversation). So is
+    ``--remote <ADDR>`` with an option of :data:`_EMBEDDED`, measured connected (the MANAGER
+    DECISION, #51's reopen)."""
     from aisquare.core.agent_adapters.codex import CodexAdapter
 
     values = CodexAdapter.capabilities.value_options
@@ -497,11 +503,11 @@ def _runs_as(words: Sequence[str]) -> HoldsOpen:
             if "=" not in word and word in values:
                 next(rest, None)  # its value
             continue
+        if embedded and not remote:
+            return "alone"
         after = list(rest)
         if word == _APP_SERVER and _daemons(after):
             return "clients"
-        if embedded and not remote:
-            return "alone"
         if word not in _COMMANDS:
             return "session"  # a prompt's first word
         if word in _RESUMES:
@@ -515,20 +521,33 @@ def _runs_as(words: Sequence[str]) -> HoldsOpen:
 
 def _daemons(words: Sequence[str]) -> bool:
     """Whether an ``app-server`` run with ``words`` after it is the managed daemon's own,
-    read up to the prompt and never into it, as :func:`_runs_as` reads: its ``daemon`` and
-    one of that one's own subcommands (:data:`_DAEMON_COMMANDS`), or ``--managed-daemon``
-    among its options, each with no word after it that could be a prompt's
-    (:func:`_could_be_prompt`). ``ps`` lists ``codex 'app-server daemon keeps dying'`` as
-    ``codex app-server daemon keeps dying``: a TUI, which read as the daemon was never named
-    though connected, the daemon named under it with its stop, and adopt run from its shell
-    told to stop the daemon (r33). Measured on 0.164.0, ``codex app-server daemon`` with no
-    subcommand of its own and ``codex app-server --managed-daemon crashes`` each exit at once
-    (its usage, "unrecognized subcommand"): a Codex that runs with such words is a TUI."""
+    read up to the prompt and never into it, as :func:`_runs_as` reads: ``--managed-daemon``
+    among its options, or its ``daemon`` and :data:`_PID_UPDATE_LOOP`, each with no word
+    after it that could be a prompt's (:func:`_could_be_prompt`); or ``daemon`` and another
+    of its own subcommands (:data:`_DAEMON_COMMANDS`) read as a subcommand's own is, so with
+    options after it and nothing else (``app-server daemon stop -c model=…``). ``ps`` lists
+    ``codex 'app-server daemon keeps dying'`` as ``codex app-server daemon keeps dying``,
+    and ``codex 'app-server daemon stop'`` as ``codex app-server daemon stop``: TUIs, which
+    read as the daemon were never named though connected, the daemon named under them with
+    its stop, and adopt run from their shell told to stop the daemon (r33, r34). Measured on
+    0.164.0, ``codex app-server daemon`` with no subcommand of its own and ``codex
+    app-server --managed-daemon crashes`` each exit at once (its usage, "unrecognized
+    subcommand"), and ``app-server daemon help``, ``version``, ``stop``, ``stop -c
+    model=…`` and ``restart`` within a second (``start`` within 3 s, installing the daemon,
+    whose processes run from :data:`_DAEMON_DIR`): a Codex that runs with such words is a
+    TUI. Not ``pid-update-loop``, which run by hand ran on (killed after 20 s), nor
+    ``--managed-daemon``, which run by hand off :data:`_DAEMON_DIR` is a daemon (r34's
+    MANAGER DECISION): a TUI whose prompt is ``app-server daemon pid-update-loop`` or
+    ``app-server --managed-daemon`` reads as the daemon, the limit, beside a subcommand's own
+    followed by options, read as that subcommand for every subcommand (``codex 'cloud-tasks
+    list --json'`` reads ``alone``). Where the socket can say, adopt asks it all the same."""
     if words[:1] == [_DAEMON]:
+        if words[1:2] == [_PID_UPDATE_LOOP]:
+            return not _could_be_prompt(words[2:], frozenset())
         return (
             words[1:2] != []
             and words[1] in _DAEMON_COMMANDS
-            and not _could_be_prompt(words[2:], frozenset())
+            and not _could_be_prompt(words[1:], _DAEMON_COMMANDS)
         )
     return _MANAGED_DAEMON in words and not _could_be_prompt(words, frozenset())
 

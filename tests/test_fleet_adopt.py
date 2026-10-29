@@ -764,6 +764,41 @@ def test_a_codex_connected_to_its_daemon_is_named_whatever_its_words_say(
     assert "quit it first" in _refused(7601)
 
 
+def test_a_tui_whose_prompt_starts_with_the_daemons_own_words_is_never_the_daemon(
+    codex_daemon: DaemonTable, daemon_sockets: dict[int, set[int]]
+) -> None:
+    """r33 1: ``codex 'app-server daemon keeps dying'`` lists as ``codex app-server daemon
+    keeps dying``, which read as the daemon's own (``clients``), so that TUI was never asked
+    of the socket nor named, and the daemon was, with its stop, under an open TUI. The
+    daemon's words are read up to the prompt: where the socket cannot say, it is a form
+    that can be the daemon's client; where it says it is connected, it is named."""
+    processes, _holds = codex_daemon
+    processes.append(_codex(7005, "app-server daemon keeps dying"))
+
+    assert "quit it first" in _refused(7005)
+
+    daemon_sockets[13090] = {7005}
+    assert "quit it first" in _refused(7005)
+
+
+def test_adopt_run_from_the_shell_of_a_codex_whose_prompt_names_the_daemon_names_that_codex(
+    codex_daemon: DaemonTable,
+) -> None:
+    """r33 1: run from the shell of ``codex -c model=… 'app-server daemon is wedged'``, an
+    embedded TUI that holds its own rollout, adopt took that TUI for the daemon and told the
+    human to stop the daemon. It is a Codex of its own: named, "quit it first", never with
+    the daemon's note or stop."""
+    processes, holds = codex_daemon
+    holds[7300] = holds.pop(13090)
+    me = os.getpid()
+    processes.append(_codex(7300, "-c model=gpt-5.5 app-server daemon is wedged"))
+    processes.append((8800, 7300, "/bin/zsh -c aisquare fleet adopt"))
+    processes.append((me, 8800, f"python -m aisquare fleet adopt {THREAD}"))
+
+    said = _refused(7300)
+    assert "quit it first" in said and "Codex's background app-server" not in said
+
+
 def test_adopt_run_from_a_shell_the_daemon_runs_still_counts_the_daemon(
     codex_daemon: DaemonTable, daemon_sockets: dict[int, set[int]]
 ) -> None:
@@ -880,8 +915,9 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
     ``--enable`` nor ``--disable``, which ran on the daemon when it matched them. A prompt is
     never read for options (tester-50: ``ps`` loses quoting), nor what follows ``--``, and a
     subcommand's name followed by what could be a prompt's words, past its own subcommand,
-    reads as a prompt's, a possible client. A process that runs no Codex, whatever its
-    arguments say, none; Claude Code's none."""
+    reads as a prompt's, a possible client; so do the daemon's own words (r33: ``app-server
+    daemon`` past one of its own, ``--managed-daemon``, an option that takes no value). A
+    process that runs no Codex, whatever its arguments say, none; Claude Code's none."""
     reader = get_adapter("codex").transcript_reader
     claude = get_adapter("claude-code").transcript_reader
     assert reader is not None and claude is not None
@@ -890,6 +926,8 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
     assert reader.held_open([CODEX_DAEMON_BIN, "app-server"]) == "clients", "run from its dir"
     assert reader.held_open(f"{CODEX_NATIVE} app-server daemon stop".split()) == "clients"
     assert reader.held_open(f"{CODEX_NATIVE} app-server --managed-daemon".split()) == "clients"
+    assert reader.held_open([CODEX_NATIVE, *CODEX_DAEMON.split()[1:]]) == "clients"
+    assert reader.held_open([CODEX_NATIVE, *CODEX_DAEMON_LOOP.split()[1:]]) == "clients"
     assert reader.held_open([CODEX_NATIVE]) == "session"
     assert reader.held_open(["node", "/usr/local/bin/codex"]) == "session"
     for plain in (
@@ -926,6 +964,10 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
         "resume --last use -c",  # its prompt
         "agents",
         "app-server proxy",
+        "app-server daemon keeps dying",  # a prompt, never the daemon's own (r33)
+        "app-server daemon stop the bleeding",  # past the daemon's own subcommand
+        "app-server --managed-daemon crashes",  # ``--managed-daemon`` takes no value
+        "app-server --managed-daemon -- crashes",
     ):
         assert reader.held_open([CODEX_NATIVE, *plain.split()]) == "session", plain
     for prompt in PROMPTS:
@@ -968,6 +1010,8 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
         "mcp list",
         "login status",
         "--remote-auth-token-env TOKEN -c model=gpt-5.5",  # no ``--remote``
+        "-c model=gpt-5.5 app-server daemon is wedged",  # an embedded TUI's prompt (r33)
+        "app-server daemon",  # none of its own: Codex prints its usage and exits
     ):
         assert reader.held_open([CODEX_NATIVE, *alone.split()]) == "alone", alone
     assert reader.held_open(["node", "--no-warnings", "/usr/local/bin/codex", "exec"]) == "alone"

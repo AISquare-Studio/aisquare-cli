@@ -417,6 +417,27 @@ _OWN_COMMANDS = {
 bash`` lists them (0.164.0): a word right after its subcommand's name that is one of them is
 that, never a prompt's (``codex execpolicy check --rules <PATH>``, ``codex app-server
 generate-ts``), as an option's value is not (:func:`_could_be_prompt`)."""
+_DAEMON_COMMANDS = frozenset(
+    {
+        "bootstrap",
+        "start",
+        "restart",
+        "update",
+        "enable-remote-control",
+        "disable-remote-control",
+        "stop",
+        "version",
+        "pid-update-loop",
+        "help",
+    }
+)
+"""``app-server daemon``'s own subcommands, as ``codex completion bash`` lists them (0.164.0,
+``codex__app__server__daemon``): ``daemon`` followed by none of them is a prompt's word
+(:func:`_daemons`)."""
+_FLAGS = frozenset({_MANAGED_DAEMON})
+"""The options known to take no value (``codex completion bash`` completes none for them):
+the word after one is never its value (:func:`_could_be_prompt`), so ``codex 'app-server
+--managed-daemon crashes'`` reads as a prompt's."""
 _REMOTE = "--remote"
 """The option that connects Codex's TUI to an app-server it names (``--remote <ADDR>``:
 ``ws://``, ``wss://`` or ``unix://[PATH]``), its own or the daemon's; Codex refuses it with
@@ -449,9 +470,10 @@ def _runs_as(words: Sequence[str]) -> HoldsOpen:
     (``capabilities.value_options``); the first word that is neither is the subcommand, or
     else a prompt's, which ends the reading.
 
-    ``clients`` for the daemon's own (``app-server daemon …``, ``app-server …
-    --managed-daemon``). ``alone`` for an option of :data:`_EMBEDDED` (``--config=…``, ``-c…`` and
-    ``-p…`` too) before the prompt, unless :data:`_REMOTE` is too, and for a subcommand of
+    ``clients`` for the daemon's own (:func:`_daemons`: ``app-server daemon stop``,
+    ``app-server … --managed-daemon``, never a prompt that starts so). ``alone`` for an
+    option of :data:`_EMBEDDED` (``--config=…``, ``-c…`` and ``-p…`` too) before the
+    prompt, unless :data:`_REMOTE` is too, and for a subcommand of
     :data:`_COMMANDS` that is not one of those that can be the daemon's client
     (:data:`_RESUMES`, :data:`_CLIENTS`, ``app-server`` :data:`_PROXY`). ``session`` for
     those, for no subcommand, and for a first word that is none (a prompt). A subcommand's
@@ -476,7 +498,7 @@ def _runs_as(words: Sequence[str]) -> HoldsOpen:
                 next(rest, None)  # its value
             continue
         after = list(rest)
-        if word == _APP_SERVER and (after[:1] == [_DAEMON] or _MANAGED_DAEMON in after):
+        if word == _APP_SERVER and _daemons(after):
             return "clients"
         if embedded and not remote:
             return "alone"
@@ -489,6 +511,26 @@ def _runs_as(words: Sequence[str]) -> HoldsOpen:
         own = _OWN_COMMANDS.get(word, frozenset())
         return "session" if _could_be_prompt(after, own) else "alone"
     return "alone" if embedded and not remote else "session"
+
+
+def _daemons(words: Sequence[str]) -> bool:
+    """Whether an ``app-server`` run with ``words`` after it is the managed daemon's own,
+    read up to the prompt and never into it, as :func:`_runs_as` reads: its ``daemon`` and
+    one of that one's own subcommands (:data:`_DAEMON_COMMANDS`), or ``--managed-daemon``
+    among its options, each with no word after it that could be a prompt's
+    (:func:`_could_be_prompt`). ``ps`` lists ``codex 'app-server daemon keeps dying'`` as
+    ``codex app-server daemon keeps dying``: a TUI, which read as the daemon was never named
+    though connected, the daemon named under it with its stop, and adopt run from its shell
+    told to stop the daemon (r33). Measured on 0.164.0, ``codex app-server daemon`` with no
+    subcommand of its own and ``codex app-server --managed-daemon crashes`` each exit at once
+    (its usage, "unrecognized subcommand"): a Codex that runs with such words is a TUI."""
+    if words[:1] == [_DAEMON]:
+        return (
+            words[1:2] != []
+            and words[1] in _DAEMON_COMMANDS
+            and not _could_be_prompt(words[2:], frozenset())
+        )
+    return _MANAGED_DAEMON in words and not _could_be_prompt(words, frozenset())
 
 
 def _marks_embedded(option: str) -> bool:
@@ -529,11 +571,12 @@ def _could_be_prompt(words: Sequence[str], own: frozenset[str]) -> bool:
     with that name: one is neither an option, the value right after one, nor, the first such,
     one of the subcommand's own (``own``, :data:`_OWN_COMMANDS`) (``app-server --listen
     ws://127.0.0.1:4500`` and ``execpolicy check --rules /r.rules`` cannot; ``exec the
-    tests`` and ``exec review the diff`` can)."""
+    tests`` and ``exec review the diff`` can). An option's value is the word right after it,
+    unless it is joined to it or the option takes none (:data:`_FLAGS`)."""
     valued = False
     for word in words:
         if word.startswith("-") and word != "--":
-            valued = "=" not in word
+            valued = "=" not in word and word not in _FLAGS
         elif valued:
             valued = False
         elif word in own:

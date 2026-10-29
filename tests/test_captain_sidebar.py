@@ -62,12 +62,19 @@ async def quiet(pilot: Pilot[None]) -> None:
 
 
 def agent_opened(pilot: Pilot[None], agent_id: str) -> Callable[[], bool]:
-    """The last effect of selecting an agent: its row selected, its pane focused (#147)."""
+    """The last effect of selecting an agent: its row selected, ITS pane focused (#147).
+
+    Its own pane, not any: a row takes the sidebar's highlight as it is clicked, before its
+    view is built, so with another agent's pane still focused "selected and a pane focused"
+    held at once, and the wait ended before the view it waits for was there."""
     app = fleet_app(pilot)
 
     def done() -> bool:
-        return app.sidebar.selected_key == f"agent:{agent_id}" and isinstance(
-            app.focused, TerminalPane
+        focused = app.focused
+        return (
+            app.sidebar.selected_key == f"agent:{agent_id}"
+            and isinstance(focused, TerminalPane)
+            and any(node.id == f"agent-{agent_id}" for node in focused.ancestors)
         )
 
     return done
@@ -200,7 +207,11 @@ def test_with_the_captured_directories_shown_the_home_is_still_no_card(
         for _ in range(12):  # more presses than there are rows: the walk ends at the last one
             await pilot.press("down")
             await pilot.pause()
-            walk.extend(row.selection_key for row in app.query(".cursor").results(Activatable))
+            walk.extend(
+                row.selection_key
+                for row in app.sidebar.query(Activatable)
+                if row.has_class("selected")
+            )
         return cards, copies, walk
 
     cards, copies, walk = drive(body)

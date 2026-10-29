@@ -111,6 +111,7 @@ from aisquare.cli.ui.sidebar import (
     StopAgent,
     UpdateSelected,
     UsageStatsSelected,
+    ViewSelected,
     agent_name,
 )
 from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
@@ -575,12 +576,15 @@ class HelpScreen(ModalScreen[None]):
         text.append("aisquare fleet — keys\n\n", style="bold")
         for key, what in (
             ("click", "select a project or an agent; ⚙ Settings; + onboards a project"),
-            ("↑ ↓ Enter", "move over the sidebar and open the row under the cursor"),
+            # One highlight, the click's and the arrows'; passing over +, Spawn agent, Start
+            # captain, ⬆ or a group header acts on nothing.
+            ("↑ ↓", "move the highlight, opening a project, agent or Settings"),
+            ("Enter", "click the highlighted row; the arrows only open views"),
             # Arranging the sidebar (#140): every one of these has a CLI twin.
-            ("shift+↑ ↓", "move the row under the cursor one place"),
-            ("g p space", "group · pin · fold the row under the cursor"),
+            ("shift+↑ ↓", "move the highlighted row one place"),
+            ("g p space", "group · pin · fold the highlighted row"),
             ("u", "undo the last arrangement; a toast says what"),
-            ("m", "mark the card under the cursor, as shift+click does"),
+            ("m", "mark the highlighted card, as shift+click does"),
             ("shift+g", "group the marked cards; Esc clears the marks"),
             ("drag title", "move a card or a group header to a new place"),
             ("F2 dblclick", "rename the card in place: Enter or a click away saves, Esc cancels"),
@@ -2036,14 +2040,45 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         await self._show("onboard", lambda: OnboardView(id="onboard"))
         self.sidebar.select(None)
 
+    def _moved_on(self, event: ViewSelected, key: str) -> bool:
+        """Whether the sidebar's highlight has left the row that posted ``event`` since it did.
+
+        The arrows (or a click) went on to another row, whose own message is queued behind
+        this one. Opened now, this row's view would be built for nothing — an agent's pane
+        attaches — and shown under a highlight that is on another row.
+        """
+        return event.from_row and self.sidebar.selected_key != key
+
+    async def _open_row(
+        self, key: str, view_id: str, factory: Callable[[], Widget] | None = None
+    ) -> bool:
+        """Show ``view_id`` and put the sidebar's highlight on ``key``'s row; ``False`` when a
+        row took the highlight while the view was being built.
+
+        Building a view awaits its mount, and a click (or an arrow) handled meanwhile puts the
+        highlight on its own row and queues its own message. Selecting ``key`` after the wait
+        pulled the highlight back, and that row's message then found it gone and opened
+        nothing: the click was lost. Its message opens it next, so nothing more of this one's
+        is done — no selection, no memory, no focus.
+        """
+        highlight = self.sidebar.selected_key
+        await self._show(view_id, factory)
+        if self.sidebar.selected_key != highlight:
+            return False
+        self.sidebar.select(key)
+        return True
+
     async def on_project_selected(self, event: ProjectSelected) -> None:
+        if self._moved_on(event, f"project:{event.project_id}"):
+            return
         project = self.snapshot.project(event.project_id) if self.snapshot else None
         if project is None:
             self.notify("that project is no longer listed", severity="warning", timeout=4)
             return
         view_id = f"project-{project.id}"
-        await self._show(view_id, lambda: self._project_view(project, view_id))
-        self.sidebar.select(f"project:{project.id}")
+        key = f"project:{project.id}"
+        if not await self._open_row(key, view_id, lambda: self._project_view(project, view_id)):
+            return
         self.doctor_scope = project.id
         self._remember_selection(f"project:{project.id}")
 
@@ -2059,16 +2094,22 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         return view
 
     async def on_agent_selected(self, event: AgentSelected) -> None:
+        """The agent's view, its pane taking the keyboard (#147) — not while the arrows pass
+        over its row (:attr:`ViewSelected.browsing`): there the next ↓ is the sidebar's."""
+        if self._moved_on(event, f"agent:{event.agent_id}"):
+            return
         status = self.snapshot.agent(event.project_id, event.agent_id) if self.snapshot else None
         if status is None:
             self.notify("that agent is no longer listed", severity="warning", timeout=4)
             return
         view_id = f"agent-{status.agent.id}"
-        await self._show(view_id, lambda: self._agent_view(status, view_id))
-        self.sidebar.select(f"agent:{status.agent.id}")
+        key = f"agent:{status.agent.id}"
+        if not await self._open_row(key, view_id, lambda: self._agent_view(status, view_id)):
+            return
         self.doctor_scope = self._doctor_scope_of(status.agent)
         self._remember_selection(f"agent:{event.project_id}/{status.agent.id}")
-        self._focus_pane(view_id)
+        if not event.browsing:
+            self._focus_pane(view_id)
 
     def _doctor_scope_of(self, agent: FleetAgent) -> str | None:
         """The Doctor's scope for ``agent``: its project, or ``None`` (the global checks)
@@ -2845,11 +2886,15 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     async def on_settings_selected(self, event: SettingsSelected) -> None:
         """*⚙ Settings*: the hub, with the keyboard on its first link when it came from the
-        keyboard (the sidebar had it)."""
-        from_keyboard = self.focused is self.sidebar
-        await self._show("settings-hub", lambda: SettingsHubView(id="settings-hub"))
+        keyboard (the sidebar had it) — Enter, not an arrow passing over the row."""
+        if self._moved_on(event, SETTINGS_KEY):
+            return
+        from_keyboard = self.focused is self.sidebar and not event.browsing
+        if not await self._open_row(
+            SETTINGS_KEY, "settings-hub", lambda: SettingsHubView(id="settings-hub")
+        ):
+            return
         self._show_doctor_findings()  # a hub built just now has not been told yet
-        self.sidebar.select(SETTINGS_KEY)
         self._remember_selection("settings")
         if from_keyboard:
             self.query_one("#settings-hub", SettingsHubView).focus_first()

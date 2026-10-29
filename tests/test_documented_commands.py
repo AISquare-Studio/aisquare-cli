@@ -775,8 +775,9 @@ CENSUS = {
     ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
     # Re-measured 2026-10-07 when the README became a front page (roadmap 9.5):
     # the two quickstarts and the plain-command block, with the `uv tool install`
-    # line and the installer URL as the two classified mentions.
-    "README.md": (5, 2),
+    # line and the installer URL as the two classified mentions. 2026-10-28: the
+    # plain-command block gained `fleet relabel`.
+    "README.md": (6, 2),
 }
 
 

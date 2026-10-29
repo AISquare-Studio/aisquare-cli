@@ -1865,6 +1865,7 @@ class ContextStore(Protocol):
         self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
     ) -> FleetAgent: ...
     def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent: ...
+    def relabel_fleet_agent(self, agent_id: str, old: str, new: str) -> FleetAgent | None: ...
     def end_fleet_agent_if_live(
         self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
     ) -> FleetAgent | None: ...
@@ -5755,6 +5756,65 @@ class SqliteStore:
             raise KeyError(agent_id)
         return agent
 
+    def relabel_fleet_agent(self, agent_id: str, old: str, new: str) -> FleetAgent | None:
+        """Call the LIVE row ``agent_id`` ``new`` while it is still ``old``; ``None`` when it is
+        not (ended, or relabelled meanwhile), and nothing is written.
+
+        One transaction for everything a label names (``services.fleet.relabel``): the row;
+        the ENDED rows of ``old`` in its project, the agent's own earlier runs, which a restart
+        by label and Restart all read as its history (``fleet_label_heads``) and would
+        otherwise take for a dead agent of that name; the ``ui_state`` rows kept per label
+        (:data:`_FLEET_LABEL_MOVES`), any ``new`` had dropped first; and the record that
+        ``old`` was renamed (:data:`FLEET_RENAMED`: the row's id and when), which a lookup by
+        ``old`` names in its refusal. Another LIVE row holding ``new`` trips the partial
+        ``fleet_agent_live_label`` index: ``sqlite3.IntegrityError`` is raised, and the
+        service picks the next suffix, as a spawn does.
+        """
+        try:
+            cursor = self._conn.execute(
+                "UPDATE fleet_agent SET label = ? WHERE id = ? AND label = ? AND ended_at IS NULL",
+                (new, agent_id, old),
+            )
+            if cursor.rowcount != 1:
+                self._conn.rollback()
+                return None
+            row = self._conn.execute(
+                "SELECT project_id FROM fleet_agent WHERE id = ?", (agent_id,)
+            ).fetchone()
+            project_id = str(row["project_id"])
+            self._conn.execute(
+                "UPDATE fleet_agent SET label = ? "
+                "WHERE project_id = ? AND label = ? AND ended_at IS NOT NULL",
+                (new, project_id, old),
+            )
+            for prefix in _FLEET_LABEL_MOVES:
+                self._conn.execute(
+                    "DELETE FROM ui_state WHERE key = ?", (f"{prefix}{project_id}:{new}",)
+                )
+                self._conn.execute(
+                    "UPDATE ui_state SET key = ?, updated_at = ? WHERE key = ?",
+                    (f"{prefix}{project_id}:{new}", _now_iso(), f"{prefix}{project_id}:{old}"),
+                )
+            now = _now_iso()
+            self._conn.execute(
+                "DELETE FROM ui_state WHERE key = ?", (f"{FLEET_RENAMED}{project_id}:{new}",)
+            )
+            self._conn.execute(
+                "INSERT INTO ui_state (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value, "
+                "updated_at = excluded.updated_at",
+                (
+                    f"{FLEET_RENAMED}{project_id}:{old}",
+                    json.dumps({"agent": agent_id, "at": now}),
+                    now,
+                ),
+            )
+        except Exception:
+            self._conn.rollback()
+            raise
+        self._conn.commit()
+        return self.get_fleet_agent(agent_id)
+
     def set_session_persona(self, session_id: str, persona: str | None) -> TeamSession:
         """The persona a joined session now runs as — beside ``set_fleet_agent_persona``."""
         session = self.get_session(session_id)
@@ -6155,11 +6215,21 @@ debounce, the solo session's not-yet-briefed mark (#346), and the quiet compacti
 its newest refusal and its latest arm (P1 WS-4)."""
 
 
-_FLEET_LABEL_STATE: tuple[str, ...] = ("before-limit:", "before-limit-warned:", "fleet-launched:")
+_FLEET_LABEL_MOVES: tuple[str, ...] = ("before-limit:", "before-limit-warned:", "fleet-launched:")
 """The ``ui_state`` keys kept per fleet label as ``<prefix><project id>:<label>``: the turn
 end that last started a before-limit move, the crossing a ``warn`` has named
-(``services.hooks``), and the row's model record (``services.model_memory``, #16). A reset
-clears a project's (:meth:`SqliteStore.reset_project`)."""
+(``services.hooks``), and the row's model record (``services.model_memory``, #16). They are
+the agent's, so a relabel moves them to its new label
+(:meth:`SqliteStore.relabel_fleet_agent`)."""
+
+FLEET_RENAMED = "fleet-renamed:"
+"""The ``ui_state`` key ``fleet-renamed:<project id>:<old label>``: the row a relabel took
+that label from and when, as JSON (``{"agent": …, "at": …}``), for a lookup by the old
+label to name the new one (``services.fleet.relabel``)."""
+
+_FLEET_LABEL_STATE: tuple[str, ...] = (*_FLEET_LABEL_MOVES, FLEET_RENAMED)
+"""Every ``ui_state`` key kept per fleet label. A reset clears a project's
+(:meth:`SqliteStore.reset_project`)."""
 
 
 def _session_meta_terms(sessions: Sequence[str]) -> Iterator[tuple[str, tuple[str, ...]]]:

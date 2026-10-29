@@ -22,9 +22,9 @@ from __future__ import annotations
 
 import hashlib
 import re
-import unicodedata
 from collections.abc import Collection
 
+from aisquare.core import names
 from aisquare.core.ids import PROJECT_PREFIX
 
 CODENAME = re.compile(r"^[a-z]{3,7}-[a-z]{3,7}$")
@@ -91,18 +91,17 @@ def is_codename(text: str) -> bool:
 def codename_from_text(text: str) -> str | None:
     """The codename a project named ``text`` takes, or ``None`` when ``text`` gives none.
 
-    Lowercased, accents folded (NFKD: ``é`` is ``e``, and what has no ASCII letter, an
-    emoji or a CJK character, goes), each run of anything outside ``[a-z0-9]`` one ``-``,
-    then trimmed to start with a letter and to :data:`CODENAME_MAX` characters with no
-    ``-`` at either end: ``AISquare CLI`` → ``aisquare-cli``, ``Café ✨ Board`` →
-    ``cafe-board``. ``!!!``, ``42`` and ``日本語`` give nothing (``None``), and neither do
+    :func:`aisquare.core.names.slug` of it, the one rule a fleet agent's label is made by
+    too (``services.fleet.label_from_text``), so one typed name makes the same of either:
+    case folded, accents folded (``Café ✨ Board`` → ``cafe-board``, ``Straße`` →
+    ``strasse``), each run of anything else outside ``[a-z0-9]`` one ``-`` (a letter with no
+    ASCII base too: ``Søren board`` → ``s-ren-board``), cut to :data:`CODENAME_MAX` with no
+    ``-`` at either end. Then trimmed to start with a letter: ``2024 Roadmap`` →
+    ``roadmap``. ``!!!``, ``42`` and ``日本語`` give nothing (``None``), and neither do
     ``p``, ``pr`` or ``prj`` (:func:`is_codename`). Pure: whether it is free is
     :func:`first_free`'s to say.
     """
-    folded = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
-    slug = re.sub(r"[^a-z0-9]+", "-", folded.lower())
-    slug = re.sub(r"^[^a-z]+", "", slug)  # starts with a letter
-    slug = slug[:CODENAME_MAX].rstrip("-")
+    slug = re.sub(r"^[^a-z]+", "", names.slug(text, max_len=CODENAME_MAX))
     return slug if slug and is_codename(slug) else None
 
 

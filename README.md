@@ -80,6 +80,7 @@ Everything the UI does is also a plain command, and every one takes `--json`;
 
 ```sh
 aisquare fleet ls                      # this project's agents and their live state
+aisquare fleet relabel coder-1 login fix  # give an agent a name you chose: login-fix
 aisquare fleet attach                  # the same session in raw tmux, full fidelity
 aisquare doctor                        # is everything wired? (and how to fix anything)
 ```

@@ -12,6 +12,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gave up), and its index. Nothing is rewritten or dropped. 0.9.1 opens a v41 store as
   current and leaves the table alone; `--project <old codename>` then finds nothing there.
 
+### Added
+
+- **Rename a running fleet agent: from its sidebar row, or `aisquare fleet relabel`.** Click
+  an agent's row a second time, or press F2 on it, and its label becomes a field: type any
+  name, and the line under it shows the label it will become (`Login Fix` → `login-fix`,
+  `2FA work` → `coder-2fa-work`); Enter or a click away saves, Esc cancels. `aisquare fleet
+  relabel coder-1 login fix` does the same from a shell (`--json` too), and both say
+  `coder-1 is now login-fix`. A name another running agent of the project holds gets the
+  next free suffix (`login-fix-2`), and you are told. From then on the agent is that label
+  everywhere: `fleet tell`, `stop`, `restart`, `switch`, the board's lines and its tmux
+  window. The old label finds nothing, and its refusal says what the agent is called now.
+  An `agent_renamed` line on the board tells the manager. The agent keeps its worktree and
+  branch, as they are: its restart, stop and reap find them by the row. The manager and
+  the captain keep their labels, no agent can take `manager` or `captain`, and an agent
+  that ended is not renamed. `fleet rename` still renames the project's codename.
+
 ### Changed
 
 - **Renaming a project renames its fleet codename and tmux session too.** Saving a card's

@@ -85,6 +85,13 @@ def _renamed_notes(project: ProjectInfo) -> list[str]:
         ("2024 Roadmap", "roadmap"),
         ("Über.Proj:ect..x", "uber-proj-ect-x"),
         ("naïve façade", "naive-facade"),
+        # The shared rule (core.names.slug), as a fleet agent's label makes them:
+        ("Søren board", "s-ren-board"),  # ø has no ASCII base: a separator
+        ("Straße", "strasse"),  # case-folded
+        (
+            "K\u0131rm\u0131z\u0131",
+            "k-rm-z",
+        ),  # Turkish "red": the dotless i has no ASCII base either
         ("日本語のプロジェクト 🚀", None),
         ("42", None),
         ("---", None),
@@ -127,6 +134,24 @@ def test_a_slug_names_a_tmux_session_and_a_git_ref(text: str) -> None:
     assert is_codename(slug)
     assert re.fullmatch(r"[a-z][a-z0-9]*(-[a-z0-9]+)*", slug) and len(slug) <= CODENAME_MAX
     _git("check-ref-format", "--branch", f"fleet/{slug}/01abc-work", cwd=Path.cwd())
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "AISquare CLI",
+        "Café ✨ Board",
+        "Søren board",
+        "Straße",
+        "K\u0131rm\u0131z\u0131",
+        "Login Fix",
+    ],
+)
+def test_a_codename_and_an_agent_label_make_the_same_of_one_name(text: str) -> None:
+    """One rule (``core.names.slug``) for both, so a name typed on a project's card and on an
+    agent's row gives the same slug (reviews of #455 and #456: they disagreed on ``Søren``
+    and ``ß``)."""
+    assert codename_from_text(text) == fleet_service.label_from_text(text, "coder")
 
 
 def test_the_wider_shape_is_what_a_chosen_codename_may_have() -> None:

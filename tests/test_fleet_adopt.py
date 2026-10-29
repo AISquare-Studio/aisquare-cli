@@ -1013,9 +1013,10 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
     assert reader.held_open(CODEX_DAEMON.split()) == "clients"
     assert reader.held_open(CODEX_DAEMON_LOOP.split()) == "clients"
     assert reader.held_open([CODEX_DAEMON_BIN, "app-server"]) == "clients", "run from its dir"
-    # Off the daemon's dir, the forms that run on (a hand-run managed daemon is one: the one
-    # limit, a TUI whose prompt is these words read so where the socket cannot say), and one
-    # of the daemon's own subcommands followed by options, as ``cloud-tasks list --json``.
+    # Off the daemon's dir, three forms (a TUI whose prompt is one of them read so where the
+    # socket cannot say, the limit): the two that run on (a hand-run managed daemon is one),
+    # and one of the daemon's own subcommands followed by options, as ``cloud-tasks list
+    # --json`` is its own.
     assert reader.held_open(f"{CODEX_NATIVE} app-server --managed-daemon".split()) == "clients"
     stop = f"{CODEX_NATIVE} app-server daemon stop -c model=gpt-5.5"
     assert reader.held_open(stop.split()) == "clients"

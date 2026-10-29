@@ -114,11 +114,12 @@ adapter.**
     them alone, read as a prompt's, so `codex 'add a -c flag'` is a TUI, and so, the lesser
     harm, is `codex exec fix the tests`, `codex review the diff` or `codex login status`; the
     daemon's own words too, so `codex 'app-server daemon keeps dying'` and `codex 'app-server
-    daemon stop'` are TUIs, an option that runs Codex embedded read before them, and only the
-    forms that run on read as the daemon, `app-server daemon pid-update-loop` and `app-server
-    … --managed-daemon` (each a daemon's process when run by hand), a TUI whose prompt is one
-    of them the limit; one of the daemon's own subcommands followed by options reads as that
-    subcommand, as every subcommand's does). So never, where the socket can say, one that
+    daemon stop'` are TUIs, an option that runs Codex embedded read before them, and three
+    forms read as the daemon: the two that run on, `app-server … --managed-daemon` and
+    `app-server daemon pid-update-loop` (each a daemon's process when run by hand), and one of
+    the daemon's own subcommands followed by options (`app-server daemon stop -c model=…`),
+    read as that subcommand, as every subcommand's own is; a TUI whose prompt is one of the
+    three the limit). So never, where the socket can say, one that
     runs embedded (`-c`, `--search`, `--profile`, `--no-daemon`, `--strict-config`,
     `--dangerously-bypass-hook-trust`, `exec` or `review`, measured: each holds its own
     rollout) or runs no thread of the daemon's (an `app-server` of its own, an IDE's or with

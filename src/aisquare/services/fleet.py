@@ -77,6 +77,7 @@ from aisquare.core.locking import holding
 from aisquare.core.spawn import git_env
 from aisquare.core.store import (
     FLEET_RENAMED,
+    RETIRED_LABEL,
     AmbiguousIdError,
     ContextStore,
     StoreUnopenable,
@@ -9511,8 +9512,16 @@ def restart(
         agent = store.fleet_agent_by_label(project.id, label, live_only=False)
         if agent is None:
             raise NoSuchAgent(
-                f"no agent {label!r} in {_name(project)} — "
-                f"`{project_service.fleet_command('ls', project, '--all')}` shows every row"
+                f"no agent {label!r} in {_name(project)}{_renamed_hint(store, project, label)}"
+                f" — `{project_service.fleet_command('ls', project, '--all')}` shows every row"
+            )
+        if agent.label.startswith(RETIRED_LABEL):
+            # A 💤 row whose label a relabel gave another agent (`store.RETIRED_LABEL`): it
+            # has no label of its own to come back under.
+            raise FleetError(
+                f"cannot restart {label!r}: a rename gave its label, "
+                f"{agent.label.removeprefix(RETIRED_LABEL)!r}, to another agent — nothing "
+                "was restarted"
             )
         if agent_id is not None and agent.id != agent_id:
             raise _replaced(project, label, agent, agent_id)
@@ -11507,11 +11516,14 @@ def relabel(
     From then on the agent IS the new label: every lookup by label (``tell``, ``stop``,
     ``restart``, ``switch``, a hand-off, ``fleet ls``) finds it there, and its earlier rows
     of the old label move with it, so the old one names nothing (a refusal by it says what it
-    is called now). The board names its posts by the row's label, read when they are shown,
-    so its identity (``AISQUARE_FLEET_AGENT``, the row's id; ``--as``, its session) needs
-    nothing. An ``agent_renamed`` event on its board tells the manager. Its worktree and
-    branch are NOT moved: it is live in them, and every later step finds the tree by the
-    row's ``cwd`` (:func:`_tree_path`). The tmux window is renamed to match, failing OPEN as
+    is called now). The ended rows the new label already had — another agent's — are retired
+    (``~login-fix``, ``store.RETIRED_LABEL``): looked up by its newest row, the label is this
+    agent's, before it ends and after, whenever those rows were started. The board names its
+    posts by the row's label, read when they are shown, so its identity
+    (``AISQUARE_FLEET_AGENT``, the row's id; ``--as``, its session) needs nothing. An
+    ``agent_renamed`` event on its board tells the manager. Its worktree and branch are NOT
+    moved: it is live in them, and every later step finds the tree by the row's ``cwd``
+    (:func:`_tree_path`). The tmux window is renamed to match, failing OPEN as
     :func:`rename` does: the row is what everything reads, and a note says what tmux said.
     """
     notes: list[str] = []

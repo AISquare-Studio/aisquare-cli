@@ -5512,15 +5512,19 @@ class SqliteStore:
         query gave both of, give the one of the greater id.
 
         ``project_id`` keeps it to one project's rows, in the query: a restart's plan asks
-        for one project, once per project and again per row (final delta review, n5)."""
+        for one project, once per project and again per row (final delta review, n5).
+
+        A row a relabel retired (:data:`RETIRED_LABEL`) heads nothing: its label is another
+        agent's now, and no restart by label can name it."""
         scope, args = ("WHERE project_id = ?", (project_id,)) if project_id else ("", ())
         rows = self._conn.execute(
             f"SELECT {self._fleet_agent_read} FROM fleet_agent WHERE id IN ("
-            "SELECT id FROM (SELECT id, ended_at, ROW_NUMBER() OVER ("
+            "SELECT id FROM (SELECT id, label, ended_at, ROW_NUMBER() OVER ("
             "PARTITION BY project_id, label ORDER BY created_at DESC, id DESC) AS newest "
-            f"FROM fleet_agent {scope}) WHERE ended_at IS NULL OR newest = 1) "
+            f"FROM fleet_agent {scope}) WHERE ended_at IS NULL OR (newest = 1 "
+            "AND substr(label, 1, 1) != ?)) "
             "ORDER BY created_at, id",
-            args,
+            (*args, RETIRED_LABEL),
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 
@@ -5763,7 +5767,11 @@ class SqliteStore:
         One transaction for everything a label names (``services.fleet.relabel``): the row;
         the ENDED rows of ``old`` in its project, the agent's own earlier runs, which a restart
         by label and Restart all read as its history (``fleet_label_heads``) and would
-        otherwise take for a dead agent of that name; the ``ui_state`` rows kept per label
+        otherwise take for a dead agent of that name; the ENDED rows that already carried
+        ``new`` — another agent's history — retired to ``~<new>`` (:data:`RETIRED_LABEL`),
+        so that every lookup of ``new`` by its newest row (:meth:`fleet_agent_by_label`), now
+        and once this agent ends too, is this agent's and never that one's, however much
+        later than this agent's own row it was started; the ``ui_state`` rows kept per label
         (:data:`_FLEET_LABEL_MOVES`), any ``new`` had dropped first; and the record that
         ``old`` was renamed (:data:`FLEET_RENAMED`: the row's id and when), which a lookup by
         ``old`` names in its refusal. Another LIVE row holding ``new`` trips the partial
@@ -5782,6 +5790,13 @@ class SqliteStore:
                 "SELECT project_id FROM fleet_agent WHERE id = ?", (agent_id,)
             ).fetchone()
             project_id = str(row["project_id"])
+            # `new`'s own history first — another agent's, ended — out of the way, before
+            # this agent's moves in.
+            self._conn.execute(
+                "UPDATE fleet_agent SET label = ? "
+                "WHERE project_id = ? AND label = ? AND ended_at IS NOT NULL",
+                (RETIRED_LABEL + new, project_id, new),
+            )
             self._conn.execute(
                 "UPDATE fleet_agent SET label = ? "
                 "WHERE project_id = ? AND label = ? AND ended_at IS NOT NULL",
@@ -6221,6 +6236,14 @@ end that last started a before-limit move, the crossing a ``warn`` has named
 (``services.hooks``), and the row's model record (``services.model_memory``, #16). They are
 the agent's, so a relabel moves them to its new label
 (:meth:`SqliteStore.relabel_fleet_agent`)."""
+
+RETIRED_LABEL = "~"
+"""Before a label, an ENDED row whose label a relabel gave another agent
+(:meth:`SqliteStore.relabel_fleet_agent`): ``~login-fix``. Never a label (``LABEL`` starts
+with a letter), so nothing typed resolves it; never a label's head
+(:meth:`SqliteStore.fleet_label_heads`), so no restart by label, Restart all or dead-team
+line takes it for the agent the label names now. The row keeps its id, its window, its
+history: a stop or a view pinned to it still finds it by its id."""
 
 FLEET_RENAMED = "fleet-renamed:"
 """The ``ui_state`` key ``fleet-renamed:<project id>:<old label>``: the row a relabel took

@@ -1001,6 +1001,10 @@ class AgentRow(Activatable):
         self.status = status
         self._tip()
         self.paint()
+        if self._field is not None:
+            # The frame may have changed what is taken (a spawn, another rename): the label
+            # it will become is said again, the field itself untouched.
+            self._paint_preview(self._field.value)
 
     def _tip(self) -> None:
         """The rename gesture, on a row that offers one: not the manager's, not the captain's,

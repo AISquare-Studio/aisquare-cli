@@ -94,6 +94,7 @@ from aisquare.cli.ui.sidebar import (
     TIMES,
     AccountsSelected,
     AddProject,
+    AgentRow,
     AgentSelected,
     AppSettingsSelected,
     CaptainRequested,
@@ -116,7 +117,13 @@ from aisquare.cli.ui.sidebar import (
 )
 from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
 from aisquare.cli.ui.stop import StopAgentScreen
-from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane, log_paste
+from aisquare.cli.ui.terminal import (
+    EscapeToSidebar,
+    InPlaceField,
+    SelectionHost,
+    TerminalPane,
+    log_paste,
+)
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.update import (
@@ -2188,7 +2195,18 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         pane = getattr(view, "pane", None)
         if isinstance(pane, TerminalPane):
-            self.call_after_refresh(pane.focus)
+            self.call_after_refresh(self._focus_unless_typing, pane)
+
+    def _focus_unless_typing(self, pane: TerminalPane) -> None:
+        """Focus ``pane`` — unless an in-place field holds the keys by then. A double-click's
+        second click lands while the first one's view is still being shown, and opens a
+        field over the agent's row (its rename): taken from it, the field closed unsaved, as
+        a blur closes it (validator of #455, minor 2)."""
+        if isinstance(self.focused, InPlaceField):
+            return
+        if any(row.renaming for row in self.sidebar.query(AgentRow)):
+            return
+        pane.focus()
 
     async def on_agent_restarted(self, event: AgentRestarted) -> None:
         """A restart minted a new row (#138): say so, and show it where the old one was — but

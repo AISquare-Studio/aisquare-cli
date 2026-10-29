@@ -955,6 +955,7 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
         f"--remote unix:// fork {THREAD} --profile p2",
         "exec review the diff",  # a prompt past ``exec``'s own subcommand
         "exec review fork",  # its own subcommand is the first word only
+        "exec review fork --json",  # so, with more after it, past the first only
         "resume",
         "resume --last",
         f"resume {THREAD}",
@@ -965,6 +966,7 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
         "resume --last use -c",  # its prompt
         "agents",
         "app-server proxy",
+        "app-server proxy --sock /tmp/s",  # a client, whatever its own options
         "app-server daemon keeps dying",  # a prompt, never the daemon's own (r33)
         "app-server daemon stop the bleeding",  # past the daemon's own subcommand
         "app-server --managed-daemon crashes",  # ``--managed-daemon`` takes no value

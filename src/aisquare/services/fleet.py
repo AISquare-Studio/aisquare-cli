@@ -11218,15 +11218,16 @@ def _codename_changed(updated: ProjectInfo, old: str | None, notes: list[str] | 
                 if not srv.has_session(old_session):
                     continue
                 if srv.has_session(new_session):
-                    # An agent started under the old name while the project was renamed (a
-                    # spawn that read the codename before the write): tmux will not merge two
-                    # sessions, and every reader also looks in the old one (`_fleet_sessions`).
+                    # Both stand: an agent started under the old name while the project was
+                    # renamed, or a session of the new name left from before (a forgotten
+                    # project's, one made by hand). tmux will not merge two sessions; a
+                    # scoped shutdown also looks in the old one (`_fleet_sessions`).
                     if notes is not None:
                         notes.append(
-                            f"{old_session} still runs beside {new_session} on tmux "
-                            f"({address}) — an agent started in it while the project was "
-                            f"renamed. `fleet ls`, `tell`, `stop` and `reap` reach its agents "
-                            f"by pane id and a scoped `shutdown` stops both; "
+                            f"{old_session} was not renamed: a session named {new_session} "
+                            f"already runs on tmux ({address}). `fleet ls`, `tell`, `stop` and "
+                            f"`reap` reach this project's agents by pane id, and a scoped "
+                            f"`shutdown` stops both; "
                             f"`{project_service.fleet_command('attach', updated)}` shows "
                             f"{new_session}"
                         )

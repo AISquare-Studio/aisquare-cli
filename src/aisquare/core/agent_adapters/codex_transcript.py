@@ -226,13 +226,15 @@ class CodexTranscript:
         living on after ``/exit``: ``app-server --listen unix://… --managed-daemon``, which
         holds the rollout, and ``app-server daemon pid-update-loop``, which holds none.
         ``session`` for a form that can be the daemon's client (:func:`_runs_as`): its TUI
-        (no subcommand, a prompt, ``resume``, ``fork``) and ``agents`` and ``app-server
-        proxy``, each measured connected to the daemon's socket. ``alone`` for any other,
-        never the daemon's client: one that runs embedded (a fleet Codex's ``-c`` overrides,
-        ``exec``, ``review``), which holds its rollout itself, and one that runs no thread of
-        the daemon's (``app-server`` of its own, ``exec-server``, ``login``). Each holds what
-        it has open from its first prompt on for as long as its session lives (``lsof`` on
-        0.164.0, ``core.process_table``)."""
+        (no subcommand, a prompt, ``resume``, ``fork``, and ``--remote <ADDR>`` whatever
+        else it is given) and ``agents`` and ``app-server proxy``, each measured connected to
+        the daemon's socket. ``alone`` for any other, never the daemon's client: one that
+        runs embedded (a fleet Codex's ``-c`` overrides, ``exec``, ``review``), which holds
+        its rollout itself, and one that runs no thread of the daemon's (``app-server`` of its
+        own, ``exec-server``, ``login`` and every other subcommand, ``execpolicy``,
+        ``tcp-tunnel`` and ``cloud-tasks`` too). Each holds what it has open from its first
+        prompt on for as long as its session lives (``lsof`` on 0.164.0,
+        ``core.process_table``)."""
         from aisquare.core.agent_adapters.codex import CodexAdapter
 
         image = process_executable(args)
@@ -340,6 +342,7 @@ start on a loopback (unmeasured)."""
 _COMMANDS = frozenset(
     {
         "agents",
+        "tcp-tunnel",
         "exec",
         "e",
         "review",
@@ -355,6 +358,7 @@ _COMMANDS = frozenset(
         "doctor",
         "sandbox",
         "debug",
+        "execpolicy",
         "apply",
         "a",
         "resume",
@@ -366,6 +370,7 @@ _COMMANDS = frozenset(
         "unarchive",
         "fork",
         "cloud",
+        "cloud-tasks",
         "exec-server",
         "features",
         "help",
@@ -373,9 +378,51 @@ _COMMANDS = frozenset(
         "stdio-to-uds",
     }
 )
-"""Codex 0.164.0's subcommands and their aliases (``codex --help``, and the two it hides, its
-``Internal:`` ones): a first word that is none of them is a prompt's (``codex [OPTIONS]
-[PROMPT]``), a TUI's."""
+"""Codex 0.164.0's subcommands and their aliases: every name ``codex completion bash`` lists
+(``codex --help`` hides ``execpolicy``, ``tcp-tunnel``, ``responses-api-proxy`` and
+``stdio-to-uds``), and ``cloud-tasks``, the alias it hides, which its help lists beside its
+subcommand's description as it does ``e`` and ``a`` (``codex help cloud-tasks`` says ``Usage:
+codex cloud``; ``codex help`` of any other word, ``mcp-server``, ``proto`` or ``chat``,
+"unrecognized subcommand"). A first word that is none of them is a prompt's (``codex
+[OPTIONS] [PROMPT]``), a TUI's."""
+_OWN_COMMANDS = {
+    _APP_SERVER: frozenset(
+        {
+            _DAEMON,
+            "proxy",
+            "generate-ts",
+            "generate-json-schema",
+            "generate-internal-json-schema",
+            "help",
+        }
+    ),
+    "cloud": frozenset({"exec", "status", "list", "apply", "diff", "help"}),
+    "cloud-tasks": frozenset({"exec", "status", "list", "apply", "diff", "help"}),
+    "completion": frozenset({"bash", "elvish", "fish", "powershell", "zsh"}),
+    "debug": frozenset(
+        {"models", _APP_SERVER, "prompt-input", "trace-reduce", "clear-memories", "help"}
+    ),
+    "exec": frozenset({"resume", "fork", "review", "help"}),
+    "e": frozenset({"resume", "fork", "review", "help"}),
+    "exec-server": frozenset({"forward", "help"}),
+    "execpolicy": frozenset({"check", "help"}),
+    "features": frozenset({"list", "enable", "disable", "help"}),
+    "login": frozenset({"status", "help"}),
+    "mcp": frozenset({"list", "get", "add", "remove", "login", "logout", "help"}),
+    "plugin": frozenset({"add", "list", "marketplace", "remove", "help"}),
+    "remote-control": frozenset({"start", "stop", "pair", "help"}),
+    "sandbox": frozenset({"uninstall", "help"}),
+}
+"""The subcommands of each of :data:`_COMMANDS` that has its own, as ``codex completion
+bash`` lists them (0.164.0): a word right after its subcommand's name that is one of them is
+that, never a prompt's (``codex execpolicy check --rules <PATH>``, ``codex app-server
+generate-ts``), as an option's value is not (:func:`_could_be_prompt`)."""
+_REMOTE = "--remote"
+"""The option that connects Codex's TUI to an app-server it names (``--remote <ADDR>``:
+``ws://``, ``wss://`` or ``unix://[PATH]``), its own or the daemon's; Codex refuses it with
+any subcommand but the TUI's (``codex --remote unix:// exec …``: "only supported for
+interactive TUI commands"). Measured on 0.164.0 (tester-50-51), ``codex --remote unix:// -c
+model=…`` was connected to the daemon's socket, its ``-c`` notwithstanding."""
 _RESUMES = frozenset({"resume", "fork"})
 """The subcommands that run Codex's TUI on a thread (``resume``/``fork [OPTIONS] [SESSION_ID]
 [PROMPT]``), on its daemon unless they run embedded."""
@@ -384,12 +431,12 @@ _PROXY = "proxy"
 """The other forms that connect to Codex's managed daemon, measured on 0.164.0 (``lsof -U``:
 a socket whose peer is the daemon's on the path it listens on): ``agents`` ("Browse all agent
 sessions on the shared local app-server daemon") and ``app-server proxy`` ("Proxy stdio bytes
-to the running app-server control socket"). With the daemon holding a thread, these, a TUI
-with no subcommand, ``--remote unix://``, a prompt (``codex 'review the diff with -c and
--p'``, which ``ps`` lists as ``review the diff with -c and -p``), ``resume <id>`` and ``fork
-<id>`` were connected to it; ``app-server`` (stdio), ``app-server --listen ws://…``,
-``exec-server`` and ``login`` were not, and ``review`` and ``exec``, mid-turn, held their own
-rollouts."""
+to the running app-server control socket"), ``proxy`` being one of ``app-server``'s own
+subcommands (:data:`_OWN_COMMANDS`). With the daemon holding a thread, these, a TUI with no
+subcommand, ``--remote unix://``, a prompt (``codex 'review the diff with -c and -p'``, which
+``ps`` lists as ``review the diff with -c and -p``), ``resume <id>`` and ``fork <id>`` were
+connected to it; ``app-server`` (stdio), ``app-server --listen ws://…``, ``exec-server`` and
+``login`` were not, and ``review`` and ``exec``, mid-turn, held their own rollouts."""
 _THREAD_ID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 """A thread id (a UUID), the ``SESSION_ID`` of a ``resume`` or a ``fork``."""
 
@@ -404,40 +451,44 @@ def _runs_as(words: Sequence[str]) -> HoldsOpen:
 
     ``clients`` for the daemon's own (``app-server daemon …``, ``app-server …
     --managed-daemon``). ``alone`` for an option of :data:`_EMBEDDED` (``--config=…``, ``-c…`` and
-    ``-p…`` too) before the prompt, and for a subcommand of :data:`_COMMANDS` that is not
-    one of those that can be the daemon's client (:data:`_RESUMES`, :data:`_CLIENTS`,
-    ``app-server`` :data:`_PROXY`). ``session`` for those, for no subcommand, and for a
-    first word that is none (a prompt). A subcommand's name followed by a word that could be
-    a prompt's (:func:`_could_be_prompt`) reads as a prompt too: ``codex 'exec the tests'``
-    and ``codex exec the tests`` list alike, and the TUI the first is, is a possible client
-    (the MANAGER DECISION: naming a Codex the human started, "quit it first", is the lesser
-    harm; telling them to stop the daemon under an open TUI breaks their conversation)."""
+    ``-p…`` too) before the prompt, unless :data:`_REMOTE` is too, and for a subcommand of
+    :data:`_COMMANDS` that is not one of those that can be the daemon's client
+    (:data:`_RESUMES`, :data:`_CLIENTS`, ``app-server`` :data:`_PROXY`). ``session`` for
+    those, for no subcommand, and for a first word that is none (a prompt). A subcommand's
+    name followed by a word that could be a prompt's (:func:`_could_be_prompt`) reads as a
+    prompt too: ``codex 'exec the tests'`` and ``codex exec the tests`` list alike, and the
+    TUI the first is, is a possible client (the MANAGER DECISION: naming a Codex the human
+    started, "quit it first", is the lesser harm; telling them to stop the daemon under an
+    open TUI breaks their conversation). So is ``--remote <ADDR>`` with an option of
+    :data:`_EMBEDDED`, measured connected (the MANAGER DECISION, #51's reopen)."""
     from aisquare.core.agent_adapters.codex import CodexAdapter
 
     values = CodexAdapter.capabilities.value_options
     rest = iter(words)
-    embedded = False
+    embedded = remote = False
     for word in rest:
         if word == "--":
             break  # a prompt
         if word.startswith("-"):
             embedded = embedded or _marks_embedded(word)
+            remote = remote or word.split("=", 1)[0] == _REMOTE
             if "=" not in word and word in values:
                 next(rest, None)  # its value
             continue
         after = list(rest)
         if word == _APP_SERVER and (after[:1] == [_DAEMON] or _MANAGED_DAEMON in after):
             return "clients"
-        if embedded:
+        if embedded and not remote:
             return "alone"
         if word not in _COMMANDS:
             return "session"  # a prompt's first word
         if word in _RESUMES:
-            return _resumes_as(after)
+            return _resumes_as(after, remote=remote)
         if word in _CLIENTS or (word == _APP_SERVER and after[:1] == [_PROXY]):
             return "session"
-        return "session" if _could_be_prompt(after) else "alone"
-    return "alone" if embedded else "session"
+        own = _OWN_COMMANDS.get(word, frozenset())
+        return "session" if _could_be_prompt(after, own) else "alone"
+    return "alone" if embedded and not remote else "session"
 
 
 def _marks_embedded(option: str) -> bool:
@@ -446,42 +497,47 @@ def _marks_embedded(option: str) -> bool:
     return option.split("=", 1)[0] in _EMBEDDED or option[:2] in _EMBEDDED
 
 
-def _resumes_as(words: Sequence[str]) -> HoldsOpen:
-    """A ``resume`` or a ``fork`` run with ``words`` after it: ``alone`` for an option of
-    :data:`_EMBEDDED` before its prompt, else ``session``. Its ``SESSION_ID`` is read past
-    when it is a thread id (:data:`_THREAD_ID`); any other word is its prompt (``--last``'s
-    too), a session's name, or a prompt that begins with ``resume`` (``codex 'resume work
-    -c'``), and ends the reading."""
+def _resumes_as(words: Sequence[str], *, remote: bool) -> HoldsOpen:
+    """A ``resume`` or a ``fork`` run with ``words`` after it, ``remote`` when
+    :data:`_REMOTE` came before it: ``alone`` for an option of :data:`_EMBEDDED` before its
+    prompt, unless :data:`_REMOTE` is there too, else ``session``. Its ``SESSION_ID`` is
+    read past when it is a thread id (:data:`_THREAD_ID`); any other word is its prompt
+    (``--last``'s too), a session's name, or a prompt that begins with ``resume`` (``codex
+    'resume work -c'``), and ends the reading."""
     from aisquare.core.agent_adapters.codex import CodexAdapter
 
     values = CodexAdapter.capabilities.value_options
     rest = iter(words)
-    named = False
+    embedded = named = False
     for word in rest:
         if word == "--":
             break
         if word.startswith("-"):
-            if _marks_embedded(word):
-                return "alone"
+            embedded = embedded or _marks_embedded(word)
+            remote = remote or word.split("=", 1)[0] == _REMOTE
             if "=" not in word and word in values:
                 next(rest, None)
             continue
         if named or not _THREAD_ID.fullmatch(word):
             break
         named = True
-    return "session"
+    return "alone" if embedded and not remote else "session"
 
 
-def _could_be_prompt(words: Sequence[str]) -> bool:
+def _could_be_prompt(words: Sequence[str], own: frozenset[str]) -> bool:
     """Whether ``words``, after a subcommand's name, could be the rest of a prompt that starts
-    with that name: one is neither an option nor the value right after one (``app-server
-    --listen ws://127.0.0.1:4500`` cannot; ``exec the tests`` can)."""
+    with that name: one is neither an option, the value right after one, nor, the first such,
+    one of the subcommand's own (``own``, :data:`_OWN_COMMANDS`) (``app-server --listen
+    ws://127.0.0.1:4500`` and ``execpolicy check --rules /r.rules`` cannot; ``exec the
+    tests`` and ``exec review the diff`` can)."""
     valued = False
     for word in words:
         if word.startswith("-") and word != "--":
             valued = "=" not in word
         elif valued:
             valued = False
+        elif word in own:
+            own = frozenset()  # its own subcommand, the first word only
         else:
             return True
     return False

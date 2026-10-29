@@ -445,6 +445,15 @@ NO_CLIENTS = (
     "review",
     "login",
 )
+#: Codex 0.164.0's subcommands its ``--help`` hides (tester-50-51, #51's reopen), as ``ps``
+#: lists them: the alias ``cloud-tasks`` (``codex help cloud-tasks`` says ``Usage: codex
+#: cloud``), and ``execpolicy`` and ``tcp-tunnel``, which ``codex completion bash`` lists.
+#: Each was read as a prompt's first word, a TUI's.
+HIDDEN_COMMANDS = (
+    "cloud-tasks",
+    "execpolicy check --rules /r.rules",
+    "tcp-tunnel --proxy-url https://p --proxy-origins-file /o --target 127.0.0.1:9",
+)
 
 
 DaemonTable = tuple[list[tuple[int, int, str]], dict[int, frozenset[str]]]
@@ -632,15 +641,41 @@ def test_a_codex_that_runs_no_thread_of_the_daemons_is_never_named_as_its_client
     assert not pids & set(re.findall(r"\d+", said))
 
 
+@pytest.mark.parametrize("words", HIDDEN_COMMANDS)
+def test_a_codex_subcommand_its_help_hides_is_never_named_as_its_daemons_client(
+    codex_daemon: DaemonTable, words: str
+) -> None:
+    """#51's reopen (tester-50-51): ``cloud-tasks``, ``execpolicy`` and ``tcp-tunnel`` were no
+    subcommands to the classifier, so each read as a prompt, a TUI, and with the socket unable
+    to say adopt named it as the daemon's client, "quit it first" (pid 9100). None is a TUI
+    (``execpolicy check`` is past its own subcommand): the daemon is named, note and stop."""
+    processes, _holds = codex_daemon
+    processes.append(_codex(9100, words))
+    said = _refused(13090)
+    _says_the_daemon(said)
+    assert "9100" not in said
+
+
 @pytest.mark.parametrize(
-    "words", ["", f"resume {THREAD}", f"fork {THREAD}", "agents", "app-server proxy"]
+    "words",
+    [
+        "",
+        f"resume {THREAD}",
+        f"fork {THREAD}",
+        "agents",
+        "app-server proxy",
+        "--remote unix:// -c model=gpt-5.5",
+        "-- -c is broken",
+    ],
 )
 def test_a_codex_that_can_be_the_daemons_client_is_named_before_it(
     codex_daemon: DaemonTable, words: str
 ) -> None:
     """Codex's TUI with no subcommand, ``resume <id>`` and ``fork <id>``, and its ``agents``
     and ``app-server proxy``, each measured connected to the daemon's socket (r31): with the
-    socket unable to say, each is named before the daemon, "quit it first", unchanged."""
+    socket unable to say, each is named before the daemon, "quit it first", unchanged. So is
+    a TUI given ``--remote`` (measured connected with a ``-c``, tester-50-51: the MANAGER
+    DECISION, #51's reopen) and one whose prompt follows ``--`` (``-c`` its prompt's)."""
     processes, _holds = codex_daemon
     processes.append(_codex(7001, words))
     assert "quit it first" in _refused(7001)
@@ -660,7 +695,7 @@ def test_a_prompt_is_never_read_for_codexs_options(
     assert "quit it first" in _refused(7401)
 
 
-@pytest.mark.parametrize("words", NO_CLIENTS)
+@pytest.mark.parametrize("words", [*NO_CLIENTS, *HIDDEN_COMMANDS])
 def test_a_codex_that_is_no_client_and_holds_the_thread_itself_is_named(
     codex_daemon: DaemonTable, words: str
 ) -> None:
@@ -712,6 +747,23 @@ def test_a_daemons_client_is_the_codex_connected_to_its_socket_when_that_can_be_
     _says_the_daemon(_refused(13090))
 
 
+def test_a_codex_connected_to_its_daemon_is_named_whatever_its_words_say(
+    codex_daemon: DaemonTable, daemon_sockets: dict[int, set[int]]
+) -> None:
+    """r32's nit 1 (tester-50-51's M16): a TUI given the prompt ``'review -c model=gpt-5.5'``
+    lists as a ``review`` with a ``-c``, words that read as never the daemon's client
+    (``alone``). Its socket says it is one: where the socket can say, it is named, "quit it
+    first", whatever its words say, and never the daemon under it."""
+    processes, _holds = codex_daemon
+    words = "review -c model=gpt-5.5"
+    reader = get_adapter("codex").transcript_reader
+    assert reader is not None and reader.held_open([CODEX_NATIVE, *words.split()]) == "alone"
+    processes.append(_codex(7601, words))
+    daemon_sockets[13090] = {7601}
+
+    assert "quit it first" in _refused(7601)
+
+
 def test_a_codex_tui_of_another_home_is_never_named_as_this_daemons_client(
     codex_daemon: DaemonTable, daemon_sockets: dict[int, set[int]]
 ) -> None:
@@ -759,14 +811,16 @@ def test_codexs_daemon_that_holds_no_rollout_leaves_the_thread_adoptable(
 def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
     """``held_open``: every process of Codex's daemon for its clients; for its own session, a
     form that can be the daemon's client (``session``: its TUI with no subcommand or a
-    prompt, ``resume``, ``fork``, ``agents``, ``app-server proxy``, each measured connected to
-    the daemon's socket, r31) or one that never is (``alone``: one that runs embedded, #50,
-    and every other subcommand, an ``app-server`` of its own, ``exec-server``, ``review``,
-    ``login``…, measured not connected or holding their own rollouts); never ``--enable`` nor
-    ``--disable``, which ran on the daemon when it matched them. A prompt is never read for
-    options (tester-50: ``ps`` loses quoting), and a subcommand's name followed by what could
-    be a prompt's words reads as a prompt's, a possible client. A process that runs no Codex,
-    whatever its arguments say, none; Claude Code's none."""
+    prompt, ``resume``, ``fork``, ``--remote`` whatever else it is given, ``agents``,
+    ``app-server proxy``, each measured connected to the daemon's socket, r31 and #51's
+    reopen) or one that never is (``alone``: one that runs embedded, #50, and every other
+    subcommand, an ``app-server`` of its own, ``exec-server``, ``review``, ``login``…, those
+    its help hides too, measured not connected or holding their own rollouts); never
+    ``--enable`` nor ``--disable``, which ran on the daemon when it matched them. A prompt is
+    never read for options (tester-50: ``ps`` loses quoting), nor what follows ``--``, and a
+    subcommand's name followed by what could be a prompt's words, past its own subcommand,
+    reads as a prompt's, a possible client. A process that runs no Codex, whatever its
+    arguments say, none; Claude Code's none."""
     reader = get_adapter("codex").transcript_reader
     claude = get_adapter("claude-code").transcript_reader
     assert reader is not None and claude is not None
@@ -791,6 +845,16 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
         "-m gpt-5.5 exec --json say hi",
         "app-server is down, fix it",
         "-- use -c and --search",  # a prompt
+        "-- -c is broken",  # ``-c`` the prompt's, after ``--``
+        "resume -- -c is broken",
+        "--remote unix:// -c model=gpt-5.5",  # measured connected, its ``-c`` notwithstanding
+        "-c model=gpt-5.5 --remote unix://",
+        "--remote unix:// -c model=gpt-5.5 fix the bug",  # and its prompt
+        "--remote=ws://127.0.0.1:4500 --search",
+        f"resume --remote unix:// {THREAD} -c model=gpt-5.5",
+        f"--remote unix:// fork {THREAD} --profile p2",
+        "exec review the diff",  # a prompt past ``exec``'s own subcommand
+        "exec review fork",  # its own subcommand is the first word only
         "resume",
         "resume --last",
         f"resume {THREAD}",
@@ -801,7 +865,6 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
         "resume --last use -c",  # its prompt
         "agents",
         "app-server proxy",
-        "app-server generate-ts",  # nothing tells its second word from a prompt's
     ):
         assert reader.held_open([CODEX_NATIVE, *plain.split()]) == "session", plain
     for prompt in PROMPTS:
@@ -838,6 +901,12 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
         "mcp",
         "cloud",
         "stdio-to-uds",
+        *HIDDEN_COMMANDS,
+        "app-server generate-ts",  # its own subcommand (``codex completion bash``)
+        "exec resume --last",
+        "mcp list",
+        "login status",
+        "--remote-auth-token-env TOKEN -c model=gpt-5.5",  # no ``--remote``
     ):
         assert reader.held_open([CODEX_NATIVE, *alone.split()]) == "alone", alone
     assert reader.held_open(["node", "--no-warnings", "/usr/local/bin/codex", "exec"]) == "alone"

@@ -904,6 +904,27 @@ def test_adopt_run_from_an_embedded_codexs_own_shell_names_that_codex(
     assert "quit it first" in _refused(7001)
 
 
+@pytest.mark.parametrize("words", ["", "-c model=gpt-5.5"])
+def test_adopt_run_from_a_codexs_own_shell_takes_a_thread_no_process_holds(
+    codex_daemon: DaemonTable, words: str
+) -> None:
+    """tester-51-r33's X3, measured live on 0.164.0: from the shell of an embedded TUI that
+    holds its own rollout, adopt of a free thread went through end to end. A Codex above
+    adopt is counted as any other process: it is named for what it holds, never for every
+    thread, and a thread no process holds is adoptable from under it."""
+    processes, holds = codex_daemon
+    holds.clear()  # the daemon let go
+    holds[7001] = frozenset({"/home/dev/.codex/sessions/rollout-of-its-own.jsonl"})
+    me = os.getpid()
+    processes.append((7001, 1, f"{CODEX_NATIVE} {words}".strip()))
+    processes.append((8800, 7001, "/bin/zsh -c aisquare fleet adopt"))
+    processes.append((me, 8800, f"python -m aisquare fleet adopt {THREAD}"))
+
+    [listed] = adopt_service.recent()
+    assert listed.held_by is None and adoptable(listed)
+    assert adopt_service.adopt(THREAD).agent.agent == "codex"
+
+
 def test_a_codex_tui_of_another_home_is_never_named_as_this_daemons_client(
     codex_daemon: DaemonTable, daemon_sockets: dict[int, set[int]]
 ) -> None:

@@ -747,21 +747,52 @@ def test_a_daemons_client_is_the_codex_connected_to_its_socket_when_that_can_be_
     _says_the_daemon(_refused(13090))
 
 
+@pytest.mark.parametrize(
+    ("words", "read"),
+    [
+        ("review -c model=gpt-5.5", "alone"),
+        ("app-server --managed-daemon", "clients"),
+        ("app-server daemon pid-update-loop", "clients"),
+        ("app-server daemon stop -c model=gpt-5.5", "clients"),
+    ],
+)
 def test_a_codex_connected_to_its_daemon_is_named_whatever_its_words_say(
-    codex_daemon: DaemonTable, daemon_sockets: dict[int, set[int]]
+    codex_daemon: DaemonTable, daemon_sockets: dict[int, set[int]], words: str, read: str
 ) -> None:
     """r32's nit 1 (tester-50-51's M16): a TUI given the prompt ``'review -c model=gpt-5.5'``
     lists as a ``review`` with a ``-c``, words that read as never the daemon's client
-    (``alone``). Its socket says it is one: where the socket can say, it is named, "quit it
-    first", whatever its words say, and never the daemon under it."""
+    (``alone``); and r34 (tester-51-r33's F1, live): one given the daemon's own command line
+    as its prompt lists as the daemon's own (``clients``). Its socket says it is one: where
+    the socket can say, it is named, "quit it first", whatever its words say, and never the
+    daemon under it. Where it cannot, its words decide: the daemon is named."""
     processes, _holds = codex_daemon
-    words = "review -c model=gpt-5.5"
     reader = get_adapter("codex").transcript_reader
-    assert reader is not None and reader.held_open([CODEX_NATIVE, *words.split()]) == "alone"
+    assert reader is not None and reader.held_open([CODEX_NATIVE, *words.split()]) == read
     processes.append(_codex(7601, words))
     daemon_sockets[13090] = {7601}
 
     assert "quit it first" in _refused(7601)
+
+    del daemon_sockets[13090]
+    _says_the_daemon(_refused(13090))
+
+
+def test_the_daemons_own_processes_are_never_named_as_its_clients(
+    codex_daemon: DaemonTable, daemon_sockets: dict[int, set[int]]
+) -> None:
+    """r34 (the MANAGER DECISION, briefs/58 item 8(a)): the socket is asked about every Codex
+    process but those that serve by what they run, the daemon's own, run from its dir. Its
+    ``pid-update-loop`` (measured on 0.164.0: listening on a socket of its own, connected to
+    none of the daemon's) and another home's daemon are never named as its clients, whatever
+    the socket says of them: the daemon is, with its note and stop."""
+    processes, _holds = codex_daemon
+    other = "/home/dev/.aisquare/codex-accounts/5/packages/app-server-daemon/releases/0.164.0"
+    processes.append((7061, 1, f"{other}/bin/codex app-server --listen unix:// --managed-daemon"))
+    daemon_sockets[13090] = {13100, 7061}
+
+    said = _refused(13090)
+    _says_the_daemon(said)
+    assert not {"13100", "7061"} & set(re.findall(r"\d+", said))
 
 
 @pytest.mark.parametrize(

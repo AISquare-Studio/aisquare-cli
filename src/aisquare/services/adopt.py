@@ -49,7 +49,12 @@ from pathlib import Path
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import process_table, procs
 from aisquare.core.agent_adapters import adapters, default_adapter, recorded_adapter
-from aisquare.core.agent_adapters.types import AgentAdapter, AgentTranscript, HoldsOpen
+from aisquare.core.agent_adapters.types import (
+    AgentAdapter,
+    AgentTranscript,
+    HoldsOpen,
+    process_executable,
+)
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError
 from aisquare.models import AdoptableConversation, ClaudeAccount, ProjectInfo
@@ -183,6 +188,16 @@ def _holds_open(args: str) -> bool:
     )
 
 
+def _serves(reader: AgentTranscript, words: Sequence[str]) -> bool:
+    """Whether the process run with ``words`` holds what it has open for the clients it
+    serves by what it runs, whatever its arguments say: its executable alone
+    (``types.process_executable``) reads so (``AgentTranscript.held_open``'s ``clients``:
+    Codex's managed daemon, run from its own dir). One that reads so by its words only may
+    be a TUI whose prompt they are (``codex 'app-server daemon pid-update-loop'``, r34)."""
+    image = process_executable(words)
+    return image is not None and reader.held_open(words[: words.index(image) + 1]) == "clients"
+
+
 def _fleet_panes() -> set[int]:
     """The pid tmux started in each live fleet row's pane, where its launch record places it
     (``fleet.resolve_place``, never the row's own columns): none of a row it cannot place,
@@ -217,6 +232,7 @@ class _Holders:
         self._others = [(pid, args.split()) for pid, _parent, args in listed if pid not in mine]
         self._open: dict[str, tuple[list[tuple[int, HoldsOpen]], frozenset[str] | None]] = {}
         self._fleet: set[int] | None = None
+        self._serving: set[int] = set()
 
     def of(self, native: str, transcript: Path, adapter: AgentAdapter) -> int | None:
         if (pid := self._registry.get(native)) is not None:
@@ -239,8 +255,11 @@ class _Holders:
         process the human knows to quit; with none, the daemon is (:meth:`serving`). A client
         is a process of the agent's connected to the daemon's socket
         (``process_table.connected_to``, measured on macOS: r31), whatever its arguments
-        say; where the socket cannot say (``/proc``, no ``lsof``), one that runs a form that
-        can be one (``held_open``'s ``session``). A process of the daemon's that holds nothing
+        say, the daemon's own words too (r34, live: a TUI ``codex 'app-server daemon stop'``,
+        connected, was never asked, and the daemon was named under it with its stop), all
+        but the daemon's own processes, which serve by what they run (:func:`_serves`); where
+        the socket cannot say (``/proc``, no ``lsof``), one that runs a form that can be one
+        (``held_open``'s ``session``). A process of the daemon's that holds nothing
         (its ``pid-update-loop``) is never named, nor as its client one that is none: one
         that runs embedded or runs no thread of the daemon's (``held_open``'s ``alone``: an
         ``exec``, an ``app-server`` of its own, an ``exec-server``, a ``login``), named only
@@ -275,13 +294,17 @@ class _Holders:
         server = next((pid for pid, kind in holders if kind == "clients"), None)
         if own is not None or server is None:
             return own
-        agents = [pid for pid, kind in runs if kind != "clients"]
+        words_of = dict(self._others)
+        agents = [pid for pid, _kind in runs if not _serves(reader, words_of[pid])]
         connected = process_table.connected_to(server, agents)
         if connected is None:  # the socket cannot say: the forms that can be its client
             clients = [pid for pid, kind in runs if kind == "session"]
         else:
             clients = [pid for pid in agents if pid in connected]
-        return next((pid for pid in clients if not self._fleets(pid)), server)
+        named = next((pid for pid in clients if not self._fleets(pid)), server)
+        if named == server:
+            self._serving.add(server)
+        return named
 
     def _fleets(self, pid: int) -> bool:
         """Whether ``pid`` is a live fleet row's agent: the process tmux started in its pane
@@ -295,12 +318,9 @@ class _Holders:
         """Whether ``pid``, as :meth:`of` named it, holds the conversation for the clients it
         serves (``AgentTranscript.held_open``'s ``clients``: Codex's managed app-server
         daemon), none of them running: its refusal says how it lets go
-        (``AgentTranscript.server_note``), not "quit it"."""
-        return any(
-            each == pid and kind == "clients"
-            for runs, _held in self._open.values()
-            for each, kind in runs
-        )
+        (``AgentTranscript.server_note``), not "quit it". Never a client named before it,
+        whose words read so too (r34: ``codex 'app-server --managed-daemon'``, connected)."""
+        return pid in self._serving
 
 
 def holder(

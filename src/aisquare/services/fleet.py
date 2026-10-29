@@ -7182,9 +7182,28 @@ def _stop_row(
     return StopReceipt(ended, released, release_failed, withheld=handover)
 
 
-OWNER_ACTORS = frozenset({"user"})
-"""The actors that are the owner (:func:`acting_as`): asq, Remote, the captain on the owner's
-word, and a shell that is no fleet window. Only they end a pause with a stop."""
+OWNER_ACTORS = frozenset({"user", "captain"})
+"""Who is the owner, as a stop's ``actor`` (:func:`acting_as`) or a restart's ``spawned_by``
+names it: ``user`` (asq, Remote, a shell that is no fleet window, a command with no
+``--as``) and the captain, which acts on the owner's word. Only they end a pause, by a stop,
+a restart or a resume; an agent's session is refused (:func:`_paused_by_the_owner`)."""
+
+
+def _the_owners(who: str | None) -> bool:
+    """Whether ``who`` (an ``actor`` or a ``spawned_by``) is the owner (:data:`OWNER_ACTORS`);
+    ``None`` is an internal caller's, which asks for no one."""
+    return who is None or who in OWNER_ACTORS
+
+
+def _paused_by_the_owner(project: ProjectInfo, label: str) -> FleetError:
+    """The refusal of a stop, restart or switch an agent asked for of a paused teammate: the
+    pause is the owner's (decision 1 of #9), and so is ending it — a manager's cycle that
+    stopped one released its claims, and one that restarted one undid the owner's pause."""
+    return FleetError(
+        f"{label} was paused by the owner (`fleet pause`), and only they end a pause: their "
+        f"`{project_service.fleet_command('resume', project)}` brings it back; nothing was "
+        "changed"
+    )
 
 
 def _stop_a_paused_agent(
@@ -7194,7 +7213,6 @@ def _stop_a_paused_agent(
     agent_id: str | None,
     actor: str | None,
     reason: str | None,
-    agent_may: bool = False,
 ) -> tuple[StopReceipt, bool] | None:
     """:func:`stop` of a PAUSED agent: its row recorded stopped, the claims its pause kept
     released, its exit announced; the receipt, and whether the exit wakes the manager. ``None``
@@ -7208,8 +7226,7 @@ def _stop_a_paused_agent(
 
     The pause is the owner's, and so is ending it: a stop an agent asks for (``actor`` a
     session, ``fleet stop --as``, a manager's cycle) is refused, saying so, with nothing
-    changed. ``agent_may`` is a resume's own, for a paused agent whose task closed meanwhile
-    (:func:`bulk`): nothing is left of it to resume, whoever runs the resume."""
+    changed (:func:`_paused_by_the_owner`)."""
     with store_session() as store:
         if store.fleet_agent_by_label(project.id, label) is not None:
             return None  # a live row: `stop` stops it
@@ -7223,12 +7240,8 @@ def _stop_a_paused_agent(
         head = store.fleet_agent_by_label(project.id, row.label, live_only=False)
         if head is None or head.id != row.id:
             return None
-        if actor is not None and actor not in OWNER_ACTORS and not agent_may:
-            raise FleetError(
-                f"{row.label} was paused by the owner (`fleet pause`), and only they end a "
-                f"pause: `{project_service.fleet_command('resume', project)}` brings it back; "
-                "nothing was changed"
-            )
+        if not _the_owners(actor):
+            raise _paused_by_the_owner(project, row.label)
         stopped = store.mark_fleet_agent_stopped(row.id)
         released, failed = _release_or_say(store, stopped, why="agent stopped")
         wakes = _emit_exit(
@@ -8754,9 +8767,24 @@ def switch(
     ``/exit``: what ``before_stop`` saw can have changed by then, and the mark hides a turn's
     ``working`` from every later reader. It raises to refuse; the mark is taken back and
     nothing has been stopped.
+
+    A PAUSED agent has no process to move: an agent's switch of it is refused as the owner's
+    pause (:func:`_paused_by_the_owner`), and the owner is told to resume it first.
     """
     with store_session() as store:
-        agent = _live_agent(store, project, label, agent_id=agent_id)
+        try:
+            agent = _live_agent(store, project, label, agent_id=agent_id)
+        except NoSuchAgent:
+            head = store.fleet_agent_by_label(project.id, label, live_only=False)
+            if head is None or not _paused_row(head):
+                raise
+            if not _the_owners(spawned_by):
+                raise _paused_by_the_owner(project, label) from None
+            resume = project_service.fleet_command("resume", project)
+            raise FleetError(
+                f"{label} is paused, with no process to move: `{resume}` brings it back, and "
+                "a switch then moves it; nothing was changed"
+            ) from None
         session = store.get_session(agent.session_id) if agent.session_id else None
         if _handed_over(agent, session, _now()):
             # The automatic path refuses a session already in flight
@@ -9451,7 +9479,9 @@ def restart(
     kept, parked on its session, so a resumed replacement keeps them with the session id and
     a fresh one takes them over with its row, as a hand-over's does (``takes_over``); it is
     admitted as any agent that has no process is. Its first line says it was paused
-    (:func:`_restart_prompt`), and so does the board's ``restarted`` line.
+    (:func:`_restart_prompt`), and so does the board's ``restarted`` line. Only the owner
+    resumes it (``spawned_by`` in :data:`OWNER_ACTORS`): an agent's ``--as`` is refused, its
+    own ``fleet resume`` included (:func:`_paused_by_the_owner`).
     """
     for flag, value in (("--model", model), ("--effort", effort)):
         if value is not None and not value.strip():
@@ -9473,6 +9503,9 @@ def restart(
             )
         if agent_id is not None and agent.id != agent_id:
             raise _replaced(project, label, agent, agent_id)
+        if _paused_row(agent) and not _the_owners(spawned_by):
+            # An agent may not resume a paused teammate: the pause is the owner's.
+            raise _paused_by_the_owner(project, label)
         session = store.get_session(agent.session_id) if agent.session_id else None
         if agent.ended_at is None and _handed_over(agent, session, _now()):
             # A `switch` (or another restart) is between its `/exit` and its end: the
@@ -11243,7 +11276,7 @@ def _end_a_closed_pause(row: BulkRow, *, actor: str) -> BulkReceipt:
     project, agent = row.project, row.agent
     _still_paused(row)
     ended = _stop_a_paused_agent(
-        project, agent.label, agent_id=agent.id, actor=actor, reason=row.closes, agent_may=True
+        project, agent.label, agent_id=agent.id, actor=actor, reason=row.closes
     )
     if ended is None:
         raise NoSuchAgent(NOT_PAUSED)

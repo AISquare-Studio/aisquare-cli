@@ -14,7 +14,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as current, and it never reads `paused_at`: a paused agent's row is `stopped`, a value it
   knows, so 0.9.1 shows a paused agent as a stopped 💤 row, and Restart all leaves it. Its
   `reap` may then remove a paused agent's worktree once nothing in it is unpushed; resume
-  paused agents before moving back if you want them back where they were.
+  paused agents before moving back if you want them back where they were. A paused agent's
+  task stays claimed there (the pause leased it to 2126), and 0.9.1 knows of no pause to end:
+  only `aisquare task release <id>` frees it.
 
 ### Added
 
@@ -47,8 +49,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     update lost leave it.
   - The owner's `fleet stop <label>` of a paused agent ends its pause: its row is recorded
     stopped, the claims it kept go back to the board and its exit is announced. An agent's
-    (`--as <session>`, a manager's cycle) is refused: the pause is the owner's.
-    `fleet restart <label>` resumes it, as `fleet resume` would.
+    (`--as <session>`, a manager's cycle) is refused: the pause is the owner's. The owner's
+    `fleet restart <label>` resumes it, as `fleet resume` would; an agent's restart, switch
+    or resume of a paused teammate is refused the same way.
 
 ### Changed
 

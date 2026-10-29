@@ -23,7 +23,7 @@ from textual.widgets import Button, OptionList, Static
 from aisquare.cli.ui.click_guard import GuardedButton
 from aisquare.cli.ui.project_menu import ProjectMenu
 from aisquare.cli.ui.views.fleet_bulk import TITLE, ConfirmBulk
-from aisquare.cli.ui.views.project import ProjectView
+from aisquare.cli.ui.views.project import ManagerTab, ProjectView
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
@@ -345,3 +345,36 @@ def test_a_signal_with_no_agent_paused_is_cleared_from_the_card(
     assert label == "Clear fleet-paused"
     assert acting_on_running.signals == [("off", "prj_a")]
     assert acting_on_running.calls == [], "no agent was started or stopped"
+
+
+def test_a_paused_managers_tab_says_paused_and_offers_resume_not_start(
+    acting_on_paused: Paused,
+) -> None:
+    """Manager's follow-up to #9 (seq 4920): a paused manager's tab read "manager exited (0)"
+    with a *Start manager* button, which the spawn refuses beside a paused manager. It says
+    the manager is paused, and offers *Resume agents…* for that project in its place."""
+
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, bool, str]:
+        app = _app(pilot)
+        app.sidebar.open_menu("prj_a")
+        await settle(app)
+        await _menu(pilot, "settings")
+        view = app.current_view()
+        assert isinstance(view, ProjectView)
+        view.active = "tab-manager"
+        await settle(app)
+        tab = view.query_one(ManagerTab)
+        header = shown(tab.query_one("#manager-header", Static))
+        start = tab.query_one("#start-manager", Button).display
+        resume = tab.query_one("#resume-manager", Button)
+        shows_resume = resume.display
+        resume.press()
+        await settle(app)
+        dialog = app.screen
+        assert isinstance(dialog, ConfirmBulk)
+        return header, start, shows_resume, shown(dialog.query_one("#bulk-title", Static))
+
+    header, start, resume, title = drive(go)
+    assert header.startswith("alpha's manager is paused.") and "exited" not in header
+    assert (start, resume) == (False, True), "Resume agents in place of Start manager"
+    assert title == "Resume the paused agents of alpha?"

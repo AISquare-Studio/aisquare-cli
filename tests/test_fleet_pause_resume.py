@@ -733,3 +733,44 @@ def test_a_resume_clears_a_signal_with_no_agent_paused(fleet: Fleet) -> None:
 
     assert not fleet_service.is_paused(fleet.alpha)
     assert [p.id for p in report.signals] == [fleet.alpha.id]
+
+
+def test_an_agent_may_not_restart_switch_or_resume_a_paused_teammate_and_the_owner_may(
+    fleet: Fleet, tmux: FakeTmux
+) -> None:
+    """Review of #457 delta (seq 4918), 3: as for its stop (m3), an agent's ``fleet restart
+    <label> --as <its session>`` resumed the owner's paused teammate, and ``fleet resume --as``
+    each of them. Refused, nothing started; the owner's restart (no ``--as``) resumes it."""
+    coder = fleet.agents[_coder_label(fleet, "alpha")]
+    manager = fleet.agents["alpha/manager"]
+    assert manager.session_id is not None
+    runner = CliRunner()
+    ref = fleet.alpha.id
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    spawned = len(tmux.spawned)
+
+    restarted = runner.invoke(
+        app, ["--json", "fleet", "restart", coder.label, "-P", ref, "--as", manager.session_id]
+    )
+    assert restarted.exit_code == 1, restarted.output
+    assert "paused by the owner" in json.loads(restarted.stdout)["detail"]
+    with pytest.raises(FleetError, match="paused by the owner"):
+        fleet_service.switch(fleet.alpha, coder.label, spawned_by=manager.session_id)
+    with pytest.raises(FleetError, match="no process to move"):
+        fleet_service.switch(fleet.alpha, coder.label)  # the owner's: resume it first
+    resumed = fleet_service.bulk(
+        "resume", projects=[fleet.alpha], acting_session=manager.session_id
+    )
+    outcomes = _outcomes(fleet, resumed.receipts)
+    assert outcomes["alpha/manager"] == ("skipped", fleet_service.THIS_SESSION)  # its own row
+    assert outcomes[_coder_label(fleet, "alpha")][0] == "failed"
+    assert "paused by the owner" in (outcomes[_coder_label(fleet, "alpha")][1] or "")
+    assert len(tmux.spawned) == spawned, "nothing was started"
+    assert _row(coder.id).paused_at is not None and fleet_service.is_paused(fleet.alpha)
+    assert _task(fleet.tasks["alpha"]).claimed_by == coder.session_id
+
+    owners = runner.invoke(app, ["--json", "fleet", "restart", coder.label, "-P", ref])
+
+    assert owners.exit_code == 0, owners.output
+    assert json.loads(owners.stdout)["started"]["label"] == coder.label
+    assert _row(coder.id).paused_at is None and _states(fleet.alpha)[coder.label] != "paused"

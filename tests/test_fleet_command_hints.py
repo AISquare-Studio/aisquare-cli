@@ -200,7 +200,7 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fleet.py", "switch"): _FLEET_OP,
     ("services/fleet.py", "restart"): _FLEET_OP,
     ("services/fleet.py", "pause_agent"): _FLEET_OP,
-    ("services/fleet.py", "_stop_a_paused_agent"): _FLEET_OP,
+    ("services/fleet.py", "_paused_by_the_owner"): _FLEET_OP,
     ("services/fleet.py", "rename"): "the project renamed, with its new codename",
     ("services/fleet.py", "attach_argv"): _FLEET_OP,
     ("services/hooks.py", "hand_over"): (

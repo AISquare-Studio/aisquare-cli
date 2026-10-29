@@ -105,6 +105,18 @@ def codename_from_text(text: str) -> str | None:
     return slug if slug and is_codename(slug) else None
 
 
+def why_no_codename(text: str) -> str:
+    """Why :func:`codename_from_text` gives ``text`` no codename, in a note's words: it leaves
+    no letter, or it leaves ``p``, ``pr`` or ``prj``, how every project id begins."""
+    slug = re.sub(r"^[^a-z]+", "", names.slug(text, max_len=CODENAME_MAX))
+    if slug and PROJECT_PREFIX.startswith(slug):
+        return (
+            f"{slug!r} is how every project id begins ({PROJECT_PREFIX}…), so "
+            f"--project {slug} would name them all"
+        )
+    return "it needs a letter a-z once accents are dropped"
+
+
 def first_free(base: str, taken: Collection[str]) -> str:
     """``base`` when nobody holds it, else the first of ``base-2``, ``base-3``, … that is
     free — ``base`` cut short enough (no ``-`` left at its end) that the suffix keeps the

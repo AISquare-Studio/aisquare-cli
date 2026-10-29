@@ -1765,7 +1765,7 @@ class ContextStore(Protocol):
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
     def swap_codename(self, project_id: str, codename: str) -> tuple[str | None, ProjectInfo]: ...
     def folder_names_in_use(self, project_id: str) -> set[str]: ...
-    def aliases_in_use(self, project_id: str) -> set[str]: ...
+    def aliases_in_use(self, project_id: str | None = None) -> set[str]: ...
     def codename_aliases(self, project_id: str) -> list[str]: ...
     def codename_alias_owners(self) -> dict[str, str]: ...
     def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo: ...
@@ -4643,14 +4643,15 @@ class SqliteStore:
         ).fetchall()
         return {str(row["name"]) for row in rows}
 
-    def aliases_in_use(self, project_id: str) -> set[str]:
-        """The codenames every live project but ``project_id`` gave up at a rename: what
-        :meth:`find_projects` still finds those projects by, so a codename that is one of
-        them would make that reference name two projects."""
+    def aliases_in_use(self, project_id: str | None = None) -> set[str]:
+        """The codenames every live project but ``project_id`` (with ``None``, every live
+        project) gave up at a rename: what :meth:`find_projects` still finds those projects
+        by, so a codename that is one of them would make that reference name two projects.
+        A forgotten project's are free again: nothing finds it by them."""
         rows = self._conn.execute(
             "SELECT a.codename FROM project_codename_alias a JOIN project p "
             "ON p.id = a.project_id WHERE p.forgotten_at IS NULL AND a.project_id != ?",
-            (project_id,),
+            (project_id if project_id is not None else "",),
         ).fetchall()
         return {str(row["codename"]) for row in rows}
 

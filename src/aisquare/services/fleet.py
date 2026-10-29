@@ -992,7 +992,7 @@ def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> 
             current = store.get_project(project.id)
             if current is not None and current.codename:
                 return current
-            name = codenames.codename_for(project.id, taken=store.codenames_in_use())
+            name = codenames.codename_for(project.id, taken=_generation_taken(store))
             try:
                 return store.set_codename(project.id, name)
             except sqlite3.IntegrityError:
@@ -1033,7 +1033,16 @@ def _codename_to_add(store: ContextStore, project: ProjectInfo) -> str:
     kept = _kept_codename(store, project)
     if kept is not None:
         return kept
-    return codenames.codename_for(project.id, taken=store.codenames_in_use())
+    return codenames.codename_for(project.id, taken=_generation_taken(store))
+
+
+def _generation_taken(store: ContextStore) -> set[str]:
+    """What the generated walk (:func:`codenames.codename_for`) passes over: every codename in
+    use, and every one a live project gave up at a rename, which ``--project`` still finds that
+    project by (:meth:`ContextStore.aliases_in_use`). A new project generated onto one moved
+    that reference to itself without a word (task #6, reopened). The walk and its first
+    candidate are unchanged for a project whose name collides with neither."""
+    return store.codenames_in_use() | store.aliases_in_use()
 
 
 def _is_home_project(project: ProjectInfo) -> bool:
@@ -11221,6 +11230,17 @@ def rename(project: ProjectInfo, codename: str, *, notes: list[str] | None = Non
                 f"codename {codename!r} is another project's folder name: `--project "
                 f"{codename}` names that one, and would name this one instead — pick another"
             )
+        if codename in store.aliases_in_use(project.id):
+            # Reserved for the live project that gave it up: its agents were given it, and
+            # taken here, their `fleet stop --project <it>` acted on this one (task #6,
+            # reopened; the manager's rule overrides "the current holder wins").
+            owner_id = store.codename_alias_owners().get(codename)
+            owner = store.get_project(owner_id) if owner_id is not None else None
+            had = _name(owner) if owner is not None else "another project"
+            raise FleetError(
+                f"codename {codename!r} is one {had} had: `--project {codename}` still names "
+                "it — pick another"
+            )
         try:
             old, updated = store.swap_codename(project.id, codename)
         except sqlite3.IntegrityError as exc:
@@ -11264,8 +11284,8 @@ def follow_name(project: ProjectInfo, *, notes: list[str] | None = None) -> Proj
             if notes is not None:
                 kept = f"stays {current.codename}" if current.codename else "is not set"
                 notes.append(
-                    f"{shown!r} gives no codename (it needs a letter a-z once accents are "
-                    f"dropped), so the fleet codename {kept} — "
+                    f"{shown!r} gives no codename ({codenames.why_no_codename(shown)}), so the "
+                    f"fleet codename {kept} — "
                     f"`{project_service.fleet_command('rename', current)} <codename>` sets one"
                 )
             return current

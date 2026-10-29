@@ -204,8 +204,12 @@ def test_a_name_that_gives_no_codename_saves_the_nickname_and_says_so(
     assert renamed.nickname == "!!!" and _stored(project).nickname == "!!!"
     assert renamed.codename == before == _codename(project), "the codename is left as it was"
     [note] = notes
-    assert "'!!!' gives no codename" in note and f"stays {before}" in note
+    assert "'!!!' gives no codename (it needs a letter a-z" in note and f"stays {before}" in note
     assert f"aisquare fleet rename --project {before} <codename>" in note
+    # `PRJ` slugs to `prj`, how every project id begins: the note says that, not "a letter".
+    prj: list[str] = []
+    fleet_service.rename_project(project, "PRJ", notes=prj)
+    assert prj and "'prj' is how every project id begins (prj_…)" in prj[0], prj
     assert tmux.renamed == [] and _renamed_notes(project) == []
 
 
@@ -365,23 +369,65 @@ def test_the_old_codename_still_finds_the_project_and_the_board_is_told_once(
     assert len(_renamed_notes(project)) == 2
 
 
-def test_a_project_that_holds_an_old_codename_now_is_the_one_it_names(
+def test_a_project_that_holds_a_codename_now_is_the_one_it_names(
     tmux: FakeTmux, project: ProjectInfo, tmp_path: Path
 ) -> None:
+    """A codename no live project gave up: the project that holds it is the one it names, and
+    one taken back by the project that gave it up is its current codename again."""
     old = fleet_service.ensure_codename(project).codename
     assert old is not None
     fleet_service.rename_project(project, "Renamed")
     other = _repo(tmp_path, "other")
-    assert project_service.resolve(old).id == project.id, "the alias, while nobody holds it"
-    fleet_service.rename(other, old)
-    assert project_service.resolve(old).id == other.id, "the current holder wins"
-    assert fleet_service.resolve_project(old).id == other.id
+    fleet_service.rename(other, "never-given-up")
+    assert project_service.resolve("never-given-up").id == other.id
+    assert project_service.resolve(old).id == project.id, "its old codename, while it lives"
     # Taken back by its old project, it is that project's current codename again.
-    fleet_service.rename(other, "someone-else")
     fleet_service.rename(project, old)
     with store_session() as store:
         assert old not in store.codename_aliases(project.id)
+    assert project_service.resolve(old).id == project.id
     assert project_service.resolve("renamed").id == project.id
+
+
+def test_fleet_rename_refuses_a_codename_a_live_project_gave_up(
+    tmux: FakeTmux, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """The tester's (1): another project's ``fleet rename`` took ``quiet-goose``, which svcA
+    gave up and its agents were given, and their ``fleet stop --project quiet-goose`` then
+    acted on it, with no word to svcA's board. It stays reserved for the project that gave it
+    up while that project lives (the manager's rule overrides "the current holder wins")."""
+    old = fleet_service.ensure_codename(project).codename
+    assert old is not None
+    fleet_service.rename_project(project, "Svc A")
+    other = _repo(tmp_path, "billing")
+    with pytest.raises(FleetError, match=f"codename '{old}' is one Svc A had: `--project {old}`"):
+        fleet_service.rename(other, old)
+    assert fleet_service.resolve_project(old).id == project.id
+    # Forgotten, nothing finds it by its old codenames: they are free again.
+    project_service.forget(project.id)
+    assert fleet_service.rename(other, old).codename == old
+
+
+def test_a_generated_codename_walks_past_one_a_live_project_gave_up(
+    tmux: FakeTmux, project: ProjectInfo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tester's (2): a new project's generated codename landed on ``proud-magpie``, which
+    a live project gave up, and ``--project proud-magpie`` moved to it without a word. The
+    walk passes it as it passes one in use; with nothing in the way it is unchanged."""
+    old = fleet_service.ensure_codename(project).codename
+    assert old is not None
+    fleet_service.rename_project(project, "Billing")
+    total = len(codenames.ADJECTIVES) * len(codenames.ANIMALS)
+    at = next(i for i in range(total) if codenames._pair(i) == old)
+    monkeypatch.setattr(codenames, "_start_index", lambda seed: at)  # forced onto the alias
+    newcomer = _repo(tmp_path, "newcomer")
+    given = fleet_service.ensure_codename(newcomer).codename
+    assert given == codenames._pair((at + 1) % total), "the next pair along"
+    assert fleet_service.resolve_project(old).id == project.id
+    # Control: the walk itself is unchanged when the first candidate is free.
+    later = _repo(tmp_path, "later")
+    monkeypatch.setattr(codenames, "_start_index", lambda seed: (at + 5) % total)
+    assert fleet_service.ensure_codename(later).codename == codenames._pair((at + 5) % total)
 
 
 def test_a_rename_never_takes_another_projects_folder_name(
@@ -592,12 +638,16 @@ def test_a_session_another_project_holds_now_is_never_taken_by_a_rename(
     tmux: FakeTmux, project: ProjectInfo, tmp_path: Path
 ) -> None:
     """A codename this project gave up and another took since names THAT project's session:
-    a later rename of this one moves its own session only."""
+    a later rename of this one moves its own session only. Taken while this one was
+    forgotten (its old codenames are free then), and this one added again since."""
     fleet_service.ensure_codename(project)
     fleet_service.rename(project, "shared-name")
     fleet_service.rename(project, "mine-now")
+    project_service.forget(project.id)
     other = _repo(tmp_path, "other")
     fleet_service.rename(other, "shared-name")
+    with store_session() as store:
+        store.onboard_project(project)  # added again: its old codenames come back with it
     tmux.sessions["asq-shared-name"] = []  # the other project's agents
     tmux.sessions["asq-mine-now"] = []
     fleet_service.rename(project, "mine-later")

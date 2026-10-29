@@ -414,9 +414,9 @@ _OWN_COMMANDS = {
     "sandbox": frozenset({"uninstall", "help"}),
 }
 """The subcommands of each of :data:`_COMMANDS` that has its own, as ``codex completion
-bash`` lists them (0.164.0): a word right after its subcommand's name that is one of them is
-that, never a prompt's (``codex execpolicy check --rules <PATH>``, ``codex app-server
-generate-ts``), as an option's value is not (:func:`_could_be_prompt`)."""
+bash`` lists them (0.164.0): a word right after its subcommand's name that is one of them,
+with more after it, is that, never a prompt's (``codex execpolicy check --rules <PATH>``,
+``codex exec resume --last``), as an option's value is not (:func:`_could_be_prompt`)."""
 _DAEMON_COMMANDS = frozenset(
     {
         "bootstrap",
@@ -569,17 +569,21 @@ def _resumes_as(words: Sequence[str], *, remote: bool) -> HoldsOpen:
 def _could_be_prompt(words: Sequence[str], own: frozenset[str]) -> bool:
     """Whether ``words``, after a subcommand's name, could be the rest of a prompt that starts
     with that name: one is neither an option, the value right after one, nor, the first such,
-    one of the subcommand's own (``own``, :data:`_OWN_COMMANDS`) (``app-server --listen
-    ws://127.0.0.1:4500`` and ``execpolicy check --rules /r.rules`` cannot; ``exec the
-    tests`` and ``exec review the diff`` can). An option's value is the word right after it,
-    unless it is joined to it or the option takes none (:data:`_FLAGS`)."""
+    one of the subcommand's own (``own``, :data:`_OWN_COMMANDS`) with more after it
+    (``app-server --listen ws://127.0.0.1:4500``, ``execpolicy check --rules /r.rules`` and
+    ``exec resume --last`` cannot; ``exec the tests``, ``exec review the diff`` and ``login
+    status`` can). An option's value is the word right after it, unless it is joined to it
+    or the option takes none (:data:`_FLAGS`). One of its own that is the last word is a
+    prompt's as well as it is that subcommand: ``codex 'login status'`` lists as ``codex
+    login status``, a TUI measured connected to the daemon (tester-51-final), so it is a
+    possible client, the lesser harm (the MANAGER DECISION, as for a first word)."""
     valued = False
-    for word in words:
+    for at, word in enumerate(words):
         if word.startswith("-") and word != "--":
             valued = "=" not in word and word not in _FLAGS
         elif valued:
             valued = False
-        elif word in own:
+        elif word in own and at < len(words) - 1:
             own = frozenset()  # its own subcommand, the first word only
         else:
             return True

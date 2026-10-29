@@ -915,9 +915,10 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
     ``--enable`` nor ``--disable``, which ran on the daemon when it matched them. A prompt is
     never read for options (tester-50: ``ps`` loses quoting), nor what follows ``--``, and a
     subcommand's name followed by what could be a prompt's words, past its own subcommand,
-    reads as a prompt's, a possible client; so do the daemon's own words (r33: ``app-server
-    daemon`` past one of its own, ``--managed-daemon``, an option that takes no value). A
-    process that runs no Codex, whatever its arguments say, none; Claude Code's none."""
+    or by its own subcommand alone (``login status``, tester-51-final), reads as a prompt's,
+    a possible client; so do the daemon's own words (r33: ``app-server daemon`` past one of
+    its own, ``--managed-daemon``, an option that takes no value). A process that runs no
+    Codex, whatever its arguments say, none; Claude Code's none."""
     reader = get_adapter("codex").transcript_reader
     claude = get_adapter("claude-code").transcript_reader
     assert reader is not None and claude is not None
@@ -968,6 +969,13 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
         "app-server daemon stop the bleeding",  # past the daemon's own subcommand
         "app-server --managed-daemon crashes",  # ``--managed-daemon`` takes no value
         "app-server --managed-daemon -- crashes",
+        "app-server daemon",  # Codex prints its usage and exits: a running one is a TUI
+        # One of a subcommand's own as the last word: a prompt's as well (tester-51-final:
+        # ``codex 'login status'`` measured connected; the MANAGER DECISION).
+        "login status",
+        "mcp list",
+        "app-server generate-ts",
+        "cloud-tasks status",
     ):
         assert reader.held_open([CODEX_NATIVE, *plain.split()]) == "session", plain
     for prompt in PROMPTS:
@@ -1005,13 +1013,11 @@ def test_a_codex_process_says_how_it_holds_what_it_writes() -> None:
         "cloud",
         "stdio-to-uds",
         *HIDDEN_COMMANDS,
-        "app-server generate-ts",  # its own subcommand (``codex completion bash``)
-        "exec resume --last",
-        "mcp list",
-        "login status",
+        "exec resume --last",  # its own subcommand (``codex completion bash``), then more
+        "cloud-tasks list --json",
+        "app-server generate-ts --out /tmp/ts",
         "--remote-auth-token-env TOKEN -c model=gpt-5.5",  # no ``--remote``
         "-c model=gpt-5.5 app-server daemon is wedged",  # an embedded TUI's prompt (r33)
-        "app-server daemon",  # none of its own: Codex prints its usage and exits
     ):
         assert reader.held_open([CODEX_NATIVE, *alone.split()]) == "alone", alone
     assert reader.held_open(["node", "--no-warnings", "/usr/local/bin/codex", "exec"]) == "alone"

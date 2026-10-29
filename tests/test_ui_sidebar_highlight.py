@@ -418,6 +418,38 @@ def test_spawn_agent_reached_by_the_arrows_opens_on_the_open_views_project(
     assert drive(go) == [("project-prj_b", "prj_b"), ("project-prj_c", "prj_c")]
 
 
+def test_spawn_agent_arrowed_onto_from_a_clicked_card_opens_on_that_card(
+    tmp_path: Path, script: Script, captain_off: None
+) -> None:
+    """The tester's repro: the open view came from a click, and the arrows only passed
+    rows that open nothing on the way to *Spawn agent*. It opened on alpha, the first
+    listed, folded away in its group; it opens on beta, the card clicked, as main did."""
+    two_projects(tmp_path, script)
+    with store_session() as store:
+        group, _ = groups_service.create_group(store, "tools", ["prj_a"])
+        groups_service.set_collapsed(store, group.id, True)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[list[str]], str, str]:
+        app = fleet_app(pilot)
+        await pilot.click(card_for(app, "prj_b").query_one(ProjectTitle))
+        await settle(app)
+        walked = [highlighted(app)]
+        for _ in range(2):  # the folded group's header, Spawn agent
+            await pilot.press("up")
+            await settle(app)
+            walked.append(highlighted(app))
+        shown = str(app.content.current)
+        await pilot.press("enter")
+        await settle(app)
+        dialog = app.screen
+        assert isinstance(dialog, SpawnDialog), type(dialog).__name__
+        return walked, shown, dialog.project.id
+
+    walked, shown, project = drive(go)
+    assert walked == [["project:prj_b"], [f"group:{group.id}"], ["spawn-agent"]]
+    assert (shown, project) == ("project-prj_b", "prj_b")
+
+
 def test_an_arrow_onto_a_row_that_opens_nothing_mid_build_still_finishes_the_open(
     tmp_path: Path, script: Script, captain_off: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

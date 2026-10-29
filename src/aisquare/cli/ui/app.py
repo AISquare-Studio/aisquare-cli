@@ -102,6 +102,7 @@ from aisquare.cli.ui.sidebar import (
     ProjectCard,
     ProjectRenamed,
     ProjectSelected,
+    RenameAgent,
     RenameProject,
     ResizeSidebar,
     SettingsRow,
@@ -251,6 +252,8 @@ PROJECT_REMOVE_WORKER = "project-remove"
 PROJECT_FRESH_WORKER = "project-fresh"
 """The thread worker *Start fresh…* clears a project's board and fleet on (``project fresh``),
 one a project at a time (:func:`_fresh_group`)."""
+AGENT_RENAME_WORKER = "agent-relabel"
+"""The thread worker an agent row's name field renames its agent on (``fleet relabel``)."""
 TOAST_PLACES = 3
 """The places a refusal's toast names before it counts the rest: at 80x24 a longer list
 pushed the toast's title and what to do off the screen."""
@@ -584,6 +587,11 @@ class HelpScreen(ModalScreen[None]):
             ("shift+g", "group the marked cards; Esc clears the marks"),
             ("drag title", "move a card or a group header to a new place"),
             ("F2 dblclick", "rename the card in place: Enter or a click away saves, Esc cancels"),
+            (
+                "F2 dblclick",
+                "on an agent's row, rename the agent (its label and tmux window); not the "
+                "manager's or the captain's",
+            ),
             (
                 ". ⋯ r-click",
                 "the card's menu: rename, pin, settings, start fresh, remove from the fleet",
@@ -1110,6 +1118,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         are never listed, whatever ``show_captured`` says, and ``a`` is no key."""
         self._undo: list[project_groups.UndoEntry] = []
         """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
+        self._relabels: dict[Worker[Any], RenameAgent] = {}
+        """Each agent rename on its way (:data:`AGENT_RENAME_WORKER`), with what asked for it:
+        a refusal reopens that row's field with what was typed."""
         self._fresh_choices: dict[str, FreshChoice] = {}
         """Each project's last confirmed Start fresh, by id: what a reopened dialog ticks."""
         self._fresh_asked: dict[str, FreshChoice] = {}
@@ -1911,6 +1922,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.worker.name == PROJECT_FRESH_WORKER:
             self._project_freshened(event)
             return
+        if event.worker.name == AGENT_RENAME_WORKER:
+            self._agent_renamed(event)
+            return
         if event.worker.name == FLEET_WORKER:
             self._fleet_read(event)
             return
@@ -2359,6 +2373,51 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.sidebar.open_rename(project.id, event.typed)
             return
         self.post_message(ProjectRenamed(renamed))
+
+    def on_rename_agent(self, event: RenameAgent) -> None:
+        """An agent row's name field was saved: ``fleet relabel``, off the UI thread.
+
+        The rename also asks tmux to rename the agent's window, which may wait on a busy
+        server, so it runs in a worker (:data:`AGENT_RENAME_WORKER`), never on this thread. The
+        row shows the old label until the frame after it lands.
+        """
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        target, label, typed = project, event.label, event.typed
+        worker = self.run_worker(
+            lambda: fleet_service.relabel(target, label, typed, actor="user"),
+            name=AGENT_RENAME_WORKER,
+            group=AGENT_RENAME_WORKER,
+            thread=True,
+            exit_on_error=False,  # a refusal is an answer to show, not a crash
+        )
+        # Before the worker can report: its state change is handled on this thread.
+        self._relabels[worker] = event
+
+    def _agent_renamed(self, event: Worker.StateChanged) -> None:
+        """Say what the agent is called now, or why not, and reopen the field with what was
+        typed on a refusal, to correct."""
+        if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            return
+        asked = self._relabels.pop(event.worker, None)
+        result = event.worker.result
+        if event.state is WorkerState.SUCCESS and isinstance(result, fleet_service.RelabelReceipt):
+            said = "\n".join([result.said, *result.notes])
+            self.notify(said, title="renamed", timeout=8, markup=False)
+        elif event.state is WorkerState.ERROR:
+            error = event.worker.error
+            self.notify(
+                _why_unread(error) if error is not None else "the rename did not finish",
+                title="not renamed",
+                severity="error",
+                timeout=8,
+                markup=False,
+            )
+            if asked is not None:
+                self.sidebar.open_agent_rename(asked.agent_id, asked.typed)
+        self.refresh_data()
 
     def on_project_renamed(self, event: ProjectRenamed) -> None:
         """A nickname was written — a card, its menu, a Settings tab: every name says it now."""
@@ -3674,6 +3733,7 @@ def _writing_workers() -> dict[str, str]:
         CONSENT_WORKER: "the answer to the usage-sharing question",
         PROJECT_REMOVE_WORKER: "a project's removal",
         PROJECT_FRESH_WORKER: "a project's fresh start",
+        AGENT_RENAME_WORKER: "an agent's rename",
         REATTACH_WORKER: "the update's restart of the agents it kept",
         PRESS_WORKER: "the update's record of the running agents",
     }

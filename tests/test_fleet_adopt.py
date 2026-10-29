@@ -454,6 +454,21 @@ HIDDEN_COMMANDS = (
     "execpolicy check --rules /r.rules",
     "tcp-tunnel --proxy-url https://p --proxy-origins-file /o --target 127.0.0.1:9",
 )
+#: ``app-server daemon``'s own subcommands, as Codex 0.164.0's ``codex completion bash`` lists
+#: them (``codex__app__server__daemon``). Each followed by an option is that subcommand, read
+#: as the daemon's own (tester-52's P3).
+DAEMON_COMMANDS = (
+    "bootstrap",
+    "start",
+    "restart",
+    "update",
+    "enable-remote-control",
+    "disable-remote-control",
+    "stop",
+    "version",
+    "pid-update-loop",
+    "help",
+)
 
 
 DaemonTable = tuple[list[tuple[int, int, str]], dict[int, frozenset[str]]]
@@ -753,7 +768,7 @@ def test_a_daemons_client_is_the_codex_connected_to_its_socket_when_that_can_be_
         ("review -c model=gpt-5.5", "alone"),
         ("app-server --managed-daemon", "clients"),
         ("app-server daemon pid-update-loop", "clients"),
-        ("app-server daemon stop -c model=gpt-5.5", "clients"),
+        *((f"app-server daemon {own} -c model=gpt-5.5", "clients") for own in DAEMON_COMMANDS),
     ],
 )
 def test_a_codex_connected_to_its_daemon_is_named_whatever_its_words_say(
@@ -762,9 +777,10 @@ def test_a_codex_connected_to_its_daemon_is_named_whatever_its_words_say(
     """r32's nit 1 (tester-50-51's M16): a TUI given the prompt ``'review -c model=gpt-5.5'``
     lists as a ``review`` with a ``-c``, words that read as never the daemon's client
     (``alone``); and r34 (tester-51-r33's F1, live): one given the daemon's own command line
-    as its prompt lists as the daemon's own (``clients``). Its socket says it is one: where
-    the socket can say, it is named, "quit it first", whatever its words say, and never the
-    daemon under it. Where it cannot, its words decide: the daemon is named."""
+    as its prompt lists as the daemon's own (``clients``), each of its own subcommands
+    followed by an option too (tester-52's P3). Its socket says it is one: where the socket
+    can say, it is named, "quit it first", whatever its words say, and never the daemon
+    under it. Where it cannot, its words decide: the daemon is named."""
     processes, _holds = codex_daemon
     reader = get_adapter("codex").transcript_reader
     assert reader is not None and reader.held_open([CODEX_NATIVE, *words.split()]) == read

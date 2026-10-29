@@ -241,9 +241,11 @@ def test_a_slug_another_project_holds_gets_a_suffix_and_the_owner_is_told(
     assert fleet_service.rename_project(project, "AISquare CLI", notes=again).codename == (
         "aisquare-cli-2"
     )
-    # Freed, the name is taken back at the next rename.
+    # Given up by the other project, it still names that one (`--project aisquare-cli` in
+    # its agents' prompts), so it stays taken.
     fleet_service.rename(other, "other-checkout")
-    assert fleet_service.rename_project(project, "AISquare CLI").codename == "aisquare-cli"
+    assert fleet_service.rename_project(project, "AISquare CLI").codename == "aisquare-cli-2"
+    assert fleet_service.resolve_project("aisquare-cli").id == other.id
 
 
 def test_a_codename_half_that_fails_leaves_the_nickname_saved_and_says_why(
@@ -673,43 +675,124 @@ def test_one_board_that_cannot_be_told_does_not_keep_the_others_from_the_note(
     ]
 
 
-# --- task #6 reopened: an old codename against a folder of that name -----------------------
+# --- task #6 reopened: a --project reference never moves without a word -------------------
 
 
-def test_an_old_codename_outranks_a_folder_of_that_name_added_since(
+def _cli(*args: str) -> tuple[int, str]:
+    result = CliRunner().invoke(app, list(args))
+    return result.exit_code, result.output
+
+
+def test_repro_a_two_checkouts_of_one_name_and_a_project_renamed_twice(
+    tmux: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tester's repro (a), the owner's ws1..ws7 layout: ws1/dupcli and ws2/dupcli; in ws2
+    ``project rename DupCLI``, then ``project rename "Release work"``. ``dupcli`` is ws1's
+    folder name, so ws2 takes ``dupcli-2``; the second rename says the old one still works,
+    and it does, while ``--project dupcli`` stays what it always was: both folders."""
+    ws1 = _repo(tmp_path, "ws1/dupcli")
+    ws2 = _repo(tmp_path, "ws2/dupcli")
+    monkeypatch.chdir(ws2.root)
+    first = _cli("project", "rename", "DupCLI")
+    assert first[0] == 0, first[1]
+    assert "fleet codename: dupcli-2 (tmux asq-dupcli-2)" in first[1]
+    assert "dupcli is another project's folder name" in first[1]
+    second = _cli("project", "rename", "Release work")
+    assert second[0] == 0, second[1]
+    assert "was dupcli-2 (--project dupcli-2 still works)" in second[1]
+    listed = _cli("fleet", "ls", "--project", "dupcli-2")
+    assert listed[0] == 0 and "Release work" in listed[1], listed[1]
+    ambiguous = _cli("fleet", "ls", "--project", "dupcli")
+    assert ambiguous[0] != 0 and "matches several projects" in ambiguous[1], ambiguous[1]
+    assert {ws1.id, ws2.id} == {p.id for p in (ws1, ws2)}
+
+
+def test_repro_b_a_project_renamed_after_another_projects_folder(
     tmux: FakeTmux, project: ProjectInfo, tmp_path: Path
 ) -> None:
-    """Only a project that holds a codename NOW outranks one that gave it up. Looked up after
-    the folders, ``--project otherproj`` reached a checkout added since in ``.../otherproj``,
-    and the renamed project's live agents (``fleet stop --project otherproj``) acted on it."""
+    """The tester's repro (b): project A renamed 'otherproj', then 'Fleet Probe', with B in
+    ``…/otherproj`` (codename crisp-otter). ``--project otherproj`` named B before and names
+    B after; A's agents were given A's own codename, which still names A alone."""
+    other = _repo(tmp_path, "elsewhere/otherproj")
+    fleet_service.rename(other, "crisp-otter")
+    first = fleet_service.rename_project(project, "otherproj")
+    assert first.codename == "otherproj-2"
+    fleet_service.rename_project(project, "Fleet Probe")
+    assert _renamed_notes(project)[-1] == (
+        "project renamed: otherproj-2 → fleet-probe; --project otherproj-2 still works"
+    )
+    assert fleet_service.resolve_project("otherproj").id == other.id
+    assert fleet_service.resolve_project("otherproj-2").id == project.id
+
+
+def test_an_old_codename_a_folder_takes_since_is_refused_naming_both(
+    tmux: FakeTmux, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """A checkout added in ``…/otherproj`` while A's codename is ``otherproj``, then A
+    renamed: the reference names two projects, refused as ambiguous with both named — never
+    moved to either — and the rename says which reference to use instead of "still works"."""
     fleet_service.ensure_codename(project)
     fleet_service.rename(project, "otherproj")
-    fleet_service.rename_project(project, "Fleet Probe")
-    added_since = _repo(tmp_path, "elsewhere/otherproj")
-    assert fleet_service.ensure_codename(added_since).codename != "otherproj"
-    assert project_service.resolve("otherproj").id == project.id
-    assert fleet_service.resolve_project("otherproj").id == project.id
-    assert project_service.resolve(str(added_since.root)).id == added_since.id
+    added = _repo(tmp_path, "later/otherproj")
+    assert fleet_service.resolve_project("otherproj").id == project.id, "its codename, now"
+    code, said = _cli("project", "rename", "Fleet Probe", "-P", "otherproj")
+    assert code == 0, said
+    assert (
+        "was otherproj (--project otherproj names another project too: use --project fleet-probe)"
+    ) in said.replace("\n", " ").replace("  ", " ")
+    assert _codename(project) == "fleet-probe"
+    assert _renamed_notes(project)[-1] == (
+        "project renamed: otherproj → fleet-probe; use --project fleet-probe "
+        "(--project otherproj names another project too)"
+    )
+    assert not fleet_service.old_codename_works(project.id, "otherproj")
+    with pytest.raises(fleet_service.NoSuchProject, match="matches several projects") as caught:
+        fleet_service.resolve_project("otherproj")
+    assert "fleet-probe" in str(caught.value)
+    with pytest.raises(ValueError, match="matches multiple projects"):
+        project_service.resolve("otherproj")
+    assert project_service.resolve(str(added.root)).id == added.id
+    # The CLI says the same.
+    code, said = _cli("project", "rename", "Third", "-P", "fleet-probe")
+    assert code == 0, said
+    assert "was fleet-probe (--project fleet-probe still works)" in said
 
 
-def test_an_old_codename_beside_two_checkouts_of_that_name_is_not_ambiguous(
-    tmux: FakeTmux, tmp_path: Path
+def test_a_rename_never_takes_a_codename_another_project_gave_up(
+    tmux: FakeTmux, project: ProjectInfo, tmp_path: Path
 ) -> None:
-    """The owner's ws1..ws7 layout: ws2 named ``dupcli`` before ws1 was added, then renamed.
-    Its board was told ``--project dupcli still works``, and it does — not "matches several
-    projects"."""
-    ws2 = _repo(tmp_path, "ws2/dupcli")
-    assert fleet_service.rename_project(ws2, "DupCLI").codename == "dupcli"
-    _repo(tmp_path, "ws1/dupcli")
+    """Another live project's old codename still names it (``--project``): a rename taking it
+    would make that reference name two."""
+    other = _repo(tmp_path, "other")
+    fleet_service.rename_project(other, "Ledger")
+    fleet_service.rename_project(other, "Accounts")
     notes: list[str] = []
-    assert fleet_service.rename_project(ws2, "Release work", notes=notes).codename == (
-        "release-work"
-    )
-    assert _renamed_notes(ws2)[-1] == (
-        "project renamed: dupcli → release-work; --project dupcli still works"
-    )
-    assert project_service.resolve("dupcli").id == ws2.id
-    assert fleet_service.resolve_project("dupcli").id == ws2.id
+    assert fleet_service.rename_project(project, "Ledger", notes=notes).codename == "ledger-2"
+    assert notes == [
+        "ledger is a codename another project had (`--project ledger` still names it), so "
+        "this project's is ledger-2"
+    ]
+    assert fleet_service.resolve_project("ledger").id == other.id
+
+
+def test_a_stray_session_of_the_name_is_taken_and_suffixed(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """A tmux session ``asq-billing`` already running that is not this project's (a forgotten
+    project's, one made by hand): renamed onto it, the project's session could not follow,
+    and ``attach`` would have opened the stray. The name is taken; the walk suffixes."""
+    fleet_service.spawn(project, "manager")
+    old = _codename(project)
+    tmux.sessions["asq-billing"] = []
+    notes: list[str] = []
+    renamed = fleet_service.rename_project(project, "Billing", notes=notes)
+    assert renamed.codename == "billing-2"
+    assert notes == [
+        "a tmux session asq-billing is already running, and it is not this project's, so "
+        "this project's codename is billing-2"
+    ]
+    assert set(tmux.sessions) == {"asq-billing", "asq-billing-2"}
+    assert tmux.renamed == [(f"asq-{old}", "asq-billing-2")]
 
 
 def test_a_settings_save_of_the_same_name_leaves_a_chosen_codename_alone(

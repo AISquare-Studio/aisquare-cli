@@ -212,11 +212,16 @@ def rename(
         markup=False,  # a nickname is text, not markup
     )
     if followed.codename and followed.codename != target.codename:
-        was = (
-            f", was {target.codename} (--project {target.codename} still works)"
-            if target.codename
-            else ""
-        )
+        was = ""
+        if target.codename:
+            # Said to work only while it names this project alone (task #6, reopened).
+            works = fleet_service.old_codename_works(followed.id, target.codename)
+            was = (
+                f", was {target.codename} (--project {target.codename} still works)"
+                if works
+                else f", was {target.codename} (--project {target.codename} names another "
+                f"project too: use --project {followed.codename})"
+            )
         console.print(
             f"  fleet codename: {followed.codename} "
             f"(tmux {fleet_service.session_name(followed.codename)}){was}",

@@ -176,7 +176,7 @@ def _listed(names: list[str]) -> str:
 
 def _project_matches(snapshot: FleetSnapshot, ref: str) -> list[ProjectInfo]:
     """Every listed project ``ref`` names: an exact id alone, else the one whose codename it is,
-    else the one that gave that codename up at a rename, else id prefix or name.
+    else each it names as an id prefix, a name or a codename given up at a rename.
 
     The codename before a name, as the store finds a ``--project`` (``find_projects``): a
     project renamed takes its name's slug as its codename (``aisquare-cli``), which may be
@@ -193,16 +193,16 @@ def _project_matches(snapshot: FleetSnapshot, ref: str) -> list[ProjectInfo]:
     if coded:
         return coded
     # A codename the project gave up at a rename, which the captain may still have been
-    # given (review of #456, nit 6): found as `--project` finds it, before a name.
+    # given (review of #456, nit 6): found as `--project` finds it, beside an id or a name,
+    # so one that is also another project's name is refused naming both.
     with store_session() as store:
         owner = store.codename_alias_owners().get(folded)
-    former = [project for project in snapshot.projects if project.id == owner]
-    if former:
-        return former
     return [
         project
         for project in snapshot.projects
-        if project.id.startswith(ref) or project_name(project).casefold() == folded
+        if project.id.startswith(ref)
+        or project_name(project).casefold() == folded
+        or project.id == owner
     ]
 
 

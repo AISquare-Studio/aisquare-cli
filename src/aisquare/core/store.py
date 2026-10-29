@@ -1765,6 +1765,7 @@ class ContextStore(Protocol):
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
     def swap_codename(self, project_id: str, codename: str) -> tuple[str | None, ProjectInfo]: ...
     def folder_names_in_use(self, project_id: str) -> set[str]: ...
+    def aliases_in_use(self, project_id: str) -> set[str]: ...
     def codename_aliases(self, project_id: str) -> list[str]: ...
     def codename_alias_owners(self) -> dict[str, str]: ...
     def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo: ...
@@ -2646,20 +2647,21 @@ class SqliteStore:
         return found
 
     def find_projects(self, term: str) -> list[ProjectInfo]:
-        """The live projects ``term`` names: the one whose codename it is; else the one that
-        gave that codename up at a rename (``project_codename_alias``); else an id prefix or
-        a directory name; and only when none of those match, a nickname (exactly, case and
-        all).
+        """The live projects ``term`` names: the one whose codename it is; else every one it
+        names as an id prefix, a directory name or a codename given up at a rename
+        (``project_codename_alias``); and only when none of those match, a nickname (exactly,
+        case and all).
 
         The codename first: it is unique, and it is what every printed ``--project`` says
-        (``services.project.fleet_command``). A codename given up comes next, before a
-        folder: the project's live agents were given ``--project earnest-hawk`` in their
-        start packs and prompts, and only a project that holds ``earnest-hawk`` NOW outranks
-        it. After the folders, it lost to a checkout added since under that name — or two —
-        and an agent's ``fleet stop --project earnest-hawk`` stopped another project's
-        agent, or was refused as ambiguous (task #6, reopened). A rename never takes another
-        project's folder name as its codename (``services.fleet.follow_name``), so neither
-        rule takes a folder reference that already worked. The nickname comes last so that
+        (``services.project.fleet_command``); a project that holds a codename NOW is the one
+        it names. A codename given up stands with the folders and the id prefixes: its
+        project's live agents were given ``--project earnest-hawk``, and a checkout added
+        since in ``…/earnest-hawk`` makes it name two, refused as ambiguous with both named
+        — never moved to either without a word (task #6, reopened). Asked after the folders,
+        it went to the checkout, and an agent's ``fleet stop --project earnest-hawk``
+        stopped another project's agent. A rename never takes another project's folder name
+        or old codename as its own (``services.fleet.follow_name``), so a reference that
+        worked before a rename keeps naming what it named. The nickname comes last so that
         one a person types never takes a reference that already worked: a nickname spelled
         like another project's codename or folder leaves that one found, rather than both
         refused as ambiguous.
@@ -2670,16 +2672,11 @@ class SqliteStore:
         ).fetchall()
         if not rows:
             rows = self._conn.execute(
-                f"SELECT {_PROJECT_COLUMNS} FROM project WHERE forgotten_at IS NULL AND id IN "
-                "(SELECT project_id FROM project_codename_alias WHERE codename = ?)",
-                (term,),
-            ).fetchall()
-        if not rows:
-            rows = self._conn.execute(
                 f"SELECT {_PROJECT_COLUMNS} FROM project "
-                "WHERE forgotten_at IS NULL AND (id GLOB ? OR name = ?) "
+                "WHERE forgotten_at IS NULL AND (id GLOB ? OR name = ? OR id IN "
+                "(SELECT project_id FROM project_codename_alias WHERE codename = ?)) "
                 "ORDER BY name",
-                (_glob_prefix(term), term),
+                (_glob_prefix(term), term, term),
             ).fetchall()
         if not rows:
             rows = self._conn.execute(
@@ -4644,6 +4641,17 @@ class SqliteStore:
             "SELECT name FROM project WHERE forgotten_at IS NULL AND id != ?", (project_id,)
         ).fetchall()
         return {str(row["name"]) for row in rows}
+
+    def aliases_in_use(self, project_id: str) -> set[str]:
+        """The codenames every live project but ``project_id`` gave up at a rename: what
+        :meth:`find_projects` still finds those projects by, so a codename that is one of
+        them would make that reference name two projects."""
+        rows = self._conn.execute(
+            "SELECT a.codename FROM project_codename_alias a JOIN project p "
+            "ON p.id = a.project_id WHERE p.forgotten_at IS NULL AND a.project_id != ?",
+            (project_id,),
+        ).fetchall()
+        return {str(row["codename"]) for row in rows}
 
     def codename_aliases(self, project_id: str) -> list[str]:
         """The codenames ``project_id`` gave up that no project holds now, newest first: its

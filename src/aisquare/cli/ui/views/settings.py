@@ -244,12 +244,14 @@ class SettingsView(VerticalScroll):
         wanted = self.query_one("#nickname", Input).value.strip()
         project = self.project
 
-        def rename() -> tuple[ProjectInfo, list[str]]:
+        def rename() -> tuple[ProjectInfo, list[str], bool]:
             notes: list[str] = []
+            before = project.codename
             renamed = fleet_service.rename_project(
                 project, wanted or None, notes=notes, follow_unchanged=False
             )
-            return renamed, notes
+            works = bool(before) and fleet_service.old_codename_works(renamed.id, before or "")
+            return renamed, notes, works
 
         self.run_worker(
             rename,
@@ -281,7 +283,7 @@ class SettingsView(VerticalScroll):
         result = event.worker.result
         if not isinstance(result, tuple):
             return
-        updated, notes = result
+        updated, notes, old_works = result
         if not isinstance(updated, ProjectInfo):
             return
         before = self.project.codename
@@ -297,7 +299,12 @@ class SettingsView(VerticalScroll):
         if updated.codename:
             said += f" · fleet codename {updated.codename}"
             if before and before != updated.codename:
-                said += f" (was {before}; --project {before} still works)"
+                said += (
+                    f" (was {before}; --project {before} still works)"
+                    if old_works
+                    else f" (was {before}; --project {before} names another project too: use "
+                    f"--project {updated.codename})"
+                )
         self.notify(said, timeout=6, markup=False)
         for note in notes:
             self.notify(note, severity="warning", timeout=10, markup=False)

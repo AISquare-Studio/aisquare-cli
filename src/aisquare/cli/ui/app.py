@@ -277,6 +277,8 @@ class _CodenameFollowed:
     """The project as the store has it now."""
     notes: list[str]
     """What :func:`fleet.follow_name` could not do, or chose: a suffix, a name that gives none."""
+    old_works: bool = True
+    """Whether ``--project <before>`` names this project alone now (``old_codename_works``)."""
 
 
 _QUIT_POLL = 0.1
@@ -2391,7 +2393,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         def follow() -> _CodenameFollowed:
             notes: list[str] = []
             after = fleet_service.follow_name(project, notes=notes)
-            return _CodenameFollowed(before, after, notes)
+            works = bool(before) and fleet_service.old_codename_works(after.id, before or "")
+            return _CodenameFollowed(before, after, notes, works)
 
         self.run_worker(
             follow,
@@ -2418,11 +2421,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         after = result.after
         if after.codename is not None and after.codename != result.before:
-            was = (
-                f" — was {result.before}, and --project {result.before} still works"
-                if result.before
-                else ""
-            )
+            was = ""
+            if result.before:
+                was = (
+                    f" — was {result.before}, and --project {result.before} still works"
+                    if result.old_works
+                    else f" — was {result.before}; --project {result.before} names another "
+                    f"project too, so use --project {after.codename}"
+                )
             self.notify(
                 f"✓ {project_service.display_name(after)} · fleet codename {after.codename} "
                 f"(tmux {fleet_service.session_name(after.codename)}){was}",

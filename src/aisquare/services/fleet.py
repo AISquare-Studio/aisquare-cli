@@ -11104,12 +11104,15 @@ def follow_name(project: ProjectInfo, *, notes: list[str] | None = None) -> Proj
                 )
             return current
         folders = store.folder_names_in_use(project.id)
+        retired = store.aliases_in_use(project.id)
+        standing = _standing_codenames(store, project.id)
         for _ in range(_CODENAME_RETRIES):
             # Its own codename read again each time round: another rename of it may have
             # written one since, and that one is this project's to keep, not taken.
             row = store.get_project(project.id)
             own = row.codename if row is not None else None
-            taken = (store.codenames_in_use() | folders) - ({own} if own else set())
+            taken = store.codenames_in_use() | folders | retired | standing
+            taken -= {own} if own else set()
             codename = codenames.first_free(wanted, taken)
             if codename == own:
                 return row or current
@@ -11136,8 +11139,50 @@ def follow_name(project: ProjectInfo, *, notes: list[str] | None = None) -> Proj
                 f"{wanted} is another project's folder name (`--project {wanted}` names it), "
                 f"so this project's codename is {codename}"
             )
+        elif wanted in retired:
+            notes.append(
+                f"{wanted} is a codename another project had (`--project {wanted}` still "
+                f"names it), so this project's is {codename}"
+            )
+        elif wanted in standing:
+            notes.append(
+                f"a tmux session {session_name(wanted)} is already running, and it is not this "
+                f"project's, so this project's codename is {codename}"
+            )
     _codename_changed(updated, old, notes)
     return updated
+
+
+def _standing_codenames(store: ContextStore, project_id: str) -> set[str]:
+    """The codenames ``asq-`` sessions on the project's servers already use and the project
+    does not: a stray one (a forgotten project's, one made by hand) would hold the name a
+    rename gives, and the project's own session could not be renamed onto it. Asked of every
+    server one of the project's rows lives on and today's, by the lenient listing: a server
+    that cannot be asked names nothing, and the rename's tmux half says what it could not do.
+    """
+    config = settings()
+    rows = store.fleet_agents(project_id, live_only=False)
+    row = store.get_project(project_id, include_forgotten=True)
+    own = {*(store.codename_aliases(project_id)), *([row.codename] if row and row.codename else [])}
+    addresses = {_address(agent, config) for agent in rows} | {_Address(config.tmux_socket)}
+    standing: set[str] = set()
+    for address in addresses:
+        try:
+            names = _server_at(address, config).list_sessions()
+        except (TmuxError, OSError):
+            continue
+        standing.update(
+            name.removeprefix(SESSION_PREFIX) for name in names if name.startswith(SESSION_PREFIX)
+        )
+    return standing - own
+
+
+def old_codename_works(project_id: str, old: str) -> bool:
+    """Whether ``--project <old>`` names ``project_id`` alone now: what a rename's note, the
+    CLI's line and the toast say only when it is so (task #6, reopened). A folder of that
+    name added since makes it name two, and they say which reference to use instead."""
+    with store_session() as store:
+        return [p.id for p in store.find_projects(old)] == [project_id]
 
 
 def rename_project(
@@ -11250,7 +11295,11 @@ def _codename_changed(updated: ProjectInfo, old: str | None, notes: list[str] | 
                         "is already the new one). `fleet ls`, `tell`, `stop` and `reap` are "
                         "unaffected — they address panes by id"
                     )
-    text = f"project renamed: {old} → {updated.codename}; --project {old} still works"
+    text = f"project renamed: {old} → {updated.codename}; " + (
+        f"--project {old} still works"
+        if old_codename_works(updated.id, old)
+        else f"use --project {updated.codename} (--project {old} names another project too)"
+    )
     for board in sorted(boards):
         # One board's failure is that board's: the rest are still told (review of #456, 7).
         try:

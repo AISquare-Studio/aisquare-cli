@@ -73,6 +73,9 @@ class SessionsOnly(TmuxServer):
     def has_session(self, name: str) -> bool:
         return name in self.sessions
 
+    def list_sessions(self) -> list[str]:
+        return sorted(self.sessions)
+
     def rename_session(self, old: str, new: str) -> None:
         self.sessions.discard(old)
         self.sessions.add(new)

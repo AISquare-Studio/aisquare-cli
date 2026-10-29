@@ -1474,7 +1474,7 @@ def test_settings_saves_a_nickname_and_a_blank_one_clears_it(
     from aisquare.core.store import store_session
     from tests.fleet_fakes import tmux_sessions_as
 
-    sessions = tmux_sessions_as(monkeypatch, {"asq-auth-wip"})
+    sessions = tmux_sessions_as(monkeypatch)
     renamed: list[str] = []
 
     async def scenario(pilot: Pilot[None], host: Host) -> list[object]:
@@ -1500,6 +1500,7 @@ def test_settings_saves_a_nickname_and_a_blank_one_clears_it(
         seen.append(field.value)
         seen.append(shown(host.query_one("#settings-title", Static)))
         seen.append(shown(host.query_one("#fleet-id", Static)))
+        sessions.sessions.add("asq-auth-wip")  # an agent started under the new codename
         field.value = ""
         host.query_one("#save-nickname", Button).press()
         await settle(pilot)

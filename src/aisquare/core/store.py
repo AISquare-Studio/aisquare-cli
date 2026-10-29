@@ -2646,22 +2646,23 @@ class SqliteStore:
         return found
 
     def find_projects(self, term: str) -> list[ProjectInfo]:
-        """The live projects ``term`` names: the one whose codename it is; else an id prefix
-        or a directory name; when none of those match, a codename the project gave up
-        (``project_codename_alias``); and only when none of those match, a nickname
-        (exactly, case and all).
+        """The live projects ``term`` names: the one whose codename it is; else the one that
+        gave that codename up at a rename (``project_codename_alias``); else an id prefix or
+        a directory name; and only when none of those match, a nickname (exactly, case and
+        all).
 
         The codename first: it is unique, and it is what every printed ``--project`` says
-        (``services.project.fleet_command``). A project renamed takes its name's slug, and
-        one renamed "AISquare CLI" is ``aisquare-cli``, the folder of every other checkout of
-        that repository; matched with them, the hint printed for it named several projects
-        and was refused. The nickname comes last so that one a person types never takes a
-        reference that already worked: a nickname spelled like another project's codename or
-        folder leaves that one found, rather than both refused as ambiguous. A codename given
-        up comes after the current ones for the same reason: a project that holds it now is
-        the one it names, and the one that held it before is found by it only while no other
-        does — a live agent's ``--project earnest-hawk``, written before its project was
-        renamed, still reaches it.
+        (``services.project.fleet_command``). A codename given up comes next, before a
+        folder: the project's live agents were given ``--project earnest-hawk`` in their
+        start packs and prompts, and only a project that holds ``earnest-hawk`` NOW outranks
+        it. After the folders, it lost to a checkout added since under that name — or two —
+        and an agent's ``fleet stop --project earnest-hawk`` stopped another project's
+        agent, or was refused as ambiguous (task #6, reopened). A rename never takes another
+        project's folder name as its codename (``services.fleet.follow_name``), so neither
+        rule takes a folder reference that already worked. The nickname comes last so that
+        one a person types never takes a reference that already worked: a nickname spelled
+        like another project's codename or folder leaves that one found, rather than both
+        refused as ambiguous.
         """
         rows = self._conn.execute(
             f"SELECT {_PROJECT_COLUMNS} FROM project WHERE forgotten_at IS NULL AND codename = ?",
@@ -2669,16 +2670,16 @@ class SqliteStore:
         ).fetchall()
         if not rows:
             rows = self._conn.execute(
+                f"SELECT {_PROJECT_COLUMNS} FROM project WHERE forgotten_at IS NULL AND id IN "
+                "(SELECT project_id FROM project_codename_alias WHERE codename = ?)",
+                (term,),
+            ).fetchall()
+        if not rows:
+            rows = self._conn.execute(
                 f"SELECT {_PROJECT_COLUMNS} FROM project "
                 "WHERE forgotten_at IS NULL AND (id GLOB ? OR name = ?) "
                 "ORDER BY name",
                 (_glob_prefix(term), term),
-            ).fetchall()
-        if not rows:
-            rows = self._conn.execute(
-                f"SELECT {_PROJECT_COLUMNS} FROM project WHERE forgotten_at IS NULL AND id IN "
-                "(SELECT project_id FROM project_codename_alias WHERE codename = ?)",
-                (term,),
             ).fetchall()
         if not rows:
             rows = self._conn.execute(

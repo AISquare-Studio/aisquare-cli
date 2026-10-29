@@ -11141,15 +11141,29 @@ def follow_name(project: ProjectInfo, *, notes: list[str] | None = None) -> Proj
 
 
 def rename_project(
-    project: ProjectInfo, nickname: str | None, *, notes: list[str] | None = None
+    project: ProjectInfo,
+    nickname: str | None,
+    *,
+    notes: list[str] | None = None,
+    follow_unchanged: bool = True,
 ) -> ProjectInfo:
     """A project renamed, both halves: its nickname (:func:`project_service.set_nickname`,
     whose ``ValueError`` and ``KeyError`` come through as they are, nothing written), then
     its codename and tmux session (:func:`follow_name`). The second fails open: the
     nickname is saved, and ``notes`` says why the codename is not what the name gives.
     ``project rename`` and the Settings tab; a card runs the halves apart, the second in a
-    worker."""
+    worker.
+
+    Without ``follow_unchanged``, a save that leaves the name as it was is no rename, and
+    the codename is left alone: the Settings tab's Save always writes, and saved unchanged it
+    put the slug back over a codename ``fleet rename`` had set (task #6, reopened). ``project
+    rename`` keeps it: typing the name a project already has is how one nicknamed before
+    0.9.2 takes the codename it gives."""
+    with store_session() as store:
+        before = store.get_project(project.id)
     renamed = project_service.set_nickname(project, nickname)
+    if not follow_unchanged and before is not None and before.nickname == renamed.nickname:
+        return renamed
     try:
         return follow_name(renamed, notes=notes)
     except FleetError as exc:

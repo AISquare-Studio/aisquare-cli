@@ -246,7 +246,10 @@ class SettingsView(VerticalScroll):
 
         def rename() -> tuple[ProjectInfo, list[str]]:
             notes: list[str] = []
-            return fleet_service.rename_project(project, wanted or None, notes=notes), notes
+            renamed = fleet_service.rename_project(
+                project, wanted or None, notes=notes, follow_unchanged=False
+            )
+            return renamed, notes
 
         self.run_worker(
             rename,

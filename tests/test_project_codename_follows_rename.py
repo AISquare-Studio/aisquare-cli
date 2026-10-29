@@ -671,3 +671,55 @@ def test_one_board_that_cannot_be_told_does_not_keep_the_others_from_the_note(
     assert notes == [
         f"board {project.id} could not be told of the new codename (database is locked)"
     ]
+
+
+# --- task #6 reopened: an old codename against a folder of that name -----------------------
+
+
+def test_an_old_codename_outranks_a_folder_of_that_name_added_since(
+    tmux: FakeTmux, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Only a project that holds a codename NOW outranks one that gave it up. Looked up after
+    the folders, ``--project otherproj`` reached a checkout added since in ``.../otherproj``,
+    and the renamed project's live agents (``fleet stop --project otherproj``) acted on it."""
+    fleet_service.ensure_codename(project)
+    fleet_service.rename(project, "otherproj")
+    fleet_service.rename_project(project, "Fleet Probe")
+    added_since = _repo(tmp_path, "elsewhere/otherproj")
+    assert fleet_service.ensure_codename(added_since).codename != "otherproj"
+    assert project_service.resolve("otherproj").id == project.id
+    assert fleet_service.resolve_project("otherproj").id == project.id
+    assert project_service.resolve(str(added_since.root)).id == added_since.id
+
+
+def test_an_old_codename_beside_two_checkouts_of_that_name_is_not_ambiguous(
+    tmux: FakeTmux, tmp_path: Path
+) -> None:
+    """The owner's ws1..ws7 layout: ws2 named ``dupcli`` before ws1 was added, then renamed.
+    Its board was told ``--project dupcli still works``, and it does — not "matches several
+    projects"."""
+    ws2 = _repo(tmp_path, "ws2/dupcli")
+    assert fleet_service.rename_project(ws2, "DupCLI").codename == "dupcli"
+    _repo(tmp_path, "ws1/dupcli")
+    notes: list[str] = []
+    assert fleet_service.rename_project(ws2, "Release work", notes=notes).codename == (
+        "release-work"
+    )
+    assert _renamed_notes(ws2)[-1] == (
+        "project renamed: dupcli → release-work; --project dupcli still works"
+    )
+    assert project_service.resolve("dupcli").id == ws2.id
+    assert fleet_service.resolve_project("dupcli").id == ws2.id
+
+
+def test_a_settings_save_of_the_same_name_leaves_a_chosen_codename_alone(
+    tmux: FakeTmux, project: ProjectInfo
+) -> None:
+    """The Settings tab's Save always writes; saved unchanged, it put the slug back over a
+    codename ``fleet rename`` had set. ``project rename`` with the same name still re-derives
+    it: that is how a project nicknamed before this release takes its name's codename."""
+    fleet_service.rename_project(project, "Payments")
+    fleet_service.rename(project, "quiet-lynx")
+    kept = fleet_service.rename_project(project, "Payments", follow_unchanged=False)
+    assert kept.codename == "quiet-lynx" == _codename(project)
+    assert fleet_service.rename_project(project, "Payments").codename == "payments"

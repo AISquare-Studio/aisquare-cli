@@ -764,6 +764,29 @@ def test_a_codex_connected_to_its_daemon_is_named_whatever_its_words_say(
     assert "quit it first" in _refused(7601)
 
 
+def test_adopt_run_from_a_shell_the_daemon_runs_still_counts_the_daemon(
+    codex_daemon: DaemonTable, daemon_sockets: dict[int, set[int]]
+) -> None:
+    """r32's question, measured on 0.164.0: the daemon runs the shell commands of every TUI
+    on it (``zsh -c …`` a child of the ``--managed-daemon`` process, whose parent was the TUI
+    that had started it). adopt dropped its own ancestors, so run from such a shell it dropped
+    the daemon and that TUI and took a thread the daemon held (live: adoptable). The daemon
+    and those above it are never this command's own: with no client running, the daemon is
+    named, with its note and stop; with the TUI that started it connected, that TUI."""
+    processes, _holds = codex_daemon
+    me = os.getpid()
+    processes.append((8800, 13090, "/bin/zsh -c aisquare fleet adopt"))
+    processes.append((me, 8800, f"python -m aisquare fleet adopt {THREAD}"))
+
+    _says_the_daemon(_refused(13090))
+
+    processes[0] = (13090, 7001, CODEX_DAEMON)  # the TUI that started it, still running
+    processes.append((7000, 1, "node /usr/local/bin/codex"))
+    processes.append((7001, 7000, CODEX_NATIVE))
+    daemon_sockets[13090] = {7001}
+    assert "quit it first" in _refused(7001)
+
+
 def test_a_codex_tui_of_another_home_is_never_named_as_this_daemons_client(
     codex_daemon: DaemonTable, daemon_sockets: dict[int, set[int]]
 ) -> None:

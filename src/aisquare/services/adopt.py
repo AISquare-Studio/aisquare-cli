@@ -26,9 +26,11 @@ for minutes after it quit, holds it too (Codex resumes no thread it has open): a
 Codex's that runs is named before it, told by what it runs and never by a word in its
 arguments, and the refusal of the daemon itself says how it lets go
 (``AgentTranscript.server_note``). Its process that holds nothing is never named, nor as its
-client a Codex that runs embedded or a fleet agent, which is none. A stale entry
-whose pid was reused can only make it refuse, which is the safe way to be wrong; a process
-table that cannot be read says nothing, as a registry that cannot be read does.
+client a Codex that runs embedded or a fleet agent, which is none. This command's own
+process and those above it hold nothing, short of that daemon, which runs the commands of
+every TUI attached to it (adopt run from such a shell sees it and its other clients). A
+stale entry whose pid was reused can only make it refuse, which is the safe way to be wrong;
+a process table that cannot be read says nothing, as a registry that cannot be read does.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -143,15 +145,36 @@ def _process_args() -> list[Process]:
     return listed
 
 
-def _ancestors(processes: Sequence[Process], pid: int) -> set[int]:
-    """``pid`` and every process above it: the shell and the agent that run this command are
-    no holder of the session it adopts (review of #370)."""
-    parents = {child: parent for child, parent, _args in processes}
+def _ancestors(
+    processes: Sequence[Process], pid: int, *, until: Callable[[str], bool] | None = None
+) -> set[int]:
+    """``pid`` and every process above it, up to and never including one whose arguments
+    ``until`` stops at: the shell and the agent that run this command are no holder of the
+    session it adopts (review of #370)."""
+    parents = {child: (parent, args) for child, parent, args in processes}
     seen: set[int] = set()
     while pid and pid not in seen:
+        parent, args = parents.get(pid, (0, ""))
+        if until is not None and until(args):
+            break
         seen.add(pid)
-        pid = parents.get(pid, 0)
+        pid = parent
     return seen
+
+
+def _serves(args: str) -> bool:
+    """Whether the process run with ``args`` holds what it has open for the clients it serves
+    (an agent's ``AgentTranscript.held_open`` says ``clients``: Codex's managed app-server
+    daemon). Such a process runs the commands of every client attached to it, measured on
+    0.164.0 (r32's question): a shell command of a TUI's on the daemon was a child of the
+    daemon, whose parent was the TUI that had started it, another TUI. So it and those above
+    it are never this command's own (:func:`_ancestors`): from such a shell, the daemon's hold
+    and its other clients were dropped, and a thread it held read as free."""
+    words = args.split()
+    return any(
+        reader is not None and reader.held_open(words) == "clients"
+        for reader in (each.transcript_reader for each in adapters())
+    )
 
 
 def _fleet_panes() -> set[int]:
@@ -173,8 +196,9 @@ def _fleet_panes() -> set[int]:
 
 class _Holders:
     """Who holds a conversation, read once for a listing: the registries, the processes this
-    command does not run under, and, for an agent whose writer holds its transcript open, what
-    that agent's processes hold (one read of the process table, asked of the first such
+    command does not run under (a daemon it runs under, and those above it, still counting:
+    :func:`_serves`), and, for an agent whose writer holds its transcript open, what that
+    agent's processes hold (one read of the process table, asked of the first such
     conversation only)."""
 
     def __init__(
@@ -182,7 +206,7 @@ class _Holders:
     ) -> None:
         self._registry = _registry_holders(accounts)
         listed = _process_args() if processes is None else processes
-        mine = _ancestors(listed, os.getpid())
+        mine = _ancestors(listed, os.getpid(), until=_serves)
         self._listed = listed
         self._others = [(pid, args.split()) for pid, _parent, args in listed if pid not in mine]
         self._open: dict[str, tuple[list[tuple[int, HoldsOpen]], frozenset[str] | None]] = {}
@@ -284,7 +308,9 @@ def holder(
     """The pid of a live process holding the conversation ``session_id`` (``agent``'s own
     id for it), or ``None``: the registry first, then a process of any agent's whose
     arguments name it (``AgentAdapter.adoptable``), then one of ``agent``'s that holds its
-    transcript open where its writer does; never this command's own process or one above it."""
+    transcript open where its writer does; never this command's own process or one above it,
+    short of a daemon that serves clients (:func:`_serves`), which runs every client's
+    commands."""
     adapter = recorded_adapter(agent) or default_adapter()
     return _Holders(accounts, processes).of(session_id, transcript, adapter)
 

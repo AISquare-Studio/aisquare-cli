@@ -92,9 +92,10 @@ def test_off_by_default_only_twins_show_their_directory(tmp_path: Path) -> None:
 
     always, lines = drive(go)
     assert always is False
+    # Each twin's codename after its directory: neither is the one its name gives (`api`).
     assert lines == {
-        "prj_w": _directory(tmp_path, "work/api"),
-        "prj_o": _directory(tmp_path, "oss/api"),
+        "prj_w": _directory(tmp_path, "work/api") + " · amber-otter",
+        "prj_o": _directory(tmp_path, "oss/api") + " · ruby-fox",
         "prj_u": None,
     }
 

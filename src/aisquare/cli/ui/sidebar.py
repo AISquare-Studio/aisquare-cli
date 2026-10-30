@@ -2,8 +2,9 @@
 
 docs/plans/fleet-tui.md §4.1. One ``ProjectCard`` per registered project, each
 with a disclosure, its name (the nickname, else the basename — renamed in place),
-chips (agents alive · 🔔 count), a ⋯ menu, and — when two projects share a name —
-the path as a dim subtitle; under it one ``AgentRow`` per fleet agent (role icon,
+chips (agents alive · 🔔 count), a ⋯ menu, and a dim subtitle — the path when two projects
+share a name, and the fleet codename when it is not the one the name gives
+(:func:`project_subtitle`); under it one ``AgentRow`` per fleet agent (role icon,
 label, state chip, exit status). Above the projects, one *actions* block under the Fleet
 header — *▶ Start captain* (the captain's own row while one is live) and *Spawn agent*, whose
 dialog asks which project — and under the separator, one
@@ -62,6 +63,7 @@ from aisquare.cli.ui.groups import (
     UndoLayout,
 )
 from aisquare.cli.ui.terminal import InPlaceField
+from aisquare.core import codenames
 from aisquare.models import (
     FleetAgent,
     FleetAgentStatus,
@@ -277,12 +279,44 @@ def short_path(path: Path, home: Path | None = None) -> str:
         return str(path)
 
 
+def codename_aside(project: ProjectInfo) -> str | None:
+    """The project's fleet codename when it is not the one its name gives
+    (:func:`codenames.codename_from_text` of :func:`project_name`), else ``None``.
+
+    A manager or a captain names a project by its codename (``--project earnest-hawk``), and
+    one never renamed has a generated one (``earnest-hawk``) its card does not otherwise
+    say; so does one set with ``fleet rename``, or one suffixed because another project
+    held the name's (``aisquare-cli-2``). One its name gives is said by the name itself."""
+    codename = project.codename
+    if codename is None or codename == codenames.codename_from_text(project_name(project)):
+        return None
+    return codename
+
+
 def project_subtitle(project: ProjectInfo, names: Counter[str], *, always: bool) -> str | None:
     """The dim line under a card's name: the project's directory (:func:`short_path`) when
     ``always`` — ``[ui] always_show_project_path`` — or when another listed project shares
-    its name (``names`` counts the listed projects by :func:`project_name`); ``None``, no
-    line, otherwise."""
-    return short_path(project.root) if always or names[project_name(project)] > 1 else None
+    its name (``names`` counts the listed projects by :func:`project_name`); then
+    `` · <codename>`` when its codename is not the one its name gives
+    (:func:`codename_aside`); ``None``, no line, when neither is said."""
+    path = short_path(project.root) if always or names[project_name(project)] > 1 else None
+    aside = codename_aside(project)
+    if aside is None:
+        return path
+    return f"{path} · {aside}" if path else f"· {aside}"
+
+
+def project_title_tooltip(project: ProjectInfo) -> str:
+    """The card name's tooltip: its fleet codename, whether the card says it or not, with the
+    tmux session it names, then the gestures."""
+    gestures = "double-click or F2 to rename · right-click or . for the menu"
+    codename = project.codename
+    if codename is None:
+        return f"no fleet codename yet (the first agent gives it one) · {gestures}"
+    return (
+        f"fleet codename {codename} (tmux {fleet_service.session_name(codename)}, "
+        f"--project {codename}) · {gestures}"
+    )
 
 
 def ordered_agents(statuses: Iterable[FleetAgentStatus]) -> list[FleetAgentStatus]:
@@ -403,9 +437,10 @@ def relabel_preview(typed: str, agent: FleetAgent, taken: Collection[str] = ()) 
 def project_title_text(project: ProjectInfo) -> Text:
     """``🗂 Auth rewrite`` — the name a person gave it (else the folder's), and nothing else.
 
-    The codename is not shown: it names the tmux session and the branches, and a
-    nickname says what the project is. The chips are their own widget
-    (:func:`project_chips_text`), so a long name is cut before them, not them.
+    The codename is not on this line: a rename gives the project the codename its name
+    gives, and one that is not is said under it (:func:`project_subtitle`) and in the
+    title's tooltip. The chips are their own widget (:func:`project_chips_text`), so a long
+    name is cut before them, not them.
     """
     return Text(f"🗂 {project_name(project)}", no_wrap=True, overflow="ellipsis")
 
@@ -773,7 +808,7 @@ class ProjectTitle(DragHandle):
         super().__init__(project_title_text(project))
         self.project_id = project.id
         self.selection_key = f"project:{project.id}"
-        self.tooltip = "double-click or F2 to rename · right-click or . for the menu"
+        self.tooltip = project_title_tooltip(project)
 
     def message(self) -> Message:
         return ProjectSelected(self.project_id)
@@ -1328,7 +1363,9 @@ class ProjectCard(Vertical):
         if painting == self._painted:
             return
         try:
-            self.query_one(ProjectTitle).update(project_title_text(project))
+            title = self.query_one(ProjectTitle)
+            title.update(project_title_text(project))
+            title.tooltip = project_title_tooltip(project)
             self.query_one(CardChips).update(project_chips_text(project, statuses))
             holder = self.query_one("#agents", Vertical)
         except NoMatches:  # composing right now — compose reads the fields

@@ -14669,10 +14669,10 @@ def test_rename_says_what_a_swallowed_tmux_rename_cost(
     assert fleet_service.rename(project, "ruby-fox").codename == "ruby-fox"
 
 
-@pytest.mark.parametrize("bad", ["Amber-Otter", "amber_otter", "amber-otter-x"])
+@pytest.mark.parametrize("bad", ["Amber-Otter", "amber_otter", "amber.otter", "x" * 25])
 def test_rename_rejects_a_bad_shape(tmux: FakeTmux, project: ProjectInfo, bad: str) -> None:
     before = fleet_service.ensure_codename(project).codename
-    with pytest.raises(FleetError, match="adjective-animal"):
+    with pytest.raises(FleetError, match="lowercase letters and digits"):
         fleet_service.rename(project, bad)
     assert _codename(project) == before and tmux.renamed == []
 

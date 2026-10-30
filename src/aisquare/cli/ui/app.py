@@ -94,6 +94,7 @@ from aisquare.cli.ui.sidebar import (
     TIMES,
     AccountsSelected,
     AddProject,
+    AgentRow,
     AgentSelected,
     AppSettingsSelected,
     CaptainRequested,
@@ -102,6 +103,7 @@ from aisquare.cli.ui.sidebar import (
     ProjectCard,
     ProjectRenamed,
     ProjectSelected,
+    RenameAgent,
     RenameProject,
     ResizeSidebar,
     SettingsRow,
@@ -111,11 +113,18 @@ from aisquare.cli.ui.sidebar import (
     StopAgent,
     UpdateSelected,
     UsageStatsSelected,
+    ViewSelected,
     agent_name,
 )
 from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
 from aisquare.cli.ui.stop import StopAgentScreen
-from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane, log_paste
+from aisquare.cli.ui.terminal import (
+    EscapeToSidebar,
+    InPlaceField,
+    SelectionHost,
+    TerminalPane,
+    log_paste,
+)
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.update import (
@@ -248,9 +257,14 @@ HEADROOM_SECONDS = 60.0
 goes to the network only for an account whose cached usage is over five minutes old."""
 PROJECT_REMOVE_WORKER = "project-remove"
 """The thread worker a card's *Remove from fleet…* forgets its project on (``project forget``)."""
+PROJECT_CODENAME_WORKER = "project-codename"
+"""The thread worker a card's rename gives the project its new codename and renames its tmux
+session on (``services.fleet.follow_name``), once the nickname is written."""
 PROJECT_FRESH_WORKER = "project-fresh"
 """The thread worker *Start fresh…* clears a project's board and fleet on (``project fresh``),
 one a project at a time (:func:`_fresh_group`)."""
+AGENT_RENAME_WORKER = "agent-relabel"
+"""The thread worker an agent row's name field renames its agent on (``fleet relabel``)."""
 TOAST_PLACES = 3
 """The places a refusal's toast names before it counts the rest: at 80x24 a longer list
 pushed the toast's title and what to do off the screen."""
@@ -262,6 +276,20 @@ dialog opens again on what the run found (``FleetApp._project_freshened``)."""
 def _fresh_group(project_id: str) -> str:
     """The worker group of a project's Start fresh: one run of it at a time."""
     return f"{PROJECT_FRESH_WORKER}:{project_id}"
+
+
+@dataclass(frozen=True)
+class _CodenameFollowed:
+    """What a card's rename did to the codename (:data:`PROJECT_CODENAME_WORKER`)."""
+
+    before: str | None
+    """The codename the project had when its nickname was written."""
+    after: ProjectInfo
+    """The project as the store has it now."""
+    notes: list[str]
+    """What :func:`fleet.follow_name` could not do, or chose: a suffix, a name that gives none."""
+    old_works: bool = True
+    """Whether ``--project <before>`` names this project alone now (``old_codename_works``)."""
 
 
 _QUIT_POLL = 0.1
@@ -575,15 +603,23 @@ class HelpScreen(ModalScreen[None]):
         text.append("aisquare fleet — keys\n\n", style="bold")
         for key, what in (
             ("click", "select a project or an agent; ⚙ Settings; + onboards a project"),
-            ("↑ ↓ Enter", "move over the sidebar and open the row under the cursor"),
+            # One highlight, the click's and the arrows'; passing over +, Spawn agent, Start
+            # captain, ⬆ or a group header acts on nothing.
+            ("↑ ↓", "move the highlight, opening a project, agent or Settings"),
+            ("Enter", "click the highlighted row; the arrows only open views"),
             # Arranging the sidebar (#140): every one of these has a CLI twin.
-            ("shift+↑ ↓", "move the row under the cursor one place"),
-            ("g p space", "group · pin · fold the row under the cursor"),
+            ("shift+↑ ↓", "move the highlighted row one place"),
+            ("g p space", "group · pin · fold the highlighted row"),
             ("u", "undo the last arrangement; a toast says what"),
-            ("m", "mark the card under the cursor, as shift+click does"),
+            ("m", "mark the highlighted card, as shift+click does"),
             ("shift+g", "group the marked cards; Esc clears the marks"),
             ("drag title", "move a card or a group header to a new place"),
             ("F2 dblclick", "rename the card in place: Enter or a click away saves, Esc cancels"),
+            (
+                "F2 dblclick",
+                "on an agent's row, rename the agent (its label and tmux window); not the "
+                "manager's or the captain's",
+            ),
             (
                 ". ⋯ r-click",
                 "the card's menu: rename, pin, settings, start fresh, remove from the fleet",
@@ -1110,6 +1146,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         are never listed, whatever ``show_captured`` says, and ``a`` is no key."""
         self._undo: list[project_groups.UndoEntry] = []
         """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
+        self._relabels: dict[Worker[Any], RenameAgent] = {}
+        """Each agent rename on its way (:data:`AGENT_RENAME_WORKER`), with what asked for it:
+        a refusal reopens that row's field with what was typed."""
         self._fresh_choices: dict[str, FreshChoice] = {}
         """Each project's last confirmed Start fresh, by id: what a reopened dialog ticks."""
         self._fresh_asked: dict[str, FreshChoice] = {}
@@ -1911,6 +1950,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.worker.name == PROJECT_FRESH_WORKER:
             self._project_freshened(event)
             return
+        if event.worker.name == PROJECT_CODENAME_WORKER:
+            self._codename_followed(event)
+            return
+        if event.worker.name == AGENT_RENAME_WORKER:
+            self._agent_renamed(event)
+            return
         if event.worker.name == FLEET_WORKER:
             self._fleet_read(event)
             return
@@ -2018,8 +2063,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     # --- selection → content ----------------------------------------------------------
 
-    async def _show(self, view_id: str, factory: Callable[[], Widget] | None = None) -> None:
-        """Switch the right pane to ``view_id``, building it with ``factory`` the first time."""
+    async def _show(
+        self, view_id: str, factory: Callable[[], Widget] | None = None, *, counted: bool = True
+    ) -> None:
+        """Switch the right pane to ``view_id``, building it with ``factory`` the first time.
+
+        ``counted``: a use of the view for the feature counts. Not one the sidebar's arrows
+        open on their way past its row — browsing ten rows is not ten uses (#77).
+        """
         switcher = self.content
         try:
             switcher.get_child_by_id(view_id)
@@ -2029,21 +2080,65 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             await switcher.add_content(factory(), set_current=True)
         else:
             switcher.current = view_id
-        feature_use.record(view_feature(view_id))
+        if counted:
+            feature_use.record(view_feature(view_id))
         self.call_after_refresh(self._maybe_ask_sharing)  # once, after onboarding: see there
 
     async def on_add_project(self, event: AddProject) -> None:
         await self._show("onboard", lambda: OnboardView(id="onboard"))
         self.sidebar.select(None)
 
+    def _moved_on(self, event: ViewSelected, key: str) -> bool:
+        """Whether the sidebar's highlight has left the row that posted ``event`` since it did.
+
+        The arrows (or a click) went on to another row, whose own message is queued behind
+        this one. Opened now, this row's view would be built for nothing — an agent's pane
+        attaches — and shown under a highlight that is on another row.
+        """
+        return event.from_row and self.sidebar.selected_key != key
+
+    async def _open_row(
+        self,
+        key: str,
+        view_id: str,
+        factory: Callable[[], Widget] | None = None,
+        *,
+        browsing: bool = False,
+    ) -> bool:
+        """Show ``view_id`` and put the sidebar's highlight on ``key``'s row; ``False`` when,
+        while the view was being built, the highlight went to another row that opens a view.
+
+        Building a view awaits its mount, and a click (or an arrow) handled meanwhile puts the
+        highlight on its own row. Selecting ``key`` after the wait pulled the highlight back,
+        and a view row's message, queued behind this one, then found it gone and opened
+        nothing: the click was lost. That message opens its view next, so nothing more of
+        this one's is done. A row that opens no view (``+``, *Spawn agent*, a group header)
+        sends no message to follow: this view stays the one shown, so its open is finished —
+        the caller's Doctor scope and remembered selection — under the highlight the user put
+        elsewhere (the caller asks before handing anything the keyboard).
+
+        ``browsing``: the arrows opened it in passing, which the feature counts skip.
+        """
+        highlight = self.sidebar.selected_key
+        await self._show(view_id, factory, counted=not browsing)
+        if self.sidebar.selected_key == highlight:
+            self.sidebar.select(key)
+            return True
+        return not self.sidebar.highlight_opens_a_view()
+
     async def on_project_selected(self, event: ProjectSelected) -> None:
+        if self._moved_on(event, f"project:{event.project_id}"):
+            return
         project = self.snapshot.project(event.project_id) if self.snapshot else None
         if project is None:
             self.notify("that project is no longer listed", severity="warning", timeout=4)
             return
         view_id = f"project-{project.id}"
-        await self._show(view_id, lambda: self._project_view(project, view_id))
-        self.sidebar.select(f"project:{project.id}")
+        key = f"project:{project.id}"
+        if not await self._open_row(
+            key, view_id, lambda: self._project_view(project, view_id), browsing=event.browsing
+        ):
+            return
         self.doctor_scope = project.id
         self._remember_selection(f"project:{project.id}")
 
@@ -2059,16 +2154,26 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         return view
 
     async def on_agent_selected(self, event: AgentSelected) -> None:
+        """The agent's view, its pane taking the keyboard (#147) — not while the arrows pass
+        over its row (:attr:`ViewSelected.browsing`): there the next ↓ is the sidebar's."""
+        if self._moved_on(event, f"agent:{event.agent_id}"):
+            return
         status = self.snapshot.agent(event.project_id, event.agent_id) if self.snapshot else None
         if status is None:
             self.notify("that agent is no longer listed", severity="warning", timeout=4)
             return
         view_id = f"agent-{status.agent.id}"
-        await self._show(view_id, lambda: self._agent_view(status, view_id))
-        self.sidebar.select(f"agent:{status.agent.id}")
+        key = f"agent:{status.agent.id}"
+        if not await self._open_row(
+            key, view_id, lambda: self._agent_view(status, view_id), browsing=event.browsing
+        ):
+            return
         self.doctor_scope = self._doctor_scope_of(status.agent)
         self._remember_selection(f"agent:{event.project_id}/{status.agent.id}")
-        self._focus_pane(view_id)
+        if not event.browsing and self.sidebar.selected_key == key:
+            # Not when an arrow took the highlight elsewhere while the view was built: the
+            # user is on the sidebar's rows, and the next arrow would type into the pane.
+            self._focus_pane(view_id)
 
     def _doctor_scope_of(self, agent: FleetAgent) -> str | None:
         """The Doctor's scope for ``agent``: its project, or ``None`` (the global checks)
@@ -2154,7 +2259,18 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         pane = getattr(view, "pane", None)
         if isinstance(pane, TerminalPane):
-            self.call_after_refresh(pane.focus)
+            self.call_after_refresh(self._focus_unless_typing, pane)
+
+    def _focus_unless_typing(self, pane: TerminalPane) -> None:
+        """Focus ``pane`` — unless an in-place field holds the keys by then. A double-click's
+        second click lands while the first one's view is still being shown, and opens a
+        field over the agent's row (its rename): taken from it, the field closed unsaved, as
+        a blur closes it (validator of #455, minor 2)."""
+        if isinstance(self.focused, InPlaceField):
+            return
+        if any(row.renaming for row in self.sidebar.query(AgentRow)):
+            return
+        pane.focus()
 
     async def on_agent_restarted(self, event: AgentRestarted) -> None:
         """A restart minted a new row (#138): say so, and show it where the old one was — but
@@ -2337,11 +2453,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     # --- a card's name and menu ------------------------------------------------------------
 
     def on_rename_project(self, event: RenameProject) -> None:
-        """A card's name field was saved: write the nickname, as ``aisquare project rename``.
+        """A card's name field was saved: write the nickname, then the codename its name
+        gives, as ``aisquare project rename``.
 
-        On this thread, as every sidebar gesture's write is (:meth:`_layout`): one row,
-        and the card already says the new name. A refusal says why and reopens the
-        field with what was typed, to correct.
+        The nickname on this thread, as every sidebar gesture's write is (:meth:`_layout`):
+        one row, and the card already says the new name. A refusal says why and reopens the
+        field with what was typed, to correct. The codename and the tmux session in a
+        worker (:meth:`_follow_name`): it asks tmux and writes the boards, and the UI never
+        waits on either.
         """
         project = self.snapshot.project(event.project_id) if self.snapshot else None
         if project is None:
@@ -2359,6 +2478,113 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.sidebar.open_rename(project.id, event.typed)
             return
         self.post_message(ProjectRenamed(renamed))
+        self._follow_name(renamed)
+
+    def _follow_name(self, project: ProjectInfo) -> None:
+        """The codename half of a card's rename, off the UI thread (:func:`fleet.follow_name`);
+        :meth:`_codename_followed` says what it did. Per project and never ``exclusive``: a
+        cancelled worker's thread runs on regardless, and its answer would go unsaid."""
+        before = project.codename
+
+        def follow() -> _CodenameFollowed:
+            notes: list[str] = []
+            after = fleet_service.follow_name(project, notes=notes)
+            works = bool(before) and fleet_service.old_codename_works(after.id, before or "")
+            return _CodenameFollowed(before, after, notes, works)
+
+        self.run_worker(
+            follow,
+            name=PROJECT_CODENAME_WORKER,
+            group=f"{PROJECT_CODENAME_WORKER}:{project.id}",
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _codename_followed(self, event: Worker.StateChanged) -> None:
+        """A toast naming the codename a card's rename gave (and the old one that still
+        works), a warning for each note; a failure says the nickname stands and why the
+        codename did not follow it."""
+        if event.state is WorkerState.ERROR:
+            self.notify(
+                f"the name is saved, but the fleet codename was not changed: {event.worker.error}",
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
+            return
+        result = event.worker.result
+        if event.state is not WorkerState.SUCCESS or not isinstance(result, _CodenameFollowed):
+            return
+        after = result.after
+        if after.codename is not None and after.codename != result.before:
+            was = ""
+            if result.before:
+                was = (
+                    f" — was {result.before}, and --project {result.before} still works"
+                    if result.old_works
+                    else f" — was {result.before}; --project {result.before} names another "
+                    f"project too, so use --project {after.codename}"
+                )
+            self.notify(
+                f"✓ {project_service.display_name(after)} · fleet codename {after.codename} "
+                f"(tmux {fleet_service.session_name(after.codename)}){was}",
+                timeout=8,
+                markup=False,
+            )
+            self.post_message(ProjectRenamed(after))
+        elif after.codename is not None and not result.notes:
+            self.notify(
+                f"✓ {project_service.display_name(after)} · fleet codename {after.codename}",
+                timeout=5,
+                markup=False,
+            )
+        for note in result.notes:
+            self.notify(note, severity="warning", timeout=10, markup=False)
+
+    def on_rename_agent(self, event: RenameAgent) -> None:
+        """An agent row's name field was saved: ``fleet relabel``, off the UI thread.
+
+        The rename also asks tmux to rename the agent's window, which may wait on a busy
+        server, so it runs in a worker (:data:`AGENT_RENAME_WORKER`), never on this thread. The
+        row shows the old label until the frame after it lands.
+        """
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        target, label, typed = project, event.label, event.typed
+        worker = self.run_worker(
+            lambda: fleet_service.relabel(target, label, typed, actor="user"),
+            name=AGENT_RENAME_WORKER,
+            group=AGENT_RENAME_WORKER,
+            thread=True,
+            exit_on_error=False,  # a refusal is an answer to show, not a crash
+        )
+        # Before the worker can report: its state change is handled on this thread.
+        self._relabels[worker] = event
+
+    def _agent_renamed(self, event: Worker.StateChanged) -> None:
+        """Say what the agent is called now, or why not, and reopen the field with what was
+        typed on a refusal, to correct."""
+        if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            return
+        asked = self._relabels.pop(event.worker, None)
+        result = event.worker.result
+        if event.state is WorkerState.SUCCESS and isinstance(result, fleet_service.RelabelReceipt):
+            said = "\n".join([result.said, *result.notes])
+            self.notify(said, title="renamed", timeout=8, markup=False)
+        elif event.state is WorkerState.ERROR:
+            error = event.worker.error
+            self.notify(
+                _why_unread(error) if error is not None else "the rename did not finish",
+                title="not renamed",
+                severity="error",
+                timeout=8,
+                markup=False,
+            )
+            if asked is not None:
+                self.sidebar.open_agent_rename(asked.agent_id, asked.typed)
+        self.refresh_data()
 
     def on_project_renamed(self, event: ProjectRenamed) -> None:
         """A nickname was written — a card, its menu, a Settings tab: every name says it now."""
@@ -2639,15 +2865,23 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         pane.paste_text(event.text)
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
-        """*Spawn agent*: the Spawn dialog, on the project asked for — else the first listed —
-        with every listed project in its Project field, in the sidebar's order."""
+        """*Spawn agent*: the Spawn dialog, on the project asked for — else the open view's,
+        else the first listed — with every listed project in its Project field, in the
+        sidebar's order.
+
+        The open view's when the highlight names no project: reached by the arrows, *Spawn
+        agent* holds the highlight itself, and the dialog opened on the first project listed
+        while the user was looking at another's view — passed over a folded group, or under
+        key repeat that skipped the rows between (review of #458).
+        """
         snapshot = self.snapshot
         listed = self.sidebar.ordered_projects() or (snapshot.projects if snapshot else [])
         if event.project_id is None:
             if not listed:
                 self.notify("No projects yet — press + to onboard one", timeout=4)
                 return
-            project: ProjectInfo | None = listed[0]
+            shown = self._shown_project_id()
+            project: ProjectInfo | None = next((p for p in listed if p.id == shown), listed[0])
         else:
             project = snapshot.project(event.project_id) if snapshot else None
         if project is None:
@@ -2657,6 +2891,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             SpawnDialog(project, projects=listed, accounts=self._accounts),
             callback=self.spawn_finished,
         )
+
+    def _shown_project_id(self) -> str | None:
+        """The project of the view the right pane shows: a project's, or an agent's (the
+        captain's is the home's, never a listed project); ``None`` for any other page."""
+        view = self.current_view()
+        if isinstance(view, ProjectView):
+            return view.project.id
+        if isinstance(view, AgentView):
+            return view.status.agent.project_id
+        return None
 
     def spawn_finished(self, receipt: fleet_service.SpawnReceipt | None) -> None:
         """The dialog closed: toast the receipt and its notes, then show the new agent.
@@ -2845,13 +3089,20 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     async def on_settings_selected(self, event: SettingsSelected) -> None:
         """*⚙ Settings*: the hub, with the keyboard on its first link when it came from the
-        keyboard (the sidebar had it)."""
-        from_keyboard = self.focused is self.sidebar
-        await self._show("settings-hub", lambda: SettingsHubView(id="settings-hub"))
+        keyboard (the sidebar had it) — Enter, not an arrow passing over the row."""
+        if self._moved_on(event, SETTINGS_KEY):
+            return
+        from_keyboard = self.focused is self.sidebar and not event.browsing
+        if not await self._open_row(
+            SETTINGS_KEY,
+            "settings-hub",
+            lambda: SettingsHubView(id="settings-hub"),
+            browsing=event.browsing,
+        ):
+            return
         self._show_doctor_findings()  # a hub built just now has not been told yet
-        self.sidebar.select(SETTINGS_KEY)
         self._remember_selection("settings")
-        if from_keyboard:
+        if from_keyboard and self.sidebar.selected_key == SETTINGS_KEY:
             self.query_one("#settings-hub", SettingsHubView).focus_first()
 
     # --- the ⬆ row: a newer aisquare, and the one-click update ------------------------------
@@ -3674,6 +3925,8 @@ def _writing_workers() -> dict[str, str]:
         CONSENT_WORKER: "the answer to the usage-sharing question",
         PROJECT_REMOVE_WORKER: "a project's removal",
         PROJECT_FRESH_WORKER: "a project's fresh start",
+        PROJECT_CODENAME_WORKER: "a project's new codename",
+        AGENT_RENAME_WORKER: "an agent's rename",
         REATTACH_WORKER: "the update's restart of the agents it kept",
         PRESS_WORKER: "the update's record of the running agents",
     }

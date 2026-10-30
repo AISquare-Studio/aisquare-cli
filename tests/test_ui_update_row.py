@@ -168,13 +168,13 @@ async def _toasts(app: FleetApp, *, group: str | None = None) -> list[str]:
 
 
 async def _open_by_keyboard(pilot: Pilot[None], app: FleetApp) -> UpdateScreen:
-    """↓ from the top of the sidebar until the cursor is on the ⬆ row, then Enter."""
+    """↓ from the top of the sidebar until the highlight is on the ⬆ row, then Enter."""
     app.sidebar.focus()
     for _ in range(30):
         await pilot.press("down")
-        if app.sidebar._cursor_key == UPDATE_KEY:
+        if app.sidebar.selected_key == UPDATE_KEY:
             break
-    assert app.sidebar._cursor_key == UPDATE_KEY, "the ⬆ row is reachable from the keyboard"
+    assert app.sidebar.selected_key == UPDATE_KEY, "the ⬆ row is reachable from the keyboard"
     await pilot.press("enter")
     await settle_page(app)
     screen = app.screen

@@ -41,6 +41,7 @@ from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectForgetReport, ProjectInfo
 from aisquare.services import install_route
 from aisquare.services import project as project_service
+from tests.fleet_fakes import SessionsOnly, tmux_sessions_as
 from tests.test_ui_shell import (
     PRIVATE_SOCKET,
     Script,
@@ -51,6 +52,7 @@ from tests.test_ui_shell import (
     composited,
     drive,
     fleet_app,
+    refreshed,
     row_for,
     seed,
     settle,
@@ -63,6 +65,13 @@ from tests.test_ui_shell import script as _script
 #: Re-exported so pytest collects them here (the guard is autouse there, and here).
 no_real_tmux = _no_real_tmux
 script = _script
+
+
+@pytest.fixture(autouse=True)
+def fleet_sessions(monkeypatch: pytest.MonkeyPatch) -> SessionsOnly:
+    """A rename's codename half asks the fleet's tmux server for the project's session
+    (task #6): here a server that holds none and runs no tmux. A test that has one says so."""
+    return tmux_sessions_as(monkeypatch)
 
 
 @pytest.fixture
@@ -194,9 +203,14 @@ def test_an_emoji_nickname_shows_whole_and_keeps_the_cards_columns(
 
 @pytest.mark.usefixtures("wide_click_chain")
 def test_a_double_click_renames_in_place_and_enter_saves_at_once(
-    tmp_path: Path, script: Script
+    tmp_path: Path, script: Script, fleet_sessions: SessionsOnly
 ) -> None:
+    """The name is saved at once, on the UI thread; the codename follows it in a worker
+    (task #6) — the tmux session renamed, and a toast that names the new codename and the
+    old one that still works."""
     seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", None))
+    fleet_sessions.sessions.add("asq-amber-otter")
+    sessions = fleet_sessions
 
     async def go(pilot: Pilot[None]) -> dict[str, object]:
         app = fleet_app(pilot)
@@ -215,6 +229,8 @@ def test_a_double_click_renames_in_place_and_enter_saves_at_once(
         await settle(app)  # no refresh tick runs in these tests (refresh_seconds=3600)
         return {
             **opened,
+            "toasts": await _toasts(app),
+            "subtitle": card_for(app, "prj_a").subtitle,
             "title": _title(app, "prj_a"),
             "closed": not field.display and title.display,
             "sidebar_focused": app.focused is app.sidebar,
@@ -223,15 +239,58 @@ def test_a_double_click_renames_in_place_and_enter_saves_at_once(
             "view": _view_id(app),
         }
 
-    seen = drive(go)
+    seen = drive(go, notifications=True)
     assert seen["open"] and seen["focused"]
     assert seen["value"] == seen["selected"] == "alpha", "prefilled with the name, all selected"
     assert seen["title"] == "🗂 Payments v2" and seen["closed"] and seen["sidebar_focused"]
     stored = _stored("prj_a")
     assert stored is not None and stored.nickname == "Payments v2"
-    assert stored.codename == "amber-otter", "the codename is not touched"
+    assert stored.codename == "payments-v2", "the codename follows the name"
+    assert sessions.renamed == [("asq-amber-otter", "asq-payments-v2")]
+    assert (
+        "✓ Payments v2 · fleet codename payments-v2 (tmux asq-payments-v2) — was amber-otter, "
+        "and --project amber-otter still works"
+    ) in str(seen["toasts"])
+    assert seen["subtitle"] is None, "the codename is the name's: the card need not say it"
     assert seen["undo"] == 0 and seen["order"], "a double-click is no drag: nothing moved"
     assert seen["view"] == "project-prj_a", "the first click of the two opened it"
+
+
+def test_a_card_says_a_codename_its_name_does_not_give_and_its_tooltip_always_does(
+    tmp_path: Path, script: Script
+) -> None:
+    """Task #6, acceptance 5: what a manager calls the project is on its card. A generated
+    codename (``earnest-hawk``), never renamed, is said dim under the name; one the name
+    gives (``beta``) is not; the name's tooltip says the codename either way. A ``fleet
+    rename`` reaches the card at the next frame."""
+    seed(tmp_path, ("prj_a", "alpha", "earnest-hawk"), ("prj_b", "beta", "beta"))
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        a, b = card_for(app, "prj_a"), card_for(app, "prj_b")
+        line = a.query_one(".card-subtitle", Static)
+        seen: dict[str, object] = {
+            "a": shown(line) if line.display else None,
+            "b": b.query_one(".card-subtitle", Static).display,
+            "a tip": str(a.query_one(ProjectTitle).tooltip),
+            "b tip": str(b.query_one(ProjectTitle).tooltip),
+        }
+        with store_session() as store:
+            store.set_codename("prj_a", "quiet-lynx")
+        await refreshed(app)
+        seen["a after"] = shown(line)
+        seen["a tip after"] = str(a.query_one(ProjectTitle).tooltip)
+        return seen
+
+    seen = drive(go)
+    assert seen["a"] == "· earnest-hawk"
+    assert seen["b"] is False, "beta's codename is its name's: no line"
+    assert str(seen["a tip"]).startswith(
+        "fleet codename earnest-hawk (tmux asq-earnest-hawk, --project earnest-hawk) · "
+        "double-click or F2 to rename"
+    )
+    assert str(seen["b tip"]).startswith("fleet codename beta (tmux asq-beta, --project beta)")
+    assert seen["a after"] == "· quiet-lynx" and "quiet-lynx" in str(seen["a tip after"])
 
 
 @pytest.mark.usefixtures("wide_click_chain")
@@ -502,7 +561,9 @@ def test_the_menu_opens_from_its_button_the_dot_key_and_a_right_click(
         "✗ Remove from fleet…",
     ]
     assert seen["width"] == MENU_WIDTH
-    assert seen["view"] == "project-prj_a", "a right-click opens the menu, not the project"
+    # ↓ opened beta, as the arrows open the row they land on; a right-click on alpha
+    # opens its menu and leaves beta's view where it is.
+    assert seen["view"] == "project-prj_b", "a right-click opens the menu, not the project"
 
 
 def test_the_menu_renames_pins_and_opens_the_settings_tab(tmp_path: Path, script: Script) -> None:

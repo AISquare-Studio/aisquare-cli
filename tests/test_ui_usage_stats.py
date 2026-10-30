@@ -315,6 +315,26 @@ def test_each_range_renders_its_figures(machine: Machine, range_: UsageRange) ->
     assert page["status"].startswith("Updated ")
 
 
+def test_the_page_scrolls_down_to_its_last_section_at_160_by_48(machine: Machine) -> None:
+    """The body under the range switcher sized itself to the window (a plain ``Vertical``,
+    ``height: 1fr``) and clipped what did not fit, so the page never scrolled (max_scroll_y
+    0) and Accounts, Busiest days, Models and Features were out of reach at 160x48."""
+    _history(machine)
+
+    async def go(pilot: Pilot[None], view: UsageStatsView) -> tuple[int, Region, Region]:
+        await settle_until(view.app, lambda: _painted(view, "7d"))
+        await settle_page(view.app)
+        can_scroll = view.max_scroll_y
+        view.scroll_end(animate=False)
+        await settle_page(view.app)
+        return can_scroll, view.region, view.query_one("#usage-features", Static).region
+
+    can_scroll, page, features = _drive_page(real_loader(), go, size=(160, 48))
+
+    assert can_scroll > 0
+    assert features.height > 0 and page.contains_region(features), (page, features)
+
+
 def test_the_range_buttons_show_which_range_is_on_and_a_click_switches(machine: Machine) -> None:
     _history(machine)
     calls: list[tuple[UsageRange, bool, bool]] = []

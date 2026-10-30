@@ -1695,6 +1695,11 @@ class TmuxServer:
         _require_targetable(new)
         self.run("rename-session", "-t", f"={old}", new)
 
+    def rename_window(self, pane_id: str, name: str) -> None:
+        """Name the window holding ``pane_id`` ``name``, as :meth:`spawn_window`'s ``-n`` did."""
+        _require_targetable(name)
+        self.run("rename-window", "-t", pane_id, _data_arg(name))
+
     def attach_argv(self, session: str) -> list[str]:
         """The command a terminal runs to attach to ``session`` (the escape hatch)."""
         return self.argv("attach-session", "-t", f"={session}")

@@ -662,6 +662,52 @@ def test_real_tmux_following_a_pane_leaves_its_sessions_current_window_alone(
 
 
 @_needs_tmux
+def test_real_tmux_a_pane_on_screen_stays_attached_when_its_session_is_renamed(
+    live: TmuxServer, tmp_path: Path
+) -> None:
+    """A project renamed renames its tmux session (``asq-earnest-hawk`` → ``asq-aisquare-cli``,
+    task #6) under the panes asq has open on it. The control client follows the session by
+    its id, never its name, and the pane by its ``%id``: the same client goes on serving the
+    pane, keys typed after the rename reach it and its ``%output`` still arrives, and nothing
+    is said to the owner."""
+    shown_pane = _window(live, "asq-earnest-hawk", tmp_path, ["cat"])
+    other = _window(live, "asq-earnest-hawk", tmp_path, ["cat"])
+
+    async def drive() -> tuple[int | None, int | None, int, bool, list[str]]:
+        host = Host(live, shown_pane)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: _serving(pane) and _client(pane).answered, 10.0)
+            before = _client(pane).pid
+            live.rename_session("asq-earnest-hawk", "asq-aisquare-cli")
+            await pilot.pause(0.3)
+            outputs = _client(pane).outputs.get(shown_pane, 0)
+            await pilot.press(*"after")
+            await wait_until(pilot, _row_shows(pane, "after"), timeout=3.0)
+            after = _client(pane).outputs.get(shown_pane, 0) - outputs
+            # And the other window of the renamed session, attached to as a click on its row
+            # would, is served too.
+            pane.attach(other)
+            await wait_until(pilot, lambda: _serving(pane) and pane.facts is not None, 5.0)
+            await pilot.press("z")
+            await wait_until(pilot, _row_shows(pane, "z"), timeout=3.0)
+            return (
+                before,
+                _client(pane).pid,
+                after,
+                live.has_session("asq-aisquare-cli"),
+                list(host.notices),
+            )
+
+    before, pid, outputs, renamed, notices = run(drive())
+    assert renamed and not live.has_session("asq-earnest-hawk")
+    assert pid == before, "the same control client, never a restart"
+    assert outputs > 0, "its output kept arriving over the client"
+    assert notices == [], notices
+
+
+@_needs_tmux
 def test_real_tmux_a_stalled_client_killed_waits_out_the_retry_before_another_starts(
     live: TmuxServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -2,17 +2,19 @@
 
 Its NICKNAME — the name every list shows (``services.project.display_name``),
 what ``aisquare project rename`` sets — is edited here: Enter or Save writes it,
-and a blank field clears it back to the folder name. Its codename is shown, not
-edited: it names the tmux session and the branches, and ``aisquare fleet
-rename`` is where it changes. Under it, the command that attaches a terminal to
+and a blank field clears it back to the folder name. The codename follows it, as it
+follows ``project rename`` (``services.fleet.rename_project``): ``Billing v2`` makes it
+``billing-v2`` and the tmux session ``asq-billing-v2``; ``aisquare fleet rename`` sets one
+of your own. It is shown, not edited. Under it, the command that attaches a terminal to
 the project's tmux session (:func:`attach_line`), from the shell's agent frames
 (:meth:`SettingsView.show_agents`). Its *Start fresh…* asks the shell to clear the
 project's board and fleet (:class:`~aisquare.cli.ui.fresh.StartFresh`), as the card's menu
 does. Everything machine-wide — roles, the fleet, how launches pick an account — is App
 settings (``views.app_settings``).
 
-The write opens the store, so it runs in a thread worker (:data:`NICKNAME_WORKER`)
-and the tab answers when it lands: the field and the title show what the store
+The write opens the store and asks tmux, so it runs in a thread worker
+(:data:`NICKNAME_WORKER`) and the tab answers when it lands: the field and the title show
+what the store
 now holds, and :class:`~aisquare.cli.ui.sidebar.ProjectRenamed` tells the rest
 of the app to show the new name. A rename made anywhere else — a card, ``project
 rename`` in a shell — reaches the tab with the app's next frame
@@ -41,7 +43,8 @@ from aisquare.services import install_route
 from aisquare.services import project as project_service
 
 NICKNAME_WORKER = "settings-nickname"
-"""The worker the nickname is written in: it writes the store."""
+"""The worker the nickname and the codename it gives are written in: it writes the store and
+renames the tmux session."""
 
 
 def fleet_id_line(project: ProjectInfo) -> Text:
@@ -55,7 +58,7 @@ def fleet_id_line(project: ProjectInfo) -> Text:
         )
     return Text(
         f"fleet id: {codename} — tmux session {fleet_service.session_name(codename)}, "
-        f"branches fleet/{codename}/…",
+        f"branches fleet/{codename}/…, --project {codename}; renaming the project renames it",
         style="dim",
     )
 
@@ -212,7 +215,8 @@ class SettingsView(VerticalScroll):
         # The command in bold, not in backticks: the note is a ``Text``, which shows them.
         yield Static(
             Text.assemble(
-                "The nickname is the name every list shows; blank shows the folder name. ",
+                "The nickname is the name every list shows; blank shows the folder name. "
+                "The fleet id follows it. ",
                 ("aisquare project rename", "bold"),
                 " sets the same. The settings for every project — roles, the fleet, "
                 "accounts — are in App settings ▸ Agent settings.",
@@ -239,8 +243,18 @@ class SettingsView(VerticalScroll):
         """
         wanted = self.query_one("#nickname", Input).value.strip()
         project = self.project
+
+        def rename() -> tuple[ProjectInfo, list[str], bool]:
+            notes: list[str] = []
+            before = project.codename
+            renamed = fleet_service.rename_project(
+                project, wanted or None, notes=notes, follow_unchanged=False
+            )
+            works = bool(before) and fleet_service.old_codename_works(renamed.id, before or "")
+            return renamed, notes, works
+
         self.run_worker(
-            lambda: project_service.set_nickname(project, wanted or None),
+            rename,
             name=NICKNAME_WORKER,
             group=NICKNAME_WORKER,
             exclusive=True,
@@ -266,16 +280,32 @@ class SettingsView(VerticalScroll):
             return
         if event.state is not WorkerState.SUCCESS:
             return
-        updated = event.worker.result
+        result = event.worker.result
+        if not isinstance(result, tuple):
+            return
+        updated, notes, old_works = result
         if not isinstance(updated, ProjectInfo):
             return
+        before = self.project.codename
         self.project = updated
         self.query_one("#nickname", Input).value = updated.nickname or ""
         self.query_one("#settings-title", Static).update(self._title())
+        self.query_one("#fleet-id", Static).update(fleet_id_line(updated))
         folder = updated.root.name or updated.id
         if updated.nickname:
             said = f"✓ {folder} is now called {updated.nickname}"
         else:
             said = f"✓ {folder} shows its folder name again"
-        self.notify(said, timeout=5, markup=False)
+        if updated.codename:
+            said += f" · fleet codename {updated.codename}"
+            if before and before != updated.codename:
+                said += (
+                    f" (was {before}; --project {before} still works)"
+                    if old_works
+                    else f" (was {before}; --project {before} names another project too: use "
+                    f"--project {updated.codename})"
+                )
+        self.notify(said, timeout=6, markup=False)
+        for note in notes:
+            self.notify(note, severity="warning", timeout=10, markup=False)
         self.post_message(ProjectRenamed(updated))

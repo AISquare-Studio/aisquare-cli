@@ -302,6 +302,7 @@ class UsageCause(StrEnum):
 
     # the macOS Keychain would not say
     keychain_locked = "keychain_locked"
+    keychain_locked_ssh = "keychain_locked_ssh"  # locked in an SSH login into the Mac
     keychain_refused = "keychain_refused"
     keychain_timeout = "keychain_timeout"
     keychain_failed = "keychain_failed"
@@ -374,6 +375,12 @@ class ClaudeUsage(BaseModel):
     """No usage request is sent for this account before then: the endpoint's
     ``Retry-After``, or an exponential default when it sent none. Recorded on disk, so
     every ``aisquare`` process, the Accounts page and ``--refresh`` wait it out too."""
+    recorded_elsewhere: bool = False
+    """Not taken by this process: its Keychain is locked (an SSH login into the Mac), so the
+    figure is one another process recorded for the login a process that could read the
+    Keychain saw in the slot last: the Mac's own asq, or an agent's status line it took in
+    (``services.claude_accounts._logins``). Said beside its age, ``via the Mac's asq · 2m
+    ago``; counted, picked by and aged like a reading taken here."""
 
     @computed_field  # type: ignore[prop-decorator]
     @property

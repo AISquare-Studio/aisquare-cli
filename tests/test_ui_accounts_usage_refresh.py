@@ -726,3 +726,57 @@ def test_adopt_a_conversation_picks_from_the_list_and_adopts_the_one_chosen(
     assert disabled == [True, False], "the held one cannot be picked"
     assert adopted == ["bbbbbbbb-2"]
     assert notice.startswith("✓ adopted bbbbbbbb as coder-1"), notice
+
+
+def test_over_ssh_the_page_shows_the_macs_reading_and_whose_it_is(
+    no_network: dict[str, Any], clock: Clock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task #18: an asq in an SSH login into the Mac, whose Keychain says locked, shows the
+    reading the Mac's own asq recorded for the slot's login — marked in the session cell,
+    whose it is and how old on hover and on the line beside Refresh usage — and asks the
+    endpoint nothing, the button's refresh included."""
+    monkeypatch.setenv("SSH_CONNECTION", "192.0.2.7 52144 192.0.2.1 22")
+    monkeypatch.setattr(
+        core,
+        "stored_login",
+        lambda account, fresh=False: core.StoredLogin(None, core.KEYCHAIN_LOCKED, "locked"),
+    )
+    with store_session() as store:  # what the Mac's asq left: a reading, and the login it saw
+        store.add_usage_sample(
+            UsageSample(
+                slot=2,
+                fetched_at=NOW - timedelta(minutes=2),
+                session_percent=40.0,
+                session_resets_at=NOW + timedelta(hours=3),
+                week_percent=10.0,
+                week_resets_at=NOW + timedelta(days=3),
+                token_fingerprint="fp-two",
+            )
+        )
+        store.set_ui_state(
+            "usage-login:2",
+            accounts_service.SeenLogin(token="fp-two", seen_at=NOW - timedelta(hours=1)).dump(),
+        )
+    frame = _overview(_status(2, "slot2@example.com", root=tmp_path, token_state="unreadable"))
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: "via" in _age(view))
+        await settle(app)
+        seen: dict[str, object] = {"age": _age(view), "row": _with_tooltip(view, 2)}
+        await pilot.click(view.query_one("#usage-refresh", Button))
+        await settle(app)
+        seen["refreshed"] = _age(view)
+        seen["why"] = why(view, 2)
+        return seen
+
+    seen = drive(go, overview=frame)
+    assert seen["age"] == "via the Mac's asq 2m ago"
+    assert "40% · Mac" in str(seen["row"])
+    assert "via the Mac's asq · 2m ago — the login Keychain is locked in this SSH session" in str(
+        seen["row"]
+    )
+    assert seen["refreshed"] == "via the Mac's asq 2m ago"
+    assert seen["why"] == "", "a figure to show, not the '!'"
+    assert no_network["usage_calls"] == []

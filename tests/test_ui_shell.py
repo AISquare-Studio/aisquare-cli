@@ -37,6 +37,8 @@ from textual._xterm_parser import XTermParser
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
+from textual.css.stylesheet import Stylesheet
+from textual.dom import DOMNode
 from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widget import Widget
@@ -4441,6 +4443,199 @@ def test_the_divider_is_the_line_and_lights_while_the_navigator_has_focus(
         False,
         True,
     )
+
+
+def _sides(app: FleetApp) -> tuple[bool, bool, bool]:
+    """``(sidebar faded, content faded, divider lit)``."""
+    return (
+        app.sidebar.has_class("-unfocused"),
+        app.content.has_class("-unfocused"),
+        app.query_one(Divider).has_class("-neighbour-focused"),
+    )
+
+
+def test_the_side_without_the_focus_is_faded_and_the_fade_follows_every_focus_change(
+    tmp_path: Path, script: Script
+) -> None:
+    """A sentence typed at an agent landed on the sidebar's one-key bindings (x stops an
+    agent, q quits), and the divider's one accented column was the only sign of where keys
+    were going. The side without the focus is faded now; the one keys go to is unchanged."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        seen: dict[str, object] = {}
+        app.sidebar.focus()
+        await pilot.pause()
+        seen["sidebar"] = _sides(app)
+        pane = RecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        await pilot.pause()  # let it lay out, or the click lands on the old view
+        await pilot.click(pane)
+        await pilot.pause()
+        seen["click on the pane"] = (_sides(app), app.focused is pane)
+        await pilot.press("f12")
+        await settle(app)  # the pane posts EscapeToSidebar, and the app moves the focus
+        seen["escape hatch"] = (_sides(app), app.focused is app.sidebar)
+        await pilot.press("tab")
+        await pilot.pause()
+        seen["tab"] = (_sides(app), app.focused is pane)
+        await pilot.click(app.sidebar, offset=(1, app.sidebar.size.height - 1))
+        await pilot.pause()
+        seen["click on the sidebar"] = (_sides(app), app.focused is app.sidebar)
+        view = Vertical(Static("a view"), Input(id="fade-probe"), id="fade-view")
+        await app.content.add_content(view, set_current=True)
+        app.query_one("#fade-probe", Input).focus()
+        await pilot.pause()
+        seen["a view's widget"] = _sides(app)
+        app.screen.set_focus(None)
+        await pilot.pause()
+        seen["nothing focused"] = (_sides(app), app.focused)
+        return seen
+
+    on_sidebar = (False, True, True)
+    on_content = (True, False, False)
+    assert drive(go) == {
+        "sidebar": on_sidebar,
+        "click on the pane": (on_content, True),
+        "escape hatch": (on_sidebar, True),
+        "tab": (on_content, True),
+        "click on the sidebar": (on_sidebar, True),
+        "a view's widget": on_content,
+        "nothing focused": ((False, False, False), None),
+    }
+
+
+def test_a_focus_change_restyles_the_two_sides_and_nothing_under_them(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fade is the side's ``opacity``, which Textual multiplies into every row as it
+    paints, so the side alone is restyled. A plain ``set_class`` on the sidebar restyled
+    every row under it as well, on top of the restyle Textual already gives them when the
+    sidebar's own ``:focus`` changes: ~80 ms of CPU a focus change at 50 projects of 3
+    agents, growing with the fleet. Counted, not timed, as the tick's budget is."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [
+        status("prj_a", "coder-1", "coder", "working"),
+        status("prj_a", "coder-2", "coder", "working", minute=1),
+    ]
+    restyled: list[DOMNode] = []
+    marking = False
+    apply, mark = Stylesheet.apply, Panes._mark_focus
+
+    def counting_apply(self: Stylesheet, node: DOMNode, *args: Any, **kwargs: Any) -> None:
+        if marking:
+            restyled.append(node)
+        apply(self, node, *args, **kwargs)
+
+    def counted_mark(self: Panes) -> None:
+        nonlocal marking
+        marking = True
+        try:
+            mark(self)
+        finally:
+            marking = False
+
+    monkeypatch.setattr(Stylesheet, "apply", counting_apply)
+    monkeypatch.setattr(Panes, "_mark_focus", counted_mark)
+
+    async def go(pilot: Pilot[None]) -> tuple[set[str], list[str]]:
+        app = fleet_app(pilot)
+        pane = RecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        await pilot.pause()
+        app.sidebar.focus()
+        await pilot.pause()
+        restyled.clear()
+        for target in (pane, app.sidebar, pane):
+            target.focus()
+            await pilot.pause()
+        sides = {app.sidebar, app.content, app.query_one(Divider)}
+        return (
+            {type(node).__name__ for node in restyled if node in sides},
+            [type(node).__name__ for node in restyled if node not in sides],
+        )
+
+    sides, below = drive(go)
+    assert sides == {"Sidebar", "ContentSwitcher", "Divider"}, "each flip restyles the sides"
+    assert below == [], "and nothing under them"
+
+
+Rgb = tuple[int, int, int]
+
+
+def _ink(widget: Widget, word: str) -> tuple[Rgb, Rgb]:
+    """``(foreground, background)`` of ``word`` as Textual composites ``widget``."""
+    width, height = widget.size
+    for strip in widget.render_lines(Region(0, 0, width, height)):
+        for segment in strip:
+            if word in segment.text and segment.style is not None:
+                fg, bg = segment.style.color, segment.style.bgcolor
+                assert fg is not None and bg is not None, segment
+                fg_rgb, bg_rgb = fg.triplet, bg.triplet
+                assert fg_rgb is not None and bg_rgb is not None, segment
+                return (
+                    (fg_rgb.red, fg_rgb.green, fg_rgb.blue),
+                    (bg_rgb.red, bg_rgb.green, bg_rgb.blue),
+                )
+    raise AssertionError(f"{word!r} is not painted in {widget!r}")
+
+
+def test_the_fade_is_painted_slight_and_reaches_the_agents_own_colours(
+    tmp_path: Path, script: Script
+) -> None:
+    """What the eye gets, not the class: the faded side's text is drawn a little toward
+    its background — the sidebar's rows, a pane's own text, and a 24-bit colour such as
+    Claude Code draws in, since ``opacity`` is multiplied into every widget below the
+    side — and the side the keys go to is drawn exactly as with nothing focused."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    tmux = FakeTmux()
+    # Claude Code's own orange, 24-bit; the cursor off the words, as its cell is a
+    # segment of its own.
+    tmux.panes["%1"] = FakePane(
+        screen=["\x1b[38;2;215;119;87mclaude\x1b[0m plain"], cursor=(20, 0), width=40, height=1
+    )
+
+    async def go(pilot: Pilot[None]) -> dict[str, list[tuple[Rgb, Rgb]]]:
+        app = fleet_app(pilot)
+        server = tmux.server(tmp_path, socket=PRIVATE_SOCKET)
+        pane = TerminalPane("%1", server=server, id="fade-pane")
+        await app.content.add_content(pane, set_current=True)
+        deadline = time.monotonic() + 3.0
+        while "plain" not in pane_text(pane):
+            assert time.monotonic() < deadline, "the pane never painted the scripted row"
+            await pilot.pause()
+        row = app.query_one(SettingsRow)
+
+        def inks() -> list[tuple[Rgb, Rgb]]:
+            return [_ink(row, "Settings"), _ink(pane, "claude"), _ink(pane, "plain")]
+
+        seen: dict[str, list[tuple[Rgb, Rgb]]] = {}
+        app.screen.set_focus(None)
+        await pilot.pause()
+        seen["nothing focused"] = inks()
+        app.sidebar.focus()
+        await pilot.pause()
+        seen["sidebar"] = inks()
+        pane.focus()
+        await pilot.pause()
+        seen["pane"] = inks()
+        return seen
+
+    seen = drive(go)
+    full = seen["nothing focused"]
+    assert seen["sidebar"][0] == full[0] and seen["pane"][1:] == full[1:], (
+        "the side the keys go to is drawn as it always was"
+    )
+    faded = [seen["pane"][0], *seen["sidebar"][1:]]
+    for name, (ink, under), (was, _) in zip(
+        ("sidebar", "claude", "plain"), faded, full, strict=True
+    ):
+        assert ink != was, f"{name}: the side without the focus is faded"
+        # Slight: 10-25 % of the way to the background on every channel that moves.
+        for now, before, bg in zip(ink, was, under, strict=True):
+            if abs(before - bg) > 40:
+                assert 0.10 <= (before - now) / (before - bg) <= 0.25, (name, ink, was, under)
 
 
 def test_a_state_file_that_is_not_an_object_is_left_alone_and_said_so_once(

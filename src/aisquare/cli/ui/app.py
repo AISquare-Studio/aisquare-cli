@@ -690,12 +690,31 @@ class Panes(Horizontal):
     - **The focus signal.** Focus is in the sidebar or in a pane (§4.3), and
       the sidebar's ``border-right`` used to say which. The divider is that
       line now — one column, the one the hand grabs — and lights ``$accent``
-      while focus is in the sidebar.
+      while focus is in the sidebar. A one-column line was too quiet to stop
+      a sentence typed at the agent from landing on the sidebar's one-key
+      bindings, so the side WITHOUT the focus is faded too (``-unfocused``):
+      the side the keys go to is the brighter one.
 
     The app keeps no handler for any of it, and nothing here assumes there is
     one ``Divider`` on the screen: the handle and the navigator are this
     container's direct children, and a later split inside a view is not its
     business.
+    """
+
+    # The fade's strength, in one place. `opacity`, not `text-opacity` or `tint`: it
+    # is the one of the three Textual multiplies into every widget below at paint
+    # time, so a focus change restyles the side alone (`_fade`). The other two are
+    # set per widget, so they need a rule for every descendant: each focus change
+    # then restyled every row of the sidebar (~80 ms of CPU at 50 projects of 3
+    # agents, growing with the fleet), and the universal selector is matched against
+    # every node the app restyles. A faded pane repaints no slower than with
+    # `text-opacity`, and faster than with `tint`. What it gives up: Textual blends a
+    # 16-colour SGR colour (31 red, 32 green…) by its ANSI number and maps that to
+    # the theme afterwards, so such text in a pane keeps its strength; the pane's own
+    # text, and the 256- and 24-bit colours Claude Code draws in (the bundled tmux
+    # conf passes `Tc`), fade with the rest.
+    DEFAULT_CSS = """
+    Panes > .-unfocused { opacity: 0.82; }
     """
 
     MIN_CONTENT: ClassVar[int] = 40
@@ -741,17 +760,39 @@ class Panes(Horizontal):
         self._mark_focus()
 
     def _mark_focus(self) -> None:
-        """Light the divider iff focus is in the sidebar — read off the screen, not the event.
+        """Light the divider iff focus is in the sidebar, and fade the side focus is not
+        in — read off the screen, not the event.
 
         A pane's ``DescendantBlur`` bubbles up through the content switcher while
         the sidebar's ``DescendantFocus`` is posted straight here, so the two can
         arrive in either order; the screen's ``focused`` is already settled by
-        the time either does.
+        the time either does. The side is the direct child the focused widget is
+        in; with nothing focused, or the focus outside this container, no side
+        has it and none is faded.
         """
         focused = self.screen.focused
-        sidebar = self.sidebar
-        beside = focused is not None and (focused is sidebar or sidebar in focused.ancestors)
-        self.divider.set_class(beside, "-neighbour-focused")
+        side = (
+            None
+            if focused is None
+            else next((node for node in focused.ancestors_with_self if node.parent is self), None)
+        )
+        divider = self.divider
+        divider.set_class(side is self.sidebar, "-neighbour-focused")
+        for child in self.children:
+            if child is not divider:
+                self._fade(child, side is not None and child is not side)
+
+    def _fade(self, side: Widget, faded: bool) -> None:
+        """Fade ``side`` or bring it back, restyling ``side`` alone.
+
+        ``set_class`` would restyle every widget below it, and nothing below
+        needs it: the fade is ``opacity``, which Textual reads off the ancestors
+        when it paints, and setting it repaints the children.
+        """
+        if side.has_class("-unfocused") is faded:
+            return
+        side.set_class(faded, "-unfocused", update=False)
+        self.app.stylesheet.update_nodes([side])
 
 
 class _WorkerThreads(WorkerManager):

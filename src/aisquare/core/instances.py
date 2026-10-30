@@ -343,11 +343,36 @@ def _forget(instance_id: str) -> None:
             path.unlink(missing_ok=True)
 
 
-def _read(path: Path) -> Instance | None:
+Unloaded = Literal["gone", "failed", "unparsable"]
+"""Why a record was not read (:func:`_load`)."""
+
+_RETRY_SECONDS = 0.05
+"""How long :func:`roll` waits before reading again a record whose read failed."""
+
+
+def _load(path: Path) -> Instance | Unloaded:
+    """The record at ``path``, or why not: ``gone``, its file no longer there (an asq that
+    quit between the folder's listing and this read); ``failed``, an ``OSError`` reading it
+    (a sharing violation during another asq's beat on Windows, an NFS ``ESTALE``);
+    ``unparsable``, its content, which a release this one cannot read wrote."""
     try:
-        return Instance.from_record(json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, ValueError, RecursionError):
-        return None
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "gone"
+    except UnicodeDecodeError:
+        return "unparsable"
+    except OSError:
+        return "failed"
+    try:
+        instance = Instance.from_record(json.loads(text))
+    except (ValueError, RecursionError):
+        return "unparsable"
+    return "unparsable" if instance is None else instance
+
+
+def _read(path: Path) -> Instance | None:
+    loaded = _load(path)
+    return None if isinstance(loaded, str) else loaded
 
 
 @dataclass(frozen=True)
@@ -399,13 +424,26 @@ def roll(*, prune: bool = True) -> Roll:
                 with contextlib.suppress(OSError):
                     path.unlink()
             continue
-        instance = _read(path)
-        if instance is None or instance.id != stem:
-            if not _old(path):
-                unreadable.append(Unreadable(stem, _written(path) or now))
-            elif prune and _lock_held(stem) is not True:
+        loaded = _load(path)
+        if loaded == "failed":  # once more, a moment later: the failures it means are brief
+            time.sleep(_RETRY_SECONDS)
+            loaded = _load(path)
+        if loaded in ("gone", "failed"):
+            # Quit since the listing, or unreadable twice running for a reason not its
+            # content: neither a live asq nor one of an unknown release (re-review of #462).
+            continue
+        if isinstance(loaded, str) or loaded.id != stem:
+            written = _written(path)
+            if written is None:
+                continue  # gone since
+            held = _lock_held(stem) is True
+            if held or now - written < timedelta(seconds=STALE_SECONDS):
+                # A held lock is a running process at any age, as for a record it can read.
+                unreadable.append(Unreadable(stem, written))
+            elif prune:
                 _forget(stem)
             continue
+        instance = loaded
         if is_live(instance, host=here, now=now):
             live.append(instance)
         elif prune:

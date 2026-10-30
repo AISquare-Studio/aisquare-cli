@@ -22,10 +22,11 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
 import typer
 
-from aisquare.core import instances
+from aisquare.core import instances, paths
 from aisquare.core.console import stderr_console
 from aisquare.core.instances import Instance, Unreadable
 
@@ -43,6 +44,9 @@ SIGTERM_LOSES = (
 """What ``kill <pid>`` costs an asq, against its own quit (``run_ui`` after ``app.run``)."""
 
 Ask = Callable[[str], bool]
+
+_SAID_UNCHECKED: set[Path] = set()
+"""The homes this process has said it could not check: said once each."""
 
 
 def _say(line: str) -> None:
@@ -170,8 +174,12 @@ def _pass(
             ) from None
         except OSError as exc:
             # A home asq cannot write in: it runs, as it did before there was a registry, and
-            # says what that costs. The only case the gate lets an asq through unchecked.
-            _say(f"⚠ asq could not check the other asqs on this home ({exc}); none will see it")
+            # says what that costs, once (`ui --project` passes the gate before run_ui does).
+            # The only case the gate lets an asq through unchecked.
+            home = paths.aisquare_home()
+            if home not in _SAID_UNCHECKED:
+                _SAID_UNCHECKED.add(home)
+                _say(f"⚠ asq could not check the other asqs on this home ({exc}); none will see it")
             return None
         _quit_others(
             me, differing, found.unreadable, ask=ask, interactive=interactive, wait_s=wait_s

@@ -581,6 +581,10 @@ def test_4a_a_fresh_record_this_release_cannot_read_is_an_asq_of_an_unknown_rele
         said = " ".join(capsys.readouterr().err.split())
         assert refused.value.exit_code == 1 and asked == [] and instances.this_instance() is None
         assert f"asq of a release this one cannot read — its record {path}" in said
+    # Control: a minute old with no lock held (its asq gone), it is a leftover.
+    with asq_running(version="0.9.9", hold_lock=False) as left:
+        path = instances.registry_dir() / f"{left.id}.json"
+        path.write_text(json.dumps({**left.to_record(), "started_at": 1}), encoding="utf-8")
         long_ago = time.time() - instances.STALE_SECONDS - 1
         os.utime(path, (long_ago, long_ago))
         assert instance_gate.admit() is not None, "control: a minute old, it is a leftover"
@@ -726,3 +730,74 @@ def test_9_inside_tmux_how_the_client_attached_is_asked_once_a_minute_not_every_
     registration.deregister()
 
     assert beats >= 20 and len(asked) == 1, f"{len(asked)} asks over {beats} beats"
+
+
+# --- re-review of #462 -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("read", ["vanished", "failed-once"])
+def test_r1_a_record_that_vanishes_or_fails_one_read_is_no_asq_of_an_unknown_release(
+    read: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An asq that quits between the folder's listing and the read, or a read that fails once
+    (a sharing violation during another asq's beat on Windows, an NFS ESTALE): the gate took
+    either for a record it could not read and refused a newcomer for it."""
+    read_text = Path.read_text
+    calls: list[Path] = []
+
+    with asq_running() as other:
+        record = instances.registry_dir() / f"{other.id}.json"
+
+        def flaky(self: Path, *args: Any, **kwargs: Any) -> str:
+            if self == record and not calls:
+                calls.append(self)
+                if read == "vanished":
+                    self.unlink()  # its asq quit just now
+                    raise FileNotFoundError(2, "No such file or directory", str(self))
+                raise PermissionError(13, "sharing violation", str(self))
+            return read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", flaky)
+        registration = instance_gate.admit(interactive=False)
+        monkeypatch.setattr(Path, "read_text", read_text)
+
+        said = capsys.readouterr().err
+        assert registration is not None and "cannot read" not in said, said
+        if read == "failed-once":
+            assert instances.other_instances() == [other], "read again, and live"
+
+
+def test_r2_an_unreadable_record_whose_lock_is_held_counts_at_any_age(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A held lock is a running process, however old its record (review finding 5); a record
+    this release cannot read was ignored once a minute old all the same."""
+    with asq_running(version="0.9.9") as later:
+        path = instances.registry_dir() / f"{later.id}.json"
+        path.write_text(json.dumps({**later.to_record(), "started_at": 1}), encoding="utf-8")
+        long_ago = time.time() - instances.STALE_SECONDS - 30
+        os.utime(path, (long_ago, long_ago))
+
+        with pytest.raises(typer.Exit):
+            instance_gate.admit(interactive=False)
+
+    assert f"its record {path}" in " ".join(capsys.readouterr().err.split())
+
+
+def test_r3_on_a_home_asq_cannot_write_ui_project_says_so_once(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """``ui --project`` passes the gate before ``run_ui`` does, and each said it."""
+
+    def unwritable() -> Path:
+        raise PermissionError(13, "Permission denied", str(instances.registry_dir()))
+
+    monkeypatch.setattr(instances, "_private_dir", unwritable)
+    monkeypatch.setattr(fleet_cli, "interactive_terminal", lambda: True)
+    monkeypatch.setattr(fleet_service, "ui_scope", lambda *refs: None)
+    monkeypatch.setattr(ui_app, "run_ui", lambda **options: instance_gate.admit())
+
+    result = runner.invoke(cli_app, ["ui", "--project", "alpha"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr.count("could not check the other asqs on this home") == 1

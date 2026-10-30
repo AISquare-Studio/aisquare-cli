@@ -328,7 +328,11 @@ def is_live(instance: Instance, *, host: str | None = None, now: datetime | None
     clock on an NFS home a minute off). Else, this host: its pid runs and it keeps no lock;
     another host: a heartbeat under :data:`STALE_SECONDS` old (that host cannot be asked
     about its pids)."""
-    held = _lock_held(instance.id)
+    return _live(instance, _lock_held(instance.id), host=host, now=now)
+
+
+def _live(instance: Instance, held: bool | None, *, host: str | None, now: datetime | None) -> bool:
+    """:func:`is_live`, its lock already probed (``held``)."""
     if held:
         return True
     if instance.host == (host_name() if host is None else host):
@@ -399,6 +403,10 @@ class Roll(NamedTuple):
     """Every live asq, this one included, oldest first."""
     unreadable: list[Unreadable]
     """Records this release cannot read, fresh or with their lock held."""
+    held: frozenset[str] = frozenset()
+    """The ids of the live records whose lock is held: a running process's, whatever host the
+    record names. macOS renames the host with the network when no HostName is set, so a
+    record of this very machine can name another (#21's reopen)."""
 
 
 def roll(*, prune: bool = True) -> Roll:
@@ -422,6 +430,7 @@ def roll(*, prune: bool = True) -> Roll:
     now = datetime.now(UTC)
     live: list[Instance] = []
     unreadable: list[Unreadable] = []
+    held: set[str] = set()
     for name in names:
         path = folder / name
         stem = name.removesuffix(".json")
@@ -442,19 +451,23 @@ def roll(*, prune: bool = True) -> Roll:
             written = _written(path)
             if written is None:
                 continue  # gone since
-            held = _lock_held(stem) is True
-            if held or now - written < timedelta(seconds=STALE_SECONDS):
+            locked = _lock_held(stem) is True
+            if locked or now - written < timedelta(seconds=STALE_SECONDS):
                 # A held lock is a running process at any age, as for a record it can read.
                 unreadable.append(Unreadable(stem, written, _pid_in(path)))
             elif prune:
                 _forget(stem)
             continue
         instance = loaded
-        if is_live(instance, host=here, now=now):
+        lock = _lock_held(stem)
+        if _live(instance, lock, host=here, now=now):
             live.append(instance)
+            if lock:
+                held.add(stem)
         elif prune:
             _forget(stem)  # not live: its lock is not held
-    return Roll(sorted(live, key=lambda instance: instance.started_at), unreadable)
+    ordered = sorted(live, key=lambda instance: instance.started_at)
+    return Roll(ordered, unreadable, frozenset(held))
 
 
 def _explained(name: str, names: list[str]) -> bool:

@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,7 +24,7 @@ import typer
 
 from aisquare.cli.ui import app as ui_app
 from aisquare.cli.ui import instance_gate
-from aisquare.core import instance_scan, instances, procs
+from aisquare.core import instance_scan, instances, locking, procs
 from aisquare.core.instance_scan import parse_elapsed, ui_command
 from tests.fakebin import executable_fake
 
@@ -54,6 +55,8 @@ UIS = [
     "asq --profile work",
     "asq --profile=work ui",
     "aisquare -v --no-color",
+    "asq -vq",  # global short flags written together (tester's reopen of #21)
+    "aisquare -qv ui",
 ]
 
 NOT_UIS = [
@@ -81,6 +84,8 @@ NOT_UIS = [
     "claude --append-system-prompt you run under asq",
     f"{UV} -m aisquare.cli.app",
     f"{UV} {BIN}/tasq",
+    "asq -vV",
+    "asq -qh",
     "",
 ]
 
@@ -357,3 +362,99 @@ def test_an_asq_whose_record_this_release_cannot_read_is_not_also_taken_for_a_pr
     said = " ".join(capsys.readouterr().err.split())
     assert f"its record {path}" in said
     assert "predates the registry" not in said and "before the registry" not in said
+
+
+# --- the tester's reopen of #21 ----------------------------------------------------------------
+
+
+def test_a_live_record_whose_lock_is_held_is_never_taken_for_a_pre_registry_asq(
+    listing: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """macOS renames the host with the network when no HostName is set: an asq of this very
+    machine, registered under the old name, holds its lock and its record is live, yet only
+    records naming this host had their pids left out of the look, and it was refused as one
+    before the registry, with `kill <pid>` advice."""
+    from tests.asq_elsewhere import asq_running
+
+    renamed = "dhcp-10-0-0-5.example.net"
+    assert renamed != instances.host_name()
+    with asq_running(host=renamed, pid=4242) as mine_renamed:
+        listing([_line(4242, 1, "01:00:00", "ttys003", f"{UV} {BIN}/asq")])
+
+        registration = instance_gate.admit(interactive=False)
+
+        said = capsys.readouterr().err
+        assert registration is not None, said
+        assert "before the registry" not in said and "kill 4242" not in said
+        assert instances.other_instances() == [mine_renamed], "both live, each sees the other"
+
+
+def _gate_held() -> bool:
+    """Whether some holder has ``.gate.lock`` right now (as another asq starting would find it)."""
+    lock = instances.registry_dir() / instances.GATE_LOCK
+    try:
+        fd = os.open(lock, os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    try:
+        try:
+            locking.acquire(fd, wait_s=0)
+        except TimeoutError:
+            return True
+        locking.unlock(fd)
+        return False
+    finally:
+        os.close(fd)
+
+
+def test_the_look_in_ps_runs_outside_the_gates_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Its ps calls are bounded at 2 s each, one more per asq UI of another home: held under
+    the gate's lock, N of them held an asq starting beside this one past GATE_WAIT_SECONDS,
+    and it was refused ("held its gate over 2 s")."""
+    seen: list[tuple[str, bool]] = []
+    instances.registry_dir().mkdir(parents=True)  # where an asq that ran before left it
+    (instances.registry_dir() / instances.GATE_LOCK).touch()
+
+    def ps() -> str:
+        seen.append(("ps", _gate_held()))
+        return _line(4500, 1, "01:00:00", "ttys007", f"{UV} {BIN}/asq") + "\n"
+
+    def environment(process: Any) -> dict[str, str]:
+        seen.append(("ps -E", _gate_held()))
+        return {"AISQUARE_HOME": "/elsewhere"}
+
+    monkeypatch.setattr(instance_scan, "_ps", ps)
+    monkeypatch.setattr(instance_scan, "_environment", environment)
+
+    assert instance_gate.admit(interactive=False) is not None
+    assert seen and all(not held for _, held in seen), seen
+
+
+def test_an_asq_starting_beside_a_slow_look_is_not_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(instances, "GATE_WAIT_SECONDS", 0.3)
+    looking = threading.Event()
+
+    def slow_ps() -> str:
+        looking.set()
+        time.sleep(1.0)  # a loaded machine's ps, under its 2 s bound
+        return ""
+
+    monkeypatch.setattr(instance_scan, "_ps", slow_ps)
+    outcome: list[object] = []
+
+    def beside() -> None:
+        looking.wait(5)
+        try:
+            with instances.gate():
+                outcome.append("passed")
+        except TimeoutError as exc:
+            outcome.append(exc)
+
+    other = threading.Thread(target=beside)
+    other.start()
+    registration = instance_gate.admit(interactive=False)
+    other.join(5)
+
+    assert registration is not None and outcome == ["passed"], outcome

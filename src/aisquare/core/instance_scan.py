@@ -122,11 +122,16 @@ def _opens_the_ui(args: list[str]) -> bool:
             return False
         if arg == "--profile":
             at += 2
-        elif arg.startswith("--profile=") or arg in _GLOBAL_FLAGS:
+        elif arg.startswith("--profile=") or arg in _GLOBAL_FLAGS or _short_flags(arg):
             at += 1
         else:
             return arg == "ui"
     return True
+
+
+def _short_flags(arg: str) -> bool:
+    """``-vq``: the global short flags that still open the UI, written together."""
+    return len(arg) > 2 and arg[0] == "-" and arg[1] != "-" and set(arg[1:]) <= {"v", "q"}
 
 
 # --- the listing -------------------------------------------------------------------------------

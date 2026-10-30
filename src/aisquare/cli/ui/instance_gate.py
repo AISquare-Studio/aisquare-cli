@@ -170,17 +170,32 @@ def _quit_others(
         _say(f"✓ asq {other.version} (pid {other.pid}) quit")
 
 
+def _accounted(found: instances.Roll, me: Instance) -> set[int]:
+    """The pids the registry accounts for, which the look in ``ps`` must not take for asqs
+    before the registry: every live record's on this host, and every live record's whose lock
+    is held whatever host it names (macOS renames the host with the network when no HostName
+    is set, #21's reopen), and the pid an unreadable record still says."""
+    pids = {other.pid for other in found.live if other.host == me.host or other.id in found.held}
+    return pids | {record.pid for record in found.unreadable if record.pid is not None}
+
+
 def _pass(
     *, ask: Ask | None, interactive: bool | None, wait_s: float
 ) -> instances.Registration | None:
     me = instances.describe_this_process()
     while True:
+        # The look in ps runs BEFORE the gate's lock is taken: its calls (one, and one more per
+        # asq UI of another home) are bounded at 2 s each, and held under the lock they could
+        # hold an asq starting beside this one past GATE_WAIT_SECONDS, to be refused (#21's
+        # reopen). What it found is filtered under the lock, against the registry as read
+        # there: an asq that registered meanwhile is in that read, and one before the registry
+        # started meanwhile is too young to be found anyway (instance_scan.STARTING_SECONDS).
+        found_in_ps = instance_scan.unregistered_uis(_accounted(instances.roll(prune=False), me))
         try:
             with instances.gate() as found:
                 differing = [other for other in found.live if other.differs_from(me)]
-                here = {other.pid for other in found.live if other.host == me.host}
-                here |= {record.pid for record in found.unreadable if record.pid is not None}
-                strays = instance_scan.unregistered_uis(here)
+                accounted = _accounted(found, me)
+                strays = [ui for ui in found_in_ps if ui.pid not in accounted]
                 if not differing and not found.unreadable and not strays:
                     return instances.register(me)
         except TimeoutError:

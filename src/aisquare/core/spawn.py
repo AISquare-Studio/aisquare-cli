@@ -82,6 +82,11 @@ narrowing their environment would be change without a reason:
   * ``core/procs.py::_inspect_ps`` — ``ps -o ppid=,lstart=,comm=`` on macOS and the BSDs:
     one process's parent, start and image, for the proof behind a session's own MCP
     server row (``services/mcp_host``). A string, no model.
+  * ``core/instance_scan.py::_ps`` — ``ps -U <uid> -o pid=,ppid=,etime=,tty=,command=``: this
+    user's processes, for the instance gate's look for an asq older than the registry (#21).
+    A listing, no model.
+  * ``core/instance_scan.py::_environment`` — ``ps -E -p <pid>`` on macOS and the BSDs: one
+    such asq's ``AISQUARE_HOME``/``HOME``, whether it runs on this home (#21). No model.
   * ``cli/watch.py::action_open_transcript`` — a pager/viewer on a file.
   * ``cli/ui/terminal.py::wsl_path`` — ``wslpath -u`` on a Windows path pasted into a
     pane under WSL (#288). A path converter, no model.
@@ -347,6 +352,16 @@ SEAMS: dict[str, Seam] = {
         EXCLUDED,
         "`ps -o ppid=,lstart=,comm=` on macOS and the BSDs: one process's parent, start and "
         "image, for the proof behind a session's own MCP server row (#397). A string, no model",
+    ),
+    "aisquare/core/instance_scan.py::_ps": Seam(
+        EXCLUDED,
+        "`ps -U <uid> -o pid=,ppid=,etime=,tty=,command=`: this user's processes, for the "
+        "instance gate's look for an asq older than the registry (#21). A listing, no model",
+    ),
+    "aisquare/core/instance_scan.py::_environment": Seam(
+        EXCLUDED,
+        "`ps -E -p <pid>` on macOS and the BSDs: one asq's AISQUARE_HOME and HOME, whether it "
+        "runs on this home (#21). No model",
     ),
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"

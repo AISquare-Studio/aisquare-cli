@@ -15,7 +15,11 @@ stopped, what it could not save said in ITS terminal), and once its record has g
 one starts. No, no terminal to ask in, an asq too old to be asked, or one that has not quit
 within :data:`QUIT_WAIT_SECONDS`: nothing starts, the exit is 1, and what was said is how
 to quit it by hand. Beside asqs of its own release, or none, the gate is one read of a
-small folder: no prompt, no wait.
+small folder and one ``ps``: no prompt, no wait.
+
+An asq of a release before the registry (0.9.1 and older) writes no record: the gate finds
+it in ``ps`` (``core.instance_scan``, #21) and refuses beside it as beside one that cannot
+be asked to quit.
 """
 
 from __future__ import annotations
@@ -26,8 +30,9 @@ from pathlib import Path
 
 import typer
 
-from aisquare.core import instances, paths
+from aisquare.core import instance_scan, instances, paths
 from aisquare.core.console import stderr_console
+from aisquare.core.instance_scan import UnregisteredUi
 from aisquare.core.instances import Instance, Unreadable
 
 QUIT_WAIT_SECONDS = 15.0
@@ -94,14 +99,16 @@ def _quit_others(
     me: Instance,
     differing: list[Instance],
     unreadable: list[Unreadable],
+    strays: list[UnregisteredUi],
     *,
     ask: Ask | None,
     interactive: bool | None,
     wait_s: float,
 ) -> None:
-    """Say why ``me`` does not start beside ``differing`` and ``unreadable``; return once they
-    have quit on a yes, or raise :class:`typer.Exit` (1). An unreadable record is an asq of an
-    unknown release that cannot be asked to quit, so with one there is nothing to ask."""
+    """Say why ``me`` does not start beside ``differing``, ``unreadable`` and ``strays``;
+    return once they have quit on a yes, or raise :class:`typer.Exit` (1). An unreadable record
+    (an asq of an unknown release) and a stray (an asq of a release before the registry, found
+    in ``ps``, #21) cannot be asked to quit, so with either there is nothing to ask."""
     _say(f"⚠ {_release(me)} cannot run beside a running asq of another release:")
     for other in differing:
         _say(f"  {_release(other)} — {other.where}")
@@ -110,9 +117,11 @@ def _quit_others(
         _say(
             f"  asq of a release this one cannot read — its record {record.path}, written {written}"
         )
+    for stray in strays:
+        _say(f"  asq of a release before the registry — {stray.where}: {stray.shown_command}")
     _say("Two releases on one home would run two codebases against one store and one tmux.")
     unaskable = [other for other in differing if not other.askable]
-    if unaskable or unreadable:
+    if unaskable or unreadable or strays:
         for other in unaskable:
             on = "" if other.host == me.host else f" on {other.host}"
             _say(
@@ -126,7 +135,13 @@ def _quit_others(
                 f"quit it in its own terminal (q). If no asq runs, the record is a leftover, "
                 f"ignored once a minute old; or delete it."
             )
-        those = len(unaskable) + len(unreadable) > 1
+        for stray in strays:
+            _say(
+                f"The asq of pid {stray.pid} predates the registry: its release is unknown, and "
+                f"it cannot be asked to quit from here. Quit it in its own terminal (q), or end "
+                f"it with `kill {stray.pid}`: {SIGTERM_LOSES}."
+            )
+        those = len(unaskable) + len(unreadable) + len(strays) > 1
         raise _refuse(f"Start it again once {'those asqs have' if those else 'that asq has'} quit.")
     many = len(differing) > 1
     hand = "; ".join(_by_hand(other) for other in differing)
@@ -163,7 +178,10 @@ def _pass(
         try:
             with instances.gate() as found:
                 differing = [other for other in found.live if other.differs_from(me)]
-                if not differing and not found.unreadable:
+                here = {other.pid for other in found.live if other.host == me.host}
+                here |= {record.pid for record in found.unreadable if record.pid is not None}
+                strays = instance_scan.unregistered_uis(here)
+                if not differing and not found.unreadable and not strays:
                     return instances.register(me)
         except TimeoutError:
             # Another asq's gate held past its wait: started now, this one would run unchecked
@@ -182,7 +200,13 @@ def _pass(
                 _say(f"⚠ asq could not check the other asqs on this home ({exc}); none will see it")
             return None
         _quit_others(
-            me, differing, found.unreadable, ask=ask, interactive=interactive, wait_s=wait_s
+            me,
+            differing,
+            found.unreadable,
+            strays,
+            ask=ask,
+            interactive=interactive,
+            wait_s=wait_s,
         )
 
 

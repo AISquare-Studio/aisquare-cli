@@ -26,7 +26,7 @@ from typer.testing import CliRunner
 
 import aisquare
 from aisquare.core import agents as agent_core
-from aisquare.core import experimental, insights
+from aisquare.core import experimental, insights, instance_scan
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
 from aisquare.models import ProjectInfo
@@ -534,6 +534,16 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # reads: the interpreter (sys.executable) and the distribution's RECORD on sys.path.
     agent_core.current_install.cache_clear()
     return home
+
+
+@pytest.fixture(autouse=True)
+def no_look_at_the_machines_processes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The instance gate lists this user's processes for an asq older than the registry
+    (``core.instance_scan``, #21). Under the suite that would be the developer's own asq, or
+    a sibling worktree's, and a test of ``run_ui`` would pass or refuse by what else runs on
+    the machine. So ``ps`` says nothing here, as where it is missing; the scan's own tests
+    hand it a listing of their own."""
+    monkeypatch.setattr(instance_scan, "_ps", lambda: "")
 
 
 _uid = private_fleets.uid

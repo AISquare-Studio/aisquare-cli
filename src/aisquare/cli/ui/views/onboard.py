@@ -13,7 +13,7 @@ the reason. It never prompts: ``init`` is non-interactive and the explainability
 consent is one of those buttons, never a question.
 
 The tree reads the disk when it is built and when a folder is opened, and again on
-**↻** beside the hint (or ``ctrl+r`` from anywhere in the view) and each time the
+**↻** before the hint (or ``ctrl+r`` from anywhere in the view) and each time the
 shell shows the view again: a folder cloned since appears without retyping its path.
 """
 
@@ -94,8 +94,8 @@ class OnboardView(Vertical):
     DEFAULT_CSS = """
     OnboardView { padding: 1 2; }
     OnboardView #onboard-head { height: auto; }
-    OnboardView #onboard-head .hint { width: auto; }
-    OnboardView #onboard-reload { width: auto; min-width: 3; margin: 0 0 0 1; }
+    OnboardView #onboard-head .hint { width: 1fr; }
+    OnboardView #onboard-reload { width: auto; min-width: 3; margin: 0 1 0 0; }
     OnboardView #onboard-body { height: 1fr; }
     OnboardView #onboard-tree { width: 40%; min-width: 24; border-right: solid $primary; }
     OnboardView #onboard-form { width: 1fr; padding: 0 0 0 1; }
@@ -130,11 +130,13 @@ class OnboardView(Vertical):
         self.running = False
 
     def compose(self) -> ComposeResult:
+        # ↻ first and the hint wrapping: at 80 columns the pane is 45 wide and the hint
+        # 48, so a ↻ after it was off the screen.
         with Horizontal(id="onboard-head"):
-            yield Static("Onboard a project — type a directory, or browse:", classes="hint")
             yield Button(
                 "↻", id="onboard-reload", compact=True, tooltip="Reload directories (ctrl+r)"
             )
+            yield Static("Onboard a project — type a directory, or browse:", classes="hint")
         with Horizontal(id="onboard-body"):
             yield ProjectTree(self.root, show_hidden=self.show_hidden, id="onboard-tree")
             with Vertical(id="onboard-form"):

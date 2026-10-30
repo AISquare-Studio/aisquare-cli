@@ -109,6 +109,7 @@ from aisquare.cli.ui.sidebar import (
     Sidebar,
     SpawnAgent,
     StopAgent,
+    ToggleActiveOnly,
     UpdateSelected,
     UsageStatsSelected,
     agent_name,
@@ -299,6 +300,9 @@ SELECTED_KEY = "fleet.selected"
 """``ui_state`` key for what is open: ``project:<id>``, ``agent:<project>/<id>``, ``settings``
 (the hub), ``app-settings``, ``accounts`` or ``doctor:<project or ''>`` (#144)."""
 SHOW_CAPTURED_KEY = "fleet.show_captured"
+ACTIVE_ONLY_KEY = "fleet.active_only"
+"""``ui_state`` key for the sidebar's active-only filter (the header's ○/●, ``l``): ``"1"``
+while only the projects with a live agent are listed, no row while every project is."""
 
 
 def _ui_state(key: str) -> str | None:
@@ -604,6 +608,7 @@ class HelpScreen(ModalScreen[None]):
                 if self.capturing
                 else []
             ),
+            ("l ○", "from the sidebar: list only the projects with a live agent, or all again"),
             ("+  w", "onboard a project · back to the Welcome page"),
             ("F1", "command palette"),
             ("q", "quit — from the sidebar; inside a pane every key goes to the agent"),
@@ -1143,6 +1148,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._theme_restored = True
         self.watch(self.content, "current", self._content_switched, init=False)
         self.show_captured = _ui_state(SHOW_CAPTURED_KEY) == "1"
+        self.sidebar.set_active_only(_ui_state(ACTIVE_ONLY_KEY) == "1")
         # The first frame is read here, on the UI thread, before anything is drawn: there
         # is nothing on screen yet for the read to hold up, and what was open last time is
         # reopened from it below. Every frame after it is read in a thread (`refresh_data`).
@@ -1435,6 +1441,22 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             "showing captured directories too — `a` hides them again"
             if self.show_captured
             else "captured directories hidden — `a` shows them",
+            timeout=4,
+        )
+
+    def on_toggle_active_only(self, event: ToggleActiveOnly) -> None:
+        """The header's ○/● or ``l``: only the projects with a live agent, or all of them.
+
+        The sidebar filters the frame it holds, so nothing is re-read: each tick then
+        shows a project as its agents start, and hides it as the last one exits.
+        """
+        on = not self.sidebar.active_only
+        self.sidebar.set_active_only(on)
+        _remember_ui_state(ACTIVE_ONLY_KEY, "1" if on else None)
+        self.notify(
+            "showing only the projects with a live agent — `l` shows them all"
+            if on
+            else "showing every project — `l` shows only the active ones",
             timeout=4,
         )
 
@@ -2235,13 +2257,22 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.refresh_data()
 
     def on_move_row(self, event: MoveRow) -> None:
+        # One step is one row ON SCREEN: the captured rows count only while `a` shows them,
+        # and none the active-only filter hides counts.
         if event.kind == "group":
-            self._layout(lambda s: project_groups.step_group(s, event.ident, event.delta), "move")
-        else:
-            # One step is one row ON SCREEN: the captured rows count only while `a` shows them.
-            shown = self._listing_captured()
+            groups = self.sidebar.hidden_groups
             self._layout(
-                lambda s: project_groups.step(s, event.ident, event.delta, all=shown), "move"
+                lambda s: project_groups.step_group(s, event.ident, event.delta, hidden=groups),
+                "move",
+            )
+        else:
+            shown = self._listing_captured()
+            hidden = self.sidebar.hidden_projects
+            self._layout(
+                lambda s: project_groups.step(
+                    s, event.ident, event.delta, all=shown, hidden=hidden
+                ),
+                "move",
             )
 
     def on_toggle_pin(self, event: TogglePin) -> None:

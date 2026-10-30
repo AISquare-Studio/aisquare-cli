@@ -198,7 +198,7 @@ def test_the_header_has_no_star_and_nothing_is_headed_captain(
         return [child.id for child in header.children], statics
 
     header, statics = drive(body)
-    assert header == ["fleet-title", "add-project"]
+    assert header == ["fleet-title", "add-project", "active-only"]  # the + and its filter
     assert "Captain" not in statics and not any("★" in text for text in statics)
 
 

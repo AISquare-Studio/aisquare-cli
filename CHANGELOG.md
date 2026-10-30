@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Active only, in the sidebar's header**: the ○ after the `+` (or `l` while the sidebar
+  has focus) lists only the projects with a live agent — working, waiting, asking for you,
+  limited or unknown; an exited or lost one does not count. A project comes and goes on the
+  two-second refresh as its agents start and exit; a group header with no member shown,
+  and the 📌 Pinned label with no pinned entry shown, go with them. The Captain section is
+  never filtered, the open view stays open when its card is hidden, and shift+↑/↓ step
+  over the hidden rows. The choice is remembered across restarts (`fleet.active_only`).
+
 ## [0.9.1] - 2026-10-27
 
 **Usage & stats: what every Claude Code session on this machine spent, by day,

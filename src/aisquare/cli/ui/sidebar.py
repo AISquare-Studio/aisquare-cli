@@ -110,6 +110,11 @@ class AddProject(Message):
     """The + beside Fleet."""
 
 
+class ToggleActiveOnly(Message):
+    """The ○/● after the +, or ``l`` in the sidebar: list only the projects with a live agent,
+    or every project again. The app flips it and remembers it."""
+
+
 class CaptainRequested(Message):
     """*▶ Start captain* in the actions block: the captain's view, or a start when there is none
     (T4)."""
@@ -583,6 +588,40 @@ class AddButton(Activatable):
         return AddProject()
 
 
+ACTIVE_ONLY_EMPTY = "No active projects — press l to show all."
+"""The projects' empty line while the active-only filter is on and no project passes it."""
+
+NO_PROJECTS = "No projects yet — press + to onboard one."
+"""The projects' empty line with nothing onboarded."""
+
+
+class ActiveOnlyButton(Activatable):
+    """The ○ after the ``+``: on (●, the accent), the sidebar lists only the projects with a
+    live agent (:meth:`Sidebar.show_projects`). ``l`` from the sidebar does the same."""
+
+    DEFAULT_CSS = """
+    ActiveOnlyButton { width: 3; color: $text-muted; }
+    ActiveOnlyButton.-on { color: $accent; text-style: bold; }
+    """
+
+    def __init__(self) -> None:
+        # No selection key: ↑/↓ walk the rows, not this glyph; the keyboard has ``l``.
+        super().__init__(id="active-only")
+        self.show(on=False)
+
+    def show(self, *, on: bool) -> None:
+        self.set_class(on, "-on")
+        self.update(Text(" ● " if on else " ○ "))
+        self.tooltip = (
+            "Active only: on — only the projects with a live agent are listed (l shows all)"
+            if on
+            else "Active only: off — every project is listed (l lists only those with a live agent)"
+        )
+
+    def message(self) -> Message:
+        return ToggleActiveOnly()
+
+
 class Disclosure(Static):
     """▾ / ▸ — collapses or expands the agent rows of its card."""
 
@@ -942,6 +981,19 @@ def group_header_text(
             text.append(" · ", style="dim")
         text.append(f"🔔{bells}", style="bold red")
     return text
+
+
+def has_live_agent(
+    project_id: str,
+    agents: Mapping[str, list[FleetAgentStatus]],
+    live: Mapping[str, int] | None = None,
+) -> bool:
+    """Whether a project has an agent in ``ALIVE_STATES`` — the card's "alive" chip, not an
+    exited or lost row. A project folded away is not read on the tick (#83): its live rows
+    are counted from ``live`` instead, as :func:`group_header_text` counts them."""
+    if project_id in agents:
+        return any(s.state in ALIVE_STATES for s in agents[project_id])
+    return (live or {}).get(project_id, 0) > 0
 
 
 class GroupHeader(DragHandle):
@@ -1478,6 +1530,15 @@ class OthersSection(Vertical):
 # --- the pane ---------------------------------------------------------------------
 
 
+_FrameInputs = tuple[
+    list[ProjectInfo],
+    dict[str, list[FleetAgentStatus]],
+    Mapping[str, str],
+    list[ProjectGroup] | None,
+    Mapping[str, int] | None,
+]
+"""``Sidebar.show_projects``' arguments, kept to repaint the frame when the filter flips."""
+
 MOVE_KEYS = Binding.Group("move", compact=True)
 """The sidebar's ↓ and ↑, as the footer shows them: one entry."""
 
@@ -1534,6 +1595,8 @@ class Sidebar(Vertical):
         # The card under the cursor: its name in place, and its menu (⋯).
         Binding("f2", "rename", "rename", show=False),
         Binding("full_stop", "project_menu", "menu", show=False, key_display="."),
+        # The header's ○/●: only the projects with a live agent, or all of them again.
+        Binding("l", "toggle_active_only", "active only", show=False),
     ]
 
     can_focus = True
@@ -1564,11 +1627,24 @@ class Sidebar(Vertical):
         self._drag: DragState | None = None
         self._drag_source: DragHandle | None = None
         self._drop_target: Widget | None = None
+        self.active_only = False
+        """Whether only the projects with a live agent are listed (the header's ○/●, ``l``).
+        The app holds the remembered choice and sets it (:meth:`set_active_only`)."""
+        self.hidden_projects: frozenset[str] = frozenset()
+        """The listed projects the active-only filter hides in the frame on screen."""
+        self.hidden_groups: frozenset[str] = frozenset()
+        """The groups whose header it hides: none of their members passes it."""
+        self._frame_inputs: _FrameInputs | None = None
+        """What the last frame was painted from, which a flip of the filter repaints."""
+        self._always_show_paths = False
+        self._empty_said = NO_PROJECTS
+        """What the projects' empty line says (:meth:`_show_empty`)."""
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="fleet-header"):
             yield Static(Text("Fleet"), id="fleet-title")
             yield AddButton()
+            yield ActiveOnlyButton()
         yield ActionsSection(captain=self.captain, id="actions")
         yield Static("", id="projects-notice")
         # can_focus=False: the rows are Statics, so a mouse-down on one focuses
@@ -1578,10 +1654,7 @@ class Sidebar(Vertical):
         # cursor and the sidebar never read as focused. Focus belongs to the
         # Sidebar (§4.3); the cursor scrolls the list through ``scroll_visible``.
         with VerticalScroll(id="projects", can_focus=False):
-            yield Static(
-                Text("No projects yet — press + to onboard one.", style="dim"),
-                id="projects-empty",
-            )
+            yield Static(Text(NO_PROJECTS, style="dim"), id="projects-empty")
         yield OthersSection(id="others")
 
     # --- data in -----------------------------------------------------------------
@@ -1635,20 +1708,41 @@ class Sidebar(Vertical):
         group is collapsed), then the loose projects — pins and manual order
         from the store, nothing sorted behind the user's back. Children are
         reconciled into that order by id, so a frame costs moves, not rebuilds.
+
+        While :attr:`active_only` is on, a project with no live agent
+        (:func:`has_live_agent`) keeps its card, hidden, and so does a group header
+        none of whose members passes, and the Pinned label with no pinned entry
+        shown: the cursor walks only what is on screen, and the arrangement, the
+        Spawn dialog's projects and the open view are the whole fleet's still. A
+        project whose agents could not be read (``notices``) is not known to be idle,
+        and stays. The Captain section is not a project, and is never filtered.
         """
         notices = notices or {}
-        # A mark is on a card the user can see. One whose project left the list
-        # (forgotten from a shell, a captured directory hidden again with `a`)
-        # lost its highlight with its card, and the next drag, `g` or shift+g
-        # still carried it: a forgotten id refused the whole drop, and a hidden
-        # directory was moved into the group without a word (final review of
-        # #203, F5). A card folded away in its group is still listed, and keeps it.
+        self._frame_inputs = (projects, agents, notices, groups, live)
+        self._always_show_paths = always_show_paths
         listed = {project.id for project in projects}
-        self._marked = [pid for pid in self._marked if pid in listed]
+        passing = (
+            {
+                project.id
+                for project in projects
+                if project.id in notices or has_live_agent(project.id, agents, live)
+            }
+            if self.active_only
+            else listed
+        )
+        self.hidden_projects = frozenset(listed - passing)
+        # A mark is on a card the user can see. One whose project left the list
+        # (forgotten from a shell, a captured directory hidden again with `a`, an
+        # idle one the active-only filter hides) lost its highlight with its card,
+        # and the next drag, `g` or shift+g still carried it: a forgotten id refused
+        # the whole drop, and a hidden directory was moved into the group without a
+        # word (final review of #203, F5). A card folded away in its group is still
+        # listed, and keeps it.
+        self._marked = [pid for pid in self._marked if pid in passing]
         arrangement = arrange(projects, groups or [])
         self.arrangement = arrangement
         holder = self.query_one("#projects", VerticalScroll)
-        self.query_one("#projects-empty", Static).display = not projects
+        self._show_empty(projects=bool(projects), passing=bool(passing))
         # Its own children, not a query: a query walks every row of every card beneath them.
         shown = holder.children
         existing_cards = {c.project.id: c for c in shown if isinstance(c, ProjectCard)}
@@ -1675,34 +1769,50 @@ class Sidebar(Vertical):
             card.set_class(project.id in self._marked, "marked")
             card.set_class(stripe % 2 == 0, "even")
             card.set_class(stripe % 2 == 1, "odd")
-            card.display = not hidden
-            stripe += 1
+            card.display = not hidden and project.id in passing
+            # A card the filter hides takes no stripe: the two around it still alternate.
+            if project.id in passing:
+                stripe += 1
             ordered.append(card)
 
-        def header_for(entry: GroupEntry) -> None:
+        hidden_groups: set[str] = set()
+
+        def header_for(entry: GroupEntry) -> bool:
+            """The header and its members; whether the header is on screen."""
             header = existing_headers.pop(entry.group.id, None)
             if header is None:
                 header = GroupHeader(entry, agents, live)
             else:
                 header.show(entry, agents, live)
+            # Off, every header shows, an empty group's as ever.
+            header.display = not self.active_only or any(
+                member.id in passing for member in entry.members
+            )
+            if not header.display:
+                hidden_groups.add(entry.group.id)
             ordered.append(header)
             for member in entry.members:
                 card_for(member, scope=entry.group.id, hidden=entry.group.collapsed)
+            return header.display
 
         if arrangement.pinned:
             label = existing_labels.pop("pinned-label", None) or SectionLabel(
                 Text("📌 Pinned"), id="pinned-label"
             )
             ordered.append(label)
+            pinned_shown = False
             for entry in arrangement.pinned:
                 if isinstance(entry, GroupEntry):
-                    header_for(entry)
+                    pinned_shown |= header_for(entry)
                 else:
                     card_for(entry, scope=None, hidden=False)
+                    pinned_shown |= entry.id in passing
+            label.display = pinned_shown
         for entry in arrangement.groups:
             header_for(entry)
         for project in arrangement.loose:
             card_for(project, scope=None, hidden=False)
+        self.hidden_groups = frozenset(hidden_groups)
 
         stale: list[Widget] = [
             *existing_cards.values(),
@@ -1725,10 +1835,41 @@ class Sidebar(Vertical):
         self._ring_on_attention(status for statuses in agents.values() for status in statuses)
         self._apply_selection()
 
+    def _show_empty(self, *, projects: bool, passing: bool) -> None:
+        """The projects' one dim line: none onboarded, or none the active-only filter passes."""
+        line = self.query_one("#projects-empty", Static)
+        said = ACTIVE_ONLY_EMPTY if self.active_only else NO_PROJECTS
+        if said != self._empty_said:
+            line.update(Text(said, style="dim"))
+            self._empty_said = said
+        line.display = not passing if self.active_only else not projects
+
+    def set_active_only(self, on: bool) -> None:
+        """List only the projects with a live agent, or every project again: the header's
+        glyph follows, and the frame on screen is repainted at once, not at the next tick."""
+        self.active_only = on
+        self.query_one(ActiveOnlyButton).show(on=on)
+        if self._frame_inputs is None:
+            return  # no frame yet: the first one is painted so
+        projects, agents, notices, groups, live = self._frame_inputs
+        self.show_projects(
+            projects,
+            agents,
+            notices=notices,
+            groups=groups,
+            live=live,
+            always_show_paths=self._always_show_paths,
+        )
+
+    def action_toggle_active_only(self) -> None:
+        """``l``: the header's ○/●, from the keyboard."""
+        self.query_one(ActiveOnlyButton).activate()
+
     def show_paths(self, always: bool) -> None:
         """``[ui] always_show_project_path`` changed (App settings saved, reloaded or reset):
         every card's directory line follows now, from the frame on screen, rather than at the
         next frame's read."""
+        self._always_show_paths = always
         if self.last_frame is None:
             return
         names = Counter(project_name(project) for project in self.last_frame[0])

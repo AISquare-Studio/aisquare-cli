@@ -415,8 +415,8 @@ _FRESH_HELP = (
     "unless --discard-unpushed. It prints the plan and asks first at a terminal "
     "(twice when discarding); off a terminal it is a dry run unless --yes, and under "
     "--json without --yes it prints the plan and changes nothing. Refused from "
-    "inside one of the project's own fleet agents, and while another project's "
-    "fleet agents read its board."
+    "inside one of the project's own fleet agents, unless --dry-run, and while "
+    "another project's fleet agents read its board."
 )
 """``fresh``'s ``--help`` text, passed explicitly (not the docstring below): a plain
 multi-line docstring here renders ragged ("worktree", "(with" alone on their own line)

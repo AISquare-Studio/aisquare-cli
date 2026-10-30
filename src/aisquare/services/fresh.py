@@ -497,7 +497,7 @@ def _refuse(store: ContextStore, project: ProjectInfo, *, dry_run: bool = False)
             f"can't start fresh from inside {row.label}, one of "
             f"{project_service.display_name(stored)}'s own fleet agents: the stop would take "
             "this pane down part-way through. Run it from the UI (asq) or from a terminal of "
-            "your own",
+            "your own; --dry-run shows the plan from here",
             code="inside_fleet_agent",
         )
     readers = project_service.board_readers(store, stored)

@@ -666,10 +666,15 @@ def test_dry_run_is_allowed_from_inside_one_of_the_projects_own_fleet_agents(
     assert json.loads(as_json.stdout)["live_agents"] == ["coder-1"]
     assert _rows(alpha.id) == before and spawned == []
 
-    # The real run from the same pane still refuses, unchanged.
+    # The real run from the same pane still refuses, and says the dry run is the way here.
     refused = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--yes"])
     assert refused.exit_code == 2, refused.output
-    assert "can't start fresh from inside coder-1" in " ".join(refused.output.split())
+    said = " ".join(refused.output.split())
+    assert "can't start fresh from inside coder-1" in said
+    assert "--dry-run shows the plan from here" in said
+    # --help says so too (review of #469): it said "Refused from inside" with no exception.
+    helped = plain(runner.invoke(app, ["project", "fresh", "--help"]).output)
+    assert "own fleet agents, unless --dry-run, and while" in helped
 
 
 def test_a_board_another_projects_fleet_reads_is_refused_naming_them(

@@ -382,7 +382,7 @@ def usage_(
     # alias as the label, disabled marked — and one concurrent read for all of
     # them (review of #205, third round), skipping what the cache still holds.
     accounts = [_resolve(slot)] if slot is not None else accounts_service.list_accounts()
-    statuses = [accounts_service.describe(account) for account in accounts]
+    statuses = accounts_service.describe_all(accounts)
     asked = [status for status in statuses if status.signed_in or slot is not None]
     readings = accounts_service.cached_usage([status.account for status in asked], force=refresh)
     for status in asked:
@@ -739,7 +739,7 @@ def default(
             f"✓ machine default: {_who(chosen)} — moved to rank 1 of the priority order",
             markup=False,
         )
-        if not core.signed_in(chosen):
+        if not accounts_service.is_signed_in(chosen):
             # Rank 1 is the default only for an account that can run a launch (review
             # of #406, m1): say so, or the line above promises what the next launch skips.
             stdout_console().print(

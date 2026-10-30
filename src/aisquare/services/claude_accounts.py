@@ -41,6 +41,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -138,17 +139,34 @@ def describe(account: ClaudeAccount) -> ClaudeAccountStatus:
     A token the Keychain would not show (locked, refused) is ``unreadable``: neither a
     missing one, which would offer a log-in that cannot help, nor one to use.
     """
-    login = core.stored_login(account)
-    creds = login.credentials
-    return ClaudeAccountStatus(
-        account=account,
-        label=core.label(account),
-        identity=core.identity(account),
-        signed_in=core.signed_in(account),
-        token_state="unreadable" if login.unreadable is not None else core.token_state(creds),
-        subscription=core.subscription_label(creds),
-        hooks_installed=_hooks_installed(account),
-    )
+    return describe_all([account])[0]
+
+
+def describe_all(accounts: Sequence[ClaudeAccount]) -> list[ClaudeAccountStatus]:
+    """:func:`describe` for each of ``accounts``, signed in as :func:`signed_in_slots` says, in
+    one look at the store: a slot whose Keychain is locked here and that the Mac's asq saw
+    signed out is signed out here too (``token_state`` ``missing``), as the Mac shows it."""
+    signed = signed_in_slots(accounts)
+    statuses: list[ClaudeAccountStatus] = []
+    for account in accounts:
+        login = core.stored_login(account)
+        creds = login.credentials
+        identity = core.identity(account)
+        state = "unreadable" if login.unreadable is not None else core.token_state(creds)
+        if identity is not None and login.problem == "locked" and account.slot not in signed:
+            state = "missing"  # locked here, and seen signed out by the Mac's asq
+        statuses.append(
+            ClaudeAccountStatus(
+                account=account,
+                label=core.label(account),
+                identity=identity,
+                signed_in=account.slot in signed,
+                token_state=state,
+                subscription=core.subscription_label(creds),
+                hooks_installed=_hooks_installed(account),
+            )
+        )
+    return statuses
 
 
 def _hooks_installed(account: ClaudeAccount) -> bool:
@@ -167,9 +185,7 @@ def overview() -> AccountsOverview:
     cannot be opened costs the ARRANGEMENT (order, aliases, disabled flags)
     and never the listing — see :func:`list_accounts`.
     """
-    return AccountsOverview(
-        claude=install(), accounts=[describe(account) for account in list_accounts()]
-    )
+    return AccountsOverview(claude=install(), accounts=describe_all(list_accounts()))
 
 
 # --- the registry: alias, priority order, default, disabled (#145) ------------------------------
@@ -636,8 +652,9 @@ def preferred_account(
     hand-over is leaving) is passed over with a note, said as the rungs above
     say it (review of #205, fourth round).
     """
+    signed = signed_in_slots(accounts)
     for account in accounts:
-        if account.disabled or not core.signed_in(account):
+        if account.disabled or account.slot not in signed:
             continue
         if account.slot in skip:
             if notes is not None:
@@ -845,6 +862,8 @@ def forget_arrangement(slot: int) -> None:
         store.delete_usage_samples(slot)
         store.set_ui_state(_BACKOFF_KEY.format(slot=slot), None)  # and its wait (F1 of #400)
         store.set_ui_state(_FAMILY_KEY.format(slot=slot), None)  # and its family weeks
+        # And the login last seen there: the next occupant's is its own (task #18).
+        store.set_ui_state(_LOGIN_KEY.format(slot=slot), None)
 
 
 # --- usage ------------------------------------------------------------------------------
@@ -1311,8 +1330,9 @@ def somewhere_to_hand_over(leaving: int | None = None) -> bool:
     accounts, _note = _read_for_handover()
     if accounts is None:
         return True
+    signed = signed_in_slots(accounts)
     usable = [
-        account.slot for account in accounts if not account.disabled and core.signed_in(account)
+        account.slot for account in accounts if not account.disabled and account.slot in signed
     ]
     if leaving is None:
         return len(usable) >= 2
@@ -1377,9 +1397,10 @@ def _record_sample(
         token_fingerprint=_token_fingerprint(account),
     )
     store.add_usage_sample(sample)
-    if sample.token_fingerprint is not None and core.keychain_platform():
+    token = sample.token_fingerprint
+    if token is not None and core.keychain_platform() and not _noted_lately(account, token):
         # Read here: the login an SSH session into the Mac shows readings for (`_logins`).
-        _note_login(store, account.slot, sample.token_fingerprint, now or _now())
+        _note_login(store, account, token, now or _now())
     families = None
     if result.family_week_percent or result.family_week_resets_at:
         families = json.dumps(
@@ -1457,7 +1478,16 @@ def _token_fingerprint(account: ClaudeAccount, now: datetime | None = None) -> s
 
 _LOGIN_KEY = "usage-login:{slot}"
 """The ``ui_state`` row that says which login a slot holds, as a process that could read it
-saw last (:class:`SeenLogin`, :func:`_logins`)."""
+saw last (:class:`SeenLogin`, :func:`_logins`): a fingerprint, or none for a slot seen
+signed out (``/logout`` keeps ``.claude.json``'s account and drops the token)."""
+LOGIN_NOTE_SECONDS = 60.0
+"""How long a login this process said in a slot's row goes unsaid again while it reads the
+same: the Mac's asq looks at every slot on its two-second tick, which opened the store each
+time. Another login read is said at once."""
+_NOTED: dict[tuple[str, str], tuple[str | None, float]] = {}
+"""What this process last said in each slot's row, by (store, config dir): the login and when
+(``time.monotonic``). Keyed on the store too, as a test's home is another store each time."""
+_NOTED_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -1485,22 +1515,60 @@ class SeenLogin:
             return None  # a row this version cannot read says no login: nothing is served
 
 
-def _note_login(store: ContextStore, slot: int, token: str | None, now: datetime) -> None:
-    """Say in ``slot``'s row that it holds the login ``token`` names, read here: written only
-    when the row says another (or nothing), compared and set, so a read meanwhile by another
-    process, of the same Keychain, stands."""
-    key = _LOGIN_KEY.format(slot=slot)
+def _read_login(account: ClaudeAccount, *, fresh: bool = False) -> tuple[bool, str | None]:
+    """Whether this process can read ``account``'s login, and its token's fingerprint (``None``:
+    no login stored). ``fresh`` asks the Keychain again (``core.stored_login``)."""
+    login = core.stored_login(account, fresh=fresh)
+    if login.unreadable is not None:
+        return False, None
+    creds = login.credentials
+    return True, _login_digest(creds) if creds is not None else None
+
+
+def _noted_key(account: ClaudeAccount) -> tuple[str, str]:
+    return str(paths.db_path()), str(account.config_dir)
+
+
+def _noted_lately(account: ClaudeAccount, token: str | None) -> bool:
+    """Whether this process said ``token`` in ``account``'s row in the last
+    :data:`LOGIN_NOTE_SECONDS`."""
+    with _NOTED_LOCK:
+        noted = _NOTED.get(_noted_key(account))
+    return (
+        noted is not None
+        and noted[0] == token
+        and 0 <= time.monotonic() - noted[1] < LOGIN_NOTE_SECONDS
+    )
+
+
+def _note_login(
+    store: ContextStore, account: ClaudeAccount, token: str | None, now: datetime
+) -> None:
+    """Say in ``account``'s row that it holds the login ``token`` names (``None``: none),
+    read here: written only when the row says another (or nothing), compared and set.
+
+    Before a row naming another login is overwritten the login is read again, fresh: this
+    process's read can be :data:`core.KEYCHAIN_MEMO_SECONDS` old, and the row a newer login
+    another process has read since, which an older one written back would hide behind the
+    last login's figure. What the fresh read says is written, if it still differs."""
+    key = _LOGIN_KEY.format(slot=account.slot)
     raw = store.ui_state(key)
     held = SeenLogin.load(raw)
-    if held is not None and held.token == token:
-        return
-    store.replace_ui_state(key, raw, SeenLogin(token=token, seen_at=now).dump())
+    if held is not None and held.token != token:
+        readable, token = _read_login(account, fresh=True)
+        if not readable:
+            return
+    if held is None or held.token != token:
+        store.replace_ui_state(key, raw, SeenLogin(token=token, seen_at=now).dump())
+    with _NOTED_LOCK:
+        _NOTED[_noted_key(account)] = (token, time.monotonic())
 
 
 @dataclass
 class _Logins:
     """Which login each slot's readings are served for (:func:`_logins`): ``tokens``, slot →
-    fingerprint, and ``borrowed``, the slots whose login this process did not read itself.
+    fingerprint, and ``borrowed``, the slots whose login this process did not read itself;
+    ``signed_out``, the slots locked here that the row says hold no login.
 
     Read from the Keychain at once; the rows (:data:`_LOGIN_KEY`) in the first store session
     the readings are looked up in (:meth:`settle`, from :func:`_recorded_usage`), so a read
@@ -1508,23 +1576,32 @@ class _Logins:
 
     now: datetime
     tokens: dict[int, str]
-    seen: dict[int, str | None]
-    """The logins read here, each to be said in its slot's row."""
+    seen: list[tuple[ClaudeAccount, str | None]]
+    """The logins read here and not said lately, each to be said in its slot's row."""
     locked: list[int]
     """The slots whose Keychain is locked here, each to take its login from its row."""
     borrowed: set[int] = field(default_factory=set)
+    signed_out: set[int] = field(default_factory=set)
     settled: bool = False
+
+    @property
+    def needs_store(self) -> bool:
+        return bool(self.seen or self.locked)
 
     def settle(self, store: ContextStore) -> None:
         """Say each login read here in its row, and take each locked slot's from its row."""
         if self.settled:
             return
         self.settled = True
-        for slot, token in self.seen.items():
-            _note_login(store, slot, token, self.now)
+        for account, token in self.seen:
+            _note_login(store, account, token, self.now)
         for slot in self.locked:
             held = SeenLogin.load(store.ui_state(_LOGIN_KEY.format(slot=slot)))
-            if held is not None and held.token is not None:
+            if held is None:
+                continue
+            if held.token is None:
+                self.signed_out.add(slot)
+            else:
                 self.tokens[slot] = held.token
                 self.borrowed.add(slot)
 
@@ -1535,18 +1612,20 @@ def _logins(accounts: Sequence[ClaudeAccount], now: datetime) -> _Logins:
 
     Read here, the token's fingerprint (none for a token expired at ``now``, as
     :func:`_token_fingerprint` says), and the slot's row (:data:`_LOGIN_KEY`) made to say so
-    for the processes that cannot read it. Where this process's Keychain is LOCKED, the
-    login that row names: the readings another process recorded for it are this process's
-    to show, marked (:attr:`ClaudeUsage.recorded_elsewhere`). Never the login the newest
-    reading was taken with: a slot the Mac saw signed into another login, before any reading
-    of that one, would show the last login's figure. No row, a row naming no login, or a
-    Keychain that would not say for another reason (refused, no answer): nothing is served,
-    as before. A store that cannot be opened costs the locked slots their readings, and
-    nothing else. The rows are read and written when :meth:`_Logins.settle` is; only where
-    a Keychain keeps the logins (macOS), the one place one can be locked.
+    for the processes that cannot read it, a slot with no login stored included. Where this
+    process's Keychain is LOCKED, the login that row names: the readings another process
+    recorded for it are this process's to show, marked
+    (:attr:`ClaudeUsage.recorded_elsewhere`), and a row naming no login is a slot signed out
+    (:func:`signed_in_slots`). Never the login the newest reading was taken with: a slot the
+    Mac saw signed into another login, before any reading of that one, would show the last
+    login's figure. No row, or a Keychain that would not say for another reason (refused, no
+    answer): nothing is served, as before. A store that cannot be opened costs the locked
+    slots their readings, and nothing else. The rows are read and written when
+    :meth:`_Logins.settle` is; only where a Keychain keeps the logins (macOS), the one place
+    one can be locked.
     """
     tokens: dict[int, str] = {}
-    seen: dict[int, str | None] = {}
+    seen: list[tuple[ClaudeAccount, str | None]] = []
     locked: list[int] = []
     keychain = core.keychain_platform()
     for account in accounts:
@@ -1555,20 +1634,44 @@ def _logins(accounts: Sequence[ClaudeAccount], now: datetime) -> _Logins:
             locked.append(account.slot)
         elif login.unreadable is None:
             creds = login.credentials
-            if keychain:
-                seen[account.slot] = _login_digest(creds) if creds is not None else None
+            token = _login_digest(creds) if creds is not None else None
+            if keychain and not _noted_lately(account, token):
+                seen.append((account, token))
             if creds is not None and not creds.expired(now):
                 tokens[account.slot] = _login_digest(creds)
     return _Logins(now=now, tokens=tokens, seen=seen, locked=locked)
 
 
 def _settled(logins: _Logins) -> _Logins:
-    """``logins``, settled in a store session of its own when none has settled it yet. Best
-    effort: a store that cannot be opened leaves it as it is."""
-    if not logins.settled:
+    """``logins``, settled in a store session of its own when none has settled it yet and it
+    has a row to read or write. Best effort: a store that cannot be opened leaves it as it
+    is."""
+    if not logins.settled and logins.needs_store:
         with contextlib.suppress(sqlite3.Error), store_session() as store:
             logins.settle(store)
     return logins
+
+
+def signed_in_slots(accounts: Sequence[ClaudeAccount], *, now: datetime | None = None) -> set[int]:
+    """The slots of ``accounts`` that are signed in (``core.signed_in``), as every surface
+    weighs them: the Accounts page and ``accounts`` commands, the status line, a pick.
+
+    A slot whose Keychain is locked here reads signed in (its login is unreadable, not
+    gone) unless a process that could read it last saw no login there (:func:`_logins`):
+    over SSH, a ``/logout`` on the Mac is a logout here too, so no surface shows the last
+    login's figure for it nor picks it. Every slot looked at says what it holds for the
+    processes that cannot read it, a signed-out one included."""
+    logins = _settled(_logins(accounts, now or _now()))
+    return {
+        account.slot
+        for account in accounts
+        if account.slot not in logins.signed_out and core.signed_in(account)
+    }
+
+
+def is_signed_in(account: ClaudeAccount) -> bool:
+    """:func:`signed_in_slots` for one account."""
+    return account.slot in signed_in_slots([account])
 
 
 VIA_THE_MAC = "via the Mac's asq"
@@ -2606,11 +2709,9 @@ def read_fleet_headroom(
     ``accounts`` defaults to the arranged list; a slot that is not signed in is
     never fetched, and with none signed in the level is ``empty``.
     """
-    candidates = [
-        account
-        for account in (list_accounts() if accounts is None else accounts)
-        if not account.disabled and core.signed_in(account)
-    ]
+    listed = list_accounts() if accounts is None else accounts
+    signed = signed_in_slots(listed, now=now)
+    candidates = [account for account in listed if not account.disabled and account.slot in signed]
     readings = cached_usage(candidates, max_age=max_age, force=force, now=now, fetch=fetch)
     summary = fleet_headroom(candidates, readings, now=now)
     write_statusline_fleet(summary, candidates, now=now, readings=readings)
@@ -3066,10 +3167,11 @@ def headroom_choice(
     cache's older figure, shown on the page with its age, is never picked by.
     """
     skip = set(exclude)
+    signed = signed_in_slots(accounts, now=now)
     candidates = [
         account
         for account in accounts
-        if not account.disabled and account.slot not in skip and core.signed_in(account)
+        if not account.disabled and account.slot not in skip and account.slot in signed
     ]
     if not candidates:
         return None, [_NOTHING_TO_PICK]
@@ -3388,7 +3490,7 @@ def line_reading(
     if accounts is None or note is not None:
         return None
     account = next((a for a in accounts if a.slot == slot), None)
-    if account is None or not core.signed_in(account):
+    if account is None or account.slot not in signed_in_slots([account], now=now):
         return None
     if on_record:
         reading = _on_record([account], max_age=USAGE_MAX_AGE_SECONDS, now=now).get(slot)
@@ -3432,12 +3534,13 @@ def room_on_record(
         return False
     moment = now or _now()
     marks = limit_marks(now=moment)
+    signed = signed_in_slots(accounts, now=moment)
     candidates = [
         account
         for account in accounts
         if not account.disabled
         and account.slot != leaving
-        and core.signed_in(account)
+        and account.slot in signed
         and not any(mark.blocks(family) for mark in marks.get(account.slot, []))
     ]
     readings = _on_record(candidates, max_age=USAGE_MAX_AGE_SECONDS, now=moment)

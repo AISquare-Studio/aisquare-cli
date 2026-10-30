@@ -1187,6 +1187,26 @@ def hand_over(
         )
 
 
+_HARNESS_BLOCK = re.compile(
+    r"<(task-notification|local-command-caveat|command-name|command-message|command-args"
+    r"|system-reminder)>.*?</\1>",
+    re.DOTALL,
+)
+"""A closed tag Claude Code itself writes into the prompt field: a background task's notice,
+a slash command's caveat or its name/message/args, a hook's reminder. Matched only when
+CLOSED — ``<command-name> is the tag the parser misses`` has no ``</command-name>`` and is a
+person's words, as typed, not this."""
+
+
+def _without_harness_blocks(text: str) -> str | None:
+    """``text`` with every :data:`_HARNESS_BLOCK` cut out, or ``None`` if nothing is left.
+
+    A prompt that is entirely such blocks (a background task's completion, a slash
+    command's own echo) is not a person's turn; one that mixes real words with one
+    keeps the words, trimmed where the cut left space behind."""
+    return _HARNESS_BLOCK.sub("", text).strip() or None
+
+
 def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | None = None) -> str:
     """Record the prompt, consult CI, open this turn's row.
 
@@ -1228,6 +1248,8 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
         )
         record = False
     text = prompt if record and prompt is not None and prompt.strip() else None
+    if text is not None and _HARNESS_BLOCK.search(text):
+        text = _without_harness_blocks(text)
     try:
         with store_session() as store:
             project = active_project(store, cwd)

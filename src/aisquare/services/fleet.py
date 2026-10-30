@@ -61,6 +61,7 @@ from aisquare.core import (
     selfcli,
 )
 from aisquare.core import memory as memory_core
+from aisquare.core import names as names_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
@@ -75,6 +76,8 @@ from aisquare.core.ids import new_agent_id
 from aisquare.core.locking import holding
 from aisquare.core.spawn import git_env
 from aisquare.core.store import (
+    FLEET_RENAMED,
+    RETIRED_LABEL,
     AmbiguousIdError,
     ContextStore,
     StoreUnopenable,
@@ -256,6 +259,11 @@ class CapacityRefused(FleetError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class _LostToARelabel(FleetError):
+    """A worktree spawn's label went, while it started, to an agent working in another tree
+    (:func:`relabel`): the tree the spawn made is nobody's, and :func:`spawn` removes it."""
 
 
 class EndedMeanwhile(NoSuchAgent):
@@ -818,6 +826,57 @@ def slugify(text: str, *, limit: int = 32) -> str:
     return slug[:limit].rstrip("-")
 
 
+LABEL_RULE = "a label is 2 to 24 lowercase letters, digits and '-', starting with a letter"
+"""The rule :data:`LABEL` holds, in the words a refusal of a typed name says it."""
+
+
+def label_from_text(text: str, role: str) -> str:
+    """The label free ``text`` becomes (:func:`relabel`; the sidebar shows it while it is typed).
+
+    :func:`aisquare.core.names.slug` of it — lowercased, its accents folded, each run of
+    anything else outside ``[a-z0-9]`` one ``-``, no ``-`` at either end, cut to 24 with no
+    ``-`` left at its end — with ``<role>-`` before one that starts with a digit (``2FA work``
+    for a coder is ``coder-2fa-work``: a label starts with a letter), cut to 24 again. Always
+    a :data:`LABEL`. Text that leaves fewer than two letters or digits (``!!!``, ``x``) is
+    refused (:class:`FleetError`), the rule said.
+    """
+    slugged = names_core.slug(text, max_len=24)
+    if len(slugged.replace("-", "")) < 2:
+        raise FleetError(
+            f"{text.strip()!r} leaves no label to keep — {LABEL_RULE}, so type at least two "
+            "letters or digits"
+        )
+    if not slugged[0].isalpha():
+        stem = slugify(role)
+        slugged = f"{stem if stem[:1].isalpha() else 'agent'}-{slugged}"
+    label = slugged[:24].rstrip("-")
+    if not is_label(label):  # pragma: no cover - every branch above makes one
+        raise FleetError(f"{text.strip()!r} makes no label — {LABEL_RULE}")
+    return label
+
+
+def relabel_refusal(agent: FleetAgent) -> str | None:
+    """Why ``agent`` cannot be renamed (:func:`relabel`), or ``None`` when it can — what the
+    sidebar asks before it offers a rename, with no store read.
+
+    The manager and the captain run under the one label their role has (:func:`_fixed_label`),
+    which the fleet and the board find them by. An ended agent runs nothing a name could
+    follow: its label is the next spawn's to take."""
+    if agent.role == "manager" or agent.label == MANAGER_LABEL:
+        return (
+            f"the manager is always labelled {MANAGER_LABEL!r} — the fleet and the board find "
+            "it by that name, so it is not renamed"
+        )
+    if agent.role == CAPTAIN_ROLE or is_the_captains_row(agent):
+        return (
+            f"the captain is always labelled {CAPTAIN_LABEL!r} — the fleet and the board find "
+            "it by that name, so it is not renamed"
+        )
+    if agent.ended_at is not None:
+        return f"{agent.label} has ended — only a running agent is renamed"
+    return None
+
+
 def branch_name(codename: str, *, task_id: str | None, title: str | None) -> str:
     """``fleet/<codename>/<task-short-id>-<slug>``; ``fleet/<codename>/<slug>`` without a task.
 
@@ -1036,6 +1095,7 @@ def next_label(
     wanted: str | None = None,
     task_id: str | None = None,
     store: ContextStore | None = None,
+    trees: Path | None = None,
 ) -> str:
     """The label a new agent gets: the asked one, or ``<role>-<task>`` / ``<role>-<n>``,
     suffixed ``-2``, ``-3`` while a LIVE agent already holds it (§5.7).
@@ -1043,13 +1103,22 @@ def next_label(
     The stem before a suffix is trimmed so the whole stays within 24 characters
     (:func:`_fitted`). A bound role's characters are its own and kept as they are
     (``data_eng-1``): only a label somebody typed is checked against the rule.
+
+    ``trees`` is where a NEW worktree is made (``<root>/<worktree_dir>``, :func:`spawn`'s for
+    an agent with none of its own yet): a label whose tree there a live agent works in is
+    held too. That agent was relabelled (:func:`relabel`), which moves no tree, and its tree
+    keeps the label it was spawned under, which no other agent may start in.
     """
     fixed = _fixed_label(role, wanted)
     if fixed is not None:
         return fixed
 
     def pick(store: ContextStore) -> str:
-        live = {agent.label for agent in store.fleet_agents(project.id, live_only=True)}
+        rows = store.fleet_agents(project.id, live_only=True)
+        live = {agent.label for agent in rows}
+        if trees is not None:
+            here = trees.resolve()
+            live |= {a.cwd.name for a in rows if a.worktree and a.cwd.resolve().parent == here}
         if wanted is not None:
             base = wanted
         elif task_id:
@@ -1069,6 +1138,25 @@ def next_label(
         return pick(store)
     with store_session() as opened:
         return pick(opened)
+
+
+def _why_held(store: ContextStore, project: ProjectInfo, label: str, trees: Path | None) -> str:
+    """Why :func:`next_label` passed over the asked ``label``, in a spawn's note: a live agent
+    holds it, or (``trees`` given) a relabelled one still works in the tree named for it —
+    which ``fleet ls`` lists under its new label, so the note names that one."""
+    if trees is not None and store.fleet_agent_by_label(project.id, label, live_only=True) is None:
+        path = _tree_at(trees / label)
+        holder = next(
+            (
+                row
+                for row in store.fleet_agents(project.id, live_only=True)
+                if row.worktree and _tree_at(row.cwd) == path
+            ),
+            None,
+        )
+        if holder is not None:
+            return f"label {label!r} is the worktree {holder.label} still works in ({holder.cwd})"
+    return f"label {label!r} is held by a live agent"
 
 
 def _fork_label(
@@ -1486,7 +1574,7 @@ def _worktree_for(
     """
     if own is not None and not own.exists():
         return _remake_worktree(root, own, own_branch, notes)
-    path = root / worktree_dir / label
+    path = _tree_path(root, worktree_dir, label, own)
     if path.exists():
         if start_point is not None:
             raise FleetError(
@@ -1523,6 +1611,18 @@ def _worktree_for(
             _add_worktree(root, path, branch, new=True, start_point=start_point)
     _exclude_worktrees(common, worktree_dir, notes)
     return path
+
+
+def _tree_path(root: Path, worktree_dir: str, label: str, own: Path | None) -> Path:
+    """Where a worktree agent labelled ``label`` works: ``<root>/<worktree_dir>/<label>``, or
+    ``own``, the tree a replacement's row recorded (:func:`_respawn`), when it is one of
+    today's ``worktree_dir``. A relabelled agent's tree keeps the label it was spawned under
+    (:func:`relabel` moves no tree, nor a branch), and it is still that agent's: its restart,
+    switch or take-over carries on there, never in a new tree under its new label."""
+    trees = root / worktree_dir
+    if own is not None and own.resolve().parent == trees.resolve():
+        return own
+    return trees / label
 
 
 def _branch_exists(root: Path, branch: str) -> bool:
@@ -3292,11 +3392,23 @@ def _task_for(store: ContextStore, board_id: str, task_id: str | None) -> TeamTa
 def _live_agent(
     store: ContextStore, project: ProjectInfo, label: str, *, agent_id: str | None = None
 ) -> FleetAgent:
-    """The live row ``label`` names; with ``agent_id``, only if it is THAT row (:func:`stop`)."""
+    """The live row ``label`` names; with ``agent_id``, only if it is THAT row (:func:`stop`).
+
+    A ``label`` the agent was relabelled from (:func:`relabel`) names nothing now, and the
+    refusal says what it is called instead. Pinned to ``agent_id`` — a view that read the
+    row before the rename — the row is found by its id all the same."""
     agent = store.fleet_agent_by_label(project.id, label, live_only=True)
+    if agent is None and agent_id is not None:
+        pinned = store.get_fleet_agent(agent_id)
+        if (
+            pinned is not None
+            and pinned.ended_at is None
+            and _renamed_from(store, project, label) == pinned.id
+        ):
+            return pinned
     if agent is None:
         raise NoSuchAgent(
-            f"no live agent {label!r} in {_name(project)} — "
+            f"no live agent {label!r} in {_name(project)}{_renamed_hint(store, project, label)} — "
             f"`{project_service.fleet_command('ls', project)}` shows who is running"
         )
     if agent_id is not None and agent.id != agent_id:
@@ -3655,15 +3767,22 @@ def spawn(
                 codename=observed,
             )
         else:
-            picked = next_label(project, role, wanted=label, task_id=resolved_task_id, store=store)
-    if label is not None and picked != label:
-        if role == "manager":
-            notes.append(f"the manager is always labelled {MANAGER_LABEL!r} (asked: {label!r})")
-        else:
-            notes.append(f"label {label!r} is held by a live agent — using {picked!r}")
+            # A new tree's place is held where a relabelled agent still works in it; a
+            # replacement keeps its own (`_tree_path`).
+            fresh = use_worktree and own_worktree is None
+            trees = project.root / config.worktree_dir if fresh else None
+            picked = next_label(
+                project, role, wanted=label, task_id=resolved_task_id, store=store, trees=trees
+            )
+            if label is not None and picked != label and role != "manager":
+                notes.append(f"{_why_held(store, project, label, trees)} — using {picked!r}")
+    if label is not None and picked != label and role == "manager":
+        notes.append(f"the manager is always labelled {MANAGER_LABEL!r} (asked: {label!r})")
+    # The tree it will work in, when it gets one: its label's, or a replacement's own.
+    tree = _tree_path(project.root, config.worktree_dir, picked, own_worktree)
 
     def refuse_if_taken() -> None:
-        _refuse_occupied_worktree(project, config.worktree_dir, picked)
+        _refuse_occupied_worktree(project, tree, picked)
 
     if use_worktree:
         if not is_git_project(project.root):
@@ -3906,7 +4025,7 @@ def spawn(
     # from its brain folder under the home, so no project's CLAUDE.md or hooks brief it as a
     # worker (T2, 13121). The row records it and a restart replays it.
     home = cwd if cwd is not None else project.root
-    start = project.root / config.worktree_dir / picked if common is not None else home
+    start = tree if common is not None else home
     settled: str | None = None
     if choice.account is not None:
         # Here as well as in the window's `aisquare launch`, so the receipt — the manager's
@@ -3935,6 +4054,9 @@ def spawn(
     )
     with tree_lock:
         cwd = home
+        # Whether this spawn makes its tree, which it then removes should its label go to a
+        # relabelled agent meanwhile (`_LostToARelabel`): a tree that was there stays.
+        makes_tree = common is not None and not tree.exists()
         if common is not None:
             branch = branch_name(
                 codename,
@@ -4047,18 +4169,22 @@ def spawn(
             first_prompt="pending" if first is not None else None,
             first_prompt_at=_now() if first is not None else None,
         )
-        stored = _record(
-            agent,
-            project,
-            srv,
-            wanted=label,
-            notes=notes,
-            cap=config.max_agents_per_project,
-            total=0 if experimental.captain_role(role) else config.max_agents_total,
-            onboard=onboard,
-            codename=codename,
-            replaces=replaces,
-        )
+        try:
+            stored = _record(
+                agent,
+                project,
+                srv,
+                wanted=label,
+                notes=notes,
+                cap=config.max_agents_per_project,
+                total=0 if experimental.captain_role(role) else config.max_agents_total,
+                onboard=onboard,
+                codename=codename,
+                replaces=replaces,
+            )
+        except _LostToARelabel as exc:
+            unmade = _unmake_tree(project.root, cwd) if makes_tree else ""
+            raise FleetError(f"{exc}{unmade}; spawn again") from exc
     if picks and spec is None and _the_owners_spawn(spawned_by):
         # The next spawn's pick, once this agent is up: a spawn refused on its way chose nothing.
         try:
@@ -4733,12 +4859,13 @@ def open_window(
     )
 
 
-def _refuse_occupied_worktree(project: ProjectInfo, worktree_dir: str, label: str) -> None:
+def _refuse_occupied_worktree(project: ProjectInfo, tree: Path, label: str) -> None:
     """Refuse the tree a LIVE agent is working in — before anything touches it.
 
-    ``next_label`` keeps live labels apart, so the only way to arrive here is a
-    parallel spawn that picked this label from a snapshot taken a moment
-    earlier. The tree at ``<worktree_dir>/<label>`` is then the winner's, and
+    ``next_label`` keeps live labels apart, and the trees of relabelled agents, so the only
+    way to arrive here is a parallel spawn that picked this label from a snapshot taken a
+    moment earlier. ``tree`` (:func:`_tree_path`: ``<worktree_dir>/<label>``, or a
+    replacement's own) is then the winner's, and
     neither starting a second agent in it nor (worse) checking another branch
     out from under the first one is acceptable.
 
@@ -4749,7 +4876,7 @@ def _refuse_occupied_worktree(project: ProjectInfo, worktree_dir: str, label: st
     :func:`_reuse_worktree` asks this function again immediately before its
     ``git checkout`` (``refuse_if_taken``).
     """
-    path = (project.root / worktree_dir / label).resolve()
+    path = tree.resolve()
     with store_session() as store:
         live = store.fleet_agents(project.id, live_only=True)
     holder = next((a for a in live if a.worktree and a.cwd.resolve() == path), None)
@@ -4816,6 +4943,21 @@ def _record(
             f"could not record the agent ({exc}) — its tmux window was killed rather than "
             "left running unrecorded"
         ) from exc
+
+
+def _unmake_tree(root: Path, tree: Path) -> str:
+    """Remove the worktree a refused spawn made (:class:`_LostToARelabel`), under the branch
+    lock the spawn holds; what that did, said as the end of the refusal. Not forced: the
+    agent never ran in it (``launch`` waits for the row), and a tree with anything in it
+    stays rather than lose it."""
+    try:
+        removed = _git(root, "worktree", "remove", str(tree))
+    except FleetError as exc:
+        return f" — the worktree it made at {tree} could not be removed ({exc})"
+    if removed.returncode != 0:
+        why = removed.stderr.strip() or "no reason"
+        return f" — the worktree it made at {tree} could not be removed ({why})"
+    return f" — the worktree it made at {tree} was removed"
 
 
 def _kill_unrecorded(srv: TmuxServer, pane_id: str) -> None:
@@ -4902,12 +5044,26 @@ def _relabel(
     two live agents editing one checkout on one branch — the thing worktrees
     exist to prevent — with only the row's label to say otherwise. So the
     spawn is refused instead; the window is killed by the caller.
+
+    Unless the label went to an agent working somewhere else: one :func:`relabel` named so
+    meanwhile, whose tree keeps the label it was spawned under. Then the tree at this
+    agent's cwd is this spawn's alone, named for a label it does not hold, and the refusal
+    (:class:`_LostToARelabel`) names the holder and where it works; :func:`spawn` removes
+    the tree it made.
     """
     if agent.role == "manager":
         raise FleetError(f"{_name(project)} already has a manager — one per project")
     if experimental.captain_role(agent.role):
         raise FleetError("the home already has a captain — one per home")
     if agent.worktree:
+        holder = store.fleet_agent_by_label(project.id, agent.label, live_only=True)
+        if holder is not None and _tree_at(holder.cwd) != _tree_at(agent.cwd):
+            raise _LostToARelabel(
+                f"label {agent.label!r} was taken while this agent was starting: "
+                f"{holder.label} ({holder.id}) holds it now and works in {holder.cwd} — "
+                f"this agent's worktree {agent.cwd} is named for that label, so it is refused "
+                "rather than recorded under another"
+            )
         raise FleetError(
             f"label {agent.label!r} was taken while this agent was starting, and "
             f"{agent.cwd} is that label's worktree — the agent that won the label works "
@@ -9153,7 +9309,9 @@ def _refuse_a_take_over_that_would_move(project: ProjectInfo, agent: FleetAgent,
             f"as {role} it would be labelled {fixed!r}, not {agent.label!r}{where} — {keeps}"
         )
     if agent.worktree:
-        path = project.root / settings().worktree_dir / agent.label
+        # Its own tree when that is still under today's `worktree_dir`, whatever it is
+        # labelled now (a relabel moves no tree).
+        path = _tree_path(project.root, settings().worktree_dir, agent.label, agent.cwd)
         if path.resolve() != agent.cwd.resolve():
             raise FleetError(
                 f"as {role} it would start in {path}, not in {agent.cwd} where it works now "
@@ -9293,8 +9451,16 @@ def restart(
         agent = store.fleet_agent_by_label(project.id, label, live_only=False)
         if agent is None:
             raise NoSuchAgent(
-                f"no agent {label!r} in {_name(project)} — "
-                f"`{project_service.fleet_command('ls', project, '--all')}` shows every row"
+                f"no agent {label!r} in {_name(project)}{_renamed_hint(store, project, label)}"
+                f" — `{project_service.fleet_command('ls', project, '--all')}` shows every row"
+            )
+        if agent.label.startswith(RETIRED_LABEL):
+            # A 💤 row whose label a relabel gave another agent (`store.RETIRED_LABEL`): it
+            # has no label of its own to come back under.
+            raise FleetError(
+                f"cannot restart {label!r}: a rename gave its label, "
+                f"{agent.label.removeprefix(RETIRED_LABEL)!r}, to another agent — nothing "
+                "was restarted"
             )
         if agent_id is not None and agent.id != agent_id:
             raise _replaced(project, label, agent, agent_id)
@@ -11010,6 +11176,211 @@ def rename(project: ProjectInfo, codename: str, *, notes: list[str] | None = Non
                     "panes by id"
                 )
     return updated
+
+
+@dataclass(frozen=True)
+class RelabelReceipt:
+    """What :func:`relabel` did: the row as it is now, the label it had, the label the typed
+    name became (:func:`label_from_text`, before any suffix), and what to tell the owner."""
+
+    agent: FleetAgent
+    old: str
+    wanted: str
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def changed(self) -> bool:
+        return self.agent.label != self.old
+
+    @property
+    def said(self) -> str:
+        """``coder-1 is now login-fix``, the line the CLI and the sidebar's toast both say."""
+        if not self.changed:
+            return f"{self.old} is already called {self.old} — nothing changed"
+        return f"{self.old} is now {self.agent.label}"
+
+
+def relabel(
+    project: ProjectInfo, label: str, text: str, *, actor: str | None = None
+) -> RelabelReceipt:
+    """Rename the live agent ``label`` to the label ``text`` becomes (:func:`label_from_text`):
+    ``fleet relabel`` and the sidebar's agent row both call this.
+
+    Refused for the manager and the captain, and for an agent that ended
+    (:func:`relabel_refusal`), and to ``manager`` or ``captain``, labels their roles keep. A
+    label another LIVE agent of the project holds takes the next free suffix
+    (``login-fix-2``), and a note says so; the agent's own label is no change. The write is
+    one compare-and-set against the partial ``fleet_agent_live_label`` index
+    (``store.relabel_fleet_agent``): a rename or a spawn that takes the label meanwhile
+    trips it, and the next suffix is tried, so two live rows never share a label.
+
+    From then on the agent IS the new label: every lookup by label (``tell``, ``stop``,
+    ``restart``, ``switch``, a hand-off, ``fleet ls``) finds it there, and its earlier rows
+    of the old label move with it, so the old one names nothing (a refusal by it says what it
+    is called now). The ended rows the new label already had — another agent's — are retired
+    (``~login-fix``, ``store.RETIRED_LABEL``): looked up by its newest row, the label is this
+    agent's, before it ends and after, whenever those rows were started. The board names its
+    posts by the row's label, read when they are shown, so its identity
+    (``AISQUARE_FLEET_AGENT``, the row's id; ``--as``, its session) needs nothing. An
+    ``agent_renamed`` event on its board tells the manager. Its worktree and branch are NOT
+    moved: it is live in them, and every later step finds the tree by the row's ``cwd``
+    (:func:`_tree_path`). The tmux window is renamed to match, failing OPEN as
+    :func:`rename` does: the row is what everything reads, and a note says what tmux said.
+    """
+    notes: list[str] = []
+    with store_session() as store:
+        agent = store.fleet_agent_by_label(project.id, label, live_only=True)
+        if agent is None:
+            ended = store.fleet_agent_by_label(project.id, label, live_only=False)
+            if ended is not None:
+                raise FleetError(f"cannot rename {label!r}: {relabel_refusal(ended)}")
+            raise NoSuchAgent(
+                f"no live agent {label!r} in {_name(project)}"
+                f"{_renamed_hint(store, project, label)} — "
+                f"`{project_service.fleet_command('ls', project)}` shows who is running"
+            )
+        refusal = relabel_refusal(agent)
+        if refusal is not None:
+            raise FleetError(f"cannot rename {label!r}: {refusal}")
+        wanted = label_from_text(text, agent.role)
+        if wanted in (MANAGER_LABEL, CAPTAIN_LABEL):
+            raise FleetError(
+                f"cannot rename {label!r} to {wanted!r}: that label is reserved for the "
+                f"{wanted}, whom the fleet and the board find by it — pick another name"
+            )
+        if wanted == agent.label:
+            return RelabelReceipt(agent, label, wanted, notes)
+        for _ in range(_LABEL_RETRIES):
+            others = {
+                row.label
+                for row in store.fleet_agents(project.id, live_only=True)
+                if row.id != agent.id
+            }
+            picked = free_label(wanted, others)
+            if picked == agent.label:
+                notes.append(f"{wanted} is another live agent's label — {label} keeps its own")
+                return RelabelReceipt(agent, label, wanted, notes)
+            try:
+                renamed = store.relabel_fleet_agent(agent.id, agent.label, picked)
+            except sqlite3.IntegrityError:
+                continue  # another rename or a spawn took it meanwhile: the next suffix
+            if renamed is None:
+                now = store.get_fleet_agent(agent.id)
+                if now is None or now.ended_at is not None:
+                    raise NoSuchAgent(f"{label} ({agent.id}) ended meanwhile — nothing renamed")
+                raise FleetError(f"{label} was renamed {now.label} meanwhile — nothing changed")
+            break
+        else:
+            raise FleetError(f"could not rename {label!r}: every label tried was taken meanwhile")
+        if picked != wanted:
+            notes.append(f"{wanted} is another live agent's label — named it {picked}")
+        by = f" — renamed by {_actor_name(store, actor)}" if actor is not None else ""
+        # The row is the record; the event, the courtesy. Written as no session's, so the
+        # agent's own next delta, which leaves out its own posts, tells it its new name too.
+        with contextlib.suppress(Exception):
+            _team()._emit(
+                store,
+                _board_of_row(renamed),
+                "agent_renamed",
+                f"{label} is now {renamed.label}{by}",
+                actor=actor,
+                meta={"agent": renamed.id, "from": label, "to": renamed.label},
+            )
+    _rename_window(renamed, notes)
+    return RelabelReceipt(renamed, label, wanted, notes)
+
+
+def free_label(wanted: str, taken: Collection[str]) -> str:
+    """``wanted``, or the first ``wanted-2``, ``-3`` … (within 24 characters, :func:`_fitted`)
+    that no label in ``taken`` is."""
+    if wanted not in taken:
+        return wanted
+    for n in range(2, 1000):
+        candidate = _fitted(wanted, f"-{n}")
+        if candidate not in taken:
+            return candidate
+    raise FleetError(f"no free label for {wanted!r}")
+
+
+_WINDOW_RENAMES = 3
+"""How many times :func:`_rename_window` asks tmux at most: once, and again for each relabel
+of the row that landed while it did (the latest relabel's own pass names it after that)."""
+
+
+def _rename_window(agent: FleetAgent, notes: list[str]) -> None:
+    """Name ``agent``'s tmux window the label its row has NOW, failing OPEN with a note
+    (:func:`relabel`).
+
+    The row is read again right before tmux is asked, and again after: two quick relabels of
+    one agent (the CLI and the sidebar) finish their tmux calls in either order, and the one
+    that finished last left the older label on the window. A label that changed meanwhile is
+    named again; an agent that ended meanwhile is left as it is.
+
+    Only on the server its row was started on: one that started since numbers its panes from
+    ``%0`` again, and its pane under the row's id is another agent's (:func:`_outlived`)."""
+    srv = server_of(agent)
+    label = agent.label
+    try:
+        if _outlived(agent, srv.started_at()):
+            notes.append(
+                "its tmux window was not renamed: the server at its socket is not the one it "
+                f"was started on, where {agent.pane_id} is another agent's pane"
+            )
+            return
+        named: str | None = None
+        for _ in range(_WINDOW_RENAMES):
+            now = _label_now(agent)
+            if now is None or now == named:
+                return
+            label = now
+            srv.rename_window(agent.pane_id, label)
+            named = label
+    except TmuxError as exc:
+        notes.append(
+            f"the label is {label}, but tmux could not rename its window ({exc}) — "
+            f"`tmux -L {agent.tmux_socket} rename-window -t {agent.pane_id} {label}` does "
+            "that. `fleet ls`, `tell`, `stop` and `reap` are unaffected — they address panes by id"
+        )
+
+
+def _label_now(agent: FleetAgent) -> str | None:
+    """The label ``agent``'s row has now, ``None`` once it has ended; the one it was handed
+    when the store cannot say (its window is named that rather than not at all)."""
+    try:
+        with store_session() as store:
+            row = store.get_fleet_agent(agent.id)
+    except Exception:
+        return agent.label
+    return row.label if row is not None and row.ended_at is None else None
+
+
+def _renamed_from(store: ContextStore, project: ProjectInfo, label: str) -> str | None:
+    """The id of the row :func:`relabel` took ``label`` from, while no row of that label has
+    been started since (a label is free again once renamed away); ``None`` otherwise."""
+    raw = store.ui_state(f"{FLEET_RENAMED}{project.id}:{label}")
+    if raw is None:
+        return None
+    try:
+        record = json.loads(raw)
+        agent_id, at = record["agent"], datetime.fromisoformat(record["at"])
+    except (ValueError, TypeError, KeyError):
+        return None
+    if not isinstance(agent_id, str):
+        return None
+    newest = store.fleet_agent_by_label(project.id, label, live_only=False)
+    return agent_id if newest is None or newest.created_at < at else None
+
+
+def _renamed_hint(store: ContextStore, project: ProjectInfo, label: str) -> str:
+    """`` (renamed: it is login-fix now)``, for a refusal by a label :func:`relabel` took from
+    an agent; empty for any other."""
+    agent_id = _renamed_from(store, project, label)
+    agent = store.get_fleet_agent(agent_id) if agent_id is not None else None
+    if agent is None:
+        return ""
+    if agent.ended_at is not None:
+        return f" (renamed {agent.label}, which has since ended)"
+    return f" (renamed: it is {agent.label} now)"
 
 
 def pause(project: ProjectInfo, *, session_ref: str | None = None) -> None:

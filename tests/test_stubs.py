@@ -75,6 +75,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "attach",
             "reap",
             "rename",
+            "relabel",
             "pause",
             "resume",
             "switch",

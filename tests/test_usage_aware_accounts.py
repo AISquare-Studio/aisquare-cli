@@ -2356,6 +2356,19 @@ def test_the_sentence_says_now_the_week_and_the_soonest_reset() -> None:
     assert service.summary_sentence(HeadroomSummary(level="unknown"), {}) is None
 
 
+def test_the_sentence_says_one_account_and_two_accounts() -> None:
+    """One account read "0.8 of 1 accounts left"; the count agrees with its noun now."""
+    soon = NOW + timedelta(days=2)
+    one = service.fleet_headroom(
+        [ClaudeAccount(slot=2, config_dir=Path("/accounts/2"), managed=True)],
+        {2: ClaudeUsage(available=True, session_percent=30.0, week_percent=20.0,
+                        week_resets_at=soon, fetched_at=NOW)},
+    )  # fmt: skip
+    assert "week: 0.8 of 1 account left · " in (service.summary_sentence(one, {}, now=NOW) or "")
+    two = service.summary_sentence(_two((soon, soon)), {}, now=NOW) or ""
+    assert "week: 0.9 of 2 accounts left · " in two
+
+
 def _usage_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     second, third = _slot("two@x.dev", "tok-2"), _slot("three@x.dev", "tok-3")
     readings = {

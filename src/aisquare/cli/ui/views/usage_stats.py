@@ -256,6 +256,7 @@ class UsageStatsView(VerticalScroll):
     UsageStatsView #usage-ranges { height: auto; margin-bottom: 1; }
     UsageStatsView .usage-range { margin: 0 1 0 0; min-width: 12; }
     UsageStatsView #usage-status { height: auto; color: $text-muted; margin-bottom: 1; }
+    UsageStatsView #usage-body { height: auto; }
     UsageStatsView #usage-tiles { grid-size: 4; grid-gutter: 1 2; height: auto; }
     UsageStatsView .usage-tile { height: 3; padding: 0 1; border-left: tall $primary; }
     UsageStatsView #usage-split { height: auto; margin-top: 1; }

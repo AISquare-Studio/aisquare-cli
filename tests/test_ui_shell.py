@@ -807,8 +807,9 @@ def test_a_project_opened_between_two_ticks_names_its_session_at_once(
 def test_the_card_names_the_project_not_its_codename_and_a_path_tells_twins_apart(
     tmp_path: Path, script: Script
 ) -> None:
-    """The codename names the tmux session and the branches; the card says the name a
-    person knows the project by (its nickname, else its folder), and nothing else."""
+    """The card's title is the name a person knows the project by (its nickname, else its
+    folder), and nothing else; a codename that name does not give is said dim under it, after
+    the path that tells twins apart (task #6)."""
     seed(
         tmp_path,
         ("prj_w", "work/api", "amber-otter"),
@@ -834,9 +835,10 @@ def test_the_card_names_the_project_not_its_codename_and_a_path_tells_twins_apar
         "🗂 api",
         "🗂 unique",
     ]
-    # The two `api` projects are told apart by their path; the unique one is not decorated.
-    assert cards["prj_w"][1] and cards["prj_w"][2].endswith("work/api")
-    assert cards["prj_o"][1] and cards["prj_o"][2].endswith("oss/api")
+    # The two `api` projects are told apart by their path, then their codename, which `api`
+    # does not give; the unique one, with no codename, is not decorated.
+    assert cards["prj_w"][1] and cards["prj_w"][2].endswith("work/api · amber-otter")
+    assert cards["prj_o"][1] and cards["prj_o"][2].endswith("oss/api · ruby-fox")
     assert cards["prj_u"][1] is False and cards["prj_u"][2] == ""
 
 
@@ -6467,7 +6469,7 @@ def test_a_handle_removed_mid_press_lets_the_mouse_go(
 
 
 def test_the_settings_tab_follows_a_rename_made_on_the_card_or_in_a_shell(
-    tmp_path: Path, script: Script
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The tab kept the project it was built with: after a card rename it still showed the
     folder name, and Save with a blank field was refused as "already that" against its stale
@@ -6478,7 +6480,9 @@ def test_the_settings_tab_follows_a_rename_made_on_the_card_or_in_a_shell(
     from aisquare.cli.ui.views.settings import SettingsView
     from aisquare.core.store import store_session
     from aisquare.services import project as project_service
+    from tests.fleet_fakes import tmux_sessions_as
 
+    tmux_sessions_as(monkeypatch)  # the rename's codename half asks for its session
     projects = seed(tmp_path, ("prj_a", "alpha", None))
 
     def stored() -> str | None:

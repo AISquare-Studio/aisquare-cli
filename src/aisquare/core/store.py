@@ -1256,6 +1256,23 @@ CREATE TABLE IF NOT EXISTS feature_use (
 
 CREATE INDEX IF NOT EXISTS usage_turn_recorded ON usage_turn (recorded_at);
 """
+
+# v41: the codenames a project has given up. Renaming a project now renames its codename
+# (``services.fleet.follow_name``), and live agents were handed the old one in their start
+# packs and prompts (``--project earnest-hawk``), so it still names the project: one row a
+# retired codename, the project that last held it (:meth:`SqliteStore.set_codename` writes
+# it, :meth:`SqliteStore.find_projects` reads it after the current codenames). Additive: a
+# table and its index, both ``IF NOT EXISTS`` and in :data:`_PRODUCTS`; the foreign key
+# puts it among the tables a purge finds by the schema.
+_SCHEMA_V41 = """
+CREATE TABLE IF NOT EXISTS project_codename_alias (
+    codename   TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES project (id),
+    retired_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS project_codename_alias_project
+    ON project_codename_alias (project_id);
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1298,6 +1315,7 @@ _MIGRATIONS = (
     _SCHEMA_V38,
     _SCHEMA_V39,
     _SCHEMA_V40,
+    _SCHEMA_V41,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1384,6 +1402,7 @@ _PRODUCTS: dict[int, _Products] = {
             ("usage_turn", "source", "TEXT"),
         ),
     ),
+    40: _Products(("project_codename_alias", "project_codename_alias_project")),
 }
 
 _PROJECT_COLUMNS = (
@@ -1744,6 +1763,11 @@ class ContextStore(Protocol):
     def latest_seq(self, project_id: str) -> int: ...
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
+    def swap_codename(self, project_id: str, codename: str) -> tuple[str | None, ProjectInfo]: ...
+    def folder_names_in_use(self, project_id: str) -> set[str]: ...
+    def aliases_in_use(self, project_id: str | None = None) -> set[str]: ...
+    def codename_aliases(self, project_id: str) -> list[str]: ...
+    def codename_alias_owners(self) -> dict[str, str]: ...
     def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo: ...
     def codenames_in_use(self) -> set[str]: ...
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
@@ -1841,6 +1865,7 @@ class ContextStore(Protocol):
         self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
     ) -> FleetAgent: ...
     def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent: ...
+    def relabel_fleet_agent(self, agent_id: str, old: str, new: str) -> FleetAgent | None: ...
     def end_fleet_agent_if_live(
         self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
     ) -> FleetAgent | None: ...
@@ -2623,19 +2648,37 @@ class SqliteStore:
         return found
 
     def find_projects(self, term: str) -> list[ProjectInfo]:
-        """The live projects ``term`` names: an id prefix, a directory name or a codename,
-        and only when none of those match, a nickname (exactly, case and all).
+        """The live projects ``term`` names: the one whose codename it is; else every one it
+        names as an id prefix, a directory name or a codename given up at a rename
+        (``project_codename_alias``); and only when none of those match, a nickname (exactly,
+        case and all).
 
-        The nickname comes last so that one a person types never takes a reference
-        that already worked: a nickname spelled like another project's codename or
-        folder leaves that one found, rather than both refused as ambiguous.
+        The codename first: it is unique, and it is what every printed ``--project`` says
+        (``services.project.fleet_command``); a project that holds a codename NOW is the one
+        it names. A codename given up stands with the folders and the id prefixes: its
+        project's live agents were given ``--project earnest-hawk``, and a checkout added
+        since in ``…/earnest-hawk`` makes it name two, refused as ambiguous with both named
+        — never moved to either without a word (task #6, reopened). Asked after the folders,
+        it went to the checkout, and an agent's ``fleet stop --project earnest-hawk``
+        stopped another project's agent. A rename never takes another project's folder name
+        or old codename as its own (``services.fleet.follow_name``), so a reference that
+        worked before a rename keeps naming what it named. The nickname comes last so that
+        one a person types never takes a reference that already worked: a nickname spelled
+        like another project's codename or folder leaves that one found, rather than both
+        refused as ambiguous.
         """
         rows = self._conn.execute(
-            f"SELECT {_PROJECT_COLUMNS} FROM project "
-            "WHERE forgotten_at IS NULL AND (id GLOB ? OR name = ? OR codename = ?) "
-            "ORDER BY name",
-            (_glob_prefix(term), term, term),
+            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE forgotten_at IS NULL AND codename = ?",
+            (term,),
         ).fetchall()
+        if not rows:
+            rows = self._conn.execute(
+                f"SELECT {_PROJECT_COLUMNS} FROM project "
+                "WHERE forgotten_at IS NULL AND (id GLOB ? OR name = ? OR id IN "
+                "(SELECT project_id FROM project_codename_alias WHERE codename = ?)) "
+                "ORDER BY name",
+                (_glob_prefix(term), term, term),
+            ).fetchall()
         if not rows:
             rows = self._conn.execute(
                 f"SELECT {_PROJECT_COLUMNS} FROM project "
@@ -4551,13 +4594,87 @@ class SqliteStore:
     # --- fleet -----------------------------------------------------------------
 
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo:
-        """Give a project its fleet codename (unique: the index raises on a clash)."""
-        self._conn.execute("UPDATE project SET codename = ? WHERE id = ?", (codename, project_id))
-        self._conn.commit()
+        """Give a project its fleet codename (unique: the index raises on a clash), keeping the
+        one it replaced as an alias (:meth:`swap_codename`)."""
+        return self.swap_codename(project_id, codename)[1]
+
+    def swap_codename(self, project_id: str, codename: str) -> tuple[str | None, ProjectInfo]:
+        """Give a project its fleet codename, and say which one it REPLACED: read in the same
+        ``BEGIN IMMEDIATE`` transaction as the write, so two renames of one project at once
+        each learn the codename they really took over, not the one they read before.
+
+        The one it held before, if any, is kept as its alias (``project_codename_alias``,
+        :meth:`find_projects`), in the same transaction: the last project to give a codename
+        up is the one it names; one taken back is its project's current codename again, and
+        no longer an alias. A clash with another project's codename raises
+        ``sqlite3.IntegrityError`` and writes nothing.
+        """
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT codename FROM project WHERE id = ?", (project_id,)
+            ).fetchone()
+            old = row["codename"] if row is not None else None
+            self._conn.execute(
+                "UPDATE project SET codename = ? WHERE id = ?", (codename, project_id)
+            )
+            if old is not None and old != codename:
+                self._conn.execute(
+                    "INSERT INTO project_codename_alias (codename, project_id, retired_at) "
+                    "VALUES (?, ?, ?) ON CONFLICT (codename) DO UPDATE SET "
+                    "project_id = excluded.project_id, retired_at = excluded.retired_at",
+                    (old, project_id, datetime.now(UTC).isoformat()),
+                )
+            self._conn.execute(
+                "DELETE FROM project_codename_alias WHERE codename = ? AND project_id = ?",
+                (codename, project_id),
+            )
         project = self.get_project(project_id)
         if project is None:
             raise KeyError(project_id)
-        return project
+        return (str(old) if old is not None else None), project
+
+    def folder_names_in_use(self, project_id: str) -> set[str]:
+        """The directory names of every live project but ``project_id``: what
+        :meth:`find_projects` matches ``--project <name>`` against, so a codename that is one
+        of them would take that reference from the project it named."""
+        rows = self._conn.execute(
+            "SELECT name FROM project WHERE forgotten_at IS NULL AND id != ?", (project_id,)
+        ).fetchall()
+        return {str(row["name"]) for row in rows}
+
+    def aliases_in_use(self, project_id: str | None = None) -> set[str]:
+        """The codenames every live project but ``project_id`` (with ``None``, every live
+        project) gave up at a rename: what :meth:`find_projects` still finds those projects
+        by, so a codename that is one of them would make that reference name two projects.
+        A forgotten project's are free again: nothing finds it by them."""
+        rows = self._conn.execute(
+            "SELECT a.codename FROM project_codename_alias a JOIN project p "
+            "ON p.id = a.project_id WHERE p.forgotten_at IS NULL AND a.project_id != ?",
+            (project_id if project_id is not None else "",),
+        ).fetchall()
+        return {str(row["codename"]) for row in rows}
+
+    def codename_aliases(self, project_id: str) -> list[str]:
+        """The codenames ``project_id`` gave up that no project holds now, newest first: its
+        agents' ``fleet/<codename>/…`` branches and lingering ``asq-<codename>`` sessions from
+        before a rename are under them. One another project has taken since is that
+        project's, its session and branches included, and is left out."""
+        rows = self._conn.execute(
+            "SELECT codename FROM project_codename_alias WHERE project_id = ? AND codename "
+            "NOT IN (SELECT codename FROM project WHERE codename IS NOT NULL) "
+            "ORDER BY retired_at DESC, codename",
+            (project_id,),
+        ).fetchall()
+        return [str(row["codename"]) for row in rows]
+
+    def codename_alias_owners(self) -> dict[str, str]:
+        """Every codename given up → the project that last held it, for a reader that matches
+        many references at once (the watcher's sources) as :meth:`find_projects` would."""
+        rows = self._conn.execute(
+            "SELECT codename, project_id FROM project_codename_alias"
+        ).fetchall()
+        return {str(row["codename"]): str(row["project_id"]) for row in rows}
 
     def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo:
         """Name a project as a person sees it, or clear that name with ``None``.
@@ -5396,15 +5513,19 @@ class SqliteStore:
         query gave both of, give the one of the greater id.
 
         ``project_id`` keeps it to one project's rows, in the query: a restart's plan asks
-        for one project, once per project and again per row (final delta review, n5)."""
+        for one project, once per project and again per row (final delta review, n5).
+
+        A row a relabel retired (:data:`RETIRED_LABEL`) heads nothing: its label is another
+        agent's now, and no restart by label can name it."""
         scope, args = ("WHERE project_id = ?", (project_id,)) if project_id else ("", ())
         rows = self._conn.execute(
             f"SELECT {self._fleet_agent_read} FROM fleet_agent WHERE id IN ("
-            "SELECT id FROM (SELECT id, ended_at, ROW_NUMBER() OVER ("
+            "SELECT id FROM (SELECT id, label, ended_at, ROW_NUMBER() OVER ("
             "PARTITION BY project_id, label ORDER BY created_at DESC, id DESC) AS newest "
-            f"FROM fleet_agent {scope}) WHERE ended_at IS NULL OR newest = 1) "
+            f"FROM fleet_agent {scope}) WHERE ended_at IS NULL OR (newest = 1 "
+            "AND substr(label, 1, 1) != ?)) "
             "ORDER BY created_at, id",
-            args,
+            (*args, RETIRED_LABEL),
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 
@@ -5639,6 +5760,76 @@ class SqliteStore:
         if agent is None:
             raise KeyError(agent_id)
         return agent
+
+    def relabel_fleet_agent(self, agent_id: str, old: str, new: str) -> FleetAgent | None:
+        """Call the LIVE row ``agent_id`` ``new`` while it is still ``old``; ``None`` when it is
+        not (ended, or relabelled meanwhile), and nothing is written.
+
+        One transaction for everything a label names (``services.fleet.relabel``): the row;
+        the ENDED rows of ``old`` in its project, the agent's own earlier runs, which a restart
+        by label and Restart all read as its history (``fleet_label_heads``) and would
+        otherwise take for a dead agent of that name; the ENDED rows that already carried
+        ``new`` — another agent's history — retired to ``~<new>`` (:data:`RETIRED_LABEL`),
+        so that every lookup of ``new`` by its newest row (:meth:`fleet_agent_by_label`), now
+        and once this agent ends too, is this agent's and never that one's, however much
+        later than this agent's own row it was started; the ``ui_state`` rows kept per label
+        (:data:`_FLEET_LABEL_MOVES`), any ``new`` had dropped first; and the record that
+        ``old`` was renamed (:data:`FLEET_RENAMED`: the row's id and when), which a lookup by
+        ``old`` names in its refusal. Another LIVE row holding ``new`` trips the partial
+        ``fleet_agent_live_label`` index: ``sqlite3.IntegrityError`` is raised, and the
+        service picks the next suffix, as a spawn does.
+        """
+        try:
+            cursor = self._conn.execute(
+                "UPDATE fleet_agent SET label = ? WHERE id = ? AND label = ? AND ended_at IS NULL",
+                (new, agent_id, old),
+            )
+            if cursor.rowcount != 1:
+                self._conn.rollback()
+                return None
+            row = self._conn.execute(
+                "SELECT project_id FROM fleet_agent WHERE id = ?", (agent_id,)
+            ).fetchone()
+            project_id = str(row["project_id"])
+            # `new`'s own history first — another agent's, ended — out of the way, before
+            # this agent's moves in.
+            self._conn.execute(
+                "UPDATE fleet_agent SET label = ? "
+                "WHERE project_id = ? AND label = ? AND ended_at IS NOT NULL",
+                (RETIRED_LABEL + new, project_id, new),
+            )
+            self._conn.execute(
+                "UPDATE fleet_agent SET label = ? "
+                "WHERE project_id = ? AND label = ? AND ended_at IS NOT NULL",
+                (new, project_id, old),
+            )
+            for prefix in _FLEET_LABEL_MOVES:
+                self._conn.execute(
+                    "DELETE FROM ui_state WHERE key = ?", (f"{prefix}{project_id}:{new}",)
+                )
+                self._conn.execute(
+                    "UPDATE ui_state SET key = ?, updated_at = ? WHERE key = ?",
+                    (f"{prefix}{project_id}:{new}", _now_iso(), f"{prefix}{project_id}:{old}"),
+                )
+            now = _now_iso()
+            self._conn.execute(
+                "DELETE FROM ui_state WHERE key = ?", (f"{FLEET_RENAMED}{project_id}:{new}",)
+            )
+            self._conn.execute(
+                "INSERT INTO ui_state (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value, "
+                "updated_at = excluded.updated_at",
+                (
+                    f"{FLEET_RENAMED}{project_id}:{old}",
+                    json.dumps({"agent": agent_id, "at": now}),
+                    now,
+                ),
+            )
+        except Exception:
+            self._conn.rollback()
+            raise
+        self._conn.commit()
+        return self.get_fleet_agent(agent_id)
 
     def set_session_persona(self, session_id: str, persona: str | None) -> TeamSession:
         """The persona a joined session now runs as — beside ``set_fleet_agent_persona``."""
@@ -6040,11 +6231,29 @@ debounce, the solo session's not-yet-briefed mark (#346), and the quiet compacti
 its newest refusal and its latest arm (P1 WS-4)."""
 
 
-_FLEET_LABEL_STATE: tuple[str, ...] = ("before-limit:", "before-limit-warned:", "fleet-launched:")
+_FLEET_LABEL_MOVES: tuple[str, ...] = ("before-limit:", "before-limit-warned:", "fleet-launched:")
 """The ``ui_state`` keys kept per fleet label as ``<prefix><project id>:<label>``: the turn
 end that last started a before-limit move, the crossing a ``warn`` has named
-(``services.hooks``), and the row's model record (``services.model_memory``, #16). A reset
-clears a project's (:meth:`SqliteStore.reset_project`)."""
+(``services.hooks``), and the row's model record (``services.model_memory``, #16). They are
+the agent's, so a relabel moves them to its new label
+(:meth:`SqliteStore.relabel_fleet_agent`)."""
+
+RETIRED_LABEL = "~"
+"""Before a label, an ENDED row whose label a relabel gave another agent
+(:meth:`SqliteStore.relabel_fleet_agent`): ``~login-fix``. Never a label (``LABEL`` starts
+with a letter), so nothing typed resolves it; never a label's head
+(:meth:`SqliteStore.fleet_label_heads`), so no restart by label, Restart all or dead-team
+line takes it for the agent the label names now. The row keeps its id, its window, its
+history: a stop or a view pinned to it still finds it by its id."""
+
+FLEET_RENAMED = "fleet-renamed:"
+"""The ``ui_state`` key ``fleet-renamed:<project id>:<old label>``: the row a relabel took
+that label from and when, as JSON (``{"agent": …, "at": …}``), for a lookup by the old
+label to name the new one (``services.fleet.relabel``)."""
+
+_FLEET_LABEL_STATE: tuple[str, ...] = (*_FLEET_LABEL_MOVES, FLEET_RENAMED)
+"""Every ``ui_state`` key kept per fleet label. A reset clears a project's
+(:meth:`SqliteStore.reset_project`)."""
 
 
 def _session_meta_terms(sessions: Sequence[str]) -> Iterator[tuple[str, tuple[str, ...]]]:

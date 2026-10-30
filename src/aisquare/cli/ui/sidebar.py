@@ -36,7 +36,7 @@ markup in data).
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
@@ -62,6 +62,7 @@ from aisquare.cli.ui.groups import (
     TogglePin,
     UndoLayout,
 )
+from aisquare.cli.ui.instances_chip import InstancesChip
 from aisquare.cli.ui.terminal import InPlaceField
 from aisquare.core import codenames
 from aisquare.models import (
@@ -77,6 +78,7 @@ from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
 
 if TYPE_CHECKING:
     from aisquare.cli.ui.attach import ReturnTo
+    from aisquare.core.instances import Instance
 
 ROLE_ICON: dict[str, str] = {
     "manager": "🧭",
@@ -1789,7 +1791,7 @@ class StatusLine(Static):
 
 class OthersSection(Vertical):
     """Everything that is not a project, under the separator: *⚙ Settings*, the ⬆ row while a
-    release is offered, and the status line."""
+    release is offered, the status line, and the chip while more than one asq runs (#20)."""
 
     DEFAULT_CSS = """
     OthersSection { height: auto; border-top: solid $primary; padding: 0 1; }
@@ -1799,6 +1801,7 @@ class OthersSection(Vertical):
         yield SettingsRow()
         yield UpdateRow()
         yield StatusLine(id="status-line")
+        yield InstancesChip(id="instances-chip")
 
 
 # --- the pane ---------------------------------------------------------------------
@@ -2366,6 +2369,11 @@ class Sidebar(Vertical):
         notice = self.query_one("#projects-notice", Static)
         notice.update(Text(text or "", style="bold yellow"))
         notice.display = bool(text)
+
+    def show_instances(self, live: Sequence[Instance], this_id: str | None) -> None:
+        """The asqs live on this home (#20): the chip under the status line, while there are
+        two or more; ``this_id`` is this asq's record."""
+        self.query_one(InstancesChip).show_instances(live, this_id)
 
     def show_aisquare(self, signed_in: bool | None) -> None:
         """The status line's AISquare dot: signed in, out, or ``None`` when it cannot be read."""

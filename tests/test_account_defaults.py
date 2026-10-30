@@ -852,8 +852,12 @@ def test_accounts_default_sets_shows_and_clears_at_all_three_levels(
 
     listed = runner.invoke(app, ["accounts", "list"])
     assert listed.exit_code == 0, listed.output
-    rows = [line.split() for line in listed.stdout.splitlines()]
-    assert [row[0] for row in rows if row and row[0].isdigit()] == ["2", "1", "3"]  # by rank
+    # A row starts at column 0 with its slot; a cell that wraps continues on an indented
+    # line. The directory column folds the managed slots' temp path, and its last piece
+    # can be the bare slot (`…/claude-accounts/2` under xdist's longer basetemp), which
+    # a first-word-is-a-digit filter read as a second row for that slot.
+    slots = [line.split()[0] for line in listed.stdout.splitlines() if line[:1].isdigit()]
+    assert slots == ["2", "1", "3"]  # by rank
     assert "*" not in listed.stdout and "no default account" not in listed.stdout  # no star
     ordered = runner.invoke(app, ["accounts", "order", "2"])
     assert ordered.exit_code == 0, ordered.output

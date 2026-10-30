@@ -11,16 +11,23 @@ log into a ``RichLog``. On success the view posts :class:`ProjectOnboarded`
 through an embedded :class:`DoctorView`; on failure :class:`OnboardFailed` with
 the reason. It never prompts: ``init`` is non-interactive and the explainability
 consent is one of those buttons, never a question.
+
+The tree reads the disk when it is built and when a folder is opened, and again on
+**↻** beside the hint (or ``ctrl+r`` from anywhere in the view) and each time the
+shell shows the view again: a folder cloned since appears without retyping its path.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import ClassVar
 
 from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
+from textual.await_complete import AwaitComplete
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import Button, DirectoryTree, Input, RichLog, Static
@@ -55,7 +62,10 @@ class ProjectTree(DirectoryTree):
     """The home directory, dotfiles hidden unless asked — a project lives in the open."""
 
     def __init__(self, path: Path, *, show_hidden: bool = False, id: str | None = None) -> None:
-        super().__init__(path, id=id)
+        # Resolved, as Textual resolves each folder before listing it: a root reached
+        # through a symlink (macOS's /var) otherwise has children under another path,
+        # and a reload cannot find the node the cursor was on.
+        super().__init__(path.expanduser().resolve(), id=id)
         self.show_hidden = show_hidden
 
     def filter_paths(self, paths: Iterable[Path]) -> Iterable[Path]:
@@ -83,6 +93,9 @@ class OnboardView(Vertical):
 
     DEFAULT_CSS = """
     OnboardView { padding: 1 2; }
+    OnboardView #onboard-head { height: auto; }
+    OnboardView #onboard-head .hint { width: auto; }
+    OnboardView #onboard-reload { width: auto; min-width: 3; margin: 0 0 0 1; }
     OnboardView #onboard-body { height: 1fr; }
     OnboardView #onboard-tree { width: 40%; min-width: 24; border-right: solid $primary; }
     OnboardView #onboard-form { width: 1fr; padding: 0 0 0 1; }
@@ -92,6 +105,9 @@ class OnboardView(Vertical):
     OnboardView #onboard-log { height: 1fr; min-height: 4; border: round $primary; }
     OnboardView #onboard-doctor { height: auto; max-height: 50%; padding: 0; }
     """
+    # ctrl, as the path box takes every printable key; a view's binding, so it is live
+    # only with the keyboard in this view (an agent's pane keeps its own ctrl+r).
+    BINDINGS: ClassVar = [Binding("ctrl+r", "reload", "reload dirs")]
 
     def __init__(
         self,
@@ -114,7 +130,11 @@ class OnboardView(Vertical):
         self.running = False
 
     def compose(self) -> ComposeResult:
-        yield Static("Onboard a project — type a directory, or browse:", classes="hint")
+        with Horizontal(id="onboard-head"):
+            yield Static("Onboard a project — type a directory, or browse:", classes="hint")
+            yield Button(
+                "↻", id="onboard-reload", compact=True, tooltip="Reload directories (ctrl+r)"
+            )
         with Horizontal(id="onboard-body"):
             yield ProjectTree(self.root, show_hidden=self.show_hidden, id="onboard-tree")
             with Vertical(id="onboard-form"):
@@ -166,9 +186,32 @@ class OnboardView(Vertical):
         self.query_one("#onboard-verdict", Static).update(render_verdict(self.verdict))
         self.query_one("#onboard-run", Button).disabled = not self.verdict.ok or self.running
 
+    # ---------------------------------------------------------------- the disk
+
+    def action_reload(self) -> None:
+        self.reload()
+
+    def reload(self) -> AwaitComplete:
+        """Read the disk again: the tree, and the verdict on the path typed.
+
+        Open folders stay open and the cursor stays where it was, if both still exist.
+        ``reload_node`` on the root, not the tree's ``reload``: that one swaps the load
+        queue for a new one, and a folder opened as it ran, still queued on the old one,
+        is never marked done — the tree then loads no folder opened after it. Allowed
+        while an onboard runs: the run has its own path, its log and button are not
+        touched here, and ``set_path`` keeps the button off until the run finishes.
+        """
+        self.set_path(self.query_one("#onboard-path", Input).value)
+        tree = self.query_one("#onboard-tree", ProjectTree)
+        return tree.reload_node(tree.root)
+
     # ---------------------------------------------------------------- the run
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "onboard-reload":
+            event.stop()
+            self.reload()
+            return
         if event.button.id != "onboard-run":
             return
         event.stop()

@@ -19,6 +19,7 @@ shell shows the view again: a folder cloned since appears without retyping its p
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import ClassVar
@@ -128,6 +129,10 @@ class OnboardView(Vertical):
         self.outcome: OnboardOutcome | None = None
         self.log_lines: list[str] = []
         self.running = False
+        self.reloading = False
+        """Whether a reload of the tree is in flight; another asked for meanwhile waits."""
+        self._reload_wanted = False
+        self._reloads: AwaitComplete | None = None
 
     def compose(self) -> ComposeResult:
         # ↻ first and the hint wrapping: at 80 columns the pane is 45 wide and the hint
@@ -202,10 +207,38 @@ class OnboardView(Vertical):
         is never marked done — the tree then loads no folder opened after it. Allowed
         while an onboard runs: the run has its own path, its log and button are not
         touched here, and ``set_path`` keeps the button off until the run finishes.
+
+        One at a time: asked for while one runs (a double-click on ↻, ctrl+r held down,
+        ``+`` meanwhile), it is one more after it, however many times it was asked. The
+        returned awaitable ends when no more are owed.
         """
         self.set_path(self.query_one("#onboard-path", Input).value)
+        self._reload_wanted = True
+        if not self.reloading or self._reloads is None:
+            self.reloading = True
+            self._reloads = AwaitComplete(self._reload_tree())
+        return self._reloads
+
+    async def _reload_tree(self) -> None:
+        """Reload the tree for as long as reloads are asked for, each after the tree has
+        handled what the one before it posted.
+
+        A reload posts a ``NodeExpanded`` for each folder it opens again, the root among
+        them. The next reload resets the root to not loaded; a ``NodeExpanded(root)`` still
+        queued then puts the root on the loader's queue, and once the lock is free the
+        loader lists it again, every folder closed and the cursor on whatever row is now
+        at its line (tester, seq 5308). So each waits for the tree's queue first.
+        """
         tree = self.query_one("#onboard-tree", ProjectTree)
-        return tree.reload_node(tree.root)
+        try:
+            while self._reload_wanted:
+                self._reload_wanted = False
+                handled = asyncio.Event()
+                if tree.call_later(handled.set):  # behind every message the tree holds
+                    await handled.wait()
+                await tree.reload_node(tree.root)
+        finally:
+            self.reloading = False
 
     # ---------------------------------------------------------------- the run
 

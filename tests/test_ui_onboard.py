@@ -422,6 +422,64 @@ def test_reload_lists_folders_made_since_and_keeps_what_was_open(
     assert str(seen["verdict"]).startswith("✓ will register")
 
 
+async def _quiet(pilot: Pilot[None], view: OnboardView, tree: ProjectTree) -> None:
+    """Until no reload is in flight and the tree's lock has stayed free for 0.3 s: the
+    collapse came after the last reload, when the loader rebuilt a root queued again."""
+    deadline = time.monotonic() + 15.0
+    calm = 0
+    while calm < 6:
+        if time.monotonic() > deadline:
+            raise AssertionError("the tree never went quiet")
+        await pilot.pause(0.05)
+        calm = calm + 1 if not view.reloading and not tree.lock.is_locked else 0
+
+
+BURSTS = 50
+"""Bursts of five ctrl+r: before the fix about one in fifteen lost the open folders, so
+fifty miss it about one run in forty (tester, seq 5308)."""
+
+
+def test_reloads_close_together_keep_open_folders_open_and_the_cursor(tmp_path: Path) -> None:
+    """A double-click on ↻, or ctrl+r pressed again and again (tester, seq 5308).
+
+    Each reload posts a NodeExpanded for every folder it opens again. A second reload
+    started at once reset the root while the first one's NodeExpanded(root) was still to
+    be handled; handled then, it put the root on the loader's queue again, and the loader
+    rebuilt it with every folder closed and the cursor on another row, so the next Enter
+    picked another folder.
+    """
+    code, old = tmp_path / "code", tmp_path / "code" / "old"
+    old.mkdir(parents=True)
+    (tmp_path / "other" / "inside").mkdir(parents=True)
+
+    async def drive_view() -> tuple[int, bool, Path | None] | None:
+        view = OnboardView(tmp_path, run=Scripted({}), validate=_validate)
+        async with Host(view).run_test(size=(120, 40)) as pilot:
+            tree = view.query_one("#onboard-tree", ProjectTree)
+            await _settle(pilot, lambda: _listed(tree, code))
+            folder = _node(tree, code)
+            assert folder is not None
+            folder.expand()
+            await _settle(pilot, lambda: _listed(tree, old))
+            opened = _node(tree, old)
+            assert opened is not None
+            tree.move_cursor(opened)
+            tree.focus()
+            await pilot.pause()
+            for burst in range(BURSTS):
+                await pilot.press(*["ctrl+r"] * 5)
+                await _quiet(pilot, view, tree)
+                folder, cursor = _node(tree, code), tree.cursor_node
+                kept_open = folder is not None and folder.is_expanded
+                at = cursor.data.path if cursor is not None and cursor.data is not None else None
+                if not kept_open or at != old:
+                    return burst, kept_open, at
+            return None
+
+    lost = asyncio.run(drive_view())
+    assert lost is None, f"(burst, code still open, cursor on): {lost}"
+
+
 def test_ctrl_r_reloads_and_judges_the_typed_path_again(tmp_path: Path) -> None:
     later = tmp_path / "later"
 
@@ -470,12 +528,14 @@ async def _until(done: Callable[[], bool], *, timeout: float = 5.0) -> bool:
 
 
 def test_a_folder_opened_as_a_reload_runs_does_not_stop_the_tree(tmp_path: Path) -> None:
-    """Why ``reload_node`` on the root, not the tree's own ``reload``.
+    """A folder opened while a reload holds the tree's lock is listed, and so is the next.
 
-    That one gives the tree a new load queue and cancels its loader. A folder opened
-    while a reload holds the tree's lock is taken off the old queue by the loader, which
-    then waits on the lock: cancelled there, it is never marked done, the tree waits on it
-    for ever, and no folder opened after it is listed.
+    The tree's own ``reload`` gives it a new load queue and cancels its loader: a folder
+    the loader had taken and was waiting on the lock with was never marked done, the tree
+    waited on it for ever, and no folder opened after it was listed. The view reloads with
+    ``reload_node`` on the root, which does neither, and only once the tree has handled
+    what it holds, so the loader is never left waiting as a reload starts. With that wait
+    in place the tree's ``reload`` passes this too: it pins the behaviour, not the call.
     """
     for name in ("a", "b"):
         (tmp_path / name / "inner").mkdir(parents=True)

@@ -57,6 +57,20 @@ Some things can only have one holder. Whichever asq takes it first keeps it unti
 - The transcript sweep for *Usage & stats*, and `aisquare watch`, each run in one process at a
   time, as before.
 
+## SSH can't start the fleet's tmux server (macOS)
+
+On macOS a tmux server belongs to the login that started it, and so does every pane it opens.
+Agents in a server started from an SSH login can't read their Claude Code login from the Keychain.
+So asq refuses to start the fleet's tmux server from an SSH login:
+
+```text
+not started: start asq on the Mac first: agents started from an SSH login can't read the Keychain
+```
+
+Start the first agent in asq at the Mac. After that, a fleet server is running and agents spawn
+into it from SSH as usual. Only starting the server is refused. A server that the Mac started
+stays the Mac's, whoever attaches to it later.
+
 ## One release per home: the version gate and the quit offer
 
 Two releases on one home would race on the store's migrations. So when asq starts, it first reads

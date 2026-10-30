@@ -752,11 +752,12 @@ def test_over_ssh_the_page_shows_the_macs_reading_and_whose_it_is(
                 token_fingerprint="fp-two",
             )
         )
-        store.set_ui_state(
-            "usage-login:2",
-            accounts_service.SeenLogin(token="fp-two", seen_at=NOW - timedelta(hours=1)).dump(),
-        )
     frame = _overview(_status(2, "slot2@example.com", root=tmp_path, token_state="unreadable"))
+    with store_session() as store:  # the login the Mac's asq saw in slot 2's Keychain item
+        store.set_ui_state(
+            accounts_service._seen_key(frame.accounts[0].account),
+            accounts_service.SeenLogin(token="fp-two", expires_at=NOW + timedelta(hours=7)).dump(),
+        )
 
     async def go(pilot: Pilot[None]) -> dict[str, object]:
         app = fleet_app(pilot)
@@ -771,11 +772,11 @@ def test_over_ssh_the_page_shows_the_macs_reading_and_whose_it_is(
         return seen
 
     seen = drive(go, overview=frame)
-    assert seen["age"] == "via the Mac's asq 2m ago"
+    assert seen["age"] == "via the Mac's asq · 2m ago", "as every surface says it (#461 item 6)"
     assert "40% · Mac" in str(seen["row"])
     assert "via the Mac's asq · 2m ago — the login Keychain is locked in this SSH session" in str(
         seen["row"]
     )
-    assert seen["refreshed"] == "via the Mac's asq 2m ago"
+    assert seen["refreshed"] == "via the Mac's asq · 2m ago"
     assert seen["why"] == "", "a figure to show, not the '!'"
     assert no_network["usage_calls"] == []

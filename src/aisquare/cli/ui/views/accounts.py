@@ -1523,8 +1523,8 @@ class AccountsView(Vertical):
         this CLI cannot read (missing, a locked Keychain) counts in neither half
         (``usage_is_readable``, the CLI's rule too): its own usage cells say so, and an account
         left expired would otherwise say "failed" every tick. A locked row showing what the
-        Mac's asq took (``recorded_elsewhere``) is said apart: ``via the Mac's asq · 2m ago``,
-        the oldest such reading.
+        Mac's asq took (``recorded_elsewhere``) is said apart, as every surface says it:
+        ``via the Mac's asq · 2m ago``, the oldest such reading.
         """
         # A tick's read is the cache's: it asks nothing while the readings are fresh, and
         # said "refreshing…" (the button off) every minute for no request. Said for a read
@@ -1564,7 +1564,7 @@ class AccountsView(Vertical):
                     parts.append(f"last try failed {accounts_service.describe_age(max(failed))}")
             if via:
                 parts.append(
-                    f"{accounts_service.VIA_THE_MAC} {accounts_service.describe_age(min(via))}"
+                    f"{accounts_service.VIA_THE_MAC} · {accounts_service.describe_age(min(via))}"
                 )
             said = " · ".join(parts)
         self.query_one("#usage-age", Static).update(Text(said, style="dim"))

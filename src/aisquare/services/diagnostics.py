@@ -1879,11 +1879,10 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     """
     if not paths.db_path().exists():
         return None
-    accounts = [
-        account
-        for account in claude_accounts_service.list_accounts()
-        if not account.disabled and claude_accounts_core.signed_in(account)
-    ]
+    listed = claude_accounts_service.list_accounts()
+    # Signed in as every surface weighs it: over SSH, a slot the Mac saw logged out is out.
+    signed = claude_accounts_service.signed_in_slots(listed)
+    accounts = [account for account in listed if not account.disabled and account.slot in signed]
     if not accounts:
         return None
     settings = claude_accounts_service.accounts_settings()

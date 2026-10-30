@@ -45,13 +45,14 @@ def _new_process() -> None:
     _forget_usage_memory()
     with service._NOTED_LOCK:
         service._NOTED.clear()
+        service._ROWS.clear()
 
 
-def _creds(token: str) -> core.ClaudeCredentials:
+def _creds(token: str, expires_at: datetime | None = None) -> core.ClaudeCredentials:
     """What a slot's item holds once Claude Code signed in with ``token``."""
     return core.ClaudeCredentials(
         access_token=token,
-        expires_at=NOW + timedelta(hours=7),
+        expires_at=expires_at or NOW + timedelta(hours=7),
         subscription_type="max",
         rate_limit_tier="default_claude_max_5x",
     )
@@ -66,15 +67,21 @@ class TwoAsqs:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.monkeypatch = monkeypatch
         self.items: dict[str, str] = {}
+        self.expiry: dict[str, datetime] = {}
         self.remembered: dict[str, str | None] = {}
         self.locked = False
         self.reads: list[str] = []
         monkeypatch.setattr(core, "keychain_platform", lambda: True)
         monkeypatch.setattr(core, "read_keychain", self.read)
 
-    def login(self, account: ClaudeAccount, token: str) -> None:
-        """Claude Code signed ``account`` in: its item holds ``token``."""
+    def login(
+        self, account: ClaudeAccount, token: str, *, expires_at: datetime | None = None
+    ) -> None:
+        """Claude Code signed ``account`` in: its item holds ``token`` (expiring at
+        ``expires_at``, else seven hours after NOW)."""
         self.items[core.keychain_service(account)] = token
+        if expires_at is not None:
+            self.expiry[token] = expires_at
 
     def read(self, service_name: str, account: str, *, fresh: bool = False) -> core.KeychainRead:
         self.reads.append(service_name)
@@ -85,7 +92,7 @@ class TwoAsqs:
         token = self.remembered[service_name]
         if token is None:
             return core.KeychainRead(found=False)
-        return core.KeychainRead(found=True, credentials=_creds(token))
+        return core.KeychainRead(found=True, credentials=_creds(token, self.expiry.get(token)))
 
     def on_the_mac(self) -> None:
         """The asq on the Mac's own screen: its Keychain reads."""
@@ -425,7 +432,7 @@ def test_a_slot_the_mac_saw_signed_out_shows_nothing_over_ssh(asqs: TwoAsqs) -> 
 
 def test_the_login_row_is_written_only_when_the_mac_sees_another_login(asqs: TwoAsqs) -> None:
     [two] = _slots(asqs, 1)
-    key = f"usage-login:{two.slot}"
+    key = service._seen_key(two)
     _mac_reads(asqs, [two], NOW - timedelta(minutes=10), s2=40.0)
     first = _store_rows()["ui_state"]
     row = next(value for name, value, *_ in first if name == key)
@@ -445,8 +452,9 @@ def test_the_login_row_is_written_only_when_the_mac_sees_another_login(asqs: Two
 
 def test_a_login_row_this_version_cannot_read_serves_nothing() -> None:
     assert service.SeenLogin.load("{truncated") is None
-    assert service.SeenLogin.load(json.dumps({"token": 7, "seen_at": NOW.isoformat()})) is None
-    seen = service.SeenLogin(token="fp", seen_at=NOW)
+    assert service.SeenLogin.load(json.dumps({"token": 7, "expires_at": None})) is None
+    assert service.SeenLogin.load(json.dumps({"token": "fp", "expires_at": "soon"})) is None
+    seen = service.SeenLogin(token="fp", expires_at=NOW)
     assert service.SeenLogin.load(seen.dump()) == seen
 
 
@@ -548,7 +556,7 @@ def test_signing_back_in_on_the_mac_is_signed_in_over_ssh_again(
 def test_forgetting_a_slot_forgets_the_login_seen_there(asqs: TwoAsqs) -> None:
     [two] = _slots(asqs, 1)
     _mac_reads(asqs, [two], NOW - timedelta(minutes=2), s2=40.0)
-    key = f"usage-login:{two.slot}"
+    key = service._seen_key(two)
     assert any(row[0] == key for row in _store_rows()["ui_state"])
 
     service.forget_arrangement(two.slot)
@@ -565,9 +573,11 @@ def test_a_login_remembered_from_before_is_not_written_over_a_newer_one(
     would serve the last login's figure for the new one."""
     [two] = _slots(asqs, 1)
     _mac_reads(asqs, [two], NOW - timedelta(minutes=2), s2=40.0)  # A remembers tok-2
-    key = f"usage-login:{two.slot}"
+    key = service._seen_key(two)
     asqs.login(two, "tok-2-new")
-    newer = service.SeenLogin(token=service._login_digest(_creds("tok-2-new")), seen_at=NOW)
+    newer = service.SeenLogin(
+        token=service._login_digest(_creds("tok-2-new")), expires_at=NOW + timedelta(hours=7)
+    )
     from aisquare.core.store import store_session
 
     with store_session() as store:  # B's read of the new login
@@ -602,3 +612,193 @@ def test_the_mac_says_each_login_once_a_minute_not_on_every_two_second_tick(
     for _ in range(5):
         service.signed_in_slots(accounts)
     assert opens == [], "the same logins, said again, opened the store"
+
+
+# --- review of #461 (seq 5157): one test per finding --------------------------------------
+
+
+def _counting_opens(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Every store session the accounts service opens from here on."""
+    import contextlib
+
+    from aisquare.core.store import store_session as real
+
+    opens: list[int] = []
+
+    @contextlib.contextmanager
+    def counted() -> Any:
+        opens.append(1)
+        with real() as store:
+            yield store
+
+    monkeypatch.setattr("aisquare.services.claude_accounts.store_session", counted)
+    return opens
+
+
+def test_a_locked_asq_is_never_served_another_environments_login_for_its_slot(
+    asqs: TwoAsqs, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 1 (major), the reviewer's repro: a shell whose CLAUDE_CONFIG_DIR names another
+    plain claude (b@, ~/work-claude) records 95 % for ITS slot 1. An SSH asq whose slot 1
+    is ~/.claude (a@) is not served it, and the work shell's /logout signs nothing out
+    there: the row is keyed by the Keychain item, which is another one."""
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    one = core.default_account()
+    _sign_in(one, "a@example.com", credentials=False)
+    asqs.login(one, "tok-A")
+    work = fake_home / "work-claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(work))
+    other = core.default_account()
+    _sign_in(other, "b@example.com", credentials=False)
+    asqs.login(other, "tok-B")
+    asqs.on_the_mac()
+    service.cached_usage(
+        service.list_accounts(),
+        now=NOW - timedelta(minutes=1),
+        fetch=_Usage({"tok-B": _payload(95.0)}),
+    )
+
+    asqs.over_ssh()
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    reading = service.cached_usage(service.list_accounts(), now=NOW, fetch=NoFetch())[1]
+    assert not reading.available and not reading.recorded_elsewhere, reading
+    assert reading.session_percent is None
+
+    asqs.on_the_mac()  # the work shell's plain claude logs out, and its asq looks
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(work))
+    del asqs.items[core.keychain_service(other)]
+    service.describe_all(service.list_accounts())
+    asqs.over_ssh()
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    assert service.is_signed_in(core.default_account()), "a@'s slot 1 is not b@'s"
+
+
+def test_a_token_the_mac_saw_expire_reads_expired_over_ssh_as_on_the_mac(
+    asqs: TwoAsqs,
+) -> None:
+    """Item 2: slot 2's token expires a minute before NOW. The Mac then says it has
+    expired, needs a log-in, shows no figure, and a hand-over skips it; over SSH the same,
+    never its last figure as 'Keychain locked'."""
+    two, three = _slots(asqs)
+    asqs.login(two, "tok-2", expires_at=NOW - timedelta(minutes=1))
+    _mac_reads(asqs, [two, three], NOW - timedelta(minutes=3), s2=40.0, s3=70.0)
+
+    asqs.over_ssh()
+    readings = service.cached_usage([two, three], now=NOW, fetch=NoFetch())
+    assert not readings[2].available and readings[2].needs_login
+    assert (readings[2].cause, readings[2].reason) == (
+        UsageCause.token_expired,
+        "the stored token has expired",
+    )
+    assert readings[3].available and readings[3].recorded_elsewhere
+    status = service.describe(two)
+    assert status.signed_in and status.token_state == "expired"
+    later = service.cached_usage([two], now=NOW + timedelta(minutes=20), fetch=NoFetch())[2]
+    assert not later.available and later.needs_login, "no kept figure for an expired login"
+    # A hand-over over SSH reads live (max_age None), as the Mac's does.
+    picked, notes = service.headroom_choice([two, three], switch_at=80, now=NOW, fetch=NoFetch())
+    assert picked is not None and picked.slot == three.slot, notes
+    assert "headroom: account 2 skipped — the stored token has expired" in notes
+
+
+def test_the_ssh_ticks_look_at_every_slot_opens_the_store_no_more_than_before(
+    asqs: TwoAsqs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 3: the SSH asq's two-second tick (the overview's describe_all) opened the store
+    for the locked slots' rows every time, beside the registry's own read."""
+    two, three = _slots(asqs)
+    _mac_reads(asqs, [two, three], NOW - timedelta(minutes=2), s2=40.0, s3=70.0)
+    asqs.over_ssh()
+    accounts = service.list_accounts()
+    service.describe_all(accounts)  # the first look reads the rows
+    opens = _counting_opens(monkeypatch)
+
+    for _ in range(5):
+        statuses = service.describe_all(accounts)
+
+    assert opens == []
+    assert {s.account.slot for s in statuses if s.signed_in} == {two.slot, three.slot}
+
+
+def test_a_hooks_look_on_the_mac_opens_no_store_for_the_logins(
+    asqs: TwoAsqs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 3: a hook is a new process (nothing said lately); its look at which slots are
+    signed in, before a limit or at a StopFailure, opened one more store session."""
+    two, three = _slots(asqs)
+    asqs.on_the_mac()
+    accounts = service.list_accounts()
+    opens = _counting_opens(monkeypatch)
+
+    assert service.signed_in_slots(accounts) == {two.slot, three.slot}
+    preferred = service.preferred_account(accounts)
+    assert preferred is not None and preferred.slot == two.slot
+
+    assert opens == []
+
+
+def test_a_login_whose_write_lost_the_race_is_not_taken_as_said(asqs: TwoAsqs) -> None:
+    """Item 4: the row was written by another process between the read and the write; this
+    one must look again next time rather than leave the row for a minute."""
+    [two] = _slots(asqs, 1)
+    asqs.on_the_mac()
+
+    class Raced:
+        def __init__(self) -> None:
+            self.rows: dict[str, str] = {}
+
+        def ui_state(self, key: str) -> str | None:
+            return self.rows.get(key)
+
+        def replace_ui_state(self, key: str, expected: str | None, value: str | None) -> bool:
+            self.rows[key] = service.SeenLogin(token="someone else's").dump()
+            return False
+
+    seen = service._seen_in(core.stored_login(two))
+    assert seen is not None and seen.token is not None
+    service._note_login(Raced(), two, seen)  # type: ignore[arg-type]
+
+    assert not service._noted_lately(two, seen.token)
+
+
+def test_doctor_and_first_run_weigh_a_slot_the_mac_saw_logged_out_as_out(
+    asqs: TwoAsqs,
+) -> None:
+    """Item 5: doctor's headroom check and first run's 'is the plain claude signed in'
+    counted a slot the Mac saw logged out as signed in over SSH."""
+    from aisquare.services import diagnostics, first_run
+
+    plain = core.default_account()
+    _sign_in(plain, "one@example.com", credentials=False)
+    asqs.login(plain, "tok-1")
+    asqs.on_the_mac()
+    service.describe_all([plain])
+    del asqs.items[core.keychain_service(plain)]  # /logout on the Mac
+    asqs.on_the_mac()
+    service.describe_all([plain])
+
+    asqs.over_ssh()
+    assert first_run._signed_in_default() is False
+    assert diagnostics._claude_account_headroom_check() is None  # no signed-in account to read
+
+
+def test_a_hand_over_over_ssh_gives_each_slot_one_note(asqs: TwoAsqs) -> None:
+    """Item 6: a hand-over over SSH said a slot twice: picked by its reading, then read via
+    the Mac's asq. One note says both."""
+    two, three = _slots(asqs)
+    _mac_reads(asqs, [two, three], NOW - timedelta(minutes=3), s2=90.0, s3=10.0)
+
+    asqs.over_ssh()
+    picked, notes = service.headroom_choice([two, three], switch_at=80, now=NOW, fetch=NoFetch())
+
+    assert picked is not None and picked.slot == three.slot, notes
+    assert [note for note in notes if note.startswith("headroom: account 3 ")] == [
+        f"headroom: account 3 {LOCKED_SSH} — picked by its reading from 3m ago, {VIA}"
+    ]
+
+
+def test_the_login_row_holds_only_what_is_read_from_it() -> None:
+    """Item 7: ``seen_at`` was written and never read. The row holds the login and when its
+    token expires, which a locked process answers by (item 2)."""
+    row = json.loads(service.SeenLogin(token="fp", expires_at=NOW).dump())
+    assert row == {"token": "fp", "expires_at": NOW.isoformat()}

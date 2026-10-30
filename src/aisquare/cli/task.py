@@ -187,15 +187,29 @@ def add(
         _fail_team(exc, as_session)
     delivery = team_service.last_delivery()
     emit_write_warning(delivery)
+    supersedes = team_service.last_supersedes()
     if get_state().json_output:
         payload = {"created": created, **task.model_dump(mode="json")}
         payload.update(delivery_fields(delivery))
         payload["missing_blocks"] = missing
+        # Always present, null when the add did not bump a closed task off its key —
+        # a script should be able to read it without probing (cf. `task show`'s
+        # `stopped_because`).
+        payload["supersedes"] = (
+            {"number": supersedes.number, "id": supersedes.id, "status": supersedes.status}
+            if supersedes is not None
+            else None
+        )
         typer.echo(json.dumps(payload))
     else:
         verb = "added" if created else "already tracked (idempotent)"
+        note = ""
+        if supersedes is not None:
+            old_ref = f"#{supersedes.number}" if supersedes.number is not None else supersedes.id
+            note = f" (supersedes {supersedes.status} {old_ref})"
         stdout_console().print(
-            f"✓ {verb}: {team_service.task_label(task)} {task.title}{receipt_suffix(delivery)}"
+            f"✓ {verb}: {team_service.task_label(task)} {task.title}"
+            f"{note}{receipt_suffix(delivery)}"
         )
 
 

@@ -74,7 +74,12 @@ explicitly, off a terminal); or nothing."""
 
 
 def plan(
-    project: ProjectInfo, *, memory: bool = False, prompts: bool = False, branches: bool = False
+    project: ProjectInfo,
+    *,
+    memory: bool = False,
+    prompts: bool = False,
+    branches: bool = False,
+    dry_run: bool = False,
 ) -> FreshPlan:
     """What :func:`start_fresh` would clear, stop and remove, read-only, and the work found
     only in the trees and branches it removes (:func:`fleet_service.unpushed_work`).
@@ -85,13 +90,16 @@ def plan(
     its board as a hub's, live or a restart away (``project forget``'s rule,
     :func:`project_service.board_readers`), and a fleet the stop could not take down from
     here (``fleet shutdown``'s own refusals: no usable tmux, a call from inside its server).
+    ``dry_run`` lifts the one about the caller's own pane: nothing here stops anything, so a
+    manager agent can read the plan from inside its own fleet. The real run still refuses it
+    (``start_fresh`` never passes ``dry_run``).
 
     The tmux sessions the stop kills are planned too (:func:`_sessions`), live rows or none:
     a session outlives its rows (a dead pane ``remain-on-exit`` keeps, a process a row
     recorded as died that still runs), and left standing it kept them beside the new
     manager."""
     with store_session() as store:
-        project = _refuse(store, project)
+        project = _refuse(store, project, dry_run=dry_run)
         rows = store.fleet_agents(project.id)
         tables = store.reset_project(project.id, memory=memory, prompts=prompts, apply=False)
     live = sorted(
@@ -468,8 +476,12 @@ def unpushed_refusal(
     )
 
 
-def _refuse(store: ContextStore, project: ProjectInfo) -> ProjectInfo:
-    """``project`` as the store has it, unless :func:`plan` refuses it (:class:`FreshRefused`)."""
+def _refuse(store: ContextStore, project: ProjectInfo, *, dry_run: bool = False) -> ProjectInfo:
+    """``project`` as the store has it, unless :func:`plan` refuses it (:class:`FreshRefused`).
+
+    ``dry_run`` skips only the own-fleet-agent refusal below: that one exists because the
+    REAL run's stop would take the caller's own pane down mid-reset, which a read-only plan
+    never does."""
     stored = store.get_project(project.id)
     if stored is None or stored.onboarded_at is None:
         raise FreshRefused(str(project_service.NotAdded(project)), code="not_onboarded")
@@ -480,7 +492,7 @@ def _refuse(store: ContextStore, project: ProjectInfo) -> ProjectInfo:
         )
     own = orchestrator.env_fleet_agent()
     row = store.get_fleet_agent(own) if own else None
-    if row is not None and row.project_id == stored.id:
+    if row is not None and row.project_id == stored.id and not dry_run:
         raise FreshRefused(
             f"can't start fresh from inside {row.label}, one of "
             f"{project_service.display_name(stored)}'s own fleet agents: the stop would take "

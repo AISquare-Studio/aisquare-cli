@@ -398,6 +398,34 @@ def prune(
 
 # --- start fresh ---------------------------------------------------------------------------
 
+_FRESH_HELP = (
+    "Start fresh: clear the project's board and fleet, then start a blank manager "
+    "(alias: reset).\n"
+    "\n"
+    "Every live agent is stopped as `fleet shutdown` stops it, each agent's worktree "
+    "is removed, and the board's tasks, notes, sessions, signals and work briefs "
+    "(with their kept evidence), the manager's state file and the fleet's rows are "
+    "deleted; task and brief numbers start at #1 again. The checkout, every other "
+    "branch, the registration and its settings, the symbol index and every other "
+    "project are kept, and so are its context entries, prompt log and fleet branches "
+    "unless --memory, --prompts or --branches says otherwise. No command report is "
+    "deleted, but with their briefs gone they are no longer pinned as evidence "
+    "(unless another board's brief cites one), and normal retention takes them. Work "
+    "its worktrees or branches hold that no remote has refuses the reset, named, "
+    "unless --discard-unpushed. It prints the plan and asks first at a terminal "
+    "(twice when discarding); off a terminal it is a dry run unless --yes, and under "
+    "--json without --yes it prints the plan and changes nothing. Refused from "
+    "inside one of the project's own fleet agents, and while another project's "
+    "fleet agents read its board."
+)
+"""``fresh``'s ``--help`` text, passed explicitly (not the docstring below): a plain
+multi-line docstring here renders ragged ("worktree", "(with" alone on their own line)
+under newer typer/rich, which keep a source line break as a hard one instead of folding
+it into the paragraph before rewrapping to the terminal width. Adjacent string literals
+carry no such break — the same trick the ``help=`` texts above already use — but ruff's
+formatter joins a *bare* multi-line string statement (a docstring) into one line, so it
+has to live in its own assignment instead."""
+
 
 def fresh(
     project: Annotated[
@@ -448,25 +476,13 @@ def fresh(
 ) -> None:
     """Start fresh: clear the project's board and fleet, then start a blank manager (alias: reset).
 
-    Every live agent is stopped as `fleet shutdown` stops it, each agent's worktree
-    is removed, and the board's tasks, notes, sessions, signals and work briefs (with
-    their kept evidence), the manager's state file and the fleet's rows are deleted;
-    task and brief numbers start at #1 again. The checkout, every other branch, the
-    registration and its settings, the symbol index and every other project are kept,
-    and so are its context entries, prompt log and fleet branches unless
-    --memory, --prompts or --branches says otherwise. No command report is deleted,
-    but with their briefs gone they are no longer pinned as evidence (unless another
-    board's brief cites one), and normal retention takes them. Work its worktrees or
-    branches hold that no remote has refuses the reset, named, unless
-    --discard-unpushed. It prints the plan and asks first at a terminal (twice when
-    discarding); off a terminal it is a dry run unless --yes, and under --json
-    without --yes it prints the plan and changes nothing. Refused from inside one
-    of the project's own fleet agents, and while another project's fleet agents
-    read its board.
+    See ``_FRESH_HELP`` above for the full text ``--help`` shows.
     """
     target = _project_ref(project) if project is not None else project_service.info()
     try:
-        planned = fresh_service.plan(target, memory=memory, prompts=prompts, branches=branches)
+        planned = fresh_service.plan(
+            target, memory=memory, prompts=prompts, branches=branches, dry_run=dry_run
+        )
     except fresh_service.FreshRefused as exc:
         fail(str(exc), error=exc.code, ref=target.id, detail=str(exc), exit_code=2)
     if dry_run or (get_state().json_output and not yes):
@@ -547,7 +563,7 @@ def fresh(
         raise typer.Exit(code=1)
 
 
-app.command("fresh")(fresh)
+app.command("fresh", help=_FRESH_HELP)(fresh)
 app.command("reset", hidden=True, help="Alias of 'fresh'.")(fresh)
 
 

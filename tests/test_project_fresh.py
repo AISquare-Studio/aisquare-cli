@@ -641,6 +641,37 @@ def test_it_is_refused_from_inside_one_of_the_projects_own_fleet_agents(
     assert fresh_service.plan(alpha).live_agents == ["coder-1"]
 
 
+def test_dry_run_is_allowed_from_inside_one_of_the_projects_own_fleet_agents(
+    runner: CliRunner,
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #3: a dry run stops nothing, so it must not trip the same-pane refusal the real
+    # run needs — a manager agent has to be able to read the plan from its own pane.
+    alpha, _beta, _, _ = two
+    with store_session() as store:
+        mine = store.upsert_fleet_agent(_agent(alpha, "coder-1"))
+    before = _rows(alpha.id)
+    monkeypatch.setenv(FLEET_AGENT_ENV_VAR, mine.id)
+    monkeypatch.setattr(fleet_service, "shutdown_plan", lambda *_, **__: _NO_SESSIONS)
+
+    dry = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    assert "stops   coder-1 first" in dry.output
+    assert _rows(alpha.id) == before and spawned == []
+
+    as_json = runner.invoke(app, ["--json", "project", "fresh", "-P", "alpha-x", "--dry-run"])
+    assert as_json.exit_code == 0, as_json.output
+    assert json.loads(as_json.stdout)["live_agents"] == ["coder-1"]
+    assert _rows(alpha.id) == before and spawned == []
+
+    # The real run from the same pane still refuses, unchanged.
+    refused = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--yes"])
+    assert refused.exit_code == 2, refused.output
+    assert "can't start fresh from inside coder-1" in " ".join(refused.output.split())
+
+
 def test_a_board_another_projects_fleet_reads_is_refused_naming_them(
     runner: CliRunner,
     two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],

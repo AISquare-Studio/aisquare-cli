@@ -116,11 +116,41 @@ whole key a kitty-protocol terminal reports only because Textual asked for
 every key — nothing at all (#151). ``Paste`` goes through the paste buffer so
 the agent sees one bracketed paste. The wheel scrolls our own offset over the
 pane's history (clamped to ``history_size``); any key returns to live.
-``Resize`` is forwarded as ``resize-window`` after a 100 ms debounce. Keys, typed
+``Resize`` is forwarded as ``resize-window`` after a 100 ms debounce, unless another
+asq sizes the window (below, "Size between two asq"). Keys, typed
 text, mouse reports and pastes go down the control client's pipe while it serves
 the pane — a paste as ``set-buffer`` + ``paste-buffer``, since ``load-buffer -``
 would read the pipe — and as tmux processes when polling. Forwarded input asks
 for the frame that shows its echo at once, so an echo never waits for the idle tick.
+
+Size between two asq. The Mac's own asq and one over SSH into the same Mac can show
+one agent at two terminal sizes, and each forwarded its own widget's size, so every
+attach and every resize of one undid the other's and the agent reflowed back and forth.
+The asq its owner last typed in sizes the window. Input from a pane — a key, a paste,
+a click — names this asq in the window's ``@asq-size-owner``
+(``core.tmux.SIZE_OWNER_OPTION``: pid, machine, ``ssh``/``mac``, and when) and resizes
+the window to this widget at once, both in one chain down the control client's pipe
+ahead of the input (:meth:`TerminalPane._claim_size`); a resize after that is debounced
+as before. The resize is sent even when the last frame showed the widget's size: that
+frame can be older than the other asq's resize, and a claim that trusted it left the
+window at the other's size for good (measured: two panes under a loaded test run).
+A pane whose window another RUNNING asq has claimed sends no ``resize-window``
+(:meth:`TerminalPane._sync_size`), and while the pane's size is not the widget's,
+row 0's corner says ``[sized by the other asq (ssh)]`` (or ``(Mac)``).
+Every frame carries the option (``#{@asq-size-owner}`` beside the pane's facts), so
+following it costs no tmux process; when that asq ends, or the option is unset, the
+pane sizes the window again, after the debounce. Liveness is the pid's
+(``core.procs.alive``): tmux's socket is a file on this machine, so every asq that
+can claim a window runs here. What it costs: one ``show-options`` before each resize
+this asq would send (a frame can be an idle tick old, and a resize on its word undid
+a claim made since); one option write and one resize per change of hands — the write
+redraws every client attached to the server once (why the per-key stamps are not
+options), and the resize to the size a window already has changes nothing in it; a
+claim left by an asq whose pid another process has reused since keeps that window at
+its size until input here takes it; and a resize by the other asq that lands in the few
+milliseconds between its question and a claim made here leaves the window at its size
+until the next resize or claim here. With one asq the option names it or nobody: no
+hint, and the same resizes at the same times, plus that one claim at the first input.
 
 Selection (§4.3). The pane owns its highlight; :class:`TerminalPane`'s docstring
 states the rules — who sees a gesture, when a highlight is dropped, and which
@@ -171,6 +201,7 @@ import time
 import weakref
 from bisect import bisect_left
 from collections.abc import Callable
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar, Literal, NamedTuple, assert_never
@@ -194,6 +225,7 @@ from textual.timer import Timer
 from textual.widget import Widget
 
 from aisquare.cli.ui.clipboard import ClipboardApp, characters, copy_and_tell
+from aisquare.core import procs
 from aisquare.core.clipboard import in_wsl
 from aisquare.core.keys import (
     EXTENDED_MINIMUM,
@@ -206,6 +238,7 @@ from aisquare.core.tmux import (
     WRAP_FLAGS_MINIMUM,
     Capture,
     PaneFacts,
+    SizeOwner,
     TmuxError,
     TmuxServer,
     TmuxUnavailable,
@@ -237,6 +270,22 @@ NOTHING_TO_COPY = "nothing to copy — no text under the highlight"
 """What a left drag is told when it left a highlight with no text under it: once for
 the gesture, by :func:`route_selection_gesture`, or by the pane that ran a shift+drag
 itself (:meth:`TerminalPane._end_shift_drag`)."""
+SIZED_ELSEWHERE = "[sized by the other asq{where}]"
+"""Row 0's corner while another asq sizes the window and its size is not this widget's
+(the module's "Size between two asq"); ``where`` names that asq's terminal when known."""
+_WHERE = {"ssh": " (ssh)", "mac": " (Mac)"}
+
+
+def sized_elsewhere(owner: SizeOwner) -> str:
+    """:data:`SIZED_ELSEWHERE` for ``owner``: ``[sized by the other asq (ssh)]``."""
+    return SIZED_ELSEWHERE.format(where=_WHERE.get(owner.where, ""))
+
+
+class Corner(NamedTuple):
+    """Row 0's corner marker: what it says, and how it is drawn."""
+
+    text: str
+    style: Style
 
 
 class DisplayedRow:
@@ -330,8 +379,8 @@ class DisplayedRow:
 
 class Shown(NamedTuple):
     """What the pane displays at one moment, before any overlay: the frame's rows,
-    the bottom-row notice standing in for the last row, and the corner marker's
-    numbers on row 0 (``None`` while live).
+    the bottom-row notice standing in for the last row, and the corner marker on row 0
+    (``None`` while live and sized here).
 
     One value for the paint, the copy and the staleness check, so "did the text
     under the highlight change" is asked of the rows the user SEES. The check
@@ -343,7 +392,7 @@ class Shown(NamedTuple):
 
     lines: list[str]
     notice: str | None
-    marker: tuple[int, int] | None
+    marker: Corner | None
 
 
 def _extract(selection: Selection, rows: list[DisplayedRow], width: int) -> str:
@@ -1199,6 +1248,10 @@ class TerminalPane(Widget, can_focus=True):
     """Seconds before a FAILED ``resize-window`` is tried again (then doubling)."""
     RESIZE_RETRY_MAX: float = 8.0
     """Where the resize backoff stops, so an unreachable pane costs ~1 process / 8 s."""
+    CLAIM_GAP: float = 1.0
+    """Seconds before input claims a window's size again while the frames still show the
+    owner the last claim replaced — that claim failed: it is made again, but not at every
+    key (:meth:`_claim_size`). An owner the frames name since is claimed from at once."""
     WHEEL_LINES: int = 3
     """History lines one wheel notch moves."""
     WHEEL_COALESCE: float = 0.02
@@ -1330,6 +1383,17 @@ class TerminalPane(Widget, can_focus=True):
         self._resize_timer: Timer | None = None
         self._resize_retry: float = self.RESIZE_RETRY
         self._synced: tuple[str, int, int] | None = None
+        self.owner_pid = os.getpid()
+        """The asq this pane takes a window's size for (:meth:`_claim_size`): this process.
+        Every pane of one asq is one owner; a test stands a second asq up beside the first
+        by giving a pane another pid."""
+        self._sized_by: SizeOwner | None = None
+        """The other asq, running, that sizes the window this pane shows (the module's "Size
+        between two asq"): nothing is resized from here while it does. ``None``: this pane
+        sizes it."""
+        self._claimed: tuple[_ServerKey, str, float, str] | None = None
+        """The window size last claimed: server, pane, when (``time.monotonic``), and the
+        owner it replaced, as the frame then said it."""
         self._warned: set[tuple[_ServerKey | None, str]] = set()
         """``(server or None, key)`` per notice said — see :meth:`_warn_once`."""
         self._reported_gone = False
@@ -1355,8 +1419,8 @@ class TerminalPane(Widget, can_focus=True):
         """The (code, column, row) of the last drag report sent, so a pointer that
         has not left its cell is not reported again — a terminal reports motion
         per cell, not per pixel."""
-        self._marker: tuple[int, int] | None = None
-        """``(scrollback, history)`` the corner marker last showed, or ``None``."""
+        self._marker: Corner | None = None
+        """What the corner marker last showed (:meth:`_corner`), or ``None``."""
         self._selection_bg: Style | None = None
         """The selection tint, resolved once per selection rather than per row."""
         self._baseline: Selection | None = None
@@ -1478,6 +1542,7 @@ class TerminalPane(Widget, can_focus=True):
         self._wrapped = []
         self._cursor = None
         self._synced = None
+        self._sized_by = None
         self._resize_retry = self.RESIZE_RETRY
         self._reported_gone = False
         self._marker = None
@@ -1721,9 +1786,11 @@ class TerminalPane(Widget, can_focus=True):
             replaced.add(height - 1)
         # The corner marker: row 0 repaints whenever k or the history it is
         # measured against moved — including the clamp above, and history that
-        # keeps growing under a frozen scrolled view. Decided HERE, once, rather
+        # keeps growing under a frozen scrolled view — and when the hint that
+        # another asq sizes the window comes or goes. Decided HERE, once, rather
         # than at every site that touches ``scrollback``.
-        marker = (self.scrollback, facts.history_size) if self.scrollback else None
+        self._follow_size_owner(facts)
+        marker = self._corner(facts)
         if marker != self._marker:
             dirty.add(0)
             replaced.add(0)
@@ -2172,7 +2239,7 @@ class TerminalPane(Widget, can_focus=True):
                 if shown.notice is not None and y == height - 1
                 else self._frame_row(line, width)
             )
-            strip = self._with_scroll_marker(strip, width, row, shown.marker)
+            strip = self._with_marker(strip, width, row, shown.marker)
         return strip
 
     def _composed(self, y: int, shown: Shown) -> bool:
@@ -2467,27 +2534,26 @@ class TerminalPane(Widget, can_focus=True):
             return Segment(text, style + over)
         return Segment(text, style + tint if style is not None else tint)
 
-    def _with_scroll_marker(
-        self, strip: Strip, width: int, row: DisplayedRow, numbers: tuple[int, int]
-    ) -> Strip:
-        """``[↑k/history]`` in the top-right corner while the view is in history.
+    def _with_marker(self, strip: Strip, width: int, row: DisplayedRow, marker: Corner) -> Strip:
+        """``marker`` in the top-right corner: ``[↑k/history]`` while the view is in history,
+        and :data:`SIZED_ELSEWHERE` while another asq sizes the window to another size.
 
         tmux's own copy-mode indicator, in the same place: without it a scrolled
         pane is indistinguishable from a live one that happens to be quiet. The
         cut is snapped to a grapheme boundary of ``row`` — ``strip``'s text
         model, cached — and a widened gap is blank.
         """
-        layout = self._marker_layout(row, width, numbers)
+        layout = self._marker_layout(row, width, marker.text)
         if layout is None:
             return strip
-        cut, gap, marker = layout
+        cut, gap = layout
         return Strip.join(
             [
                 strip.crop(0, cut),
                 Strip(
                     [
                         Segment(" " * gap, self.rich_style),
-                        Segment(marker, self.rich_style + SCROLL_MARKER),
+                        Segment(marker.text, self.rich_style + marker.style),
                     ]
                 ),
             ]
@@ -2499,17 +2565,28 @@ class TerminalPane(Widget, can_focus=True):
     East-Asian Ambiguous and resolves to one cell, so the shipped marker cannot
     tell the two apart (review of the ninth version)."""
 
-    def _marker_layout(
-        self, row: DisplayedRow, width: int, shown: tuple[int, int]
-    ) -> tuple[int, int, str] | None:
-        """``(cut, gap, marker)`` in cells — one answer for the strip and the text.
+    def _corner(self, facts: PaneFacts) -> Corner | None:
+        """What row 0's corner says for the frame ``facts`` describe: where the view is while
+        it is in history; else, while another asq sizes the window (:attr:`_sized_by`) and
+        the pane is not this widget's size, that it does; else nothing. The scroll position
+        wins: it is the one a reader acts on, and the hint is back at the next live frame."""
+        if self.scrollback:
+            text = self.SCROLL_MARKER_TEMPLATE.format(
+                scrollback=self.scrollback, history=facts.history_size
+            )
+            return Corner(text, SCROLL_MARKER)
+        owner = self._sized_by
+        if owner is None or (facts.width, facts.height) == tuple(self.content_size):
+            return None
+        return Corner(sized_elsewhere(owner), NOTICE)
 
-        ``shown`` is the ``(scrollback, history)`` pair the marker names — the
-        frame's own, so a row can be composed for the frame about to replace
-        this one as well as for the one on screen.
+    def _marker_layout(self, row: DisplayedRow, width: int, marker: str) -> tuple[int, int] | None:
+        """``(cut, gap)`` in cells for ``marker`` over ``row`` — one answer for the strip and
+        the text; ``None`` when the widget is too narrow for it.
+
+        ``marker`` is the frame's own (:meth:`_corner`), so a row can be composed for the
+        frame about to replace this one as well as for the one on screen.
         """
-        scrollback, history = shown
-        marker = self.SCROLL_MARKER_TEMPLATE.format(scrollback=scrollback, history=history)
         # CELLS, like `cut`, `gap` and every crop they feed. `↑` is East-Asian
         # Ambiguous and resolves to one cell today, so a character count agreed
         # by luck — and a row where they diverge puts the marker over its corner
@@ -2518,7 +2595,7 @@ class TerminalPane(Widget, can_focus=True):
         if marker_cells >= width:
             return None
         cut, _ = row.snap(width - marker_cells, width - marker_cells)
-        return cut, width - marker_cells - cut, marker
+        return cut, width - marker_cells - cut
 
     TAB_STOPS: ClassVar[int] = 8
     """Where a TAB cell advances to. tmux stores a tab as a cell and prints it as
@@ -2635,6 +2712,7 @@ class TerminalPane(Widget, can_focus=True):
     def _send_translation(self, translation: Translation) -> None:
         # Not ``_send``: the call-graph guards key calls by bare name, and the captain's voice
         # server has a ``_send`` the hook path reaches, which would lead it into ``_forward``.
+        self._claim_size()
         self._forward("key" if translation.kind == "key" else "text", translation.value)
 
     def _forward(self, kind: InputKind, value: str | bytes) -> bool:
@@ -2961,6 +3039,7 @@ class TerminalPane(Widget, can_focus=True):
         self.scrollback = 0
         if self.text_selection is not None:
             self._clear_own_selection()  # input into the agent: the highlight is stale (rule 3)
+        self._claim_size()
         self._forward("paste", text)
         self._input_arrived()
 
@@ -2988,8 +3067,12 @@ class TerminalPane(Widget, can_focus=True):
         with a word and copied it twice (review of #135, finding 13). A click
         here is a press and a release in the same cell, with the LEFT button;
         only those count, and only in succession (class docstring, rule 6).
+
+        A click is input from this asq, as a key is: it takes the window's size
+        (:meth:`_claim_size`).
         """
         self.focus()
+        self._claim_size()
         if self._program_owns_mouse() and not event.shift:
             # The press and the release already went to the program (#148): a
             # double click is two presses there, and Claude Code does its own
@@ -3730,7 +3813,8 @@ class TerminalPane(Widget, can_focus=True):
         )
 
     def _sync_size(self) -> None:
-        """Size the tmux window to this widget's content area (once per distinct size)."""
+        """Size the tmux window to this widget's content area (once per distinct size) —
+        unless another asq sizes it (:meth:`_size_owner_now`)."""
         self._resize_timer = None
         if self.pane_id is None or self.server is None:
             return
@@ -3739,6 +3823,13 @@ class TerminalPane(Widget, can_focus=True):
             return
         wanted = (self.pane_id, width, height)
         if wanted == self._synced:
+            return
+        self._sized_by = self._size_owner_now(self.server, self.pane_id)
+        if self._sized_by is not None:
+            # Left at the other asq's size; this frame's corner says so. Not synced: once
+            # the size is this pane's again, it is sent whatever was sent before.
+            self._synced = None
+            self._frame_now()
             return
         try:
             self.server.resize(self.pane_id, width, height)
@@ -3767,3 +3858,109 @@ class TerminalPane(Widget, can_focus=True):
             self._resize_retry, self._sync_size, name="terminal-resize-retry"
         )
         self._resize_retry = min(self._resize_retry * 2, self.RESIZE_RETRY_MAX)
+
+    # --- size between two asq ------------------------------------------------------------
+
+    def _other_owner(self, held: str) -> SizeOwner | None:
+        """The asq ``held`` names (:data:`~aisquare.core.tmux.SIZE_OWNER_OPTION`) when it is
+        another, and runs; ``None`` when the size is this pane's to set: unset, this asq's,
+        or an asq that ended. A pid another process has reused since reads as running: the
+        window keeps the size it has until input here takes it."""
+        owner = SizeOwner.parse(held)
+        if owner is None or owner.pid == self.owner_pid or not procs.alive(owner.pid):
+            return None
+        return owner
+
+    def _size_owner_now(self, server: TmuxServer, pane_id: str) -> SizeOwner | None:
+        """The other asq that sizes ``pane_id``'s window now, asked right before this pane
+        would size it: one ``show-options``, unless the last frame already named one that
+        runs. A frame can be an idle tick old, and a resize sent on its word undid a claim
+        made since."""
+        facts = self.facts
+        if facts is not None:
+            owner = self._other_owner(facts.size_owner)
+            if owner is not None:
+                return owner
+        try:
+            held = server.size_owner(pane_id)
+        except TmuxError:
+            return None  # it will not say: sized as before, and the resize says what is wrong
+        return self._other_owner(held)
+
+    def _follow_size_owner(self, facts: PaneFacts) -> None:
+        """Each frame: which asq sizes the window now. When the one this pane left it to lets
+        go — it ended, its claim was unset, or this asq took it — the pane sizes it again,
+        after the debounce, as a resize would."""
+        owner = self._other_owner(facts.size_owner)
+        let_go = self._sized_by is not None and owner is None
+        self._sized_by = owner
+        if owner is not None or let_go:
+            # Not at a size this pane sent: the next one it may send is sent, even the same.
+            self._synced = None
+        if let_go and self._resize_timer is None:
+            self._resize_timer = self.set_timer(
+                self.RESIZE_DEBOUNCE, self._sync_size, name="terminal-resize"
+            )
+
+    def _claim_size(self) -> None:
+        """Input reached the pane from here — a key, a paste, a click: this asq sizes its
+        window from now on, and does at once, so the reader sees the pane at the size
+        they are typing in. Claim and resize are one chain (``core.tmux.size_claim_commands``):
+        down the control client's pipe while it serves the pane, so the key that claims starts
+        no tmux process, and one process when polling. Only when the last frame names another
+        asq or nobody, so it is written once per change of hands; and only from a pane on
+        screen, which has a size to give."""
+        server, pane_id = self.server, self.pane_id
+        width, height = self.content_size
+        if server is None or pane_id is None or width <= 0 or height <= 0:
+            return
+        facts = self.facts
+        held = SizeOwner.parse(facts.size_owner) if facts is not None else None
+        if held is not None and held.pid == self.owner_pid:
+            return
+        now, key = time.monotonic(), _server_key(server)
+        replaced = facts.size_owner if facts is not None else ""
+        last = self._claimed
+        if (
+            last is not None
+            and (last[0], last[1], last[3]) == (key, pane_id, replaced)
+            and now - last[2] < self.CLAIM_GAP
+        ):
+            return  # the frames still show what the last claim replaced: it did not land
+        self._claimed = (key, pane_id, now, replaced)
+        owner = SizeOwner.claiming(self.owner_pid)
+        wanted = (pane_id, width, height)
+        if self._resize_timer is not None:
+            self._resize_timer.stop()
+            self._resize_timer = None
+        self._resize_retry = self.RESIZE_RETRY
+        link = self._serving()
+        try:
+            if link is not None:
+                done = partial(self._claim_answered, wanted)
+                link.client.claim_size(pane_id, owner, width, height, done=done)
+            else:
+                server.claim_size(pane_id, owner, width, height)
+        except TmuxError as error:
+            self.log.warning(f"could not take the size of {pane_id}: {error}")
+            self._synced = None
+            self._retry_size()
+            return
+        self._sized_by = None
+        self._synced = wanted
+        if facts is not None:
+            # Until the next frame says so itself: a resize meanwhile must not read the
+            # owner this claim replaced.
+            self.facts = replace(facts, size_owner=owner.value())
+        if link is None:
+            self._frame_now()  # as after any polled resize; over the pipe, the input asks
+
+    def _claim_answered(self, wanted: tuple[str, int, int], reply: Reply) -> None:
+        """tmux answered a claim sent down the pipe: refused — the claim, or its resize — it
+        is retried as a refused resize is (the module's "Failing open"), and that retry asks
+        tmux who sizes the window first."""
+        if reply.ok or self._synced != wanted:
+            return
+        self.log.warning(f"could not take the size of {wanted[0]}: {reply.failure()}")
+        self._synced = None
+        self._retry_size()

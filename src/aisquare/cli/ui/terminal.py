@@ -202,6 +202,7 @@ import itertools
 import os
 import re
 import subprocess
+import sys
 import time
 import weakref
 from bisect import bisect_left
@@ -230,7 +231,7 @@ from textual.timer import Timer
 from textual.widget import Widget
 
 from aisquare.cli.ui.clipboard import ClipboardApp, characters, copy_and_tell
-from aisquare.core import procs
+from aisquare.core import instances, procs
 from aisquare.core.clipboard import in_wsl
 from aisquare.core.keys import (
     EXTENDED_MINIMUM,
@@ -282,8 +283,43 @@ _WHERE = {"ssh": " (ssh)", "mac": " (Mac)"}
 
 
 def sized_elsewhere(owner: SizeOwner) -> str:
-    """:data:`SIZED_ELSEWHERE` for ``owner``: ``[sized by the other asq (ssh)]``."""
-    return SIZED_ELSEWHERE.format(where=_WHERE.get(owner.where, ""))
+    """:data:`SIZED_ELSEWHERE` for ``owner``: ``[sized by the other asq (ssh)]``. Its terminal
+    as its record in the instance registry says it (``core.instances``, kept fresh by its
+    beat), else as its claim said it."""
+    record = _owner_record(owner)
+    where = owner.where
+    if record is not None:
+        where = "ssh" if record.kind == "ssh" else ("mac" if sys.platform == "darwin" else "")
+    return SIZED_ELSEWHERE.format(where=_WHERE.get(where, ""))
+
+
+def _owner_record(owner: SizeOwner) -> instances.Instance | None:
+    """``owner``'s record among the other live asqs, as this asq's beat thread last read them
+    (``Registration.others``): never the folder, on the UI thread. ``None`` when not there."""
+    registration = instances.this_registration()
+    if registration is None:
+        return None
+    return next((other for other in registration.others if other.pid == owner.pid), None)
+
+
+def size_owner_runs(owner: SizeOwner) -> bool:
+    """Whether the asq ``owner`` names still runs: its pid alive, and a live asq in the
+    instance registry. A pid another process has reused since is alive and is no asq. The
+    registry is the one this asq's beat thread last read, so a claim stamped after that read
+    is one it could not have seen, and counts. An asq with no registration (a test's app, a
+    home it cannot write) has the pid alone to go by."""
+    if not procs.alive(owner.pid):
+        return False
+    registration = instances.this_registration()
+    if registration is None:
+        return True
+    return _owner_record(owner) is not None or owner.stamp > registration.others_read_ns
+
+
+def _claim(pid: int) -> SizeOwner:
+    """The claim asq ``pid`` sizes a window with: its kind as its registration says it."""
+    mine = instances.this_instance()
+    return SizeOwner.claiming(pid, kind=None if mine is None else mine.kind)
 
 
 class Corner(NamedTuple):
@@ -3914,7 +3950,7 @@ class TerminalPane(Widget, can_focus=True):
         """``held`` when it is another asq's claim and that asq has ended: a claim the next
         resize may pass over (:meth:`_sync_size`); ``None`` otherwise."""
         owner = SizeOwner.parse(held)
-        if owner is None or owner.pid == self.owner_pid or procs.alive(owner.pid):
+        if owner is None or owner.pid == self.owner_pid or size_owner_runs(owner):
             return None
         return held.strip()
 
@@ -3924,7 +3960,7 @@ class TerminalPane(Widget, can_focus=True):
         or an asq that ended. A pid another process has reused since reads as running: the
         window keeps the size it has until input here takes it."""
         owner = SizeOwner.parse(held)
-        if owner is None or owner.pid == self.owner_pid or not procs.alive(owner.pid):
+        if owner is None or owner.pid == self.owner_pid or not size_owner_runs(owner):
             return None
         return owner
 
@@ -3970,7 +4006,7 @@ class TerminalPane(Widget, can_focus=True):
             return  # the frames still show what the last claim replaced: it did not land
         self._claimed = (key, pane_id, now, replaced)
         self._claims += 1
-        owner = SizeOwner.claiming(self.owner_pid)
+        owner = _claim(self.owner_pid)
         wanted = (pane_id, width, height)
         if self._resize_timer is not None:
             self._resize_timer.stop()

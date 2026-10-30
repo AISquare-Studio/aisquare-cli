@@ -547,6 +547,7 @@ class Registration:
         self._thread: threading.Thread | None = None
         self._deliver: Deliver | None = None
         self._others: list[Instance] = []
+        self._others_read_ns = 0
 
     @property
     def instance(self) -> Instance:
@@ -558,6 +559,12 @@ class Registration:
         :data:`HEARTBEAT_SECONDS` ago: for the UI thread, which reads no folder (a home on a
         hung NFS mount would hold it). Empty until the thread's first beat."""
         return self._others
+
+    @property
+    def others_read_ns(self) -> int:
+        """When :attr:`others` was last read (``time.time_ns``); ``0`` before the first read.
+        A claim stamped after it is one the read could not have seen (``cli.ui.terminal``)."""
+        return self._others_read_ns
 
     def start(self) -> None:
         """Start the beat thread: the heartbeat every :data:`HEARTBEAT_SECONDS` (the first at
@@ -626,7 +633,9 @@ class Registration:
                     _log.debug("the asq instance record could not be written", exc_info=True)
                 try:
                     mine = self._instance.id
+                    read_at = time.time_ns()
                     self._others = [i for i in live_instances() if i.id != mine]
+                    self._others_read_ns = read_at
                 except Exception:
                     _log.debug("the other asqs could not be read", exc_info=True)
                 next_beat = time.monotonic() + HEARTBEAT_SECONDS

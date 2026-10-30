@@ -742,12 +742,25 @@ class SizeOwner(NamedTuple):
 
     @classmethod
     def claiming(
-        cls, pid: int, *, environ: Mapping[str, str] | None = None, platform: str | None = None
+        cls,
+        pid: int,
+        *,
+        kind: str | None = None,
+        environ: Mapping[str, str] | None = None,
+        platform: str | None = None,
     ) -> SizeOwner:
-        """The value asq process ``pid`` claims a window with, now."""
+        """The value asq process ``pid`` claims a window with, now. ``kind`` is that asq's
+        own in the instance registry (``core.instances``: ``ssh`` or ``native``), which knows
+        a tmux whose client attached over SSH; the environment says only how the asq STARTED,
+        and is read only when no registry kind is given."""
         env = os.environ if environ is None else environ
         system = sys.platform if platform is None else platform
-        if any(env.get(marker) for marker in ("SSH_CONNECTION", "SSH_TTY")):
+        remote = (
+            kind == "ssh"
+            if kind is not None
+            else any(env.get(marker) for marker in ("SSH_CONNECTION", "SSH_TTY"))
+        )
+        if remote:
             where = "ssh"
         elif system == "darwin":
             where = "mac"

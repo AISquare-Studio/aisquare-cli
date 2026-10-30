@@ -200,6 +200,12 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fleet.py", "switch"): _FLEET_OP,
     ("services/fleet.py", "restart"): _FLEET_OP,
     ("services/fleet.py", "pause_agent"): _FLEET_OP,
+    ("services/fleet.py", "_paused_by_the_owner"): (
+        _FLEET_OP + ", or the paused row's project in a bulk plan (``bulk_plan``'s covered)"
+    ),
+    ("services/fleet.py", "_refuse_occupied_worktree"): (
+        "the project the spawn acts on, whose live row holds the tree (REVIEW-RC092, n1)"
+    ),
     ("services/fleet.py", "_codename_changed"): "the project renamed, with its new codename",
     ("services/fleet.py", "follow_name"): "the project renamed, as its row holds it now",
     ("services/fleet.py", "relabel"): _FLEET_OP,

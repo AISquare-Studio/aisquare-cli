@@ -177,7 +177,12 @@ def rename(
         ),
     ] = None,
     clear: Annotated[
-        bool, typer.Option("--clear", help="Drop the nickname: the folder's name shows again.")
+        bool,
+        typer.Option(
+            "--clear",
+            help="Drop the nickname: the folder's name shows again, and the codename becomes "
+            "its slug.",
+        ),
     ] = False,
 ) -> None:
     """Give a project a nickname — what the sidebar and the lists call it — and its fleet

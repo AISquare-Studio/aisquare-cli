@@ -8461,7 +8461,7 @@ def _reconcile_pauses(
 
 
 def shutdown_plan(
-    project: ProjectInfo | None = None, *, forget: bool = False, from_inside: bool = False
+    project: ProjectInfo | None = None, *, forget: bool = False, allow_inside: bool = False
 ) -> ShutdownPlan:
     """What :func:`shutdown` would end — read-only, and it refuses the same way.
 
@@ -8472,7 +8472,7 @@ def shutdown_plan(
     the same way: the operator confirms this list, so a list missing a session
     the run would still kill is worse than no list at all.
 
-    ``from_inside`` lifts the last of those, :func:`_refuse_from_inside`, for a caller that
+    ``allow_inside`` lifts the last of those, :func:`_refuse_from_inside`, for a caller that
     never carries the plan out (``project fresh --dry-run``): only the kill takes the pane
     down, and listing the sessions kills nothing.
 
@@ -8500,7 +8500,7 @@ def shutdown_plan(
             config=config,
         )
     sockets = _shutdown_sockets(targets, config)
-    if not from_inside:
+    if not allow_inside:
         _refuse_from_inside(sockets, config)
     answering = _shutdown_probe(sockets, config)
     sessions: list[str] = []

@@ -542,7 +542,7 @@ def _sessions(project: ProjectInfo, *, live: bool, dry_run: bool = False) -> lis
     try:
         # With the strict read's sessions too: the plan asks one no live row lived on only
         # just in case, and passes over a failure to ask it (review of #429, round 4).
-        planned = fleet_service.shutdown_plan(project, from_inside=dry_run)
+        planned = fleet_service.shutdown_plan(project, allow_inside=dry_run)
         return list(dict.fromkeys([*standing, *planned.sessions]))
     except fleet_service.InsideTheFleet as exc:
         raise FreshRefused(

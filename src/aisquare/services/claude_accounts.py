@@ -142,12 +142,15 @@ def describe(account: ClaudeAccount) -> ClaudeAccountStatus:
     return describe_all([account])[0]
 
 
-def describe_all(accounts: Sequence[ClaudeAccount]) -> list[ClaudeAccountStatus]:
+def describe_all(
+    accounts: Sequence[ClaudeAccount], *, store: ContextStore | None = None
+) -> list[ClaudeAccountStatus]:
     """:func:`describe` for each of ``accounts``, signed in as :func:`signed_in_slots` says, in
-    one look at the store, which also says every login read here for the processes that
-    cannot read it. A slot whose Keychain is locked here reads as the Mac's asq last saw it:
-    signed out (``token_state`` ``missing``), or its token expired (``expired``)."""
-    signed, logins = _signed_logins(accounts, say=True)
+    one look at the store (``store``, when the caller has one open), which also says every
+    login read here for the processes that cannot read it. A slot whose Keychain is locked
+    here reads as the Mac's asq last saw it: signed out (``token_state`` ``missing``), or its
+    token expired (``expired``)."""
+    signed, logins = _signed_logins(accounts, say=True, store=store)
     statuses: list[ClaudeAccountStatus] = []
     for account in accounts:
         login = core.stored_login(account)
@@ -187,8 +190,19 @@ def overview() -> AccountsOverview:
     "Offline" still holds: the registry is a local SQLite read. A store that
     cannot be opened costs the ARRANGEMENT (order, aliases, disabled flags)
     and never the listing — see :func:`list_accounts`.
+
+    The registry's read and the logins' rows (:func:`describe_all`) share ONE store
+    session: asq reads the overview on its two-second tick, and over SSH the rows of the
+    slots locked there opened a second session each time their memo lapsed (tester's
+    reopen of #18, seq 5229).
     """
-    return AccountsOverview(claude=install(), accounts=describe_all(list_accounts()))
+    try:
+        with store_session() as store:
+            accounts = _arranged(store)
+            statuses = describe_all(accounts, store=store)
+    except sqlite3.Error:  # as `list_accounts` fails open: the listing, without the arrangement
+        statuses = describe_all(core.list_accounts())
+    return AccountsOverview(claude=install(), accounts=statuses)
 
 
 # --- the registry: alias, priority order, default, disabled (#145) ------------------------------
@@ -1702,11 +1716,18 @@ def _logins(accounts: Sequence[ClaudeAccount], now: datetime, *, say: bool = Tru
     return _Logins(now=now, tokens=tokens, seen=seen, locked=locked)
 
 
-def _settled(logins: _Logins) -> _Logins:
-    """``logins``, settled from memory when it can be (:meth:`_Logins.settle_from_memory`),
-    else in a store session of its own when it has a row to read or write. Best effort: a
-    store that cannot be opened leaves it as it is."""
-    if logins.settled or logins.settle_from_memory():
+def _settled(logins: _Logins, store: ContextStore | None = None) -> _Logins:
+    """``logins``, settled in ``store`` when the caller has one open, else from memory when it
+    can be (:meth:`_Logins.settle_from_memory`), else in a store session of its own when it
+    has a row to read or write. Best effort: a store that cannot be opened, or read, leaves
+    it as it is."""
+    if logins.settled:
+        return logins
+    if store is not None:
+        with contextlib.suppress(sqlite3.Error):
+            logins.settle(store)
+        return logins
+    if logins.settle_from_memory():
         return logins
     if logins.seen or logins.locked:
         with contextlib.suppress(sqlite3.Error), store_session() as store:
@@ -1715,10 +1736,14 @@ def _settled(logins: _Logins) -> _Logins:
 
 
 def _signed_logins(
-    accounts: Sequence[ClaudeAccount], *, now: datetime | None = None, say: bool = False
+    accounts: Sequence[ClaudeAccount],
+    *,
+    now: datetime | None = None,
+    say: bool = False,
+    store: ContextStore | None = None,
 ) -> tuple[set[int], _Logins]:
-    """:func:`signed_in_slots`, and the logins it was read from."""
-    logins = _settled(_logins(accounts, now or _now(), say=say))
+    """:func:`signed_in_slots`, and the logins it was read from (in ``store``, if given)."""
+    logins = _settled(_logins(accounts, now or _now(), say=say), store)
     signed = {
         account.slot
         for account in accounts

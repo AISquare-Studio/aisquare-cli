@@ -802,3 +802,34 @@ def test_the_login_row_holds_only_what_is_read_from_it() -> None:
     token expires, which a locked process answers by (item 2)."""
     row = json.loads(service.SeenLogin(token="fp", expires_at=NOW).dump())
     assert row == {"token": "fp", "expires_at": NOW.isoformat()}
+
+
+def test_the_overview_tick_opens_the_store_once_as_on_base_over_ssh_and_on_the_mac(
+    asqs: TwoAsqs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tester's reopen (seq 5229): asq reads the overview on its two-second tick, and base
+    opens the store once for it (the registry's read). Over SSH the locked slots' rows were a
+    second session every time their ten-second memo lapsed: 18 opens in 15 ticks. They are
+    read in the registry's session now, memo or not; on the Mac, the logins said there too."""
+    two, three = _slots(asqs)
+    _mac_reads(asqs, [two, three], NOW - timedelta(minutes=2), s2=40.0, s3=70.0)
+    monkeypatch.setattr(service, "LOGIN_ROW_SECONDS", 0.0)  # every tick finds the memo lapsed
+
+    asqs.over_ssh()
+    opens = _counting_opens(monkeypatch)
+    per_tick = []
+    for _ in range(15):
+        before = len(opens)
+        statuses = service.overview().accounts
+        per_tick.append(len(opens) - before)
+    assert per_tick == [1] * 15
+    assert {s.account.slot for s in statuses if s.signed_in} == {two.slot, three.slot}
+
+    asqs.on_the_mac()  # a new process: every login is said on its first tick
+    del asqs.items[core.keychain_service(three)]  # and slot 3 was logged out
+    before = len(opens)
+    service.overview()
+    assert len(opens) - before == 1
+    asqs.over_ssh()
+    rows = {status.account.slot: status for status in service.overview().accounts}
+    assert rows[two.slot].signed_in and not rows[three.slot].signed_in

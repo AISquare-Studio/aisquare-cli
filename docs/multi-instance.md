@@ -97,6 +97,9 @@ Some refusals come without a question, because there is nothing this asq can ask
 
 - **An asq that can't be asked to quit.** Its record has no quit channel. The new asq names its pid
   and says what `kill <pid>` loses against quitting it in its own terminal. It never kills it.
+- **An asq from before the registry** (0.9.1 and older), which writes no record. The new asq finds
+  it with one `ps`, names its pid, terminal and command, and says what `kill <pid>` loses. It never
+  kills it. An asq started in the last 10 seconds, or one on another home, isn't counted.
 - **A record this release can't read.** Most likely a later release's asq. The new asq names the
   record's file. A record whose asq is gone (no lock held) is ignored once it is a minute old.
 - **Another asq is starting at the same moment.** If it has held the home's gate for over

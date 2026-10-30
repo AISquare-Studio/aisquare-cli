@@ -50,16 +50,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its session resumed from its transcript (`claude --resume`) and one carry-on line typed,
   or, with no transcript, started fresh with the board's hand-off prompt, taking its claims
   over. An agent that exited without a pause stays 💤, and a second resume does nothing.
-  A paused agent whose task was done or dropped meanwhile is not resumed: the resume ends
-  its pause (its claims go back to the board, and `reap` may take its tree) and says so.
+  A paused agent whose task was done or dropped meanwhile is not resumed: the owner's
+  resume ends its pause (its claims go back to the board, and `reap` may take its tree) and
+  says so.
   - **asq:** Settings ▸ Fleet has *Pause all…* and *Resume all…* beside *Restart all…*
     and *Stop all…*, in the same dialog (who, by project; *Managers only*; Cancel
     focused), run off the UI thread with a toast per agent and one that sums it up. A
     project card's ⋯ menu has *Pause agents…* and *Resume agents…*, and so has the
     project's Settings tab: the same dialog for that project alone, the one that would
     act on nothing greyed (*Resume* clears a `fleet-paused` signal with no agent paused
-    too). A paused agent shows `⏯ paused` in the sidebar, and its view offers *Resume*, and
-    *Stop*, which ends the pause for good.
+    too). A paused agent shows `⏯ paused` in the sidebar and on Remote, and its view offers
+    *Resume*, and *Stop*, which ends the pause for good.
   - A paused agent survives a rename. It keeps its label: `fleet relabel` and the sidebar
     refuse to rename it until it is resumed, and give no running agent its label. Renaming
     its project leaves it paused, and it resumes in the renamed project's tmux session, in
@@ -69,11 +70,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     nor its branch, a spawn does not take its label (a second manager is refused while
     the project's own is paused), and Restart all, Stop all and the restart of agents an
     update lost leave it.
-  - The owner's `fleet stop <label>` of a paused agent ends its pause: its row is recorded
-    stopped, the claims it kept go back to the board and its exit is announced. An agent's
-    (`--as <session>`, a manager's cycle) is refused: the pause is the owner's. The owner's
-    `fleet restart <label>` resumes it, as `fleet resume` would; an agent's restart, switch
-    or resume of a paused teammate is refused the same way.
+  - Only the owner ends a pause: asq, Remote, or a shell that is no agent's window. The
+    owner's `fleet stop <label>` of a paused agent ends its pause: its row is recorded
+    stopped, the claims it kept go back to the board and its exit is announced. The owner's
+    `fleet restart <label>` resumes it, as `fleet resume` would. An agent's stop, restart,
+    switch or resume of a paused teammate is refused and changes nothing, the project's
+    `fleet-paused` signal included, whether it is run from the agent's own window with no
+    `--as`, with `--as <session>`, or with `--as captain`; the captain acts as the owner from
+    its own window alone. That includes a paused agent whose task closed: only the owner's
+    resume ends that pause.
 
 ### Changed
 

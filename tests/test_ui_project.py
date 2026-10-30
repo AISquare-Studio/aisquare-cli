@@ -298,6 +298,7 @@ def project() -> ProjectInfo:
 def no_fleet(monkeypatch: pytest.MonkeyPatch) -> None:
     """A fleet with no manager and no tmux: the view must never reach the real service."""
     monkeypatch.setattr(fleet_service, "manager_of", lambda project: None)
+    monkeypatch.setattr(fleet_service, "paused_manager_of", lambda project: None)
     monkeypatch.setattr(
         fleet_service, "status_of", lambda agent: FleetAgentStatus(agent=agent, state="waiting")
     )
@@ -1022,6 +1023,39 @@ def test_a_resize_after_the_manager_leaves_keeps_the_no_manager_text(
     for text in (left, resized):
         assert "has no manager yet" in text, text
         assert "🧭 manager" not in text and "%11" not in text, text  # no stale info line
+
+
+def test_with_no_frame_yet_a_paused_managers_tab_says_paused_and_offers_resume(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the #457 fold, n3: the tab's own read as it mounts (no frame yet: asq
+    starting, or a frame whose fleet read failed) asked for the LIVE manager alone, and a
+    paused one read as "no manager yet" beside *Start manager*, which the spawn refuses beside
+    a paused manager. It says paused, and offers *Resume agents…*, as a frame shows it."""
+    now = datetime.now(tz=UTC)
+    paused = fake_agent(project, pane_id="%41").model_copy(
+        update={"ended_at": now, "ended_by": "stopped", "paused_at": now}
+    )
+    monkeypatch.setattr(
+        fleet_service,
+        "paused_manager_of",
+        lambda asked: (
+            FleetAgentStatus(agent=paused, state="paused", detail=fleet_service.PAUSED_DETAIL)
+            if asked.id == project.id
+            else None
+        ),
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, bool, bool]:
+        await settle(pilot)
+        header = " ".join(shown(host.query_one("#manager-header", Static)).split())
+        start = host.query_one("#start-manager", Button).display
+        return header, start, host.query_one("#resume-manager", Button).display
+
+    header, start, resume = drive(project, scenario)
+    assert f"{project.root.name}'s manager is paused." in header, header
+    assert "no manager yet" not in header and "exited" not in header
+    assert (start, resume) == (False, True), "Resume agents in place of Start manager"
 
 
 def test_the_manager_tab_says_the_manager_exited_and_how_to_bring_it_back(

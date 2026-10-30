@@ -879,3 +879,128 @@ def test_a_paused_agent_survives_a_project_rename_and_resumes_in_its_session(
     sessions = {str(entry["session"]) for entry in tmux.spawned[spawned:]}
     assert sessions == {"asq-alpha-two"}, sessions
     assert not fleet_service.is_paused(renamed)
+
+
+# --- the fold's review of d537df59 (reviewer-457d, seq 5050; validator, seq 5043) -------------
+
+
+def _the_running_manager(project: ProjectInfo) -> FleetAgent:
+    with store_session() as store:
+        row = store.fleet_agent_by_label(project.id, "manager", live_only=True)
+    assert row is not None
+    return row
+
+
+def test_an_agents_own_window_may_not_end_the_owners_pause_with_or_without_as(
+    fleet: Fleet, tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m1 (MAJOR): the gate trusted the name a caller passed. From the manager's own window
+    (its ``AISQUARE_FLEET_AGENT``) with no ``--as``, ``fleet restart`` and ``fleet resume``
+    said ``user``: the restart resumed the owner's paused coder, and the resume brought the
+    team back and cleared the owner's signal. And ``--as captain`` from any agent ended a
+    pause by a stop, releasing its claim. Each is refused, nothing started, the claim and the
+    signal as they were; from the owner's shell, the resume brings the team back."""
+    coder = fleet.agents[_coder_label(fleet, "alpha")]
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    fleet_service.bulk("resume", managers_only=True, projects=[fleet.alpha])
+    manager = _the_running_manager(fleet.alpha)
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", manager.id)
+    runner = CliRunner()
+    ref = fleet.alpha.id
+    spawned, signals = len(tmux.spawned), len(_events(fleet.alpha, "signal"))
+
+    for args in (
+        ["fleet", "restart", coder.label, "-P", ref],
+        ["fleet", "resume", "-P", ref],
+        ["fleet", "stop", coder.label, "-P", ref],
+        ["fleet", "restart", coder.label, "-P", ref, "--as", "captain"],
+        ["fleet", "resume", "-P", ref, "--as", "captain"],
+        ["fleet", "stop", coder.label, "-P", ref, "--as", "captain"],
+    ):
+        result = runner.invoke(app, ["--json", *args])
+        assert result.exit_code == 1, (args, result.output)
+        assert "paused by the owner" in result.stdout, (args, result.stdout)
+    with pytest.raises(FleetError, match="paused by the owner"):
+        fleet_service.switch(fleet.alpha, coder.label)  # `user`, from the manager's window
+
+    assert len(tmux.spawned) == spawned, "nothing was started"
+    assert len(_events(fleet.alpha, "signal")) == signals, "the owner's signal was not touched"
+    assert _row(coder.id).paused_at is not None and fleet_service.is_paused(fleet.alpha)
+    assert _task(fleet.tasks["alpha"]).claimed_by == coder.session_id
+    monkeypatch.delenv("AISQUARE_FLEET_AGENT")
+    owners = runner.invoke(app, ["--json", "fleet", "resume", "-P", ref])
+    assert owners.exit_code == 0, owners.output
+    assert _row(coder.id).paused_at is None and not fleet_service.is_paused(fleet.alpha)
+
+
+def test_an_agents_refused_resume_writes_no_signal(fleet: Fleet, tmux: FakeTmux) -> None:
+    """m2: an agent's resume cleared the owner's ``fleet-paused`` before any row was tried,
+    every row was then refused, and the signal was set again: two broadcasts, and a window
+    in which the manager read it off. Refused in the plan, each row fails untried and the
+    signal is never written."""
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    fleet_service.bulk("resume", managers_only=True, projects=[fleet.alpha])
+    manager = _the_running_manager(fleet.alpha)
+    assert manager.session_id is not None
+    signals, spawned = len(_events(fleet.alpha, "signal")), len(tmux.spawned)
+
+    report = fleet_service.bulk("resume", projects=[fleet.alpha], acting_session=manager.session_id)
+
+    coder_key = _coder_label(fleet, "alpha")
+    outcome, why = _outcomes(fleet, report.receipts)[coder_key]
+    assert outcome == "failed" and "paused by the owner" in (why or ""), why
+    assert not report.ok and report.signals == ()
+    assert [(p.id, n) for p, n in report.kept] == [(fleet.alpha.id, 1)]
+    assert len(_events(fleet.alpha, "signal")) == signals, "no signal written, on or off"
+    assert len(tmux.spawned) == spawned and fleet_service.is_paused(fleet.alpha)
+
+
+def test_an_agents_resume_of_a_paused_agent_whose_task_closed_names_what_the_owners_does(
+    fleet: Fleet,
+) -> None:
+    """n1: refused an agent, the end of a closed task's pause said the owner's resume "brings
+    it back"; for that row it ends the pause. The refusal says so."""
+    coder = fleet.agents[_coder_label(fleet, "alpha")]
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    with store_session() as store:
+        store.set_task_status(fleet.tasks["alpha"].id, "done")
+    manager = fleet.agents["alpha/manager"]
+
+    report = fleet_service.bulk("resume", projects=[fleet.alpha], acting_session=manager.session_id)
+
+    outcome, why = _outcomes(fleet, report.receipts)[_coder_label(fleet, "alpha")]
+    assert outcome == "failed"
+    assert why == (
+        f"{coder.label} was paused by the owner (`fleet pause`), and only the owner ends a pause "
+        "(their resume ends the pause, as its task is done); nothing was changed"
+    )
+    assert _row(coder.id).paused_at is not None
+
+
+def test_a_switch_pinned_to_a_row_the_paused_label_no_longer_names_is_a_stale_pin(
+    fleet: Fleet,
+) -> None:
+    """n2: a switch pinned to row A (Remote's agent/switch), whose label has since gone to a row
+    B now paused, was told about B. It is the stale pin a running B gets (``_replaced``)."""
+    coder = fleet.agents[_coder_label(fleet, "alpha")]
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+
+    with pytest.raises(fleet_service.NoSuchAgent, match="ended and was replaced since"):
+        fleet_service.switch(fleet.alpha, coder.label, agent_id="agt_an_older_row")
+    with pytest.raises(FleetError, match="no process to move"):
+        fleet_service.switch(fleet.alpha, coder.label, agent_id=coder.id)  # pinned to B itself
+
+
+def test_the_paused_manager_is_read_from_the_store_alone(fleet: Fleet) -> None:
+    """n3: what the Manager tab shows with no frame yet: the project's paused manager, as a
+    listing shows it, and nothing once it runs again."""
+    manager = fleet.agents["alpha/manager"]
+    assert fleet_service.paused_manager_of(fleet.alpha) is None
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+
+    paused = fleet_service.paused_manager_of(fleet.alpha)
+
+    assert paused is not None and paused.agent.id == manager.id
+    assert (paused.state, paused.detail) == ("paused", fleet_service.PAUSED_DETAIL)
+    fleet_service.bulk("resume", projects=[fleet.alpha])
+    assert fleet_service.paused_manager_of(fleet.alpha) is None

@@ -265,7 +265,13 @@ class ManagerTab(Vertical):
             self.show(None, unavailable=str(exc))
             return
         if manager is None:
-            self.show(None)
+            # A paused manager is no "no manager yet": its header says paused, and its button
+            # is Resume agents, as a frame shows it (review of the #457 fold, n3).
+            try:
+                paused = fleet_service.paused_manager_of(self.project)
+            except Exception:  # the store is briefly unavailable: the next frame says it
+                paused = None
+            self.show(None, exited=paused)
             return
         try:
             status = fleet_service.status_of(manager)

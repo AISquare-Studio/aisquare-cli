@@ -6412,6 +6412,20 @@ def manager_of(project: ProjectInfo) -> FleetAgent | None:
     return agent if agent is not None and agent.role == "manager" else None
 
 
+def paused_manager_of(project: ProjectInfo) -> FleetAgentStatus | None:
+    """The project's PAUSED manager, as a listing shows it (``paused``, :data:`PAUSED_DETAIL`):
+    the newest row of its label, when ``fleet pause`` ended it (:func:`_paused_row`); else
+    ``None``. Read of the store alone: a paused agent has no window to ask tmux about. What
+    the Manager tab shows with no frame to read it from (``ProjectView``), where
+    :func:`manager_of`'s ``None`` read as no manager yet and offered *Start manager*, which
+    :func:`spawn` refuses beside a paused one (review of the #457 fold, n3)."""
+    with store_session() as store:
+        agent = store.fleet_agent_by_label(project.id, MANAGER_LABEL, live_only=False)
+    if agent is None or agent.role != "manager" or not _paused_row(agent):
+        return None
+    return FleetAgentStatus(agent=agent, state="paused", detail=PAUSED_DETAIL)
+
+
 def tell(
     project: ProjectInfo,
     label: str,
@@ -6925,29 +6939,34 @@ def _moved(name: str, now: str | None, launched: str | None, then: str | None) -
     return harness.clean_effort(now) != harness.clean_effort(launched)
 
 
-def _the_owners_spawn(spawned_by: str) -> bool:
+def _the_owners_spawn(spawned_by: str, store: ContextStore | None = None) -> bool:
     """Whether a spawn is the owner's choice, whose model and effort are the next pick
     (manager decision, seq 3428 b): the owner's shell or asq (``user``, from no fleet agent's
     environment), or the captain acting on the owner's words, from its own call path alone
     (:func:`_the_captains_row`; its spawn takes no model today, ``captain.actions.spawn``).
     A spawn an agent makes (``fleet spawn … --as <session>``, ``--as captain`` included, or
     run from a fleet agent's own shell, which inherits its ``AISQUARE_FLEET_AGENT``) runs its
-    flags for that one agent."""
+    flags for that one agent. ``store``, a caller's open session, is read for the captain's
+    row (:func:`_the_captains_row`)."""
     own = orchestrator.env_fleet_agent()
     if own is None:
         return spawned_by == "user"
     # In a fleet agent's environment the captain's own call path alone is the owner's: never
     # an `--as captain` any agent can type (seq 3609, 2).
-    return _the_captains_row(own)
+    return _the_captains_row(own, store)
 
 
-def _the_captains_row(agent_id: str) -> bool:
+def _the_captains_row(agent_id: str, store: ContextStore | None = None) -> bool:
     """Whether ``agent_id`` (a process's ``AISQUARE_FLEET_AGENT``) is the live captain's own row,
     with the captain on: the one caller in a fleet agent's environment that acts on the
-    owner's words (seq 3609, 2). Never decided by a name a caller passes."""
+    owner's words (seq 3609, 2). Never decided by a name a caller passes. Read through
+    ``store`` when given, else in a session of its own."""
     if not experimental.captain_enabled():
         return False
-    with store_session() as store:
+    if store is None:
+        with store_session() as opened:
+            row = opened.get_fleet_agent(agent_id)
+    else:
         row = store.get_fleet_agent(agent_id)
     return row is not None and row.ended_at is None and row.role == CAPTAIN_ROLE
 
@@ -7420,27 +7439,36 @@ def _stop_row(
     return StopReceipt(ended, released, release_failed, withheld=handover)
 
 
-OWNER_ACTORS = frozenset({"user", "captain"})
-"""Who is the owner, as a stop's ``actor`` (:func:`acting_as`) or a restart's ``spawned_by``
-names it: ``user`` (asq, Remote, a shell that is no fleet window, a command with no
-``--as``) and the captain, which acts on the owner's word. Only they end a pause, by a stop,
-a restart or a resume; an agent's session is refused (:func:`_paused_by_the_owner`)."""
+def _the_owners(who: str | None, store: ContextStore | None = None) -> bool:
+    """Whether ``who`` (a stop's ``actor``, a restart's, switch's or resume's ``spawned_by``)
+    is the owner, who alone ends a pause, by a stop, a restart or a resume
+    (:func:`_paused_by_the_owner`). Decided as the owner's spawn is
+    (:func:`_the_owners_spawn`), by the caller's environment first: from no fleet agent's,
+    ``user`` (asq, Remote, the owner's shell with no ``--as``); from a fleet agent's, the
+    captain's own row alone, whatever ``who`` says. Decided by ``who`` alone, an agent's own
+    window with no ``--as`` was ``user`` and resumed the owner's paused team, signal and all,
+    and any agent's ``--as captain`` ended a pause (review of the #457 fold, m1). ``None`` is
+    an internal caller's, which asks for no one. ``store``, a caller's open session."""
+    return who is None or _the_owners_spawn(who, store)
 
 
-def _the_owners(who: str | None) -> bool:
-    """Whether ``who`` (an ``actor`` or a ``spawned_by``) is the owner (:data:`OWNER_ACTORS`);
-    ``None`` is an internal caller's, which asks for no one."""
-    return who is None or who in OWNER_ACTORS
-
-
-def _paused_by_the_owner(project: ProjectInfo, label: str) -> FleetError:
-    """The refusal of a stop, restart or switch an agent asked for of a paused teammate: the
-    pause is the owner's (decision 1 of #9), and so is ending it — a manager's cycle that
-    stopped one released its claims, and one that restarted one undid the owner's pause."""
+def _paused_by_the_owner(
+    project: ProjectInfo, label: str, *, closes: str | None = None
+) -> FleetError:
+    """The refusal of a stop, restart, switch or resume an agent asked for of a paused
+    teammate: the pause is the owner's (decision 1 of #9), and so is ending it — a manager's
+    cycle that stopped one released its claims, and one that restarted one undid the owner's
+    pause. It names no command: every way to end a pause is the owner's alone (asq, Remote,
+    their own shell). ``closes`` is why the owner's resume would end this pause rather than
+    bring the agent back (its task closed, ``BulkRow.closes``)."""
+    ends = (
+        f"their resume ends the pause, as its {closes}"
+        if closes is not None
+        else "their resume brings it back"
+    )
     return FleetError(
-        f"{label} was paused by the owner (`fleet pause`), and only they end a pause: their "
-        f"`{project_service.fleet_command('resume', project)}` brings it back; nothing was "
-        "changed"
+        f"{label} was paused by the owner (`fleet pause`), and only the owner ends a pause "
+        f"({ends}); nothing was changed"
     )
 
 
@@ -7478,7 +7506,7 @@ def _stop_a_paused_agent(
         head = store.fleet_agent_by_label(project.id, row.label, live_only=False)
         if head is None or head.id != row.id:
             return None
-        if not _the_owners(actor):
+        if not _the_owners(actor, store):
             raise _paused_by_the_owner(project, row.label)
         stopped = store.mark_fleet_agent_stopped(row.id)
         released, failed = _release_or_say(store, stopped, why="agent stopped")
@@ -9018,7 +9046,9 @@ def switch(
     nothing has been stopped.
 
     A PAUSED agent has no process to move: an agent's switch of it is refused as the owner's
-    pause (:func:`_paused_by_the_owner`), and the owner is told to resume it first.
+    pause (:func:`_paused_by_the_owner`), and the owner is told to resume it first. Pinned to
+    another row (``agent_id``) than the paused one its label names now, the pin is stale, as
+    for a running one (:func:`_replaced`).
     """
     with store_session() as store:
         try:
@@ -9027,7 +9057,10 @@ def switch(
             head = store.fleet_agent_by_label(project.id, label, live_only=False)
             if head is None or not _paused_row(head):
                 raise
-            if not _the_owners(spawned_by):
+            if agent_id is not None and head.id != agent_id:
+                # Pinned to another row (a view read before the label moved): a stale pin.
+                raise _replaced(project, label, head, agent_id) from None
+            if not _the_owners(spawned_by, store):
                 raise _paused_by_the_owner(project, label) from None
             resume = project_service.fleet_command("resume", project)
             raise FleetError(
@@ -9731,8 +9764,9 @@ def restart(
     a fresh one takes them over with its row, as a hand-over's does (``takes_over``); it is
     admitted as any agent that has no process is. Its first line says it was paused
     (:func:`_restart_prompt`), and so does the board's ``restarted`` line. Only the owner
-    resumes it (``spawned_by`` in :data:`OWNER_ACTORS`): an agent's ``--as`` is refused, its
-    own ``fleet resume`` included (:func:`_paused_by_the_owner`).
+    resumes it (:func:`_the_owners`): an agent's restart is refused, from its own window with
+    no ``--as`` and with any ``--as`` alike, its ``fleet resume`` included
+    (:func:`_paused_by_the_owner`).
     """
     for flag, value in (("--model", model), ("--effort", effort)):
         if value is not None and not value.strip():
@@ -9762,7 +9796,7 @@ def restart(
             )
         if agent_id is not None and agent.id != agent_id:
             raise _replaced(project, label, agent, agent_id)
-        if _paused_row(agent) and not _the_owners(spawned_by):
+        if _paused_row(agent) and not _the_owners(spawned_by, store):
             # An agent may not resume a paused teammate: the pause is the owner's.
             raise _paused_by_the_owner(project, label)
         session = store.get_session(agent.session_id) if agent.session_id else None
@@ -10689,6 +10723,11 @@ class BulkRow:
     """A resume's: why it ends this paused agent's pause rather than resuming it — its task is
     done or dropped, so nothing is left to resume. The pause ends as the owner's stop ends it,
     its claims released, and ``reap`` may take its tree (review of #457, m4)."""
+    refused: str | None = None
+    """A resume's, by an agent: the owner's refusal (:func:`_paused_by_the_owner`). The row is
+    reported failed and never tried, and its project's ``fleet-paused`` signal is left as it
+    is. Refused only as each row was tried, the resume cleared the owner's signal first and
+    set it again after (review of the #457 fold, m2)."""
 
     @property
     def agent(self) -> FleetAgent:
@@ -10735,8 +10774,8 @@ class BulkPlan:
 
     @property
     def targets(self) -> list[BulkRow]:
-        """The rows the action acts on."""
-        return [row for row in self.rows if row.skip is None]
+        """The rows the action acts on: neither left nor refused."""
+        return [row for row in self.rows if row.skip is None and row.refused is None]
 
     @property
     def acts(self) -> bool:
@@ -10902,6 +10941,9 @@ def bulk_plan(
             ]
         signalled = frozenset(_paused_projects(store, covered)) if action == "resume" else None
         own, own_session = _own_rows(store, acting_session)
+        # Only the owner ends a pause (`_the_owners`): an agent's resume is refused row by row,
+        # before anything is written (review of the #457 fold, m1 and m2).
+        owners = action != "resume" or _the_owners(acting_session or "user", store)
     # Each project's label heads, from the one read above (`_label_heads` for one project):
     # read again per project, a plan asked the store 1 + N times (last delta review, n6).
     heads_of: dict[str, dict[str, FleetAgent]] = {}
@@ -10946,11 +10988,15 @@ def bulk_plan(
             agent = status.agent
             skip: str | None
             closes: str | None = None
+            refused: str | None = None
             if agent.id in own or (own_session is not None and agent.session_id == own_session):
                 skip = THIS_SESSION
             elif action == "resume":
                 skip = None if status.state == "paused" else NOT_PAUSED
-                if skip is None and agent.id in closed:
+                if skip is None and not owners:
+                    why = closed.get(agent.id) if agent.label != MANAGER_LABEL else None
+                    refused = str(_paused_by_the_owner(project, agent.label, closes=why))
+                elif skip is None and agent.id in closed:
                     # Its task closed while it was paused: nothing is left to resume, and its
                     # pause is ended (m4). A manager's is refused by `restart`, as before.
                     if agent.label == MANAGER_LABEL:
@@ -10972,7 +11018,7 @@ def bulk_plan(
                 skip = THE_CAPTAIN
             else:
                 skip = closed.get(agent.id)
-            rows.append(BulkRow(project, status, skip, closes))
+            rows.append(BulkRow(project, status, skip, closes, refused))
     return BulkPlan(
         action,
         managers_only,
@@ -11254,6 +11300,8 @@ def bulk(
             named = f"{row.agent.label} ({_name(row.project)})"
             if row.skip is not None:
                 receipt = BulkReceipt(row.project, row.agent, "skipped", row.skip, dead=row.dead)
+            elif row.refused is not None:
+                receipt = BulkReceipt(row.project, row.agent, "failed", row.refused, dead=row.dead)
             else:
                 where = f"while {doing} {named}"
                 # A manager is restarted after its team (`bulk_plan`): told of those this
@@ -11295,12 +11343,12 @@ def _resumes_clear(
     those it leaves paused, with how many agents stay paused: cleared only where the resume
     acts on every paused agent of the project (:attr:`BulkPlan.paused`), a signal-only pause
     from an earlier version with none included. ``--managers``, or a paused agent it leaves,
-    keeps the signal on (review of #457, m2). A project whose agents could not be read is
-    neither."""
+    keeps the signal on (review of #457, m2), and so does one an agent's resume was refused
+    (``BulkRow.refused``). A project whose agents could not be read is neither."""
     unread = {project.id for project, _ in plan.unread}
     acting: dict[str, set[str]] = {}
     for row in rows:
-        if row.skip is None:
+        if row.skip is None and row.refused is None:
             acting.setdefault(row.project.id, set()).add(row.agent.id)
     clear: list[ProjectInfo] = []
     kept: list[tuple[ProjectInfo, int]] = []

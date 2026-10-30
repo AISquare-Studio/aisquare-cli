@@ -2395,9 +2395,9 @@ def summary_sentence(
     now = now or _now()
     parts = [f"Fleet: {round(summary.percent_left)}% left now"]
     if summary.weeks_left is not None:
-        parts.append(
-            f"week: {summary.weeks_left:.1f} of {len(summary.week_left_by_slot)} accounts left"
-        )
+        count = len(summary.week_left_by_slot)
+        noun = "account" if count == 1 else "accounts"
+        parts.append(f"week: {summary.weeks_left:.1f} of {count} {noun} left")
     if summary.week_resets_soonest is not None:
         soonest = summary.week_resets_soonest
         name = labels.get(soonest.slot) or core.default_label(soonest.slot)

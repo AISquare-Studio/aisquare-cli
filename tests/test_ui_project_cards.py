@@ -561,7 +561,9 @@ def test_the_menu_opens_from_its_button_the_dot_key_and_a_right_click(
         "✗ Remove from fleet…",
     ]
     assert seen["width"] == MENU_WIDTH
-    assert seen["view"] == "project-prj_a", "a right-click opens the menu, not the project"
+    # ↓ opened beta, as the arrows open the row they land on; a right-click on alpha
+    # opens its menu and leaves beta's view where it is.
+    assert seen["view"] == "project-prj_b", "a right-click opens the menu, not the project"
 
 
 def test_the_menu_renames_pins_and_opens_the_settings_tab(tmp_path: Path, script: Script) -> None:

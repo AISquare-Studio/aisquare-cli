@@ -17,10 +17,10 @@ Two rules shape the code more than the layout does:
 
 - **Rebuilds update in place.** The app re-reads the store every two seconds
   and calls ``show_projects`` with the whole frame. Cards and rows are keyed by
-  project and agent id and mutated, not re-created, so the highlight, the
-  keyboard cursor, a collapsed card and the scroll position survive every
-  tick, and nothing flickers. Only a project or agent that appeared or vanished
-  mounts or unmounts a widget.
+  project and agent id and mutated, not re-created, so the one highlight (the
+  mouse's and the keyboard's), a collapsed card and the scroll position survive
+  every tick, and nothing flickers. Only a project or agent that appeared or
+  vanished mounts or unmounts a widget.
 - **Rows post messages; the app decides.** ``AddProject``, ``ProjectSelected``,
   ``AgentSelected``, ``SpawnAgent``, ``SettingsSelected``, ``AccountsSelected``,
   ``UpdateSelected``, ``RenameProject``, ``RenameAgent`` and ``OpenProjectMenu`` are the whole
@@ -123,13 +123,32 @@ class CaptainRequested(Message):
     (T4)."""
 
 
-class ProjectSelected(Message):
+class ViewSelected(Message):
+    """A view asked for by its row: a project's, an agent's, or the Settings hub.
+
+    Posted by the row itself (a click, Enter, an arrow landing on it) or by the shell on the
+    row's behalf (a restored selection, the ui receiver, the captain's insignia).
+    """
+
+    from_row = False
+    """The row posted it, and the sidebar put its one highlight on that row as it did. The
+    shell leaves the highlight alone then — and opens nothing once the highlight has moved
+    on to another row, whose own message is queued behind this one: an answer landing late
+    pulled the highlight back, and each row the arrows passed built its view, an agent's
+    pane attach included."""
+
+    browsing = False
+    """An arrow landed on the row: its view opens as a click opens it, but the keyboard
+    stays in the sidebar, so the next arrow moves on rather than typing into a pane."""
+
+
+class ProjectSelected(ViewSelected):
     def __init__(self, project_id: str) -> None:
         self.project_id = project_id
         super().__init__()
 
 
-class AgentSelected(Message):
+class AgentSelected(ViewSelected):
     def __init__(self, project_id: str, agent_id: str) -> None:
         self.project_id = project_id
         self.agent_id = agent_id
@@ -140,7 +159,8 @@ class SpawnAgent(Message):
     """*Spawn agent*, or the receiver's ``open_spawn``: the Spawn dialog.
 
     ``project_id`` is the project the dialog opens on — the sidebar's selection, which the
-    dialog's Project field can change — or ``None`` for the first project listed.
+    dialog's Project field can change — or ``None``: the open view's project, else the first
+    listed (the shell's to say: the sidebar does not know the view).
     """
 
     def __init__(self, project_id: str | None = None) -> None:
@@ -183,7 +203,7 @@ class UsageStatsSelected(Message):
     """The Usage & stats page: what this machine's Claude Code sessions spent, by range."""
 
 
-class SettingsSelected(Message):
+class SettingsSelected(ViewSelected):
     """*⚙ Settings*: the Settings hub, with its links to App settings, Accounts and Doctor."""
 
 
@@ -471,8 +491,8 @@ SETTINGS_ICON = "\u2699\ufe0e"
 """⚙ in its text presentation (VS15): a monotone gear, never the coloured emoji."""
 
 UPDATE_KEY = "update"
-"""The ⬆ row's key: reachable from the keyboard, never the highlighted selection (it opens
-a dialog, not a page)."""
+"""The ⬆ row's key: the arrows highlight it and open nothing — it opens a dialog, not a
+page, on Enter or a click, which leaves the highlight where it was."""
 
 UPDATE_ICON = "\u2b06\ufe0e"
 """⬆ in its text presentation (VS15), as :data:`SETTINGS_ICON` is."""
@@ -594,6 +614,13 @@ class Activatable(Static):
     ``selection_key`` names what it stands for (``project:<id>``,
     ``agent:<id>``, ``settings``) so the sidebar can re-apply the highlight
     after a rebuild without holding widget references.
+
+    The sidebar has ONE highlight (``.selected``), and the mouse and the keyboard move the
+    same one. A row that stands for a view (its message a :class:`ViewSelected`) takes it
+    when clicked or entered, and the arrows open it as they land on it. The others act —
+    ``+`` onboards, *Spawn agent*, *Start captain* and ⬆ open a dialog, a group header
+    folds: the arrows only highlight them, and Enter (or a click) acts. Passing over one
+    never pops a dialog.
     """
 
     # ``text-wrap`` / ``text-overflow`` live HERE, not on the Rich ``Text`` the rows
@@ -609,7 +636,6 @@ class Activatable(Static):
     DEFAULT_CSS = """
     Activatable { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
     Activatable.selected { text-style: bold; background: $primary 35%; }
-    Activatable.cursor { background: $accent 30%; }
     """
 
     selection_key: str = ""
@@ -628,8 +654,35 @@ class Activatable(Static):
         click on a containing section. Left implicit, the sender would be
         whichever of those was handling its own event, and a message posted by a
         section onto its title would never reach the app.
+
+        A row that opens a view takes the sidebar's highlight here, before the shell has
+        read its message (:attr:`ViewSelected.from_row`): an arrow pressed in between goes
+        on from this row, not from the one highlighted before the click.
         """
-        self.post_message(self.message().set_sender(self))
+        self._post(self.message(), browsing=False)
+
+    @property
+    def opens_view(self) -> bool:
+        """Whether the row stands for a view (its message a :class:`ViewSelected`): the arrows
+        open it as they land on it, and its message follows whenever it takes the highlight."""
+        return isinstance(self.message(), ViewSelected)
+
+    def arrive(self) -> None:
+        """An arrow landed here: open the row's view, as a click would, the keyboard staying
+        in the sidebar. A row that acts rather than shows does nothing more than take the
+        highlight the sidebar has put on it."""
+        message = self.message()
+        if isinstance(message, ViewSelected):
+            self._post(message, browsing=True)
+
+    def _post(self, message: Message, *, browsing: bool) -> None:
+        if isinstance(message, ViewSelected):
+            sidebar = self._sidebar()
+            if sidebar is not None:
+                sidebar.select(self.selection_key)
+                message.from_row = True
+            message.browsing = browsing
+        self.post_message(message.set_sender(self))
 
     def on_click(self, event: events.Click) -> None:
         event.stop()
@@ -656,7 +709,8 @@ class AddButton(Activatable):
 
     def __init__(self) -> None:
         super().__init__(Text(" + "), id="add-project")
-        self.selection_key = "add"  # reachable from the keyboard; never highlighted as selected
+        # The arrows highlight it like any row; once onboarding opens, no row is.
+        self.selection_key = "add"
 
     def message(self) -> Message:
         return AddProject()
@@ -1256,7 +1310,7 @@ class GroupHeader(DragHandle):
 
 
 class SectionLabel(Static):
-    """``📌 Pinned`` — a heading that is not a row (the cursor skips it)."""
+    """``📌 Pinned`` — a heading that is not a row (the arrows skip it)."""
 
     DEFAULT_CSS = """
     SectionLabel { height: 1; padding: 0 1; color: $text-muted; text-style: italic; }
@@ -1514,7 +1568,7 @@ def doctor_badge(failing: int, warning: int) -> str:
 
 class UpdateRow(Activatable):
     """The ⬆ row under *⚙ Settings* (:func:`update_row_text`), shown while a newer aisquare is
-    out. Click or Enter → the update dialog; never the highlighted selection."""
+    out. Click or Enter → the update dialog; the arrows only highlight it."""
 
     DEFAULT_CSS = """
     UpdateRow { display: none; }
@@ -1544,8 +1598,8 @@ of the fleet that asked for it answers: until then nothing says there is no capt
 
 START_CAPTAIN_KEY = "start-captain"
 SPAWN_AGENT_KEY = "spawn-agent"
-"""The two actions' keys: reachable from the keyboard, never the highlighted selection (each
-opens a dialog or a view that has its own row)."""
+"""The two actions' keys: the arrows highlight them and open nothing (each opens a dialog,
+or a view that has its own row); Enter or a click acts, a click leaving the highlight be."""
 
 
 ACTION_ICON_CELLS = 2
@@ -1689,8 +1743,8 @@ class ActionsSection(Vertical):
 class StatusLine(Static):
     """The dim line under *⚙ Settings* (:func:`status_line_text`). A click opens Accounts.
 
-    Not a row: it is never focused, never under the keyboard cursor and never the
-    highlighted selection — the Accounts page it opens is one of Settings' pages, so
+    Not a row: it is never focused, never reached by the arrows and never the
+    highlighted row — the Accounts page it opens is one of Settings' pages, so
     *⚙ Settings* stays the highlighted row (the human: "clicking on that should
     directly take me to accounts page but still that line wont be highlighted").
     """
@@ -1758,8 +1812,9 @@ class Sidebar(Vertical):
     """Header and the scrolling project list; under the separator, *⚙ Settings* and its status.
 
     Focusable, because §4.3 puts focus either here or in a terminal pane:
-    ↑/↓ move a cursor over the rows, Enter activates the row under it, and the
-    escape hatch from a pane lands here.
+    ↑/↓ move the one highlight over the rows and open the view of the row they
+    land on, Enter activates the highlighted row, and the escape hatch from a
+    pane lands here.
     """
 
     DEFAULT_CSS = """
@@ -1803,7 +1858,7 @@ class Sidebar(Vertical):
         Binding("space", "toggle_collapse", "fold", show=False),
         Binding("u", "undo_layout", "undo", show=False),
         Binding("escape", "clear_marks", "clear marks", show=False),
-        # The card under the cursor: its name in place, and its menu (⋯).
+        # The highlighted card: its name in place, and its menu (⋯).
         Binding("f2", "rename", "rename", show=False),
         Binding("full_stop", "project_menu", "menu", show=False, key_display="."),
     ]
@@ -1815,8 +1870,11 @@ class Sidebar(Vertical):
         self.captain = captain
         """Whether the experimental captain is on: off, the actions block has no captain slot."""
         self.selected_key: str | None = None
-        """What is highlighted: ``project:<id>``, ``agent:<id>``, or ``settings`` while the hub
-        or a page it opens (App settings, Accounts, Doctor) shows."""
+        """The one highlighted row: ``project:<id>``, ``agent:<id>``, or ``settings`` while the
+        hub or a page it opens (App settings, Accounts, Doctor) shows — or, put there by the
+        arrows, a row that acts (``add``, ``group:<id>``, *Spawn agent*, *Start captain*, ⬆).
+        A click, the arrows and the shell all move this one key; there is no second,
+        keyboard-only highlight."""
         self.aisquare: bool | None = None
         """The AISquare sign-in the status line shows: signed in, out, or unknown."""
         self.headroom: HeadroomSummary | None = None
@@ -1827,7 +1885,9 @@ class Sidebar(Vertical):
         """Slot → its five-hour window, percent USED, from the last headroom read: the
         ``#N·NN%`` on the agent rows (``HeadroomSummary.session_by_slot``)."""
         self._prev_states: dict[str, str] = {}
-        self._cursor_key: str | None = None
+        self._anchor_key: str | None = None
+        """The last row highlighted: where the arrows go on from while none is. Clearing the
+        highlight (the Welcome page, onboarding) leaves the place it was."""
         self.last_frame: tuple[list[ProjectInfo], dict[str, list[FleetAgentStatus]]] | None = None
         self.arrangement: Arrangement | None = None
         """The order the last frame was painted in (groups, pins, loose) — #140."""
@@ -1847,8 +1907,8 @@ class Sidebar(Vertical):
         # the nearest focusable ancestor. Left focusable, this scroll would take
         # that focus and — once the list overflows — its own up/down bindings
         # would eat the arrows, so ↑/↓ scrolled the list instead of moving the
-        # cursor and the sidebar never read as focused. Focus belongs to the
-        # Sidebar (§4.3); the cursor scrolls the list through ``scroll_visible``.
+        # highlight and the sidebar never read as focused. Focus belongs to the
+        # Sidebar (§4.3); the arrows scroll the list through ``scroll_visible``.
         with VerticalScroll(id="projects", can_focus=False):
             yield Static(
                 Text("No projects yet — press + to onboard one.", style="dim"),
@@ -2027,7 +2087,7 @@ class Sidebar(Vertical):
             card.set_class(card.project.id in self._marked, "marked")
 
     def action_toggle_mark(self) -> None:
-        """``m``: shift+click's twin, on the card under the cursor (or the card of its row).
+        """``m``: shift+click's twin, on the highlighted card (or the highlighted row's card).
 
         Most terminals keep Shift+click for their own text selection while an
         app reports the mouse (kitty, the VTE terminals, Konsole, Alacritty,
@@ -2045,8 +2105,8 @@ class Sidebar(Vertical):
             card.remove_class("marked")
 
     def _cursor_target(self) -> tuple[str, str] | None:
-        """``("project", id)`` or ``("group", id)`` for the row under the cursor (or selected)."""
-        key = self._cursor_key or self.selected_key
+        """``("project", id)`` or ``("group", id)`` for the highlighted row."""
+        key = self.selected_key
         if not key:
             return None
         kind, _, ident = key.partition(":")
@@ -2153,10 +2213,10 @@ class Sidebar(Vertical):
             self.post_message(OpenProjectMenu(project_id, card.region))
 
     def action_rename(self) -> None:
-        """F2: rename what is under the cursor — an agent row's agent (``fleet relabel``), a
-        card title's project. On a row that offers no rename (the manager's, the captain's,
-        an ended agent's), say why."""
-        kind, _, ident = (self._cursor_key or self.selected_key or "").partition(":")
+        """F2: rename the highlighted row — an agent row's agent (``fleet relabel``), a card
+        title's project (or the card of another highlighted row). On an agent's row that offers
+        no rename (the manager's, the captain's, an ended agent's), say why."""
+        kind, _, ident = (self.selected_key or "").partition(":")
         row = self._agent_row(ident) if kind == "agent" else None
         if row is not None and self._on_screen(row):
             refusal = self.open_agent_rename(ident)
@@ -2168,7 +2228,7 @@ class Sidebar(Vertical):
             self.open_rename(target[1])
 
     def action_project_menu(self) -> None:
-        """``.``: the menu of the card under the cursor, as its ⋯ opens it."""
+        """``.``: the menu of the highlighted card, as its ⋯ opens it."""
         target = self._cursor_target()
         if target is not None and target[0] == "project":
             self.open_menu(target[1])
@@ -2340,8 +2400,9 @@ class Sidebar(Vertical):
 
     def spawn_project_id(self) -> str | None:
         """The project *Spawn agent* opens on: the selected card's, or the selected agent's
-        project; else ``None`` (the first one listed). The captain's row, whose board is no
-        listed project, and a group, Settings or nothing selected, name none."""
+        project; else ``None``, and the shell opens it on the open view's project (else the
+        first listed). The captain's row, whose board is no listed project, and a group,
+        Settings, *Spawn agent* itself (reached by the arrows) or nothing selected name none."""
         kind, _, ident = (self.selected_key or "").partition(":")
         listed = {project.id for project in self.ordered_projects()}
         if kind == "project":
@@ -2357,23 +2418,42 @@ class Sidebar(Vertical):
     # --- selection ------------------------------------------------------------------
 
     def select(self, key: str | None) -> None:
-        """Highlight the row for ``key`` (a project, an agent or ``settings``)."""
+        """Put the one highlight on the row for ``key``; ``None`` highlights no row.
+
+        A key already highlighted costs nothing: an arrow selects its row, the row selects
+        itself as it posts its message, and the shell's answer selects it again — three
+        passes over every row (and a title lookup per card) for each key pressed.
+        """
+        if key == self.selected_key:
+            return
         self.selected_key = key
+        if key is not None:
+            self._anchor_key = key
         self._apply_selection()
 
+    def highlight_opens_a_view(self) -> bool:
+        """Whether the highlighted row stands for a view, so that its own message — posted as it
+        took the highlight — is on its way to open it (:attr:`Activatable.opens_view`)."""
+        key = self.selected_key
+        return key is not None and any(
+            row.selection_key == key and row.opens_view for row in self.query(Activatable)
+        )
+
     def _apply_selection(self) -> None:
+        # Over EVERY row, the ones hidden in a folded card or group too: a row that kept
+        # the class while hidden was a second highlight the moment it came back.
         for row in self.query(Activatable):
             row.set_class(row.selection_key == self.selected_key, "selected")
         self._show_active_menus()
 
     def _show_active_menus(self) -> None:
-        """A card's ⋯ shows on hover, and while its name is selected or under the cursor."""
+        """A card's ⋯ shows on hover, and while its name is the highlighted row."""
         for card in self.query(ProjectCard):
             try:
                 title = card.query_one(ProjectTitle)
             except NoMatches:  # not composed yet: the next frame paints it
                 continue
-            card.set_class(title.has_class("selected") or title.has_class("cursor"), "-active")
+            card.set_class(title.has_class("selected"), "-active")
 
     # --- bell -----------------------------------------------------------------------
 
@@ -2396,7 +2476,7 @@ class Sidebar(Vertical):
     # --- keyboard -------------------------------------------------------------------
 
     def _rows(self) -> list[Activatable]:
-        """The rows the cursor may land on: activatable and actually on screen."""
+        """The rows the arrows may land on: activatable and actually on screen."""
         return [
             row for row in self.query(Activatable) if row.selection_key and self._on_screen(row)
         ]
@@ -2406,7 +2486,7 @@ class Sidebar(Vertical):
 
         A collapsed card hides its rows by hiding their ``#agents`` holder
         (``_paint_decorations``); the rows' own ``display`` stays True. Filtering
-        on that alone walked the cursor onto invisible rows, so ↑/↓ lost the
+        on that alone walked the arrows onto invisible rows, so ↑/↓ lost the
         highlight and Enter opened an agent the user could not see.
         """
         if not row.display:
@@ -2419,39 +2499,43 @@ class Sidebar(Vertical):
         return True
 
     def _move_cursor(self, step: int) -> None:
+        """↑/↓: the highlight goes one row on from the highlighted one, and that row opens.
+
+        It goes on from THE highlight — the row a click put it on, or the shell — since
+        there is no other: a keyboard cursor of its own stayed behind on the row the
+        arrows last left, and the next ↓ jumped back to it from the row just clicked.
+        A row that acts rather than shows (``+``, a group header, *Spawn agent*, *Start
+        captain*, ⬆) is only highlighted (:meth:`Activatable.arrive`); Enter acts.
+        """
         every = [row for row in self.query(Activatable) if row.selection_key]
         on_screen = [index for index, row in enumerate(every) if self._on_screen(row)]
-        # Cleared over EVERY row, not only the visible ones: a row hidden inside
-        # a collapsed card kept the class forever, so two rows rendered as the
-        # keyboard cursor as soon as the card came back.
-        for row in every:
-            row.remove_class("cursor")
         if not on_screen:
             return
         keys = [every[index].selection_key for index in on_screen]
-        anchor = self._cursor_key or self.selected_key
+        anchor = self.selected_key or self._anchor_key
         if anchor in keys:
             slot = max(0, min(len(on_screen) - 1, keys.index(anchor) + step))
         else:
             slot = self._nearest_on_screen(every, on_screen, anchor, step)
         row = every[on_screen[slot]]
-        self._cursor_key = row.selection_key
-        row.add_class("cursor")
         row.scroll_visible()
-        self._show_active_menus()
+        if row.selection_key == self.selected_key:
+            return  # at an end of the list: still there, and already open
+        self.select(row.selection_key)
+        row.arrive()
 
     @staticmethod
     def _nearest_on_screen(
         every: list[Activatable], on_screen: list[int], anchor: str | None, step: int
     ) -> int:
-        """Which visible row takes the cursor when the anchor row is not one.
+        """Which visible row takes the highlight when the anchor row is not one.
 
-        A collapsed card takes its rows off screen with the cursor still on one
+        A collapsed card takes its rows off screen with the highlight still on one
         of them: continuing from the top of the pane (index 0) is a jump the user
-        did not ask for, so the cursor resumes at the nearest row that IS on
+        did not ask for, so the highlight resumes at the nearest row that IS on
         screen, ahead of the old one when moving down and behind it when moving
-        up. No cursor and no selection yet is the other case, and there the first
-        row is right — there is no "above" to move to.
+        up. Nothing highlighted yet is the other case, and there the first row is
+        right — there is no "above" to move to.
         """
         home = next((index for index, row in enumerate(every) if row.selection_key == anchor), None)
         if home is None:
@@ -2463,24 +2547,25 @@ class Sidebar(Vertical):
         return behind[-1] if behind else ahead[0]
 
     def put_cursor(self, key: str) -> bool:
-        """Put the keyboard cursor on the row for ``key``; whether that row is on screen.
+        """Put the highlight on the row for ``key`` and scroll to it; whether it is on screen.
 
         For a caller that hands the keyboard to a row on the user's behalf (the ui
         receiver's ``focus_project``): ↑/↓ and Enter then go on from that row, as
-        they would had the arrows brought the cursor there. A row that is not on
-        screen — a card inside a folded group — is not one to land on (the arrows ask
-        ``_on_screen`` too), so the cursor stays where it was.
+        they would had the arrows brought the highlight there. Its view is the
+        caller's to open. A row that is not on screen — a card inside a folded group —
+        is not one to land on (the arrows ask ``_on_screen`` too): nothing moves here.
         """
-        rows = [row for row in self.query(Activatable) if row.selection_key]
         target = next(
-            (row for row in rows if row.selection_key == key and self._on_screen(row)), None
+            (
+                row
+                for row in self.query(Activatable)
+                if row.selection_key == key and self._on_screen(row)
+            ),
+            None,
         )
         if target is None:
             return False
-        for row in rows:
-            row.remove_class("cursor")
-        self._cursor_key = key
-        target.add_class("cursor")
+        self.select(key)
         target.scroll_visible()
         return True
 
@@ -2495,8 +2580,10 @@ class Sidebar(Vertical):
         self._move_cursor(-1)
 
     def action_activate(self) -> None:
+        """Enter: what a click on the highlighted row does — an agent's pane takes the keyboard,
+        ``+`` onboards, *Spawn agent* opens its dialog, a group header folds."""
         for row in self._rows():
-            if row.selection_key == self._cursor_key:
+            if row.selection_key == self.selected_key:
                 row.activate()
                 return
 
@@ -2505,8 +2592,10 @@ class Sidebar(Vertical):
 
         The binding is the sidebar's, not the row's — the rows are Statics with
         ``can_focus=False`` on purpose (see ``#projects`` above), so there is no
-        focused row to bind to. It acts on what is selected, which is what the
-        user sees highlighted and what the open view is showing.
+        focused row to bind to. It acts on the highlighted row: an agent's row the
+        arrows or a click put it on, whose view is the one open. With the highlight
+        on a row that opens no view (``+``, a group header, *Spawn agent*) while an
+        agent's view still shows, it does nothing — the key stops what is lit.
 
         The agent names its own project, so a row selected under one card cannot
         be stopped against another's ``ProjectInfo``.

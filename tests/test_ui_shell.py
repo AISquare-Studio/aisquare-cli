@@ -42,7 +42,17 @@ from textual.dom import DOMNode
 from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widget import Widget
-from textual.widgets import Button, Checkbox, Input, OptionList, Static, Switch, Tabs
+from textual.widgets import (
+    Button,
+    Checkbox,
+    DataTable,
+    Input,
+    OptionList,
+    Static,
+    Switch,
+    Tabs,
+    Tree,
+)
 from textual.widgets._toast import Toast
 from textual.worker import Worker, WorkerState
 
@@ -4510,10 +4520,12 @@ def test_a_focus_change_restyles_the_two_sides_and_nothing_under_them(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The fade is the side's ``opacity``, which Textual multiplies into every row as it
-    paints, so the side alone is restyled. A plain ``set_class`` on the sidebar restyled
-    every row under it as well, on top of the restyle Textual already gives them when the
-    sidebar's own ``:focus`` changes: ~80 ms of CPU a focus change at 50 projects of 3
-    agents, growing with the fleet. Counted, not timed, as the tick's budget is."""
+    paints, so the side alone is restyled; the rows below are only told their styles
+    changed (``notify_style_update``), which matches no CSS. A plain ``set_class`` on the
+    sidebar restyled every row under it as well, on top of the restyle Textual already
+    gives them when the sidebar's own ``:focus`` changes: ~80 ms of CPU a focus change at
+    50 projects of 3 agents, growing with the fleet. Counted, not timed, as the tick's
+    budget is."""
     seed(tmp_path, ("prj_a", "alpha", None))
     script["prj_a"] = [
         status("prj_a", "coder-1", "coder", "working"),
@@ -4559,6 +4571,69 @@ def test_a_focus_change_restyles_the_two_sides_and_nothing_under_them(
     sides, below = drive(go)
     assert sides == {"Sidebar", "ContentSwitcher", "Divider"}, "each flip restyles the sides"
     assert below == [], "and nothing under them"
+
+
+def _painted(widget: Widget) -> list[tuple[str, str, str]]:
+    """``widget`` as Textual composites it: each segment's text, foreground and background."""
+    width, height = widget.size
+    return [
+        (segment.text, str(segment.style.color), str(segment.style.bgcolor))
+        for strip in widget.render_lines(Region(0, 0, width, height))
+        for segment in strip
+        if segment.style is not None
+    ]
+
+
+def test_a_widget_that_caches_its_style_repaints_as_a_full_restyle_would(
+    tmp_path: Path, script: Script
+) -> None:
+    """``_fade`` restyles the side alone, and Textual's ``get_visual_style`` keeps every
+    ancestor's ``opacity`` in a cache only ``notify_style_update`` clears. So an OptionList
+    (the Board's live feed), a DataTable or a Tree kept the faded highlight after the focus
+    went to the sidebar and back (review of #470, M2). Each step is held against what a
+    full restyle of the content paints."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> list[tuple[str, bool]]:
+        app = fleet_app(pilot)
+        table: DataTable[str] = DataTable(id="fade-table")
+        tree: Tree[None] = Tree("root", id="fade-tree")
+        view = Vertical(
+            OptionList("one", "two", id="fade-list"),
+            table,
+            tree,
+            Input(id="fade-input"),
+            id="fade-view",
+        )
+        await app.content.add_content(view, set_current=True)
+        table.add_columns("a", "b")
+        table.add_rows([("1", "2"), ("3", "4")])
+        tree.root.expand()
+        tree.root.add_leaf("leaf")
+        await pilot.pause()
+        widgets = [app.query_one("#fade-list"), table, tree]
+        field = app.query_one("#fade-input", Input)
+        seen: list[tuple[str, bool]] = []
+        for step, target in (
+            ("in the content", field),
+            ("to the sidebar", app.sidebar),
+            ("back to the content", field),
+            ("to the sidebar again", app.sidebar),
+        ):
+            target.focus()
+            await pilot.pause()
+            painted = [_painted(widget) for widget in widgets]
+            app.stylesheet.update(app.content)
+            await pilot.pause()
+            seen.append((step, painted == [_painted(widget) for widget in widgets]))
+        return seen
+
+    assert drive(go) == [
+        ("in the content", True),
+        ("to the sidebar", True),
+        ("back to the content", True),
+        ("to the sidebar again", True),
+    ]
 
 
 Rgb = tuple[int, int, int]

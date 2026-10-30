@@ -707,12 +707,15 @@ class Panes(Horizontal):
     # set per widget, so they need a rule for every descendant: each focus change
     # then restyled every row of the sidebar (~80 ms of CPU at 50 projects of 3
     # agents, growing with the fleet), and the universal selector is matched against
-    # every node the app restyles. A faded pane repaints no slower than with
-    # `text-opacity`, and faster than with `tint`. What it gives up: Textual blends a
-    # 16-colour SGR colour (31 red, 32 green…) by its ANSI number and maps that to
-    # the theme afterwards, so such text in a pane keeps its strength; the pane's own
-    # text, and the 256- and 24-bit colours Claude Code draws in (the bundled tmux
-    # conf passes `Tc`), fade with the rest.
+    # every node the app restyles. The fade is not free to paint: a faded pane
+    # repaints at about 1.8x the cost of one with the focus (every segment is
+    # blended), still no slower than with `text-opacity` and faster than with
+    # `tint`; the pane being typed into is never faded. What it gives up: Textual
+    # blends a 16-colour SGR colour (31 red, 42 green background…) by its ANSI
+    # number and maps that to the theme afterwards, so such text and backgrounds in
+    # a pane keep their strength; the pane's own text, and the 256- and 24-bit
+    # colours Claude Code draws in (the bundled tmux conf passes `Tc`), fade with
+    # the rest.
     DEFAULT_CSS = """
     Panes > .-unfocused { opacity: 0.82; }
     """
@@ -785,14 +788,22 @@ class Panes(Horizontal):
     def _fade(self, side: Widget, faded: bool) -> None:
         """Fade ``side`` or bring it back, restyling ``side`` alone.
 
-        ``set_class`` would restyle every widget below it, and nothing below
-        needs it: the fade is ``opacity``, which Textual reads off the ancestors
-        when it paints, and setting it repaints the children.
+        ``set_class`` would match the CSS again for every widget below it, and
+        only ``side``'s own rules change: the fade is ``opacity``, which Textual
+        multiplies in from the ancestors, and setting it repaints the children.
+        What the children keep of the old opacity is dropped by hand:
+        ``get_visual_style`` caches the ancestors' opacity until
+        ``notify_style_update``, and an OptionList (the Board's live feed), a
+        DataTable or a Tree paints from that cache, so without this they kept
+        the fade after focus came back (review of #470, M2). That call is the
+        one step of a restyle the children need, and it matches no CSS.
         """
         if side.has_class("-unfocused") is faded:
             return
         side.set_class(faded, "-unfocused", update=False)
         self.app.stylesheet.update_nodes([side])
+        for widget in side.walk_children(Widget):
+            widget.notify_style_update()
 
 
 class _WorkerThreads(WorkerManager):

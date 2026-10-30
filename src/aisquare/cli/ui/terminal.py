@@ -133,27 +133,29 @@ window's ``@asq-size-owner`` (``core.tmux.SIZE_OWNER_OPTION``: pid, machine,
 chain down the control client's pipe ahead of the input
 (:meth:`TerminalPane._claim_size`); a resize after that is debounced as before. The
 resize is sent even when the last frame showed the widget's size: that frame can be
-older than the other asq's resize, and a claim that trusted it left the window at the
-other's size for good (measured: two panes under a loaded test run). A pane whose window
-another RUNNING asq has claimed sends no ``resize-window``
-(:meth:`TerminalPane._sync_size`), and while the pane's size is not the widget's, row
-0's corner says ``[sized by the other asq (ssh)]`` (or ``(Mac)``). Every frame carries
-the option (``#{@asq-size-owner}`` beside the pane's facts), so following it costs no
-tmux process; when that asq ends, or the option is unset, the pane sizes the window
-again, after the debounce. Liveness is the pid's (``core.procs.alive``): tmux's socket
-is a file on this machine, so every asq that can claim a window runs here. What it
-costs: one question before each resize this asq would send (a frame can be an idle tick
-old, and a resize on its word undid a claim made since) — down the control client's
-pipe, no process; one ``show-options`` when polling, which put ~20-30 ms on a resize's
-way to the agent on a loaded machine; one option write and one resize per change of
-hands — the write redraws every client attached to the server once (why the per-key
-stamps are not options), and the resize to the size a window already has changes nothing
-in it; a claim left by an asq whose pid another process has reused since keeps that
-window at its size until input here takes it; and a resize by the other asq that lands
-in the few milliseconds between its question and a claim made here leaves the window at
-its size until the next resize or claim here. With one asq the option names it or
-nobody: no hint, and the same resizes at the same times, plus that one claim at the
-first input.
+older than the other asq's resize. Every other resize is CONDITIONAL, decided by tmux as
+it runs it (``if-shell -F``, ``core.tmux.resize_unless_owned_command``): sized only
+while the option is unset, names this asq, or names an asq this pane saw had ended;
+otherwise tmux prints the claim and nothing moves (:meth:`TerminalPane._sync_size`).
+tmux runs one client's command at a time, so a claim and a conditional resize cannot
+cross: whichever runs last, the window ends at the claimer's size. Asked first and
+resized on the answer, a "nobody" read before another asq's claim was acted on after it,
+and the window kept the wrong size (tester of #463: 7 in 121 runs of the two-asq test).
+While the pane's size is not the widget's because another asq has claimed it, row 0's
+corner says ``[sized by the other asq (ssh)]`` (or ``(Mac)``). Every frame carries the
+option (``#{@asq-size-owner}`` beside the pane's facts), so following it costs no tmux
+process; a frame asked before this pane's own claim is not believed about it
+(:meth:`TerminalPane._captured`). When that asq ends, or the option is unset, the pane
+sizes the window again, after the debounce. Liveness is the pid's
+(``core.procs.alive``): tmux's socket is a file on this machine, so every asq that can
+claim a window runs here. What it costs: nothing per resize — the conditional resize is
+one process, as the plain one was, and a claim by an ended asq tmux names before this
+pane saw it end takes a second; one option write and one resize per change of hands —
+the write redraws every client attached to the server once (why the per-key stamps are
+not options), and the resize to the size a window already has changes nothing in it; and
+a claim left by an asq whose pid another process has reused since keeps that window at
+its size until input here takes it. With one asq the option names it or nobody: no hint,
+and the same resizes at the same times, plus that one claim at the first input.
 
 Selection (§4.3). The pane owns its highlight; :class:`TerminalPane`'s docstring
 states the rules — who sees a gesture, when a highlight is dropped, and which
@@ -1394,9 +1396,9 @@ class TerminalPane(Widget, can_focus=True):
         """The other asq, running, that sizes the window this pane shows (the module's "Size
         between two asq"): nothing is resized from here while it does. ``None``: this pane
         sizes it."""
-        self._size_question = 0
-        """Counts the questions of who sizes the window (:meth:`_ask_size_owner`) and the
-        claims: an answer to any but the latest is dropped."""
+        self._claims = 0
+        """Counts this pane's size claims: a control frame asked before the latest one names
+        the owner that claim replaced, and is not believed about it (:meth:`_captured`)."""
         self._claimed: tuple[_ServerKey, str, float, str] | None = None
         """The window size last claimed: server, pane, when (``time.monotonic``), and the
         owner it replaced, as the frame then said it."""
@@ -1955,7 +1957,7 @@ class TerminalPane(Widget, can_focus=True):
                 scrollback=scrollback,
                 height=self.facts.height if self.facts is not None else None,
                 flags=self._wrap_flags(),
-                done=partial(self._captured, link, self._generation, scrollback),
+                done=partial(self._captured, link, self._generation, scrollback, self._claims),
             )
         except TmuxError:
             self._capturing = False  # the client ended as it was asked: polling takes over
@@ -1965,9 +1967,19 @@ class TerminalPane(Widget, can_focus=True):
         self._request_frame()
 
     def _captured(
-        self, link: _Control, generation: int, scrollback: int, result: Capture | TmuxError
+        self,
+        link: _Control,
+        generation: int,
+        scrollback: int,
+        claims: int,
+        result: Capture | TmuxError,
     ) -> None:
-        """A control frame's answer: shown, unless the pane moved on while it was coming."""
+        """A control frame's answer: shown, unless the pane moved on while it was coming.
+
+        One asked before this pane's latest size claim was answered before tmux ran it, and
+        names the owner the claim replaced: believed, the corner said "sized by the other
+        asq" for a frame, and the next frame's "let go" sent the size once more (tester of
+        #463). The claim stands in for what it says about the owner."""
         if not self._capturing or link is not self._link:
             return  # answered after this pane stopped using that client
         self._capturing = False
@@ -1982,6 +1994,9 @@ class TerminalPane(Widget, can_focus=True):
             # Asked for another pane, or another offset: ask again for this one.
             self._request_frame(urgent=True)
             return
+        if claims != self._claims and self.facts is not None:
+            owner = self.facts.size_owner
+            result = replace(result, facts=replace(result.facts, size_owner=owner))
         self._show_capture(result)
         if again:
             self._request_frame()
@@ -3832,7 +3847,11 @@ class TerminalPane(Widget, can_focus=True):
 
     def _sync_size(self) -> None:
         """Size the tmux window to this widget's content area (once per distinct size) —
-        unless another asq sizes it, asked of tmux first (:meth:`_ask_size_owner`)."""
+        unless another asq that runs has claimed it, which tmux itself decides as it runs
+        the resize (``core.tmux.resize_unless_owned_command``): one process, as a plain
+        resize was, and none when the last frame already names such an asq. A claim the
+        last frame named and that is an ended asq's is passed over by name; one tmux names
+        that this pane had not seen end is passed over by a second try."""
         self._resize_timer = None
         if self.pane_id is None or self.server is None:
             return
@@ -3842,23 +3861,24 @@ class TerminalPane(Widget, can_focus=True):
         wanted = (self.pane_id, width, height)
         if wanted == self._synced:
             return
-        self._ask_size_owner(self.server, wanted)
-
-    def _resize_unless_owned(
-        self, server: TmuxServer, wanted: tuple[str, int, int], held: str
-    ) -> None:
-        """Send ``wanted`` — unless ``held``, the window's owner as tmux just said it, is
-        another asq that runs: then the window is left at its size, and the corner says so."""
-        pane_id, width, height = wanted
-        self._sized_by = self._other_owner(held)
-        if self._sized_by is not None:
-            # Not synced: once the size is this pane's again, it is sent whatever was sent
-            # before.
+        facts = self.facts
+        if facts is not None and self._other_owner(facts.size_owner) is not None:
+            # The last frame names another asq that runs: nothing is sent, not even the
+            # conditional resize, which would only be refused. Never a wrong resize: a frame
+            # that is stale the other way is followed by the one that lets go.
+            self._sized_by = self._other_owner(facts.size_owner)
             self._synced = None
             self._frame_now()
             return
+        gone = self._ended_claim(facts.size_owner) if facts is not None else None
         try:
-            server.resize(pane_id, width, height)
+            held = self.server.resize_unless_owned(
+                self.pane_id, width, height, owner_pid=self.owner_pid, gone=gone
+            )
+            if held is not None and held != gone and self._ended_claim(held) is not None:
+                held = self.server.resize_unless_owned(
+                    self.pane_id, width, height, owner_pid=self.owner_pid, gone=held
+                )
         except TmuxUnavailable:
             self._fail(TMUX_UNAVAILABLE)
             self._retry_size()
@@ -3868,7 +3888,10 @@ class TerminalPane(Widget, can_focus=True):
             self._retry_size()
             return
         self._resize_retry = self.RESIZE_RETRY
-        self._synced = wanted
+        self._sized_by = None if held is None else self._other_owner(held)
+        # Refused, the window is the other asq's size: not synced, so once the size is this
+        # pane's again it is sent, whatever was sent before. The frame's corner says so.
+        self._synced = wanted if held is None else None
         self._frame_now()
         self._schedule(self.FAST_INTERVAL)
 
@@ -3887,6 +3910,14 @@ class TerminalPane(Widget, can_focus=True):
 
     # --- size between two asq ------------------------------------------------------------
 
+    def _ended_claim(self, held: str) -> str | None:
+        """``held`` when it is another asq's claim and that asq has ended: a claim the next
+        resize may pass over (:meth:`_sync_size`); ``None`` otherwise."""
+        owner = SizeOwner.parse(held)
+        if owner is None or owner.pid == self.owner_pid or procs.alive(owner.pid):
+            return None
+        return held.strip()
+
     def _other_owner(self, held: str) -> SizeOwner | None:
         """The asq ``held`` names (:data:`~aisquare.core.tmux.SIZE_OWNER_OPTION`) when it is
         another, and runs; ``None`` when the size is this pane's to set: unset, this asq's,
@@ -3896,48 +3927,6 @@ class TerminalPane(Widget, can_focus=True):
         if owner is None or owner.pid == self.owner_pid or not procs.alive(owner.pid):
             return None
         return owner
-
-    def _ask_size_owner(self, server: TmuxServer, wanted: tuple[str, int, int]) -> None:
-        """Who sizes the window, asked right before this pane would size it to ``wanted``
-        (:meth:`_resize_unless_owned` decides): a frame can be an idle tick old, and a resize
-        sent on its word undid a claim made since. Down the control client's pipe while one
-        serves the pane — no process, answered within the next turns of the loop
-        (:meth:`_size_owner_answered`); one ``show-options`` when polling. Not asked when the
-        last frame already names another asq that runs: that one only ends, or hands over to
-        this asq by a claim, and the frames follow both."""
-        self._size_question += 1
-        facts = self.facts
-        if facts is not None and self._other_owner(facts.size_owner) is not None:
-            self._resize_unless_owned(server, wanted, facts.size_owner)
-            return
-        link = self._control_link()
-        if link is not None:
-            done = partial(self._size_owner_answered, self._size_question, server, wanted)
-            try:
-                link.client.size_owner(wanted[0], done=done)
-            except TmuxError:
-                pass  # the client ended as it was asked: polled, as before there was one
-            else:
-                return
-        try:
-            held = server.size_owner(wanted[0])
-        except TmuxError:
-            held = ""  # it will not say: sized as before, and the resize says what is wrong
-        self._resize_unless_owned(server, wanted, held)
-
-    def _size_owner_answered(
-        self, question: int, server: TmuxServer, wanted: tuple[str, int, int], reply: Reply
-    ) -> None:
-        """tmux said who sizes the window. Acted on only while it is still the question: a
-        later one, a claim, an attach or another size of this widget has made it moot — the
-        size that is wanted now is asked, or sent, by whoever changed it. A failed answer is
-        nobody's claim: sized as before, and the resize says what is wrong."""
-        if question != self._size_question or self.server is not server:
-            return
-        if wanted != (self.pane_id, *self.content_size) or wanted == self._synced:
-            return
-        held = reply.lines[-1] if reply.ok and reply.lines else ""
-        self._resize_unless_owned(server, wanted, held)
 
     def _follow_size_owner(self, facts: PaneFacts) -> None:
         """Each frame: which asq sizes the window now. When the one this pane left it to lets
@@ -3980,7 +3969,7 @@ class TerminalPane(Widget, can_focus=True):
         ):
             return  # the frames still show what the last claim replaced: it did not land
         self._claimed = (key, pane_id, now, replaced)
-        self._size_question += 1  # an answer on its way names the owner this claim replaces
+        self._claims += 1
         owner = SizeOwner.claiming(self.owner_pid)
         wanted = (pane_id, width, height)
         if self._resize_timer is not None:

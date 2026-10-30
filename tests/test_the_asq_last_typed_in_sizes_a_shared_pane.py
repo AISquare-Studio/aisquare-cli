@@ -34,6 +34,7 @@ from aisquare.cli.ui import terminal as terminal_module
 from aisquare.cli.ui.terminal import SelectionHost, TerminalPane, sized_elsewhere
 from aisquare.core.tmux import (
     BUNDLED_CONF,
+    SIZE_OWNER_OPTION,
     Completed,
     SizeOwner,
     TmuxError,
@@ -145,7 +146,8 @@ def test_with_one_asq_the_pane_sizes_its_window_as_before_and_shows_no_hint(
     claimed = ("resize-window", "%1", "60", "20")
     assert resizes == [*at_attach, claimed, ("resize-window", "%1", *map(str, size))], resizes
     assert [_owner_pid(value) for _, value in fake.claims] == [os.getpid()], fake.claims
-    assert fake.owner_reads == 2, "one question before each resize it decided, and no more"
+    assert fake.conditional_resizes == 2, "each resize it decided is one conditional command"
+    assert fake.owner_reads == 0, "and nothing asked before it"
     assert "sized by" not in corner, corner
 
 
@@ -482,27 +484,41 @@ class _TwoAsq(SelectionHost):
         return self.query_one(f"#{which}", TerminalPane)
 
 
-def _counting(calls: list[tuple[str, ...]]) -> Callable[[Sequence[str], bytes | None], Completed]:
-    def runner(argv: Sequence[str], stdin: bytes | None) -> Completed:
-        calls.append(tuple(argv))
-        return _tmux(argv, stdin)
+Call = tuple[tuple[str, ...], Completed]
+"""One tmux process a pane started: its argv, and tmux's answer."""
 
-    return runner
+
+class _Counting:
+    """The real tmux runner, every process it starts kept with its answer. ``before_resize``
+    runs once, as the next resize — plain or conditional — reaches tmux and before tmux runs
+    it: another asq's claim landing between a pane's last look and its resize."""
+
+    def __init__(self) -> None:
+        self.calls: list[Call] = []
+        self.before_resize: Callable[[], None] | None = None
+
+    def __call__(self, argv: Sequence[str], stdin: bytes | None) -> Completed:
+        args = tuple(argv)
+        hook = self.before_resize
+        if hook is not None and any(arg.startswith("resize-window") for arg in args):
+            self.before_resize = None
+            hook()
+        said = _tmux(argv, stdin)
+        self.calls.append((args, said))
+        return said
 
 
 @pytest.fixture
-def calls() -> list[tuple[str, ...]]:
-    return []
+def counting() -> _Counting:
+    return _Counting()
 
 
 @pytest.fixture
-def live(tmp_path: Path, calls: list[tuple[str, ...]]) -> Iterator[TmuxServer]:
+def live(tmp_path: Path, counting: _Counting) -> Iterator[TmuxServer]:
     """A private real server whose tmux processes are counted; control mode allowed."""
     conf = tmp_path / "tmux.conf"
     conf.write_text(BUNDLED_CONF, encoding="utf-8")
-    server = TmuxServer(
-        f"asq-test-{os.getpid()}-size", conf=conf, runner=_counting(calls), control=True
-    )
+    server = TmuxServer(f"asq-test-{os.getpid()}-size", conf=conf, runner=counting, control=True)
     terminal_module.forget_server_versions()
     try:
         yield server
@@ -519,28 +535,41 @@ def _window_size(server: TmuxServer, pane_id: str) -> tuple[int, int]:
     return int(width), int(height)
 
 
-def _resized_to(calls: list[tuple[str, ...]]) -> list[tuple[int, int]]:
-    """The sizes the panes' ``resize-window`` processes asked for, in order."""
-    return [
-        (int(call[call.index("-x") + 1]), int(call[call.index("-y") + 1]))
-        for call in calls
-        if "resize-window" in call
-    ]
+def _resized_to(calls: list[Call]) -> list[tuple[int, int]]:
+    """The sizes tmux resized the window to, in order: each plain resize that ran, and each
+    conditional one it did not refuse (refused, it prints the claim instead)."""
+    sizes: list[tuple[int, int]] = []
+    for argv, said in calls:
+        if said.returncode != 0:
+            continue
+        if "resize-window" in argv:
+            words = list(argv)
+        elif "if-shell" in argv and not said.stdout.strip():
+            words = argv[-2].split()
+        else:
+            continue
+        sizes.append((int(words[words.index("-x") + 1]), int(words[words.index("-y") + 1])))
+    return sizes
 
 
 def _size(pane: TerminalPane) -> tuple[int, int]:
     return pane.content_size.width, pane.content_size.height
 
 
-_TERMINALS = [(110, 28), (130, 32), (100, 26), (124, 30), (116, 29)]
-"""The sizes the app is resized through: each gives the two panes two different widths."""
+_MINE_TERMINALS = [(110, 28), (130, 32), (100, 26), (124, 30)]
+_THEIR_TERMINALS = [(116, 29), (102, 27), (128, 31), (112, 27)]
+"""The sizes the app is resized through while each asq owns the window: each gives the two
+panes two different widths, and each phase ENDS at a size other than the one it started
+at. A phase that ended where its claim had sized the window passed with no resize at all
+when a loaded loop let the debounce fold every size into that one (1 in 240 runs, at a
+load average of 98): right, but not what the phase is there to show."""
 
 
 @_needs_tmux
 def test_real_tmux_two_asq_on_one_window_never_resize_it_back_and_forth(
     live: TmuxServer,
     tmp_path: Path,
-    calls: list[tuple[str, ...]],
+    counting: _Counting,
     other_asq: subprocess.Popen[bytes],
 ) -> None:
     """Acceptance 5. The window takes the size of the asq last typed in, and only that one
@@ -550,6 +579,8 @@ def test_real_tmux_two_asq_on_one_window_never_resize_it_back_and_forth(
     pane_id = live.spawn_window(
         "asq-size", name="w", cwd=tmp_path, command=["cat"], width=100, height=30
     ).pane_id
+
+    calls = counting.calls
 
     async def drive() -> dict[str, Any]:
         host = _TwoAsq(live, pane_id, other_asq.pid)
@@ -563,32 +594,50 @@ def test_real_tmux_two_asq_on_one_window_never_resize_it_back_and_forth(
             def hint(pane: TerminalPane) -> Callable[[], bool]:
                 return lambda: "[sized by the other asq" in _corner(pane)
 
-            async def resize_both(owner: TerminalPane, other: TerminalPane) -> dict[str, Any]:
-                """Resize the app through every size; what reached tmux, and whose it was."""
+            async def resize_both(
+                owner: TerminalPane, other: TerminalPane, terminals: list[tuple[int, int]]
+            ) -> dict[str, Any]:
+                """Resize the app through ``terminals``; what reached tmux, and whose it was."""
                 calls.clear()
                 owner_sizes, other_sizes = set(), set()
-                for terminal in _TERMINALS:
+                for terminal in terminals:
                     await pilot.resize_terminal(*terminal)
                     await pilot.pause(0.25)
                     owner_sizes.add(_size(owner))
                     other_sizes.add(_size(other))
-                await wait_until(pilot, window_is(owner), 3.0)
-                await wait_until(pilot, hint(other), 3.0)
+                await wait_until(pilot, window_is(owner), 5.0)
+                await wait_until(pilot, hint(other), 5.0)
                 resized = _resized_to(calls)
                 return {
                     "resized": resized,
                     "owner's": set(resized) <= owner_sizes,
                     "other's": set(resized) & other_sizes,
                     "owner hint": hint(owner)(),
-                    # Who sizes the window is asked down the pipe: no process of its own.
-                    "questions": [call for call in calls if "show-options" in call],
+                    "questions": [argv for argv, _ in calls if "show-options" in argv],
+                    # What each resize command got back, for a failure to say what happened.
+                    "sent": [
+                        (
+                            argv[-2] if "if-shell" in argv else " ".join(argv[5:]),
+                            said.stdout.strip(),
+                        )
+                        for argv, said in calls
+                        if any(arg.startswith("resize-window") for arg in argv)
+                    ],
+                    "views": {
+                        pane.id: (
+                            pane.facts.size_owner if pane.facts else None,
+                            pane._sized_by,
+                            pane._synced,
+                        )
+                        for pane in (owner, other)
+                    },
                 }
 
             await wait_until(pilot, lambda: mine.facts is not None and theirs.facts is not None)
             mine.focus()
             await pilot.press("m", "i", "n", "e", "enter")
             await wait_until(pilot, window_is(mine), 3.0)
-            seen["mine typed"] = await resize_both(mine, theirs)
+            seen["mine typed"] = await resize_both(mine, theirs, _MINE_TERMINALS)
 
             # A drag-select in the other asq reads: no claim, no resize, the highlight stands.
             # Over text both rows of its view already show: a frame that changes the text
@@ -615,7 +664,7 @@ def test_real_tmux_two_asq_on_one_window_never_resize_it_back_and_forth(
             # Claimed and resized in one chain down the pipe: no process, and no debounce.
             seen["at their key"] = (_resized_to(calls), theirs._resize_timer is None)
             await wait_until(pilot, window_is(theirs), 3.0)
-            seen["they typed"] = await resize_both(theirs, mine)
+            seen["they typed"] = await resize_both(theirs, mine, _THEIR_TERMINALS)
 
             calls.clear()
             await pilot.pause(1.2)
@@ -650,3 +699,76 @@ def test_real_tmux_two_asq_on_one_window_never_resize_it_back_and_forth(
     assert seen["owner pids"] == {"mine": other_asq.pid, "theirs": other_asq.pid}, (
         "the claim stays the dead asq's until input: nobody's, read as unset"
     )
+
+
+@_needs_tmux
+def test_real_tmux_a_claim_landing_between_a_look_and_a_resize_is_never_undone(
+    live: TmuxServer,
+    tmp_path: Path,
+    counting: _Counting,
+    other_asq: subprocess.Popen[bytes],
+) -> None:
+    """The ordering that failed the two-asq test 7 in 121 runs at d14c39b1, forced: this pane
+    last saw nobody's claim; another asq claims the window, and sizes it to its own widget,
+    as this pane's resize reaches tmux. The resize must not undo the claim — the window keeps
+    the claimer's size, and this pane says who sized it. Asked first and resized on the
+    answer, the resize ran after the claim and the window took this pane's size for good."""
+    pane_id = live.spawn_window(
+        "asq-race", name="w", cwd=tmp_path, command=["cat"], width=100, height=30
+    ).pane_id
+    theirs = SizeOwner(other_asq.pid, "mac-mini", "ssh", time.time_ns()).value()
+
+    def their_claim() -> None:
+        claim = ["set-option", "-w", "-t", pane_id, SIZE_OWNER_OPTION, theirs]
+        resize = ["resize-window", "-t", pane_id, "-x", "50", "-y", "15"]
+        assert _tmux(live.argv(*claim, ";", *resize), None).returncode == 0
+
+    async def drive() -> tuple[tuple[int, int], str, str]:
+        host = Host(live, pane_id)
+        async with host.run_test(size=(100, 30)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: pane._serving() is not None and synced(pane), 5.0)
+            assert pane.facts is not None and pane.facts.size_owner == "", "the premise"
+            counting.before_resize = their_claim
+            await pilot.resize_terminal(90, 28)
+            await wait_until(pilot, lambda: counting.before_resize is None, 3.0)
+            await pilot.pause(0.8)  # past the debounce, and an idle frame after it
+            return _window_size(live, pane_id), pane.facts.size_owner, _corner(pane)
+
+    window, owner, corner = run(drive())
+    assert owner == theirs
+    assert window == (50, 15), f"the claimer's size, not this pane's 90x28: {window}"
+    assert corner.endswith("[sized by the other asq (ssh)]"), corner
+
+
+def test_a_claim_landing_between_a_look_and_a_resize_is_never_undone(
+    fake: FakeTmux, tmp_path: Path, other_asq: subprocess.Popen[bytes]
+) -> None:
+    """The same ordering against the fake tmux, which runs ``if-shell -F`` as tmux does:
+    another asq's claim lands as this pane's resize reaches tmux. Refused, the window keeps
+    the claimer's 50x15; nothing but the attach's resize ever ran."""
+    fake_pane = fake.panes["%1"]
+    theirs = _claim(other_asq.pid)
+
+    def their_claim(pane: FakePane) -> None:
+        fake.before_resize = None
+        pane.size_owner = theirs
+        pane.width, pane.height = 50, 15
+
+    async def drive() -> str:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(60, 20)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            fake.before_resize = their_claim
+            await pilot.resize_terminal(70, 22)
+            await wait_until(pilot, lambda: fake.before_resize is None)
+            await pilot.pause(0.6)  # past the debounce, and an idle frame after it
+            return _corner(pane)
+
+    corner = run(drive())
+    size = (fake_pane.width, fake_pane.height)
+    assert size == (50, 15), f"the claimer's size, not this pane's 70x22: {size}"
+    assert fake_pane.size_owner == theirs
+    assert corner.endswith("[sized by the other asq (ssh)]"), corner
+    assert _resizes(fake) == [("resize-window", "%1", "60", "20")], "the attach's alone"

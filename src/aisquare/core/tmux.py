@@ -709,7 +709,10 @@ class PaneFacts:
     reader's question."""
 
 
-_SIZE_OWNER = re.compile(r"(\d+)@([^/\s]+)/([a-z]*)/(\d+)", re.ASCII)
+_SIZE_OWNER = re.compile(r"([1-9]\d*)@([A-Za-z0-9._-]+)/([a-z]*)/(\d+)", re.ASCII)
+"""A claim's value. Digits, a hostname's characters, ``/`` and ``@`` only: it is compared
+inside a tmux format (:func:`resize_unless_owned_command`), where ``,`` ``}`` and ``#`` mean
+something."""
 
 
 class SizeOwner(NamedTuple):
@@ -750,8 +753,8 @@ class SizeOwner(NamedTuple):
             where = "mac"
         else:
             where = "local"
-        host = re.sub(r"[/\s]", "", socket_module.gethostname().split(".")[0]) or "localhost"
-        return cls(pid, host, where, time.time_ns())
+        host = re.sub(r"[^A-Za-z0-9_-]", "", socket_module.gethostname().split(".")[0])
+        return cls(pid, host or "localhost", where, time.time_ns())
 
 
 @dataclass(frozen=True)
@@ -902,9 +905,33 @@ def resize_command(pane_id: str, width: int, height: int) -> list[str]:
     return ["resize-window", "-t", pane_id, "-x", str(max(1, width)), "-y", str(max(1, height))]
 
 
-def size_owner_command(pane_id: str) -> list[str]:
-    """``show-options`` of the pane's window's :data:`SIZE_OWNER_OPTION`: its value, or nothing."""
-    return ["show-options", "-wqv", "-t", pane_id, SIZE_OWNER_OPTION]
+_HELD = f"#{{{SIZE_OWNER_OPTION}}}"
+"""The window's claim, as a format reads it."""
+
+
+def resize_unless_owned_command(
+    pane_id: str, width: int, height: int, owner_pid: int, gone: str | None
+) -> list[str]:
+    """A ``resize-window`` that tmux runs only while the window's :data:`SIZE_OWNER_OPTION` is
+    unset, names asq ``owner_pid``, or still holds ``gone`` — a claim the caller saw to be an
+    ended asq's; otherwise the claim is printed. tmux decides as it runs it (``if-shell -F``,
+    no shell), so a claim that lands after the caller last looked is never undone: asked
+    first and resized on the answer, a resize sent on a "nobody" read before another asq's
+    claim landed after it, and the window kept that size (tester of #463, 7 in 121 runs).
+
+    Never down the control client's pipe: there the command ``if-shell`` runs answers in a
+    ``%begin``/``%end`` block of its own, and only when the condition holds (measured on
+    3.8), so how many answers come would depend on the claim. ``gone`` is a value
+    :meth:`SizeOwner.parse` read, so nothing in it means anything in a format."""
+    if gone is not None and SizeOwner.parse(gone) is None:
+        gone = None
+    held = _HELD
+    sizable = f"#{{||:#{{==:{held},}},#{{m:{owner_pid}@*,{held}}}}}"
+    if gone is not None:
+        sizable = f"#{{||:{sizable},#{{==:{held},{gone.strip()}}}}}"
+    resize = " ".join(resize_command(pane_id, width, height))
+    refused = f"display-message -p -t {pane_id} '{held}'"
+    return ["if-shell", "-F", "-t", pane_id, sizable, resize, refused]
 
 
 def size_claim_commands(
@@ -2005,12 +2032,14 @@ class TmuxServer:
         """Size the pane's window to the pane the UI is showing it in."""
         self.run(*resize_command(pane_id, width, height))
 
-    def size_owner(self, pane_id: str) -> str:
-        """The pane's window's :data:`SIZE_OWNER_OPTION`, raw; ``""`` when no asq claimed it.
-
-        ``-q`` answers an unset option with nothing and exit 0 — and a gone pane the same
-        way (measured on 3.8): read as unset, so the resize that follows says it is gone."""
-        return self.run(*size_owner_command(pane_id)).strip()
+    def resize_unless_owned(
+        self, pane_id: str, width: int, height: int, *, owner_pid: int, gone: str | None = None
+    ) -> str | None:
+        """Size the pane's window as :meth:`resize` does — unless another asq has claimed it
+        (:func:`resize_unless_owned_command`, which says when). ``None`` when it was sized;
+        the claim that refused it, as tmux holds it, when not. One process, as a resize."""
+        said = self.run(*resize_unless_owned_command(pane_id, width, height, owner_pid, gone))
+        return said.strip() or None
 
     def claim_size(self, pane_id: str, owner: SizeOwner, width: int, height: int) -> None:
         """Name ``owner`` as the asq that sizes the pane's window (:data:`SIZE_OWNER_OPTION`),

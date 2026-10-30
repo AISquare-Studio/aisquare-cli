@@ -134,7 +134,13 @@ class FakeTmux:
         self.claims: list[tuple[str, str]] = []
         """``(pane, value)`` per ``set-option -w @asq-size-owner`` — an asq taking the size."""
         self.owner_reads = 0
-        """``show-options`` of ``@asq-size-owner``: the question asked before a resize."""
+        """``show-options`` of ``@asq-size-owner`` — what an earlier pane asked before each
+        resize; kept so a test can be run against that code too."""
+        self.conditional_resizes = 0
+        """``if-shell -F`` resizes (``core.tmux.resize_unless_owned_command``), run or refused."""
+        self.before_resize: Callable[[FakePane], None] | None = None
+        """A hook run as a resize reaches tmux — plain or conditional — before tmux runs it:
+        another asq's claim landing between a pane's last look and its resize."""
         self.refuse_claims = False
         """Whether ``set-option @asq-size-owner`` fails, the option left as it was."""
         self.claim_attempts = 0
@@ -225,7 +231,7 @@ class FakeTmux:
     def _flag(group: list[str], flag: str) -> str:
         return group[group.index(flag) + 1]
 
-    def _one(self, group: list[str], stdin: bytes | None) -> Completed:
+    def _one(self, group: list[str], stdin: bytes | None, *, hooked: bool = False) -> Completed:
         name = group[0]
         if name == "load-buffer":
             self.input.append((name, (stdin or b"").decode("utf-8")))
@@ -303,11 +309,31 @@ class FakeTmux:
             pane.size_owner = group[-1]
             self.claims.append((pane_id, group[-1]))
             return Completed(0, "", "")
+        if name == "if-shell":
+            # ``if-shell -F -t <pane> <format> <resize> <refused>``, as tmux runs it: the
+            # format read against the window's claim NOW (resize_unless_owned_command).
+            assert group[1:4] == ["-F", "-t", pane_id], group
+            sizable, resize, _ = group[4:7]
+            self.conditional_resizes += 1
+            if self.before_resize is not None:
+                self.before_resize(pane)
+            mine = re.search(r"#\{m:(\d+)@\*,", sizable)
+            gone = re.search(r"#\{==:#\{@asq-size-owner\},([^}]+)\}", sizable)
+            held = pane.size_owner
+            if (
+                not held
+                or (mine is not None and held.startswith(f"{mine.group(1)}@"))
+                or (gone is not None and held == gone.group(1))
+            ):
+                return self._one(resize.split(), stdin, hooked=True)
+            return Completed(0, held + "\n", "")
         if name == "show-options" and group[-1] == SIZE_OWNER_OPTION:
             assert group[1:4] == ["-wqv", "-t", pane_id], group
             self.owner_reads += 1
             return Completed(0, pane.size_owner + "\n" if pane.size_owner else "", "")
         if name == "resize-window":
+            if self.before_resize is not None and not hooked:
+                self.before_resize(pane)
             width, height = int(self._flag(group, "-x")), int(self._flag(group, "-y"))
             self.input.append((name, pane_id, str(width), str(height)))
             if self.fail_resizes > 0:

@@ -258,9 +258,12 @@ class ScriptedServer(TmuxServer):
     def resize(self, pane_id: str, width: int, height: int) -> None:
         self.resizes.append((pane_id, width, height))
 
-    def size_owner(self, pane_id: str) -> str:
+    def resize_unless_owned(
+        self, pane_id: str, width: int, height: int, *, owner_pid: int, gone: str | None = None
+    ) -> str | None:
         """No asq has claimed a scripted window: the pane sizes it, as these tests expect."""
-        return ""
+        self.resizes.append((pane_id, width, height))
+        return None
 
     def claim_size(self, pane_id: str, owner: SizeOwner, width: int, height: int) -> None:
         self.resizes.append((pane_id, width, height))

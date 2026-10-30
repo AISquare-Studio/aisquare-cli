@@ -84,6 +84,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whole of it on hover); and the *↑*,
   *↓*, *Log in*, *Disable* and *Remove* buttons are as wide as their labels. A narrower
   terminal still scrolls the table sideways as one.
+- **`aisquare task add` of a dropped or done task's title adds a new task.** The title's key
+  was still held by the closed task, so the add answered `already tracked (idempotent)`
+  forever, and recurring work (a release checklist, a re-run after a revert) could not be
+  added again. It gets a fresh key and number now, and says what it replaces:
+  `✓ added: #9 … (supersedes dropped #4)`; `--json` carries `supersedes` (`number`, `id`,
+  `status`), `null` when nothing was replaced. A title whose task is still open stays
+  idempotent, as before.
+- **The prompt log no longer records Claude Code's own blocks as your prompts.** A
+  background task's `<task-notification>`, a slash command's `<command-name>`,
+  `<command-message>`, `<command-args>` and `<local-command-caveat>`, and a hook's
+  `<system-reminder>` arrive in the prompt field, and `aisquare log` listed them as turns.
+  A prompt that is only such blocks is not recorded; one that mixes them with your words
+  keeps the words. A tag that is never closed is left as typed.
+- **A leading `--json` gives root usage errors as JSON.** `aisquare --json nosuchcmd` and
+  `aisquare --json --badopt` printed the human error box on stderr and nothing on stdout,
+  though `--json`'s help says a leading `--json` gets usage errors as JSON. Both print one
+  JSON object (`{"error": "unknown_command", …}`, `{"error": "usage", …}`) and exit 2 now.
+  `--json` taken as another option's value (`aisquare --profile --json --badopt`) stays
+  human.
+- **`aisquare project fresh --help` reads as one paragraph, and `--dry-run` works inside a
+  fleet agent.** Newer typer and rich kept the docstring's line breaks, so the help came out
+  ragged, with words like `worktree` and `(with` alone on a line. A dry run was refused from
+  inside one of the project's own fleet agents, though it stops nothing; a manager can read
+  the plan from its own pane now. The real run is still refused there.
 
 ## [0.9.1] - 2026-10-27
 

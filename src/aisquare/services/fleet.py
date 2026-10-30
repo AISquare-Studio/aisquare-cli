@@ -4902,6 +4902,16 @@ def _refuse_a_server_from_ssh() -> None:
         )
 
 
+def _no_server_listens(answer: SocketAnswer | None) -> bool:
+    """Whether a window opened at a socket that answered ``answer`` (``TmuxServer.listener``)
+    would START a server there: a stale file (``None``) or none (``"gone"``). A listener
+    (``"answers"``) is joined, and a socket that could not be asked (``"unasked"``) is not
+    taken for an empty one. The one rule both askers keep: the start's own check
+    (:func:`_before_a_server_starts`) and ``restart``'s before its stop
+    (:func:`_refuse_a_server_start_from_ssh`)."""
+    return answer != "answers" and answer != "unasked"
+
+
 def _refuse_a_server_start_from_ssh(srv: TmuxServer) -> None:
     """:func:`_refuse_a_server_from_ssh` where no server listens at ``srv``'s socket, for a
     caller that must refuse before it stops or records anything: ``restart``, whose contract
@@ -4914,7 +4924,7 @@ def _refuse_a_server_start_from_ssh(srv: TmuxServer) -> None:
         answer = srv.listener(srv.socket_path())
     except TmuxUnavailable:
         return
-    if answer != "answers" and answer != "unasked":
+    if _no_server_listens(answer):
         _refuse_a_server_from_ssh()
 
 
@@ -4942,7 +4952,7 @@ def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[Flee
         answer = srv.listener(srv.socket_path())
     except TmuxUnavailable:
         return []  # no POSIX uid: no tmux server can exist here
-    if answer != "answers" and answer != "unasked":  # no server listens: this one would start it
+    if _no_server_listens(answer):  # this one would start it
         _refuse_a_server_from_ssh()
     reads = tmux_core.SocketReads()  # that answer, for every row recorded at the path
     reads.heard_listener(srv, None, answer)

@@ -231,3 +231,30 @@ def test_a_restart_from_ssh_over_a_stale_socket_refuses_before_it_records_the_de
     assert (row(), list(tmux.typed), len(tmux.spawned)) == before, "nothing recorded or started"
     assert fleet_suite._events(project, "agent_exited") == []
     assert f"cannot restart {agent.label!r}" in str(refused.value), "restart's own refusal"
+
+
+@pytest.mark.parametrize("answer", [None, "gone", "answers", "unasked"])  # listener()'s answers
+def test_the_start_and_restarts_early_check_keep_one_rule_for_no_server_listens(
+    answer: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#23 (review 5388): `restart`'s pre-stop refusal and the start's own check asked the same
+    question in two copies. One rule now (`_no_server_listens`): over SSH both refuse exactly
+    where a window would start a server, a stale file or none."""
+    monkeypatch.setattr(login_session, "remote_session", lambda: True)
+    monkeypatch.setattr(fleet_service, "_forget_an_exited_server", lambda *a: [])
+    monkeypatch.setattr(fleet_service, "_refuse_a_freed_socket", lambda *a: None)
+    starts = answer in (None, "gone")
+
+    def refused(check: Any) -> bool:
+        try:
+            check()
+        except fleet_service.FleetError as exc:
+            assert "start asq on the Mac first" in str(exc)
+            return True
+        return False
+
+    srv = _Server(answer)
+    config = fleet_service.settings()
+    assert fleet_service._no_server_listens(answer) is starts  # type: ignore[arg-type]
+    assert refused(lambda: fleet_service._refuse_a_server_start_from_ssh(srv)) is starts  # type: ignore[arg-type]
+    assert refused(lambda: fleet_service._before_a_server_starts(srv, config)) is starts  # type: ignore[arg-type]

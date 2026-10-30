@@ -524,7 +524,11 @@ def request_quit(instance: Instance, *, by: Instance) -> None:
 
 
 def wait_gone(
-    instance: Instance, timeout: float, *, clock: Callable[[], float] = time.monotonic
+    instance: Instance,
+    timeout: float,
+    *,
+    held: bool = False,
+    clock: Callable[[], float] = time.monotonic,
 ) -> bool:
     """Wait at most ``timeout`` seconds for ``instance`` to quit (its record gone, or no
     longer live, and on this machine its process ended); whether it did.
@@ -532,11 +536,14 @@ def wait_gone(
     The process too: an asq leaves the registry once its quit's waits are over, and runs a
     moment longer to its exit, in which the gate's look in ``ps`` (``core.instance_scan``)
     would take it for an asq with no record, of a release before the registry (#21). On
-    this machine is its record naming this host, OR its lock held as the wait begins: macOS
-    renames the host with the network, and a record of this very machine can name another
-    (#466's review)."""
+    this machine is its record naming this host, OR its lock held: macOS renames the host with
+    the network, and a record of this very machine can name another (#466's review). ``held``
+    is what the gate's read found (``Roll.held``), as the lock may be let go before this wait
+    begins: of two such asqs asked to quit at once, the second had left the registry while
+    the first was waited for, and was taken for gone while its process still ran (#466's
+    re-review)."""
     deadline = clock() + timeout
-    here = instance.host == host_name() or _lock_held(instance.id) is True
+    here = instance.host == host_name() or held or _lock_held(instance.id) is True
     while True:
         instance_now = _read(_record(instance.id))
         left = instance_now is None or not is_live(instance_now)

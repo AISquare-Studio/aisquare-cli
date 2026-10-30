@@ -486,3 +486,66 @@ def test_beside_an_unreadable_record_whose_pid_cannot_be_read_no_asq_is_called_p
     said = " ".join(capsys.readouterr().err.split())
     assert f"its record {path}" in said
     assert "before the registry" not in said and "kill 4242" not in said
+
+
+_RENAMED_STAND_IN = r"""
+import sys, threading, time
+from dataclasses import replace
+from aisquare.core import instances
+instances.attached_kind = lambda env=None: "native"
+instances.POLL_SECONDS = 0.02  # each takes its quit request at once, the two together
+me = replace(instances.describe_this_process(), version="0.0.1", host=sys.argv[1])
+with instances.gate():
+    registration = instances.register(me)
+asked = threading.Event()
+registration.deliver_quits_to(lambda request: asked.set())
+registration.start()
+print("ready", flush=True)
+asked.wait(30)
+registration.deregister()  # its lock let go here, its process on for sys.argv[2] seconds
+time.sleep(float(sys.argv[2]))
+"""
+
+
+def test_two_renamed_host_asqs_asked_to_quit_at_once_are_both_waited_out(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#466's re-review, nit 1 (confirmed by the tester, 5432): the owner's case, a Mac asq and
+    an SSH one, both of another release and registered under a host name the network has since
+    changed. Answered y, the gate asks both to quit, then waits for each in turn; the second
+    had let its lock go while the first was waited for, so its wait took it for gone while its
+    process still ran, and it was refused as one before the registry: the yes undone. What
+    the gate's read found held (``Roll.held``) decides, not the lock as each wait begins."""
+    renamed = "dhcp-10-0-0-5.example.net"
+    stand_ins: list[subprocess.Popen[str]] = []
+    for linger in ("0", "1.0"):  # the second's exit lags the first's by a second
+        stand_in = subprocess.Popen(
+            [sys.executable, "-c", _RENAMED_STAND_IN, renamed, linger],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        threading.Thread(target=stand_in.wait, daemon=True).start()  # reaped: no zombie
+        assert stand_in.stdout is not None and stand_in.stdout.readline().strip() == "ready"
+        stand_ins.append(stand_in)  # started in turn: the gate waits for them in this order
+    lines = {
+        stand_in.pid: _line(stand_in.pid, 1, "05:00", f"ttys00{at}", f"{UV} {BIN}/asq")
+        for at, stand_in in enumerate(stand_ins)
+    }
+    monkeypatch.setattr(
+        instance_scan,
+        "_ps",
+        lambda: "".join(line + "\n" for pid, line in lines.items() if procs.alive(pid)),
+    )
+    monkeypatch.setattr(instance_scan, "_environment", lambda process: None)
+
+    try:
+        registration = instance_gate.admit(ask=lambda question: True, interactive=True)
+    finally:
+        for stand_in in stand_ins:
+            stand_in.kill()
+
+    said = capsys.readouterr().err
+    assert registration is not None, said
+    assert "predates the registry" not in said
+    for stand_in in stand_ins:
+        assert f"✓ asq 0.0.1 (pid {stand_in.pid}) quit" in said

@@ -104,6 +104,7 @@ def _quit_others(
     ask: Ask | None,
     interactive: bool | None,
     wait_s: float,
+    held: frozenset[str] = frozenset(),
 ) -> None:
     """Say why ``me`` does not start beside ``differing``, ``unreadable`` and ``strays``;
     return once they have quit on a yes, or raise :class:`typer.Exit` (1). An unreadable record
@@ -161,7 +162,7 @@ def _quit_others(
             by_hand = _by_hand(other)
             raise _refuse(f"The request could not be written ({exc}); {by_hand}.") from None
     for other in differing:
-        if not instances.wait_gone(other, wait_s):
+        if not instances.wait_gone(other, wait_s, held=other.id in held):
             raise _refuse(
                 f"asq {other.version} (pid {other.pid}) has not quit within {wait_s:g} s: it "
                 f"may be finishing work it does not cut off (a restart of the fleet), which it "
@@ -227,6 +228,7 @@ def _pass(
             ask=ask,
             interactive=interactive,
             wait_s=wait_s,
+            held=found.held,
         )
 
 

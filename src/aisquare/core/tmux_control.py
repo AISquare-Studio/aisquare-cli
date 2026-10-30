@@ -106,6 +106,7 @@ from aisquare.core.tmux import (
     parse_frame,
     paste_buffer_name,
     size_claim_commands,
+    size_owner_command,
 )
 
 CONTROL_MINIMUM: tuple[int, int] = MIN_VERSION
@@ -554,6 +555,13 @@ class ControlClient:
     def command(self, *args: str, done: Done | None = None) -> None:
         """Run one tmux command; ``done`` is delivered its :class:`Reply`."""
         self._pipe_send([(args, done, False)])
+
+    def size_owner(self, pane_id: str, *, done: Done) -> None:
+        """:meth:`TmuxServer.size_owner` down the pipe: ``done`` is delivered the answer, the
+        value its last line — no line when no asq claimed the window. No process: asked
+        before every resize the pane would send, a ``show-options`` process put ~20-30 ms on a
+        resize's way to the agent on a loaded machine (tester of #463)."""
+        self.command(*size_owner_command(pane_id), done=done)
 
     def claim_size(
         self, pane_id: str, owner: SizeOwner, width: int, height: int, *, done: Done | None = None

@@ -40,7 +40,7 @@ from aisquare.core.tmux import (
     TmuxServer,
     _tmux,
 )
-from tests.pane_harness import FakePane, FakeTmux, click
+from tests.pane_harness import FakePane, FakeTmux, click, drag
 from tests.test_terminal_pane import Host, rows, run, scroll_event, synced, wait_until
 
 _needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")
@@ -295,6 +295,79 @@ def test_a_paste_and_a_click_take_the_size_and_the_wheel_does_not(
     ]
 
 
+def _rows_pane(fake: FakeTmux) -> FakePane:
+    """The fake pane, as tall as the 60x20 widget and wider: every row on screen, the hint
+    up (the sizes differ), and text to select on each row."""
+    pane = fake.panes["%1"]
+    pane.width, pane.height = 80, 20
+    pane.screen = [f"row {n} of the agent" for n in range(20)]
+    return pane
+
+
+def test_a_drag_select_in_the_other_asq_takes_no_size_and_keeps_its_highlight(
+    fake: FakeTmux, tmp_path: Path, other_asq: subprocess.Popen[bytes]
+) -> None:
+    """Selecting is reading, as the wheel is. Textual makes a ``Click`` of a drag whose press
+    and release land on the pane, and that click took the size: the agent was resized under
+    the highlight being made, and the reflow wiped it (tester of #463). A drag claims
+    nothing, resizes nothing, and its highlight stands; a click in one cell still claims."""
+    _rows_pane(fake).size_owner = _claim(other_asq.pid)
+
+    async def drive() -> tuple[str | None, bool, list[tuple[str, str]], list[int | None]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(60, 20)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: pane.facts is not None)
+            await pilot.pause(0.2)
+            await drag(pilot, pane, (0, 2), (8, 3))
+            await pilot.pause(0.4)  # past the debounce, and frames after it
+            selected = pane.selected_text()
+            standing = pane.text_selection is not None
+            after_drag = list(fake.claims)
+            await click(pilot, pane, (4, 6))
+            await wait_until(pilot, lambda: synced(pane))
+            return selected, standing, after_drag, [_owner_pid(v) for _, v in fake.claims]
+
+    selected, standing, after_drag, after_click = run(drive())
+    assert selected == "row 2 of the agent\nrow 3 of ", repr(selected)
+    assert standing, "the highlight stands after the drag"
+    assert after_drag == [], after_drag
+    assert after_click == [os.getpid()], "a click in one cell takes the size"
+    assert _resizes(fake) == [("resize-window", "%1", "60", "20")], "the click's, only"
+
+
+def test_a_drag_the_program_takes_claims_no_size_either(
+    fake: FakeTmux, tmp_path: Path, other_asq: subprocess.Popen[bytes]
+) -> None:
+    """Under a program that owns the mouse (Claude Code's fullscreen view), a drag goes to it
+    as press, motion and release — its own selection, which a reflow would wipe as well. It
+    reaches the program and claims nothing; a click forwarded in one cell claims."""
+    pane_fake = _rows_pane(fake)
+    pane_fake.alternate_on = pane_fake.mouse_on = pane_fake.mouse_sgr = True
+    pane_fake.mouse_drag = True
+    pane_fake.size_owner = _claim(other_asq.pid)
+
+    async def drive() -> tuple[list[str], list[tuple[str, str]], list[int | None]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(60, 20)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: pane.facts is not None)
+            await pilot.pause(0.2)
+            await drag(pilot, pane, (3, 2), (9, 4))
+            await pilot.pause(0.4)
+            reports, after_drag = fake.sent_text(), list(fake.claims)
+            await click(pilot, pane, (5, 5))
+            await wait_until(pilot, lambda: synced(pane))
+            return reports, after_drag, [_owner_pid(v) for _, v in fake.claims]
+
+    reports, after_drag, after_click = run(drive())
+    joined = "".join(reports)
+    assert joined.startswith("\x1b[<0;4;3M") and joined.endswith("\x1b[<0;10;5m"), repr(joined)
+    assert after_drag == [], after_drag
+    assert after_click == [os.getpid()]
+    assert _resizes(fake) == [("resize-window", "%1", "60", "20")], "the click's, only"
+
+
 def test_keys_after_the_claim_claim_nothing_more(fake: FakeTmux, tmp_path: Path) -> None:
     """Written once per change of hands, never per key: tmux redraws every attached client
     at an option write."""
@@ -507,13 +580,34 @@ def test_real_tmux_two_asq_on_one_window_never_resize_it_back_and_forth(
                     "owner's": set(resized) <= owner_sizes,
                     "other's": set(resized) & other_sizes,
                     "owner hint": hint(owner)(),
+                    # Who sizes the window is asked down the pipe: no process of its own.
+                    "questions": [call for call in calls if "show-options" in call],
                 }
 
             await wait_until(pilot, lambda: mine.facts is not None and theirs.facts is not None)
             mine.focus()
-            await pilot.press("m")
+            await pilot.press("m", "i", "n", "e", "enter")
             await wait_until(pilot, window_is(mine), 3.0)
             seen["mine typed"] = await resize_both(mine, theirs)
+
+            # A drag-select in the other asq reads: no claim, no resize, the highlight stands.
+            # Over text both rows of its view already show: a frame that changes the text
+            # under a highlight drops it (the pane's own rule), and the burst of resizes
+            # just before may leave a frame to come.
+            def shows_both() -> bool:
+                return [row.text[:4] for row in rows(theirs)[:2]] == ["mine", "mine"]
+
+            await wait_until(pilot, shows_both, 3.0)
+            await pilot.pause(0.6)  # an idle frame past the last resize
+            calls.clear()
+            await drag(pilot, theirs, (0, 1), (3, 1))
+            await pilot.pause(0.5)
+            seen["their drag"] = {
+                "selected": theirs.selected_text() or "",
+                "owner": _owner_pid(theirs.facts.size_owner if theirs.facts else ""),
+                "resized": _resized_to(calls),
+                "window is mine's": window_is(mine)(),
+            }
 
             calls.clear()
             theirs.focus()
@@ -544,6 +638,13 @@ def test_real_tmux_two_asq_on_one_window_never_resize_it_back_and_forth(
         assert found["owner's"], f"{phase}: only the owner's sizes reached tmux: {found}"
         assert not found["other's"], f"{phase}: the other asq resized it: {found}"
         assert not found["owner hint"], f"{phase}: the owner says nothing: {found}"
+        assert found["questions"] == [], f"{phase}: a show-options process: {found}"
+    assert seen["their drag"] == {
+        "selected": "mine",
+        "owner": os.getpid(),
+        "resized": [],
+        "window is mine's": True,
+    }, seen["their drag"]
     assert seen["at their key"] == ([], True), "their key resized at once, down the pipe"
     assert seen["idle"] == [], f"resized while nobody did anything: {seen['idle']}"
     assert seen["owner pids"] == {"mine": other_asq.pid, "theirs": other_asq.pid}, (

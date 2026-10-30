@@ -902,6 +902,11 @@ def resize_command(pane_id: str, width: int, height: int) -> list[str]:
     return ["resize-window", "-t", pane_id, "-x", str(max(1, width)), "-y", str(max(1, height))]
 
 
+def size_owner_command(pane_id: str) -> list[str]:
+    """``show-options`` of the pane's window's :data:`SIZE_OWNER_OPTION`: its value, or nothing."""
+    return ["show-options", "-wqv", "-t", pane_id, SIZE_OWNER_OPTION]
+
+
 def size_claim_commands(
     pane_id: str, owner: SizeOwner, width: int, height: int
 ) -> tuple[list[str], list[str]]:
@@ -2005,7 +2010,7 @@ class TmuxServer:
 
         ``-q`` answers an unset option with nothing and exit 0 — and a gone pane the same
         way (measured on 3.8): read as unset, so the resize that follows says it is gone."""
-        return self.run("show-options", "-wqv", "-t", pane_id, SIZE_OWNER_OPTION).strip()
+        return self.run(*size_owner_command(pane_id)).strip()
 
     def claim_size(self, pane_id: str, owner: SizeOwner, width: int, height: int) -> None:
         """Name ``owner`` as the asq that sizes the pane's window (:data:`SIZE_OWNER_OPTION`),

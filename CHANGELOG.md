@@ -6,40 +6,89 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-30
+
+**Pause and resume the agents of a project, or of every project: idle managers and coders
+stop spending tokens without being reaped, and come back where they were from one dialog.
+Rename a running agent from its sidebar row or `fleet relabel`. Renaming a project now
+renames its fleet codename and tmux session too, and the old codename keeps working. One
+sidebar highlight for a click and the arrow keys. Usage & stats scrolls to its end, and the
+Accounts table fits a 160-column terminal beside the default sidebar.**
+
 **Upgrading:**
+- From 0.9.1, run `aisquare upgrade`, or take the update `asq` offers.
 - **The store migrates from v40 (0.9.1's) to v42 on first open, automatically, in two
   steps.** v41 adds one table, `project_codename_alias` (the codenames a renamed project
   gave up), and its index; v42 adds one nullable column, `fleet_agent.paused_at`: when
   `fleet pause` ended the row. Nothing is rewritten or dropped.
 - **Moving back to 0.9.1 is safe.** Its migrator treats a store at or past its own version
-  as current: it leaves the table alone, so `--project <old codename>` then finds nothing
-  there, and it never reads `paused_at`: a paused agent's row is `stopped`, a value it
-  knows, so 0.9.1 shows a paused agent as a stopped 💤 row, and Restart all leaves it. Its
-  `reap` may then remove a paused agent's worktree once nothing in it is unpushed; resume
-  paused agents before moving back if you want them back where they were. A paused agent's
-  task stays claimed there (the pause leased it to 2126), and 0.9.1 knows of no pause to end:
-  only `aisquare task release <id>` frees it.
+  as current: `user_version` stays 42, and it never reads the alias table or `paused_at`.
+  So `--project <old codename>` finds nothing there (use the new one), and a paused agent's
+  row reads as one `fleet stop` ended (its `ended_by` is `stopped`, a value 0.9.1 knows):
+  it is in neither asq's sidebar nor `fleet ls`, `fleet ls --all` lists it as `💤
+  exited(0)`, and Restart all leaves it. Its task stays claimed (the pause leased it to
+  2126), and 0.9.1 knows of no pause to end: `fleet restart <label>` brings the agent back
+  as any stopped agent, holding the claim when it resumes its transcript, and otherwise
+  only `aisquare task release <id>` gives the task back to the board. 0.9.1 also lets a
+  spawn take a paused agent's label (and a second manager start beside a paused one), and
+  its `reap` removes a paused agent's worktree and branch once nothing in them is
+  unpushed; back on 0.9.2, a paused agent whose label another row took is not resumed, and
+  its claims wait for `task release`. **Resume paused agents before moving back.** Moved
+  forward again, 0.9.2 reads the paused rows and the old codenames as it left them.
+- **No setting, extra or dependency is added or removed.** One new command, `aisquare
+  fleet relabel`, and two new flags on `fleet pause` and `fleet resume`, `--all` and
+  `--managers`.
+- **`fleet pause` now exits the agents, not only the signal.** In 0.9.1 it set the
+  project's `fleet-paused` signal and nothing else; now it also pauses every running agent
+  of the project (or `--group`, `--all`), and `fleet resume` starts them again. A script
+  that ran `fleet pause` to hold a manager's spawns stops the running agents too now;
+  `aisquare team signal fleet-paused on`, run in the project (it takes no `-P` or
+  `--group`), still sets the signal alone, and `team signal fleet-paused off` clears it.
+  An agent's `fleet resume` (with `--as`, or from an agent's window) no longer clears a
+  signal-only pause: it is refused and exits 1.
+- **Renaming a project renames its codename and tmux session**, so the `--project` a
+  manager quotes is the name on its card. A project you nicknamed before 0.9.2 keeps its
+  codename until it is renamed again; `aisquare project rename "<its name>"` gives it the
+  codename its name gives now. Branches and worktrees keep their names.
+- **Only the owner ends a pause:** asq, Remote, or a shell that is no agent's window, with
+  no `--as`. Any caller may pause (a manager pausing its team leaves its own row running);
+  an agent's `fleet resume`, or its `stop`, `restart` or `switch` of a paused teammate, is
+  refused, and a paused agent is not renamed until it is resumed.
+- **`fleet relabel` renames a running agent only:** not the manager or the captain, not an
+  agent that ended or is paused, and never to `manager` or `captain`. A name another live
+  or paused agent holds gets a suffix, and the old label finds nothing afterwards, until a
+  later spawn is given it.
+- **For `--json` readers:** `fleet pause --json` and `fleet resume --json` print the bulk
+  report (`receipts`, `summary`, `ok`, as `restart --all` does, with `signals` and `kept`)
+  where 0.9.1 printed `{"paused", "project", "name", "codename", "tmux_session"}` (a list
+  of them for `--group`); a fleet agent's `state` may now be `paused` and its row carries
+  `paused_at`; `project rename --json` adds a `notes` list.
 
 ### Added
 
-- **Rename a running fleet agent: from its sidebar row, or `aisquare fleet relabel`.** Click
-  an agent's row a second time, or press F2 on it, and its label becomes a field: type any
-  name, and the line under it shows the label it will become (`Login Fix` → `login-fix`,
-  `2FA work` → `coder-2fa-work`); Enter or a click away saves, Esc cancels. `aisquare fleet
-  relabel coder-1 login fix` does the same from a shell (`--json` too), and both say
-  `coder-1 is now login-fix`. A name another running or paused agent of the project holds
-  gets the next free suffix (`login-fix-2`), and you are told. From then on the agent is
-  that label everywhere: `fleet tell`, `stop`, `restart`, `switch`, the board's lines and
-  its tmux window. The old label finds nothing, and its refusal says what the agent is called now.
-  An ended agent whose label the rename takes keeps its row, listed as `~login-fix` by
-  `fleet ls --all`, and no restart by label brings it back.
-  An `agent_renamed` line on the board tells the manager. The agent keeps its worktree and
-  branch, as they are: its restart, stop and reap find them by the row. The manager and
-  the captain keep their labels, no agent can take `manager` or `captain`, and an agent
-  that ended, or is paused, is not renamed (resume a paused one first). `fleet rename`
-  still renames the project's codename.
+- **Rename a running fleet agent: from its sidebar row, or `aisquare fleet relabel`.**
+  Double-click an agent's row, or press F2 while the sidebar has the keys and the row is
+  highlighted, and its label becomes a field: type any name, and the line under it shows
+  the label it will become (`Login Fix` → `login-fix`; a name that starts with a digit takes
+  the role first, `2FA work` → `coder-2fa-work` for a coder; a name a paused agent keeps is
+  suffixed when saved, and the toast says so); Enter or a click away saves,
+  Esc cancels. `aisquare fleet relabel coder-1 login fix` does the same from a shell
+  (`--json` too) and prints `✓ coder-1 is now login-fix`; the sidebar's toast says so too.
+  A name another running or paused agent of the project holds gets the next free suffix
+  (`login-fix-2`), and you are told. From then on the agent is that label everywhere:
+  `fleet tell`, `stop`, `restart`, `switch`, the board's lines and its tmux window (if tmux
+  cannot rename the window, the label still changes and a note says why, with the tmux
+  command when one helps). The old label finds nothing, and its refusal says what the agent
+  is called now, until a later spawn is given that label. An ended agent
+  whose label the rename takes keeps its row, listed as `~login-fix` by `fleet ls --all`,
+  and no restart by label brings it back. An `agent_renamed` line on the board tells the
+  manager on its next turn; it wakes nobody. The agent keeps its worktree and branch, as
+  they are: its restart, stop and reap find them by the row. The manager and the captain
+  keep their labels, no agent can take `manager` or `captain`, and an agent that ended,
+  or is paused, is not renamed (resume a paused one first). `fleet rename` still renames
+  the project's codename.
 - **Pause and resume the agents of a project, or of every project**, so idle managers and
-  coders stop spending tokens without being reaped, and come back with one click — before
+  coders stop spending tokens without being reaped, and come back from one dialog — before
   a reboot or an OS update too. A pause exits each running agent's Claude process as
   `fleet stop` does (`/exit`, the grace, the window killed) and keeps everything else of
   it: its row, label, role, task claim, worktree, branch, account and transcript. Its
@@ -52,33 +101,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   over. An agent that exited without a pause stays 💤, and a second resume does nothing.
   A paused agent whose task was done or dropped meanwhile is not resumed: the owner's
   resume ends its pause (its claims go back to the board, and `reap` may take its tree) and
-  says so.
+  says so. A paused manager whose task closed is left paused by a resume; the owner's
+  `fleet stop manager` ends that pause.
   - **asq:** Settings ▸ Fleet has *Pause all…* and *Resume all…* beside *Restart all…*
     and *Stop all…*, in the same dialog (who, by project; *Managers only*; Cancel
-    focused), run off the UI thread with a toast per agent and one that sums it up. A
+    focused), run off the UI thread with a toast for each agent it paused or brought back
+    (a resumed one's reads `✓ restarted`) and one that sums it up, the skipped included. A
     project card's ⋯ menu has *Pause agents…* and *Resume agents…*, and so has the
     project's Settings tab: the same dialog for that project alone, the one that would
     act on nothing greyed (*Resume* clears a `fleet-paused` signal with no agent paused
-    too). A paused agent shows `⏯ paused` in the sidebar and on Remote, and its view offers
-    *Resume*, and *Stop*, which ends the pause for good.
+    too). A paused agent shows `⏯ paused` in the sidebar (`paused ⏯` on Remote), and its
+    view offers *Resume* (that agent alone, as `fleet restart <label>` does: the project
+    stays fleet-paused until *Resume agents…* or `fleet resume`), and *Stop*, which ends the
+    pause for good. With its manager paused,
+    a project's Manager tab says so and offers *▶ Resume agents…* in place of *Start
+    manager*.
   - A paused agent survives a rename. It keeps its label: `fleet relabel` and the sidebar
     refuse to rename it until it is resumed, and give no running agent its label. Renaming
     its project leaves it paused, and it resumes in the renamed project's tmux session, in
     its own worktree and branch.
   - A paused agent survives its tmux server: `fleet reap --server-down` after a reboot
     leaves it paused, its worktree and claims intact. `reap` removes neither its worktree
-    nor its branch, a spawn does not take its label (a second manager is refused while
-    the project's own is paused), and Restart all, Stop all and the restart of agents an
-    update lost leave it.
-  - Only the owner ends a pause: asq, Remote, or a shell that is no agent's window. The
-    owner's `fleet stop <label>` of a paused agent ends its pause: its row is recorded
-    stopped, the claims it kept go back to the board and its exit is announced. The owner's
-    `fleet restart <label>` resumes it, as `fleet resume` would. An agent's stop, restart,
-    switch or resume of a paused teammate is refused and changes nothing, the project's
+    nor its branch, a spawn does not take its label (it is given the next suffix, and a
+    second manager is refused while the project's own is paused), and Restart all, Stop
+    all, `fleet shutdown` and the restart of agents an update lost leave it.
+  - Only the owner ends a pause: asq, Remote, or a shell that is no agent's window, with no
+    `--as`. The owner's `fleet stop <label>` of a paused agent ends its pause: its row is
+    recorded stopped, the claims it kept go back to the board and its exit is announced.
+    The owner's `fleet restart <label>` resumes that one agent as `fleet resume` would, but
+    leaves the project's `fleet-paused` signal as it is, and refuses an agent whose task
+    closed (the owner's stop ends that pause, and so does the owner's resume, except for a
+    manager). A paused agent has no process to
+    move, so `fleet switch` refuses it: resume it first. An agent's stop, restart, switch or
+    resume of a paused teammate is refused and changes nothing, the project's
     `fleet-paused` signal included, whether it is run from the agent's own window with no
     `--as`, with `--as <session>`, or with `--as captain`; the captain acts as the owner from
-    its own window alone. That includes a paused agent whose task closed: only the owner's
-    resume ends that pause.
+    its own window alone. That includes a paused agent whose task closed: only the owner
+    ends that pause.
 
 ### Changed
 
@@ -87,30 +146,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   project rename "AISquare CLI"` sets the codename to the name's slug, `aisquare-cli`
   (lowercased, accents folded, at most 24 characters), and renames the session
   `asq-earnest-hawk` → `asq-aisquare-cli` on every tmux server the project's agents use.
-  Clearing the name takes the slug of the folder's name. A slug another project holds gets
-  the next free suffix (`aisquare-cli-2`), and you are told whose it is. A name with no
+  Clearing the name takes the slug of the folder's name. A slug that is taken gets the next
+  free suffix (`aisquare-cli-2`), and you are told why: another project's codename, another
+  project's folder name (which `--project` already names it by), a codename another project
+  gave up at a rename, or an `asq-` tmux session that is not this project's. A name with no
   letter to slug (`!!!`) saves the nickname and leaves the codename, saying so. The card's
   rename saves the name at once and does the codename and tmux half in the background; a
   toast names the new codename. If that half fails, the name is still saved and the toast
   says why. Projects that are never renamed keep their generated `adjective-animal`
   codename.
 - **The old codename still works.** `--project earnest-hawk` finds the project after a
-  rename, unless another project now holds `earnest-hawk` as its codename, in which case
-  that project is found. A rename posts one note, "project renamed: earnest-hawk →
-  aisquare-cli; --project earnest-hawk still works", on each board the project's agents
-  read (and the captain's, while one is live), so a live manager learns the new name on its
-  next turn. Hints printed after the rename use the new codename. Branches
-  (`fleet/earnest-hawk/…`) and worktrees keep their names. A coder spawned again for a
-  task carries on in that task's branch under the old codename. Open panes stay attached.
-  A watcher source that names the old codename still reaches the project.
+  rename, and the old codename stays reserved for it while the project is registered: no
+  other project is given it (`fleet rename` refuses it, and a project rename or a new
+  project's generated codename passes over it), and renaming the project back to it makes it
+  its codename again. A checkout added later in a folder named `earnest-hawk` makes
+  `--project earnest-hawk` name two projects, which is refused naming both rather than
+  moved to either. A rename posts one note, "project renamed: earnest-hawk → aisquare-cli;
+  --project earnest-hawk still works" (or, when the old codename names another project too,
+  "…; use --project aisquare-cli (--project earnest-hawk names another project too)"), on
+  each board the project's agents read, a paused agent's included (and the captain's, while
+  one is live), so a live manager learns the new name on its next turn. Hints printed after
+  the rename use the new codename. Branches (`fleet/earnest-hawk/…`) and worktrees keep
+  their names. A coder spawned again for a task carries on in that task's branch under the
+  old codename. Open panes stay attached. A watcher source that names the old codename
+  still reaches the project.
 - **A card shows the codename when its name does not give it.** A generated codename that
   was never renamed, one set with `fleet rename`, or a suffixed one appears dim under the
   name (`· earnest-hawk`), after the directory when that is shown too. The name's tooltip
   shows the codename, its tmux session and `--project` either way.
 - **`aisquare fleet rename` accepts any codename of that shape** (`billing-v2`, not only
   `amber-otter`): lowercase letters and digits in words joined by `-`, starting with a
-  letter, at most 24 characters. It keeps the old codename working and tells the boards,
-  as a project rename does.
+  letter, at most 24 characters, and not `p`, `pr` or `prj` (how every project id begins).
+  It refuses another project's folder name and a codename another registered project gave
+  up, since `--project <it>` already names that project. It keeps the old codename working
+  and tells the boards, as a project rename does.
 - **An exact codename now wins over a folder name in `--project`.** A codename matched
   together with another checkout's folder name (two clones of `aisquare-cli`) was refused
   as ambiguous. Now it names the project that holds the codename. The captain's `ui` actions
@@ -118,14 +187,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`fleet pause` and `fleet resume` pause and resume the agents, not only the signal.**
   `fleet pause [-P <project> | --group <group> | --all] [--managers]` sets the project's
   `fleet-paused` signal, as before, and then pauses every running agent of it, its
-  manager first, one line each, then a count; `fleet resume` resumes the paused agents,
-  the manager last, and clears the signal where no agent stays paused: `--managers`, or an
-  agent whose resume failed, leaves it on, and says so. A signal that cannot be set or cleared
-  refuses the command before any agent is touched, as before; an agent that fails is its
-  own line and exits 1. `--json` prints the report `restart --all` prints, with
-  `signals` and `kept`. The manager's rule is unchanged: it spawns nothing while `fleet-paused` is
-  on, and `fleet shutdown` still clears the signal. `fleet ls` shows a paused agent as
-  `⏯ paused`.
+  manager first, one line each, then a count (`--all` and `--managers` are new; the
+  captain, and the agent that runs the command, are not paused); `fleet resume` resumes the
+  paused agents, the manager last, and clears the signal where no agent stays paused:
+  `--managers`, or an agent whose resume failed, leaves it on, and says so. A signal that
+  cannot be set or cleared refuses the command before any agent is touched, as before; an
+  agent that fails is its own line and exits 1. With the board off (`AISQUARE_TEAM=0`),
+  where 0.9.1 refused, the agents are paused and resumed with no signal. `--json` prints the
+  report `restart --all` prints, with `signals` and `kept`. The manager's rule is
+  unchanged: it spawns nothing while `fleet-paused` is on, and `fleet shutdown` still
+  clears the signal (and leaves a paused agent paused). `fleet ls` shows a paused agent as
+  `⏯ paused`, however long ago it was paused.
+- **One sidebar highlight, for a click and the arrow keys.** The sidebar had two, a
+  click's and a keyboard cursor the arrows moved apart from it; now a click and Up/Down move
+  the same one. A click on a project, an agent or ⚙ Settings opens it, as before. Up/Down
+  open each project, agent or Settings row they land on, and the keyboard stays in the
+  sidebar: an agent's pane or the Settings hub takes it on Enter or a click, not as an
+  arrow passes over. Rows that act rather than show (`+`, *Spawn agent*, *Start captain*,
+  the update row, a group header) are only highlighted by the arrows, with no dialog popped;
+  Enter acts on them. Enter, F2, `x` and the other sidebar keys act on the highlighted row,
+  so `x` asks to stop the agent the arrows just reached. *Spawn agent* reached by the
+  arrows opens on the project whose view is on screen, else the first listed. A held arrow
+  does not open every view it passes.
 
 ### Fixed
 
@@ -135,15 +218,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Features could not be reached. It sizes to its content now.
 - **The Fleet line says "1 account".** With one account's week read, the Accounts page
   and `aisquare accounts usage` said `week: 0.8 of 1 accounts left`.
-- **The Accounts table fits a 160-column terminal, with no sideways scroll.** A row was
+- **The Accounts table fits a 160-column terminal beside the default sidebar, with no
+  sideways scroll.** A row was
   167 cells on the 123 the page has there, so the week-resets column was cut and a
   horizontal scrollbar showed. The resets columns show the distance alone
-  (`in 6d 12h`, at most `in 4h 59m` for the session and `in 23h 59m` for the week; a kept
-  reading whose window has reset reads `reset`), with the whole reset, clock time or age
-  and all, on hover; their headers read `5h resets` and `wk resets`, as the status line
-  does; the name and email columns are 12 and 17 cells (a longer value ends in `…`, the
-  whole of it on hover); and the *↑*,
-  *↓*, *Log in*, *Disable* and *Remove* buttons are as wide as their labels. A narrower
+  (`in 4h 59m`, `in 6d 12h`; a kept reading whose window has reset reads `reset`), with the
+  whole reset, clock time or age and all, on hover; their headers read `5h resets` and `wk
+  resets`, as Claude Code's status line does; the name and email columns are 12 and 17
+  cells (a longer value ends in `…`, the whole of it on hover); and the *↑*, *↓*,
+  *Log in*, *Disable* and *Remove* buttons are as wide as their longest labels. A narrower
   terminal still scrolls the table sideways as one.
 
 ## [0.9.1] - 2026-10-27
@@ -5955,7 +6038,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.1...v0.8.2

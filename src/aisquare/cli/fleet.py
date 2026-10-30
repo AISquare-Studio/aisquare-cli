@@ -1836,6 +1836,12 @@ def ui(
             error="not_a_tty",
             detail=reason,
         )
+    if project or group:
+        # --project and --group are read from the store, whose open migrates it: beside a live
+        # asq of another release, not before run_ui's instance gate would let asq start (#17).
+        from aisquare.cli.ui import instance_gate
+
+        instance_gate.check()
     try:
         scope = fleet_service.ui_scope(project or (), group or ())
     except fleet_service.FleetError as exc:

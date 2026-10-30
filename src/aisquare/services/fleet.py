@@ -8460,7 +8460,9 @@ def _reconcile_pauses(
     return failures
 
 
-def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -> ShutdownPlan:
+def shutdown_plan(
+    project: ProjectInfo | None = None, *, forget: bool = False, from_inside: bool = False
+) -> ShutdownPlan:
     """What :func:`shutdown` would end — read-only, and it refuses the same way.
 
     The guards run here too, so the plan an operator is asked to confirm is one
@@ -8469,6 +8471,10 @@ def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -
     before anything is printed. A session query that fails AFTER a good probe refuses
     the same way: the operator confirms this list, so a list missing a session
     the run would still kill is worse than no list at all.
+
+    ``from_inside`` lifts the last of those, :func:`_refuse_from_inside`, for a caller that
+    never carries the plan out (``project fresh --dry-run``): only the kill takes the pane
+    down, and listing the sessions kills nothing.
 
     Each row's disposition is the run's own verdict (:func:`_shutdown_verdict`), so what
     the plan says it stops, leaves live or records lost is what the run does with it.
@@ -8494,7 +8500,8 @@ def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -
             config=config,
         )
     sockets = _shutdown_sockets(targets, config)
-    _refuse_from_inside(sockets, config)
+    if not from_inside:
+        _refuse_from_inside(sockets, config)
     answering = _shutdown_probe(sockets, config)
     sessions: list[str] = []
     for socket in sockets:

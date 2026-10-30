@@ -273,6 +273,32 @@ def test_no_leaves_the_other_running_and_says_how_to_quit_it(
     )
 
 
+@pytest.mark.parametrize("answer", [EOFError, KeyboardInterrupt], ids=["end-of-input", "ctrl-c"])
+def test_ctrl_c_or_the_end_of_input_at_the_question_is_a_no_that_says_how_to_quit_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], answer: type[BaseException]
+) -> None:
+    """Tester's reopen of #17: typer 0.27's ``confirm`` raises typer's own ``Abort``, no
+    subclass of click's that ``_confirm`` caught, so ^C or ^D escaped as a bare "Aborted."
+    with no word of how to quit the other asq. The real question, its input cut off."""
+
+    def cut_off(_prompt: str = "") -> str:
+        raise answer
+
+    monkeypatch.setattr("typer._click.termui.visible_prompt_func", cut_off)
+    with asq_running(version="0.0.1") as other:
+        with pytest.raises(typer.Exit) as refused:
+            instance_gate.admit(interactive=True)
+        assert instances.live_instances() == [other] and f"{other.id}.quit" not in _files()
+
+    out, err = capsys.readouterr()
+    said = " ".join(err.split())
+    assert refused.value.exit_code == 1
+    # The prompt's last character is the cut-off input function's to echo.
+    assert out == "Quit the other asq? [y/N]:\n", "the prompt's line ends before the refusal"
+    assert f"press q in that asq (ssh on {other.host}, pid {other.pid}, /dev/ttys009)" in said
+    assert "Aborted" not in out + err
+
+
 def test_an_asq_that_cannot_be_asked_is_named_with_what_kill_costs(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

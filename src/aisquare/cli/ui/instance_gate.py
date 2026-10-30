@@ -23,7 +23,6 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 
-import click
 import typer
 
 from aisquare.core import instances
@@ -58,9 +57,17 @@ def _interactive() -> bool:
 
 
 def _confirm(question: str) -> bool:
+    """The y/N question; Ctrl-C or the end of input is a no.
+
+    ``typer.Abort``, never click's: typer 0.27 vendors click, and the ``Abort`` its
+    ``confirm`` raises is typer's own, no subclass of click's, so an ``except`` on click's
+    let it out as a bare "Aborted." with no word of how to quit the other asq (tester's
+    reopen of #17). Before 0.27, ``typer.Abort`` was click's, so this catches either.
+    """
     try:
         return typer.confirm(question, default=False)
-    except click.exceptions.Abort:  # Ctrl-C or the end of input: no
+    except typer.Abort:
+        typer.echo()  # the prompt's line ends here, not in the refusal said under it
         return False
 
 

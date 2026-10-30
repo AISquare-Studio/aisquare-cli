@@ -450,6 +450,9 @@ class _FleetRead:
     before Settings switched it on found nothing of it, which is not "no captain"."""
     fleet_paused: frozenset[str] = frozenset()
     """The projects whose ``fleet-paused`` signal reads on (``FleetSnapshot.fleet_paused``)."""
+    asqs: tuple[instances.Instance, ...] | None = None
+    """The asqs live on this home (#20), for the chip under the status line; ``None`` when the
+    read did not ask (a read a test builds) or the registry could not be read."""
 
 
 def _read_frame(
@@ -462,7 +465,19 @@ def _read_frame(
     home board and row when the captain is on (``experimental.captain``). ``viewed`` and
     ``scope`` as for :func:`_read_fleet`."""
     read = _read_fleet(show_captured, viewed, scope, captain=captain)
-    return replace(_read_captain(read), captain_asked=True) if captain else read
+    read = replace(_read_captain(read), captain_asked=True) if captain else read
+    return replace(read, asqs=_live_asqs())
+
+
+def _live_asqs() -> tuple[instances.Instance, ...] | None:
+    """The asqs live on this home (``core.instances``), read with each frame on the read's
+    thread, so the chip (#20) costs no timer of its own. Read only: a stale record is pruned by
+    the next asq to start and by every running asq's heartbeat (``core.instances``), never by a
+    look. ``None`` when the registry could not be read."""
+    try:
+        return tuple(instances.live_instances(prune=False))
+    except Exception:  # the chip is not worth a frame
+        return None
 
 
 def _read_fleet(
@@ -1648,6 +1663,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         after a wait (738d5594). ``None`` (the first frame, which no call asked for) asks."""
         sidebar = self.sidebar
         self.capturing = read.capturing
+        if read.asqs is not None:  # read beside the store, so said whatever the store said
+            mine = instances.this_instance()
+            sidebar.show_instances(read.asqs, None if mine is None else mine.id)
         if read.error is not None:  # the store is briefly unavailable — keep what is shown
             self.store_error = read.error
             if self.snapshot is None:

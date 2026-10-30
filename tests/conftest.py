@@ -26,7 +26,7 @@ from typer.testing import CliRunner
 
 import aisquare
 from aisquare.core import agents as agent_core
-from aisquare.core import experimental, insights
+from aisquare.core import experimental, insights, login_session
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
 from aisquare.models import ProjectInfo
@@ -741,6 +741,14 @@ def no_real_ngrok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(ngrok_tunnel, "ngrok_default_config", config)
     monkeypatch.setattr(ngrok_sdk, "ngrok2_config", ngrok2)
+
+
+@pytest.fixture(autouse=True)
+def at_the_machine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test runs as a login at the machine, never an SSH login: on a Mac reached over SSH,
+    a fleet spawn refuses to start a tmux server (#20), and the suite run there would refuse
+    every spawn that starts one. A test of that refusal patches it back."""
+    monkeypatch.setattr(login_session, "remote_session", lambda: False)
 
 
 @pytest.fixture(autouse=True)

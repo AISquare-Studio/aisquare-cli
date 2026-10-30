@@ -177,6 +177,9 @@ def doctor(*, live: bool = False, cwd: Path | None = None) -> list[DoctorCheck]:
         # Can warn (memory below the floor, pressure at warn), so it waits with the late rows.
         _check_fleet_capacity(),
         _check_watcher(),
+        # Warns when two asqs, or an asq and this aisquare, run different releases (#20), so
+        # it waits with the late rows.
+        _check_instances(),
         # Only while the experimental captain is off: one ok row saying how to turn it
         # on. On, doctor is as it was before the switch.
         *_optional(_captain_check()),
@@ -2459,6 +2462,37 @@ def _check_watcher() -> DoctorCheck:
             "aisquare watch --stop, then aisquare watch --detach",
         )
     return _ok(name, f"running (pid {found.pid}), {looked}")
+
+
+def _check_instances() -> DoctorCheck:
+    """``asq instances``: the asq UIs live on this home (``core.instances``, #20), and whether
+    each runs this aisquare's release and store schema. Two releases on one home race on the
+    store's migrations, so a mismatch warns; anything else is said at ok. A look: no record is
+    pruned and no folder made, as ``aisquare instances`` does."""
+    name = "asq instances"
+    try:
+        from aisquare.core import instances
+
+        live = instances.live_instances(prune=False)
+        me = instances.this_instance() or instances.describe_this_process()
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+    if not live:
+        return _ok(name, "no asq is running on this home")
+    others = [i for i in live if i.differs_from(me)]
+    if others:
+        named = "; ".join(f"{i.label}: schema {i.schema}" for i in others)
+        return _warn(
+            name,
+            f"{len(live)} running, {len(others)} on another release than this aisquare "
+            f"{me.version} (schema {me.schema}): {named}",
+            "Quit "
+            + ("it" if len(others) == 1 else "each of them")
+            + " (q in that asq), then start asq again, so one release uses this home",
+        )
+    one = len(live) == 1
+    where = "; ".join(i.label + (" (this one)" if i.id == me.id else "") for i in live)
+    return _ok(name, f"{len(live)} running{'' if one else ', all on ' + me.version}: {where}")
 
 
 def _check_anthropic_routing(server: explainability_ops.FleetServer | None = None) -> DoctorCheck:

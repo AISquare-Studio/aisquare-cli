@@ -1741,11 +1741,13 @@ def add_task(
             if created:
                 break
             # The first key is the key's, as it always was: an open holder is this task
-            # whatever its title (`--key`, a case variant). A suffixed key's holder is this
-            # title's only if its title is the same one: `--key ship--2` on another title,
-            # or a title whose first 64 slug characters are this one's, answered for it
-            # (tester on #469).
-            ours = candidate == derived or _same_title(task.title, title)
+            # whatever its title (a case variant). So is every key of an explicit `--key`'s
+            # chain, which says "this task, whatever the title": `--key nightly` stays
+            # idempotent after a re-add (review of #469, r3). A title's suffixed key's holder
+            # is this title's only if its title is the same one: `--key ship--2` on another
+            # title, or a title whose first 64 slug characters are this one's, answered for
+            # it (tester on #469).
+            ours = candidate == derived or key is not None or _same_title(task.title, title)
             if ours and task.status not in CLOSED_STATUSES:
                 break
             # The key's holder is dropped or done: re-adding this title must not stay

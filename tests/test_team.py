@@ -226,6 +226,23 @@ def test_a_re_add_is_not_answered_by_another_title_given_its_suffixed_key() -> N
     assert (kept.title, kept.status) == ("Unrelated", "todo")
 
 
+def test_an_explicit_key_stays_idempotent_after_a_re_add() -> None:
+    """Review of #469, r3: `--key` says "this task, whatever the title". The suffixed key's
+    holder was compared by title, so after one re-add every next `--key nightly` run made
+    another open task."""
+    d1, _ = team_service.add_task("Nightly run 10-01", key="nightly")
+    d2, made_d2 = team_service.add_task("Nightly run 10-02", key="nightly")
+    assert not made_d2 and d2.id == d1.id
+    team_service.finish_task(d1.id)
+    d3, made_d3 = team_service.add_task("Nightly run 10-03", key="nightly")
+    assert made_d3 and d3.key == "nightly--2"
+
+    d4, made_d4 = team_service.add_task("Nightly run 10-04", key="nightly")
+
+    assert not made_d4 and d4.id == d3.id and d4.number == 2
+    assert team_service.last_supersedes() is None
+
+
 def test_titles_sharing_their_first_64_key_characters_are_two_re_adds() -> None:
     """Their keys are one, clipped at 64: the second title's add met the first's re-add on
     the suffixed key and answered "already tracked" with it."""

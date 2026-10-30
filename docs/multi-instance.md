@@ -49,11 +49,14 @@ Some things can only have one holder. Whichever asq takes it first keeps it unti
   Remote panel says so instead of starting a second server.
 - **The captain's ui socket.** The captain's `ui` actions (open a dialog, select a row) go to the
   first asq that listens on the socket. Another asq that starts later leaves it alone.
-- **A shared pane's size.** When two asqs show the same agent's pane, the asq you last typed or
-  clicked in sets its size. The other one shows a short hint instead of resizing it back.
+- **A shared pane's size.** When two asqs show the same agent's pane, the asq you last typed,
+  pasted or clicked in sets its size (a drag to select text doesn't count). The other one shows
+  `[sized by the other asq (ssh)]` (or `(Mac)`) in the pane's corner instead of resizing it back,
+  and sizes the pane again once that asq quits.
 - **Usage over SSH.** An asq over SSH can't read the login Keychain, so it doesn't fetch account
-  usage itself. It shows the readings that the asq at the Mac recorded, marked with where they
-  came from and how old they are. To refresh them, open asq on the Mac, or run
+  usage itself. It shows the readings that the asq at the Mac recorded for the same login, marked
+  as recorded elsewhere, never another login's. A sign-out or an expired login that the Mac saw
+  shows the same way over SSH. To refresh the readings, open asq on the Mac, or run
   `security unlock-keychain` in the SSH session.
 - The transcript sweep for *Usage & stats*, and `aisquare watch`, each run in one process at a
   time, as before.
@@ -87,7 +90,21 @@ the records of the other live asqs, before it opens the store or touches tmux:
   With `y`, the other asq quits the way `q` would. Its terminal says which asq asked it to. The new
   one then starts. With `n`, Ctrl-C or the end of input, the new asq doesn't start, and it names
   the other asq so you can quit it yourself (`q` in it). Without a terminal to ask in, it gives
-  that same refusal.
+  that same refusal. If the other asq hasn't quit within 15 seconds (it may be finishing a
+  restart of the fleet), the new asq says so and doesn't start.
+
+Some refusals come without a question, because there is nothing this asq can ask:
+
+- **An asq that can't be asked to quit.** Its record has no quit channel. The new asq names its pid
+  and says what `kill <pid>` loses against quitting it in its own terminal. It never kills it.
+- **A record this release can't read.** Most likely a later release's asq. The new asq names the
+  record's file. A record whose asq is gone (no lock held) is ignored once it is a minute old.
+- **Another asq is starting at the same moment.** If it has held the home's gate for over
+  2 seconds, the new asq doesn't start unchecked: it says so, and you start it again a moment
+  later.
+
+The one case asq starts without the check is a home it can't write to. It says so once, and the
+other asqs won't see it.
 
 `aisquare upgrade` and `aisquare uninstall` refuse while another asq runs on the home, and asq's
 own Update and Uninstall buttons do too. Quit the other asqs first.

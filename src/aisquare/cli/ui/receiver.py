@@ -377,10 +377,13 @@ def _focus_project(app: FleetApp, arg: str | None) -> str:
     sidebar = app.sidebar
     sidebar.focus()
     if not sidebar.put_cursor(f"project:{project.id}"):
-        return (
-            f"selected {project_name(project)}; its card is in a folded group, "
-            "so the sidebar cursor stayed where it was"
+        # The filter first: unfolding its group would not show a card it hides.
+        why = (
+            "the active-only filter hides its card (it has no live agent)"
+            if project.id in sidebar.hidden_projects
+            else "its card is in a folded group"
         )
+        return f"selected {project_name(project)}; {why}, so the sidebar cursor stayed where it was"
     return f"focused {project_name(project)} in the sidebar"
 
 

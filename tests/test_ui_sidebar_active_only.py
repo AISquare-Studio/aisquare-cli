@@ -258,21 +258,27 @@ def test_on_with_nothing_live_says_so_in_place_of_the_onboard_line(
     assert off == ["prj_a", "prj_b", "prj_c", "prj_d"], "off, no empty line: there are cards"
 
 
-def test_off_with_no_projects_the_onboard_line_is_unchanged(script: Script) -> None:
-    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str]]:
+def test_with_no_projects_at_all_the_onboard_line_shows_filter_or_no_filter(
+    script: Script,
+) -> None:
+    """Nothing onboarded is not "nothing active": the ``+`` is the way on, on or off."""
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], list[str]]:
         app = fleet_app(pilot)
         off = visible(app)
         await pilot.click("#active-only")
         await settle(app)
         on = visible(app)
+        await refreshed(app)  # and a tick with the filter on says the same
+        ticked = visible(app)
         await pilot.click("#active-only")
         await settle(app)
         assert visible(app) == off
-        return off, on
+        return off, on, ticked
 
-    off, on = drive(go)
+    off, on, ticked = drive(go)
     assert off == [NO_PROJECTS] == ["No projects yet — press + to onboard one."]
-    assert on == [ACTIVE_ONLY_EMPTY]
+    assert on == ticked == [NO_PROJECTS]
 
 
 def test_a_group_header_and_the_pinned_label_hide_with_their_members(
@@ -533,18 +539,48 @@ def test_shift_down_steps_over_the_projects_the_filter_hides(
     assert after == ["prj_c", "prj_a", "prj_d"], "past prj_c, the next card on screen"
 
 
-def test_a_group_steps_over_the_headers_the_filter_hides(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("moved", "delta", "hidden", "order"),
+    [
+        # Down (``after=``) and up (``before=``), as before the filter: one place each.
+        ("one", 1, set(), ["two", "one", "three"]),
+        ("three", -1, set(), ["one", "three", "two"]),
+        # With "two" hidden: past the next header ON SCREEN, over the hidden one.
+        ("one", 1, {"two"}, ["two", "three", "one"]),
+        ("three", -1, {"two"}, ["three", "one", "two"]),
+        # At an end of what is on screen: nowhere to go, though a hidden header is there.
+        ("three", 1, {"two"}, ["one", "two", "three"]),
+        ("one", -1, {"two"}, ["one", "two", "three"]),
+    ],
+)
+def test_a_group_steps_one_header_on_screen_up_or_down(
+    tmp_path: Path, moved: str, delta: int, hidden: set[str], order: list[str]
+) -> None:
     with store_session() as store:
         for pid in ("prj_a", "prj_b", "prj_c"):
             store.onboard_project(ProjectInfo(id=pid, root=tmp_path / pid))
         for name, pid in (("one", "prj_a"), ("two", "prj_b"), ("three", "prj_c")):
             groups_service.create_group(store, name, [pid])
         ids = {g.name: g.id for g in store.project_groups()}
-        groups_service.step_group(store, ids["one"], 1, hidden={ids["two"]})
-        order = [g.name for g in sorted(store.project_groups(), key=lambda g: g.position)]
-        unmoved = groups_service.step_group(store, ids["two"], 1, hidden={ids["two"]})
-    assert order == ["two", "three", "one"], "past three, the next header on screen"
-    assert unmoved.description == "nothing to move", "a hidden header is no row to move"
+        entry = groups_service.step_group(
+            store, ids[moved], delta, hidden={ids[name] for name in hidden}
+        )
+        after = [g.name for g in sorted(store.project_groups(), key=lambda g: g.position)]
+    assert after == order
+    stayed = order == ["one", "two", "three"]
+    assert (entry.description == "nothing to move") is stayed, "no undo for no move"
+
+
+def test_a_hidden_group_header_is_no_row_to_move(tmp_path: Path) -> None:
+    with store_session() as store:
+        for pid in ("prj_a", "prj_b"):
+            store.onboard_project(ProjectInfo(id=pid, root=tmp_path / pid))
+        for name, pid in (("one", "prj_a"), ("two", "prj_b")):
+            groups_service.create_group(store, name, [pid])
+        ids = {g.name: g.id for g in store.project_groups()}
+        entry = groups_service.step_group(store, ids["two"], -1, hidden={ids["two"]})
+        after = [g.name for g in sorted(store.project_groups(), key=lambda g: g.position)]
+    assert entry.description == "nothing to move" and after == ["one", "two"]
 
 
 def test_the_header_glyph_is_no_stop_on_the_cursor_walk(tmp_path: Path, script: Script) -> None:

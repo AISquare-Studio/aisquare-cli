@@ -589,7 +589,7 @@ class AddButton(Activatable):
 
 
 ACTIVE_ONLY_EMPTY = "No active projects — press l to show all."
-"""The projects' empty line while the active-only filter is on and no project passes it."""
+"""The projects' empty line while the active-only filter hides every project there is."""
 
 NO_PROJECTS = "No projects yet — press + to onboard one."
 """The projects' empty line with nothing onboarded."""
@@ -1530,15 +1530,6 @@ class OthersSection(Vertical):
 # --- the pane ---------------------------------------------------------------------
 
 
-_FrameInputs = tuple[
-    list[ProjectInfo],
-    dict[str, list[FleetAgentStatus]],
-    Mapping[str, str],
-    list[ProjectGroup] | None,
-    Mapping[str, int] | None,
-]
-"""``Sidebar.show_projects``' arguments, kept to repaint the frame when the filter flips."""
-
 MOVE_KEYS = Binding.Group("move", compact=True)
 """The sidebar's ↓ and ↑, as the footer shows them: one entry."""
 
@@ -1634,8 +1625,11 @@ class Sidebar(Vertical):
         """The listed projects the active-only filter hides in the frame on screen."""
         self.hidden_groups: frozenset[str] = frozenset()
         """The groups whose header it hides: none of their members passes it."""
-        self._frame_inputs: _FrameInputs | None = None
-        """What the last frame was painted from, which a flip of the filter repaints."""
+        self._frame_rest: tuple[
+            Mapping[str, str], list[ProjectGroup] | None, Mapping[str, int] | None
+        ] = ({}, None, None)
+        """The last frame's ``notices``, ``groups`` and ``live``: with :attr:`last_frame`, what
+        a flip of the filter repaints from."""
         self._always_show_paths = False
         self._empty_said = NO_PROJECTS
         """What the projects' empty line says (:meth:`_show_empty`)."""
@@ -1718,7 +1712,7 @@ class Sidebar(Vertical):
         and stays. The Captain section is not a project, and is never filtered.
         """
         notices = notices or {}
-        self._frame_inputs = (projects, agents, notices, groups, live)
+        self._frame_rest = (notices, groups, live)
         self._always_show_paths = always_show_paths
         listed = {project.id for project in projects}
         passing = (
@@ -1836,22 +1830,24 @@ class Sidebar(Vertical):
         self._apply_selection()
 
     def _show_empty(self, *, projects: bool, passing: bool) -> None:
-        """The projects' one dim line: none onboarded, or none the active-only filter passes."""
+        """The projects' one dim line: none onboarded — filter or no filter, the ``+`` is the
+        way on — or projects the active-only filter all hides."""
         line = self.query_one("#projects-empty", Static)
-        said = ACTIVE_ONLY_EMPTY if self.active_only else NO_PROJECTS
+        said = ACTIVE_ONLY_EMPTY if projects else NO_PROJECTS
         if said != self._empty_said:
             line.update(Text(said, style="dim"))
             self._empty_said = said
-        line.display = not passing if self.active_only else not projects
+        line.display = not passing
 
     def set_active_only(self, on: bool) -> None:
         """List only the projects with a live agent, or every project again: the header's
         glyph follows, and the frame on screen is repainted at once, not at the next tick."""
         self.active_only = on
         self.query_one(ActiveOnlyButton).show(on=on)
-        if self._frame_inputs is None:
+        if self.last_frame is None:
             return  # no frame yet: the first one is painted so
-        projects, agents, notices, groups, live = self._frame_inputs
+        projects, agents = self.last_frame
+        notices, groups, live = self._frame_rest
         self.show_projects(
             projects,
             agents,

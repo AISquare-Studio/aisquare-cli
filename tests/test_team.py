@@ -209,6 +209,50 @@ def test_a_re_add_supersedes_its_own_title_not_one_ending_in_a_number() -> None:
     )
 
 
+def test_a_re_add_is_not_answered_by_another_title_given_its_suffixed_key() -> None:
+    """Tester on #469: `--key ship--2` on another title held the re-add's second candidate,
+    so the re-add of a done "Ship" answered "already tracked" with "Unrelated"."""
+    unrelated, _ = team_service.add_task("Unrelated", key="ship--2")
+    first, _ = team_service.add_task("Ship")
+    team_service.finish_task(first.id)
+
+    again, made_again = team_service.add_task("Ship")
+
+    assert made_again and again.title == "Ship" and again.key == "ship--3"
+    supersedes = team_service.last_supersedes()
+    assert supersedes is not None and supersedes.id == first.id
+    with store_session() as store:
+        kept = _stored_task(store, unrelated.id)
+    assert (kept.title, kept.status) == ("Unrelated", "todo")
+
+
+def test_titles_sharing_their_first_64_key_characters_are_two_re_adds() -> None:
+    """Their keys are one, clipped at 64: the second title's add met the first's re-add on
+    the suffixed key and answered "already tracked" with it."""
+    stem = "x" * 64
+    alpha, _ = team_service.add_task(f"{stem} alpha")
+    team_service.finish_task(alpha.id)
+    alpha_again, _ = team_service.add_task(f"{stem} alpha")
+
+    beta, made_beta = team_service.add_task(f"{stem} beta")
+
+    assert made_beta and beta.title == f"{stem} beta"
+    assert beta.id not in (alpha.id, alpha_again.id)
+
+
+def test_a_case_variant_of_a_re_added_title_is_still_that_task() -> None:
+    """The suffixed key's holder is compared as keys compare titles: case and punctuation
+    folded, so "SHIP!" is the re-added "Ship", as it is the first one while that is open."""
+    first, _ = team_service.add_task("Ship")
+    team_service.finish_task(first.id)
+    again, _ = team_service.add_task("Ship")
+
+    variant, made_variant = team_service.add_task("SHIP!")
+
+    assert not made_variant and variant.id == again.id
+    assert team_service.last_supersedes() is None
+
+
 # --- task keys in any script (#270) --------------------------------------------
 
 

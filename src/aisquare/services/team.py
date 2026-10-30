@@ -749,18 +749,34 @@ def task_key(title: str) -> str:
     ASCII title keys exactly as before (:func:`_legacy_task_key`); a title with nothing
     left to slug, only emoji, is keyed by a hash of it.
     """
+    slug = _title_slug(title)
+    if slug:
+        return slug[:64]
+    if title.isascii():
+        return "task"
+    folded = unicodedata.normalize("NFKC", title).casefold()
+    return "t-" + hashlib.sha256(folded.encode()).hexdigest()[:12]
+
+
+def _title_slug(title: str) -> str:
+    """:func:`task_key`'s slug of ``title``, before it is clipped to 64 characters."""
     folded = unicodedata.normalize("NFKC", title).casefold()
     kept: list[str] = []
     for char in folded:
         category = unicodedata.category(char)[0]
         belongs = category in "LN" or (category == "M" and bool(kept) and kept[-1] != "-")
         kept.append(char if belongs else "-")
-    slug = re.sub(r"-+", "-", "".join(kept)).strip("-")
-    if slug:
-        return slug[:64]
-    if title.isascii():
-        return "task"
-    return "t-" + hashlib.sha256(folded.encode()).hexdigest()[:12]
+    return re.sub(r"-+", "-", "".join(kept)).strip("-")
+
+
+def _same_title(one: str, other: str) -> bool:
+    """Whether two titles name one task as their keys do (case and punctuation folded), with
+    nothing clipped: two titles whose first 64 slug characters match are two titles."""
+
+    def identity(title: str) -> str:
+        return _title_slug(title) or unicodedata.normalize("NFKC", title).casefold()
+
+    return identity(one) == identity(other)
 
 
 def _legacy_task_key(title: str) -> str:
@@ -1722,7 +1738,15 @@ def add_task(
                     updated_at=now,
                 )
             )
-            if created or task.status not in CLOSED_STATUSES:
+            if created:
+                break
+            # The first key is the key's, as it always was: an open holder is this task
+            # whatever its title (`--key`, a case variant). A suffixed key's holder is this
+            # title's only if its title is the same one: `--key ship--2` on another title,
+            # or a title whose first 64 slug characters are this one's, answered for it
+            # (tester on #469).
+            ours = candidate == derived or _same_title(task.title, title)
+            if ours and task.status not in CLOSED_STATUSES:
                 break
             # The key's holder is dropped or done: re-adding this title must not stay
             # stuck behind a closed task forever (#2), so it gets a new key and a fresh
@@ -1730,7 +1754,8 @@ def add_task(
             # which no title's key holds (`task_key` and `_legacy_task_key` collapse runs
             # of `-`): `release-checklist-2` is the key of "Release checklist 2", and a
             # re-add keyed so answered with that task, or took it for this title's (#469).
-            supersedes = task
+            if ours:
+                supersedes = task
             suffix += 1
             candidate = f"{derived}--{suffix}"
         if created and supersedes is not None:

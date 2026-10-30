@@ -27,16 +27,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   name, and the line under it shows the label it will become (`Login Fix` → `login-fix`,
   `2FA work` → `coder-2fa-work`); Enter or a click away saves, Esc cancels. `aisquare fleet
   relabel coder-1 login fix` does the same from a shell (`--json` too), and both say
-  `coder-1 is now login-fix`. A name another running agent of the project holds gets the
-  next free suffix (`login-fix-2`), and you are told. From then on the agent is that label
-  everywhere: `fleet tell`, `stop`, `restart`, `switch`, the board's lines and its tmux
-  window. The old label finds nothing, and its refusal says what the agent is called now.
+  `coder-1 is now login-fix`. A name another running or paused agent of the project holds
+  gets the next free suffix (`login-fix-2`), and you are told. From then on the agent is
+  that label everywhere: `fleet tell`, `stop`, `restart`, `switch`, the board's lines and
+  its tmux window. The old label finds nothing, and its refusal says what the agent is called now.
   An ended agent whose label the rename takes keeps its row, listed as `~login-fix` by
   `fleet ls --all`, and no restart by label brings it back.
   An `agent_renamed` line on the board tells the manager. The agent keeps its worktree and
   branch, as they are: its restart, stop and reap find them by the row. The manager and
   the captain keep their labels, no agent can take `manager` or `captain`, and an agent
-  that ended is not renamed. `fleet rename` still renames the project's codename.
+  that ended, or is paused, is not renamed (resume a paused one first). `fleet rename`
+  still renames the project's codename.
 - **Pause and resume the agents of a project, or of every project**, so idle managers and
   coders stop spending tokens without being reaped, and come back with one click — before
   a reboot or an OS update too. A pause exits each running agent's Claude process as
@@ -59,6 +60,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     act on nothing greyed (*Resume* clears a `fleet-paused` signal with no agent paused
     too). A paused agent shows `⏯ paused` in the sidebar, and its view offers *Resume*, and
     *Stop*, which ends the pause for good.
+  - A paused agent survives a rename. It keeps its label: `fleet relabel` and the sidebar
+    refuse to rename it until it is resumed, and give no running agent its label. Renaming
+    its project leaves it paused, and it resumes in the renamed project's tmux session, in
+    its own worktree and branch.
   - A paused agent survives its tmux server: `fleet reap --server-down` after a reboot
     leaves it paused, its worktree and claims intact. `reap` removes neither its worktree
     nor its branch, a spawn does not take its label (a second manager is refused while

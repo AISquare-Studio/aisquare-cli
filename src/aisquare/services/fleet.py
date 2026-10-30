@@ -861,7 +861,9 @@ def relabel_refusal(agent: FleetAgent) -> str | None:
 
     The manager and the captain run under the one label their role has (:func:`_fixed_label`),
     which the fleet and the board find them by. An ended agent runs nothing a name could
-    follow: its label is the next spawn's to take."""
+    follow: its label is the next spawn's to take. A paused one (:func:`_paused_row`) runs
+    nothing either, and keeps its label for ``fleet resume``, which brings it back under it:
+    resumed, it is renamed as any running agent is."""
     if agent.role == "manager" or agent.label == MANAGER_LABEL:
         return (
             f"the manager is always labelled {MANAGER_LABEL!r} — the fleet and the board find "
@@ -871,6 +873,11 @@ def relabel_refusal(agent: FleetAgent) -> str | None:
         return (
             f"the captain is always labelled {CAPTAIN_LABEL!r} — the fleet and the board find "
             "it by that name, so it is not renamed"
+        )
+    if _paused_row(agent):
+        return (
+            f"{agent.label} is paused — only a running agent is renamed; `fleet resume` "
+            "brings it back under this label, and it can be renamed then"
         )
     if agent.ended_at is not None:
         return f"{agent.label} has ended — only a running agent is renamed"
@@ -12143,11 +12150,13 @@ def relabel(
     """Rename the live agent ``label`` to the label ``text`` becomes (:func:`label_from_text`):
     ``fleet relabel`` and the sidebar's agent row both call this.
 
-    Refused for the manager and the captain, and for an agent that ended
+    Refused for the manager and the captain, and for an agent that ended or is paused
     (:func:`relabel_refusal`), and to ``manager`` or ``captain``, labels their roles keep. A
     label another LIVE agent of the project holds takes the next free suffix
-    (``login-fix-2``), and a note says so; the agent's own label is no change. The write is
-    one compare-and-set against the partial ``fleet_agent_live_label`` index
+    (``login-fix-2``), and a note says so; the agent's own label is no change. So does one a
+    PAUSED agent keeps for its resume (:func:`_paused_heads`): retired as another agent's
+    history, its pause was lost, and ``fleet resume`` found nothing under its label. The
+    write is one compare-and-set against the partial ``fleet_agent_live_label`` index
     (``store.relabel_fleet_agent``): a rename or a spawn that takes the label meanwhile
     trips it, and the next suffix is tried, so two live rows never share a label.
 
@@ -12187,15 +12196,20 @@ def relabel(
             )
         if wanted == agent.label:
             return RelabelReceipt(agent, label, wanted, notes)
+        whose = "another live agent's"
         for _ in range(_LABEL_RETRIES):
-            others = {
+            paused = {
+                row.label for row in _paused_heads(store.fleet_label_heads(project.id)).values()
+            }
+            others = paused | {
                 row.label
                 for row in store.fleet_agents(project.id, live_only=True)
                 if row.id != agent.id
             }
+            whose = "a paused agent's" if wanted in paused else "another live agent's"
             picked = free_label(wanted, others)
             if picked == agent.label:
-                notes.append(f"{wanted} is another live agent's label — {label} keeps its own")
+                notes.append(f"{wanted} is {whose} label — {label} keeps its own")
                 return RelabelReceipt(agent, label, wanted, notes)
             try:
                 renamed = store.relabel_fleet_agent(agent.id, agent.label, picked)
@@ -12210,7 +12224,7 @@ def relabel(
         else:
             raise FleetError(f"could not rename {label!r}: every label tried was taken meanwhile")
         if picked != wanted:
-            notes.append(f"{wanted} is another live agent's label — named it {picked}")
+            notes.append(f"{wanted} is {whose} label — named it {picked}")
         by = f" — renamed by {_actor_name(store, actor)}" if actor is not None else ""
         # The row is the record; the event, the courtesy. Written as no session's, so the
         # agent's own next delta, which leaves out its own posts, tells it its new name too.

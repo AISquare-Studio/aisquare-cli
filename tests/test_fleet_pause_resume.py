@@ -774,3 +774,108 @@ def test_an_agent_may_not_restart_switch_or_resume_a_paused_teammate_and_the_own
     assert owners.exit_code == 0, owners.output
     assert json.loads(owners.stdout)["started"]["label"] == coder.label
     assert _row(coder.id).paused_at is None and _states(fleet.alpha)[coder.label] != "paused"
+
+
+# --- the fold into 0.9.2: a paused agent survives a relabel (#455) and a project rename (#456)
+
+
+def _resumed(fleet: Fleet, report: fleet_service.BulkReport, key: str) -> FleetAgent:
+    result = _by_key(fleet, report.receipts)[key].result
+    assert isinstance(result, fleet_service.RestartReceipt), report.receipts
+    return result.started
+
+
+def test_a_paused_agent_is_not_relabelled_and_keeps_its_label_from_a_running_one(
+    fleet: Fleet,
+) -> None:
+    """``fleet relabel`` of a paused agent is refused, saying it is paused and how it comes
+    back; a running agent renamed to the paused one's label takes the next suffix, as for a
+    live one's. Given it, the store retired the paused row to ``~<label>`` and its resume
+    found nothing under its label."""
+    coder_key = _coder_label(fleet, "alpha")
+    paused = fleet.agents[coder_key]
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    with pytest.raises(FleetError, match=f"{paused.label} is paused — only a running agent"):
+        fleet_service.relabel(fleet.alpha, paused.label, "login fix")
+    assert "fleet resume" in (fleet_service.relabel_refusal(_row(paused.id)) or "")
+    other = fleet_service.spawn(fleet.alpha, "coder", label="other", worktree=False).agent
+
+    receipt = fleet_service.relabel(fleet.alpha, other.label, paused.label)
+
+    assert receipt.agent.label == f"{paused.label}-2"
+    assert receipt.notes[0] == (
+        f"{paused.label} is a paused agent's label — named it {paused.label}-2"
+    )
+    row = _row(paused.id)
+    assert (row.label, row.paused_at is not None) == (paused.label, True)
+    assert _states(fleet.alpha)[paused.label] == "paused"
+    resumed = fleet_service.bulk("resume", projects=[fleet.alpha])
+    started = _resumed(fleet, resumed, coder_key)
+    assert (started.label, started.cwd) == (paused.label, paused.cwd)
+
+
+def test_the_store_refuses_a_relabel_onto_a_paused_agents_label(fleet: Fleet) -> None:
+    """The store's own guard, under the service's pick: a relabel onto the label a paused row
+    heads raises as a live holder's does (the service then takes the next suffix), and
+    writes nothing — neither the running row nor the paused one moves."""
+    paused = fleet.agents[_coder_label(fleet, "alpha")]
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    other = fleet_service.spawn(fleet.alpha, "coder", label="other", worktree=False).agent
+
+    with store_session() as store, pytest.raises(sqlite3.IntegrityError, match="paused"):
+        store.relabel_fleet_agent(other.id, other.label, paused.label)
+
+    assert _row(other.id).label == other.label
+    row = _row(paused.id)
+    assert (row.label, row.paused_at is not None) == (paused.label, True)
+
+
+def test_a_spawn_does_not_take_the_tree_a_relabelled_paused_agent_keeps(
+    fleet: Fleet,
+) -> None:
+    """A relabel moves no tree, so a coder spawned as ``coder-x`` and renamed ``login-fix``
+    still works in ``…/coder-x``; paused, it keeps that tree for its resume. A spawn asking
+    for ``coder-x`` is given another label, and told whose tree it is: given the label, it
+    started in the paused agent's tree, uncommitted work and all."""
+    coder_key = _coder_label(fleet, "alpha")
+    coder = fleet.agents[coder_key]
+    fleet_service.relabel(fleet.alpha, coder.label, "login fix")
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+
+    spawned = fleet_service.spawn(fleet.alpha, "coder", label=coder.label, worktree=True)
+
+    assert spawned.agent.label == f"{coder.label}-2"
+    assert spawned.agent.cwd != coder.cwd
+    assert spawned.notes[0] == (
+        f"label {coder.label!r} is the worktree login-fix paused in ({coder.cwd}) — "
+        f"using {coder.label + '-2'!r}"
+    )
+    resumed = fleet_service.bulk("resume", projects=[fleet.alpha])
+    started = _resumed(fleet, resumed, "alpha/login-fix")
+    assert (started.label, started.cwd) == ("login-fix", coder.cwd)
+
+
+def test_a_paused_agent_survives_a_project_rename_and_resumes_in_its_session(
+    fleet: Fleet, tmux: FakeTmux
+) -> None:
+    """A project renamed while its agents are paused stays paused (its signal is the
+    project's by id), and each paused agent resumes under its label, in its own worktree and
+    branch, in the tmux session of the codename the rename gave."""
+    coder_key = _coder_label(fleet, "alpha")
+    coder = fleet.agents[coder_key]
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    branch = _row(coder.id).branch
+
+    renamed = fleet_service.rename_project(fleet.alpha, "Alpha Two")
+
+    assert renamed.codename == "alpha-two"
+    assert fleet_service.is_paused(renamed)
+    assert set(_states(renamed).values()) == {"paused"}
+    spawned = len(tmux.spawned)
+    resumed = fleet_service.bulk("resume", projects=[renamed])
+    started = _resumed(fleet, resumed, coder_key)
+    assert (started.label, started.cwd, started.branch) == (coder.label, coder.cwd, branch)
+    assert started.branch is not None
+    sessions = {str(entry["session"]) for entry in tmux.spawned[spawned:]}
+    assert sessions == {"asq-alpha-two"}, sessions
+    assert not fleet_service.is_paused(renamed)

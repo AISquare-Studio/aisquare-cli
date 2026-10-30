@@ -2650,6 +2650,92 @@ def test_a_store_at_the_v40_schema_gains_the_pause_step_and_keeps_every_row() ->
     assert _contents(db) == (schema, rows), "a second open changes nothing"
 
 
+def _fresh_schema() -> list[tuple[object, ...]]:
+    """The whole schema, SQL and all, of a store this build makes from no file: the store at
+    :func:`_db_path` is moved aside for it and put back."""
+    db = _db_path()
+    aside = db.with_name("aside.db")
+    db.rename(aside)
+    try:
+        open_store().close()
+        return _contents(db)[0]
+    finally:
+        for leftover in (db, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
+            leftover.unlink(missing_ok=True)
+        aside.rename(db)
+
+
+def test_a_store_at_the_v40_schema_reaches_the_schema_a_fresh_store_has() -> None:
+    """The fold of #457 into 0.9.2: a v40 store (0.9.1's) opened by this build takes #456's
+    v41 and then the pause's v42, and ends with the schema a fresh store has — every table,
+    column (its declaration and default are in the table's SQL) and index, compared as SQLite
+    holds them, not only by name."""
+    db = _at_version(40)
+    open_store().close()
+    schema, rows = _contents(db)
+
+    assert rows["PRAGMA user_version"] == [(SCHEMA_VERSION,)] == [(42,)]
+    assert schema == _fresh_schema(), "a migrated v40 store is not a fresh store's schema"
+
+
+def test_a_store_at_456s_v41_gains_the_pause_step_and_keeps_its_codename_aliases() -> None:
+    """A store #456's v41 left (0.9.2 before the fold: the codename aliases, no pause column)
+    opens at v42: its aliases and fleet rows unchanged, each row ``paused_at`` NULL, and the
+    schema a fresh store has."""
+    db = _at_version(
+        41,
+        after=_TWO_PROJECTS
+        + "INSERT INTO project_codename_alias (codename, project_id, retired_at) "
+        "VALUES ('amber-otter', 'prj_used', '2026-10-29T00:00:00+00:00');"
+        "INSERT INTO fleet_agent (id, project_id, label, role, binary, tmux_socket, pane_id, "
+        "cwd, worktree, created_at, ended_at, ended_by) VALUES ('agt_old', 'prj_used', "
+        "'coder-1', 'coder', 'claude', 'asq', '%1', '/w', 0, '2026-10-01T00:00:00+00:00', "
+        "'2026-10-01T01:00:00+00:00', 'stopped');",
+    )
+    before = _contents(db)[1]
+
+    with store_session() as store:
+        agent = store.get_fleet_agent("agt_old")
+        found = [project.id for project in store.find_projects("amber-otter")]
+    schema, rows = _contents(db)
+
+    assert rows["PRAGMA user_version"] == [(42,)]
+    assert rows["project_codename_alias"] == before["project_codename_alias"]
+    assert [row[:-1] for row in rows["fleet_agent"]] == before["fleet_agent"]
+    assert agent is not None and agent.paused_at is None and agent.ended_by == "stopped"
+    assert found == ["prj_used"], "the alias still names its project"
+    assert schema == _fresh_schema()
+
+
+def test_a_store_457s_own_build_stamped_v41_converges_to_v42() -> None:
+    """#457's branch shipped the pause column as ITS v41, before the fold renumbered it v42:
+    a store that build stamped holds ``paused_at`` and no codename alias table. The presence
+    pass gives it #456's table and index, the ladder stamps it v42, and its paused row is
+    read as paused, as it was written."""
+    db = _at_version(
+        40,
+        after=_TWO_PROJECTS + "ALTER TABLE fleet_agent ADD COLUMN paused_at TEXT;"
+        "INSERT INTO fleet_agent (id, project_id, label, role, binary, tmux_socket, pane_id, "
+        "cwd, worktree, created_at, ended_at, ended_by, paused_at) VALUES ('agt_paused', "
+        "'prj_used', 'coder-1', 'coder', 'claude', 'asq', '%1', '/w', 0, "
+        "'2026-10-01T00:00:00+00:00', '2026-10-01T01:00:00+00:00', 'stopped', "
+        "'2026-10-01T01:00:00+00:00');",
+        stamp=41,
+    )
+
+    with store_session() as store:
+        agent = store.get_fleet_agent("agt_paused")
+    rows = _contents(db)[1]
+
+    assert rows["PRAGMA user_version"] == [(42,)]
+    assert agent is not None and agent.paused_at is not None and agent.ended_by == "stopped"
+    raw = sqlite3.connect(str(db))
+    try:
+        assert _shape(raw) == _built(SCHEMA_VERSION)
+    finally:
+        raw.close()
+
+
 # --- doctor's database row reads the schema, not only the file (review of #203) ---------------
 
 

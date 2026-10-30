@@ -5798,7 +5798,9 @@ class SqliteStore:
         ``old`` was renamed (:data:`FLEET_RENAMED`: the row's id and when), which a lookup by
         ``old`` names in its refusal. Another LIVE row holding ``new`` trips the partial
         ``fleet_agent_live_label`` index: ``sqlite3.IntegrityError`` is raised, and the
-        service picks the next suffix, as a spawn does.
+        service picks the next suffix, as a spawn does. So does a PAUSED agent's (its row the
+        newest of ``new``, ``paused_at`` set, v42), with nothing written: retired, its pause
+        was lost, and ``fleet resume`` found no agent under its label.
         """
         try:
             cursor = self._conn.execute(
@@ -5812,6 +5814,14 @@ class SqliteStore:
                 "SELECT project_id FROM fleet_agent WHERE id = ?", (agent_id,)
             ).fetchone()
             project_id = str(row["project_id"])
+            head = self._conn.execute(
+                "SELECT ended_at, paused_at FROM fleet_agent "
+                "WHERE project_id = ? AND label = ? AND id != ? "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (project_id, new, agent_id),
+            ).fetchone()
+            if head is not None and head["ended_at"] is not None and head["paused_at"]:
+                raise sqlite3.IntegrityError(f"label {new!r} is a paused agent's")
             # `new`'s own history first — another agent's, ended — out of the way, before
             # this agent's moves in.
             self._conn.execute(

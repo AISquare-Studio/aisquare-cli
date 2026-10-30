@@ -1543,8 +1543,10 @@ def test_a_switch_turned_on_by_hand_is_started_by_the_first_turning_on(machine: 
 
 
 def test_a_switch_turned_on_by_hand_with_no_identity_previews_as_a_sample(
-    machine: Machine,
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # `metrics share preview` reads by the clock; the history is dated by NOW (#22).
+    pin_clock(monkeypatch, usage_share, sharing)
     _history(machine)
     settings_service.set_value("sharing.enabled", "true")  # as `aisquare config set` does
     runner = CliRunner()

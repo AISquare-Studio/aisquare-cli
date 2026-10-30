@@ -14,6 +14,7 @@ beta, each with a running manager and coder-1).
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -281,21 +282,39 @@ def test_an_agent_that_died_before_the_column_is_read_by_its_exit_status(
     tmp_path: Path,
 ) -> None:
     """A row ended before v34 (``ended_by`` NULL): killed (143) is restarted; no status
-    (a stop's kill, or a reap) cannot be told apart and is left."""
+    (a stop's kill, or a reap) cannot be told apart and is left. One killed just over
+    :data:`~aisquare.services.fleet.DEAD_RESTART_WITHIN` ago is left too.
+
+    Dated by the clock the plan reads (``fleet._now``), not a calendar day: dated
+    2026-10-23, the crash it recalls, the row fell out of the window a week on and the
+    killed agent was no longer restarted (#22). Two days ago, past the listing's
+    ``RECENTLY_ENDED`` and inside the window: both rows reach the plan as label heads."""
     killed, quiet = fleet.agents["alpha/coder-1"], fleet.agents["beta/coder-1"]
+    died = fleet_service._now() - timedelta(days=2)
     for agent, status in ((killed, KILLED), (quiet, None)):
         tmux.vanish(agent.pane_id)
-        with store_session() as store:
-            store._conn.execute(  # type: ignore[attr-defined]
-                "UPDATE fleet_agent SET ended_at = ?, exit_status = ?, ended_by = NULL "
-                "WHERE id = ?",
-                ("2026-10-23T16:50:00+00:00", status, agent.id),
-            )
-            store._conn.commit()  # type: ignore[attr-defined]
+        _ended_before_the_column(agent, died, status)
 
     targets = {row.agent.id for row in fleet_service.bulk_plan("restart").targets}
 
     assert killed.id in targets and quiet.id not in targets
+
+    # A minute past the window: left (`_left_dead`), so not even drawn as a dead head.
+    long_ago = fleet_service._now() - fleet_service.DEAD_RESTART_WITHIN - timedelta(minutes=1)
+    _ended_before_the_column(killed, long_ago, KILLED)
+    targets = {row.agent.id for row in fleet_service.bulk_plan("restart").targets}
+
+    assert killed.id not in targets
+
+
+def _ended_before_the_column(agent: FleetAgent, ended_at: datetime, status: int | None) -> None:
+    """``agent``'s row as one ended before v34 left it: ``ended_by`` NULL, its exit status."""
+    with store_session() as store:
+        store._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE fleet_agent SET ended_at = ?, exit_status = ?, ended_by = NULL WHERE id = ?",
+            (ended_at.isoformat(), status, agent.id),
+        )
+        store._conn.commit()  # type: ignore[attr-defined]
 
 
 # --- #274 delta review 2: m1-m3 ------------------------------------------------------

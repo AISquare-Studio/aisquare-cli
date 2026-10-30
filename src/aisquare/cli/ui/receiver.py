@@ -393,7 +393,7 @@ def _focus_project(app: FleetApp, arg: str | None) -> str:
     if not sidebar.put_cursor(f"project:{project.id}"):
         return (
             f"selected {project_name(project)}; its card is in a folded group, "
-            "so the sidebar cursor stayed where it was"
+            "so the sidebar shows its highlight once the group is unfolded"
         )
     return f"focused {project_name(project)} in the sidebar"
 

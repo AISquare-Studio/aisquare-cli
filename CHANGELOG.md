@@ -127,6 +127,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on, and `fleet shutdown` still clears the signal. `fleet ls` shows a paused agent as
   `⏯ paused`.
 
+### Fixed
+
+- **Settings ▸ Usage & stats scrolls to its last section.** Its body was a plain
+  `Vertical` (`height: 1fr`) inside the page's `VerticalScroll`, so it was cut to the
+  window and the page never scrolled: at 160x48, Accounts, Busiest days, Models and
+  Features could not be reached. It sizes to its content now.
+- **The Fleet line says "1 account".** With one account's week read, the Accounts page
+  and `aisquare accounts usage` said `week: 0.8 of 1 accounts left`.
+- **The Accounts table fits a 160-column terminal, with no sideways scroll.** A row was
+  167 cells on the 123 the page has there, so the week-resets column was cut and a
+  horizontal scrollbar showed. The resets columns show the distance alone
+  (`in 6d 12h`, at most `in 4h 59m` for the session and `in 23h 59m` for the week; a kept
+  reading whose window has reset reads `reset`), with the whole reset, clock time or age
+  and all, on hover; their headers read `5h resets` and `wk resets`, as the status line
+  does; the name and email columns are 12 and 17 cells (a longer value ends in `…`, the
+  whole of it on hover); and the *↑*,
+  *↓*, *Log in*, *Disable* and *Remove* buttons are as wide as their labels. A narrower
+  terminal still scrolls the table sideways as one.
+
 ## [0.9.1] - 2026-10-27
 
 **Usage & stats: what every Claude Code session on this machine spent, by day,

@@ -333,6 +333,9 @@ class UpgradePlan:
     remote: str | None = None
     """The Remote that is on for this home in another process, named (:func:`running_remote`);
     ``None`` when none is."""
+    asqs: tuple[str, ...] = ()
+    """The asq UIs live on this home, named (:func:`running_asqs`): the upgrade refuses while
+    one runs (:attr:`asqs_refusal`)."""
     pin_refused: bool = False
     """Whether :attr:`reason` is that ``--version`` cannot pick a release for this route
     (``install_route.pin_refusal``): Homebrew's, a checkout's or a local source's."""
@@ -399,6 +402,11 @@ class UpgradePlan:
             f"install's files until it is started again. To be safe, turn it off first: "
             f"{REMOTE_OFF}"
         )
+
+    @property
+    def asqs_refusal(self) -> str | None:
+        """Why the upgrade will not run while :attr:`asqs` do, or ``None`` when none does."""
+        return asqs_refusal("upgrade", self.asqs)
 
     @property
     def config_warning(self) -> str | None:
@@ -606,6 +614,7 @@ def upgrade_plan(
     live: tuple[str, ...] = ()
     fleet_error: str | None = None
     remote: str | None = None
+    asqs: tuple[str, ...] = ()
     lost: tuple[str, ...] = ()
     regained: tuple[str, ...] = ()
     if reason is None:
@@ -625,6 +634,7 @@ def upgrade_plan(
             regained = _tools_regained()
         live, _unlistened, fleet_error = running_fleet()
         remote = running_remote()
+        asqs = running_asqs()
     return UpgradePlan(
         route=route,
         current=__version__,
@@ -640,6 +650,7 @@ def upgrade_plan(
         live_agents=live,
         fleet_error=fleet_error,
         remote=remote,
+        asqs=asqs,
         config_defaults_lost=lost,
         env_files_dropped=dropped,
         tools_regained=regained,
@@ -1331,6 +1342,9 @@ class UninstallPlan:
     remote: str | None = None
     """The Remote that is on for this home in another process, named (:func:`running_remote`);
     ``None`` when none is. It refuses the run, as a running fleet agent does."""
+    asqs: tuple[str, ...] = ()
+    """The asq UIs live on this home, named (:func:`running_asqs`). One refuses the run, as a
+    Remote on does."""
     statuslines: tuple[Path, ...] = ()
     """The config directories whose ``statusLine`` aisquare set (``accounts statusline``,
     #287): removed with the hooks, a wrapped one put back as the user had it, so no status
@@ -1480,6 +1494,9 @@ class UninstallPlan:
                 f"would work for as long as it runs. Turn it off first: {REMOTE_OFF}",
                 error="remote_on",
             )
+        refused_for_asqs = asqs_refusal("uninstall", self.asqs)
+        if refused_for_asqs is not None:
+            return UninstallRefused(refused_for_asqs, error="asq_running")
         if self.purge and self.purge_refusal is not None:
             return UninstallRefused(
                 f"--purge will not delete {self.home}: {self.purge_refusal}",
@@ -2248,6 +2265,45 @@ def running_remote() -> str | None:
     return remote_server.remote_served_by()
 
 
+def running_asqs() -> tuple[str, ...]:
+    """The asq UIs live on this home but this process, named with their kind, host and pid
+    (``core.instances``): ``asq 0.9.2 (ssh on mini, pid 4242)``. Read from the registry
+    without pruning it: a plan writes nothing to the home, a dry run's least of all (review
+    of #462). Inside an asq, that asq is not one."""
+    from aisquare.core import instances
+
+    return tuple(instance.label for instance in instances.other_instances(prune=False))
+
+
+_ASQ_COST = {
+    "upgrade": (
+        "the install would be replaced under {it}, and {it} would go on running the old "
+        "release over the new one's files: two releases on one home"
+    ),
+    "uninstall": "it would remove the program {it} {runs}, with nothing left to quit {it} cleanly",
+}
+"""What each command would do to an asq left running (:func:`asqs_refusal`)."""
+
+
+def asqs_refusal(command: str, asqs: Sequence[str], *, again: str | None = None) -> str | None:
+    """Why ``aisquare <command>`` (``upgrade`` or ``uninstall``) will not run while ``asqs``
+    run (:func:`running_asqs`), naming them, or ``None`` when none does; ``again`` is what to
+    do once they have quit. Asq's own Update and Uninstall refuse with it before quitting
+    (#17)."""
+    if not asqs:
+        return None
+    one = len(asqs) == 1
+    it = "it" if one else "them"
+    cost = _ASQ_COST.get(command, "{it} would be left running").format(
+        it=it, runs="runs" if one else "run"
+    )
+    running = "another asq runs" if one else f"{len(asqs)} other asqs run"
+    each = "it" if one else "each"
+    again = again or f"run `aisquare {command}` again"
+    named = ", ".join(asqs)
+    return f"{running} on this home ({named}): {cost}. Quit {it} first (q in {each}), then {again}."
+
+
 def plugin_answers(cache: str | None = None) -> Path:
     """The file the Claude Code plugin's launcher keeps uv's answers in.
 
@@ -2364,6 +2420,7 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         plugins=_plugins(claude_dirs),
         plugin_answers=_plugin_answers_there(),
         remote=running_remote(),
+        asqs=running_asqs(),
     )
 
 

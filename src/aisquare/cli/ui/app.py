@@ -96,6 +96,7 @@ from aisquare.cli.ui.sidebar import (
     TIMES,
     AccountsSelected,
     AddProject,
+    AgentRow,
     AgentSelected,
     AppSettingsSelected,
     CaptainRequested,
@@ -104,6 +105,7 @@ from aisquare.cli.ui.sidebar import (
     ProjectCard,
     ProjectRenamed,
     ProjectSelected,
+    RenameAgent,
     RenameProject,
     ResizeSidebar,
     SettingsRow,
@@ -117,7 +119,13 @@ from aisquare.cli.ui.sidebar import (
 )
 from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
 from aisquare.cli.ui.stop import StopAgentScreen
-from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane, log_paste
+from aisquare.cli.ui.terminal import (
+    EscapeToSidebar,
+    InPlaceField,
+    SelectionHost,
+    TerminalPane,
+    log_paste,
+)
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.update import (
@@ -259,9 +267,14 @@ HEADROOM_SECONDS = 60.0
 goes to the network only for an account whose cached usage is over five minutes old."""
 PROJECT_REMOVE_WORKER = "project-remove"
 """The thread worker a card's *Remove from fleet…* forgets its project on (``project forget``)."""
+PROJECT_CODENAME_WORKER = "project-codename"
+"""The thread worker a card's rename gives the project its new codename and renames its tmux
+session on (``services.fleet.follow_name``), once the nickname is written."""
 PROJECT_FRESH_WORKER = "project-fresh"
 """The thread worker *Start fresh…* clears a project's board and fleet on (``project fresh``),
 one a project at a time (:func:`_fresh_group`)."""
+AGENT_RENAME_WORKER = "agent-relabel"
+"""The thread worker an agent row's name field renames its agent on (``fleet relabel``)."""
 TOAST_PLACES = 3
 """The places a refusal's toast names before it counts the rest: at 80x24 a longer list
 pushed the toast's title and what to do off the screen."""
@@ -273,6 +286,20 @@ dialog opens again on what the run found (``FleetApp._project_freshened``)."""
 def _fresh_group(project_id: str) -> str:
     """The worker group of a project's Start fresh: one run of it at a time."""
     return f"{PROJECT_FRESH_WORKER}:{project_id}"
+
+
+@dataclass(frozen=True)
+class _CodenameFollowed:
+    """What a card's rename did to the codename (:data:`PROJECT_CODENAME_WORKER`)."""
+
+    before: str | None
+    """The codename the project had when its nickname was written."""
+    after: ProjectInfo
+    """The project as the store has it now."""
+    notes: list[str]
+    """What :func:`fleet.follow_name` could not do, or chose: a suffix, a name that gives none."""
+    old_works: bool = True
+    """Whether ``--project <before>`` names this project alone now (``old_codename_works``)."""
 
 
 _QUIT_POLL = 0.1
@@ -611,6 +638,11 @@ class HelpScreen(ModalScreen[None]):
             ("shift+g", "group the marked cards; Esc clears the marks"),
             ("drag title", "move a card or a group header to a new place"),
             ("F2 dblclick", "rename the card in place: Enter or a click away saves, Esc cancels"),
+            (
+                "F2 dblclick",
+                "on an agent's row, rename the agent (its label and tmux window); not the "
+                "manager's or the captain's",
+            ),
             (
                 ". ⋯ r-click",
                 "the card's menu: rename, pin, settings, start fresh, remove from the fleet",
@@ -1137,6 +1169,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         are never listed, whatever ``show_captured`` says, and ``a`` is no key."""
         self._undo: list[project_groups.UndoEntry] = []
         """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
+        self._relabels: dict[Worker[Any], RenameAgent] = {}
+        """Each agent rename on its way (:data:`AGENT_RENAME_WORKER`), with what asked for it:
+        a refusal reopens that row's field with what was typed."""
         self._fresh_choices: dict[str, FreshChoice] = {}
         """Each project's last confirmed Start fresh, by id: what a reopened dialog ticks."""
         self._fresh_asked: dict[str, FreshChoice] = {}
@@ -1954,6 +1989,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.worker.name == BULK_WORKER:
             self._bulk_done(event)
             return
+        if event.worker.name == PROJECT_CODENAME_WORKER:
+            self._codename_followed(event)
+            return
+        if event.worker.name == AGENT_RENAME_WORKER:
+            self._agent_renamed(event)
+            return
         if event.worker.name == FLEET_WORKER:
             self._fleet_read(event)
             return
@@ -2200,7 +2241,18 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         pane = getattr(view, "pane", None)
         if isinstance(pane, TerminalPane):
-            self.call_after_refresh(pane.focus)
+            self.call_after_refresh(self._focus_unless_typing, pane)
+
+    def _focus_unless_typing(self, pane: TerminalPane) -> None:
+        """Focus ``pane`` — unless an in-place field holds the keys by then. A double-click's
+        second click lands while the first one's view is still being shown, and opens a
+        field over the agent's row (its rename): taken from it, the field closed unsaved, as
+        a blur closes it (validator of #455, minor 2)."""
+        if isinstance(self.focused, InPlaceField):
+            return
+        if any(row.renaming for row in self.sidebar.query(AgentRow)):
+            return
+        pane.focus()
 
     async def on_agent_restarted(self, event: AgentRestarted) -> None:
         """A restart minted a new row (#138): say so, and show it where the old one was — but
@@ -2383,11 +2435,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     # --- a card's name and menu ------------------------------------------------------------
 
     def on_rename_project(self, event: RenameProject) -> None:
-        """A card's name field was saved: write the nickname, as ``aisquare project rename``.
+        """A card's name field was saved: write the nickname, then the codename its name
+        gives, as ``aisquare project rename``.
 
-        On this thread, as every sidebar gesture's write is (:meth:`_layout`): one row,
-        and the card already says the new name. A refusal says why and reopens the
-        field with what was typed, to correct.
+        The nickname on this thread, as every sidebar gesture's write is (:meth:`_layout`):
+        one row, and the card already says the new name. A refusal says why and reopens the
+        field with what was typed, to correct. The codename and the tmux session in a
+        worker (:meth:`_follow_name`): it asks tmux and writes the boards, and the UI never
+        waits on either.
         """
         project = self.snapshot.project(event.project_id) if self.snapshot else None
         if project is None:
@@ -2405,6 +2460,113 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.sidebar.open_rename(project.id, event.typed)
             return
         self.post_message(ProjectRenamed(renamed))
+        self._follow_name(renamed)
+
+    def _follow_name(self, project: ProjectInfo) -> None:
+        """The codename half of a card's rename, off the UI thread (:func:`fleet.follow_name`);
+        :meth:`_codename_followed` says what it did. Per project and never ``exclusive``: a
+        cancelled worker's thread runs on regardless, and its answer would go unsaid."""
+        before = project.codename
+
+        def follow() -> _CodenameFollowed:
+            notes: list[str] = []
+            after = fleet_service.follow_name(project, notes=notes)
+            works = bool(before) and fleet_service.old_codename_works(after.id, before or "")
+            return _CodenameFollowed(before, after, notes, works)
+
+        self.run_worker(
+            follow,
+            name=PROJECT_CODENAME_WORKER,
+            group=f"{PROJECT_CODENAME_WORKER}:{project.id}",
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _codename_followed(self, event: Worker.StateChanged) -> None:
+        """A toast naming the codename a card's rename gave (and the old one that still
+        works), a warning for each note; a failure says the nickname stands and why the
+        codename did not follow it."""
+        if event.state is WorkerState.ERROR:
+            self.notify(
+                f"the name is saved, but the fleet codename was not changed: {event.worker.error}",
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
+            return
+        result = event.worker.result
+        if event.state is not WorkerState.SUCCESS or not isinstance(result, _CodenameFollowed):
+            return
+        after = result.after
+        if after.codename is not None and after.codename != result.before:
+            was = ""
+            if result.before:
+                was = (
+                    f" — was {result.before}, and --project {result.before} still works"
+                    if result.old_works
+                    else f" — was {result.before}; --project {result.before} names another "
+                    f"project too, so use --project {after.codename}"
+                )
+            self.notify(
+                f"✓ {project_service.display_name(after)} · fleet codename {after.codename} "
+                f"(tmux {fleet_service.session_name(after.codename)}){was}",
+                timeout=8,
+                markup=False,
+            )
+            self.post_message(ProjectRenamed(after))
+        elif after.codename is not None and not result.notes:
+            self.notify(
+                f"✓ {project_service.display_name(after)} · fleet codename {after.codename}",
+                timeout=5,
+                markup=False,
+            )
+        for note in result.notes:
+            self.notify(note, severity="warning", timeout=10, markup=False)
+
+    def on_rename_agent(self, event: RenameAgent) -> None:
+        """An agent row's name field was saved: ``fleet relabel``, off the UI thread.
+
+        The rename also asks tmux to rename the agent's window, which may wait on a busy
+        server, so it runs in a worker (:data:`AGENT_RENAME_WORKER`), never on this thread. The
+        row shows the old label until the frame after it lands.
+        """
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        target, label, typed = project, event.label, event.typed
+        worker = self.run_worker(
+            lambda: fleet_service.relabel(target, label, typed, actor="user"),
+            name=AGENT_RENAME_WORKER,
+            group=AGENT_RENAME_WORKER,
+            thread=True,
+            exit_on_error=False,  # a refusal is an answer to show, not a crash
+        )
+        # Before the worker can report: its state change is handled on this thread.
+        self._relabels[worker] = event
+
+    def _agent_renamed(self, event: Worker.StateChanged) -> None:
+        """Say what the agent is called now, or why not, and reopen the field with what was
+        typed on a refusal, to correct."""
+        if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            return
+        asked = self._relabels.pop(event.worker, None)
+        result = event.worker.result
+        if event.state is WorkerState.SUCCESS and isinstance(result, fleet_service.RelabelReceipt):
+            said = "\n".join([result.said, *result.notes])
+            self.notify(said, title="renamed", timeout=8, markup=False)
+        elif event.state is WorkerState.ERROR:
+            error = event.worker.error
+            self.notify(
+                _why_unread(error) if error is not None else "the rename did not finish",
+                title="not renamed",
+                severity="error",
+                timeout=8,
+                markup=False,
+            )
+            if asked is not None:
+                self.sidebar.open_agent_rename(asked.agent_id, asked.typed)
+        self.refresh_data()
 
     def on_project_renamed(self, event: ProjectRenamed) -> None:
         """A nickname was written — a card, its menu, a Settings tab: every name says it now."""
@@ -3778,6 +3940,8 @@ def _writing_workers() -> dict[str, str]:
         CONSENT_WORKER: "the answer to the usage-sharing question",
         PROJECT_REMOVE_WORKER: "a project's removal",
         PROJECT_FRESH_WORKER: "a project's fresh start",
+        PROJECT_CODENAME_WORKER: "a project's new codename",
+        AGENT_RENAME_WORKER: "an agent's rename",
         REATTACH_WORKER: "the update's restart of the agents it kept",
         PRESS_WORKER: "the update's record of the running agents",
     }

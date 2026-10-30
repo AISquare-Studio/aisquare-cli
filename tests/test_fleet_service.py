@@ -228,6 +228,8 @@ class FakeTmux(TmuxServer):
         a typed first message meets in a real Claude Code (P0-W1a)."""
         self.killed: list[str] = []
         self.renamed: list[tuple[str, str]] = []
+        self.renamed_windows: list[tuple[str, str]] = []
+        """``(pane_id, name)`` for every window renamed, as ``fleet relabel`` renames them."""
         self._counter = 0
 
     @staticmethod
@@ -543,6 +545,23 @@ class FakeTmux(TmuxServer):
             raise TmuxError(f"can't find session: {old}")
         self.sessions[new] = self.sessions.pop(old)
         self.renamed.append((old, new))
+
+    def rename_window(self, pane_id: str, name: str) -> None:
+        self.binary()
+        self._require_server()
+        for windows in self.sessions.values():
+            for index, window in enumerate(windows):
+                if window.pane_id == pane_id:
+                    windows[index] = replace(window, name=name)
+                    self.renamed_windows.append((pane_id, name))
+                    return
+        raise TmuxError(f"can't find pane: {pane_id}")
+
+    def window_name(self, pane_id: str) -> str | None:
+        """The name of the window ``pane_id`` is in, as ``#{window_name}`` reads it."""
+        return next(
+            (w.name for ws in self.sessions.values() for w in ws if w.pane_id == pane_id), None
+        )
 
     def _require_server(self) -> None:
         """What every WRITE hits when no server is listening: a non-zero exit.
@@ -1596,12 +1615,13 @@ def test_spawn_retries_the_label_when_the_live_index_trips(
         wanted: str | None = None,
         task_id: str | None = None,
         store: object = None,
+        trees: Path | None = None,
         replaces: str | None = None,
     ) -> str:
         calls.append(wanted)
         if len(calls) == 1:
             return "coder-auth"  # looked free a moment ago
-        return real(project_, role, wanted=wanted, task_id=task_id, store=store)  # type: ignore[arg-type]
+        return real(project_, role, wanted=wanted, task_id=task_id, store=store, trees=trees)  # type: ignore[arg-type]
 
     monkeypatch.setattr(fleet_service, "next_label", racing)
     receipt = fleet_service.spawn(project, "coder", worktree=False, label="coder-auth")
@@ -1656,12 +1676,13 @@ def test_spawn_never_puts_a_second_live_agent_in_one_worktree(
         wanted: str | None = None,
         task_id: str | None = None,
         store: object = None,
+        trees: Path | None = None,
         replaces: str | None = None,
     ) -> str:
         if racing["on"]:
             racing["on"] = False
             return "coder-auth"  # looked free a moment ago
-        return real(project_, role, wanted=wanted, task_id=task_id, store=store)  # type: ignore[arg-type]
+        return real(project_, role, wanted=wanted, task_id=task_id, store=store, trees=trees)  # type: ignore[arg-type]
 
     monkeypatch.setattr(fleet_service, "next_label", once)
 
@@ -14650,10 +14671,10 @@ def test_rename_says_what_a_swallowed_tmux_rename_cost(
     assert fleet_service.rename(project, "ruby-fox").codename == "ruby-fox"
 
 
-@pytest.mark.parametrize("bad", ["Amber-Otter", "amber_otter", "amber-otter-x"])
+@pytest.mark.parametrize("bad", ["Amber-Otter", "amber_otter", "amber.otter", "x" * 25])
 def test_rename_rejects_a_bad_shape(tmux: FakeTmux, project: ProjectInfo, bad: str) -> None:
     before = fleet_service.ensure_codename(project).codename
-    with pytest.raises(FleetError, match="adjective-animal"):
+    with pytest.raises(FleetError, match="lowercase letters and digits"):
         fleet_service.rename(project, bad)
     assert _codename(project) == before and tmux.renamed == []
 
@@ -18213,12 +18234,13 @@ def test_the_auto_mode_evidence_is_read_before_the_window_starts(
         wanted: str | None = None,
         task_id: str | None = None,
         store: object = None,
+        trees: Path | None = None,
         replaces: str | None = None,
     ) -> str:
         calls.append(wanted)
         if len(calls) == 1:
             return "coder-auth"  # looked free a moment ago
-        return real(project_, role, wanted=wanted, task_id=task_id, store=store)  # type: ignore[arg-type]
+        return real(project_, role, wanted=wanted, task_id=task_id, store=store, trees=trees)  # type: ignore[arg-type]
 
     monkeypatch.setattr(fleet_service, "next_label", racing)
 

@@ -1809,7 +1809,7 @@ class FleetAgent(BaseModel):
     not taken (``unsent``). An ``acked`` row's ``first_prompt_at - created_at`` is how long
     the agent took to start its first turn (doctor's ``fleet-delivery`` row)."""
     paused_at: datetime | None = None
-    """When ``fleet pause`` ended the row (v41), its ``ended_by`` then ``stopped``: its claims,
+    """When ``fleet pause`` ended the row (v42), its ``ended_by`` then ``stopped``: its claims,
     label, worktree and transcript wait for ``fleet resume``. Cleared when the pause ends,
     by a resume or a stop. A column 0.9.1 never reads, so it sees a stopped 💤 row; ``None``
     for every row nothing paused."""

@@ -484,8 +484,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # origin (P2-W6, #199, stamped v36 on rc/p2-capacity-setup), v39 work briefs
     # (docs/plans/evidence-gate.md, part 2; stamped v34, v36, v37 and v38 on #306's, #341's
     # and #417's branches), v40 local usage stats (the account and repo of a session, the
-    # repo profile and the feature counters), v41 when ``fleet pause`` ended a fleet row
-    assert version == SCHEMA_VERSION == 41
+    # repo profile and the feature counters), v41 the codenames a renamed project gave up,
+    # v42 when ``fleet pause`` ended a fleet row
+    assert version == SCHEMA_VERSION == 42
 
 
 def test_a_v14_store_gains_nullable_persona_columns_through_the_persona_step() -> None:
@@ -1397,7 +1398,16 @@ _USAGE_STATS_STEP = {
     ("column", "usage_session.repo_id"),
     ("column", "usage_turn.source"),
 }  # fmt: skip
-#: v41, fleet pause/resume (task #9): when ``fleet pause`` ended a fleet row (``_PRODUCTS[40]``).
+#: v41, the codenames a project gave up at a rename (``_PRODUCTS[40]``).
+_CODENAME_ALIAS_STEP = {
+    ("table", "project_codename_alias"),
+    ("index", "project_codename_alias_project"),
+    *(
+        ("column", f"project_codename_alias.{column}")
+        for column in ("codename", "project_id", "retired_at")
+    ),
+}
+#: v42, fleet pause/resume (task #9): when ``fleet pause`` ended a fleet row (``_PRODUCTS[41]``).
 _PAUSE_STEP = {("column", "fleet_agent.paused_at")}
 # Main's v22 to v24 by name: SQLite's automatic index for the primary key is left out.
 _MAINS_STEPS_PAST_21 = {
@@ -1598,6 +1608,7 @@ def test_mains_v24_store_gains_the_persona_columns_and_keeps_every_row() -> None
         | _PARENT_COLUMNS
         | _BRIEF_STEP
         | _USAGE_STATS_STEP
+        | _CODENAME_ALIAS_STEP
         | _PAUSE_STEP
     )
     assert shape == _built(SCHEMA_VERSION), "not the schema a fresh store has"
@@ -1667,13 +1678,14 @@ def test_one_schema_is_mains_v32_with_the_persona_columns_and_the_rcs_v21_with_m
     by it. v34 adds ``fleet_agent.ended_by`` (#38) on top, v35 the two token-usage tables
     (#346), v36 the first message's three columns (P0-W1a), v37 a board event's actor and
     details (P1 WS-2), v38 a group's parent manager and a task's origin (P2-W6), v39 the
-    work-brief table, v40 local usage stats, v41 ``fleet_agent.paused_at`` (fleet pause), and
-    nothing else."""
+    work-brief table, v40 local usage stats, v41 the codenames a renamed project gave up, v42
+    ``fleet_agent.paused_at`` (fleet pause), and nothing else."""
     fresh = _built(SCHEMA_VERSION)
     persona = _built(33)
 
-    assert SCHEMA_VERSION == 41
-    assert fresh == _built(40) | _PAUSE_STEP
+    assert SCHEMA_VERSION == 42
+    assert fresh == _built(41) | _PAUSE_STEP
+    assert _built(41) == _built(40) | _CODENAME_ALIAS_STEP
     assert _built(40) == _built(39) | _USAGE_STATS_STEP
     assert _built(39) == _built(38) | _BRIEF_STEP
     assert _built(38) == _built(37) | _PARENT_COLUMNS
@@ -1785,7 +1797,7 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
     _schema_again, rows_again = _contents(db)
     version, shape, notnull = _persona_shape(db)
 
-    assert version == SCHEMA_VERSION == 41, label
+    assert version == SCHEMA_VERSION == 42, label
     assert shape == _built(SCHEMA_VERSION), label
     assert notnull == {"team_session": 0, "fleet_agent": 0}, label
     assert old_session is not None and old_session.persona == persona, label
@@ -1800,7 +1812,7 @@ def test_a_fresh_store_is_built_with_the_persona_step() -> None:
     open_store().close()
     version, shape, notnull = _persona_shape(_db_path())
 
-    assert version == SCHEMA_VERSION == 41
+    assert version == SCHEMA_VERSION == 42
     assert shape == _built(SCHEMA_VERSION)
     assert {("column", "team_session.persona"), ("column", "fleet_agent.persona")} <= shape
     assert notnull == {"team_session": 0, "fleet_agent": 0}
@@ -1886,7 +1898,7 @@ def test_the_two_v34_steps_are_v34_and_v35_each_idempotent() -> None:
     Run twice on one store, each leaves what it left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 41
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 42
     assert _MIGRATIONS[33] == ""
     assert _PRODUCTS[33] == _Products(columns=(("fleet_agent", "ended_by", "TEXT"),))
     assert _PRODUCTS[34] == _Products(
@@ -1911,6 +1923,7 @@ def test_the_two_v34_steps_are_v34_and_v35_each_idempotent() -> None:
         | _PARENT_COLUMNS
         | _BRIEF_STEP
         | _USAGE_STATS_STEP
+        | _CODENAME_ALIAS_STEP
         | _PAUSE_STEP
     )
 
@@ -2071,7 +2084,7 @@ def test_the_first_prompt_step_is_v36_past_mains_two_and_idempotent() -> None:
     it left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 41
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 42
     assert _MIGRATIONS[35] == ""
     assert _PRODUCTS[33] == _Products(columns=(("fleet_agent", "ended_by", "TEXT"),))
     assert _PRODUCTS[35] == _Products(
@@ -2097,6 +2110,7 @@ def test_the_first_prompt_step_is_v36_past_mains_two_and_idempotent() -> None:
         | _PARENT_COLUMNS
         | _BRIEF_STEP
         | _USAGE_STATS_STEP
+        | _CODENAME_ALIAS_STEP
         | _PAUSE_STEP
     )
 
@@ -2107,7 +2121,7 @@ def test_the_event_actor_step_is_v37_past_the_first_prompt_and_idempotent() -> N
     left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 41
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 42
     assert _MIGRATIONS[36] == ""
     assert _PRODUCTS[36] == _Products(
         columns=(("team_event", "actor", "TEXT"), ("team_event", "meta", "TEXT"))
@@ -2127,6 +2141,7 @@ def test_the_event_actor_step_is_v37_past_the_first_prompt_and_idempotent() -> N
         | _PARENT_COLUMNS
         | _BRIEF_STEP
         | _USAGE_STATS_STEP
+        | _CODENAME_ALIAS_STEP
         | _PAUSE_STEP
     )
 
@@ -2137,7 +2152,7 @@ def test_the_parent_step_is_v38_past_the_event_actor_and_idempotent() -> None:
     leaves what it left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 41
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 42
     assert _MIGRATIONS[37] == ""
     assert _PRODUCTS[37] == _Products(
         columns=(
@@ -2157,7 +2172,14 @@ def test_the_parent_step_is_v38_past_the_event_actor_and_idempotent() -> None:
         assert _shape(conn) == once
     finally:
         conn.close()
-    assert once == _built(37) | _PARENT_COLUMNS | _BRIEF_STEP | _USAGE_STATS_STEP | _PAUSE_STEP
+    assert once == (
+        _built(37)
+        | _PARENT_COLUMNS
+        | _BRIEF_STEP
+        | _USAGE_STATS_STEP
+        | _CODENAME_ALIAS_STEP
+        | _PAUSE_STEP
+    )
 
 
 @pytest.mark.parametrize(
@@ -2340,7 +2362,7 @@ def test_the_brief_step_is_v39_and_idempotent() -> None:
     leaves what it left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 41
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 42
     assert _PRODUCTS[38] == _Products(("brief", "brief_number"))
     conn = sqlite3.connect(":memory:")
     try:
@@ -2351,7 +2373,9 @@ def test_the_brief_step_is_v39_and_idempotent() -> None:
         assert _shape(conn) == once
     finally:
         conn.close()
-    assert once == _built(38) | _BRIEF_STEP | _USAGE_STATS_STEP | _PAUSE_STEP
+    assert once == (
+        _built(38) | _BRIEF_STEP | _USAGE_STATS_STEP | _CODENAME_ALIAS_STEP | _PAUSE_STEP
+    )
 
 
 @pytest.mark.parametrize(
@@ -2479,7 +2503,7 @@ def test_the_usage_stats_step_is_v40_and_idempotent() -> None:
     twice on one store, it leaves what it left once; a fresh store has all of it."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 41
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 42
     assert _PRODUCTS[39] == _Products(
         ("repo_profile", "feature_use", "usage_turn_recorded"),
         (
@@ -2498,7 +2522,7 @@ def test_the_usage_stats_step_is_v40_and_idempotent() -> None:
         assert _shape(conn) == once
     finally:
         conn.close()
-    assert once == _built(39) | _USAGE_STATS_STEP | _PAUSE_STEP
+    assert once == _built(39) | _USAGE_STATS_STEP | _CODENAME_ALIAS_STEP | _PAUSE_STEP
     open_store().close()
     raw = sqlite3.connect(str(_db_path()))
     try:
@@ -2571,24 +2595,25 @@ def test_a_store_another_line_stamped_v40_gains_the_usage_stats_objects() -> Non
         raw.close()
 
 
-def test_the_pause_step_is_v41_and_idempotent() -> None:
-    """The fleet pause step is v41: an empty script and one nullable column,
-    ``fleet_agent.paused_at`` (``_PRODUCTS[40]``). Run twice on one store, it leaves what it
+def test_the_pause_step_is_v42_and_idempotent() -> None:
+    """The fleet pause step is v42, after #456's v41: an empty script and one nullable column,
+    ``fleet_agent.paused_at`` (``_PRODUCTS[41]``). Run twice on one store, it leaves what it
     left once; a fresh store has it."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 41
-    assert _PRODUCTS[40] == _Products(columns=(("fleet_agent", "paused_at", "TEXT"),))
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 42
+    assert _MIGRATIONS[41] == ""
+    assert _PRODUCTS[41] == _Products(columns=(("fleet_agent", "paused_at", "TEXT"),))
     conn = sqlite3.connect(":memory:")
     try:
         for step in range(SCHEMA_VERSION):
             _run_step(conn, step)
         once = _shape(conn)
-        _run_step(conn, 40)
+        _run_step(conn, 41)
         assert _shape(conn) == once
     finally:
         conn.close()
-    assert once == _built(40) | _PAUSE_STEP
+    assert once == _built(41) | _PAUSE_STEP
     open_store().close()
     raw = sqlite3.connect(str(_db_path()))
     try:
@@ -2598,7 +2623,7 @@ def test_the_pause_step_is_v41_and_idempotent() -> None:
 
 
 def test_a_store_at_the_v40_schema_gains_the_pause_step_and_keeps_every_row() -> None:
-    """A store as 0.9.1 left it (v40) holds fleet rows nothing paused: it opens at v41, each
+    """A store as 0.9.1 left it (v40) holds fleet rows nothing paused: it opens at v42, each
     reads ``paused_at`` NULL, every row is unchanged, and a second open changes nothing."""
     db = _at_version(40)
     raw = sqlite3.connect(str(db))
@@ -2618,7 +2643,7 @@ def test_a_store_at_the_v40_schema_gains_the_pause_step_and_keeps_every_row() ->
         agent = store.get_fleet_agent("agt_old")
     assert agent is not None and agent.paused_at is None and agent.ended_by == "stopped"
     schema, rows = _contents(db)
-    assert rows["PRAGMA user_version"] == [(41,)]
+    assert rows["PRAGMA user_version"] == [(42,)]
     assert [row[:-1] for row in rows["fleet_agent"]] == before, "every column it had, unchanged"
     assert [row[-1] for row in rows["fleet_agent"]] == [None]
     open_store().close()
@@ -4383,7 +4408,7 @@ def test_a_fleet_row_is_read_as_the_columns_it_is_written_with_whatever_follows_
     SQL. Both lists come from one tuple, and a read names each column as it is written."""
     later = (*store_module._FLEET_AGENT_FIELDS, "later")
     read = store_module._read_list(later, {"board": "COALESCE(board, project_id)"})
-    # `persona` (v33), `ended_by` (v34), the first message's two (v36) and `paused_at` (v41)
+    # `persona` (v33), `ended_by` (v34), the first message's two (v36) and `paused_at` (v42)
     # are the columns that came after it, and are read as written.
     assert read.endswith(
         ", COALESCE(board, project_id) AS board, persona, ended_by, first_prompt, "

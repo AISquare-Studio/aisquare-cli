@@ -638,6 +638,7 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
         "project_setting": 0,
         "project_explainability": 0,
         "project_destination": 0,
+        "project_codename_alias": 0,
         "team_meta": 2,
         "project": 1,
     }

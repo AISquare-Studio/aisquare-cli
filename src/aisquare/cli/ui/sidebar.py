@@ -2,8 +2,9 @@
 
 docs/plans/fleet-tui.md §4.1. One ``ProjectCard`` per registered project, each
 with a disclosure, its name (the nickname, else the basename — renamed in place),
-chips (agents alive · 🔔 count), a ⋯ menu, and — when two projects share a name —
-the path as a dim subtitle; under it one ``AgentRow`` per fleet agent (role icon,
+chips (agents alive · 🔔 count), a ⋯ menu, and a dim subtitle — the path when two projects
+share a name, and the fleet codename when it is not the one the name gives
+(:func:`project_subtitle`); under it one ``AgentRow`` per fleet agent (role icon,
 label, state chip, exit status). Above the projects, one *actions* block under the Fleet
 header — *▶ Start captain* (the captain's own row while one is live) and *Spawn agent*, whose
 dialog asks which project — and under the separator, one
@@ -22,8 +23,8 @@ Two rules shape the code more than the layout does:
   mounts or unmounts a widget.
 - **Rows post messages; the app decides.** ``AddProject``, ``ProjectSelected``,
   ``AgentSelected``, ``SpawnAgent``, ``SettingsSelected``, ``AccountsSelected``,
-  ``UpdateSelected``, ``RenameProject`` and ``OpenProjectMenu`` are the whole contract between this
-  pane and the shell (the Settings hub posts ``AppSettingsSelected``,
+  ``UpdateSelected``, ``RenameProject``, ``RenameAgent`` and ``OpenProjectMenu`` are the whole
+  contract between this pane and the shell (the Settings hub posts ``AppSettingsSelected``,
   ``AccountsSelected`` and ``DoctorSelected``). Nothing here opens a view or
   writes the store.
 
@@ -35,7 +36,7 @@ markup in data).
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
@@ -62,7 +63,14 @@ from aisquare.cli.ui.groups import (
     UndoLayout,
 )
 from aisquare.cli.ui.terminal import InPlaceField
-from aisquare.models import FleetAgentStatus, HeadroomSummary, ProjectGroup, ProjectInfo
+from aisquare.core import codenames
+from aisquare.models import (
+    FleetAgent,
+    FleetAgentStatus,
+    HeadroomSummary,
+    ProjectGroup,
+    ProjectInfo,
+)
 from aisquare.services import fleet as fleet_service
 from aisquare.services.project import NICKNAME_MAX, display_name
 from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
@@ -204,6 +212,18 @@ class RenameProject(Message):
         super().__init__()
 
 
+class RenameAgent(Message):
+    """An agent row's name field was saved: rename ``agent_id``, labelled ``label``, to the label
+    ``typed`` becomes (``fleet relabel``)."""
+
+    def __init__(self, project_id: str, agent_id: str, label: str, typed: str) -> None:
+        self.project_id = project_id
+        self.agent_id = agent_id
+        self.label = label
+        self.typed = typed
+        super().__init__()
+
+
 class ProjectRenamed(Message):
     """A project's nickname was written — by a card, its menu or a Settings tab: repaint."""
 
@@ -262,12 +282,44 @@ def short_path(path: Path, home: Path | None = None) -> str:
         return str(path)
 
 
+def codename_aside(project: ProjectInfo) -> str | None:
+    """The project's fleet codename when it is not the one its name gives
+    (:func:`codenames.codename_from_text` of :func:`project_name`), else ``None``.
+
+    A manager or a captain names a project by its codename (``--project earnest-hawk``), and
+    one never renamed has a generated one (``earnest-hawk``) its card does not otherwise
+    say; so does one set with ``fleet rename``, or one suffixed because another project
+    held the name's (``aisquare-cli-2``). One its name gives is said by the name itself."""
+    codename = project.codename
+    if codename is None or codename == codenames.codename_from_text(project_name(project)):
+        return None
+    return codename
+
+
 def project_subtitle(project: ProjectInfo, names: Counter[str], *, always: bool) -> str | None:
     """The dim line under a card's name: the project's directory (:func:`short_path`) when
     ``always`` — ``[ui] always_show_project_path`` — or when another listed project shares
-    its name (``names`` counts the listed projects by :func:`project_name`); ``None``, no
-    line, otherwise."""
-    return short_path(project.root) if always or names[project_name(project)] > 1 else None
+    its name (``names`` counts the listed projects by :func:`project_name`); then
+    `` · <codename>`` when its codename is not the one its name gives
+    (:func:`codename_aside`); ``None``, no line, when neither is said."""
+    path = short_path(project.root) if always or names[project_name(project)] > 1 else None
+    aside = codename_aside(project)
+    if aside is None:
+        return path
+    return f"{path} · {aside}" if path else f"· {aside}"
+
+
+def project_title_tooltip(project: ProjectInfo) -> str:
+    """The card name's tooltip: its fleet codename, whether the card says it or not, with the
+    tmux session it names, then the gestures."""
+    gestures = "double-click or F2 to rename · right-click or . for the menu"
+    codename = project.codename
+    if codename is None:
+        return f"no fleet codename yet (the first agent gives it one) · {gestures}"
+    return (
+        f"fleet codename {codename} (tmux {fleet_service.session_name(codename)}, "
+        f"--project {codename}) · {gestures}"
+    )
 
 
 def ordered_agents(statuses: Iterable[FleetAgentStatus]) -> list[FleetAgentStatus]:
@@ -362,12 +414,39 @@ def agent_row_text(
     return text
 
 
+LABEL_FIELD_MAX = 80
+"""What an agent row's name field holds: free text, which the label it becomes cuts to 24
+(``fleet_service.label_from_text``)."""
+
+
+def relabel_preview(typed: str, agent: FleetAgent, taken: Collection[str] = ()) -> Text:
+    """``→ login-fix``: the label an agent row's field makes of ``typed``, shown under it while
+    it is typed — what ``fleet relabel`` will call the agent. ``taken`` is the labels of the
+    other live agents the card shows: one of them is suffixed, as the rename suffixes it
+    (``login-fix-2``). Text that makes no label, or a reserved one, says why instead."""
+    try:
+        wanted = fleet_service.label_from_text(typed, agent.role)
+    except fleet_service.FleetError:
+        return Text("✗ needs 2 letters or digits", style="red")
+    if wanted in (fleet_service.MANAGER_LABEL, fleet_service.CAPTAIN_LABEL):
+        return Text(f"✗ {wanted} is reserved", style="red")
+    if wanted == agent.label:
+        return Text(f"→ {wanted} (as it is)", style="dim")
+    picked = fleet_service.free_label(wanted, taken)
+    text = Text("→ ", style="dim")
+    text.append(picked, style="bold")
+    if picked != wanted:
+        text.append(f" ({wanted} is taken)", style="dim")
+    return text
+
+
 def project_title_text(project: ProjectInfo) -> Text:
     """``🗂 Auth rewrite`` — the name a person gave it (else the folder's), and nothing else.
 
-    The codename is not shown: it names the tmux session and the branches, and a
-    nickname says what the project is. The chips are their own widget
-    (:func:`project_chips_text`), so a long name is cut before them, not them.
+    The codename is not on this line: a rename gives the project the codename its name
+    gives, and one that is not is said under it (:func:`project_subtitle`) and in the
+    title's tooltip. The chips are their own widget (:func:`project_chips_text`), so a long
+    name is cut before them, not them.
     """
     return Text(f"🗂 {project_name(project)}", no_wrap=True, overflow="ellipsis")
 
@@ -735,7 +814,7 @@ class ProjectTitle(DragHandle):
         super().__init__(project_title_text(project))
         self.project_id = project.id
         self.selection_key = f"project:{project.id}"
-        self.tooltip = "double-click or F2 to rename · right-click or . for the menu"
+        self.tooltip = project_title_tooltip(project)
 
     def message(self) -> Message:
         return ProjectSelected(self.project_id)
@@ -867,11 +946,47 @@ class CardMenuButton(Static):
             sidebar.open_menu(card.project.id)
 
 
+class AgentLabelInput(InPlaceField, Input):
+    """An agent row's name as a field: Enter submits, Esc posts ``Cancelled``, and leaving it —
+    a press anywhere outside it too (:class:`InPlaceField`) — posts ``Left``: focus-out saves,
+    as Enter does."""
+
+    BINDINGS: ClassVar = [Binding("escape", "cancel_rename", "cancel", show=False)]
+
+    class Cancelled(Message):
+        """Esc in the field: close it and write nothing."""
+
+    class Left(Message):
+        """The field lost the focus while open."""
+
+    def action_cancel_rename(self) -> None:
+        self.post_message(self.Cancelled())
+
+    def on_blur(self) -> None:
+        self.post_message(self.Left())
+
+
+RENAME_TIP = "double-click or F2 to rename"
+
+
 class AgentRow(Activatable):
-    """One fleet agent under its project. Click → Agent view."""
+    """One fleet agent under its project. Click → Agent view; a second click → rename it.
+
+    The agent is renamed in place (``fleet relabel``): click its row twice, or press F2 on it,
+    and a field opens over the row, prefilled with the label, all selected, with the label
+    it will become under it (:func:`relabel_preview`). Enter or leaving the field saves
+    (``RenameAgent``), Esc closes it untouched, and a frame repaints the row beneath, never
+    the field. The manager's and the captain's rows, and an ended agent's, offer none
+    (``fleet_service.relabel_refusal``).
+    """
 
     DEFAULT_CSS = """
     AgentRow { padding-left: 3; }
+    AgentRow.-renaming { height: 2; }
+    AgentRow AgentLabelInput { width: 1fr; height: 1; }
+    AgentRow .agent-label-preview {
+        width: 1fr; height: 1; text-wrap: nowrap; text-overflow: ellipsis;
+    }
     """
 
     def __init__(self, status: FleetAgentStatus) -> None:
@@ -879,10 +994,165 @@ class AgentRow(Activatable):
         self.status = status
         self.selection_key = f"agent:{status.agent.id}"
         self._painted: tuple[FleetAgentStatus, float | None, int] | None = None
+        self.prefill = ""
+        """What the name field said when it opened: leaving it so is no change."""
+        self._field: AgentLabelInput | None = None
+        self._preview: Static | None = None
+        self._tipped: FleetAgent | None = None
+        """The row the tooltip was last decided for: a frame that changed nothing of it asks
+        nothing again."""
+        self._tip()
 
     def show(self, status: FleetAgentStatus) -> None:
         self.status = status
+        self._tip()
         self.paint()
+        if self._field is not None:
+            # The frame may have changed what is taken (a spawn, another rename): the label
+            # it will become is said again, the field itself untouched.
+            self._paint_preview(self._field.value)
+
+    def _tip(self) -> None:
+        """The rename gesture, on a row that offers one: not the manager's, not the captain's,
+        not an ended agent's. ``relabel_refusal``, the one rule a second click and F2 ask too,
+        so the tooltip never offers what they refuse — asked again only when the row changed."""
+        agent = self.status.agent
+        if agent == self._tipped:
+            return
+        self._tipped = agent
+        tip = RENAME_TIP if fleet_service.relabel_refusal(agent) is None else None
+        if self.tooltip != tip:
+            self.tooltip = tip
+
+    # --- the label, renamed in place ---------------------------------------------------
+
+    @property
+    def renaming(self) -> bool:
+        """Whether the label's field is open on this row."""
+        return self._field is not None
+
+    @property
+    def field(self) -> AgentLabelInput | None:
+        return self._field
+
+    def open_rename(self, typed: str | None = None) -> None:
+        """Open the field over the label, prefilled with it (or ``typed``), all selected.
+
+        Already open, it only takes the focus back: what was typed is kept."""
+        if self._field is None:
+            self.prefill = self.status.agent.label
+            value = self.prefill if typed is None else typed
+            field = AgentLabelInput(
+                value=value,
+                max_length=LABEL_FIELD_MAX,
+                compact=True,
+                id=f"agent-label-{self.status.agent.id}",
+            )
+            field.tooltip = "any text · Enter saves, Esc cancels"
+            preview = Static(classes="agent-label-preview")
+            self._field, self._preview = field, preview
+            self._paint_preview(value)
+            self.add_class("-renaming")
+            self.mount(field, preview)
+        self.call_after_refresh(self._focus_field)
+
+    def _focus_field(self) -> None:
+        if self._field is not None and self._field.is_mounted:
+            self._field.focus()
+            self._field.select_all()
+
+    def close_rename(self, *, refocus: bool) -> None:
+        """Close the field and show the row; ``refocus`` hands the keys back to the sidebar
+        (Enter, Esc) — not when the field closed because a click took the focus elsewhere."""
+        field, preview = self._field, self._preview
+        if field is None:
+            return
+        self._field = self._preview = None
+        self.remove_class("-renaming")
+        field.remove()
+        if preview is not None:
+            preview.remove()
+        sidebar = self._sidebar()
+        if refocus and sidebar is not None:
+            sidebar.focus()
+
+    def _taken(self) -> set[str]:
+        """The labels of the other live agents its card shows."""
+        card = next((node for node in self.ancestors if isinstance(node, ProjectCard)), None)
+        statuses = card.statuses if card is not None else []
+        return {
+            status.agent.label
+            for status in statuses
+            if status.agent.id != self.status.agent.id and status.agent.ended_at is None
+        }
+
+    def _paint_preview(self, typed: str) -> None:
+        if self._preview is not None:
+            self._preview.update(relabel_preview(typed, self.status.agent, self._taken()))
+
+    def _commit(self, typed: str, *, refocus: bool) -> None:
+        """Save what the field says — or, when it makes the label it already has, just close it.
+
+        The shell writes it (``RenameAgent``) and says what the agent is called now."""
+        self.close_rename(refocus=refocus)
+        agent = self.status.agent
+        if typed.strip() == self.prefill.strip():
+            return
+        try:
+            if fleet_service.label_from_text(typed, agent.role) == agent.label:
+                return
+        except fleet_service.FleetError:
+            pass  # the shell's rename refuses it, says the rule and reopens the field
+        self.post_message(RenameAgent(agent.project_id, agent.id, agent.label, typed))
+
+    @on(Input.Changed, "AgentLabelInput")
+    def _typed(self, event: Input.Changed) -> None:
+        event.stop()
+        self._paint_preview(event.value)
+
+    @on(Input.Submitted, "AgentLabelInput")
+    def _submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self._commit(event.value, refocus=True)
+
+    @on(AgentLabelInput.Left)
+    def _left(self, event: AgentLabelInput.Left) -> None:
+        """Focus-out saves, as Enter does — while the field is still open, and not when the
+        terminal itself lost the focus (Textual blurs the focused widget then)."""
+        event.stop()
+        if self._field is not None and self.app.app_focus:
+            self._commit(self._field.value, refocus=False)
+
+    @on(AgentLabelInput.Cancelled)
+    def _cancelled(self, event: AgentLabelInput.Cancelled) -> None:
+        event.stop()
+        self.close_rename(refocus=True)
+
+    _opened = False
+    """Whether the click before this one was a plain click that opened this row: only then is
+    a second one at the same place a rename (``ProjectTitle._opened``'s rule)."""
+
+    def on_click(self, event: events.Click) -> None:
+        opened, self._opened = self._opened, False
+        if self.renaming:
+            # A click in its field (or on the line under it) is the field's: no open.
+            event.stop()
+            event.prevent_default()
+            return
+        sidebar = self._sidebar()
+        if (
+            sidebar is not None
+            and event.button == 1
+            and event.chain >= 2
+            and opened
+            and fleet_service.relabel_refusal(self.status.agent) is None
+        ):
+            # The first click of the two opened the agent; the second renames it.
+            event.stop()
+            event.prevent_default()
+            sidebar.open_agent_rename(self.status.agent.id)
+        elif event.button == 1:
+            self._opened = True  # and ``Activatable.on_click`` opens it
 
     def paint(self) -> None:
         """Draw the row for its status, its account's session use and its width.
@@ -1099,7 +1369,9 @@ class ProjectCard(Vertical):
         if painting == self._painted:
             return
         try:
-            self.query_one(ProjectTitle).update(project_title_text(project))
+            title = self.query_one(ProjectTitle)
+            title.update(project_title_text(project))
+            title.tooltip = project_title_tooltip(project)
             self.query_one(CardChips).update(project_chips_text(project, statuses))
             holder = self.query_one("#agents", Vertical)
         except NoMatches:  # composing right now — compose reads the fields
@@ -1848,9 +2120,37 @@ class Sidebar(Vertical):
         for other in self.query(ProjectCard):
             if other.project.id != project_id and other.renaming:
                 other.close_rename(refocus=False)
+        self._close_agent_fields()
         card = self._card(project_id)
         if card is not None and card.display:
             card.open_rename(typed)
+
+    def _agent_row(self, agent_id: str) -> AgentRow | None:
+        return next((row for row in self.query(AgentRow) if row.status.agent.id == agent_id), None)
+
+    def _close_agent_fields(self, but: AgentRow | None = None) -> None:
+        """Close every agent row's open name field, unsaved, but ``but``'s: one at a time."""
+        for row in self.query(AgentRow):
+            if row is not but and row.renaming:
+                row.close_rename(refocus=False)
+
+    def open_agent_rename(self, agent_id: str, typed: str | None = None) -> str | None:
+        """Open ``agent_id``'s name field on its row (``typed`` in it), every other field
+        closing unsaved; or, for a row that offers no rename, why not
+        (``fleet_service.relabel_refusal``), and nothing opens. ``None`` once it is open, or
+        when the row is not on screen."""
+        row = self._agent_row(agent_id)
+        if row is None or not self._on_screen(row):
+            return None
+        refusal = fleet_service.relabel_refusal(row.status.agent)
+        if refusal is not None:
+            return refusal
+        for card in self.query(ProjectCard):
+            if card.renaming:
+                card.close_rename(refocus=False)
+        self._close_agent_fields(but=row)
+        row.open_rename(typed)
+        return None
 
     def open_menu(self, project_id: str) -> None:
         """Ask the shell for ``project_id``'s menu, under its card."""
@@ -1859,7 +2159,16 @@ class Sidebar(Vertical):
             self.post_message(OpenProjectMenu(project_id, card.region))
 
     def action_rename(self) -> None:
-        """F2: rename the card under the cursor (or the card of the row under it)."""
+        """F2: rename what is under the cursor — an agent row's agent (``fleet relabel``), a
+        card title's project. On a row that offers no rename (the manager's, the captain's,
+        an ended agent's), say why."""
+        kind, _, ident = (self._cursor_key or self.selected_key or "").partition(":")
+        row = self._agent_row(ident) if kind == "agent" else None
+        if row is not None and self._on_screen(row):
+            refusal = self.open_agent_rename(ident)
+            if refusal is not None:
+                self.notify(f"not renamed: {refusal}", severity="warning", timeout=6, markup=False)
+            return
         target = self._cursor_target()
         if target is not None and target[0] == "project":
             self.open_rename(target[1])

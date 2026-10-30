@@ -11308,6 +11308,14 @@ def bulk(
             # Cleared only where the resume leaves no agent paused (m2): the manager it brings
             # back then spawns again, its team back beside it.
             clear, kept = _resumes_clear(now, rows)
+            if not owners and orchestrator.team_enabled():
+                # Not the owner's: refused, nothing written (round 2, m1). Read and checked
+                # first as the owner's clear is, on the projects it would clear, so an
+                # ambiguous or unknown --as and a damaged store answer as they always did.
+                read = {project.id for project, _ in now.unread}
+                for project in now.projects:
+                    if project.id not in read:
+                        _set_pause(project, "off", acting_session, write=False)
             signals = _set_pauses(clear, on=False, session_ref=acting_session)
         for row in rows:
             named = f"{row.agent.label} ({_name(row.project)})"
@@ -12433,7 +12441,9 @@ def resume(project: ProjectInfo, *, session_ref: str | None = None) -> None:
     _set_pause(project, "off", session_ref)
 
 
-def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> None:
+def _set_pause(
+    project: ProjectInfo, value: str, session_ref: str | None, *, write: bool = True
+) -> None:
     """Set ``project``'s pause to ``value``: ``on`` on every board it lives on
     (:func:`_pause_signals`), ``off`` wherever it reads on (:func:`_pause_where_on`).
 
@@ -12455,6 +12465,10 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
     or disk is full``, a readonly store, ``disk I/O error``) is a ``FleetError`` that names
     it: the root group maps damage alone, and re-raised, it ended in a traceback, ``--json``
     printing nothing (round 36, 2/9).
+
+    Without ``write``, everything is read and checked as for the write, ``--as`` resolved
+    with it, and nothing is written: an agent's resume (:func:`bulk`), refused as not the
+    owner's only once these have answered as they always did (the fold of #457, r4).
 
     Each write is a ``signal`` event in the delta of every session on that board. Off on
     every board one of the project's rows ever recorded, ``fleet resume -P a`` put
@@ -12488,7 +12502,7 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
             if broken:
                 named = ", ".join(f"{name} on {board}" for board, name in broken)
                 raise FleetError(f"cannot {doing} the pause: {named} could not be read")
-            team.set_signals_in(store, signals, value, session_ref=session_ref)
+            team.set_signals_in(store, signals if write else [], value, session_ref=session_ref)
     except sqlite3.Error as exc:
         if isinstance(exc, StoreUnopenable) or is_corrupt_error(exc):
             raise  # damage, which the CLI's root group says how to recover from

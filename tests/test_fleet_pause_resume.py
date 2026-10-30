@@ -909,17 +909,20 @@ def test_an_agents_own_window_may_not_end_the_owners_pause_with_or_without_as(
     ref = fleet.alpha.id
     spawned, signals = len(tmux.spawned), len(_events(fleet.alpha, "signal"))
 
-    for args in (
-        ["fleet", "restart", coder.label, "-P", ref],
-        ["fleet", "resume", "-P", ref],
-        ["fleet", "stop", coder.label, "-P", ref],
-        ["fleet", "restart", coder.label, "-P", ref, "--as", "captain"],
-        ["fleet", "resume", "-P", ref, "--as", "captain"],
-        ["fleet", "stop", coder.label, "-P", ref, "--as", "captain"],
+    by_owner = "paused by the owner"
+    for args, refusal in (
+        (["fleet", "restart", coder.label, "-P", ref], by_owner),
+        (["fleet", "resume", "-P", ref], by_owner),
+        (["fleet", "stop", coder.label, "-P", ref], by_owner),
+        (["fleet", "restart", coder.label, "-P", ref, "--as", "captain"], by_owner),
+        # A resume resolves its --as first, as the owner's always did: no session is named
+        # `captain`, and that answers before the owner rule does (the fold's r4).
+        (["fleet", "resume", "-P", ref, "--as", "captain"], "unknown session 'captain'"),
+        (["fleet", "stop", coder.label, "-P", ref, "--as", "captain"], by_owner),
     ):
         result = runner.invoke(app, ["--json", *args])
         assert result.exit_code == 1, (args, result.output)
-        assert "paused by the owner" in result.stdout, (args, result.stdout)
+        assert refusal in result.stdout, (args, result.stdout)
     with pytest.raises(FleetError, match="paused by the owner"):
         fleet_service.switch(fleet.alpha, coder.label)  # `user`, from the manager's window
 

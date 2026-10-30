@@ -185,7 +185,10 @@ def _hooks_off_default() -> Path | None:
 
 
 def _signed_in_default() -> bool:
-    return accounts_core.signed_in(accounts_core.default_account())
+    # As every surface weighs it: over SSH, a plain claude the Mac saw logged out is out.
+    from aisquare.services import claude_accounts as accounts_service
+
+    return accounts_service.is_signed_in(accounts_core.default_account())
 
 
 def probe_claude(

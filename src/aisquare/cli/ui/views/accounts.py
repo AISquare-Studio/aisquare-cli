@@ -498,6 +498,12 @@ def needs_login(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> bool:
     return usage is not None and usage.needs_login
 
 
+VIA_MARK = "Mac"
+"""The session cell's mark for a reading this asq did not take (its Keychain is locked, an
+SSH session): the Mac's asq did. ``▮▮▮▮▮ 100% · Mac`` fills the cell's 16; :func:`via_tooltip`
+says the rest."""
+
+
 def _window_cells(
     usage: ClaudeUsage | None, window: str, *, now: datetime | None, clock: bool = True
 ) -> tuple[Text, Text]:
@@ -522,7 +528,18 @@ def _window_cells(
     bar = usage_bar(percent)
     if window == "session" and (kept := kept_age(usage, now=moment)) is not None:
         bar.append(f" · {kept}", style="yellow")
+    elif window == "session" and usage.recorded_elsewhere:
+        bar.append(f" · {VIA_MARK}", style="dim")  # not read here: the tooltip says whose
     return bar, Text(format_reset(resets_at, now=moment, clock=clock), style="dim")
+
+
+def via_tooltip(usage: ClaudeUsage | None, *, now: datetime | None = None) -> str | None:
+    """``via the Mac's asq · 2m ago — the login Keychain is locked in this SSH session``: whose
+    reading a live figure is, when this asq did not take it; ``None`` for one it did."""
+    if usage is None or kept_age(usage, now=now) is not None:
+        return None
+    via = accounts_service.describe_via(usage, now=now)
+    return None if via is None else f"{via} — {accounts_service.locked_reason()}"
 
 
 def kept_age(usage: ClaudeUsage, *, now: datetime | None = None) -> str | None:
@@ -558,6 +575,8 @@ def kept_tooltip(
     if usage is None or kept_age(usage, now=now) is None or usage.fetched_at is None:
         return None
     age = accounts_service.describe_age(usage.fetched_at, now=now)
+    if usage.recorded_elsewhere:
+        age += f", {accounts_service.VIA_THE_MAC}"
     why = wait_said(usage, now=now) or usage.last_failed_reason
     said = f"reading from {age} · {why}"
     fix = accounts_service.kept_fix_line(usage, slot=slot)
@@ -1056,6 +1075,8 @@ class AccountRow(Horizontal, can_focus=True):
             lines = [text.plain] if text.plain else []
             if (kept := kept_tooltip(self.usage, slot=self.slot)) is not None:
                 lines.append(kept)  # why the bar is an older reading (F1 of #400)
+            if (via := via_tooltip(self.usage)) is not None:
+                lines.append(via)  # whose reading it is, when this asq could not take it
             pace = accounts_service.describe_trend(self.trend)
             if pace:
                 lines.append(pace)  # where the session window is heading (#146)
@@ -1501,7 +1522,9 @@ class AccountsView(Vertical):
         A row that needs a login (signed out, its token expired or refused) or whose token
         this CLI cannot read (missing, a locked Keychain) counts in neither half
         (``usage_is_readable``, the CLI's rule too): its own usage cells say so, and an account
-        left expired would otherwise say "failed" every tick.
+        left expired would otherwise say "failed" every tick. A locked row showing what the
+        Mac's asq took (``recorded_elsewhere``) is said apart, as every surface says it:
+        ``via the Mac's asq · 2m ago``, the oldest such reading.
         """
         # A tick's read is the cache's: it asks nothing while the readings are fresh, and
         # said "refreshing…" (the button off) every minute for no request. Said for a read
@@ -1520,15 +1543,30 @@ class AccountsView(Vertical):
             and (when := reading.last_failed_at if reading.available else reading.fetched_at)
             is not None
         ]
-        refreshing = running and (self._usage_forced or not read)
+        via = [
+            when
+            for row in self.rows()
+            if (reading := self.usage.get(row.slot)) is not None
+            and reading.recorded_elsewhere
+            and not reading.kept
+            and (when := reading.fetched_at) is not None
+        ]
+        refreshing = running and (self._usage_forced or not (read or via))
         self.query_one("#usage-refresh", Button).disabled = refreshing
         if refreshing:
             said = "refreshing…"
         else:
-            age = accounts_service.describe_age(min(read)) if read else "never"
-            said = f"last refreshed {age}"
-            if failed:
-                said += f" · last try failed {accounts_service.describe_age(max(failed))}"
+            parts: list[str] = []
+            if read or failed or not via:
+                age = accounts_service.describe_age(min(read)) if read else "never"
+                parts.append(f"last refreshed {age}")
+                if failed:
+                    parts.append(f"last try failed {accounts_service.describe_age(max(failed))}")
+            if via:
+                parts.append(
+                    f"{accounts_service.VIA_THE_MAC} · {accounts_service.describe_age(min(via))}"
+                )
+            said = " · ".join(parts)
         self.query_one("#usage-age", Static).update(Text(said, style="dim"))
 
     def refresh_credits(self) -> None:

@@ -287,17 +287,29 @@ def _kept_lines(statuses: list[ClaudeAccountStatus]) -> list[Text]:
     """One line per row showing an older reading because the newest try read nothing:
     ``account 2: rate-limited until 14:32 — …; showing the reading from 12m ago; fix: …``
     (F1 of #400). The numbers in the table are that reading's; this says how old, why, and
-    what to do about the failed try (``kept_fix_line``, from its cause)."""
+    what to do about the failed try (``kept_fix_line``, from its cause).
+
+    A row whose figure another process took, because this one's Keychain is locked, says
+    so: ``account 2: via the Mac's asq · 2m ago (the login Keychain is locked in this SSH
+    session)``, and a kept one ``… showing the reading from 12m ago, via the Mac's asq``."""
     lines: list[Text] = []
     for status in statuses:
         usage = status.usage
-        if usage is None or not usage.available or usage.last_failed_reason is None:
+        if usage is None or not usage.available:
+            continue
+        if usage.last_failed_reason is None:
+            if (via := accounts_service.describe_via(usage)) is not None:
+                lines.append(
+                    Text(f"{status.label}: {via} ({accounts_service.locked_reason()})", style="dim")
+                )
             continue
         age = (
             f"; showing the reading from {accounts_service.describe_age(usage.fetched_at)}"
             if usage.fetched_at is not None
             else ""
         )
+        if age and usage.recorded_elsewhere:
+            age += f", {accounts_service.VIA_THE_MAC}"
         fix = accounts_service.kept_fix_line(usage, slot=status.account.slot)
         then = f"; {fix}" if fix is not None else ""
         lines.append(Text(f"{status.label}: {usage.last_failed_reason}{age}{then}", style="yellow"))
@@ -370,7 +382,7 @@ def usage_(
     # alias as the label, disabled marked — and one concurrent read for all of
     # them (review of #205, third round), skipping what the cache still holds.
     accounts = [_resolve(slot)] if slot is not None else accounts_service.list_accounts()
-    statuses = [accounts_service.describe(account) for account in accounts]
+    statuses = accounts_service.describe_all(accounts)
     asked = [status for status in statuses if status.signed_in or slot is not None]
     readings = accounts_service.cached_usage([status.account for status in asked], force=refresh)
     for status in asked:
@@ -378,7 +390,9 @@ def usage_(
     # The fleet's figure and the status-line record come from the readings as taken;
     # `_say_why` then fills the display rows that have none (it never touches `readings`).
     fleet = accounts_service.fleet_headroom([status.account for status in asked], readings)
-    accounts_service.write_statusline_fleet(fleet, [status.account for status in asked])
+    accounts_service.write_statusline_fleet(
+        fleet, [status.account for status in asked], readings=readings
+    )
     _say_why(statuses)
     if get_state().json_output:
         listed = [status.model_dump(mode="json") for status in statuses]
@@ -725,7 +739,7 @@ def default(
             f"✓ machine default: {_who(chosen)} — moved to rank 1 of the priority order",
             markup=False,
         )
-        if not core.signed_in(chosen):
+        if not accounts_service.is_signed_in(chosen):
             # Rank 1 is the default only for an account that can run a launch (review
             # of #406, m1): say so, or the line above promises what the next launch skips.
             stdout_console().print(

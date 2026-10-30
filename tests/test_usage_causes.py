@@ -46,6 +46,12 @@ CAUSES: dict[UsageCause, tuple[str, str | None]] = {
         "the login Keychain is locked",
         f"unlock the login keychain (Keychain Access, or log out and back in), {_THEN_REFRESH}",
     ),
+    # Over SSH into the Mac: the Mac's own asq records for this session; no unlock is asked.
+    UsageCause.keychain_locked_ssh: (
+        "the login Keychain is locked in this SSH session",
+        "open asq on the Mac itself, which records usage for this session too; "
+        f"or run security unlock-keychain here, {_THEN_REFRESH}",
+    ),
     UsageCause.keychain_refused: (
         "macOS refused aisquare access to the Claude Code item",
         f"allow aisquare in Keychain Access, {_THEN_REFRESH}",
@@ -113,6 +119,9 @@ def _reading(
         return read((200, b"{}"))
     _sign_in(account, "two@example.com")
     if cause is UsageCause.keychain_locked:
+        _keychain(monkeypatch, "locked", core.KEYCHAIN_LOCKED)
+    elif cause is UsageCause.keychain_locked_ssh:
+        monkeypatch.setenv("SSH_CONNECTION", "192.0.2.7 52144 192.0.2.1 22")
         _keychain(monkeypatch, "locked", core.KEYCHAIN_LOCKED)
     elif cause is UsageCause.keychain_refused:
         _keychain(monkeypatch, "refused", core.KEYCHAIN_REFUSED)

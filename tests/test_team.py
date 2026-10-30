@@ -236,6 +236,8 @@ def test_an_explicit_key_stays_idempotent_after_a_re_add() -> None:
     team_service.finish_task(d1.id)
     d3, made_d3 = team_service.add_task("Nightly run 10-03", key="nightly")
     assert made_d3 and d3.key == "nightly--2"
+    supersedes = team_service.last_supersedes()
+    assert supersedes is not None and supersedes.id == d1.id, "the key's own, any title"
 
     d4, made_d4 = team_service.add_task("Nightly run 10-04", key="nightly")
 
@@ -245,7 +247,8 @@ def test_an_explicit_key_stays_idempotent_after_a_re_add() -> None:
 
 def test_titles_sharing_their_first_64_key_characters_are_two_re_adds() -> None:
     """Their keys are one, clipped at 64: the second title's add met the first's re-add on
-    the suffixed key and answered "already tracked" with it."""
+    the suffixed key and answered "already tracked" with it, and once that was fixed, named
+    the first title's done task, holding the first key, as superseded (tester on #469)."""
     stem = "x" * 64
     alpha, _ = team_service.add_task(f"{stem} alpha")
     team_service.finish_task(alpha.id)
@@ -255,6 +258,8 @@ def test_titles_sharing_their_first_64_key_characters_are_two_re_adds() -> None:
 
     assert made_beta and beta.title == f"{stem} beta"
     assert beta.id not in (alpha.id, alpha_again.id)
+    # Nor does it supersede the done alpha, which held the first key: another title's.
+    assert team_service.last_supersedes() is None
 
 
 def test_a_case_variant_of_a_re_added_title_is_still_that_task() -> None:

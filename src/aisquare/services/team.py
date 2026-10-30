@@ -1740,15 +1740,15 @@ def add_task(
             )
             if created:
                 break
-            # The first key is the key's, as it always was: an open holder is this task
-            # whatever its title (a case variant). So is every key of an explicit `--key`'s
-            # chain, which says "this task, whatever the title": `--key nightly` stays
-            # idempotent after a re-add (review of #469, r3). A title's suffixed key's holder
-            # is this title's only if its title is the same one: `--key ship--2` on another
-            # title, or a title whose first 64 slug characters are this one's, answered for
-            # it (tester on #469).
-            ours = candidate == derived or key is not None or _same_title(task.title, title)
-            if ours and task.status not in CLOSED_STATUSES:
+            # A holder is this task's when an explicit `--key` was given, which says "this
+            # task, whatever the title" along its whole chain (`--key nightly` stays
+            # idempotent after a re-add, review of #469, r3), or when its title is this one.
+            # Not `--key ship--2` on another title, nor a title whose first 64 slug
+            # characters are this one's (tester on #469). Only such a holder is named as
+            # superseded. The first key still answers for an open holder whatever its title,
+            # as it always did.
+            same = key is not None or _same_title(task.title, title)
+            if (same or candidate == derived) and task.status not in CLOSED_STATUSES:
                 break
             # The key's holder is dropped or done: re-adding this title must not stay
             # stuck behind a closed task forever (#2), so it gets a new key and a fresh
@@ -1756,7 +1756,7 @@ def add_task(
             # which no title's key holds (`task_key` and `_legacy_task_key` collapse runs
             # of `-`): `release-checklist-2` is the key of "Release checklist 2", and a
             # re-add keyed so answered with that task, or took it for this title's (#469).
-            if ours:
+            if same:
                 supersedes = task
             suffix += 1
             candidate = f"{derived}--{suffix}"

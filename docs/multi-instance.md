@@ -29,8 +29,9 @@ them holds at a time, and what asq does to keep two releases from running agains
   when every live asq runs this aisquare's release and store schema, and warns when one doesn't.
 
 Every asq writes a small record to `~/.aisquare/instances/` when it starts, refreshes it every
-5 seconds, and removes it when it quits. A crashed asq's record is ignored and cleaned up by the
-next asq that starts. Looking (the chip, the command, the doctor) never changes the folder.
+5 seconds, and removes it when it quits. A crashed asq's record is ignored at once, and deleted
+by the next asq that starts or by the next heartbeat of any asq still running. Looking (the chip,
+the command, the doctor) never changes the folder.
 
 ## What they share
 

@@ -456,7 +456,8 @@ def _read_frame(
 def _live_asqs() -> tuple[instances.Instance, ...] | None:
     """The asqs live on this home (``core.instances``), read with each frame on the read's
     thread, so the chip (#20) costs no timer of its own. Read only: a stale record is pruned by
-    the next asq to start, not by a look. ``None`` when the registry could not be read."""
+    the next asq to start and by every running asq's heartbeat (``core.instances``), never by a
+    look. ``None`` when the registry could not be read."""
     try:
         return tuple(instances.live_instances(prune=False))
     except Exception:  # the chip is not worth a frame

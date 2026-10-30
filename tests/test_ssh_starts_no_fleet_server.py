@@ -23,6 +23,14 @@ import pytest
 
 from aisquare.core import login_session
 from aisquare.services import fleet as fleet_service
+from tests import test_fleet_service as fleet_suite
+
+# The fleet suite's fixtures, bound here so pytest finds them for this module's tests.
+tmux = fleet_suite.tmux
+clock = fleet_suite.clock
+claude_on_path = fleet_suite.claude_on_path
+repo = fleet_suite.repo
+project = fleet_suite.project
 
 _REAL_REMOTE_SESSION = login_session.remote_session
 """The real one: ``conftest.at_the_machine`` replaces it in every test."""
@@ -195,3 +203,31 @@ def test_off_macos_there_is_no_session_to_ask(monkeypatch: pytest.MonkeyPatch) -
 @pytest.mark.skipif(sys.platform != "darwin", reason="the real Security.framework")
 def test_the_real_session_answers_on_macos() -> None:
     assert _REAL_REMOTE_SESSION() in (True, False)
+
+
+def test_a_restart_from_ssh_over_a_stale_socket_refuses_before_it_records_the_dead_row(
+    tmux: Any, claude_on_path: Path, project: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``restart`` refuses all that does not depend on the stop BEFORE anything is stopped or
+    recorded (its contract). From SSH over a stale socket it recorded the dead row, and only
+    its replacement's spawn refused to start the server (review of #464, finding 1)."""
+    from aisquare.core.store import store_session
+
+    agent = fleet_service.spawn(project, "coder").agent
+    tmux.kill_server()  # the Mac's server exited: its socket file is stale, no server listens
+    monkeypatch.setattr(login_session, "remote_session", lambda: True)  # and this is SSH
+
+    def row() -> tuple[object, object]:
+        with store_session() as store:
+            [now] = [r for r in store.fleet_agents(project.id) if r.id == agent.id]
+        return now.ended_at, now.ended_by
+
+    before = (row(), list(tmux.typed), len(tmux.spawned))
+
+    with pytest.raises(fleet_service.FleetError, match="start asq on the Mac first") as refused:
+        fleet_service.restart(project, agent.label)
+
+    assert row() == (None, None), "the dead row is left for a listing, as a refusal leaves it"
+    assert (row(), list(tmux.typed), len(tmux.spawned)) == before, "nothing recorded or started"
+    assert fleet_suite._events(project, "agent_exited") == []
+    assert f"cannot restart {agent.label!r}" in str(refused.value), "restart's own refusal"

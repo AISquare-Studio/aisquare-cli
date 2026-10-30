@@ -4844,6 +4844,22 @@ def _refuse_a_server_from_ssh() -> None:
         )
 
 
+def _refuse_a_server_start_from_ssh(srv: TmuxServer) -> None:
+    """:func:`_refuse_a_server_from_ssh` where no server listens at ``srv``'s socket, for a
+    caller that must refuse before it stops or records anything: ``restart``, whose contract
+    is that every refusal not depending on the stop comes first. From SSH over a stale socket
+    it recorded the dead row, and only its replacement's spawn refused (review of #464).
+    Asked of the session first: at the machine, or off macOS, no socket is read."""
+    if not login_session.remote_session():
+        return
+    try:
+        answer = srv.listener(srv.socket_path())
+    except TmuxUnavailable:
+        return
+    if answer != "answers" and answer != "unasked":
+        _refuse_a_server_from_ssh()
+
+
 def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[FleetAgent]:
     """What must hold before anything starts a tmux server at the fleet's socket path, asked in
     this one place; the rows whose exited server's start it forgot. ``srv`` is the fleet's
@@ -9619,6 +9635,10 @@ def restart(
         choice = claude_accounts_service.choose(
             _account_wanted(account, slot), role=runs_as, project=project
         )
+        # The replacement's spawn opens its window where no server may listen: from SSH on
+        # macOS it would refuse to start one there, so the restart refuses now, with the row
+        # and its last screen as they were (#20; review of #464).
+        _refuse_a_server_start_from_ssh(server())
     except (FleetError, claude_accounts_service.NoSuchAccount) as exc:
         raise FleetError(f"cannot restart {label!r}: {exc}") from exc
     # The row's own slot is no new pin; a take-over's account is the human's choice.

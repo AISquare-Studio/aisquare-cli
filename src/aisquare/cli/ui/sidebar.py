@@ -96,6 +96,7 @@ STATE_CHIP: dict[str, tuple[str, str]] = {
     "limited": ("⏳", "magenta"),
     "exited": ("💤", "dim"),
     "lost": ("✗", "red"),
+    "paused": ("⏯", "cyan"),
     "unknown": ("·", "dim"),
 }
 CUSTOM_ROLE_ICON = "🤖"
@@ -106,12 +107,14 @@ ALIVE_STATES: frozenset[str] = fleet_service.PROCESS_STATES
 alive and parked (#146), not gone. The fleet's own set, which Stop and ``--all`` act on:
 a third copy of it could count as alive what they leave, or the reverse (review of #266,
 round 3)."""
-STOP_STATES: frozenset[str] = ALIVE_STATES | {"exited"}
+STOP_STATES: frozenset[str] = ALIVE_STATES | {"exited", "paused"}
 """Where **Stop** is offered — the agent view's button and the sidebar's ``x`` ask
 this one constant, never a copy of it: a process to stop (``ALIVE_STATES``), or an
 exited agent's dead window — `remain-on-exit` keeps it for the last screen, and Stop
 on the 💤 row removes it, which takes the row off the listing (``fleet stop`` on an
-ended row, #138). A ✗ lost row has neither: it is ``fleet reap``'s business."""
+ended row, #138). A ✗ lost row has neither: it is ``fleet reap``'s business. A ⏯ paused
+agent's Stop ends its pause for good: its kept claims go back to the board, and
+``fleet resume`` leaves it (``fleet stop`` of a paused agent)."""
 
 
 class AddProject(Message):
@@ -399,6 +402,9 @@ def agent_row_text(
         tail.append(" exited", style="dim")
         if agent.exit_status is not None:
             tail.append(f"({agent.exit_status})", style="dim")
+    elif status.state == "paused":
+        # Not exited: `fleet pause` stopped it, and `fleet resume` brings it back.
+        tail.append(" paused", style="dim")
     elif agent.account_slot is not None:
         tail.append(f" #{agent.account_slot}" + ("·" if percent is not None else ""), style="dim")
         if percent is not None:

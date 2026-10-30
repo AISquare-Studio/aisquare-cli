@@ -998,11 +998,12 @@ def needs_from_agent(
     prompt answered.
     Records older than the row are ignored throughout: a resumed session's old pending tool
     or closing question belong to the process before it. Without a readable tail, rules
-    3 to 6 and 9 cannot hold. ``exited`` and ``unknown`` agents need nothing here; ``crashed``,
-    ``manager_down`` and ``fleet_down`` speak for them. ``manager_live`` and ``accounts``
-    decide only when a push may go out, and so does ``hands_over``, the source's question of
-    a limited agent (:attr:`NeedsSources.hands_over`, whose default it shares: one default,
-    never ``None`` read as yes). ``pane_output`` says when the agent's pane last printed,
+    3 to 6 and 9 cannot hold. ``exited``, ``paused`` and ``unknown`` agents need nothing here;
+    ``crashed``, ``manager_down`` and ``fleet_down`` speak for them (never for a paused one).
+    ``manager_live`` and ``accounts`` decide only when a push may go out, and so does
+    ``hands_over``, the source's question of a limited agent
+    (:attr:`NeedsSources.hands_over`, whose default it shares: one default, never ``None``
+    read as yes). ``pane_output`` says when the agent's pane last printed,
     asked only of a sub-agent's prompt; ``pane_screen`` is what it shows, asked only with
     more than one call pending.
 
@@ -1028,7 +1029,7 @@ def needs_from_agent(
                 push_after=now + _NEEDS_PUSH_DELAY["lost"],
             )
         ]
-    if status.state in ("exited", "unknown"):
+    if status.state in ("exited", "paused", "unknown"):
         return []
     own = [e for e in events if session is not None and e.session_id == session.id]
     attention_event = max((e for e in own if e.kind == "attention"), key=_needs_seq, default=None)
@@ -2082,7 +2083,7 @@ def _needs_board_item(
 # --- one project --------------------------------------------------------------------------
 
 
-_NEEDS_NOT_ACTING = frozenset({"exited", "lost", "limited", "unknown"})
+_NEEDS_NOT_ACTING = frozenset({"exited", "lost", "limited", "paused", "unknown"})
 """Derived states of a live row that takes no nudge: dead, gone, parked on its usage limit
 until a reset that can be hours away, or on a tmux server that would not answer. A manager
 in one of them is no manager to leave a crash or a coder's question to."""
@@ -2354,7 +2355,7 @@ def _needs_tail_of(
     """The agent's transcript tail, read only where a rule can use it."""
     session = status.session
     path = None if session is None else session.transcript_path
-    if not path or status.state in ("exited", "unknown", "lost"):
+    if not path or status.state in ("exited", "paused", "unknown", "lost"):
         return None
     return reads.needs_read(partial(sources.transcript_tail, path), "a transcript")
 
@@ -2390,7 +2391,7 @@ def _needs_own_events(
     from aisquare.services.fleet import _board_of_row
 
     session = status.session
-    if session is None or status.state in ("exited", "unknown", "lost"):
+    if session is None or status.state in ("exited", "paused", "unknown", "lost"):
         return []
     if status.state != "limited" and session.state != "attention":
         return []
@@ -2653,6 +2654,8 @@ def _needs_crashed(
     for row in ended:
         if row.ended_at is None or now - row.ended_at > CRASH_WINDOW:
             continue
+        if row.paused_at is not None:
+            continue  # `fleet pause` stopped it, to be resumed: no crash
         if row.label == MANAGER_LABEL or _board_of_row(row) == manager_board:
             continue
         clean = row.exit_status in (0, None)
@@ -2739,6 +2742,8 @@ def _needs_manager_down(
 
     if manager is None or manager.ended_at is None or now - manager.ended_at > RECENTLY_ENDED:
         return []
+    if manager.paused_at is not None:
+        return []  # `fleet pause` stopped it on purpose, for `fleet resume`
     if manager.exit_status not in (0, None):
         reason = f"the manager exited unexpectedly (exit {manager.exit_status})"
     elif _needs_handover_failed(_needs_exit_of(manager, exits)):
@@ -3056,7 +3061,7 @@ def _needs_ranked(items: Sequence[NeedsItem]) -> list[NeedsItem]:
 # --- one agent, now: what an action checks before it types -------------------------------
 
 
-_NEEDS_PANE_UNVOUCHED = frozenset({"lost", "exited", "unknown"})
+_NEEDS_PANE_UNVOUCHED = frozenset({"lost", "exited", "paused", "unknown"})
 """Derived states whose pane id the listing did not vouch for. ``lost`` is a pane gone, or a
 row that outlived its tmux server, whose pane id the next server gave to ANOTHER agent
 (``fleet._outlived``, FLEET-1); ``exited`` is a dead pane; ``unknown``, a server that could

@@ -1550,12 +1550,16 @@ class AgentConnection(BaseModel):
 
 EndedBy = Literal["stopped", "died"]
 """How a fleet agent's row ended (``FleetAgent.ended_by``, #38): ``stopped`` on aisquare's
-word — ``fleet stop``, Stop all, ``shutdown``, a hand-over's old row — or ``died``, a death
-a read or ``reap`` recorded that nobody asked for."""
-FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited", "lost", "unknown"]
+word — ``fleet stop``, Stop all, ``shutdown``, a hand-over's old row, ``fleet pause`` — or
+``died``, a death a read or ``reap`` recorded that nobody asked for. A pause is told apart by
+``FleetAgent.paused_at``, never by a value here: 0.9.1 reads every row with these two."""
+FleetAgentState = Literal[
+    "working", "waiting", "attention", "limited", "exited", "lost", "paused", "unknown"
+]
 """What a fleet agent is doing, DERIVED at read time and never stored: a fresh
 ``TeamSession`` row wins (working / waiting / attention); otherwise the tmux
-pane's facts (exited with a status, or lost when the pane is gone); ``unknown``
+pane's facts (exited with a status, or lost when the pane is gone); ``paused`` for the
+newest row of its label that ``fleet pause`` ended (``FleetAgent.paused_at``); ``unknown``
 when neither source can answer."""
 
 FirstPromptState = Literal["pending", "acked", "unsent"]
@@ -1804,6 +1808,11 @@ class FleetAgent(BaseModel):
     """When ``first_prompt`` last changed: given (``pending``), taken (``acked``), found
     not taken (``unsent``). An ``acked`` row's ``first_prompt_at - created_at`` is how long
     the agent took to start its first turn (doctor's ``fleet-delivery`` row)."""
+    paused_at: datetime | None = None
+    """When ``fleet pause`` ended the row (v42), its ``ended_by`` then ``stopped``: its claims,
+    label, worktree and transcript wait for ``fleet resume``. Cleared when the pause ends,
+    by a resume or a stop. A column 0.9.1 never reads, so it sees a stopped 💤 row; ``None``
+    for every row nothing paused."""
 
 
 class FleetAgentStatus(BaseModel):

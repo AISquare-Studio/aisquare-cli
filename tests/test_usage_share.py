@@ -1543,8 +1543,11 @@ def test_a_switch_turned_on_by_hand_is_started_by_the_first_turning_on(machine: 
 
 
 def test_a_switch_turned_on_by_hand_with_no_identity_previews_as_a_sample(
-    machine: Machine,
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The command reads its 31-day sample by the clock: pinned to NOW, as its siblings are, or
+    # the history around NOW fell out of it from about 2026-11-25 on (a date bomb).
+    pin_clock(monkeypatch, usage_share, sharing)
     _history(machine)
     settings_service.set_value("sharing.enabled", "true")  # as `aisquare config set` does
     runner = CliRunner()

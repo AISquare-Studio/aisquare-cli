@@ -7,10 +7,12 @@ follows ``project rename`` (``services.fleet.rename_project``): ``Billing v2`` m
 ``billing-v2`` and the tmux session ``asq-billing-v2``; ``aisquare fleet rename`` sets one
 of your own. It is shown, not edited. Under it, the command that attaches a terminal to
 the project's tmux session (:func:`attach_line`), from the shell's agent frames
-(:meth:`SettingsView.show_agents`). Its *Start fresh…* asks the shell to clear the
-project's board and fleet (:class:`~aisquare.cli.ui.fresh.StartFresh`), as the card's menu
-does. Everything machine-wide — roles, the fleet, how launches pick an account — is App
-settings (``views.app_settings``).
+(:meth:`SettingsView.show_agents`). Its *Pause agents…* and *Resume agents…* ask the shell to
+pause or resume the project's agents (:class:`~aisquare.cli.ui.views.fleet_bulk.BulkAsked`),
+the one that would act on none greyed, and its *Start fresh…* to clear the project's board
+and fleet (:class:`~aisquare.cli.ui.fresh.StartFresh`), as the card's menu does.
+Everything machine-wide — roles, the fleet, how launches pick an account — is App settings
+(``views.app_settings``).
 
 The write opens the store and asks tmux, so it runs in a thread worker
 (:data:`NICKNAME_WORKER`) and the tab answers when it lands: the field and the title show
@@ -24,6 +26,7 @@ the tab's own copy of the project is never what decides there is nothing to save
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Sequence
 
 from rich.style import StyleType
@@ -37,6 +40,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.fresh import StartFresh
 from aisquare.cli.ui.sidebar import ProjectRenamed
+from aisquare.cli.ui.views.fleet_bulk import BulkAsked, applicable
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import install_route
@@ -132,9 +136,11 @@ class SettingsView(VerticalScroll):
     SettingsView .row Button { margin-left: 1; }
     SettingsView #fleet-id { height: auto; }
     SettingsView #attach-line { height: auto; margin-top: 1; }
-    SettingsView #fresh-row { margin-top: 1; }
-    SettingsView #fresh-row Button { margin-left: 0; }
-    SettingsView #fresh-about { width: 1fr; padding: 1 0 0 2; color: $text-muted; }
+    SettingsView #fresh-row, SettingsView #pause-row { margin-top: 1; }
+    SettingsView #fresh-row Button, SettingsView #pause-row #pause-agents { margin-left: 0; }
+    SettingsView #fresh-about, SettingsView #pause-about {
+        width: 1fr; padding: 1 0 0 2; color: $text-muted;
+    }
     SettingsView #settings-note { color: $text-muted; margin-top: 1; height: auto; }
     """
 
@@ -144,17 +150,25 @@ class SettingsView(VerticalScroll):
         self.agents: list[FleetAgentStatus] | None = None
         """The project's agent rows as the shell's last frame listed them; ``None`` before
         the first."""
+        self.fleet_paused = False
+        """Whether the project's ``fleet-paused`` signal read on in that frame: Resume clears
+        it, with no agent paused too."""
         self._attach_painted: tuple[str, list[Span], StyleType] | None = None
         """The attach line as last painted: a frame that changes nothing repaints nothing.
         Its text, spans and style — ``Text``'s own ``==`` leaves the style out."""
 
-    def show_agents(self, agents: Sequence[FleetAgentStatus]) -> None:
-        """The project's rows from the shell's frame: the attach line follows its session."""
+    def show_agents(
+        self, agents: Sequence[FleetAgentStatus], *, fleet_paused: bool = False
+    ) -> None:
+        """The project's rows from the shell's frame: the attach line follows its session, and
+        Pause / Resume what they would act on (``fleet_paused``: its signal reads on)."""
         self.agents = list(agents)
+        self.fleet_paused = fleet_paused
         try:
             line = self.query_one("#attach-line", Static)
         except NoMatches:  # not composed yet: compose reads self.agents
             return
+        self._paint_pause()
         wanted = attach_line(self.agents)
         painted = (wanted.plain, wanted.spans, wanted.style)
         if painted != self._attach_painted:
@@ -203,6 +217,17 @@ class SettingsView(VerticalScroll):
         attach = attach_line(self.agents)
         self._attach_painted = (attach.plain, attach.spans, attach.style)
         yield Static(attach, id="attach-line")
+        can = applicable(self.agents, fleet_paused=self.fleet_paused)
+        with Horizontal(classes="row", id="pause-row"):
+            yield Button("⏸ Pause agents…", id="pause-agents", disabled=not can["pause"])
+            yield Button("▶ Resume agents…", id="resume-agents", disabled=not can["resume"])
+            yield Static(
+                Text(
+                    "Pause exits its running agents and keeps each one's claim, worktree and "
+                    "session; Resume starts exactly those again. Each asks first."
+                ),
+                id="pause-about",
+            )
         with Horizontal(classes="row", id="fresh-row"):
             yield Button("↺ Start fresh…", id="start-fresh", variant="warning")
             yield Static(
@@ -223,6 +248,25 @@ class SettingsView(VerticalScroll):
             ),
             id="settings-note",
         )
+
+    def _paint_pause(self) -> None:
+        """Pause and Resume greyed where they would act on nothing (``applicable``)."""
+        can = applicable(self.agents, fleet_paused=self.fleet_paused)
+        for action in ("pause", "resume"):
+            with contextlib.suppress(NoMatches):
+                self.query_one(f"#{action}-agents", Button).disabled = not can[action]
+
+    @on(Button.Pressed, "#pause-agents")
+    def _pause(self, event: Button.Pressed) -> None:
+        """*Pause agents…*: the shell asks, as the card's menu has it ask."""
+        event.stop()
+        self.post_message(BulkAsked("pause", self.project.id))
+
+    @on(Button.Pressed, "#resume-agents")
+    def _resume(self, event: Button.Pressed) -> None:
+        """*Resume agents…*: the shell asks, as the card's menu has it ask."""
+        event.stop()
+        self.post_message(BulkAsked("resume", self.project.id))
 
     @on(Button.Pressed, "#start-fresh")
     def _start_fresh(self, event: Button.Pressed) -> None:

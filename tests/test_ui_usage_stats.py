@@ -39,7 +39,7 @@ from aisquare.models import USAGE_RANGES, UsageDay, UsageRange, UsageStats, Usag
 from aisquare.services import usage_stats
 from tests.test_ui_settings_hub import GOOD
 from tests.ui_workers import settle_page, settle_until
-from tests.usage_stats_support import IST, NOW, Machine, prompt, request
+from tests.usage_stats_support import IST, NOW, Machine, pin_clock, prompt, request
 
 T = TypeVar("T")
 SIZE = (120, 60)
@@ -143,8 +143,11 @@ def _page(view: UsageStatsView) -> dict[str, str]:
 
 
 def test_the_hub_has_a_usage_and_stats_link_that_opens_the_page_under_settings(
-    machine: Machine,
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The page's own loader reads its 7-day range by the clock: pinned to NOW, or the history
+    # around NOW fell out of it from about 2026-11-02 on (a date bomb).
+    pin_clock(monkeypatch, usage_stats)
     _history(machine)
 
     async def go() -> tuple[str | None, str | None, bool, str]:

@@ -7,10 +7,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 **Upgrading:**
-- **The store migrates from v40 (0.9.1's) to v41 on first open, automatically, in one
-  step.** It adds one table, `project_codename_alias` (the codenames a renamed project
-  gave up), and its index. Nothing is rewritten or dropped. 0.9.1 opens a v41 store as
-  current and leaves the table alone; `--project <old codename>` then finds nothing there.
+- **The store migrates from v40 (0.9.1's) to v42 on first open, automatically, in two
+  steps.** v41 adds one table, `project_codename_alias` (the codenames a renamed project
+  gave up), and its index; v42 adds one nullable column, `fleet_agent.paused_at`: when
+  `fleet pause` ended the row. Nothing is rewritten or dropped.
+- **Moving back to 0.9.1 is safe.** Its migrator treats a store at or past its own version
+  as current: it leaves the table alone, so `--project <old codename>` then finds nothing
+  there, and it never reads `paused_at`: a paused agent's row is `stopped`, a value it
+  knows, so 0.9.1 shows a paused agent as a stopped 💤 row, and Restart all leaves it. Its
+  `reap` may then remove a paused agent's worktree once nothing in it is unpushed; resume
+  paused agents before moving back if you want them back where they were. A paused agent's
+  task stays claimed there (the pause leased it to 2126), and 0.9.1 knows of no pause to end:
+  only `aisquare task release <id>` frees it.
 
 ### Added
 
@@ -19,16 +27,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   name, and the line under it shows the label it will become (`Login Fix` → `login-fix`,
   `2FA work` → `coder-2fa-work`); Enter or a click away saves, Esc cancels. `aisquare fleet
   relabel coder-1 login fix` does the same from a shell (`--json` too), and both say
-  `coder-1 is now login-fix`. A name another running agent of the project holds gets the
-  next free suffix (`login-fix-2`), and you are told. From then on the agent is that label
-  everywhere: `fleet tell`, `stop`, `restart`, `switch`, the board's lines and its tmux
-  window. The old label finds nothing, and its refusal says what the agent is called now.
+  `coder-1 is now login-fix`. A name another running or paused agent of the project holds
+  gets the next free suffix (`login-fix-2`), and you are told. From then on the agent is
+  that label everywhere: `fleet tell`, `stop`, `restart`, `switch`, the board's lines and
+  its tmux window. The old label finds nothing, and its refusal says what the agent is called now.
   An ended agent whose label the rename takes keeps its row, listed as `~login-fix` by
   `fleet ls --all`, and no restart by label brings it back.
   An `agent_renamed` line on the board tells the manager. The agent keeps its worktree and
   branch, as they are: its restart, stop and reap find them by the row. The manager and
   the captain keep their labels, no agent can take `manager` or `captain`, and an agent
-  that ended is not renamed. `fleet rename` still renames the project's codename.
+  that ended, or is paused, is not renamed (resume a paused one first). `fleet rename`
+  still renames the project's codename.
+- **Pause and resume the agents of a project, or of every project**, so idle managers and
+  coders stop spending tokens without being reaped, and come back with one click — before
+  a reboot or an OS update too. A pause exits each running agent's Claude process as
+  `fleet stop` does (`/exit`, the grace, the window killed) and keeps everything else of
+  it: its row, label, role, task claim, worktree, branch, account and transcript. Its
+  claims are parked on its session, as a hand-over parks them, and held however long it
+  stays paused (their lease no longer lapses): nothing is released, and no
+  `agent_exited` goes out (the board says `agent_paused`, which wakes nobody). A resume
+  starts exactly the agents a pause stopped, each through `fleet restart`: under its label,
+  its session resumed from its transcript (`claude --resume`) and one carry-on line typed,
+  or, with no transcript, started fresh with the board's hand-off prompt, taking its claims
+  over. An agent that exited without a pause stays 💤, and a second resume does nothing.
+  A paused agent whose task was done or dropped meanwhile is not resumed: the owner's
+  resume ends its pause (its claims go back to the board, and `reap` may take its tree) and
+  says so.
+  - **asq:** Settings ▸ Fleet has *Pause all…* and *Resume all…* beside *Restart all…*
+    and *Stop all…*, in the same dialog (who, by project; *Managers only*; Cancel
+    focused), run off the UI thread with a toast per agent and one that sums it up. A
+    project card's ⋯ menu has *Pause agents…* and *Resume agents…*, and so has the
+    project's Settings tab: the same dialog for that project alone, the one that would
+    act on nothing greyed (*Resume* clears a `fleet-paused` signal with no agent paused
+    too). A paused agent shows `⏯ paused` in the sidebar and on Remote, and its view offers
+    *Resume*, and *Stop*, which ends the pause for good.
+  - A paused agent survives a rename. It keeps its label: `fleet relabel` and the sidebar
+    refuse to rename it until it is resumed, and give no running agent its label. Renaming
+    its project leaves it paused, and it resumes in the renamed project's tmux session, in
+    its own worktree and branch.
+  - A paused agent survives its tmux server: `fleet reap --server-down` after a reboot
+    leaves it paused, its worktree and claims intact. `reap` removes neither its worktree
+    nor its branch, a spawn does not take its label (a second manager is refused while
+    the project's own is paused), and Restart all, Stop all and the restart of agents an
+    update lost leave it.
+  - Only the owner ends a pause: asq, Remote, or a shell that is no agent's window. The
+    owner's `fleet stop <label>` of a paused agent ends its pause: its row is recorded
+    stopped, the claims it kept go back to the board and its exit is announced. The owner's
+    `fleet restart <label>` resumes it, as `fleet resume` would. An agent's stop, restart,
+    switch or resume of a paused teammate is refused and changes nothing, the project's
+    `fleet-paused` signal included, whether it is run from the agent's own window with no
+    `--as`, with `--as <session>`, or with `--as captain`; the captain acts as the owner from
+    its own window alone. That includes a paused agent whose task closed: only the owner's
+    resume ends that pause.
 
 ### Changed
 
@@ -65,6 +115,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   together with another checkout's folder name (two clones of `aisquare-cli`) was refused
   as ambiguous. Now it names the project that holds the codename. The captain's `ui` actions
   follow the same rule.
+- **`fleet pause` and `fleet resume` pause and resume the agents, not only the signal.**
+  `fleet pause [-P <project> | --group <group> | --all] [--managers]` sets the project's
+  `fleet-paused` signal, as before, and then pauses every running agent of it, its
+  manager first, one line each, then a count; `fleet resume` resumes the paused agents,
+  the manager last, and clears the signal where no agent stays paused: `--managers`, or an
+  agent whose resume failed, leaves it on, and says so. A signal that cannot be set or cleared
+  refuses the command before any agent is touched, as before; an agent that fails is its
+  own line and exits 1. `--json` prints the report `restart --all` prints, with
+  `signals` and `kept`. The manager's rule is unchanged: it spawns nothing while `fleet-paused` is
+  on, and `fleet shutdown` still clears the signal. `fleet ls` shows a paused agent as
+  `⏯ paused`.
 
 ### Fixed
 

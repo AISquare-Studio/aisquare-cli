@@ -1616,6 +1616,7 @@ def test_spawn_retries_the_label_when_the_live_index_trips(
         task_id: str | None = None,
         store: object = None,
         trees: Path | None = None,
+        replaces: str | None = None,
     ) -> str:
         calls.append(wanted)
         if len(calls) == 1:
@@ -1676,6 +1677,7 @@ def test_spawn_never_puts_a_second_live_agent_in_one_worktree(
         task_id: str | None = None,
         store: object = None,
         trees: Path | None = None,
+        replaces: str | None = None,
     ) -> str:
         if racing["on"]:
             racing["on"] = False
@@ -12721,6 +12723,15 @@ class _RefusedOn:
         return bool(self._conn.__exit__(*exc))
 
 
+def _as_the_owner(w: _Hubbed, verb: str) -> None:
+    """A resume run from the owner's shell, not the coder's pane ``hubbed`` became: since the
+    fold of #457 only the owner's ``fleet resume`` writes the signal (round 2, m1), and the
+    store errors below are the write's. An agent's is refused before any write, as
+    ``test_an_agents_resume_clears_no_signal_only_pause`` says. A pause writes from either."""
+    if verb == "resume":
+        w.monkeypatch.delenv(FLEET_AGENT_ENV_VAR, raising=False)
+
+
 @pytest.mark.parametrize("verb", ["pause", "resume"])
 def test_a_pause_or_resume_the_store_refuses_on_a_later_board_writes_none(
     hubbed: _Hubbed, runner: CliRunner, verb: str
@@ -12752,6 +12763,7 @@ def test_a_pause_or_resume_the_store_refuses_on_a_later_board_writes_none(
 
     w.monkeypatch.setattr(SqliteStore, "add_signal_events", locked_on_last)
     signals = {board.id: _events(board, "signal") for board in (w.hub, w.fleet)}
+    _as_the_owner(w, verb)
 
     with pytest.raises(FleetError) as refused:
         getattr(fleet_service, verb)(w.fleet)
@@ -12807,6 +12819,7 @@ def test_a_pause_or_resume_a_full_or_readonly_store_refuses_is_said_with_no_trac
             store._conn = conn
 
     w.monkeypatch.setattr(SqliteStore, "add_signal_events", refused_on_last)
+    _as_the_owner(w, verb)
 
     with pytest.raises(FleetError) as refused:
         getattr(fleet_service, verb)(w.fleet)
@@ -18233,6 +18246,7 @@ def test_the_auto_mode_evidence_is_read_before_the_window_starts(
         task_id: str | None = None,
         store: object = None,
         trees: Path | None = None,
+        replaces: str | None = None,
     ) -> str:
         calls.append(wanted)
         if len(calls) == 1:

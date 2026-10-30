@@ -243,6 +243,20 @@ def test_clearing_the_name_takes_the_codename_from_the_folder(
     assert cleared.codename == "repo"
 
 
+def test_the_clear_options_help_says_the_codename_follows_the_folder_too() -> None:
+    """REVIEW-RC092 nit 3: ``--clear``'s help said only "the folder's name shows again", while
+    the command's text says it "gives both back to the folder's name": the codename too, as
+    the test above has it."""
+    shown = CliRunner().invoke(app, ["project", "rename", "--help"], env={"COLUMNS": "200"})
+
+    assert shown.exit_code == 0, shown.output
+    said = " ".join(shown.stdout.replace("│", " ").split())
+    assert (
+        "Drop the nickname: the folder's name shows again, and the codename becomes its slug."
+        in said
+    ), said
+
+
 def test_a_project_with_no_codename_yet_is_given_its_names(
     tmux: FakeTmux, project: ProjectInfo
 ) -> None:

@@ -31,10 +31,12 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   as any stopped agent, holding the claim when it resumes its transcript, and otherwise
   only `aisquare task release <id>` gives the task back to the board. 0.9.1 also lets a
   spawn take a paused agent's label (and a second manager start beside a paused one), and
-  its `reap` removes a paused agent's worktree and branch once nothing in them is
-  unpushed; back on 0.9.2, a paused agent whose label another row took is not resumed, and
-  its claims wait for `task release`. **Resume paused agents before moving back.** Moved
-  forward again, 0.9.2 reads the paused rows and the old codenames as it left them.
+  its `reap` removes a paused agent's worktree once it is clean and pushed, keeping its
+  branch until the default branch has its work (0.9.2's resume makes the tree again on
+  that branch); back on 0.9.2, a paused agent whose label another row took is not
+  resumed, and its claims wait for `task release`. **Resume paused agents before moving
+  back.** Moved forward again, 0.9.2 reads the paused rows and the old codenames as it left
+  them.
 - **No setting, extra or dependency is added or removed.** One new command, `aisquare
   fleet relabel`, and two new flags on `fleet pause` and `fleet resume`, `--all` and
   `--managers`.

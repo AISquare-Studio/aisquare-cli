@@ -389,7 +389,7 @@ def test_a_resume_that_is_not_the_owners_previews_each_paused_row_as_refused() -
 
     project = ProjectInfo(id="prj_a", root=Path("/w/alpha"))
     paused = _paused("prj_a", "coder-1", "coder")
-    why = "coder-1 was paused by the owner (`fleet pause`), and only the owner ends a pause"
+    why = "coder-1 is paused, and only the owner ends a pause — ask the owner"
     plan = fleet_service.BulkPlan(
         "resume",
         False,

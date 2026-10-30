@@ -29,6 +29,7 @@ from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo, TeamTask
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 from aisquare.services.fleet import NOT_PAUSED, PAUSED_LEFT, BulkReceipt, FleetError
 from tests import fakebin
@@ -470,7 +471,7 @@ def test_the_managers_stop_cycle_leaves_a_paused_agent(fleet: Fleet) -> None:
     )
 
     assert stopped.exit_code == 1, stopped.output
-    assert "paused by the owner" in json.loads(stopped.stdout)["detail"]
+    assert "only the owner ends a pause" in json.loads(stopped.stdout)["detail"]
     task = _task(fleet.tasks["alpha"])
     assert task.status == "doing" and task.claimed_by == coder.session_id, "#1 not released"
     assert _events(fleet.alpha, "task_released") == []
@@ -662,7 +663,7 @@ def test_an_agent_may_not_stop_a_paused_agent_and_the_owner_may(fleet: Fleet) ->
     fleet_service.bulk("pause", projects=[fleet.alpha])
     assert manager.session_id is not None
 
-    with pytest.raises(FleetError, match="paused by the owner"):
+    with pytest.raises(FleetError, match="only the owner ends a pause"):
         fleet_service.stop(fleet.alpha, coder.label, actor=manager.session_id)
     assert _row(coder.id).paused_at is not None
     assert _task(fleet.tasks["alpha"]).claimed_by == coder.session_id
@@ -670,7 +671,10 @@ def test_an_agent_may_not_stop_a_paused_agent_and_the_owner_may(fleet: Fleet) ->
         app,
         ["--json", "fleet", "stop", coder.label, "--project", fleet.alpha.id, "--as", "x"],
     )
-    assert refused.exit_code == 1 and "paused by the owner" in json.loads(refused.stdout)["detail"]
+    assert (
+        refused.exit_code == 1
+        and "only the owner ends a pause" in json.loads(refused.stdout)["detail"]
+    )
 
     receipt = fleet_service.stop(fleet.alpha, coder.label, actor="user")
     assert receipt.agent.paused_at is None and receipt.released
@@ -753,8 +757,8 @@ def test_an_agent_may_not_restart_switch_or_resume_a_paused_teammate_and_the_own
         app, ["--json", "fleet", "restart", coder.label, "-P", ref, "--as", manager.session_id]
     )
     assert restarted.exit_code == 1, restarted.output
-    assert "paused by the owner" in json.loads(restarted.stdout)["detail"]
-    with pytest.raises(FleetError, match="paused by the owner"):
+    assert "only the owner ends a pause" in json.loads(restarted.stdout)["detail"]
+    with pytest.raises(FleetError, match="only the owner ends a pause"):
         fleet_service.switch(fleet.alpha, coder.label, spawned_by=manager.session_id)
     with pytest.raises(FleetError, match="no process to move"):
         fleet_service.switch(fleet.alpha, coder.label)  # the owner's: resume it first
@@ -764,7 +768,7 @@ def test_an_agent_may_not_restart_switch_or_resume_a_paused_teammate_and_the_own
     outcomes = _outcomes(fleet, resumed.receipts)
     assert outcomes["alpha/manager"] == ("skipped", fleet_service.THIS_SESSION)  # its own row
     assert outcomes[_coder_label(fleet, "alpha")][0] == "failed"
-    assert "paused by the owner" in (outcomes[_coder_label(fleet, "alpha")][1] or "")
+    assert "only the owner ends a pause" in (outcomes[_coder_label(fleet, "alpha")][1] or "")
     assert len(tmux.spawned) == spawned, "nothing was started"
     assert _row(coder.id).paused_at is not None and fleet_service.is_paused(fleet.alpha)
     assert _task(fleet.tasks["alpha"]).claimed_by == coder.session_id
@@ -909,7 +913,7 @@ def test_an_agents_own_window_may_not_end_the_owners_pause_with_or_without_as(
     ref = fleet.alpha.id
     spawned, signals = len(tmux.spawned), len(_events(fleet.alpha, "signal"))
 
-    by_owner = "paused by the owner"
+    by_owner = "only the owner ends a pause"
     for args, refusal in (
         (["fleet", "restart", coder.label, "-P", ref], by_owner),
         (["fleet", "resume", "-P", ref], by_owner),
@@ -923,7 +927,7 @@ def test_an_agents_own_window_may_not_end_the_owners_pause_with_or_without_as(
         result = runner.invoke(app, ["--json", *args])
         assert result.exit_code == 1, (args, result.output)
         assert refusal in result.stdout, (args, result.stdout)
-    with pytest.raises(FleetError, match="paused by the owner"):
+    with pytest.raises(FleetError, match="only the owner ends a pause"):
         fleet_service.switch(fleet.alpha, coder.label)  # `user`, from the manager's window
 
     assert len(tmux.spawned) == spawned, "nothing was started"
@@ -954,7 +958,7 @@ def test_an_agents_refused_resume_writes_no_signal(fleet: Fleet, tmux: FakeTmux)
 
     coder_key = _coder_label(fleet, "alpha")
     outcome, why = _outcomes(fleet, report.receipts)[coder_key]
-    assert outcome == "failed" and "paused by the owner" in (why or ""), why
+    assert outcome == "failed" and "only the owner ends a pause" in (why or ""), why
     assert not report.ok and report.signals == ()
     assert [(p.id, n) for p, n in report.kept] == [(fleet.alpha.id, 1)]
     assert len(_events(fleet.alpha, "signal")) == signals, "no signal written, on or off"
@@ -976,9 +980,14 @@ def test_an_agents_resume_of_a_paused_agent_whose_task_closed_names_what_the_own
 
     outcome, why = _outcomes(fleet, report.receipts)[_coder_label(fleet, "alpha")]
     assert outcome == "failed"
+    with store_session() as store:
+        stored = store.get_project(fleet.alpha.id)
+    assert stored is not None
+    resume = project_service.fleet_command("resume", stored)
     assert why == (
-        f"{coder.label} was paused by the owner (`fleet pause`), and only the owner ends a pause "
-        "(their resume ends the pause, as its task is done); nothing was changed"
+        f"{coder.label} is paused, and only the owner ends a pause — ask the owner: their "
+        f"`{resume}` (or Resume agents… in asq) ends its pause, as its task is done; nothing "
+        "was changed"
     )
     assert _row(coder.id).paused_at is not None
 
@@ -1057,7 +1066,7 @@ def test_an_agents_resume_clears_no_signal_only_pause(
 
     assert refused.exit_code == 1, refused.output
     said = " ".join(refused.stdout.split())
-    assert "stays fleet-paused: the pause is the owner's, and only the owner ends it" in said
+    assert "stays fleet-paused: only the owner ends a pause — ask the owner: their" in said
     assert "brings them back" not in said and "was cleared" not in said
     assert len(_events(fleet.alpha, "signal")) == signals, "no signal written"
     assert fleet_service.is_paused(fleet.alpha)
@@ -1065,3 +1074,74 @@ def test_an_agents_resume_clears_no_signal_only_pause(
     owners = runner.invoke(app, ["fleet", "resume", "-P", fleet.alpha.id])
     assert owners.exit_code == 0, owners.output
     assert not fleet_service.is_paused(fleet.alpha)
+
+
+# --- REVIEW-RC092 (reviewer-rc092, seq 5456 and 5462): the refusals' words ---------------------
+
+
+def _stored(project: ProjectInfo) -> ProjectInfo:
+    with store_session() as store:
+        stored = store.get_project(project.id)
+    assert stored is not None
+    return stored
+
+
+def test_an_agent_that_paused_its_team_is_not_told_the_owner_paused_it(fleet: Fleet) -> None:
+    """Nit 6: any caller may pause, and a manager that pauses its team leaves its own row
+    running; its resume is then refused, as only the owner ends a pause. The refusal said
+    "coder-1 was paused by the owner (`fleet pause`)", which the owner never did. It says
+    only the owner ends a pause and to ask the owner, naming the resume as theirs."""
+    manager = fleet.agents["alpha/manager"]
+    key = _coder_label(fleet, "alpha")
+    coder = fleet.agents[key]
+    paused = fleet_service.bulk("pause", projects=[fleet.alpha], acting_session=manager.session_id)
+    assert _outcomes(fleet, paused.receipts)["alpha/manager"] == (
+        "skipped",
+        fleet_service.THIS_SESSION,
+    )
+    assert _row(coder.id).paused_at is not None
+
+    resumed = fleet_service.bulk(
+        "resume", projects=[fleet.alpha], acting_session=manager.session_id
+    )
+
+    outcome, why = _outcomes(fleet, resumed.receipts)[key]
+    resume = project_service.fleet_command("resume", _stored(fleet.alpha))
+    assert outcome == "failed"
+    assert why == (
+        f"{coder.label} is paused, and only the owner ends a pause — ask the owner: their "
+        f"`{resume}` (or Resume agents… in asq) brings it back; nothing was changed"
+    )
+    assert _row(coder.id).paused_at is not None and fleet_service.is_paused(fleet.alpha)
+
+
+def test_a_resume_into_its_tree_another_agent_works_in_says_what_frees_it(
+    fleet: Fleet, tmux: FakeTmux
+) -> None:
+    """Nit 1: back from 0.9.1, whose spawn can put a new agent in a paused agent's tree, the
+    resume is refused, as it must be, but said "a parallel spawn took the label …; spawn
+    again": no label was taken, and a spawn starts nothing for a paused agent. It says whose
+    tree it is now and what frees it."""
+    key = _coder_label(fleet, "alpha")
+    coder = fleet.agents[key]
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    holder = fleet_service.spawn(fleet.alpha, "coder", worktree=False).agent
+    with store_session() as store:  # in the paused agent's tree, as 0.9.1's spawn puts it
+        store._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE fleet_agent SET worktree = 1, cwd = ? WHERE id = ?",
+            (str(coder.cwd), holder.id),
+        )
+        store._conn.commit()  # type: ignore[attr-defined]
+    spawned = len(tmux.spawned)
+
+    report = fleet_service.bulk("resume", projects=[fleet.alpha])
+
+    outcome, why = _outcomes(fleet, report.receipts)[key]
+    stop = project_service.fleet_command("stop", _stored(fleet.alpha), holder.label)
+    assert outcome == "failed"
+    assert why == (
+        f"{coder.cwd.resolve()} is the live worktree of {holder.label} ({holder.id}) now, so "
+        f"{coder.label} is not started in it again until `{stop}` frees it"
+    )
+    assert coder.label not in [window["name"] for window in tmux.spawned[spawned:]]
+    assert _row(coder.id).paused_at is not None

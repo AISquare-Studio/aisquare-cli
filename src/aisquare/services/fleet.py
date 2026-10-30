@@ -1052,7 +1052,7 @@ def _generation_taken(store: ContextStore) -> set[str]:
     return store.codenames_in_use() | store.aliases_in_use()
 
 
-def _is_home_project(project: ProjectInfo) -> bool:
+def is_home_project(project: ProjectInfo) -> bool:
     """Whether ``project`` is the aisquare home's own row — the captain's home board."""
     home = paths.aisquare_home().resolve()
     return project.id == project_id_for(home)
@@ -3717,7 +3717,7 @@ def spawn(
     _refuse_an_agents_opening_command(
         project, role, prompt, spawned_by, kickoff_first=task_id is not None and kickoff
     )
-    if experimental.captain_role(role) and not _is_home_project(project):
+    if experimental.captain_role(role) and not is_home_project(project):
         raise FleetError(
             "the captain lives on the home board, one per home — `aisquare captain` starts "
             f"it; it cannot be spawned into {_name(project)}"
@@ -3882,7 +3882,7 @@ def spawn(
     tree = _tree_path(project.root, config.worktree_dir, picked, own_worktree)
 
     def refuse_if_taken() -> None:
-        _refuse_occupied_worktree(project, tree, picked)
+        _refuse_occupied_worktree(project, tree, picked, again=own_worktree is not None)
 
     if use_worktree:
         if not is_git_project(project.root):
@@ -4976,15 +4976,22 @@ def open_window(
     )
 
 
-def _refuse_occupied_worktree(project: ProjectInfo, tree: Path, label: str) -> None:
+def _refuse_occupied_worktree(
+    project: ProjectInfo, tree: Path, label: str, *, again: bool = False
+) -> None:
     """Refuse the tree a LIVE agent is working in — before anything touches it.
 
     ``next_label`` keeps live labels apart, and the trees of relabelled agents, so the only
-    way to arrive here is a parallel spawn that picked this label from a snapshot taken a
-    moment earlier. ``tree`` (:func:`_tree_path`: ``<worktree_dir>/<label>``, or a
+    way a new spawn arrives here is a parallel spawn that picked this label from a snapshot
+    taken a moment earlier. ``tree`` (:func:`_tree_path`: ``<worktree_dir>/<label>``, or a
     replacement's own) is then the winner's, and
     neither starting a second agent in it nor (worse) checking another branch
     out from under the first one is acceptable.
+
+    ``again`` is a replacement's (a restart, a switch, a resume; ``own_worktree``): the
+    agent's own tree, another agent's now, as 0.9.1's spawn can make a paused agent's. No
+    label was taken and spawning again starts nothing, so it says what frees the tree
+    (REVIEW-RC092, nit 1).
 
     The winner's row can still appear AFTER this read, and the two halves of
     that race need two different guards: :func:`_relabel` refuses the second
@@ -4997,6 +5004,12 @@ def _refuse_occupied_worktree(project: ProjectInfo, tree: Path, label: str) -> N
     with store_session() as store:
         live = store.fleet_agents(project.id, live_only=True)
     holder = next((a for a in live if a.worktree and a.cwd.resolve() == path), None)
+    if holder is not None and again:
+        stop = project_service.fleet_command("stop", project, holder.label)
+        raise FleetError(
+            f"{path} is the live worktree of {holder.label} ({holder.id}) now, so {label} is "
+            f"not started in it again until `{stop}` frees it"
+        )
     if holder is not None:
         raise FleetError(
             f"{path} is the live worktree of {holder.label} ({holder.id}) — a parallel spawn "
@@ -7456,19 +7469,18 @@ def _paused_by_the_owner(
     project: ProjectInfo, label: str, *, closes: str | None = None
 ) -> FleetError:
     """The refusal of a stop, restart, switch or resume an agent asked for of a paused
-    teammate: the pause is the owner's (decision 1 of #9), and so is ending it — a manager's
-    cycle that stopped one released its claims, and one that restarted one undid the owner's
-    pause. It names no command: every way to end a pause is the owner's alone (asq, Remote,
-    their own shell). ``closes`` is why the owner's resume would end this pause rather than
-    bring the agent back (its task closed, ``BulkRow.closes``)."""
-    ends = (
-        f"their resume ends the pause, as its {closes}"
-        if closes is not None
-        else "their resume brings it back"
-    )
+    teammate: ending a pause is the owner's (decision 1 of #9) — a manager's cycle that
+    stopped one released its claims, and one that restarted one undid the pause. Any caller
+    may pause, so it never says who paused the agent: told "paused by the owner", a manager
+    that paused its own team was told what never happened (REVIEW-RC092, nit 6). It says to
+    ask the owner, and names their resume as theirs: every way to end a pause is the owner's
+    alone (asq, Remote, their own shell). ``closes`` is why the owner's resume would end this
+    pause rather than bring the agent back (its task closed, ``BulkRow.closes``)."""
+    ends = f"ends its pause, as its {closes}" if closes is not None else "brings it back"
+    resume = project_service.fleet_command("resume", project)
     return FleetError(
-        f"{label} was paused by the owner (`fleet pause`), and only the owner ends a pause "
-        f"({ends}); nothing was changed"
+        f"{label} is paused, and only the owner ends a pause — ask the owner: their "
+        f"`{resume}` (or Resume agents… in asq) {ends}; nothing was changed"
     )
 
 
@@ -9523,7 +9535,7 @@ def _refuse_a_replay_spawn_refuses(project: ProjectInfo, agent: FleetAgent) -> N
         _fixed_label(agent.role, agent.label)
     except FleetError as exc:
         raise FleetError(f"{exc} — {keep}") from exc
-    if experimental.captain_role(agent.role) and not _is_home_project(project):
+    if experimental.captain_role(agent.role) and not is_home_project(project):
         raise FleetError(
             "the captain lives on the home board, one per home — `aisquare captain` starts "
             f"it; {agent.label!r} cannot be started again in {_name(project)}, so nothing "

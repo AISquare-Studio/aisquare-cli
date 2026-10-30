@@ -750,7 +750,14 @@ def _emit_bulk(report: fleet_service.BulkReport, console: Console, *, as_json: b
         )
         console.print(f"nothing to {report.action}: no {who} {how} {where}", markup=False)
     for project in report.signals:
-        if report.action == "pause":
+        if report.action == "pause" and fleet_service.is_home_project(project):
+            # The captain's home board: its one agent is the captain, which a pause leaves,
+            # and no manager runs there to hold (REVIEW-RC092, nit 5).
+            said = (
+                f"⏸ {_display_name(project)} is fleet-paused: it is the captain's home, where "
+                "no manager runs"
+            )
+        elif report.action == "pause":
             said = (
                 f"⏸ {_display_name(project)} is fleet-paused: its manager spawns nothing until "
                 f"`{project_service.fleet_command('resume', project)}`"
@@ -760,10 +767,12 @@ def _emit_bulk(report: fleet_service.BulkReport, console: Console, *, as_json: b
         console.print(said, markup=False)
     for project, left in report.kept:
         if not report.owners:
-            # Said to the agent that was refused: no command it could run brings them back.
+            # Said to the agent that was refused: no command it could run brings them back, so
+            # it is told to ask the owner, whose resume it names as theirs (nit 6).
             console.print(
-                f"⏸ {_display_name(project)} stays fleet-paused: the pause is the owner's, "
-                "and only the owner ends it; nothing was changed",
+                f"⏸ {_display_name(project)} stays fleet-paused: only the owner ends a pause "
+                f"— ask the owner: their `{project_service.fleet_command('resume', project)}` "
+                "(or Resume agents… in asq) ends it; nothing was changed",
                 markup=False,
             )
             continue

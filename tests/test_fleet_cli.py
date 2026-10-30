@@ -2066,6 +2066,31 @@ def test_pause_and_resume_json_say_which_way_the_switch_went(
         assert signal["project"] == {"id": PROJECT.id, "name": "api", "codename": "amber-otter"}
 
 
+def test_pause_all_says_the_captains_home_has_no_manager(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW-RC092 nit 5: ``fleet pause --all`` sets the signal of every project with a row,
+    the captain's home board among them, and said "⏸ .aisquare is fleet-paused: its manager
+    spawns nothing until …" of a board with no manager. It says it is the captain's home;
+    every other project's line is as before."""
+    from aisquare.core import paths
+
+    root = paths.aisquare_home().resolve()
+    home = ProjectInfo(id=project_id_for(root), root=root, codename="civic-egret")
+    _install(monkeypatch, "bulk", BulkReport("pause", False, (), signals=(home, PROJECT)))
+
+    paused = runner.invoke(app, ["fleet", "pause", "--all"])
+
+    assert paused.exit_code == 0, paused.output
+    said = _plain(paused.stdout)
+    assert f"⏸ {root.name} is fleet-paused: it is the captain's home, where no manager runs" in said
+    assert said.count("its manager spawns nothing") == 1, said
+    assert (
+        "⏸ api is fleet-paused: its manager spawns nothing until "
+        "`aisquare fleet resume --project amber-otter`"
+    ) in said
+
+
 def test_pause_of_an_unknown_project_is_not_found(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

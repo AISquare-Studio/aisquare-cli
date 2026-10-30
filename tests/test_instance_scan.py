@@ -302,6 +302,8 @@ from dataclasses import replace
 from aisquare.core import instances
 instances.attached_kind = lambda env=None: "native"
 me = replace(instances.describe_this_process(), version="0.0.1")
+if len(sys.argv) > 1:
+    me = replace(me, host=sys.argv[1])  # registered under a name the network has since changed
 with instances.gate():
     registration = instances.register(me)
 asked = threading.Event()
@@ -314,15 +316,19 @@ time.sleep(1.0)  # what an asq's exit takes after it leaves the registry
 """
 
 
+@pytest.mark.parametrize("host", ["same", "renamed"])
 def test_yes_waits_for_the_asked_asqs_process_to_end_not_only_its_record(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    host: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """An asq leaves the registry, then runs a moment longer to its exit. Taken as gone at its
     record, it was in ``ps`` still, an asq UI with no record: refused as one before the
-    registry, the yes it had just been given undone."""
-    stand_in = subprocess.Popen(
-        [sys.executable, "-c", _LINGERING_STAND_IN], stdout=subprocess.PIPE, text=True
-    )
+    registry, the yes it had just been given undone. ``renamed``: its record names a host name
+    the network has changed since (#466's review); its lock, held as the wait begins, says it
+    runs on this machine all the same."""
+    argv = [sys.executable, "-c", _LINGERING_STAND_IN]
+    if host == "renamed":
+        argv.append("dhcp-10-0-0-5.example.net")
+    stand_in = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True)
     threading.Thread(target=stand_in.wait, daemon=True).start()  # reaped as it ends: no zombie
     assert stand_in.stdout is not None and stand_in.stdout.readline().strip() == "ready"
     line = _line(stand_in.pid, 1, "05:00", "ttys004", f"{UV} {BIN}/asq")
@@ -458,3 +464,25 @@ def test_an_asq_starting_beside_a_slow_look_is_not_refused(
     other.join(5)
 
     assert registration is not None and outcome == ["passed"], outcome
+
+
+def test_beside_an_unreadable_record_whose_pid_cannot_be_read_no_asq_is_called_pre_registry(
+    listing: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#466's review, nit 2: a record this release cannot read and whose pid it cannot read
+    either; its own asq is in ``ps`` with no record this release reads, and was named a
+    release before the registry, with `kill <pid>` advice. The refusal names the record."""
+    from tests.asq_elsewhere import asq_running
+
+    with asq_running(version="0.9.9", pid=4242) as later:
+        path = instances.registry_dir() / f"{later.id}.json"
+        unreadable = {**later.to_record(), "started_at": 1, "pid": "a pid this release cannot read"}
+        path.write_text(json.dumps(unreadable), encoding="utf-8")
+        listing([_line(4242, 1, "01:00:00", "ttys004", f"{UV} {BIN}/asq")])
+
+        with pytest.raises(typer.Exit):
+            instance_gate.admit(interactive=False)
+
+    said = " ".join(capsys.readouterr().err.split())
+    assert f"its record {path}" in said
+    assert "before the registry" not in said and "kill 4242" not in said

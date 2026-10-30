@@ -196,6 +196,11 @@ def _pass(
                 differing = [other for other in found.live if other.differs_from(me)]
                 accounted = _accounted(found, me)
                 strays = [ui for ui in found_in_ps if ui.pid not in accounted]
+                if any(record.pid is None for record in found.unreadable):
+                    # A record this release cannot read, whose pid cannot be read either: its own
+                    # asq may be among these, and is no release before the registry. The refusal
+                    # names the record alone (#466's review).
+                    strays = []
                 if not differing and not found.unreadable and not strays:
                     return instances.register(me)
         except TimeoutError:

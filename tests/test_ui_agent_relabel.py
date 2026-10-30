@@ -17,6 +17,7 @@ which thread, is what is read.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,9 @@ import pytest
 from textual import events
 from textual.geometry import Offset
 from textual.pilot import Pilot
+from textual.widget import Widget
 from textual.widgets import Static
+from textual.widgets._toast import Toast
 
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import FleetApp, HelpScreen
@@ -37,6 +40,7 @@ from aisquare.cli.ui.sidebar import (
     ProjectTitle,
     relabel_preview,
 )
+from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import fleet as fleet_service
@@ -59,6 +63,7 @@ from tests.test_ui_shell import (
 )
 from tests.test_ui_shell import no_real_tmux as _no_real_tmux
 from tests.test_ui_shell import script as _script
+from tests.ui_workers import watch_until
 
 #: Re-exported so pytest collects them here (the guard is autouse there, and here).
 no_real_tmux = _no_real_tmux
@@ -122,9 +127,53 @@ def _team(script: Script, tmp_path: Path) -> None:
 
 
 async def _double_click(pilot: Pilot[None], row: AgentRow) -> None:
+    """Two clicks, and — when the second opened the name field — the field holding the keys.
+
+    The field takes them after the next frame is drawn (``AgentRow.open_rename``), and on
+    Windows a pending Textual timer holds one of asyncio's executor threads, so that frame can
+    come after ``settle`` has returned, and what the test types next would go to the sidebar.
+    Watched for as the toasts are (``watch_until``: no thread, a bounded wait)."""
+    app = fleet_app(pilot)
     for kind in (events.MouseDown, events.MouseUp, events.MouseDown, events.MouseUp):
         await _as_the_terminal_sends(pilot, kind, row)
-    await settle(fleet_app(pilot))
+    await settle(app)
+    await watch_until(lambda: not row.renaming or app.focused is row.field)
+
+
+async def _keys_to_the_sidebar(app: FleetApp) -> None:
+    """Hand the keys to the sidebar, as the escape key does, once an agent row's click has
+    handed them to the agent's pane.
+
+    The pane takes them after the frame that shows it is drawn (``FleetApp._focus_pane``),
+    which on Windows can be after ``settle``: landing after the sidebar's focus, it would take
+    the F2 that follows. Every row clicked here opens a pane, an ended agent's too."""
+    await watch_until(lambda: isinstance(app.focused, TerminalPane))
+    app.sidebar.focus()
+    await watch_until(lambda: app.focused is app.sidebar)
+
+
+async def _f2_opens(pilot: Pilot[None], target: Callable[[], Widget | None]) -> None:
+    """F2, and the field it opens holding the keys: ``target()`` is the one to wait for.
+
+    The field is mounted at once, but it takes the focus after the next frame is drawn: read
+    at once, the agent's F2 found no field holding the keys on windows-py3.12 (rc/0.9.2's CI,
+    run 41080458606, shard 7/10)."""
+    app = fleet_app(pilot)
+    await pilot.press("f2")
+
+    def holds_the_keys() -> bool:
+        opened = target()
+        return opened is not None and opened.display and app.focused is opened
+
+    await watch_until(holds_the_keys)
+
+
+async def _f2_refused(pilot: Pilot[None], why: str) -> None:
+    """F2 on a row that offers no rename, and its toast (``why`` in it) up before anything is
+    read: the toast is the sign the key reached the sidebar at all."""
+    app = fleet_app(pilot)
+    await pilot.press("f2")
+    await watch_until(lambda: any(why in toast.render().plain for toast in app.screen.query(Toast)))
 
 
 def _field(app: FleetApp, agent_id: str = CODER) -> AgentLabelInput | None:
@@ -288,8 +337,8 @@ def test_f2_renames_the_highlighted_agent_and_the_card_title_still_renames_the_p
     async def go(pilot: Pilot[None]) -> tuple[bool, str, bool, bool]:
         app = fleet_app(pilot)
         await _click(pilot, row_for(app, CODER))
-        app.sidebar.focus()
-        await pilot.press("f2")
+        await _keys_to_the_sidebar(app)
+        await _f2_opens(pilot, lambda: _field(app))
         field = _field(app)
         agent_open = field is not None and app.focused is field
         value = field.value if field is not None else ""
@@ -298,7 +347,8 @@ def test_f2_renames_the_highlighted_agent_and_the_card_title_still_renames_the_p
         cancelled = _field(app) is None and app.focused is app.sidebar
         await _click(pilot, card_for(app, "prj_a").query_one(ProjectTitle))
         app.sidebar.focus()
-        await pilot.press("f2")
+        await watch_until(lambda: app.focused is app.sidebar)
+        await _f2_opens(pilot, lambda: card_for(app, "prj_a").query_one(NicknameInput))
         nickname = card_for(app, "prj_a").query_one(NicknameInput)
         return agent_open, value, cancelled, nickname.display and app.focused is nickname
 
@@ -319,8 +369,9 @@ def test_the_renamed_row_keeps_the_one_highlight_and_the_arrows_go_on_from_it(
     async def go(pilot: Pilot[None]) -> dict[str, object]:
         app = fleet_app(pilot)
         await _click(pilot, row_for(app, CODER))
-        app.sidebar.focus()
-        await pilot.press("f2", *"login", "space", *"fix", "enter")
+        await _keys_to_the_sidebar(app)
+        await _f2_opens(pilot, lambda: _field(app))
+        await pilot.press(*"login", "space", *"fix", "enter")
         await settle(app)
         manager, coder = script["prj_a"]
         renamed = coder.agent.model_copy(update={"label": "login-fix"})
@@ -407,12 +458,12 @@ def test_the_managers_row_offers_no_rename_and_f2_says_why(
         manager = row_for(app, MANAGER)
         await _double_click(pilot, manager)
         double = _field(app, MANAGER) is None
-        app.sidebar.focus()
-        await pilot.press("f2")
+        await _keys_to_the_sidebar(app)
+        await _f2_refused(pilot, "the manager is always labelled 'manager'")
         f2 = _field(app, MANAGER) is None
         await _click(pilot, row_for(app, "agt_a_tester-1"))
-        app.sidebar.focus()
-        await pilot.press("f2")
+        await _keys_to_the_sidebar(app)
+        await _f2_refused(pilot, "tester-1 has ended")
         return {
             "double": double,
             "f2": f2,
@@ -452,8 +503,8 @@ def test_the_tooltip_the_second_click_and_f2_ask_one_rule(
         tip = row.tooltip
         await _double_click(pilot, row)
         double = _field(app) is None
-        app.sidebar.focus()
-        await pilot.press("f2")
+        await _keys_to_the_sidebar(app)
+        await _f2_refused(pilot, "refused for this test")
         return tip, double, _field(app) is None, await _toasts(app)
 
     tip, double, f2, toasts = drive(go, notifications=True)

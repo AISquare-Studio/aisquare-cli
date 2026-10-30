@@ -27,7 +27,7 @@ import typer
 
 from aisquare.core import instances
 from aisquare.core.console import stderr_console
-from aisquare.core.instances import Instance
+from aisquare.core.instances import Instance, Unreadable
 
 QUIT_WAIT_SECONDS = 15.0
 """How long a yes waits for the other asq to quit: its own quit waits up to a few seconds
@@ -89,19 +89,26 @@ def _refuse(why: str) -> typer.Exit:
 def _quit_others(
     me: Instance,
     differing: list[Instance],
+    unreadable: list[Unreadable],
     *,
     ask: Ask | None,
     interactive: bool | None,
     wait_s: float,
 ) -> None:
-    """Say why ``me`` does not start beside ``differing``; return once they have quit on a yes,
-    or raise :class:`typer.Exit` (1)."""
+    """Say why ``me`` does not start beside ``differing`` and ``unreadable``; return once they
+    have quit on a yes, or raise :class:`typer.Exit` (1). An unreadable record is an asq of an
+    unknown release that cannot be asked to quit, so with one there is nothing to ask."""
     _say(f"⚠ {_release(me)} cannot run beside a running asq of another release:")
     for other in differing:
         _say(f"  {_release(other)} — {other.where}")
+    for record in unreadable:
+        written = record.written_at.astimezone().strftime("%H:%M:%S")
+        _say(
+            f"  asq of a release this one cannot read — its record {record.path}, written {written}"
+        )
     _say("Two releases on one home would run two codebases against one store and one tmux.")
     unaskable = [other for other in differing if not other.askable]
-    if unaskable:
+    if unaskable or unreadable:
         for other in unaskable:
             on = "" if other.host == me.host else f" on {other.host}"
             _say(
@@ -109,7 +116,14 @@ def _quit_others(
                 f"cannot be asked from here. Quit it in its own terminal (q), or end it with "
                 f"`kill {other.pid}`{on}: {SIGTERM_LOSES}."
             )
-        raise _refuse("Start it again once that asq has quit.")
+        for record in unreadable:
+            _say(
+                f"The asq whose record is {record.path.name} cannot be asked to quit from here: "
+                f"quit it in its own terminal (q). If no asq runs, the record is a leftover, "
+                f"ignored once a minute old; or delete it."
+            )
+        those = len(unaskable) + len(unreadable) > 1
+        raise _refuse(f"Start it again once {'those asqs have' if those else 'that asq has'} quit.")
     many = len(differing) > 1
     hand = "; ".join(_by_hand(other) for other in differing)
     if not (_interactive() if interactive is None else interactive):
@@ -138,30 +152,30 @@ def _quit_others(
 
 
 def _pass(
-    *, record: bool, ask: Ask | None, interactive: bool | None, wait_s: float
+    *, ask: Ask | None, interactive: bool | None, wait_s: float
 ) -> instances.Registration | None:
     me = instances.describe_this_process()
     while True:
         try:
-            with instances.gate() as live:
-                differing = [other for other in live if other.differs_from(me)]
-                if not differing:
-                    return instances.register(me) if record else None
+            with instances.gate() as found:
+                differing = [other for other in found.live if other.differs_from(me)]
+                if not differing and not found.unreadable:
+                    return instances.register(me)
+        except TimeoutError:
+            # Another asq's gate held past its wait: started now, this one would run unchecked
+            # and, unregistered, unseen by every asq after it (review of #462).
+            raise _refuse(
+                f"Another asq is checking this home and has held its gate over "
+                f"{instances.GATE_WAIT_SECONDS:g} s. Start asq again in a moment."
+            ) from None
         except OSError as exc:
-            # A home asq cannot write in, or another asq's gate held past its wait: asq
-            # runs, as it did before there was a registry, and says what it costs.
+            # A home asq cannot write in: it runs, as it did before there was a registry, and
+            # says what that costs. The only case the gate lets an asq through unchecked.
             _say(f"⚠ asq could not check the other asqs on this home ({exc}); none will see it")
             return None
-        _quit_others(me, differing, ask=ask, interactive=interactive, wait_s=wait_s)
-
-
-def check(
-    *, ask: Ask | None = None, interactive: bool | None = None, wait_s: float = QUIT_WAIT_SECONDS
-) -> None:
-    """The gate without the registration: for what must not run beside another release before
-    ``run_ui`` does, ``aisquare ui --project``'s read of the store."""
-    if instances.this_registration() is None:
-        _pass(record=False, ask=ask, interactive=interactive, wait_s=wait_s)
+        _quit_others(
+            me, differing, found.unreadable, ask=ask, interactive=interactive, wait_s=wait_s
+        )
 
 
 def admit(
@@ -175,4 +189,4 @@ def admit(
     existing = instances.this_registration()
     if existing is not None:
         return existing
-    return _pass(record=True, ask=ask, interactive=interactive, wait_s=wait_s)
+    return _pass(ask=ask, interactive=interactive, wait_s=wait_s)

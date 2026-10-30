@@ -2267,11 +2267,12 @@ def running_remote() -> str | None:
 
 def running_asqs() -> tuple[str, ...]:
     """The asq UIs live on this home but this process, named with their kind, host and pid
-    (``core.instances``): ``asq 0.9.2 (ssh on mini, pid 4242)``. Read from the registry,
-    whose stale records it prunes and nothing else; inside an asq, that asq is not one."""
+    (``core.instances``): ``asq 0.9.2 (ssh on mini, pid 4242)``. Read from the registry
+    without pruning it: a plan writes nothing to the home, a dry run's least of all (review
+    of #462). Inside an asq, that asq is not one."""
     from aisquare.core import instances
 
-    return tuple(instance.label for instance in instances.other_instances())
+    return tuple(instance.label for instance in instances.other_instances(prune=False))
 
 
 _ASQ_COST = {

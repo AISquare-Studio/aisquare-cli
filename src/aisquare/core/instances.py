@@ -22,12 +22,22 @@ and ``.gate.lock``, held while an asq reads the others and writes its own record
 (:func:`gate`), so two asqs of different releases started at the same moment cannot
 both find nobody there.
 
-A record is **live** (:func:`is_live`) when it was written on this host and its process
-runs (its pid alive, its lock held), or written on another host sharing the home and its
-heartbeat is under :data:`STALE_SECONDS` old. Every other record is stale, ignored and
-deleted by the next reader (:func:`live_instances`). A record is rewritten every
-:data:`HEARTBEAT_SECONDS` by a daemon thread of its own, never by a Textual timer: on
-Windows each pending timer holds a thread of asyncio's executor (``HOUSEKEEPING_SECONDS``).
+A record is **live** (:func:`is_live`) while its lock is held, whatever host it names; else
+when it names this host and its pid runs (and holds no lock only because it keeps none), or
+names another host sharing the home and its heartbeat is under :data:`STALE_SECONDS` old.
+Every other record is stale, ignored and deleted by the next reader (:func:`roll`); a record
+whose lock is held never is. A record is rewritten every :data:`HEARTBEAT_SECONDS` by a
+daemon thread of its own, never by a Textual timer: on Windows each pending timer holds a
+thread of asyncio's executor (``HOUSEKEEPING_SECONDS``).
+
+A record's id is its FILE NAME's, twelve hex digits (:func:`valid_id`), never the one inside
+it: every path is built from a name the folder listing gave, so no record can name a file
+outside the folder (review of #462). A fresh record this release cannot read, its content id
+another than its name's included, is an asq of an unknown release (:class:`Unreadable`),
+which the gate refuses beside: the likeliest such record is a later release's.
+
+Across hosts on an NFS home, a client caches the folder's attributes, so another may not see
+a fresh record for about 30 s.
 """
 
 from __future__ import annotations
@@ -36,6 +46,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import socket
 import sys
 import threading
@@ -44,7 +55,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from uuid import uuid4
 
 from aisquare.core import atomic, locking, paths, procs
@@ -70,7 +81,14 @@ QUIT_CHANNEL = 1
 asq that cannot be asked to quit (:attr:`Instance.channel`)."""
 
 GATE_WAIT_SECONDS = 2.0
-"""How long :func:`register` waits for another asq's check-and-register to end."""
+"""How long :func:`gate` waits for another asq's check-and-register to end; past it, the gate
+refuses rather than start this asq unseen (``cli.ui.instance_gate``)."""
+
+KIND_SECONDS = 60.0
+"""How often, inside tmux, the beat thread asks tmux how its client attached last: one
+``tmux show-environment`` a minute, not one a heartbeat (#272 cut tmux's subprocesses)."""
+
+_ID = re.compile(r"[0-9a-f]{12}")
 
 FOLDER = "instances"
 GATE_LOCK = ".gate.lock"
@@ -189,16 +207,28 @@ def registry_dir() -> Path:
     return paths.aisquare_home() / FOLDER
 
 
+def valid_id(text: str) -> bool:
+    """Whether ``text`` is an instance id: twelve lower-case hex digits, so a path built from
+    it stays a file in the folder."""
+    return _ID.fullmatch(text) is not None
+
+
+def _named(instance_id: str, suffix: str) -> Path:
+    if not valid_id(instance_id):
+        raise ValueError(f"not an asq instance id: {instance_id!r}")
+    return registry_dir() / f"{instance_id}{suffix}"
+
+
 def _record(instance_id: str) -> Path:
-    return registry_dir() / f"{instance_id}.json"
+    return _named(instance_id, ".json")
 
 
 def _lock(instance_id: str) -> Path:
-    return registry_dir() / f"{instance_id}.lock"
+    return _named(instance_id, ".lock")
 
 
 def _quit(instance_id: str) -> Path:
-    return registry_dir() / f"{instance_id}.quit"
+    return _named(instance_id, ".quit")
 
 
 def _private_dir() -> Path:
@@ -241,6 +271,8 @@ def attached_kind(env: Mapping[str, str] | None = None) -> Kind:
 
 
 def _tty() -> str | None:
+    if sys.platform == "win32":  # no ttyname there; and mypy --platform win32 reads this
+        return None
     for stream in (sys.stdin, sys.stdout):
         with contextlib.suppress(AttributeError, OSError, ValueError):
             return os.ttyname(stream.fileno())
@@ -292,10 +324,15 @@ def _lock_held(instance_id: str) -> bool | None:
 
 
 def is_live(instance: Instance, *, host: str | None = None, now: datetime | None = None) -> bool:
-    """Same host: its pid runs and holds its lock. Another host: a heartbeat under
-    :data:`STALE_SECONDS` old (that host cannot be asked about its pids)."""
+    """Its lock held: live, whatever host it names (two machines that share a host name, a
+    clock on an NFS home a minute off). Else, this host: its pid runs and it keeps no lock;
+    another host: a heartbeat under :data:`STALE_SECONDS` old (that host cannot be asked
+    about its pids)."""
+    held = _lock_held(instance.id)
+    if held:
+        return True
     if instance.host == (host_name() if host is None else host):
-        return procs.alive(instance.pid) and _lock_held(instance.id) is not False
+        return held is None and procs.alive(instance.pid)
     age = (datetime.now(UTC) if now is None else now) - instance.heartbeat
     return age < timedelta(seconds=STALE_SECONDS)
 
@@ -313,40 +350,87 @@ def _read(path: Path) -> Instance | None:
         return None
 
 
-def live_instances(*, prune: bool = True) -> list[Instance]:
-    """Every live asq on this home, this one included, oldest first.
+@dataclass(frozen=True)
+class Unreadable:
+    """A fresh record this release cannot read: an asq of an unknown release, most likely a
+    later one, whose record says what this release does not know how to read."""
 
-    A stale record is left out, and with ``prune`` deleted with its lock and any quit
-    request; so is a record this release cannot read, and a lock, a quit request or a temp
-    whose record is gone, once the file is as old as a stale heartbeat. Reads only: no
-    folder is made.
+    id: str
+    written_at: datetime
+
+    @property
+    def path(self) -> Path:
+        return _record(self.id)
+
+
+class Roll(NamedTuple):
+    """The registry as one read found it."""
+
+    live: list[Instance]
+    """Every live asq, this one included, oldest first."""
+    unreadable: list[Unreadable]
+    """Fresh records this release cannot read."""
+
+
+def roll(*, prune: bool = True) -> Roll:
+    """The live asqs on this home, and the fresh records this release cannot read.
+
+    A record's id is its file's name (:func:`valid_id`): one whose content names another id
+    is unreadable. With ``prune``, a stale record is deleted with its lock and any quit
+    request, as is an unreadable one once its file is as old as a stale heartbeat, and so is
+    anything else the folder holds that no record explains (a lock or a quit request whose
+    record is gone, a temp, a copy) once as old; a lock still held never is. Without
+    ``prune`` it writes nothing. Reads only: no folder is made.
     """
     folder = registry_dir()
     try:
         names = sorted(os.listdir(folder))
     except OSError:
-        return []
+        return Roll([], [])
     here = host_name()
     now = datetime.now(UTC)
     live: list[Instance] = []
+    unreadable: list[Unreadable] = []
     for name in names:
         path = folder / name
-        if not name.endswith(".json") or name.startswith("."):
-            orphan = name != GATE_LOCK and name.rsplit(".", 1)[0] + ".json" not in names
-            if prune and orphan and _old(path):
+        stem = name.removesuffix(".json")
+        if stem == name or not valid_id(stem):
+            if prune and name != GATE_LOCK and _old(path) and not _explained(name, names):
                 with contextlib.suppress(OSError):
                     path.unlink()
             continue
         instance = _read(path)
-        if instance is None:
-            if prune and _old(path):
-                _forget(name.removesuffix(".json"))
+        if instance is None or instance.id != stem:
+            if not _old(path):
+                unreadable.append(Unreadable(stem, _written(path) or now))
+            elif prune and _lock_held(stem) is not True:
+                _forget(stem)
             continue
         if is_live(instance, host=here, now=now):
             live.append(instance)
         elif prune:
-            _forget(instance.id)
-    return sorted(live, key=lambda instance: instance.started_at)
+            _forget(stem)  # not live: its lock is not held
+    return Roll(sorted(live, key=lambda instance: instance.started_at), unreadable)
+
+
+def _explained(name: str, names: list[str]) -> bool:
+    """Whether ``name`` (not a record) belongs to a record still there, or is a lock still held."""
+    owner = name.split(".", 1)[0]
+    if not valid_id(owner):
+        return False
+    return f"{owner}.json" in names or (name.endswith(".lock") and _lock_held(owner) is True)
+
+
+def _written(path: Path) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, UTC)
+    except OSError:
+        return None
+
+
+def live_instances(*, prune: bool = True) -> list[Instance]:
+    """Every live asq on this home, this one included, oldest first (:func:`roll`)."""
+    return roll(prune=prune).live
 
 
 def _old(path: Path) -> bool:
@@ -357,10 +441,10 @@ def _old(path: Path) -> bool:
         return False
 
 
-def other_instances() -> list[Instance]:
-    """:func:`live_instances` but this process's own."""
+def other_instances(*, prune: bool = True) -> list[Instance]:
+    """:func:`live_instances` but this process's own; ``prune=False`` writes nothing."""
     mine = this_instance()
-    return [i for i in live_instances() if mine is None or i.id != mine.id]
+    return [i for i in live_instances(prune=prune) if mine is None or i.id != mine.id]
 
 
 # --- asking another to quit --------------------------------------------------------------------
@@ -421,10 +505,18 @@ class Registration:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._deliver: Deliver | None = None
+        self._others: list[Instance] = []
 
     @property
     def instance(self) -> Instance:
         return self._instance
+
+    @property
+    def others(self) -> list[Instance]:
+        """The other live asqs as the beat thread last read them, at most
+        :data:`HEARTBEAT_SECONDS` ago: for the UI thread, which reads no folder (a home on a
+        hung NFS mount would hold it). Empty until the thread's first beat."""
+        return self._others
 
     def start(self) -> None:
         """Start the beat thread: the heartbeat every :data:`HEARTBEAT_SECONDS` (the first at
@@ -477,18 +569,25 @@ class Registration:
 
     def _run(self) -> None:
         next_beat = 0.0
-        asked_tmux = False
+        next_kind: float | None = 0.0
         while True:
             if time.monotonic() >= next_beat:
                 try:
                     kind: Kind | None = None
-                    # Outside tmux the answer cannot change; inside, a reattach changes it.
-                    if not asked_tmux or os.environ.get("TMUX"):
+                    # Outside tmux the answer cannot change: asked once. Inside, a reattach
+                    # changes it: asked again every KIND_SECONDS, not at every beat.
+                    if next_kind is not None and time.monotonic() >= next_kind:
                         kind = attached_kind()
-                        asked_tmux = True
+                        inside = bool(os.environ.get("TMUX"))
+                        next_kind = time.monotonic() + KIND_SECONDS if inside else None
                     self.beat(kind=kind)
                 except Exception:  # a beat missed is one more next time, never a dead thread
                     _log.debug("the asq instance record could not be written", exc_info=True)
+                try:
+                    mine = self._instance.id
+                    self._others = [i for i in live_instances() if i.id != mine]
+                except Exception:
+                    _log.debug("the other asqs could not be read", exc_info=True)
                 next_beat = time.monotonic() + HEARTBEAT_SECONDS
             try:
                 self._look_for_quit()
@@ -524,23 +623,29 @@ def this_instance() -> Instance | None:
 
 
 @contextlib.contextmanager
-def gate() -> Iterator[list[Instance]]:
-    """Hold ``.gate.lock`` for the block, and yield the live asqs (:func:`live_instances`).
+def gate() -> Iterator[Roll]:
+    """Hold ``.gate.lock`` for the block, and yield the registry as read under it (:func:`roll`).
 
     An asq reads the others and writes its own record (:func:`register`) inside one such
     block, so another doing the same at the same moment reads it or is read by it. Makes the
-    folder; raises ``OSError`` when the folder or the lock (held past
-    :data:`GATE_WAIT_SECONDS`) cannot be had.
+    folder; raises :class:`TimeoutError` when another holds the lock past
+    :data:`GATE_WAIT_SECONDS`, and ``OSError`` when the folder or the lock cannot be had.
     """
     folder = _private_dir()
     with locking.holding(folder / GATE_LOCK, wait_s=GATE_WAIT_SECONDS, mode=0o600):
-        yield live_instances()
+        yield roll()
 
 
 def register(me: Instance) -> Registration:
     """Write ``me``'s record and hold its lock: this process's registration from now on.
-    Inside :func:`gate`'s block; ``me`` is :func:`describe_this_process`'s."""
+    Inside :func:`gate`'s block; ``me`` is :func:`describe_this_process`'s.
+
+    Started and beating NOW: ``me`` was described before the gate, maybe before a question
+    a person took minutes to answer, and an older heartbeat read as stale on another host
+    until the first beat (review of #462)."""
     global _this
+    now = datetime.now(UTC)
+    me = replace(me, started_at=now, heartbeat=now)
     _private_dir()
     fd = locking.open_lock_file(_lock(me.id), mode=0o600)
     try:

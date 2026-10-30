@@ -31,7 +31,7 @@ from aisquare.cli.ui import app as ui_app
 from aisquare.cli.ui import instance_gate
 from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.views.doctor import DoctorView
-from aisquare.core import instances, paths, selfcli
+from aisquare.core import instances, locking, paths, selfcli
 from aisquare.core.instances import Instance, QuitRequest
 from aisquare.core.store import SCHEMA_VERSION
 from aisquare.core.version import __version__
@@ -165,7 +165,7 @@ def test_a_crashed_asqs_record_is_gone_after_the_next_start(tmp_path: Path) -> N
     with (
         asq_running(pid=dead_pid, hold_lock=False) as dead,
         asq_running(hold_lock=False) as recycled,
-        asq_running(host="mini-elsewhere", heartbeat=old) as silent,
+        asq_running(host="mini-elsewhere", heartbeat=old, hold_lock=False) as silent,
         asq_running(host="mini-elsewhere", pid=dead_pid) as beating,
         asq_running() as live,
     ):
@@ -456,23 +456,38 @@ def test_an_asq_asked_to_quit_quits_as_q_does(monkeypatch: pytest.MonkeyPatch) -
 
 @pytest.mark.parametrize(("command", "button"), [("upgrade", "Update"), ("uninstall", "Uninstall")])
 def test_doctors_update_and_uninstall_are_refused_while_another_asq_runs(
-    command: str, button: str
+    command: str, button: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(instances, "HEARTBEAT_SECONDS", 0.05)
+    registration = _registered()
+    registration.start()
+
     async def run() -> None:
         app = ui_app.FleetApp(refresh_seconds=3600, doctor=lambda: [])
         async with app.run_test(size=(120, 40), notifications=True) as pilot:
             await settle_page(app)
             with asq_running(version="0.0.1") as other:
+                await _beaten(registration, [other])
                 app.on_doctor_view_hand_off(DoctorView.HandOff((command, "--reopen")))
                 await pilot.pause()
                 said = " ".join(note.message for note in app._notifications)
                 assert app.hand_off is None and not app._exit, "it stays"
                 assert f"another asq runs on this home ({other.label})" in said
                 assert f"Quit it first (q in it), then press {button} again." in said
+            await _beaten(registration, [])
             app.on_doctor_view_hand_off(DoctorView.HandOff((command, "--reopen")))
             assert app.hand_off == (command, "--reopen"), "control: alone, it hands over"
 
     asyncio.run(run())
+
+
+async def _beaten(registration: instances.Registration, others: list[Instance]) -> None:
+    """Wait for the beat thread to have read ``others`` as the other live asqs."""
+    for _ in range(500):
+        if registration.others == others:
+            return
+        await asyncio.sleep(0.01)
+    pytest.fail(f"the beat thread read {registration.others}, not {others}")
 
 
 def test_the_lifecycle_names_every_other_live_asq_but_this_one() -> None:
@@ -491,3 +506,223 @@ def test_a_record_is_read_whatever_a_later_release_adds() -> None:
     assert Instance.from_record(data) == me
     assert Instance.from_record({"id": "x"}) is None
     assert Instance.from_record([1, 2]) is None
+
+
+# --- review of #462: one test per finding, each failing before its fix ----------------------------
+
+
+def test_1_windows_is_never_asked_for_a_tty_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``os.ttyname`` does not exist on Windows, and ``mypy --platform win32`` (CI's lint)
+    failed on the call. Off Windows only by the platform's test, which mypy narrows on."""
+
+    def ttyname(fd: int) -> str:
+        raise AssertionError("os.ttyname asked on Windows")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(os, "ttyname", ttyname, raising=False)
+
+    assert instances._tty() is None
+
+
+_DEAD_PID = 2**22 + 12345
+"""Past every platform's highest pid (Linux's ``pid_max`` tops out at 2**22): never alive."""
+
+
+def test_2_a_records_paths_come_from_its_file_name_never_its_content() -> None:
+    """A record whose id said ``../config`` made the pruner delete ``<home>/config.json``,
+    and was itself never pruned."""
+    home = paths.aisquare_home()
+    folder = instances.registry_dir()
+    folder.mkdir(parents=True)
+    config = home / "config.json"
+    config.write_text("{}", encoding="utf-8")
+    dead = replace(instances.describe_this_process(), id="../config", pid=_DEAD_PID)
+    planted = folder / "abcdef012345.json"
+    planted.write_text(json.dumps(dead.to_record()), encoding="utf-8")
+    long_ago = time.time() - instances.STALE_SECONDS - 1
+    os.utime(planted, (long_ago, long_ago))
+    copied = folder / "abcdef012345 (1).json"
+    copied.write_text(json.dumps(dead.to_record()), encoding="utf-8")
+    os.utime(copied, (long_ago, long_ago))
+
+    assert instances.live_instances() == []
+
+    assert config.exists(), "nothing outside the folder is touched"
+    assert not planted.exists() and not copied.exists(), "both pruned, by their own names"
+    with pytest.raises(ValueError):
+        instances.request_quit(dead, by=instances.describe_this_process())
+
+
+def test_3_the_lifecycle_plans_read_the_registry_and_write_nothing() -> None:
+    """``uninstall``'s and ``upgrade``'s plans, a dry run's too, write nothing to the home;
+    reading the registry pruned it."""
+    from aisquare.services import lifecycle
+
+    with asq_running(pid=_DEAD_PID, hold_lock=False) as dead:
+        before = _files()
+        assert lifecycle.running_asqs() == ()
+        assert _files() == before and f"{dead.id}.json" in before, "the stale record stays"
+
+
+def test_4a_a_fresh_record_this_release_cannot_read_is_an_asq_of_an_unknown_release(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A later release's record is the likeliest one this release cannot read: taken as no
+    record, the gate let this asq start beside a live 0.9.9."""
+    asked: list[str] = []
+    with asq_running(version="0.9.9") as later:
+        path = instances.registry_dir() / f"{later.id}.json"
+        record = {**later.to_record(), "started_at": 1793377097}  # a shape this one cannot read
+        path.write_text(json.dumps(record), encoding="utf-8")
+
+        with pytest.raises(typer.Exit) as refused:
+            instance_gate.admit(ask=_answering(True, asked), interactive=True)
+
+        said = " ".join(capsys.readouterr().err.split())
+        assert refused.value.exit_code == 1 and asked == [] and instances.this_instance() is None
+        assert f"asq of a release this one cannot read — its record {path}" in said
+        long_ago = time.time() - instances.STALE_SECONDS - 1
+        os.utime(path, (long_ago, long_ago))
+        assert instance_gate.admit() is not None, "control: a minute old, it is a leftover"
+
+
+def test_4b_a_gate_held_past_its_wait_refuses_rather_than_start_unchecked_and_unseen(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(instances, "GATE_WAIT_SECONDS", 0.2)
+    with asq_running(version="0.0.1"):
+        folder = instances.registry_dir()
+        fd = locking.open_lock_file(folder / instances.GATE_LOCK, mode=0o600)
+        try:
+            locking.lock_exclusive(fd)  # another asq, in its gate
+            with pytest.raises(typer.Exit) as refused:
+                instance_gate.admit(interactive=False)
+        finally:
+            os.close(fd)
+
+    said = " ".join(capsys.readouterr().err.split())
+    assert refused.value.exit_code == 1 and instances.this_instance() is None
+    assert "Another asq is checking this home and has held its gate over 0.2 s" in said
+    assert "none will see it" not in said
+
+
+def test_5a_a_record_whose_lock_is_held_is_live_whatever_its_host_and_never_pruned() -> None:
+    """A clock on an NFS home a minute off, or two machines that share a host name: the
+    heartbeat or the pid said stale, and the pruner deleted a live asq's record AND its lock."""
+    old = datetime.now(UTC) - timedelta(seconds=instances.STALE_SECONDS + 30)
+    with (
+        asq_running(host="mini-elsewhere", heartbeat=old) as skewed,
+        asq_running(pid=_DEAD_PID) as same_name_elsewhere,
+    ):
+        live = instances.live_instances()
+
+        assert {i.id for i in live} == {skewed.id, same_name_elsewhere.id}
+        for kept in (skewed, same_name_elsewhere):
+            assert {f"{kept.id}.json", f"{kept.id}.lock"} <= set(_files()), "not pruned"
+
+
+def test_5b_a_record_is_stamped_at_admission_not_when_asq_was_described() -> None:
+    """``me`` is described before the question, which a person may take minutes over."""
+    an_hour_ago = datetime.now(UTC) - timedelta(hours=1)
+    me = replace(instances.describe_this_process(), started_at=an_hour_ago, heartbeat=an_hour_ago)
+    with instances.gate():
+        registration = instances.register(me)
+
+    on_disk = _record_on_disk(me.id)
+    for moment in (registration.instance.started_at, registration.instance.heartbeat):
+        assert datetime.now(UTC) - moment < timedelta(seconds=30)
+    assert on_disk["started_at"] == registration.instance.started_at.isoformat()
+    assert on_disk["heartbeat"] == registration.instance.heartbeat.isoformat()
+
+
+def test_6_ui_project_is_registered_before_its_store_is_read(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """Checked but not registered, the asq read (and maybe migrated) the store unseen, and a
+    differing release could start in that window."""
+    monkeypatch.setattr(fleet_cli, "interactive_terminal", lambda: True)
+    seen: list[object] = []
+
+    def scope(*refs: object) -> None:
+        seen.append(instances.this_instance())
+        return None
+
+    monkeypatch.setattr(fleet_service, "ui_scope", scope)
+    monkeypatch.setattr(ui_app, "run_ui", lambda **options: seen.append("run_ui"))
+
+    result = runner.invoke(cli_app, ["ui", "--project", "alpha"])
+
+    assert result.exit_code == 0, result.output
+    assert isinstance(seen[0], Instance) and seen[1:] == ["run_ui"], seen
+    assert instances.this_instance() is None and _files() == [instances.GATE_LOCK], "ended"
+
+    def unknown(*refs: object) -> None:
+        raise fleet_service.NoSuchProject("no project matches 'alpha'")
+
+    monkeypatch.setattr(fleet_service, "ui_scope", unknown)
+    failed = runner.invoke(cli_app, ["ui", "--project", "alpha"])
+    assert failed.exit_code == 1 and instances.this_instance() is None
+    assert _files() == [instances.GATE_LOCK], "a scope that fails ends the registration"
+
+
+def test_7_the_doctors_hand_off_reads_no_folder_on_the_ui_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A home on a hung NFS mount would hold the UI thread: the beat thread reads the others."""
+    monkeypatch.setattr(instances, "HEARTBEAT_SECONDS", 0.05)
+    registration = _registered()
+    registration.start()
+    on_the_ui_thread: list[str] = []
+    listdir = os.listdir
+
+    def watched(path: Any = ".") -> list[str]:
+        on_ui_thread = threading.current_thread() is threading.main_thread()
+        if on_ui_thread and Path(path) == instances.registry_dir():
+            on_the_ui_thread.append(str(path))
+        return listdir(path)
+
+    async def run() -> None:
+        app = ui_app.FleetApp(refresh_seconds=3600, doctor=lambda: [])
+        async with app.run_test(size=(120, 40), notifications=True) as pilot:
+            await settle_page(app)
+            with asq_running(version="0.0.1") as other:
+                for _ in range(500):  # the beat thread's read of it (none before the fix)
+                    if getattr(registration, "others", [other]) == [other]:
+                        break
+                    await asyncio.sleep(0.01)
+                monkeypatch.setattr(os, "listdir", watched)
+                app.on_doctor_view_hand_off(DoctorView.HandOff(("uninstall", "--reopen")))
+                await pilot.pause()
+                monkeypatch.setattr(os, "listdir", listdir)
+                assert app.hand_off is None, "refused, from what the beat thread read"
+
+    asyncio.run(run())
+    assert on_the_ui_thread == []
+
+
+def test_9_inside_tmux_how_the_client_attached_is_asked_once_a_minute_not_every_beat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[float] = []
+
+    def attached_kind(env: object = None) -> instances.Kind:
+        asked.append(time.monotonic())
+        return "ssh"
+
+    monkeypatch.setenv("TMUX", "/tmp/tmux-501/default,1234,0")
+    monkeypatch.setattr(instances, "attached_kind", attached_kind)
+    monkeypatch.setattr(instances, "HEARTBEAT_SECONDS", 0.01)
+    monkeypatch.setattr(instances, "POLL_SECONDS", 0.005)
+    registration = _registered()
+    registration.start()
+    first = registration.instance.heartbeat
+    deadline = time.monotonic() + 5
+    beats = 0
+    while time.monotonic() < deadline and beats < 20:
+        if registration.instance.heartbeat > first:
+            beats += 1
+            first = registration.instance.heartbeat
+        time.sleep(0.005)
+    registration.deregister()
+
+    assert beats >= 20 and len(asked) == 1, f"{len(asked)} asks over {beats} beats"

@@ -3785,8 +3785,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.notify(f"{running} is still running — try again when it ends", severity="warning")
             return
         button = _HANDED_OVER.get(event.args[0], event.args[0])
+        # The others as the registration's beat thread last read them: the UI thread reads no
+        # folder (review of #462). An asq that started since is the command's to refuse.
+        registration = instances.this_registration()
+        others = () if registration is None else tuple(i.label for i in registration.others)
         refusal = lifecycle_service.asqs_refusal(
-            event.args[0], lifecycle_service.running_asqs(), again=f"press {button} again"
+            event.args[0], others, again=f"press {button} again"
         )
         if refusal is not None:
             # Refused here as the command refuses it (#17), before this asq quits for nothing.

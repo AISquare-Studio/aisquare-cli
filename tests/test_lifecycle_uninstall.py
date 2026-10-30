@@ -734,7 +734,9 @@ def test_it_refuses_while_another_asq_runs_on_this_home_and_names_it(
     touched."""
     _initialised(runner, tmp_path)
     _hooked(isolated_agent_home / ".claude", tool.script)
-    with asq_running(kind="ssh") as other:
+    with asq_running(kind="ssh") as other, asq_running(pid=2**22 + 12345, hold_lock=False):
+        # And a stale record beside it: the plans read the registry without pruning it, as a
+        # plan writes nothing to the home (review of #462).
         before = _snapshot(tmp_path)
         refused = runner.invoke(app, ["--json", "uninstall", "--yes"])
         plan = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)

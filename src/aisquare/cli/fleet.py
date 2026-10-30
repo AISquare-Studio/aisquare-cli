@@ -1836,19 +1836,26 @@ def ui(
             error="not_a_tty",
             detail=reason,
         )
+    registration = None
     if project or group:
-        # --project and --group are read from the store, whose open migrates it: beside a live
-        # asq of another release, not before run_ui's instance gate would let asq start (#17).
+        # --project and --group are read from the store, whose open migrates it: so the gate
+        # is passed, AND this asq registered, before it opens (#17): checked but not yet
+        # registered, it was unseen while it read, and another release could start (review
+        # of #462). run_ui keeps this registration, and ends it as it quits.
         from aisquare.cli.ui import instance_gate
 
-        instance_gate.check()
+        registration = instance_gate.admit()
     try:
-        scope = fleet_service.ui_scope(project or (), group or ())
-    except fleet_service.FleetError as exc:
-        _fail_fleet(exc)
-    from aisquare.cli.ui.app import run_ui  # lazy: textual is heavy and only the UI needs it
+        try:
+            scope = fleet_service.ui_scope(project or (), group or ())
+        except fleet_service.FleetError as exc:
+            _fail_fleet(exc)
+        from aisquare.cli.ui.app import run_ui  # lazy: textual is heavy and only the UI needs it
 
-    if after_update:
-        run_ui(scope=scope, after_update=True)
-    else:
-        run_ui(scope=scope)
+        if after_update:
+            run_ui(scope=scope, after_update=True)
+        else:
+            run_ui(scope=scope)
+    finally:
+        if registration is not None:
+            registration.deregister()  # once: run_ui's own end of it makes this a no-op

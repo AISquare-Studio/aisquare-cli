@@ -377,8 +377,9 @@ def _read(path: Path) -> Instance | None:
 
 @dataclass(frozen=True)
 class Unreadable:
-    """A fresh record this release cannot read: an asq of an unknown release, most likely a
-    later one, whose record says what this release does not know how to read."""
+    """A record this release cannot read, fresh or with its lock held: an asq of an unknown
+    release, most likely a later one, whose record says what this release does not know how
+    to read; or one whose file would not be read twice running while its lock is held."""
 
     id: str
     written_at: datetime
@@ -394,15 +395,17 @@ class Roll(NamedTuple):
     live: list[Instance]
     """Every live asq, this one included, oldest first."""
     unreadable: list[Unreadable]
-    """Fresh records this release cannot read."""
+    """Records this release cannot read, fresh or with their lock held."""
 
 
 def roll(*, prune: bool = True) -> Roll:
-    """The live asqs on this home, and the fresh records this release cannot read.
+    """The live asqs on this home, and the records this release cannot read that are fresh or
+    have their lock held.
 
     A record's id is its file's name (:func:`valid_id`): one whose content names another id
-    is unreadable. With ``prune``, a stale record is deleted with its lock and any quit
-    request, as is an unreadable one once its file is as old as a stale heartbeat, and so is
+    is unreadable, and so is one whose read fails twice running. With ``prune``, a stale
+    record is deleted with its lock and any quit request, as is an unreadable one once its
+    file is as old as a stale heartbeat and no lock of its is held, and so is
     anything else the folder holds that no record explains (a lock or a quit request whose
     record is gone, a temp, a copy) once as old; a lock still held never is. Without
     ``prune`` it writes nothing. Reads only: no folder is made.
@@ -428,10 +431,10 @@ def roll(*, prune: bool = True) -> Roll:
         if loaded == "failed":  # once more, a moment later: the failures it means are brief
             time.sleep(_RETRY_SECONDS)
             loaded = _load(path)
-        if loaded in ("gone", "failed"):
-            # Quit since the listing, or unreadable twice running for a reason not its
-            # content: neither a live asq nor one of an unknown release (re-review of #462).
-            continue
+        if loaded == "gone":
+            continue  # its asq quit since the listing: no asq at all (re-review of #462)
+        # Unparsable, another id inside, or a read that failed twice running: whose asq it is
+        # cannot be told, and a held lock or a fresh file says one runs (final re-review).
         if isinstance(loaded, str) or loaded.id != stem:
             written = _written(path)
             if written is None:

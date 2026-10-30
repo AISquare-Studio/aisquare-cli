@@ -801,3 +801,26 @@ def test_r3_on_a_home_asq_cannot_write_ui_project_says_so_once(
 
     assert result.exit_code == 0, result.output
     assert result.stderr.count("could not check the other asqs on this home") == 1
+
+
+def test_r4_a_record_whose_read_keeps_failing_while_its_lock_is_held_still_refuses(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Final re-review: a read that failed twice was skipped as no asq, though its lock held
+    said one ran; the newcomer registered beside it silently, where 673e0237 refused."""
+    read_text = Path.read_text
+    with asq_running(version="0.9.9") as later:
+        record = instances.registry_dir() / f"{later.id}.json"
+
+        def failing(self: Path, *args: Any, **kwargs: Any) -> str:
+            if self == record:
+                raise PermissionError(13, "Permission denied", str(self))
+            return read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", failing)
+        with pytest.raises(typer.Exit):
+            instance_gate.admit(interactive=False)
+        monkeypatch.setattr(Path, "read_text", read_text)
+
+    assert instances.this_instance() is None
+    assert f"its record {record}" in " ".join(capsys.readouterr().err.split())

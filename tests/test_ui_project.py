@@ -73,7 +73,7 @@ from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.core.store import SqliteStore, store_session
-from aisquare.core.tmux import Capture, Completed, PaneFacts, TmuxServer
+from aisquare.core.tmux import Capture, Completed, PaneFacts, SizeOwner, TmuxServer
 from aisquare.core.workspace import project_id_for
 from aisquare.models import (
     DoctorCheck,
@@ -256,6 +256,16 @@ class ScriptedServer(TmuxServer):
         return Capture(lines=[f"{pane_id} scripted"], facts=facts, scrollback=0)
 
     def resize(self, pane_id: str, width: int, height: int) -> None:
+        self.resizes.append((pane_id, width, height))
+
+    def resize_unless_owned(
+        self, pane_id: str, width: int, height: int, *, owner_pid: int, gone: str | None = None
+    ) -> str | None:
+        """No asq has claimed a scripted window: the pane sizes it, as these tests expect."""
+        self.resizes.append((pane_id, width, height))
+        return None
+
+    def claim_size(self, pane_id: str, owner: SizeOwner, width: int, height: int) -> None:
         self.resizes.append((pane_id, width, height))
 
     def at(self, path: Path | None) -> TmuxServer:

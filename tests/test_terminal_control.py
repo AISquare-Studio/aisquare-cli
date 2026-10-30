@@ -918,7 +918,12 @@ def test_real_tmux_typing_into_an_agent_sends_nothing_to_a_raw_client_elsewhere(
     client on the server at every key, whatever session it was on: 40 keys into one agent
     sent ~9.8 KB a key to a 200x50 raw client on another project (re-review of #272). A
     hidden session variable (``set-environment -h``) costs it nothing (measured on 3.2a,
-    3.4 and 3.8)."""
+    3.4 and 3.8).
+
+    The first key also claims the window's size (``core.tmux.SIZE_OWNER_OPTION``), an
+    option write that tmux redraws every client for — once per change of hands, never per
+    key — so it is typed before the raw client attaches, and the keys measured are the
+    ones after it."""
     if sys.platform == "win32":
         pytest.skip("no pty on Windows; fleet attach needs a terminal")
     typed_into = _window(live, "asq-typing", tmp_path, ["cat"], width=100, height=24)
@@ -930,6 +935,9 @@ def test_real_tmux_typing_into_an_agent_sends_nothing_to_a_raw_client_elsewhere(
             pane = host.pane
             pane.focus()
             await wait_until(pilot, lambda: _serving(pane), timeout=5.0)
+            await pilot.press(">")  # the size claim, made once
+            await wait_until(pilot, _row_shows(pane, ">"), timeout=2.0)
+            assert pane.facts is not None and str(os.getpid()) in pane.facts.size_owner
             raw, fd = _raw_client(live, "asq-elsewhere")
             try:
                 await wait_until(
@@ -946,7 +954,7 @@ def test_real_tmux_typing_into_an_agent_sends_nothing_to_a_raw_client_elsewhere(
                         quiet_since = time.monotonic()
                     elif time.monotonic() - attached > 5.5 and time.monotonic() - quiet_since > 1:
                         break
-                typed = ""
+                typed = ">"
                 for letter in "stampsmustcostnothing" * 2:
                     typed += letter
                     await pilot.press(letter)
@@ -960,7 +968,7 @@ def test_real_tmux_typing_into_an_agent_sends_nothing_to_a_raw_client_elsewhere(
                 raw.wait()
 
     sent, row = run(drive())
-    assert row.startswith("stampsmustcostnothing"), row
+    assert row.startswith(">stampsmustcostnothing"), row
     assert sent == 0, f"{sent} bytes to a raw client on another session while typing 42 keys"
 
 

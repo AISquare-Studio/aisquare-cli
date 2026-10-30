@@ -359,6 +359,10 @@ def test_yes_asks_the_other_asq_to_quit_and_starts_once_it_has(
     stand_in = subprocess.Popen(
         [sys.executable, "-c", _STAND_IN, "0.0.1"], stdout=subprocess.PIPE, text=True
     )
+    # Reaped as it ends, as a real asq's shell reaps it: the gate waits for its process to
+    # end (#21), and an unreaped child of this test lives on as a zombie.
+    reaped = threading.Thread(target=stand_in.wait, daemon=True)
+    reaped.start()
     try:
         assert stand_in.stdout is not None
         assert stand_in.stdout.readline().strip() == "ready"
@@ -369,7 +373,8 @@ def test_yes_asks_the_other_asq_to_quit_and_starts_once_it_has(
             ask=lambda q: q == "Quit the other asq?", interactive=True
         )
 
-        out, _ = stand_in.communicate(timeout=20)
+        reaped.join(20)
+        out = stand_in.stdout.read()
     finally:
         stand_in.kill()
     said = capsys.readouterr().err

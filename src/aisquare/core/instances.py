@@ -328,7 +328,11 @@ def is_live(instance: Instance, *, host: str | None = None, now: datetime | None
     clock on an NFS home a minute off). Else, this host: its pid runs and it keeps no lock;
     another host: a heartbeat under :data:`STALE_SECONDS` old (that host cannot be asked
     about its pids)."""
-    held = _lock_held(instance.id)
+    return _live(instance, _lock_held(instance.id), host=host, now=now)
+
+
+def _live(instance: Instance, held: bool | None, *, host: str | None, now: datetime | None) -> bool:
+    """:func:`is_live`, its lock already probed (``held``)."""
     if held:
         return True
     if instance.host == (host_name() if host is None else host):
@@ -383,6 +387,9 @@ class Unreadable:
 
     id: str
     written_at: datetime
+    pid: int | None = None
+    """Its pid, where the record still says one as an integer: so the gate's look in ``ps``
+    (``core.instance_scan``, #21) does not take that asq for one before the registry too."""
 
     @property
     def path(self) -> Path:
@@ -396,6 +403,10 @@ class Roll(NamedTuple):
     """Every live asq, this one included, oldest first."""
     unreadable: list[Unreadable]
     """Records this release cannot read, fresh or with their lock held."""
+    held: frozenset[str] = frozenset()
+    """The ids of the live records whose lock is held: a running process's, whatever host the
+    record names. macOS renames the host with the network when no HostName is set, so a
+    record of this very machine can name another (#21's reopen)."""
 
 
 def roll(*, prune: bool = True) -> Roll:
@@ -419,6 +430,7 @@ def roll(*, prune: bool = True) -> Roll:
     now = datetime.now(UTC)
     live: list[Instance] = []
     unreadable: list[Unreadable] = []
+    held: set[str] = set()
     for name in names:
         path = folder / name
         stem = name.removesuffix(".json")
@@ -439,19 +451,23 @@ def roll(*, prune: bool = True) -> Roll:
             written = _written(path)
             if written is None:
                 continue  # gone since
-            held = _lock_held(stem) is True
-            if held or now - written < timedelta(seconds=STALE_SECONDS):
+            locked = _lock_held(stem) is True
+            if locked or now - written < timedelta(seconds=STALE_SECONDS):
                 # A held lock is a running process at any age, as for a record it can read.
-                unreadable.append(Unreadable(stem, written))
+                unreadable.append(Unreadable(stem, written, _pid_in(path)))
             elif prune:
                 _forget(stem)
             continue
         instance = loaded
-        if is_live(instance, host=here, now=now):
+        lock = _lock_held(stem)
+        if _live(instance, lock, host=here, now=now):
             live.append(instance)
+            if lock:
+                held.add(stem)
         elif prune:
             _forget(stem)  # not live: its lock is not held
-    return Roll(sorted(live, key=lambda instance: instance.started_at), unreadable)
+    ordered = sorted(live, key=lambda instance: instance.started_at)
+    return Roll(ordered, unreadable, frozenset(held))
 
 
 def _explained(name: str, names: list[str]) -> bool:
@@ -460,6 +476,15 @@ def _explained(name: str, names: list[str]) -> bool:
     if not valid_id(owner):
         return False
     return f"{owner}.json" in names or (name.endswith(".lock") and _lock_held(owner) is True)
+
+
+def _pid_in(path: Path) -> int | None:
+    """The ``pid`` a record holds as an integer, however else it fails to read; ``None``."""
+    try:
+        pid = json.loads(path.read_text(encoding="utf-8")).get("pid")
+    except (OSError, ValueError, AttributeError, RecursionError):
+        return None
+    return pid if type(pid) is int else None
 
 
 def _written(path: Path) -> datetime | None:
@@ -502,11 +527,20 @@ def wait_gone(
     instance: Instance, timeout: float, *, clock: Callable[[], float] = time.monotonic
 ) -> bool:
     """Wait at most ``timeout`` seconds for ``instance`` to quit (its record gone, or no
-    longer live); whether it did."""
+    longer live, and on this machine its process ended); whether it did.
+
+    The process too: an asq leaves the registry once its quit's waits are over, and runs a
+    moment longer to its exit, in which the gate's look in ``ps`` (``core.instance_scan``)
+    would take it for an asq with no record, of a release before the registry (#21). On
+    this machine is its record naming this host, OR its lock held as the wait begins: macOS
+    renames the host with the network, and a record of this very machine can name another
+    (#466's review)."""
     deadline = clock() + timeout
+    here = instance.host == host_name() or _lock_held(instance.id) is True
     while True:
         instance_now = _read(_record(instance.id))
-        if instance_now is None or not is_live(instance_now):
+        left = instance_now is None or not is_live(instance_now)
+        if left and (not here or not procs.alive(instance.pid)):
             return True
         if clock() >= deadline:
             return False

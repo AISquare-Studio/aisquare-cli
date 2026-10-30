@@ -1418,10 +1418,15 @@ def reap(
 
 @app.command("rename")
 def rename(
-    codename: Annotated[str, typer.Argument(help="New codename, e.g. amber-otter.")],
+    codename: Annotated[str, typer.Argument(help="New codename, e.g. amber-otter or billing-v2.")],
     project: ProjectRef = None,
 ) -> None:
-    """Set the project's fleet codename (and rename its tmux session to match)."""
+    """Set the project's fleet codename (and rename its tmux session to match).
+
+    Lowercase letters and digits in words joined by '-', starting with a letter, at most 24
+    characters. `project rename` sets it from the project's name instead. The old codename
+    still finds the project, and its board is told; branches and worktrees keep their names.
+    """
     target = _project(project)
     notes: list[str] = []
     try:
@@ -1441,6 +1446,48 @@ def rename(
     # than leave the operator to discover it at the escape hatch.
     for note in notes:
         stdout_console().print(f"  ⚠ {note}")
+
+
+@app.command("relabel")
+def relabel(
+    label: Annotated[str, typer.Argument(help="The agent's label now, e.g. coder-1.")],
+    name: Annotated[
+        list[str],
+        typer.Argument(
+            help="Its new name, any text: 'login fix' becomes login-fix (lowercase letters, "
+            "digits and '-', at most 24).",
+            metavar="NEW NAME…",
+        ),
+    ],
+    project: ProjectRef = None,
+    as_session: SessionRef = None,
+) -> None:
+    """Rename a running agent: its label everywhere and its tmux window (not the project's
+    codename — that is `fleet rename`). Its worktree and branch stay where they are."""
+    target = _project(project)
+    typed = " ".join(name)
+    try:
+        receipt = fleet_service.relabel(
+            target, label, typed, actor=fleet_service.acting_as(as_session)
+        )
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
+    if get_state().json_output:
+        payload = {
+            "label": receipt.agent.label,
+            "was": receipt.old,
+            "wanted": receipt.wanted,  # the label `typed` became, before any suffix
+            "typed": typed,
+            "changed": receipt.changed,
+            "agent": receipt.agent.model_dump(mode="json"),
+            "notes": receipt.notes,
+        }
+        typer.echo(json.dumps(payload))
+        return
+    console = stdout_console()
+    console.print(f"✓ {receipt.said}", markup=False)
+    for note in receipt.notes:
+        console.print(f"  · {note}", markup=False)
 
 
 @app.command("adopt")

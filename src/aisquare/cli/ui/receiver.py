@@ -87,6 +87,7 @@ from aisquare.cli.ui.sidebar import (
     project_name,
 )
 from aisquare.core import experimental
+from aisquare.core.store import store_session
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services.captain import state as captain_state
@@ -174,7 +175,12 @@ def _listed(names: list[str]) -> str:
 
 
 def _project_matches(snapshot: FleetSnapshot, ref: str) -> list[ProjectInfo]:
-    """Every listed project ``ref`` names: an exact id alone, else id prefix, codename or name.
+    """Every listed project ``ref`` names: an exact id alone, else the one whose codename it is,
+    else each it names as an id prefix, a name or a codename given up at a rename.
+
+    The codename before a name, as the store finds a ``--project`` (``find_projects``): a
+    project renamed takes its name's slug as its codename (``aisquare-cli``), which may be
+    another listed checkout's name too, and the codename is what the captain is given.
 
     Only ``snapshot.projects``, which never holds the captain's home board (T2) —
     ``FleetSnapshot.project`` keeps the same rule — so no ref reaches the home here.
@@ -183,12 +189,20 @@ def _project_matches(snapshot: FleetSnapshot, ref: str) -> list[ProjectInfo]:
     if exact:
         return exact
     folded = ref.casefold()
+    coded = [p for p in snapshot.projects if (p.codename or "").casefold() == folded]
+    if coded:
+        return coded
+    # A codename the project gave up at a rename, which the captain may still have been
+    # given (review of #456, nit 6): found as `--project` finds it, beside an id or a name,
+    # so one that is also another project's name is refused naming both.
+    with store_session() as store:
+        owner = store.codename_alias_owners().get(folded)
     return [
         project
         for project in snapshot.projects
         if project.id.startswith(ref)
-        or (project.codename or "").casefold() == folded
         or project_name(project).casefold() == folded
+        or project.id == owner
     ]
 
 
@@ -379,7 +393,7 @@ def _focus_project(app: FleetApp, arg: str | None) -> str:
     if not sidebar.put_cursor(f"project:{project.id}"):
         return (
             f"selected {project_name(project)}; its card is in a folded group, "
-            "so the sidebar cursor stayed where it was"
+            "so the sidebar shows its highlight once the group is unfolded"
         )
     return f"focused {project_name(project)} in the sidebar"
 

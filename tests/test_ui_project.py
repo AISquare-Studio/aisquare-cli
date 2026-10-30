@@ -1455,19 +1455,26 @@ def test_settings_holds_the_nickname_and_shows_the_codename_without_a_rename(
     value, placeholder, line, machine_fields, note = drive(project, scenario)
     assert value == "Auth work" and placeholder == project.root.name
     assert line == (
-        "fleet id: amber-otter — tmux session asq-amber-otter, branches fleet/amber-otter/…"
+        "fleet id: amber-otter — tmux session asq-amber-otter, branches fleet/amber-otter/…, "
+        "--project amber-otter; renaming the project renames it"
     )
-    assert machine_fields == [], "no codename rename, and nothing machine-wide"
+    assert machine_fields == [], "no codename field of its own, and nothing machine-wide"
+    assert "The fleet id follows it." in note
     assert "aisquare project rename sets the same" in note
     assert "`" not in note, "the note is a Text: backticks would show as they are"
 
 
-def test_settings_saves_a_nickname_and_a_blank_one_clears_it(project: ProjectInfo) -> None:
-    """Enter saves what the field holds through ``set_nickname`` — what ``project rename``
-    does — the title follows, and the app is told; a blank field clears it."""
+def test_settings_saves_a_nickname_and_a_blank_one_clears_it(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enter saves what the field holds — what ``project rename`` does: the nickname, and the
+    codename it gives with the tmux session (task #6) — the title and the fleet id line
+    follow, and the app is told; a blank field clears it, and the codename is the folder's."""
     from aisquare.cli.ui.sidebar import ProjectRenamed
     from aisquare.core.store import store_session
+    from tests.fleet_fakes import tmux_sessions_as
 
+    sessions = tmux_sessions_as(monkeypatch)
     renamed: list[str] = []
 
     async def scenario(pilot: Pilot[None], host: Host) -> list[object]:
@@ -1492,6 +1499,8 @@ def test_settings_saves_a_nickname_and_a_blank_one_clears_it(project: ProjectInf
             seen.append(store.get_project(project.id).nickname)  # type: ignore[union-attr]
         seen.append(field.value)
         seen.append(shown(host.query_one("#settings-title", Static)))
+        seen.append(shown(host.query_one("#fleet-id", Static)))
+        sessions.sessions.add("asq-auth-wip")  # an agent started under the new codename
         field.value = ""
         host.query_one("#save-nickname", Button).press()
         await settle(pilot)
@@ -1501,15 +1510,23 @@ def test_settings_saves_a_nickname_and_a_blank_one_clears_it(project: ProjectInf
         seen.append(host.notices)
         return seen
 
-    saved, field_value, title, cleared, title_after, notices = drive(project, scenario)
+    saved, field_value, title, line, cleared, title_after, notices = drive(project, scenario)
     assert saved == "Auth [wip] 🚀" and field_value == "Auth [wip] 🚀"  # trimmed, kept as typed
     assert title == "project settings — Auth [wip] 🚀"
+    assert str(line).startswith("fleet id: auth-wip — tmux session asq-auth-wip"), line
     assert cleared is None
     assert title_after == f"project settings — {project.root.name}"
     assert renamed == [project.id, project.id], "the app hears of both, to repaint the name"
     assert isinstance(notices, list)
-    assert any("is now called Auth [wip] 🚀" in m for m, _ in notices), notices
-    assert any("shows its folder name again" in m for m, _ in notices), notices
+    assert any(
+        m.endswith("is now called Auth [wip] 🚀 · fleet codename auth-wip") for m, _ in notices
+    ), notices
+    assert any(
+        "shows its folder name again · fleet codename repo (was auth-wip; --project auth-wip "
+        "still works)" in m
+        for m, _ in notices
+    ), notices
+    assert sessions.renamed == [("asq-auth-wip", "asq-repo")]
 
 
 def test_a_nickname_the_store_refuses_is_said_and_nothing_is_written(

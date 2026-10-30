@@ -387,6 +387,13 @@ def row_for(app: FleetApp, agent_id: str) -> AgentRow:
     return app.query_one(f"#agent-row-{agent_id}", AgentRow)
 
 
+def highlighted(app: FleetApp) -> list[str]:
+    """The sidebar rows carrying the highlight, hidden ones too: never more than one."""
+    return [
+        row.selection_key for row in app.sidebar.query(Activatable) if row.has_class("selected")
+    ]
+
+
 # --- pure helpers ------------------------------------------------------------------
 
 
@@ -800,8 +807,9 @@ def test_a_project_opened_between_two_ticks_names_its_session_at_once(
 def test_the_card_names_the_project_not_its_codename_and_a_path_tells_twins_apart(
     tmp_path: Path, script: Script
 ) -> None:
-    """The codename names the tmux session and the branches; the card says the name a
-    person knows the project by (its nickname, else its folder), and nothing else."""
+    """The card's title is the name a person knows the project by (its nickname, else its
+    folder), and nothing else; a codename that name does not give is said dim under it, after
+    the path that tells twins apart (task #6)."""
     seed(
         tmp_path,
         ("prj_w", "work/api", "amber-otter"),
@@ -827,9 +835,10 @@ def test_the_card_names_the_project_not_its_codename_and_a_path_tells_twins_apar
         "🗂 api",
         "🗂 unique",
     ]
-    # The two `api` projects are told apart by their path; the unique one is not decorated.
-    assert cards["prj_w"][1] and cards["prj_w"][2].endswith("work/api")
-    assert cards["prj_o"][1] and cards["prj_o"][2].endswith("oss/api")
+    # The two `api` projects are told apart by their path, then their codename, which `api`
+    # does not give; the unique one, with no codename, is not decorated.
+    assert cards["prj_w"][1] and cards["prj_w"][2].endswith("work/api · amber-otter")
+    assert cards["prj_o"][1] and cards["prj_o"][2].endswith("oss/api · ruby-fox")
     assert cards["prj_u"][1] is False and cards["prj_u"][2] == ""
 
 
@@ -2493,33 +2502,46 @@ def test_help_from_the_board_opens_at_its_section_with_every_icon_in_view(
     )
 
 
-def test_keyboard_cursor_walks_the_rows_and_enter_activates(
+def test_the_arrows_walk_the_one_highlight_and_open_each_row_they_land_on(
     tmp_path: Path, script: Script, captain_off: None
 ) -> None:
+    """↑/↓ move THE highlight — there is no second, keyboard-only one — and the row they
+    land on opens as a click opens it, the keyboard staying in the sidebar so the next
+    arrow moves on. ``+`` and *Spawn agent* only take the highlight: passing over them
+    onboards nothing and opens no dialog. Enter on an agent's row is its click: the pane
+    takes the keyboard (#147)."""
     seed(tmp_path, ("prj_a", "alpha", None))
     script["prj_a"] = [status("prj_a", "manager", "manager", "waiting")]
 
-    async def go(pilot: Pilot[None]) -> tuple[int, list[str], str | None]:
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[tuple[str, ...]], str, str]:
         app = fleet_app(pilot)
         app.sidebar.focus()
         await pilot.pause()
-        cursors_before = len(app.query(".cursor"))
-        walk: list[str] = []
+        before = highlighted(app)
+        walk: list[tuple[str, ...]] = []
         # Up at the top already stays on the first row; then down past Spawn agent to the
-        # card, its agent row, and back up to the title (the captain's walk: test_sidebar_actions).
-        for key in ("up", "down", "down", "down", "up"):
+        # card, its agent row, back up to the title and down again (the captain's walk:
+        # test_sidebar_actions).
+        for key in ("up", "down", "down", "down", "up", "down"):
             await pilot.press(key)
             await settle(app)
-            walk.append(type(app.query_one(".cursor")).__name__)
+            (row,) = (row for row in app.sidebar.query(Activatable) if row.has_class("selected"))
+            walk.append((type(row).__name__, str(app.content.current), type(app.focused).__name__))
         await pilot.press("enter")
         await settle(app)
-        return cursors_before, walk, app.content.current
+        return before, walk, str(app.content.current), type(app.focused).__name__
 
-    before, walk, current = drive(go)
-    assert before == 0  # no cursor until a key is pressed
-    assert walk == ["AddButton", "SpawnButton", "ProjectTitle", "AgentRow", "ProjectTitle"]
-    assert current == "project-prj_a"  # Enter on the title opened the project
-    assert len(walk) == len(set(walk)) + 1  # the cursor moved, it did not stick
+    before, walk, current, focused = drive(go)
+    assert before == []  # nothing highlighted until a row is chosen
+    assert walk == [
+        ("AddButton", "welcome", "Sidebar"),  # highlighted, and the Onboard view not opened
+        ("SpawnButton", "welcome", "Sidebar"),  # highlighted, and no Spawn dialog
+        ("ProjectTitle", "project-prj_a", "Sidebar"),
+        ("AgentRow", "agent-agt_a_manager", "Sidebar"),  # its pane did not take the keys
+        ("ProjectTitle", "project-prj_a", "Sidebar"),
+        ("AgentRow", "agent-agt_a_manager", "Sidebar"),
+    ]
+    assert (current, focused) == ("agent-agt_a_manager", "TerminalPane"), "Enter is the click"
 
 
 def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
@@ -2531,7 +2553,7 @@ def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
     bindings then ate the arrows as soon as the list overflowed — the documented
     ``↑ ↓ Enter`` model died after any click. Measured on the unfixed tree:
     focus landed on ``VerticalScroll``, no ``.cursor`` row existed and each
-    ``down`` moved ``scroll_y`` by one instead.
+    ``down`` moved ``scroll_y`` by one instead (the cursor is the highlight now).
     """
     specs = [(f"prj_{index:02d}", f"p{index:02d}", None) for index in range(25)]
     seed(tmp_path, *specs)
@@ -2550,10 +2572,9 @@ def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
         for _ in range(2):
             await pilot.press("down")
             await settle(app)
-            # Not query_one: with the arrows eaten there is no cursor at all, and
-            # the claim should read as a diff, not as a NoMatches from the probe.
-            cursors = app.query(".cursor").results(Activatable)
-            walk.append(next((row.selection_key for row in cursors), "(no cursor)"))
+            # A list, not one key: with the arrows eaten the highlight stays on the
+            # clicked title, and the claim should read as a diff.
+            walk.append(" ".join(highlighted(app)))
             scrolls.append(holder.scroll_y)
         # Control: a widget that IS focusable still takes the click — focus was
         # not nailed to the sidebar, only handed the rows' clicks.
@@ -2567,15 +2588,15 @@ def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
     overflow, focused, walk, scrolls, on_pane = drive(go)
     assert overflow > 0, "the list must overflow, or the bug cannot show"
     assert focused == "Sidebar"
-    assert walk == ["agent:agt_00_manager", "project:prj_01"]  # the arrows moved the cursor…
+    assert walk == ["agent:agt_00_manager", "project:prj_01"]  # the arrows moved the highlight…
     assert scrolls == [0.0, 0.0]  # …and not the scroll
     assert on_pane == "RecordingPane"
 
 
-def test_collapsing_the_card_under_the_cursor_leaves_one_cursor_and_moves_beside_it(
+def test_collapsing_the_highlighted_rows_card_leaves_one_highlight_and_moves_beside_it(
     tmp_path: Path, script: Script, captain_off: None
 ) -> None:
-    """Exactly one row may render as the keyboard cursor, collapsed cards included.
+    """Exactly one row may carry the highlight, collapsed cards included.
 
     ``_move_cursor`` re-applied the class over the VISIBLE rows only, so a row
     hidden inside a collapsed card kept it forever: two rows highlighted, and
@@ -2589,40 +2610,41 @@ def test_collapsing_the_card_under_the_cursor_leaves_one_cursor_and_moves_beside
 
     async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], list[str], list[str]]:
         app = fleet_app(pilot)
-
-        def cursors() -> list[str]:
-            return [row.selection_key for row in app.query(".cursor").results(Activatable)]
-
         app.sidebar.focus()
         await pilot.pause()
         for _ in range(4):  # add → spawn-agent → project:prj_a → agent:agt_a_manager
             await pilot.press("down")
             await settle(app)
-        walked = cursors()
-        await pilot.click(card_for(app, "prj_a").query_one(Disclosure))  # hides the cursor's row
+        walked = highlighted(app)
+        await pilot.click(card_for(app, "prj_a").query_one(Disclosure))  # hides the lit row
         await pilot.pause()
-        collapsed = cursors()
+        collapsed = highlighted(app)
         await pilot.press("down")
         await settle(app)
-        moved = cursors()
-        # Control: the walk goes on from there, one cursor at a time.
+        moved = highlighted(app)
+        # Control: the walk goes on from there, one highlight at a time.
         await pilot.press("down")
         await settle(app)
-        return walked, collapsed, moved, cursors()
+        return walked, collapsed, moved, highlighted(app)
 
     walked, collapsed, moved, onwards = drive(go)
     assert walked == ["agent:agt_a_manager"]
-    assert collapsed == walked  # the hidden row keeps it until the cursor next moves
-    assert moved == ["project:prj_b"], "one cursor row, and it resumed beside the collapsed card"
+    assert collapsed == walked  # the hidden row keeps it until the arrows next move
+    assert moved == ["project:prj_b"], "one highlight, and it resumed beside the collapsed card"
     assert onwards == ["agent:agt_b_manager"]
 
 
-def test_the_cursor_skips_the_rows_of_a_collapsed_card(
+def test_the_arrows_skip_the_rows_of_a_collapsed_card(
     tmp_path: Path, script: Script, captain_off: None
 ) -> None:
     """Collapsing hides the rows through their ``#agents`` holder, not their own flag."""
 
     def walk(*, collapse: bool) -> list[str]:
+        # The rows the arrows open are remembered, as a click's are: each walk starts at
+        # launch with nothing to reopen, or it would start where the last one ended.
+        with store_session() as store:
+            store.set_ui_state("fleet.selected", None)
+
         async def go(pilot: Pilot[None]) -> list[str]:
             app = fleet_app(pilot)
             card = card_for(app, "prj_a")
@@ -2636,7 +2658,8 @@ def test_the_cursor_skips_the_rows_of_a_collapsed_card(
             for _ in range(5):
                 await pilot.press("down")
                 await settle(app)
-                keys.append(app.query_one(".cursor", Activatable).selection_key)
+                (key,) = highlighted(app)
+                keys.append(key)
             return keys
 
         return drive(go)
@@ -2654,7 +2677,7 @@ def test_the_cursor_skips_the_rows_of_a_collapsed_card(
         "agent:agt_b_manager",
     ]
     assert not any(key.endswith("agt_a_manager") for key in collapsed), (
-        "the cursor must not land on a row hidden inside the collapsed card"
+        "the highlight must not land on a row hidden inside the collapsed card"
     )
     # Control: expanded, the very same keys walk through those rows.
     assert walk(collapse=False) == [
@@ -5585,7 +5608,7 @@ def test_the_sidebar_shows_groups_pins_and_manual_order_and_the_keys_move_them(
         app = fleet_app(pilot)
         initial = _cards(app)
         app.sidebar.focus()
-        app.sidebar.select("project:prj_c")  # the cursor's anchor
+        app.sidebar.select("project:prj_c")  # the highlight the keys act on
         await pilot.press("shift+up")
         await settle(app)
         moved = _cards(app)
@@ -5914,11 +5937,11 @@ def test_m_marks_the_card_under_the_cursor_so_a_selection_needs_no_shift_click(
         app = fleet_app(pilot)
         app.sidebar.focus()
         for key in ("project:prj_a", "project:prj_b", "agent:agt_c_coder-1", "project:prj_b"):
-            app.sidebar.select(key)  # the cursor's anchor
+            app.sidebar.select(key)  # the highlight the keys act on
             await pilot.press("m")  # cli twice: marked, then unmarked
             # `m` is the sidebar's binding, not a priority one: it runs once the key has
             # bubbled back up to the sidebar, and the next select must not move the
-            # cursor before it has.
+            # highlight before it has.
             await settle(app)
         marked = app.sidebar.marked_ids()
         highlighted = sorted(c.project.id for c in app.query(ProjectCard) if c.has_class("marked"))
@@ -6446,7 +6469,7 @@ def test_a_handle_removed_mid_press_lets_the_mouse_go(
 
 
 def test_the_settings_tab_follows_a_rename_made_on_the_card_or_in_a_shell(
-    tmp_path: Path, script: Script
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The tab kept the project it was built with: after a card rename it still showed the
     folder name, and Save with a blank field was refused as "already that" against its stale
@@ -6457,7 +6480,9 @@ def test_the_settings_tab_follows_a_rename_made_on_the_card_or_in_a_shell(
     from aisquare.cli.ui.views.settings import SettingsView
     from aisquare.core.store import store_session
     from aisquare.services import project as project_service
+    from tests.fleet_fakes import tmux_sessions_as
 
+    tmux_sessions_as(monkeypatch)  # the rename's codename half asks for its session
     projects = seed(tmp_path, ("prj_a", "alpha", None))
 
     def stored() -> str | None:

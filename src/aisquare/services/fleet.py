@@ -12078,7 +12078,7 @@ def rename_project(
 
 def _codename_changed(updated: ProjectInfo, old: str | None, notes: list[str] | None) -> None:
     """What follows a codename written over ``old``: the tmux session renamed with it, and
-    one note on each board the project's agents read — its own, a hub its live rows
+    one note on each board the project's agents read — its own, a hub its live or paused rows
     recorded, and the captain's home board while a captain is live there — saying the new
     name and that the old one still works (the agents were given the old one: their start
     packs and prompts say ``--project <old>``), so each learns it on its next turn. Nothing
@@ -12107,6 +12107,9 @@ def _codename_changed(updated: ProjectInfo, old: str | None, notes: list[str] | 
         ]
         rows = store.fleet_agents(updated.id, live_only=False)
         boards = {updated.id, *store.fleet_agent_boards(updated.id, live_only=True)}
+        # A paused agent's too: it reads that board again when it is resumed, under the
+        # session the rename renamed (`_paused_heads`).
+        boards |= {_board_of_row(row) for row in _paused_heads(rows).values()}
         if store.fleet_agents(home, live_only=True):
             boards.add(home)  # the captain's home board, while a captain reads it
     new_session = session_name(codename)

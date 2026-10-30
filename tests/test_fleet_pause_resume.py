@@ -1004,3 +1004,26 @@ def test_the_paused_manager_is_read_from_the_store_alone(fleet: Fleet) -> None:
     assert (paused.state, paused.detail) == ("paused", fleet_service.PAUSED_DETAIL)
     fleet_service.bulk("resume", projects=[fleet.alpha])
     assert fleet_service.paused_manager_of(fleet.alpha) is None
+
+
+def test_a_project_rename_tells_the_board_a_paused_agent_reads(fleet: Fleet) -> None:
+    """A rename notes each board the project's agents read, so each learns the new codename
+    on its next turn; a paused agent reads its board again when it is resumed. Its board (a
+    hub's, here beta's) is told as a running agent's is."""
+    coder = fleet.agents[_coder_label(fleet, "alpha")]
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    with store_session() as store:
+        store._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE fleet_agent SET board = ? WHERE id = ?", (fleet.beta.id, coder.id)
+        )
+        store._conn.commit()  # type: ignore[attr-defined]
+
+    with store_session() as store:
+        stored = store.get_project(fleet.alpha.id)
+    assert stored is not None and stored.codename is not None
+    old = stored.codename
+
+    fleet_service.rename_project(fleet.alpha, "Alpha Two")
+
+    told = [text for text in _events(fleet.beta, "note") if text.startswith("project renamed:")]
+    assert told == [f"project renamed: {old} → alpha-two; --project {old} still works"], told

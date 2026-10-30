@@ -143,7 +143,9 @@ def plan_text(plan: fleet_service.BulkPlan) -> Text:
     """The dialog's list: each project's name, then ``label · role · state`` per agent.
 
     The rows the action leaves are listed dim with why (an exited agent, the session
-    asq runs in); "nothing to restart" heads the list when no row is acted on. Every
+    asq runs in); "nothing to restart" heads the list when no row is acted on. A resume
+    that is not the owner's (asq run in an agent's window, ``BulkPlan.owners``) lists each
+    paused row as refused, with the owner's refusal, never as one that will be resumed. Every
     name is data, appended as text and never as markup.
     """
     text = Text()
@@ -165,6 +167,9 @@ def plan_text(plan: fleet_service.BulkPlan) -> Text:
         line.append(f"{chip} {state}", style=chip_style)
         if row.skip is not None:
             line.append(f" — left: {row.skip}")
+            line.stylize("dim")
+        elif row.refused is not None:
+            line.append(f" — refused: {row.refused}")
             line.stylize("dim")
         elif plan.action == "resume" and row.closes is not None:
             line.append(f" — {row.closes}: {WILL_END}")

@@ -759,6 +759,14 @@ def _emit_bulk(report: fleet_service.BulkReport, console: Console, *, as_json: b
             said = f"▶ the fleet-paused signal on {_display_name(project)} was cleared"
         console.print(said, markup=False)
     for project, left in report.kept:
+        if not report.owners:
+            # Said to the agent that was refused: no command it could run brings them back.
+            console.print(
+                f"⏸ {_display_name(project)} stays fleet-paused: the pause is the owner's, "
+                "and only the owner ends it; nothing was changed",
+                markup=False,
+            )
+            continue
         agents = f"{left} agent{'' if left == 1 else 's'} {'is' if left == 1 else 'are'}"
         console.print(
             f"⏸ {_display_name(project)} stays fleet-paused: {agents} still paused — "

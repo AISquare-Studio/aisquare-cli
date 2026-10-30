@@ -10771,6 +10771,10 @@ class BulkPlan:
     fleet_paused: frozenset[str] = frozenset()
     """A resume's: the ids of the projects whose ``fleet-paused`` signal reads on. A resume
     clears one with no paused agent too: a signal-only pause from an earlier version."""
+    owners: bool = True
+    """Whether the plan is the owner's (:func:`_the_owners`). A resume an agent asks for
+    starts no paused agent (``BulkRow.refused``) and clears no ``fleet-paused`` signal, one
+    with no agent paused included (review of the #457 fold, round 2, m1)."""
 
     @property
     def targets(self) -> list[BulkRow]:
@@ -10779,9 +10783,11 @@ class BulkPlan:
 
     @property
     def acts(self) -> bool:
-        """Whether confirming it does anything: an agent to act on, or, for a resume, a
-        ``fleet-paused`` signal to clear."""
-        return bool(self.targets) or (self.action == "resume" and bool(self.fleet_paused))
+        """Whether confirming it does anything: an agent to act on, or, for the owner's
+        resume, a ``fleet-paused`` signal to clear."""
+        return bool(self.targets) or (
+            self.action == "resume" and self.owners and bool(self.fleet_paused)
+        )
 
     def managers(self) -> BulkPlan:
         """The same read, the managers' rows alone: the dialog's *Managers only* switch,
@@ -10838,7 +10844,11 @@ class BulkReport:
     kept: tuple[tuple[ProjectInfo, int], ...] = ()
     """A resume's: each project it left ``fleet-paused``, with how many of its agents are
     still paused (``--managers``, a resume that failed): its manager spawns nothing beside a
-    team that is not back (review of #457, m2)."""
+    team that is not back (review of #457, m2). An agent's resume keeps every project whose
+    pause reads on, a signal-only one with ``0`` (:attr:`owners`)."""
+    owners: bool = True
+    """Whether the run was the owner's (:attr:`BulkPlan.owners`): an agent's resume is
+    refused, and is not ``ok`` when it left any project paused (:attr:`kept`)."""
 
     def of(self, outcome: BulkOutcome) -> list[BulkReceipt]:
         return [receipt for receipt in self.receipts if receipt.outcome == outcome]
@@ -10852,6 +10862,7 @@ class BulkReport:
             or self.unread
             or self.interrupted
             or any(receipt.release_failed for receipt in self.receipts)
+            or (not self.owners and bool(self.kept))
         )
 
     def summary(self) -> str:
@@ -11029,6 +11040,7 @@ def bulk_plan(
         tuple(covered),
         paused_of,
         signalled or frozenset(),
+        owners,
     )
 
 
@@ -11279,6 +11291,7 @@ def bulk(
     unread: tuple[tuple[ProjectInfo, str], ...] = ()
     signals: tuple[ProjectInfo, ...] = ()
     kept: list[tuple[ProjectInfo, int]] = []
+    owners = True
     doing = {"restart": "restarting", "stop": "stopping", "pause": "pausing"}.get(
         action, "resuming"
     )
@@ -11287,7 +11300,7 @@ def bulk(
         now = bulk_plan(
             action, managers_only=managers_only, acting_session=acting_session, projects=projects
         )
-        unread = now.unread
+        unread, owners = now.unread, now.owners
         rows = now.rows if shown is None else _as_shown(shown, now)
         if action == "pause":
             signals = _set_pauses(now.projects, on=True, session_ref=acting_session)
@@ -11329,10 +11342,17 @@ def bulk(
             interrupted=said,
             signals=signals,
             kept=tuple(kept),
+            owners=owners,
         )
         raise BulkInterrupted(report) from None
     return BulkReport(
-        action, managers_only, tuple(receipts), unread, signals=signals, kept=tuple(kept)
+        action,
+        managers_only,
+        tuple(receipts),
+        unread,
+        signals=signals,
+        kept=tuple(kept),
+        owners=owners,
     )
 
 
@@ -11344,8 +11364,19 @@ def _resumes_clear(
     acts on every paused agent of the project (:attr:`BulkPlan.paused`), a signal-only pause
     from an earlier version with none included. ``--managers``, or a paused agent it leaves,
     keeps the signal on (review of #457, m2), and so does one an agent's resume was refused
-    (``BulkRow.refused``). A project whose agents could not be read is neither."""
+    (``BulkRow.refused``). An agent's resume clears none at all (:attr:`BulkPlan.owners`):
+    every project whose pause reads on is kept. A project whose agents could not be read is
+    neither."""
     unread = {project.id for project, _ in plan.unread}
+    if not plan.owners:
+        # Only the owner ends a pause, its signal included: an agent's resume clears none,
+        # not even a signal-only one (review of the #457 fold, round 2, m1).
+        return [], [
+            (project, len(plan.paused.get(project.id, frozenset())))
+            for project in plan.projects
+            if project.id not in unread
+            and (project.id in plan.fleet_paused or plan.paused.get(project.id))
+        ]
     acting: dict[str, set[str]] = {}
     for row in rows:
         if row.skip is None and row.refused is None:

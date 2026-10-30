@@ -942,6 +942,9 @@ def test_an_agents_refused_resume_writes_no_signal(fleet: Fleet, tmux: FakeTmux)
     fleet_service.bulk("resume", managers_only=True, projects=[fleet.alpha])
     manager = _the_running_manager(fleet.alpha)
     assert manager.session_id is not None
+    # A board session, as the manager's hooks write it: `--as` it resolves, so a resume that
+    # cleared the signal would write it, and this fails on the count (round 2, n6).
+    _board_session(manager, "working")
     signals, spawned = len(_events(fleet.alpha, "signal")), len(tmux.spawned)
 
     report = fleet_service.bulk("resume", projects=[fleet.alpha], acting_session=manager.session_id)
@@ -1027,3 +1030,35 @@ def test_a_project_rename_tells_the_board_a_paused_agent_reads(fleet: Fleet) -> 
 
     told = [text for text in _events(fleet.beta, "note") if text.startswith("project renamed:")]
     assert told == [f"project renamed: {old} → alpha-two; --project {old} still works"], told
+
+
+def test_an_agents_resume_clears_no_signal_only_pause(
+    fleet: Fleet, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2, m1: with no agent paused and the signal on (the owner stopped the one paused
+    agent, ending its pause), the manager's ``fleet resume`` from its own window cleared the
+    owner's ``fleet-paused``, exit 0. It clears nothing, writes no signal, says the pause is
+    the owner's (n4: no command it could run), and exits 1; the owner's resume clears it."""
+    coder = fleet.agents[_coder_label(fleet, "alpha")]
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    fleet_service.bulk("resume", managers_only=True, projects=[fleet.alpha])
+    fleet_service.stop(fleet.alpha, coder.label)  # the owner's: its pause ended for good
+    assert fleet_service.is_paused(fleet.alpha) and _row(coder.id).paused_at is None
+    manager = _the_running_manager(fleet.alpha)
+    _board_session(manager, "working")
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", manager.id)
+    signals = len(_events(fleet.alpha, "signal"))
+    runner = CliRunner()
+
+    refused = runner.invoke(app, ["fleet", "resume", "-P", fleet.alpha.id])
+
+    assert refused.exit_code == 1, refused.output
+    said = " ".join(refused.stdout.split())
+    assert "stays fleet-paused: the pause is the owner's, and only the owner ends it" in said
+    assert "brings them back" not in said and "was cleared" not in said
+    assert len(_events(fleet.alpha, "signal")) == signals, "no signal written"
+    assert fleet_service.is_paused(fleet.alpha)
+    monkeypatch.delenv("AISQUARE_FLEET_AGENT")
+    owners = runner.invoke(app, ["fleet", "resume", "-P", fleet.alpha.id])
+    assert owners.exit_code == 0, owners.output
+    assert not fleet_service.is_paused(fleet.alpha)

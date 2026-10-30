@@ -378,3 +378,30 @@ def test_a_paused_managers_tab_says_paused_and_offers_resume_not_start(
     assert header.startswith("alpha's manager is paused.") and "exited" not in header
     assert (start, resume) == (False, True), "Resume agents in place of Start manager"
     assert title == "Resume the paused agents of alpha?"
+
+
+def test_a_resume_that_is_not_the_owners_previews_each_paused_row_as_refused() -> None:
+    """Review of the #457 fold, round 2, n5: asq run in an agent's window plans a resume that
+    is not the owner's, whose paused rows are refused (``BulkRow.refused``). The dialog listed
+    them as "will be resumed", and the run then failed them. Each says refused, and why, and
+    the plan does nothing to confirm."""
+    from aisquare.cli.ui.views.fleet_bulk import WILL_RESUME, plan_text
+
+    project = ProjectInfo(id="prj_a", root=Path("/w/alpha"))
+    paused = _paused("prj_a", "coder-1", "coder")
+    why = "coder-1 was paused by the owner (`fleet pause`), and only the owner ends a pause"
+    plan = fleet_service.BulkPlan(
+        "resume",
+        False,
+        (fleet_service.BulkRow(project, paused, refused=why),),
+        projects=(project,),
+        paused={"prj_a": frozenset({paused.agent.id})},
+        fleet_paused=frozenset({"prj_a"}),
+        owners=False,
+    )
+
+    text = " ".join(plan_text(plan).plain.split())
+
+    assert f"coder-1 · coder · ⏯ paused — refused: {why}" in text, text
+    assert WILL_RESUME not in text
+    assert plan.targets == [] and not plan.acts

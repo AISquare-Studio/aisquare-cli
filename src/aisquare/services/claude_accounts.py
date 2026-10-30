@@ -1742,8 +1742,14 @@ def _signed_logins(
     say: bool = False,
     store: ContextStore | None = None,
 ) -> tuple[set[int], _Logins]:
-    """:func:`signed_in_slots`, and the logins it was read from (in ``store``, if given)."""
-    logins = _settled(_logins(accounts, now or _now(), say=say), store)
+    """:func:`signed_in_slots`, and the logins it was read from (in ``store``, if given).
+
+    An account no login was ever recorded in (no identity in its ``.claude.json``) is not
+    read: ``core.signed_in`` reads nothing for it, and the answer is no either way, where
+    reading it cost a hook's or a pick's cold look one ``security`` process each (review of
+    #461, nit 2). The usage cache still reads every account it is given, as before."""
+    recorded = [account for account in accounts if core.identity(account) is not None]
+    logins = _settled(_logins(recorded, now or _now(), say=say), store)
     signed = {
         account.slot
         for account in accounts

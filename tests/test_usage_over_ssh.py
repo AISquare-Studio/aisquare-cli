@@ -31,6 +31,7 @@ from aisquare.models import ClaudeAccount, ClaudeUsage, UsageCause
 from aisquare.services import claude_accounts as service
 from aisquare.statusline import FLEET_FILE
 from tests.test_claude_accounts import NOW, _installed, _sign_in
+from tests.test_claude_keychain import FakeKeychain, _identity, keychain  # noqa: F401
 from tests.test_usage_aware_accounts import _payload, _Usage
 from tests.test_usage_backoff import _new_process as _forget_usage_memory
 
@@ -833,3 +834,23 @@ def test_the_overview_tick_opens_the_store_once_as_on_base_over_ssh_and_on_the_m
     asqs.over_ssh()
     rows = {status.account.slot: status for status in service.overview().accounts}
     assert rows[two.slot].signed_in and not rows[three.slot].signed_in
+
+
+def test_a_look_at_who_is_signed_in_asks_the_keychain_nothing_for_a_slot_never_signed_in(
+    keychain: FakeKeychain,  # noqa: F811 — pytest resolves fixtures by NAME
+) -> None:
+    """Review of #461 at 88ffbf89, nit 2: a hook's or a pick's look (signed_in_slots) read
+    the store of a slot no login was ever recorded in (no identity), one ``security`` process
+    each, cold, where ``core.signed_in`` reads none for it: the answer is no either way."""
+    two = core.create_account()
+    _identity(two, "two@example.com")
+    keychain.login(two, "sk-ant-oat01-two")
+    plain = core.default_account()  # never signed in: no .claude.json account
+    assert core.identity(plain) is None
+
+    signed = service.signed_in_slots(service.list_accounts())
+
+    asked = [call[call.index("-s") + 1] for call in keychain.calls()]
+    assert signed == {two.slot}
+    assert core.keychain_service(plain) not in asked, asked
+    assert asked.count(core.keychain_service(two)) == 1, asked

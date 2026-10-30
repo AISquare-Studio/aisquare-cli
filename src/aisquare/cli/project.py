@@ -484,7 +484,8 @@ def fresh(
             target, memory=memory, prompts=prompts, branches=branches, dry_run=dry_run
         )
     except fresh_service.FreshRefused as exc:
-        fail(str(exc), error=exc.code, ref=target.id, detail=str(exc), exit_code=2)
+        said = _fresh_refused(exc)
+        fail(said, error=exc.code, ref=target.id, detail=said, exit_code=2)
     if dry_run or (get_state().json_output and not yes):
         _emit_fresh_plan(planned, discard=discard_unpushed)
         return
@@ -531,7 +532,7 @@ def fresh(
             ack_wait=fleet_service.settings().prompt_ack_seconds,
         )
     except fresh_service.FreshRefused as exc:
-        said = str(exc)
+        said = _fresh_refused(exc)
         if exc.code == "unpushed_work" and exc.plan is not None and discard_unpushed:
             # Work found since the list confirmed at the terminal, before anything was
             # stopped: the flag they passed, named again, would only ask about the same list.
@@ -561,6 +562,15 @@ def fresh(
     _emit_fresh(report)
     if report.manager_error is not None:
         raise typer.Exit(code=1)
+
+
+def _fresh_refused(exc: fresh_service.FreshRefused) -> str:
+    """The refusal as this command says it: one about the caller's own pane names the dry run,
+    which runs there. Not in the service's text, which the UI's start-fresh dialog shows as it
+    is, and which has no ``--dry-run`` (review of #469)."""
+    if exc.code in ("inside_fleet_agent", "inside_fleet"):
+        return f"{exc}; --dry-run shows the plan from here"
+    return str(exc)
 
 
 app.command("fresh", help=_FRESH_HELP)(fresh)

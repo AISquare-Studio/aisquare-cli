@@ -721,6 +721,10 @@ def test_dry_run_runs_in_a_real_fleet_pane_and_the_real_run_is_still_refused_the
         assert answer["error"] == ("inside_fleet_agent" if agent else "inside_fleet")
         assert answer["detail"].endswith("; --dry-run shows the plan from here")
 
+    # The hint is the command's: the UI's start-fresh dialog shows the service's text as it is.
+    with pytest.raises(fresh_service.FreshRefused) as in_the_ui:
+        fresh_service.plan(alpha)
+    assert in_the_ui.value.code == "inside_fleet" and "--dry-run" not in str(in_the_ui.value)
     assert srv.has_session(session)
     assert _rows(alpha.id) == before and spawned == []
 

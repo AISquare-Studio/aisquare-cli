@@ -498,7 +498,7 @@ def _refuse(store: ContextStore, project: ProjectInfo, *, dry_run: bool = False)
             f"can't start fresh from inside {row.label}, one of "
             f"{project_service.display_name(stored)}'s own fleet agents: the stop would take "
             "this pane down part-way through. Run it from the UI (asq) or from a terminal of "
-            "your own; --dry-run shows the plan from here",
+            "your own",
             code="inside_fleet_agent",
         )
     readers = project_service.board_readers(store, stored)
@@ -549,7 +549,7 @@ def _sessions(project: ProjectInfo, *, live: bool, dry_run: bool = False) -> lis
             f"can't start fresh from inside the fleet's own tmux server: stopping "
             f"{project_service.display_name(project)}'s fleet kills sessions on the server "
             "this pane runs in, before anything could be reported. Run it from the UI (asq) "
-            "or from a terminal outside the fleet; --dry-run shows the plan from here",
+            "or from a terminal outside the fleet",
             code="inside_fleet",
         ) from exc
     except fleet_service.FleetUnavailable:

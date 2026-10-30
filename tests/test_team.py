@@ -160,6 +160,55 @@ def test_a_superseding_add_names_the_old_task_on_the_human_line(runner: CliRunne
     assert "#2" in _flat(added.output) and "supersedes dropped #1" in _flat(added.output)
 
 
+def test_a_title_ending_in_a_number_is_added_after_a_re_add_of_its_stem() -> None:
+    """Review of #469: the re-add's key was `release-checklist-2`, the key of the title
+    "Release checklist 2", whose add then answered "already tracked" with the re-add."""
+    first, _ = team_service.add_task("Release checklist")
+    team_service.finish_task(first.id)
+    again, made_again = team_service.add_task("Release checklist")
+
+    second, made_second = team_service.add_task("Release checklist 2")
+
+    assert made_again and made_second
+    assert second.id not in (first.id, again.id) and second.title == "Release checklist 2"
+    assert team_service.last_supersedes() is None
+
+
+def test_a_re_add_is_not_answered_by_an_open_title_ending_in_a_number() -> None:
+    """The reverse order: an open "Release checklist 2" held the key the re-add of "Release
+    checklist" tried, so the re-add was never made and the reply named the other task."""
+    numbered, _ = team_service.add_task("Release checklist 2")
+    first, _ = team_service.add_task("Release checklist")
+    team_service.finish_task(first.id)
+
+    again, made_again = team_service.add_task("Release checklist")
+
+    assert made_again and again.id not in (numbered.id, first.id)
+    assert again.title == "Release checklist"
+    supersedes = team_service.last_supersedes()
+    assert supersedes is not None and supersedes.id == first.id
+
+
+def test_a_re_add_supersedes_its_own_title_not_one_ending_in_a_number() -> None:
+    """A done "Release checklist 2" held the re-add's second candidate key, so the re-add of
+    a dropped "Release checklist" said it superseded "Release checklist 2"."""
+    numbered, _ = team_service.add_task("Release checklist 2")
+    team_service.finish_task(numbered.id)
+    first, _ = team_service.add_task("Release checklist")
+    team_service.drop_task(first.id)
+
+    again, made_again = team_service.add_task("Release checklist")
+
+    assert made_again and again.title == "Release checklist"
+    supersedes = team_service.last_supersedes()
+    assert supersedes is not None
+    assert (supersedes.id, supersedes.title, supersedes.status) == (
+        first.id,
+        "Release checklist",
+        "dropped",
+    )
+
+
 # --- task keys in any script (#270) --------------------------------------------
 
 

@@ -1726,10 +1726,13 @@ def add_task(
                 break
             # The key's holder is dropped or done: re-adding this title must not stay
             # stuck behind a closed task forever (#2), so it gets a new key and a fresh
-            # number, naming what it supersedes instead of silently shadowing it.
+            # number, naming what it supersedes instead of silently shadowing it. `--`,
+            # which no title's key holds (`task_key` and `_legacy_task_key` collapse runs
+            # of `-`): `release-checklist-2` is the key of "Release checklist 2", and a
+            # re-add keyed so answered with that task, or took it for this title's (#469).
             supersedes = task
             suffix += 1
-            candidate = f"{derived}-{suffix}"
+            candidate = f"{derived}--{suffix}"
         if created and supersedes is not None:
             # A chain of terminal keys can end in a genuine open duplicate (an earlier
             # superseded candidate, then a later one still in play) — that is the

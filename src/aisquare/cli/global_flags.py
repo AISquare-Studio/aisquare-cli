@@ -20,11 +20,18 @@ root-only deliberately.
 The root group is also where usage errors from the whole dispatch tree
 surface (issue #21): an unknown subcommand gains a did-you-mean over the
 failing group's real verbs, and when ``--json`` was already parsed (the same
-``get_state()`` every error path reads — never argv scanning) the usage
-error is emitted as ONE JSON object on stdout with exit code 2. A ``--json``
-placed after the typo is never parsed by click, so it deliberately falls
-back to the human path — lead with ``--json`` for a guaranteed
-machine-readable error.
+``get_state()`` every error path reads) the usage error is emitted as ONE
+JSON object on stdout with exit code 2. A ``--json`` placed after the typo
+is never parsed by click, so it deliberately falls back to the human path —
+lead with ``--json`` for a guaranteed machine-readable error.
+
+Two root-level failures happen before ``get_state()`` has anything to read,
+though (issue #5): click's ``resolve_command`` rejects an unknown top-level
+subcommand (``aisquare --json nosuchcmd``), and an unrecognised root option
+(``aisquare --json --badopt``) dies inside ``parse_args`` — both before
+``main_callback`` (``cli/app.py``) ever runs ``set_state``. For those two
+spots only, :func:`_json_led` reads the raw argv directly (everywhere else
+stays on ``get_state()``) so a leading ``--json`` still wins.
 """
 
 from __future__ import annotations
@@ -200,6 +207,51 @@ def _suggestions(given: str, verbs: list[str]) -> list[str]:
     return near
 
 
+def _value_taking_root_options(command: Any) -> set[str]:
+    """Declarations among the root's own options that consume a following
+    token (``--profile NAME``), as opposed to a bare flag like ``--json``.
+
+    Derived from the live params instead of a hardcoded name so a future
+    value-taking root option is picked up automatically.
+    """
+    opts: set[str] = set()
+    for param in getattr(command, "params", []):
+        if getattr(param, "is_flag", False) or getattr(param, "count", False):
+            continue
+        opts |= set(getattr(param, "opts", ()))
+    return opts
+
+
+def _json_led(args: Any, value_taking: frozenset[str] = frozenset()) -> bool:
+    """True when ``--json`` appears among the root's own options before the
+    first non-flag token (the attempted subcommand name).
+
+    Only called where ``get_state()`` cannot yet answer — a root option or
+    subcommand failing before ``main_callback`` runs (see module docstring,
+    issue #5) — so this, not ``get_state()``, is what decides those two
+    spots. A trailing ``--json`` stops the scan same as everywhere else:
+    click never parses past the unknown token either, so the two agree.
+
+    ``value_taking`` lists the root's own value-taking option declarations
+    (``--profile``): the token right after one of those is that option's
+    value, not the attempted subcommand, even though it does not itself
+    start with ``-`` (``--profile default --json --badopt``).
+    """
+    skip_next = False
+    for token in args:
+        token_str = str(token)
+        if skip_next:
+            skip_next = False
+            continue
+        if token_str == "--json":
+            return True
+        if not token_str.startswith("-"):
+            break
+        if token_str in value_taking:
+            skip_next = True
+    return False
+
+
 def _handle_usage_error(error: Any) -> None:
     """The #21 contract for a usage error bubbling out of dispatch.
 
@@ -270,6 +322,28 @@ class GlobalFlagsGroup(TyperGroup):
         super().__init__(**attrs)
         _inject_tree(self)
 
+    def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        """Catch a bad root option (``--json --badopt``) before it reaches
+        :meth:`invoke`.
+
+        This is the one usage error the whole dispatch tree raises before
+        ``main_callback`` ever runs: an unrecognised option dies inside
+        click's own option parser, so ``ctx.params`` is still empty and
+        ``get_state()`` has nothing from this invocation yet (issue #5).
+        :func:`_json_led` reads ``args`` — the raw, as-yet-unparsed argv —
+        instead. Snapshotted first: click's parser consumes ``args`` in
+        place, so by the time the ``except`` below runs it has already been
+        emptied out from under us.
+        """
+        original_args = list(args)
+        try:
+            return super().parse_args(ctx, args)
+        except USAGE_ERROR as error:
+            if _json_led(original_args, frozenset(_value_taking_root_options(self))):
+                get_state().json_output = True
+            _handle_usage_error(error)
+            raise
+
     def invoke(self, ctx: Any) -> Any:
         """Dispatch, translating usage errors per the #21 contract.
 
@@ -320,5 +394,12 @@ class GlobalFlagsGroup(TyperGroup):
                 detail=str(damaged),
             )
         except USAGE_ERROR as error:
+            # An unknown top-level subcommand (``aisquare --json nosuchcmd``):
+            # click's ``resolve_command`` rejects it before ``main_callback``
+            # runs, so ``get_state().json_output`` is still the pre-call
+            # default even though ``--json`` already parsed clean into
+            # ``ctx.params`` (issue #5).
+            if ctx.params.get("json_output"):
+                get_state().json_output = True
             _handle_usage_error(error)
             raise

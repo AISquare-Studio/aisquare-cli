@@ -597,7 +597,12 @@ def test_real_tmux_two_asq_on_one_window_never_resize_it_back_and_forth(
             async def resize_both(
                 owner: TerminalPane, other: TerminalPane, terminals: list[tuple[int, int]]
             ) -> dict[str, Any]:
-                """Resize the app through ``terminals``; what reached tmux, and whose it was."""
+                """Resize the app through ``terminals``; what reached tmux, and whose it was.
+
+                Read once the layout has settled: the app at the last terminal size, and both
+                panes' debounces run. Read as soon as the window matched the owner's widget, a
+                loaded loop could still be laying out the last size, the widget still at the
+                size the window already had, and the owner's resize not yet sent (w1#27)."""
                 calls.clear()
                 owner_sizes, other_sizes = set(), set()
                 for terminal in terminals:
@@ -605,6 +610,20 @@ def test_real_tmux_two_asq_on_one_window_never_resize_it_back_and_forth(
                     await pilot.pause(0.25)
                     owner_sizes.add(_size(owner))
                     other_sizes.add(_size(other))
+                await wait_until(pilot, lambda: tuple(pilot.app.size) == terminals[-1], 5.0)
+                await pilot.pause(0.25)  # its layout: each pane's Resize, and its debounce set
+                await wait_until(
+                    pilot,
+                    lambda: owner._resize_timer is None and other._resize_timer is None,
+                    5.0,
+                )
+                owner_sizes.add(_size(owner))
+                other_sizes.add(_size(other))
+                print(  # what a timeout below leaves to read
+                    f"settled at {terminals[-1]}: resized {_resized_to(calls)}, window "
+                    f"{_window_size(live, pane_id)}, owner {_size(owner)}, other {_size(other)}"
+                )
+                await wait_until(pilot, lambda: bool(_resized_to(calls)), 5.0)
                 await wait_until(pilot, window_is(owner), 5.0)
                 await wait_until(pilot, hint(other), 5.0)
                 resized = _resized_to(calls)
@@ -660,9 +679,16 @@ def test_real_tmux_two_asq_on_one_window_never_resize_it_back_and_forth(
 
             calls.clear()
             theirs.focus()
+            their_own = _size(theirs)
             await pilot.press("t")
-            # Claimed and resized in one chain down the pipe: no process, and no debounce.
-            seen["at their key"] = (_resized_to(calls), theirs._resize_timer is None)
+            # Claimed and resized at once, in one chain at their own size, no debounce: down
+            # the control client's pipe while it serves the pane (no process), else — its
+            # `_serving()` None, by design — one polled set-option ; resize-window (w1#29).
+            seen["at their key"] = {
+                "resized": _resized_to(calls),
+                "their own": their_own,
+                "debounce": theirs._resize_timer is not None,
+            }
             await wait_until(pilot, window_is(theirs), 3.0)
             seen["they typed"] = await resize_both(theirs, mine, _THEIR_TERMINALS)
 
@@ -694,7 +720,11 @@ def test_real_tmux_two_asq_on_one_window_never_resize_it_back_and_forth(
         "resized": [],
         "window is mine's": True,
     }, seen["their drag"]
-    assert seen["at their key"] == ([], True), "their key resized at once, down the pipe"
+    at_their_key = seen["at their key"]
+    assert at_their_key["resized"] in ([], [at_their_key["their own"]]), (
+        f"their key resized at once, to their own size and nothing else: {at_their_key}"
+    )
+    assert not at_their_key["debounce"], f"their key left a debounce running: {at_their_key}"
     assert seen["idle"] == [], f"resized while nobody did anything: {seen['idle']}"
     assert seen["owner pids"] == {"mine": other_asq.pid, "theirs": other_asq.pid}, (
         "the claim stays the dead asq's until input: nobody's, read as unset"

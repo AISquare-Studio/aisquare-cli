@@ -2686,8 +2686,10 @@ def _wait_over(reading: ClaudeUsage, now: datetime) -> bool:
 
 
 def _retry_due(reading: ClaudeUsage, now: datetime) -> bool:
-    """Whether a stale token's retry (:attr:`~ClaudeUsage.refresh_retry_at`) is due by ``now``:
-    the read that makes it is not to be answered from memory until the five minutes are up."""
+    """Whether a stale token's retry (:attr:`~ClaudeUsage.refresh_retry_at`, a minute after the
+    refresh that did not take: :data:`TOKEN_REFRESH_RETRY_SECONDS`) is due by ``now``: from then
+    the failed try is not served from memory, so the next read makes the retry rather than
+    waiting out the cache's :data:`USAGE_MAX_AGE_SECONDS`."""
     return reading.refresh_retry_at is not None and reading.refresh_retry_at <= now
 
 

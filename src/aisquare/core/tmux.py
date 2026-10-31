@@ -726,7 +726,9 @@ class SizeOwner(NamedTuple):
     """How that asq's terminal reached the machine: ``ssh``, ``mac`` (the Mac's own
     terminal), or ``local`` — what the other asq's hint names (``cli.ui.terminal``)."""
     stamp: int
-    """When it took the size (``time.time_ns``): each claim's value is its own."""
+    """When it took the size (``time.time_ns``), the clock the registry's reads are stamped
+    with (``cli.ui.terminal.size_owner_runs``). Another asq's claim differs by its pid; two of
+    one process may share a stamp on a coarse clock."""
 
     def value(self) -> str:
         return f"{self.pid}@{self.host}/{self.where}/{self.stamp}"

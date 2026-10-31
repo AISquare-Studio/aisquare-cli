@@ -31,7 +31,12 @@ from aisquare.models import ClaudeAccount, ClaudeUsage, UsageCause
 from aisquare.services import claude_accounts as service
 from aisquare.statusline import FLEET_FILE
 from tests.test_claude_accounts import NOW, _installed, _sign_in
-from tests.test_claude_keychain import FakeKeychain, _identity, keychain  # noqa: F401
+from tests.test_claude_keychain import (  # noqa: F401
+    POSIX_ONLY,
+    FakeKeychain,
+    _identity,
+    keychain,
+)
 from tests.test_usage_aware_accounts import _payload, _Usage
 from tests.test_usage_backoff import _new_process as _forget_usage_memory
 
@@ -836,6 +841,7 @@ def test_the_overview_tick_opens_the_store_once_as_on_base_over_ssh_and_on_the_m
     assert rows[two.slot].signed_in and not rows[three.slot].signed_in
 
 
+@POSIX_ONLY
 def test_a_look_at_who_is_signed_in_asks_the_keychain_nothing_for_a_slot_never_signed_in(
     keychain: FakeKeychain,  # noqa: F811 — pytest resolves fixtures by NAME
 ) -> None:

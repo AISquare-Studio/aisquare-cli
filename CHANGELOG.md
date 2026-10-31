@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **An idle account no longer reads as signed out because its token went stale.** Claude
+  Code's access token lasts hours and only Claude Code renews it, on the account's next
+  session, so an account no agent ran on lately showed `!` and *Log in* on the Accounts
+  page, and `aisquare accounts usage` said `the stored token has expired`, though the login
+  was fine. Now a usage read that finds the token expired, or refused (HTTP 401), has
+  Claude Code refresh it on that account (`claude mcp get` of a server no one has, whose
+  startup renews the token and waits for the answer: no window, no keystroke, no model
+  request; aisquare still never exchanges a token itself) and reads again. Failing that it
+  tries once more after a minute, and only then says what it said before, with the same
+  fix. In between, the row shows the last good reading with its age, and its tooltip says
+  the token is being refreshed. One refresh at a time per account, across every asq and
+  `aisquare` process; the Accounts page, `accounts usage`, the status line, the sidebar and
+  a launch's headroom pick all read through it. Disabled accounts, accounts never signed
+  in and a Keychain that will not say are as before. A 401 on a token Claude Code still
+  holds as valid is not refreshed by it outside a session: there the retry catches a
+  token another session renewed meanwhile, and otherwise *Log in* follows the minute.
+
 ## [0.9.2] - 2026-10-30
 
 **Pause and resume the agents of a project, or of every project: idle managers and coders

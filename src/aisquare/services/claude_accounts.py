@@ -27,6 +27,14 @@ answered on 2026-09-09 with Claude Code 2.1.266 and its shape is recorded in
 ``tests/test_claude_accounts.py``, and the day it changes an account's row says
 ``usage unavailable`` with the reason while everything else on the page keeps
 working. It is never called from a hook or on any path a session pays for.
+
+**A stale token is Claude Code's to refresh, never this module's.** The access token
+lasts hours and only Claude Code renews it, from the refresh token beside it; exchanged
+here, that would rotate under every session running on the account. So when a read finds
+the token expired or refused (a 401), :func:`read_usage` has Claude Code refresh it — its
+own headless startup, on the account's directory, with no window and no model request
+(:data:`TOKEN_REFRESH_ARGS`) — and reads again; once more a minute later; and only then
+does the row ask for a log-in. Meanwhile it shows the last good reading (:func:`_refresh_stale`).
 """
 
 from __future__ import annotations
@@ -44,7 +52,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -879,6 +887,7 @@ def forget_arrangement(slot: int, account: ClaudeAccount | None = None) -> None:
         store.delete_usage_samples(slot)
         store.set_ui_state(_BACKOFF_KEY.format(slot=slot), None)  # and its wait (F1 of #400)
         store.set_ui_state(_FAMILY_KEY.format(slot=slot), None)  # and its family weeks
+        store.set_ui_state(_TOKEN_REFRESH_KEY.format(slot=slot), None)  # and a token's refresh
         # And the login last seen in its Keychain item: the next occupant's is its own.
         gone = account if account is not None else core.find_account(slot)
         if gone is not None:
@@ -1054,6 +1063,9 @@ USAGE_FIXES: dict[UsageCause, str | None] = {
     UsageCause.token_missing: _LOG_IN,
     UsageCause.token_expired: _REFRESH_TOKEN,
     UsageCause.token_rejected: _REFRESH_TOKEN,
+    UsageCause.token_refreshing: (
+        "none needed yet, Claude Code refreshes the token {at}(Log in is offered if that fails)"
+    ),
     UsageCause.keychain_locked: (
         f"unlock the login keychain (Keychain Access, or log out and back in), {_THEN_REFRESH}"
     ),
@@ -1093,7 +1105,7 @@ def usage_fix(
     cause: UsageCause, *, slot: int | None = None, until: datetime | None = None
 ) -> str | None:
     """What to do about ``cause`` on slot ``slot`` (:data:`USAGE_FIXES`): ``until`` is a rate
-    limit's end, ``reads resume at 14:32 by themselves``."""
+    limit's end, ``reads resume at 14:32 by themselves``, or a stale token's retry."""
     fix = USAGE_FIXES[cause]
     if fix is None:
         return None
@@ -1106,7 +1118,7 @@ def unreadable_usage(
 ) -> ClaudeUsage:
     """A reading with nothing to show: ``reason`` says what is wrong, and ``cause`` and its
     fix (:func:`usage_fix`) are stamped here, the one place they are."""
-    until = fields.get("rate_limited_until")
+    until = fields.get("rate_limited_until") or fields.get("refresh_retry_at")
     return ClaudeUsage(
         available=False,
         reason=reason,
@@ -1128,7 +1140,7 @@ def kept_fix_line(reading: ClaudeUsage, *, slot: int | None = None) -> str | Non
     cause = reading.last_failed_cause
     if not reading.available or reading.last_failed_reason is None or cause is None:
         return None
-    fix = usage_fix(cause, slot=slot, until=reading.rate_limited_until)
+    fix = usage_fix(cause, slot=slot, until=reading.rate_limited_until or reading.refresh_retry_at)
     return f"fix: {fix}" if fix else NO_FIX
 
 
@@ -1164,20 +1176,34 @@ def _no_login_reason() -> str:
     return "no credentials file — not signed in"
 
 
+def awaits_refresh(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> bool:
+    """Whether a row whose token :func:`describe` read as expired leaves the word to its
+    reading rather than offer a log-in at once: Claude Code may yet refresh it
+    (:func:`_refresh_stale`). So for an enabled account until its reading says a log-in is
+    needed — owed, refreshed, or still refreshing (its last good reading shown). A disabled
+    account is never refreshed: its expired token asks for a log-in at once, as before."""
+    return (
+        status.token_state == "expired"
+        and not status.account.disabled
+        and not (reading is not None and reading.needs_login)
+    )
+
+
 def usage_problem(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> ClaudeUsage | None:
     """Why a row has no usage to show, worst first — or ``None`` when it shows a reading
     (a kept one too: F1 of #400) or one is still owed.
 
     No login, then a token gone or expired, all read from ``status`` without a request;
     then the reading's own cause (a 401, a locked Keychain, the endpoint). The page's
-    '!' and its tooltip, and ``accounts usage``, are drawn from it alone.
+    '!' and its tooltip, and ``accounts usage``, are drawn from it alone. An expired token
+    the quiet refresh may yet renew is the reading's to say (:func:`awaits_refresh`).
     """
     slot = status.account.slot
     if status.identity is None:
         return unreadable_usage(UsageCause.not_signed_in, "not signed in", slot=slot)
     if not status.signed_in:
         return unreadable_usage(UsageCause.token_missing, _no_login_reason(), slot=slot)
-    if status.token_state == "expired":
+    if status.token_state == "expired" and not awaits_refresh(status, reading):
         return unreadable_usage(UsageCause.token_expired, _EXPIRED, slot=slot, needs_login=True)
     if reading is not None and not reading.available:
         return reading
@@ -1185,7 +1211,11 @@ def usage_problem(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> C
 
 
 def usage(
-    account: ClaudeAccount, *, now: datetime | None = None, fetch: Fetch | None = None
+    account: ClaudeAccount,
+    *,
+    now: datetime | None = None,
+    fetch: Fetch | None = None,
+    fresh: bool = False,
 ) -> ClaudeUsage:
     """The account's five-hour and seven-day windows, or why they cannot be read.
 
@@ -1197,13 +1227,15 @@ def usage(
 
     Reads the token where Claude Code keeps it (``core.stored_login``: the
     credentials file, or on macOS the login Keychain) and sends it to
-    :data:`USAGE_URL` only; a token that has already expired is not sent at all,
-    because Claude Code refreshes it on the account's next session and this
-    module never does. A Keychain that would not show the token says why
-    (locked, refused), and asks for no log-in. No reason ever carries the token.
+    :data:`USAGE_URL` only; a token that has already expired is not sent at all:
+    only Claude Code refreshes it, on the account's next session or when
+    :func:`read_usage` has it do so. A Keychain that would not show the token says
+    why (locked, refused), and asks for no log-in. No reason ever carries the token.
+    ``fresh`` reads the login again rather than take a Keychain read from the last
+    ``core.KEYCHAIN_MEMO_SECONDS``: after a refresh, the token it left.
     """
     slot = account.slot
-    login = core.stored_login(account)
+    login = core.stored_login(account, fresh=fresh)
     creds = login.credentials
     if creds is None:
         if login.unreadable is None:
@@ -1629,6 +1661,9 @@ class _Logins:
     borrowed: set[int] = field(default_factory=set)
     signed_out: set[int] = field(default_factory=set)
     expired: set[int] = field(default_factory=set)
+    stale: dict[int, str] = field(default_factory=dict)
+    """Slot → fingerprint of a token read here that has expired: never served as live, but
+    the last good reading it took is what the row shows while it is refreshed."""
     settled: bool = False
 
     @property
@@ -1697,6 +1732,7 @@ def _logins(accounts: Sequence[ClaudeAccount], now: datetime, *, say: bool = Tru
     is; only where a Keychain keeps the logins (macOS), the one place one can be locked.
     """
     tokens: dict[int, str] = {}
+    stale: dict[int, str] = {}
     seen: list[tuple[ClaudeAccount, SeenLogin]] = []
     locked: list[ClaudeAccount] = []
     say = say and core.keychain_platform()
@@ -1713,7 +1749,9 @@ def _logins(accounts: Sequence[ClaudeAccount], now: datetime, *, say: bool = Tru
         creds = login.credentials
         if creds is not None and not creds.expired(now):
             tokens[account.slot] = _login_digest(creds)
-    return _Logins(now=now, tokens=tokens, seen=seen, locked=locked)
+        elif creds is not None:
+            stale[account.slot] = _login_digest(creds)
+    return _Logins(now=now, tokens=tokens, seen=seen, locked=locked, stale=stale)
 
 
 def _settled(logins: _Logins, store: ContextStore | None = None) -> _Logins:
@@ -2091,6 +2129,262 @@ def usage_backoffs(
     }
 
 
+# --- a stale token, refreshed quietly ----------------------------------------------------------
+#
+# An access token lasts hours, and only Claude Code renews it: on the account's next session.
+# An account no agent ran on lately read as signed out, and its row offered Log in, though
+# nothing was wrong with it (the owner pressed Log in and landed in a session with nothing to
+# do). So a read that finds the token expired, or refused (a 401), has Claude Code refresh it
+# and reads again; failing that, once more after TOKEN_REFRESH_RETRY_SECONDS; and only then
+# answers as before, a log-in needed. In between the row shows the last good reading, aged
+# (`_with_last_good`), never "signed out".
+#
+# Claude Code's, never ours: exchanging the refresh token here would rotate it under every
+# session running on the account. Measured on Claude Code 2.1.314 against a fake login and a
+# local endpoint that answered nothing real (the task's result has the run): `auth status`
+# never refreshes; every other subcommand's startup refreshes an expired token, but
+# `plugin list`, `auto-mode config` and `doctor` exit with the refresh still in flight,
+# where the server may already have rotated the refresh token. `mcp get` waits for the
+# answer — it reads the account's claude.ai connectors with the token — and so does
+# `mcp list`, which starts every MCP server to check it; `mcp get` of a name no server can
+# have (a space: `claude mcp add` refuses it) starts none. No request to the model API.
+# A 401 on a token Claude Code holds unexpired is not refreshed by it outside a session;
+# the read after it then catches a token another session has renewed meanwhile.
+#
+# At most one refresh runs per account, whichever process reads: a slot's row
+# (`_TOKEN_REFRESH_KEY`), claimed compare-and-set, says it runs, waits for its retry, or
+# gave up — for the token it is about, so the next token Claude Code writes starts afresh.
+
+TOKEN_REFRESH_ARGS = ("mcp", "get", "aisquare token refresh")
+"""What runs on a slot whose token went stale: ``claude mcp get`` of a server no one can have
+(see above). Its exit status says nothing; the login read again after it does."""
+TOKEN_REFRESH_TIMEOUT_SECONDS = 60.0
+"""How long a refresh may run: Claude Code's own token request gives up at 30 s."""
+TOKEN_REFRESH_RETRY_SECONDS = 60.0
+"""How long after a refresh that did not take the one retry is due."""
+TOKEN_REFRESH_TRIES = 2
+"""A refresh and its one retry; then a log-in is needed."""
+_TOKEN_REFRESH_KEY = "usage-token-refresh:{slot}"
+"""The ``ui_state`` row a slot's refresh is recorded in (:class:`TokenRefresh`)."""
+_STALE_TOKEN = frozenset({UsageCause.token_expired, UsageCause.token_rejected})
+
+RefreshPhase = Literal["running", "waiting", "failed"]
+
+
+@dataclass(frozen=True)
+class TokenRefresh:
+    """One slot's quiet refresh, for the stale ``token`` (:func:`_login_digest`) it is about.
+
+    ``running``: a process is refreshing it, until ``until`` (the claim lapses then: a process
+    that died holding it does not hold the slot); ``waiting``: ``tries`` did not take, and the
+    retry is due at ``until``; ``failed``: neither did, a log-in is needed. ``raw`` is the row
+    as read, for the compare-and-set that claims or settles it.
+    """
+
+    slot: int
+    token: str
+    phase: RefreshPhase
+    tries: int
+    until: datetime | None = None
+    raw: str | None = field(default=None, compare=False)
+
+    def dump(self) -> str:
+        until = self.until.isoformat() if self.until is not None else None
+        return json.dumps(
+            {"token": self.token, "phase": self.phase, "tries": self.tries, "until": until}
+        )
+
+    @classmethod
+    def load(cls, slot: int, raw: str | None) -> TokenRefresh | None:
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+            phase = data["phase"]
+            if phase not in ("running", "waiting", "failed") or not isinstance(data["token"], str):
+                return None
+            until = data.get("until")
+            return cls(
+                slot=slot,
+                token=data["token"],
+                phase=phase,
+                tries=int(data["tries"]),
+                until=datetime.fromisoformat(until) if until else None,
+                raw=raw,
+            )
+        except (ValueError, TypeError, KeyError):
+            return None  # a row this version cannot read is no refresh: one is started
+
+
+def _refresh_turn(held: TokenRefresh | None, token: str, now: datetime) -> int | None:
+    """Which try a read that found ``token`` stale starts now (1, or the retry), or ``None``
+    when it starts none: one runs, the retry is not due, or both were made."""
+    if held is None or held.token != token:
+        return 1
+    if held.phase == "failed" or held.until is None or held.until > now:
+        return None
+    if held.tries >= TOKEN_REFRESH_TRIES:  # a run that died holding the retry's claim
+        return None
+    return held.tries + 1
+
+
+def _refreshing_usage(stale: ClaudeUsage, slot: int, retry_at: datetime | None) -> ClaudeUsage:
+    """What a read answers while a stale token is being refreshed: no live reading, and not a
+    log-in either (``needs_login`` False), so the row shows its last good reading, aged."""
+    said = stale.reason or _EXPIRED
+    if retry_at is None:
+        reason = f"{said} — Claude Code is refreshing it"
+    else:
+        reason = (
+            f"{said} — Claude Code's refresh did not take, once more at "
+            f"{retry_at.astimezone().strftime('%H:%M')}"
+        )
+    return unreadable_usage(
+        UsageCause.token_refreshing, reason, slot=slot, refresh_retry_at=retry_at
+    )
+
+
+def _token_refresh_command() -> list[str] | None:
+    """What :func:`_run_token_refresh` runs (:data:`TOKEN_REFRESH_ARGS`), or ``None`` without
+    Claude Code: no refresh is tried then, and a stale token answers as it always did."""
+    found = install()
+    if not found.installed or found.binary is None:
+        return None
+    return [found.binary, *TOKEN_REFRESH_ARGS]
+
+
+def _run_token_refresh(account: ClaudeAccount, command: Sequence[str]) -> bool:
+    """Run Claude Code's own headless refresh, ``command`` (:func:`_token_refresh_command`), on
+    ``account`` and wait for it: whether it ran. Whether it WORKED is the login's to say,
+    read again after.
+
+    In the environment a session on the account runs with (:func:`session_env`), so it is
+    that account's login it refreshes, from its own directory; no terminal, nothing on
+    stdin, its output dropped. Registered in ``core.spawn.SEAMS`` as excluded.
+    """
+    try:
+        subprocess.run(  # argv, never a shell
+            list(command),
+            env=session_env(account),
+            cwd=account.config_dir if account.config_dir.is_dir() else None,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=TOKEN_REFRESH_TIMEOUT_SECONDS,
+            check=False,
+            start_new_session=True,
+        )
+    except subprocess.TimeoutExpired:
+        return True  # it ran: the login read next says whether it took
+    except OSError:
+        return False
+    return True
+
+
+RefreshRows = dict[int, tuple[str, str | None]]
+"""What :func:`_refresh_stale` leaves to write: slot → (its claim, what its row becomes)."""
+
+
+def _refresh_stale(
+    accounts: Sequence[ClaudeAccount],
+    readings: dict[int, ClaudeUsage],
+    *,
+    now: datetime | None,
+    fetch: Fetch | None,
+) -> RefreshRows:
+    """Have Claude Code refresh each of ``accounts``' stale token and read it again, in place in
+    ``readings``: an answer is then recorded as any other, and the rows returned are written,
+    in :func:`read_usage`'s one session after the round.
+
+    Per slot, by its row (:class:`TokenRefresh`), claimed compare-and-set in one store
+    session: the first read of a stale token runs the refresh; a read while it runs, or
+    before its retry is due, starts none and answers :func:`_refreshing_usage`; the first
+    read at or after it runs the retry; after that, the stale reading as before. The
+    refreshes run at once, one thread each. No Claude Code to run, or no store to claim in:
+    the reading stands, as before this existed, and no store is opened for it.
+    """
+    command = _token_refresh_command()
+    if command is None:
+        return {}
+    moment = now or _now()
+    tokens: dict[int, str] = {}
+    for account in accounts:
+        creds = core.credentials(account)
+        if creds is not None:
+            tokens[account.slot] = _login_digest(creds)
+    claimed: dict[int, tuple[TokenRefresh | None, TokenRefresh]] = {}
+    try:
+        with store_session() as store:
+            for account in accounts:
+                token = tokens.get(account.slot)
+                if token is None:
+                    continue
+                key = _TOKEN_REFRESH_KEY.format(slot=account.slot)
+                held = TokenRefresh.load(account.slot, store.ui_state(key))
+                turn = _refresh_turn(held, token, moment)
+                if turn is not None:
+                    claim = TokenRefresh(
+                        slot=account.slot,
+                        token=token,
+                        phase="running",
+                        tries=turn,
+                        until=moment + timedelta(seconds=TOKEN_REFRESH_TIMEOUT_SECONDS + 30),
+                    )
+                    expected = held.raw if held is not None else None
+                    if store.replace_ui_state(key, expected, claim.dump()):
+                        claimed[account.slot] = (held, claim)
+                        continue
+                    held = TokenRefresh.load(account.slot, store.ui_state(key))  # lost the race
+                if held is None or held.token != token or held.phase == "failed":
+                    continue  # given up on this token: the stale reading stands
+                if held.until is None or held.until <= moment:
+                    continue  # a claim that lapsed with no try left: as if given up
+                retry = held.until if held.phase == "waiting" else None
+                readings[account.slot] = _refreshing_usage(
+                    readings[account.slot], account.slot, retry
+                )
+    except sqlite3.Error:
+        return {}
+    running = [account for account in accounts if account.slot in claimed]
+    if not running:
+        return {}
+
+    def _refresh(account: ClaudeAccount) -> ClaudeUsage | None:
+        if not _run_token_refresh(account, command):
+            return None
+        return usage(account, now=now, fetch=fetch, fresh=True)
+
+    again: dict[int, ClaudeUsage | None] = {}
+    with ThreadPoolExecutor(max_workers=min(HEADROOM_WORKERS, len(running))) as pool:
+        futures = {pool.submit(_refresh, account): account.slot for account in running}
+        for future, slot in futures.items():
+            try:
+                again[slot] = future.result()
+            except Exception as exc:  # one account's failure must not cost the rest
+                again[slot] = unreadable_usage(
+                    UsageCause.read_failed, f"usage read failed ({type(exc).__name__})", slot=slot
+                )
+    after = now or _now()
+    rows: RefreshRows = {}
+    for account in running:
+        slot = account.slot
+        before, claim = claimed[slot]
+        reading = again[slot]
+        if reading is None:  # nothing ran: the row goes back as it was, the reading stands
+            rows[slot] = (claim.dump(), before.raw if before is not None else None)
+            continue
+        if reading.cause in _STALE_TOKEN and claim.tries < TOKEN_REFRESH_TRIES:
+            retry_at = after + timedelta(seconds=TOKEN_REFRESH_RETRY_SECONDS)
+            rows[slot] = (claim.dump(), replace(claim, phase="waiting", until=retry_at).dump())
+            reading = _refreshing_usage(reading, slot, retry_at)
+        elif reading.cause in _STALE_TOKEN:
+            rows[slot] = (claim.dump(), replace(claim, phase="failed", until=None).dump())
+        else:  # it took (or the token is fine and the endpoint is not): nothing to wait for
+            rows[slot] = (claim.dump(), None)
+        readings[slot] = reading
+    return rows
+
+
 def read_usage(
     accounts: Sequence[ClaudeAccount],
     *,
@@ -2116,6 +2410,10 @@ def read_usage(
     asked before the wait ends — whoever reads, forced or not — and is answered
     with the reason and ``rate_limited_until``. A rate-limited answer records the
     wait, a good one clears it, in that same store session.
+
+    A token found expired or refused (a 401), on an enabled account, is Claude Code's to
+    refresh, and is read again after (:func:`_refresh_stale`): a log-in is asked for only
+    once that and its retry, a minute on, did not take.
 
     A slot whose Keychain is locked here, and whose token the Mac's asq saw has expired
     since (:class:`SeenLogin`), is answered as the Mac answers it: the token has expired,
@@ -2164,6 +2462,14 @@ def read_usage(
                         f"usage read failed ({type(exc).__name__})",
                         slot=slot,
                     )
+    stale = [
+        account
+        for account in asked
+        if readings[account.slot].cause in _STALE_TOKEN and not account.disabled
+    ]
+    settled: RefreshRows = {}
+    if stale:  # before the locked slots' answer below, which no refresh here can change
+        settled = _refresh_stale(stale, readings, now=now, fetch=fetch)
     for account in asked:
         seen = rows.get(account.slot)
         if (
@@ -2190,8 +2496,10 @@ def read_usage(
     }
     for slot, held in started.items():
         readings[slot] = held.reading(moment)
-    if answered or started or cleared:
+    if answered or started or cleared or settled:
         with contextlib.suppress(sqlite3.Error), store_session() as store:
+            for slot, (claim, becomes) in settled.items():  # only the claim this round made
+                store.replace_ui_state(_TOKEN_REFRESH_KEY.format(slot=slot), claim, becomes)
             for account in answered:
                 _record_sample(store, account, readings[account.slot], now)
             for slot in cleared:  # only the row this round read: never a newer wait (N2)
@@ -2297,8 +2605,9 @@ def _recorded_usage(
     since would show the last one's figure. Nor, while ``current``, is one of whose
     windows has reset since: the window it describes is over, and the new one starts
     near 0 %. ``current=False`` is the last good reading a failed read shows, aged
-    (F1 of #400): an old figure, said to be old, beats ``—``. A slot whose login another
-    process saw (:func:`_logins`) is served that login's reading, which says so.
+    (F1 of #400): an old figure, said to be old, beats ``—``; that of a token that has
+    expired too (:attr:`_Logins.stale`), shown while it is refreshed. A slot whose login
+    another process saw (:func:`_logins`) is served that login's reading, which says so.
     """
     found: dict[int, ClaudeUsage] = {}
     try:
@@ -2306,6 +2615,8 @@ def _recorded_usage(
             logins.settle(store)
             for account in accounts:
                 token = logins.tokens.get(account.slot)
+                if token is None and not current:
+                    token = logins.stale.get(account.slot)
                 if token is None:
                     continue
                 samples = store.usage_samples(account.slot, since=since)
@@ -2362,6 +2673,8 @@ def _served(
             failed = None
         if failed is not None and failed.rate_limited and _wait_over(failed, now):
             failed = None
+        if failed is not None and _retry_due(failed, now):
+            failed = None
         if (answer := _preferred(recorded.get(account.slot), failed)) is not None:
             served[account.slot] = answer
     return served
@@ -2370,6 +2683,12 @@ def _served(
 def _wait_over(reading: ClaudeUsage, now: datetime) -> bool:
     """Whether the wait a rate-limited ``reading`` names has ended by ``now``."""
     return reading.rate_limited_until is not None and reading.rate_limited_until <= now
+
+
+def _retry_due(reading: ClaudeUsage, now: datetime) -> bool:
+    """Whether a stale token's retry (:attr:`~ClaudeUsage.refresh_retry_at`) is due by ``now``:
+    the read that makes it is not to be answered from memory until the five minutes are up."""
+    return reading.refresh_retry_at is not None and reading.refresh_retry_at <= now
 
 
 def _preferred(good: ClaudeUsage | None, failed: ClaudeUsage | None) -> ClaudeUsage | None:
@@ -2405,6 +2724,7 @@ def _preferred(good: ClaudeUsage | None, failed: ClaudeUsage | None) -> ClaudeUs
             "last_failed_cause": failed.cause,
             "rate_limited": failed.rate_limited,
             "rate_limited_until": failed.rate_limited_until,
+            "refresh_retry_at": failed.refresh_retry_at,
         }
     )
 
@@ -2540,7 +2860,9 @@ def _with_last_good(
     memory of one — keeps the row's figure at whatever age (F1 of #400): the reading is
     shown with how old it is and why the newer try read nothing; ``—`` only when nothing
     was ever read for this token. A failure that is about the token (``needs_login``) is
-    shown as it is: the figure belongs to a login that no longer reads.
+    shown as it is: the figure belongs to a login that no longer reads. A token being
+    refreshed (``token_refreshing``) is not yet one: its own last good figure is shown, an
+    expired token's too (:attr:`_Logins.stale`).
     """
     shown = dict(readings)
     failed = [
@@ -2548,7 +2870,13 @@ def _with_last_good(
         for account in accounts
         if not readings[account.slot].available
         and not readings[account.slot].needs_login
-        and account.slot in logins.tokens
+        and (
+            account.slot in logins.tokens
+            or (
+                readings[account.slot].cause is UsageCause.token_refreshing
+                and account.slot in logins.stale
+            )
+        )
     ]
     if failed:
         recorded = _recorded_usage(
@@ -2597,7 +2925,8 @@ def cached_usage_with_trends(
 
 def usage_is_readable(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> bool:
     """Whether a row's usage is this CLI's to read: signed in, with a token it can read that
-    has neither expired nor been refused (a 401).
+    has neither expired (unless it is being refreshed: :func:`awaits_refresh`) nor been
+    refused (a 401).
 
     The rows a "refreshed …" line ages from and says a try failed on (the Accounts page's
     rule, ``views.accounts`` ``_paint_usage_age``): a row that needs a login, or whose token
@@ -2606,7 +2935,7 @@ def usage_is_readable(status: ClaudeAccountStatus, reading: ClaudeUsage | None) 
     """
     return (
         status.signed_in
-        and status.token_state == "ok"
+        and (status.token_state == "ok" or awaits_refresh(status, reading))
         and not (reading is not None and reading.needs_login)
     )
 

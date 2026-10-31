@@ -34,6 +34,7 @@ _REFRESH_TOKEN = (
 )
 _THEN_REFRESH = "then ↻ Refresh usage (or --refresh)"
 _RESUMES = (NOW + timedelta(seconds=120)).astimezone().strftime("%H:%M")
+_RETRY = (NOW + timedelta(seconds=60)).astimezone().strftime("%H:%M")
 
 #: Every cause: the reason it reads with, and its fix — ``None`` where nothing done on this
 #: machine helps, which the tooltip and ``accounts usage`` then say (``NO_FIX``).
@@ -42,6 +43,12 @@ CAUSES: dict[UsageCause, tuple[str, str | None]] = {
     UsageCause.token_missing: ("no credentials file — not signed in", _LOG_IN),
     UsageCause.token_expired: ("the stored token has expired", _REFRESH_TOKEN),
     UsageCause.token_rejected: ("the token was rejected (HTTP 401)", _REFRESH_TOKEN),
+    # An expired token whose quiet refresh did not take, its one retry still to come.
+    UsageCause.token_refreshing: (
+        f"the stored token has expired — Claude Code's refresh did not take, once more at {_RETRY}",
+        f"none needed yet, Claude Code refreshes the token at {_RETRY} "
+        "(Log in is offered if that fails)",
+    ),
     UsageCause.keychain_locked: (
         "the login Keychain is locked",
         f"unlock the login keychain (Keychain Access, or log out and back in), {_THEN_REFRESH}",
@@ -117,6 +124,11 @@ def _reading(
     if cause is UsageCause.token_expired:
         _sign_in(account, "two@example.com", expires_in=timedelta(hours=-1))
         return read((200, b"{}"))
+    if cause is UsageCause.token_refreshing:  # a fake Claude Code whose refresh does not take
+        _sign_in(account, "two@example.com", expires_in=timedelta(hours=-1))
+        monkeypatch.setattr(service, "_token_refresh_command", lambda: ["claude"])
+        monkeypatch.setattr(service, "_run_token_refresh", lambda _account, _command: True)
+        return service.read_usage([account], now=NOW, fetch=_answering((200, b"{}")))[account.slot]
     _sign_in(account, "two@example.com")
     if cause is UsageCause.keychain_locked:
         _keychain(monkeypatch, "locked", core.KEYCHAIN_LOCKED)

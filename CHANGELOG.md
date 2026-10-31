@@ -22,8 +22,8 @@ terminal beside the default sidebar.**
 - From 0.9.1, run `aisquare upgrade`, or take the update `asq` offers.
 - **Quit every other asq before you update, at the Mac and over SSH.** A 0.9.1 asq left
   running (the one over SSH while the Mac's takes the update, say) keeps the 0.9.2 asq from
-  starting. 0.9.1 writes no instance record, so the 0.9.2 asq finds it with one `ps`, names
-  its pid, terminal, start time and command, and refuses: `asq did not start. Start it again
+  starting. 0.9.1 writes no instance record, so the 0.9.2 asq finds it in `ps`, names its
+  pid, terminal, start time and command, and refuses: `asq did not start. Start it again
   once that asq has quit.`, exit 1. Quit it in its own terminal (`q`), or end it with `kill
   <pid>`, which skips its clean quit (the refusal says what that loses), and start asq
   again. Nothing is killed for you. A 0.9.1 asq started in the 10 seconds before is not
@@ -57,10 +57,11 @@ terminal beside the default sidebar.**
   `ui_state` (macOS only), which 0.9.1 never asks for: it reads `ui_state` by exact key. A
   fleet tmux window may carry a `@asq-size-owner` option, which 0.9.1 never reads, so its
   asq resizes the pane as it always did.
-- **`aisquare upgrade` and `aisquare uninstall` refuse while an asq runs on the home,**
-  where 0.9.1 went ahead: a script that runs `upgrade --yes` beside an open asq exits 1
-  now, and so does a move back with `upgrade --version 0.9.1`. Quit the asqs first (`q` in
-  each). Inside asq, its Update and Uninstall refuse only while another asq runs.
+- **`aisquare upgrade` and `aisquare uninstall` refuse while an asq runs on the home**
+  (asqs of 0.9.2 or later; quit a 0.9.1 asq yourself), where 0.9.1 went ahead: a script
+  that runs `upgrade --yes` beside an open asq exits 1 now, and so does a move back with
+  `upgrade --version 0.9.1`. Quit the asqs first (`q` in each). Inside asq, its Update and
+  Uninstall refuse only while another asq runs.
 - **No setting, extra or dependency is added or removed.** Two new commands, `aisquare
   fleet relabel` and `aisquare instances`, and two new flags on `fleet pause` and `fleet
   resume`, `--all` and `--managers`.

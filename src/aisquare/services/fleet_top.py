@@ -10,6 +10,12 @@ fleet's ``asq``), ONE ``ps -A`` for every process (``core.process_table``), and 
 spend (:class:`SpendReader`). Nothing here writes: no row is ended, no pane or process is
 touched — a row whose pane is gone reads ``gone`` until ``fleet ls`` or ``reap`` records it.
 
+**A pane id is one server's.** The next server on a socket numbers its panes from ``%0``
+again, so after a reboot or a ``kill-server`` a live row left behind names a pane id another
+agent now holds. The listing says when its server started (``#{start_time}``, in the same
+``list-panes``), and a row written before that (``services.fleet._outlived``, as ``fleet ls``
+judges it) holds none of its panes: ``gone``, never charged with another agent's tree.
+
 **Spend** starts from what the session's Stop hooks recorded (``usage_session``: the totals
 and where their scan stopped, ``services.metrics``) and scans only what the transcript gained
 since, so it is current mid-turn and costs a few milliseconds a session. A session no hook
@@ -32,7 +38,7 @@ from typing import Any, Literal
 from aisquare.core import process_table
 from aisquare.core import usage as usage_core
 from aisquare.core.store import ContextStore, store_session
-from aisquare.core.tmux import TmuxError, TmuxServer
+from aisquare.core.tmux import PanePids, TmuxError, TmuxServer
 from aisquare.models import FleetAgent
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
@@ -44,7 +50,8 @@ State = Literal["running", "exited", "gone", "unknown"]
 - ``running``: its pane's process was in the process table;
 - ``exited``: its pane is dead (``remain-on-exit``), or its process was not in the table
   (it exited between the tmux read and the ``ps`` read);
-- ``gone``: its server answered and holds no such pane;
+- ``gone``: its server answered and holds no such pane, or the row predates the server
+  (its pane id is another's now);
 - ``unknown``: its server did not answer, or ``ps`` could not be read."""
 
 SortKey = Literal["cpu", "mem", "tokens"]
@@ -306,9 +313,9 @@ def sample(
     )
 
 
-_Panes = dict[str, int | None] | None
-"""A row's server's answer: pane id → its pid (``None`` for a dead pane), or ``None`` when the
-server did not answer."""
+_Panes = PanePids | None
+"""A row's server's answer: its panes' pids and when it started, or ``None`` when it did not
+answer."""
 
 
 def _pane_pids(rows: list[FleetAgent], locate: ServerOf) -> tuple[dict[str, _Panes], list[str]]:
@@ -369,9 +376,9 @@ def _agent_use(
     )
     if panes is None or table is None:
         return base
-    if row.pane_id not in panes:
+    if row.pane_id not in panes.pids or fleet_service._outlived(row, panes.server_started):
         return replace(base, state="gone")
-    pid = panes[row.pane_id]
+    pid = panes.pids[row.pane_id]
     tree = table.tree(pid, skip=me) if pid is not None else None
     if tree is None:
         return replace(base, state="exited", pid=pid)

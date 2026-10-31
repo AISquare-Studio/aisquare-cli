@@ -20,7 +20,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import usage as usage_core
 from aisquare.core.store import store_session
-from aisquare.core.tmux import Completed, TmuxServer
+from aisquare.core.tmux import Completed, PanePids, TmuxServer
 from aisquare.models import FleetAgent, ProjectInfo, SessionUsage, TeamSession
 from aisquare.services import fleet_top
 from tests.projects import add_project
@@ -42,15 +42,27 @@ PS = """\
 """
 
 
+SERVER_STARTED = NOW - timedelta(days=1)
+"""When the fake server started, unless a test says: before every row :func:`_agent` writes."""
+
+
 class ListedPanes(TmuxServer):
     """A fleet server that answers ``list-panes -a`` from ``panes`` (pane id → pid, ``None``
     for a dead pane) and runs no tmux. ``panes=None``: it does not answer; ``absent``: no
-    server runs behind the socket."""
+    server runs behind the socket. ``started`` is its ``#{start_time}``; ``None``: a tmux that
+    does not say."""
 
-    def __init__(self, panes: dict[str, int | None] | None, *, absent: bool = False) -> None:
+    def __init__(
+        self,
+        panes: dict[str, int | None] | None,
+        *,
+        absent: bool = False,
+        started: datetime | None = SERVER_STARTED,
+    ) -> None:
         super().__init__("asq", runner=self._answer)
         self.panes = panes
         self.absent = absent
+        self.started = started
         self.asked = 0
 
     def argv(self, *args: str) -> list[str]:
@@ -63,8 +75,9 @@ class ListedPanes(TmuxServer):
             return Completed(1, "", "no server running on /tmp/tmux-501/asq\n")
         if self.panes is None:
             return Completed(1, "", "server exited unexpectedly\n")
+        start = str(int(self.started.timestamp())) if self.started is not None else ""
         lines = [
-            f"{pane}|~|{'' if pid is None else pid}|~|{'1' if pid is None else '0'}"
+            f"{pane}|~|{'' if pid is None else pid}|~|{'1' if pid is None else '0'}|~|{start}"
             for pane, pid in self.panes.items()
         ]
         return Completed(0, "\n".join(lines) + "\n", "")
@@ -98,6 +111,8 @@ def _agent(
     session: str | None = None,
     slot: int | None = None,
     ended: bool = False,
+    created: datetime = NOW,
+    server_started: datetime | None = None,
 ) -> FleetAgent:
     row = FleetAgent(
         id=f"agt_{label}",
@@ -107,9 +122,10 @@ def _agent(
         pane_id=pane,
         session_id=session,
         cwd=project.root,
-        created_at=NOW,
+        created_at=created,
         account_slot=slot,
         ended_at=NOW if ended else None,
+        server_started_at=server_started,
     )
     with store_session() as store:
         store.upsert_fleet_agent(row)
@@ -313,12 +329,82 @@ def test_with_no_live_agent_neither_tmux_nor_ps_is_asked(project: ProjectInfo) -
     assert report.agents == [] and (ps.reads, server.asked) == (0, 0)
 
 
-def test_the_tmux_listing_parses_pids_dead_panes_and_skips_odd_lines() -> None:
+def test_the_tmux_listing_parses_pids_dead_panes_the_servers_start_and_skips_odd_lines() -> None:
+    at = "1793361600"  # 2026-10-30 12:00 UTC
+    listing = f"%1|~|500|~|0|~|{at}\n%2|~||~|1|~|{at}\nnonsense\n|~|7|~|0|~|{at}\n%3|~|x|~|0|~|\n"
+
     class Raw(ListedPanes):
         def _answer(self, argv: Sequence[str], stdin: bytes | None) -> Completed:
-            return Completed(0, "%1|~|500|~|0\n%2|~||~|1\nnonsense\n|~|7|~|0\n%3|~|x|~|0\n", "")
+            assert argv[-1] == "#{pane_id}|~|#{pane_pid}|~|#{pane_dead}|~|#{start_time}"
+            return Completed(0, listing, "")
 
-    assert Raw({}).pane_pids() == {"%1": 500, "%2": None, "%3": None}
+    answer = Raw({}).pane_pids()
+
+    assert answer == PanePids({"%1": 500, "%2": None, "%3": None}, NOW)
+    assert ListedPanes({}, absent=True).pane_pids() == PanePids({})
+    assert ListedPanes(None).pane_pids() is None
+
+
+# --- a pane id is one server's (#13 reopen, seq 5683) ----------------------------------------
+
+
+def test_a_live_row_left_from_an_earlier_server_is_gone_not_charged_with_its_pane_ids_new_holder(
+    project: ProjectInfo,
+) -> None:
+    """The tester's repro: a reboot or ``kill-server`` left a live row on ``%1``, and the next
+    server gave ``%1`` to a newer agent. The stale row recorded the server it started on (two
+    days ago), so ``fleet_service._outlived`` says no pane of this server (started an hour ago)
+    is its: it reads ``gone``, and the tree is counted once, for the agent that holds it."""
+    _agent(
+        project,
+        "stale-coder",
+        "%1",
+        created=NOW - timedelta(days=2) + timedelta(minutes=1),
+        server_started=NOW - timedelta(days=2),
+    )
+    _agent(
+        project,
+        "fresh-coder",
+        "%1",
+        created=NOW - timedelta(hours=1) + timedelta(minutes=1),
+        server_started=NOW - timedelta(hours=1),
+    )
+    server = ListedPanes({"%1": 500}, started=NOW - timedelta(hours=1))
+
+    report = _sample(server, Ps())
+
+    rows = _by_label(report)
+    stale, fresh = rows["stale-coder"], rows["fresh-coder"]
+    assert (stale.state, stale.pid, stale.cpu, stale.processes) == ("gone", None, None, 0)
+    assert (fresh.state, fresh.pid, fresh.cpu, fresh.processes) == ("running", 500, 99.0, 4)
+    totals = report.totals()
+    assert (totals.running, totals.cpu, totals.rss_kb, totals.processes) == (1, 99.0, 896_000, 4)
+    assert server.asked == 1, "the server's start came in the same list-panes"
+
+
+def test_a_row_that_recorded_no_server_start_is_judged_by_when_it_was_written(
+    project: ProjectInfo,
+) -> None:
+    """A row from before 0.8.1 recorded no server start: written before this server started,
+    no pane of it is the row's (``_outlived``'s ``created_at`` rule)."""
+    _agent(project, "old-row", "%1", created=NOW - timedelta(days=3))
+    _agent(project, "new-row", "%2", created=NOW)
+
+    rows = _by_label(
+        _sample(ListedPanes({"%1": 500, "%2": 600}, started=NOW - timedelta(hours=1)), Ps())
+    )
+
+    assert (rows["old-row"].state, rows["new-row"].state) == ("gone", "running")
+
+
+def test_a_tmux_that_does_not_say_when_it_started_leaves_the_pane_id_to_decide(
+    project: ProjectInfo,
+) -> None:
+    _agent(project, "old-row", "%1", created=NOW - timedelta(days=3))
+
+    coder = _by_label(_sample(ListedPanes({"%1": 500}, started=None), Ps()))["old-row"]
+
+    assert (coder.state, coder.processes) == ("running", 4)
 
 
 # --- what each session spent ------------------------------------------------------------------

@@ -22,7 +22,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   about the last minute, on Linux the CPU time over the process's life. Tokens start from
   what the session's Stop hooks recorded and add what its transcript gained since, so a
   long turn counts as it runs. Read-only: nothing on the page stops or restarts anything,
-  and an agent whose pane is gone reads `gone` until `fleet ls` or `reap` records it.
+  and an agent whose pane is gone reads `gone` until `fleet ls` or `reap` records it — so
+  does one left from before a reboot or a `kill-server`, whose pane id the next tmux server
+  gave to another agent: that agent's processes are counted once, for it.
 
 ## [0.9.2] - 2026-10-30
 

@@ -5279,10 +5279,13 @@ def _relabel(
 class _Seats:
     """The live rows a spawn's project may hold once its own is written (:func:`_verify_cap`):
     ``max_agents_per_project``; in auto mode ``busy_floor`` while the machine reads busy
-    (``busy`` names the signal), else no count at all (``None``)."""
+    (``busy`` names the signal), else no count at all (``None``). ``hold_minutes`` and
+    ``project_name`` are the hold a busy back-out writes, as a held spawn writes one."""
 
     cap: int | None
     busy: str | None = None
+    hold_minutes: float = BUSY_HOLD_DEFAULT_MINUTES
+    project_name: str = ""
 
 
 def _verify_cap(store: ContextStore, stored: FleetAgent, seats: _Seats) -> None:
@@ -5306,11 +5309,26 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, seats: _Seats) -> None:
         return
     store.end_fleet_agent(stored.id, ended_by="stopped")  # backed out on purpose
     if seats.busy is not None:
+        # Held like any other held spawn: a hold, a retry time, and the watcher's wake.
+        now = _now()
+        hold = _hold_project(
+            store,
+            Hold(
+                stored.project_id,
+                now,
+                now + timedelta(minutes=seats.hold_minutes),
+                seats.busy,
+                seats.project_name,
+            ),
+            live=len(live) - 1,
+            floor=cap,
+        )
         raise CapacityRefused(
             "capacity_busy",
-            f"that would be {len(live)} live agents while the machine is busy ({seats.busy}; "
+            f"that would be {len(live)} live agents while the machine is busy ({hold.signal}; "
             f"busy_floor = {cap}) — another spawn took the last seat while this one was "
-            "starting; stop one, or retry once the machine is calmer",
+            f"starting; {_retry(hold, now)}",
+            retry_at=hold.until,
         )
     raise FleetError(
         f"that would be {len(live)} live agents (max_agents_per_project = {cap}) — another "
@@ -5633,19 +5651,37 @@ def _admit_by_load(
             f"the machine is busy ({busy}) — admitted: {_name(project)} runs {live} of the "
             f"{floor} agents a project always gets (busy_floor)"
         )
-        return _Seats(floor, busy=busy)
+        return _Seats(
+            floor, busy=busy, hold_minutes=_hold_minutes(config), project_name=_name(project)
+        )
     if hold is None or now >= hold.until:
         until = now + timedelta(minutes=_hold_minutes(config))
-        hold = Hold(project.id, now, until, busy, _name(project))
-        with contextlib.suppress(Exception), store_session() as store:
-            store.set_meta(_BUSY_HOLD_META + project.id, hold.as_meta())
-        _log_admission(
-            "capacity_busy",
-            {"project": project.id, "live": live, "busy_floor": floor, "signal": busy},
-        )
+        fresh = Hold(project.id, now, until, busy, _name(project))
+        try:
+            with store_session() as store:
+                hold = _hold_project(store, fresh, live=live, floor=floor)
+        except Exception:  # a hold that cannot be written still refuses, unremembered
+            hold = fresh
     raise CapacityRefused(
         "capacity_busy", _held(project, live, floor, hold, now), retry_at=hold.until
     )
+
+
+def _hold_project(store: ContextStore, fresh: Hold, *, live: int, floor: int) -> Hold:
+    """The project's hold in force, else ``fresh``, written and logged
+    (``admission.jsonl``): what a held spawn and a busy back-out (:func:`_verify_cap`) both
+    answer by, so a retry inside it is held again without probing, and ``aisquare watch``
+    wakes the manager when it frees up."""
+    text = store.get_meta(_BUSY_HOLD_META + fresh.project_id)
+    kept = Hold.from_meta(fresh.project_id, text) if text else None
+    if kept is not None and fresh.held_at < kept.until:
+        return kept
+    store.set_meta(_BUSY_HOLD_META + fresh.project_id, fresh.as_meta())
+    _log_admission(
+        "capacity_busy",
+        {"project": fresh.project_id, "live": live, "busy_floor": floor, "signal": fresh.signal},
+    )
+    return fresh
 
 
 def _busy_floor(config: FleetSettings) -> int:
@@ -5684,16 +5720,23 @@ def _after_stopping_finished(project: ProjectInfo, live: int, notes: list[str]) 
 
 def _held(project: ProjectInfo, live: int, floor: int, hold: Hold, now: datetime) -> str:
     """A hold's refusal: the signal, its value and threshold, and the earliest retry."""
-    left = max(int((hold.until - now).total_seconds()), 0)
     ago = int((now - hold.held_at).total_seconds())
     read = f", read {ago // 60}m {ago % 60:02d}s ago" if ago > 0 else ""
-    at = hold.until.astimezone().isoformat(timespec="seconds")
     return (
         f"{_name(project)} is held, nothing started: it runs {live} live agents "
-        f"(busy_floor = {floor}) and the machine is busy — {hold.signal}{read}; retry at "
-        f"{at} or later (in {left // 60}m {left % 60:02d}s). `aisquare watch` wakes the "
-        "manager when a seat frees up; a number for max_agents_per_project in [fleet] "
-        "turns auto admission off"
+        f"(busy_floor = {floor}) and the machine is busy — {hold.signal}{read}; "
+        f"{_retry(hold, now)}; a number for max_agents_per_project in [fleet] turns auto "
+        "admission off"
+    )
+
+
+def _retry(hold: Hold, now: datetime) -> str:
+    """``retry at <time> or later (in 4m 59s). `aisquare watch` wakes …``: a hold's retry."""
+    left = max(int((hold.until - now).total_seconds()), 0)
+    at = hold.until.astimezone().isoformat(timespec="seconds")
+    return (
+        f"retry at {at} or later (in {left // 60}m {left % 60:02d}s). `aisquare watch` wakes "
+        "the manager when a seat frees up"
     )
 
 
@@ -5775,6 +5818,14 @@ def _live_per_project() -> dict[str, int]:
     name where two share it: two checkouts of one repo, neither nicknamed, are two
     projects, and one entry for both read as one project over its cap (review of #323).
     """
+    counts, rows = _live_by_project()
+    labels = _project_labels(rows)
+    return dict(sorted((labels[pid], count) for pid, count in counts.items()))
+
+
+def _live_by_project() -> tuple[dict[str, int], dict[str, ProjectInfo | None]]:
+    """Live agents per project id, the captain excluded, and each project's row (``None``
+    for one the store no longer has)."""
     counts: dict[str, int] = {}
     rows: dict[str, ProjectInfo | None] = {}
     with store_session() as store:
@@ -5784,16 +5835,27 @@ def _live_per_project() -> dict[str, int]:
             if agent.project_id not in rows:
                 rows[agent.project_id] = store.get_project(agent.project_id, include_forgotten=True)
             counts[agent.project_id] = counts.get(agent.project_id, 0) + 1
-    names = {pid: _name(row) if row is not None else pid[:12] for pid, row in rows.items()}
+    return counts, rows
+
+
+def _project_labels(
+    rows: Mapping[str, ProjectInfo | None], named: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Each project id as lists name it, with its root beside the name where two share it
+    (review of #323). A project with no row is named by ``named`` (a hold's own name),
+    else by its id."""
+    names = {
+        pid: _name(row) if row is not None else (named or {}).get(pid) or pid[:12]
+        for pid, row in rows.items()
+    }
     shared = {name for name in names.values() if list(names.values()).count(name) > 1}
-    labelled: dict[str, int] = {}
-    for pid, count in counts.items():
+    labels: dict[str, str] = {}
+    for pid, name in names.items():
         row = rows[pid]
-        label = names[pid]
-        if label in shared:
-            label = f"{label} ({row.root if row is not None else pid[:12]})"
-        labelled[label] = count
-    return dict(sorted(labelled.items()))
+        labels[pid] = (
+            f"{name} ({row.root if row is not None else pid[:12]})" if name in shared else name
+        )
+    return labels
 
 
 def _memory_refused(record: Mapping[str, object], why: str) -> NoReturn:
@@ -5837,7 +5899,11 @@ class CapacityReport:
     only auto admission holds by them."""
     busy_floor: int = 3
     holds: tuple[tuple[str, Hold], ...] = ()
-    """The holds in force, by the name lists use: a spawn into one is held without a probe."""
+    """The holds in force, each with its project's label (as :attr:`live` labels it), for
+    display: a spawn into one is held without a probe. Matched by ``Hold.project_id``."""
+    projects: dict[str, str] = field(default_factory=dict)
+    """Each label of :attr:`live` → its project id: what a hold is matched by. Two
+    checkouts named alike are two labels and two ids, never one."""
     read_at: datetime | None = None
     """When the report was read: what a hold's retry is measured from."""
 
@@ -5855,10 +5921,12 @@ class CapacityReport:
         return next((signal for signal in self.signals if signal.busy), None)
 
     def held(self, name: str) -> bool:
-        """Whether a spawn into the project lists name ``name`` would be held now."""
+        """Whether a spawn into the project :attr:`live` labels ``name`` would be held now: at
+        the floor, and the machine busy or a hold in force on that project's id."""
         if not self.auto or self.live.get(name, 0) < self.busy_floor:
             return False
-        return self.busy is not None or any(held == name for held, _ in self.holds)
+        pid = self.projects.get(name)
+        return self.busy is not None or any(hold.project_id == pid for _, hold in self.holds)
 
     def as_json(self) -> dict[str, Any]:
         head = self.headroom
@@ -5881,6 +5949,7 @@ class CapacityReport:
             "holds": [
                 {
                     "project": name,
+                    "project_id": hold.project_id,
                     "held_at": hold.held_at.isoformat(timespec="seconds"),
                     "until": hold.until.isoformat(timespec="seconds"),
                     "signal": hold.signal,
@@ -5893,15 +5962,21 @@ class CapacityReport:
 def capacity() -> CapacityReport:
     """What the next spawn would meet: the same reads :func:`_admit` makes, nothing written."""
     config = settings()
-    live = _live_per_project()
+    counts, rows = _live_by_project()
     head = memory_core.headroom()
     floor = _memory_floor(config.min_free_mb)
-    total = sum(live.values())
+    total = sum(counts.values())
     signals = load_core.evaluate(
         load_core.cpu_load(), head, load_core.thermal(), busy_thresholds(config)
     ).signals
     now = _now()
-    in_force = tuple((_held_name(hold), hold) for hold in holds() if now < hold.until)
+    auto = config.max_agents_per_project == "auto"
+    in_force = [hold for hold in holds() if now < hold.until] if auto else []
+    for hold in in_force:
+        if hold.project_id not in rows:
+            rows[hold.project_id] = _project_row(hold.project_id)
+    labels = _project_labels(rows, {hold.project_id: hold.project_name for hold in in_force})
+    live = dict(sorted((labels[pid], count) for pid, count in counts.items()))
     busy_floor = _busy_floor(config)
     report = CapacityReport(
         headroom=head,
@@ -5913,7 +5988,8 @@ def capacity() -> CapacityReport:
         reason="",
         signals=signals,
         busy_floor=busy_floor,
-        holds=in_force if config.max_agents_per_project == "auto" else (),
+        holds=tuple((labels[hold.project_id], hold) for hold in in_force),
+        projects={labels[pid]: pid for pid in counts},
         read_at=now,
     )
     admits, reason = True, "a spawn would be admitted"
@@ -5942,17 +6018,14 @@ def capacity() -> CapacityReport:
     return replace(report, admits=admits, reason=reason)
 
 
-def _held_name(hold: Hold) -> str:
-    """A held project as :func:`_live_per_project` names it; with no row to name it by, as
-    its refusal named it, and only a hold an older build wrote without that by its id."""
+def _project_row(project_id: str) -> ProjectInfo | None:
+    """A held project's row, forgotten ones too; ``None`` when there is none, or the store
+    cannot say (its hold is then named by its own name)."""
     try:
         with store_session() as store:
-            row = store.get_project(hold.project_id, include_forgotten=True)
+            return store.get_project(project_id, include_forgotten=True)
     except Exception:
-        row = None
-    if row is not None:
-        return _name(row)
-    return hold.project_name or hold.project_id[:12]
+        return None
 
 
 GATE_POLL_SECONDS = 5.0

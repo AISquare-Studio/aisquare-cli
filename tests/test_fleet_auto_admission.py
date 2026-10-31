@@ -25,6 +25,7 @@ from aisquare.cli.ui.views.app_settings import parse_max_agents
 from aisquare.core import load, memory, paths
 from aisquare.core.config import AppConfig, FleetSettings, WatchSettings, load_config, save_config
 from aisquare.core.ids import new_agent_id
+from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.core.tmux import WindowInfo
 from aisquare.models import FleetAgent, ProjectInfo
@@ -35,7 +36,7 @@ from aisquare.services import settings as settings_service
 from aisquare.services import watch as watch_service
 from tests import test_fleet_autostop as autostop_suite
 from tests import test_fleet_service as fleet_suite
-from tests.test_fleet_service import FakeTmux, _coder, _second_project, _settings
+from tests.test_fleet_service import FakeTmux, _coder, _git, _second_project, _settings
 
 tmux = fleet_suite.tmux
 clock = fleet_suite.clock
@@ -687,6 +688,76 @@ def test_a_spawn_that_races_past_the_floor_while_busy_backs_its_row_out(
     assert raced.value.code == "capacity_busy"
     assert tmux.killed == ["%3"]
     assert len(_live(project)) == 3
+    # Review of #12, round 4: held like any other held spawn, with a retry time (the JSON
+    # hint) and a hold, so a retry inside it needs no probe and the watcher wakes for it.
+    [hold] = fleet_service.holds()
+    assert raced.value.retry_at is not None and raced.value.retry_at == hold.until
+    assert hold.until - hold.held_at == timedelta(minutes=5)
+    assert hold.project_id == project.id and "cpu load 3.86 per CPU" in hold.signal
+    assert hold.project_name == project_service.display_name(project)
+    assert "retry at " in str(raced.value) and "`aisquare watch` wakes" in str(raced.value)
+    monkeypatch.setattr(tmux, "spawn_window", original)
+    asked = machine.probes
+    with pytest.raises(fleet_service.CapacityRefused) as again:
+        _coder(project)
+    assert again.value.retry_at == hold.until and machine.probes == asked, "no probe"
+    fleet_service.stop(project, "coder-1", force=True)
+    [freed] = fleet_service.freed_holds()
+    assert freed.project.id == project.id and freed.why.startswith("2 live agents")
+
+
+def test_two_checkouts_named_alike_are_matched_by_project_id_not_by_name(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    machine: Machine,
+    now: list[datetime],
+    runner: CliRunner,
+) -> None:
+    """Review of #12, round 4 (the tester's repro): two un-nicknamed checkouts, both
+    ``repo``, are two projects, labelled with their roots. The hold in force on A was named
+    ``repo`` and matched by that name, which no label is: ``fleet capacity`` said a spawn
+    would be admitted while the spawn into A was held. Matched by project id, A is held and
+    B is not, everywhere."""
+    elsewhere = tmp_path / "elsewhere" / "repo"
+    elsewhere.mkdir(parents=True)
+    _git("init", "-q", "-b", "main", cwd=elsewhere)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=elsewhere)
+    other = team_project(elsewhere)
+    with store_session() as store:
+        store.onboard_project(other)
+    assert project_service.display_name(project) == project_service.display_name(other)
+    machine.busy()
+    _three(project)
+    _coder(other)
+    with pytest.raises(fleet_service.CapacityRefused):
+        _coder(project)
+    machine.calm()
+    now[0] = NOW + timedelta(minutes=1)
+    with pytest.raises(fleet_service.CapacityRefused) as still:
+        _coder(project)
+    assert still.value.code == "capacity_busy", "the hold in force, no probe"
+
+    report = fleet_service.capacity()
+    a, b = f"repo ({project.root})", f"repo ({other.root})"
+    assert report.live == {a: 3, b: 1}
+    assert (report.held(a), report.held(b)) == (True, False)
+    assert report.reason.endswith(f"held in {a}"), report.reason
+    assert [(name, hold.project_id) for name, hold in report.holds] == [(a, project.id)]
+    assert report.projects == {a: project.id, b: other.id}
+
+    lines = runner.invoke(app, ["fleet", "capacity"]).stdout.splitlines()
+    assert f"  {a}: 3 — held" in lines and f"  {b}: 1" in lines, lines
+    assert any(line.startswith(f"held:     {a}, retry in ") for line in lines), lines
+    assert lines[-1].startswith("⚠ ") and lines[-1].endswith(f"held in {a}"), lines[-1]
+    shown = json.loads(runner.invoke(app, ["--json", "fleet", "capacity"]).stdout)
+    [held] = shown["holds"]
+    assert (held["project"], held["project_id"]) == (a, project.id)
+    assert held["project"] in shown["live"]
+    paths.ensure_home()
+    row = diagnostics._check_fleet_capacity()
+    assert f"held in {a}" in row.detail, row.detail
 
 
 def test_a_restart_of_a_running_agent_at_the_floor_is_never_held(

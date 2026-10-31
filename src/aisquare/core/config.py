@@ -750,7 +750,7 @@ BUSY_HOLD_DEFAULT_MINUTES = 5.0
 BUSY_HOLD_MAX_MINUTES = 365 * 24 * 60
 """The longest hold ``busy_hold_minutes`` takes: a year of minutes."""
 BUSY_FLOOR_MAX = 1000
-"""The highest ``busy_floor``: past any fleet a machine runs."""
+"""The highest ``busy_floor`` and ``busy_burst``: past any fleet a machine runs."""
 BUSY_LOAD_PER_CPU_MAX = 1000.0
 """The highest ``busy_load_per_cpu``: past any load a machine survives."""
 
@@ -778,10 +778,15 @@ class FleetSettings(BaseModel):
     the default: a spawn is admitted unless the machine is busy, and while it is, a spawn
     into a project that already runs ``busy_floor`` live agents is held (refused,
     ``capacity_busy``) for ``busy_hold_minutes``, without probing again; a project below
-    the floor is always admitted. Busy is any one of: the 5-minute load average per logical
-    CPU at ``busy_load_per_cpu``, Linux's CPU pressure (``some avg60``) at ``busy_cpu_psi``
-    (``0`` turns either off), memory pressure at ``busy_memory``, macOS's thermal pressure
-    at ``busy_thermal`` (``"off"`` turns either off) — ``core.load``. ``min_free_mb``,
+    the floor is always admitted. Auto has no fixed per-project number: on a calm machine
+    the only per-project bound is ``busy_burst``, the new agents a project above the floor
+    is admitted per ``busy_hold_minutes`` (default 2; ``0`` turns the guard off), since the
+    load average moves minutes after a burst of spawns does; one more is held as a busy one
+    is (``capacity_busy``), until the oldest of those admits is that old. Busy is any one
+    of: the 5-minute load average per logical CPU at ``busy_load_per_cpu``, Linux's CPU
+    pressure (``some avg60``) at ``busy_cpu_psi`` (``0`` turns either off), memory pressure
+    at ``busy_memory``, macOS's thermal pressure at ``busy_thermal`` (``"off"`` turns
+    either off) — ``core.load``. ``min_free_mb``,
     ``max_agents_total`` and a group's ``max_agents`` refuse in either mode, below the
     floor too. Each ``busy_*`` number is finite and bounded (no ``inf``, no ``nan``): the
     hold lasts at most :data:`BUSY_HOLD_MAX_MINUTES`, a year, the floor is 1 to
@@ -847,6 +852,7 @@ class FleetSettings(BaseModel):
     test_gate_mb: int = 0
     test_gate_wait_minutes: int = 15
     busy_floor: int = Field(default=3, ge=1, le=BUSY_FLOOR_MAX)
+    busy_burst: int = Field(default=2, ge=0, le=BUSY_FLOOR_MAX)
     busy_load_per_cpu: float = Field(
         default=1.0, ge=0, le=BUSY_LOAD_PER_CPU_MAX, allow_inf_nan=False
     )

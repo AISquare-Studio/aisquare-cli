@@ -2425,7 +2425,12 @@ def _check_fleet_capacity() -> DoctorCheck:
         f"{head.available_mb} MB available" if head.available_mb is not None else "memory unread"
     )
     budget = f" of {report.max_agents_total}" if report.max_agents_total else ""
-    mode = "auto" if report.auto else f"max {report.max_agents_per_project} per project"
+    burst = (
+        f"busy_burst {report.busy_burst} per {report.busy_hold_minutes:g} min"
+        if report.busy_burst
+        else "busy_burst off"
+    )
+    mode = f"auto, {burst}" if report.auto else f"max {report.max_agents_per_project} per project"
     signals = "; ".join(
         f"{signal.name} {signal.value} ({signal.threshold}: {signal.verdict})"
         for signal in report.signals

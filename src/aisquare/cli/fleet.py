@@ -1680,6 +1680,13 @@ def capacity() -> None:
             f"{report.busy_floor} agents (busy_floor)",
             markup=False,
         )
+        burst = (
+            f"at most {report.busy_burst} new agents per project per "
+            f"{report.busy_hold_minutes:g} min above busy_floor (busy_burst)"
+            if report.busy_burst
+            else "off (busy_burst = 0): no per-project limit while the machine is calm"
+        )
+        out.print(f"burst:    {burst}", markup=False)
     else:
         out.print(
             f"load:     not consulted (max_agents_per_project = {report.max_agents_per_project})",
@@ -1697,7 +1704,16 @@ def capacity() -> None:
     for name, hold in report.holds:
         retry = format_reset(hold.until, now=report.read_at)
         out.print(f"held:     {name}, retry {retry} ({hold.signal})", markup=False)
-    holding = report.auto and (report.busy is not None or bool(report.holds))
+    shown = {name for name, hold in report.holds if hold.burst}
+    for name, started, at in report.bursts:
+        if name not in shown:
+            retry = format_reset(at, now=report.read_at)
+            out.print(
+                f"held:     {name}, retry {retry} (burst: {started} agents started above "
+                f"busy_floor in the last {report.busy_hold_minutes:g} min)",
+                markup=False,
+            )
+    holding = report.auto and (report.busy is not None or bool(report.holds) or bool(report.bursts))
     mark = "✗" if not report.admits else "⚠" if holding else "✓"
     out.print(f"{mark} {report.reason}", markup=False)
 

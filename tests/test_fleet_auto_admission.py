@@ -125,7 +125,7 @@ def test_auto_is_the_default_and_parses_beside_old_ints(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         FleetSettings(max_agents_per_project="lots")
     defaults = FleetSettings()
-    assert (defaults.busy_floor, defaults.busy_hold_minutes) == (3, 5.0)
+    assert (defaults.busy_floor, defaults.busy_hold_minutes, defaults.busy_burst) == (3, 5.0, 2)
     assert (defaults.busy_load_per_cpu, defaults.busy_cpu_psi) == (1.0, 40.0)
     assert (defaults.busy_memory, defaults.busy_thermal) == ("warn", "heavy")
 
@@ -240,9 +240,15 @@ def test_each_signal_alone_makes_the_machine_busy(
     assert held.value.code == "capacity_busy"
 
 
-def test_a_calm_machine_admits_past_the_floor_with_no_note(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, machine: Machine
+def test_with_the_burst_guard_off_a_calm_machine_admits_past_the_floor_with_no_note(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """``busy_burst = 0``: auto has no per-project number at all while the machine is calm."""
+    _settings(monkeypatch, busy_burst=0)
     receipts = [fleet_service.spawn(project, "coder", worktree=False) for _ in range(6)]
     assert len(_live(project)) == 6
     assert not any("busy" in note for r in receipts for note in r.notes)
@@ -428,6 +434,8 @@ def test_a_naive_unparsable_or_out_of_range_hold_is_unreadable_and_crashes_nothi
         ("busy_floor", 1001),
         ("busy_floor", 0),
         ("busy_floor", -1),
+        ("busy_burst", 1001),
+        ("busy_burst", -1),
     ],
 )
 def test_every_busy_number_is_finite_and_bounded(field: str, value: float) -> None:
@@ -437,6 +445,10 @@ def test_every_busy_number_is_finite_and_bounded(field: str, value: float) -> No
         FleetSettings(**{field: value})
     year = FleetSettings(busy_hold_minutes=365 * 24 * 60, busy_cpu_psi=100, busy_floor=1000)
     assert (year.busy_hold_minutes, year.busy_cpu_psi, year.busy_floor) == (525_600, 100, 1000)
+    assert (FleetSettings(busy_burst=0).busy_burst, FleetSettings(busy_burst=1000).busy_burst) == (
+        0,
+        1000,
+    )
 
 
 @pytest.mark.parametrize("value", ["inf", "nan", "1e12"])
@@ -867,9 +879,10 @@ def test_the_doctor_capacity_row_lists_each_signal_and_says_busy_without_warning
     paths.ensure_home()
     row = diagnostics._check_fleet_capacity()
     assert row.status.value == "ok"
-    assert "admission auto: cpu load 0.14 per CPU (load5 2.0 / 14) (>= 1 per CPU: ok)" in (
-        row.detail
-    )
+    assert (
+        "admission auto, busy_burst 2 per 5 min: cpu load 0.14 per CPU (load5 2.0 / 14) "
+        "(>= 1 per CPU: ok)"
+    ) in row.detail
     assert "memory pressure normal (>= warn: ok)" in row.detail
     assert "thermal nominal (0) (>= heavy: ok)" in row.detail
     machine.busy()
@@ -898,6 +911,233 @@ def test_a_held_spawn_on_the_cli_is_capacity_busy_with_its_retry_in_json(
     payload = json.loads(machine.stdout)
     assert payload["error"] == "capacity_busy" and payload["detail"] == "alpha is held"
     assert payload["hint"] == "retry_at 2026-10-30T22:05:00+00:00"
+
+
+# --- the burst guard: busy_burst new agents per busy_hold_minutes above the floor -----------
+
+
+def _ledger(project: ProjectInfo) -> list[str]:
+    """The project's recorded admits above the floor, as ``[at, id]`` pairs' times."""
+    with store_session() as store:
+        text = store.ui_state(fleet_service._BUSY_BURST_KEY + project.id)
+    return [at for at, _ in json.loads(text)] if text else []
+
+
+def test_a_calm_machine_admits_busy_burst_past_the_floor_then_holds_the_next(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+) -> None:
+    """REVIEW-485 M2: with the machine calm, auto had no per-project number, and a fan-out was
+    admitted in full before load5 moved. The floor's 3 and then ``busy_burst`` (2) more are
+    admitted; the next is held like a busy one, until the oldest admit above the floor is
+    ``busy_hold_minutes`` old."""
+    _three(project)
+    now[0] = NOW + timedelta(minutes=1)
+    _coder(project)
+    now[0] = NOW + timedelta(minutes=2)
+    _coder(project)
+    assert len(_live(project)) == 5
+    assert _ledger(project) == [
+        (NOW + timedelta(minutes=1)).isoformat(),
+        (NOW + timedelta(minutes=2)).isoformat(),
+    ], "the floor's three are not counted"
+    now[0] = NOW + timedelta(minutes=3)
+    with pytest.raises(fleet_service.CapacityRefused) as held:
+        _coder(project)
+    assert held.value.code == "capacity_busy"
+    assert held.value.retry_at == NOW + timedelta(minutes=6), "the oldest admit ages out"
+    message = str(held.value)
+    assert "is held, nothing started: it runs 5 live agents (busy_floor = 3)" in message
+    assert "burst: 2 agents started above busy_floor in the last 5 min, busy_burst = 2" in message
+    assert "busy_burst = 0 in [fleet] turns the guard off" in message
+    assert len(tmux.spawned) == 5, "nothing started"
+    [hold] = fleet_service.holds()
+    assert hold.burst and hold.until == held.value.retry_at and hold.signal.startswith("burst")
+    now[0] = NOW + timedelta(minutes=5)
+    with pytest.raises(fleet_service.CapacityRefused):
+        _coder(project)
+    now[0] = NOW + timedelta(minutes=6)
+    assert _coder(project).label == "coder-6", "one admit aged out: one seat"
+    assert fleet_service.holds() == [], "admitted: the hold is forgotten"
+    with pytest.raises(fleet_service.CapacityRefused) as again:
+        _coder(project)
+    assert again.value.retry_at == NOW + timedelta(minutes=7)
+
+
+def test_below_the_floor_a_project_is_admitted_while_its_burst_is_full(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+) -> None:
+    agents = [_coder(project) for _ in range(5)]
+    with pytest.raises(fleet_service.CapacityRefused):
+        _coder(project)
+    for agent in agents[:3]:
+        fleet_service.stop(project, agent.label, force=True)
+    assert len(_live(project)) == 2
+    _coder(project)
+    assert len(_ledger(project)) == 2, "admitted under the floor: not counted"
+
+
+def test_the_burst_counts_per_project(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    machine: Machine,
+    now: list[datetime],
+) -> None:
+    other = _second_project(tmp_path)
+    for _ in range(5):
+        _coder(project)
+    with pytest.raises(fleet_service.CapacityRefused):
+        _coder(project)
+    assert len([_coder(other) for _ in range(5)]) == 5
+
+
+def test_a_restart_above_the_floor_is_never_held_and_counts_no_admit(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+) -> None:
+    """A live 1:1 replacement takes the seat it frees: no new agent, no admit."""
+    agents = [_coder(project) for _ in range(5)]
+    receipt = fleet_service.restart(project, agents[-1].label)
+    assert receipt.was_running is True and receipt.started.ended_at is None
+    assert len(_live(project)) == 5 and len(_ledger(project)) == 2
+
+
+def test_spawns_that_race_into_the_burst_back_their_row_out(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two spawns at 4 live, one admit recorded, both find room; the one whose admit is
+    written second backs out with ``capacity_busy`` and a burst hold, as the floor settles."""
+    for _ in range(4):
+        _coder(project)
+    original = tmux.spawn_window
+
+    def spawn_then_race(*args: object, **kwargs: object) -> WindowInfo:
+        window = original(*args, **kwargs)  # type: ignore[arg-type]
+        key = fleet_service._BUSY_BURST_KEY + project.id
+        with store_session() as store:  # a parallel spawn records its admit here
+            text = store.ui_state(key)
+            admits = [*json.loads(text or "[]"), [NOW.isoformat(), "agt_racer"]]
+            assert store.replace_ui_state(key, text, json.dumps(admits))
+        return window
+
+    monkeypatch.setattr(tmux, "spawn_window", spawn_then_race)
+    with pytest.raises(fleet_service.CapacityRefused, match="busy_burst = 2") as raced:
+        _coder(project)
+    assert raced.value.code == "capacity_busy"
+    assert tmux.killed == ["%5"] and len(_live(project)) == 4
+    [hold] = fleet_service.holds()
+    assert hold.burst and raced.value.retry_at == hold.until == NOW + timedelta(minutes=5)
+    assert len(_ledger(project)) == 2, "the backed-out row records no admit"
+
+
+def test_an_unreadable_or_far_off_ledger_never_holds_for_good(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+) -> None:
+    _three(project)
+    key = fleet_service._BUSY_BURST_KEY + project.id
+    far = (NOW + timedelta(days=365)).isoformat()
+    for text in ("not json", json.dumps({"a": 1}), json.dumps([[far, "x"], [far, "y"]])):
+        with store_session() as store:
+            store.set_ui_state(key, text)
+        agent = _coder(project)  # the fourth: above the floor, nothing read as an admit
+        assert agent.ended_at is None
+        assert all(at <= NOW.isoformat() for at in _ledger(project)), "the far ones dropped"
+        fleet_service.stop(project, agent.label, force=True)
+
+
+def test_fleet_capacity_and_the_doctor_say_the_burst(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+    runner: CliRunner,
+) -> None:
+    for _ in range(5):
+        _coder(project)
+    lines = runner.invoke(app, ["fleet", "capacity"]).stdout.splitlines()
+    name = project_service.display_name(project)
+    assert (
+        "burst:    at most 2 new agents per project per 5 min above busy_floor (busy_burst)"
+    ) in lines
+    assert f"  {name}: 5 — held" in lines
+    assert any(
+        line.startswith(f"held:     {name}, retry in ") and "(burst: 2 agents started" in line
+        for line in lines
+    ), lines
+    assert lines[-1] == (
+        f"⚠ a spawn would be admitted, held in {name}: 2 agents started above busy_floor = 3 "
+        "in the last 5 min (busy_burst = 2)"
+    )
+    report = json.loads(runner.invoke(app, ["--json", "fleet", "capacity"]).stdout)
+    assert (report["busy"], report["busy_burst"], report["busy_hold_minutes"]) == (False, 2, 5.0)
+    [burst] = report["bursts"]
+    assert (burst["project"], burst["project_id"], burst["started"]) == (name, project.id, 2)
+    assert burst["retry_at"] == (NOW + timedelta(minutes=5)).isoformat(timespec="seconds")
+    row = diagnostics._check_fleet_capacity()
+    assert row.status.value == "ok", "a full burst is said, not warned of"
+    assert "admission auto, busy_burst 2 per 5 min" in row.detail
+    assert f"held in {name}: 2 agents started above busy_floor = 3" in row.detail
+
+
+def test_fleet_capacity_says_when_the_burst_guard_is_off(
+    machine: Machine, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings(monkeypatch, busy_burst=0)
+    lines = runner.invoke(app, ["fleet", "capacity"]).stdout.splitlines()
+    assert (
+        "burst:    off (busy_burst = 0): no per-project limit while the machine is calm"
+    ) in lines
+
+
+def test_watch_wakes_once_a_burst_hold_ages_out(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+    nudges: list[str],
+) -> None:
+    fleet_service.spawn(project, "manager")
+    for _ in range(4):
+        _coder(project)
+    with pytest.raises(fleet_service.CapacityRefused):
+        _coder(project)
+    watcher = _watcher()
+    assert watcher.tick(NOW + timedelta(minutes=4)).new == [], "the burst is full"
+    machine.busy()
+    assert watcher.tick(NOW + timedelta(minutes=5)).new == [], "room, but the machine is busy"
+    machine.calm()
+    nudges.clear()
+    [item] = watcher.tick(NOW + timedelta(minutes=6)).new
+    assert item.kind == "capacity_freed" and item.summary == (
+        "a held spawn may start: fewer than busy_burst = 2 agents started above busy_floor in "
+        "the last 5 min — retry it"
+    )
+    assert str(item.detail["signal"]).startswith("burst: 2 agents")
+    assert nudges == [project.id] and fleet_service.holds() == []
+    assert watcher.tick(NOW + timedelta(minutes=7)).new == [], "one wake per hold"
 
 
 # --- aisquare watch wakes the manager when a held project frees up ---------------------------

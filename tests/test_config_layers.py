@@ -286,6 +286,7 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             # Auto admission by the machine's load, the default since it came (#12).
             "max_agents_per_project": "auto",
             "busy_floor": 3,
+            "busy_burst": 2,
             "busy_load_per_cpu": 1.0,
             "busy_cpu_psi": 40.0,
             "busy_memory": "warn",

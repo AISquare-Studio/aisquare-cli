@@ -12,11 +12,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 stop spending tokens without being reaped, and come back where they were from one dialog.
 Run asq at the Mac and over SSH into the same Mac at once, on one home: each asq shows the
 others, the one over SSH shows the usage the Mac recorded, and an asq of another release
-starts nothing beside a running one until that one quits. Rename a running agent from its
-sidebar row or `fleet relabel`. Renaming a project now renames its fleet codename and tmux
-session too, and the old codename keeps working. One sidebar highlight for a click and the
-arrow keys. Usage & stats scrolls to its end, and the Accounts table fits a 160-column
-terminal beside the default sidebar.**
+starts nothing beside a running one until that one quits. Spawns follow the machine's
+load: `max_agents_per_project` now defaults to `auto`, which holds a spawn into a project
+running three agents while the machine is busy, and admits at most two more every five
+minutes while it is calm. `aisquare outcomes` says what your agents achieved this week and
+how much of it you steered, and `aisquare fleet top` (asq's Agent resources page) what
+each live agent consumes. An idle account whose token went stale is refreshed quietly
+instead of reading as logged out. Stats name each repository by its real name, and the
+sidebar's header counts the live agents. Rename a running agent from its sidebar row or
+`fleet relabel`. Renaming a project now renames its fleet codename and tmux session too,
+and the old codename keeps working. One sidebar highlight for a click and the arrow keys.
+Usage & stats scrolls to its end, and the Accounts table fits a 160-column terminal beside
+the default sidebar.**
 
 **Upgrading:**
 - From 0.9.1, run `aisquare upgrade`, or take the update `asq` offers.

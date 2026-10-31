@@ -635,6 +635,26 @@ def test_a_number_keeps_todays_behaviour_and_never_probes_the_load(
     assert fleet_service.holds() == []
 
 
+def test_a_number_is_never_held_by_the_burst_guard(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``busy_burst`` is auto admission's: a number admits up to itself at once, past
+    ``busy_floor + busy_burst``, and records no admit."""
+    _settings(monkeypatch, max_agents_per_project=8)
+    assert [_coder(project).label for _ in range(8)][-1] == "coder-8"
+    with pytest.raises(fleet_service.CapacityRefused) as refused:
+        _coder(project)
+    assert refused.value.code == "capacity_project"
+    with store_session() as store:
+        assert store.ui_state(fleet_service._BUSY_BURST_KEY + project.id) is None
+    assert fleet_service.holds() == [] and machine.probes == 0
+
+
 # --- never blocks; races; replacements; auto-stop --------------------------------------------
 
 

@@ -715,7 +715,8 @@ def test_a_repository_is_profiled_once_a_day(
         again = len(calls)
         usage_stats.refresh_profiles(store, {profile.repo_id: repo}, now=NOW + timedelta(hours=25))
 
-    assert profile.name == "profiled" and profile.root == str(repo.resolve())
+    assert profile.name == "Profiled"  # as the remote's URL spells it, Org/Profiled.git
+    assert profile.root == str(repo.resolve())
     assert profile.remote == "github.com/org/profiled"
     assert (profile.traits.host, profile.traits.language) == ("github", "python")
     assert (profile.traits.size_bucket, profile.traits.monorepo, profile.files) == ("xs", False, 3)
@@ -747,10 +748,32 @@ def test_a_remote_is_normalised_without_credentials_and_classified(
 
 
 @pytest.mark.parametrize(
+    ("url", "name"),
+    [
+        ("git@github.com:Org/MyRepo.git", "MyRepo"),
+        ("https://user:token@github.com/Org/MyRepo", "MyRepo"),
+        ("ssh://git@gitlab.example.com:2222/Group/Sub/Tool.git", "Tool"),
+        ("https://bitbucket.org/a/B/", "B"),
+        ("/srv/git/x.git", None),
+        ("file:///srv/git/X.git", None),
+        ("", None),
+    ],
+)
+def test_a_remotes_repository_name_keeps_the_case_its_url_spells(
+    url: str, name: str | None
+) -> None:
+    assert repo_profile.remote_repo_name(url) == name
+    if name is not None:  # the same repository the lower-cased key names
+        assert (repo_profile.normalise_remote(url) or "").endswith(f"/{name.lower()}")
+
+
+@pytest.mark.parametrize(
     ("remote", "root", "name"),
     [
         ("github.com/aisquare-studio/aisquare-cli", "/w/ws7", "aisquare-cli"),  # the remote's
-        ("github.com/org/myapp", "/w/MyApp", "MyApp"),  # the folder gives it its case
+        ("git@github.com:Org/MyRepo.git", "/w/ws7", "MyRepo"),  # as the URL spells it
+        ("https://user:token@GitHub.com/Org/MyRepo/", "/w/ws7", "MyRepo"),
+        ("github.com/org/myrepo", "/w/MyRepo", "myrepo"),  # normalised: the case is gone
         ("gitlab.com/group/sub/tool", "/w/x", "tool"),  # the last part of a nested path
         ("github.com/org/app", None, "app"),
         (None, "/w/local-tool", "local-tool"),  # no remote: the checkout's folder
@@ -1582,9 +1605,9 @@ def test_clones_and_checkouts_of_one_remote_are_one_repository(machine: Machine)
     assert merged.tokens.total == tokens(cache_read=5000) + tokens(cache_read=3000) + tokens(
         cache_read=1000
     )
-    assert merged.name == "app"  # the remote's name, not either checkout's folder
+    assert merged.name == "App"  # the remote's name as ws2-app's URL spells it (Org/App.git)
     assert merged.repo_id == "remote:github.com/org/app"
-    assert sorted(row.name for row in week.rows) == ["app", "local-only", "other"]
+    assert sorted(row.name for row in week.rows) == ["App", "local-only", "other"]
     # in a day's rollup too: one DayRepo per repository, whose key is the remote
     assert day.repos_active == 3 and len(day.repos) == 3
     keys = sorted(repo.key for repo in day.repos)
@@ -1677,12 +1700,38 @@ def test_a_repository_with_no_remote_is_named_by_its_folder_even_when_nicknamed(
     assert "local-tool" in table and "the big one" not in table
 
 
-def test_a_profile_stored_with_a_nickname_shows_the_real_name_without_waiting_a_day(
+def test_the_name_is_spelt_as_the_remote_url_spells_it_and_the_lower_case_only_groups(
     machine: Machine,
 ) -> None:
-    """Profiles written before the rule carry the nickname in ``name``, and are refreshed once a
-    day: the name is derived on read, so they show the real name at once."""
-    remote = machine.repo("ws7", remote="https://github.com/aisquare-studio/aisquare-cli")
+    """The owner wants the ACTUAL name: ``MyRepo``, as the URL has it, not ``myrepo``. The
+    lower-cased remote is the key the clones of one remote share, and nothing shows it."""
+    main = machine.repo("ws7", remote="git@github.com:Org/MyRepo.git")
+    clone = machine.repo("ws8", remote="https://github.com/org/myrepo")  # one remote, one repo
+    _nicknamed(main)
+    _one_turn(machine, main, "a", _day(0, 9), cache_read=5000)
+    _one_turn(machine, clone, "b", _day(0, 10))
+    usage_stats.sweep(tz=IST)
+    with store_session() as store:
+        keys = {profile.remote for profile in store.repo_profiles().values()}
+
+    repos = _read("today").repos
+    names, table = _cli_names()
+
+    assert keys == {"github.com/org/myrepo"}
+    assert repos.active == 1 and [row.name for row in repos.rows] == ["MyRepo"]
+    assert repos.rows[0].repo_id == "remote:github.com/org/myrepo"
+    assert names == ["MyRepo", "MyRepo"]
+    assert "MyRepo" in table and "myrepo" not in table and "the big one" not in table
+
+
+def test_a_profile_stored_with_a_nickname_shows_the_real_name_at_once_and_its_case_next_sweep(
+    machine: Machine,
+) -> None:
+    """Profiles written before the rule carry the nickname (or the folder's name) in ``name``
+    and are refreshed once a day. On read the name is derived again at once — from the
+    normalised remote, whose case is gone — and the next sweep rewrites them however fresh,
+    so the URL's spelling is back without waiting the day."""
+    remote = machine.repo("ws7", remote="git@github.com:Org/MyRepo.git")
     local = machine.repo("local-tool")
     _nicknamed(remote)
     _nicknamed(local, nickname="the small one", codename="ruby-fox")
@@ -1700,12 +1749,18 @@ def test_a_profile_stored_with_a_nickname_shows_the_real_name_without_waiting_a_
         stored = sorted(profile.name for profile in store.repo_profiles().values())
 
     names, table = _cli_names()
+    at_once = [row.name for row in _read("today").repos.rows]
+    usage_stats.sweep(now=NOW, tz=IST)  # nothing new to read: the profiles are still fresh
+    with store_session() as store:
+        rewritten = sorted(profile.name for profile in store.repo_profiles().values())
 
-    assert sorted(profile.name for profile in written.values()) == ["aisquare-cli", "local-tool"]
-    assert stored == ["the big one", "the small one"]  # the old rows, still fresh: not refreshed
-    assert [row.name for row in _read("today").repos.rows] == ["aisquare-cli", "local-tool"]
-    assert names == ["aisquare-cli", "local-tool", "aisquare-cli"]
+    assert sorted(profile.name for profile in written.values()) == ["MyRepo", "local-tool"]
+    assert stored == ["the big one", "the small one"]  # the old rows
+    assert at_once == ["myrepo", "local-tool"]
+    assert names == ["myrepo", "local-tool", "myrepo"]
     assert "the big one" not in table and "the small one" not in table
+    assert rewritten == ["MyRepo", "local-tool"]
+    assert [row.name for row in _read("today").repos.rows] == ["MyRepo", "local-tool"]
 
 
 def test_a_repository_not_profiled_yet_is_named_by_its_folder_never_its_nickname(

@@ -488,6 +488,11 @@ def _sweep(
     if progress is not None:
         progress(len(found), len(found))
     report.attributed = _attribute(store, types, repos)
+    # A profile written before names were the repositories' own is renamed at the next sweep,
+    # its repository worked in since or not; the ones worked in go first, within the budget.
+    for profile in store.repo_profiles().values():
+        if _misnamed(profile):
+            seen_repos.setdefault(profile.repo_id, Path(profile.root))
     report.profiles = refresh_profiles(store, seen_repos, now=now)
     report.features = feature_use.fold(store)
     store.set_meta(_SWEPT_KEY, (now or datetime.now(UTC)).isoformat())
@@ -700,16 +705,21 @@ def refresh_profiles(
     now: datetime | None = None,
     budget_s: float = _PROFILE_BUDGET_S,
 ) -> int:
-    """Profile the repositories in ``roots`` (id → root) that have none, or one older than
-    :data:`PROFILE_MAX_AGE`, for at most ``budget_s`` seconds (the rest wait for the next
-    call). A root that is gone keeps the profile it had. Returns how many were written."""
+    """Profile the repositories in ``roots`` (id → root) that have none, one older than
+    :data:`PROFILE_MAX_AGE`, or one whose name is not its real name (:func:`_misnamed`), for
+    at most ``budget_s`` seconds (the rest wait for the next call). A root that is gone keeps
+    the profile it had. Returns how many were written."""
     when = now or datetime.now(UTC)
     profiles = store.repo_profiles()
     deadline = time.monotonic() + budget_s
     done = 0
     for repo_id, root in roots.items():
         current = profiles.get(repo_id)
-        if current is not None and when - current.refreshed_at < PROFILE_MAX_AGE:
+        if (
+            current is not None
+            and when - current.refreshed_at < PROFILE_MAX_AGE
+            and not _misnamed(current)
+        ):
             continue
         if not root.is_dir():
             if current is None:
@@ -724,35 +734,52 @@ def refresh_profiles(
 
 
 def real_name(remote: str | None, root: Path | None) -> str:
-    """A repository's real name: its remote's repository name (``github.com/org/aisquare-cli``
-    is ``aisquare-cli``), spelt as its folder is when the folder bears that name (a normalised
-    remote is lower case); else its folder's name. Never a project's nickname, which a profile's
-    ``name`` may be. ``""`` when there is neither."""
+    """A repository's real name: its remote's repository name as ``remote`` spells it
+    (``git@github.com:Org/MyRepo.git`` is ``MyRepo``; a normalised remote has lost the case, so
+    ``github.com/org/myrepo`` is ``myrepo``); else its folder's name. Never a project's
+    nickname, which a profile's ``name`` may be. ``""`` when there is neither."""
     folder = root.name if root is not None else ""
     if remote:
-        name = remote.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        name = repo_profile.remote_repo_name(remote) or remote.rstrip("/").rsplit("/", 1)[-1]
         if name:
-            return folder if folder.lower() == name.lower() else name
+            return name
     return folder
 
 
 def repo_name_of(
     store: ContextStore, repo_id: str, profiles: dict[str, RepoProfile] | None = None
 ) -> str:
-    """The name stats give the repository recorded as ``repo_id`` (a project id): its
-    :func:`real_name`, read off its profile; a repository not profiled yet goes by its folder's
-    until it is. Never the project's nickname or codename: a profile written before this rule
-    still carries one in ``name``, which is why the name is derived on read and that field is
-    not read. ``profiles``: the store's, when the caller has read them already."""
+    """The name stats give the repository recorded as ``repo_id`` (a project id): its real
+    name, off its profile (:func:`_profile_name`); a repository not profiled yet goes by its
+    folder's until it is. Never the project's nickname or codename. ``profiles``: the store's,
+    when the caller has read them already."""
     if repo_id == TEMP_REPO:
         return TEMP_NAME
     profile = (profiles if profiles is not None else store.repo_profiles()).get(repo_id)
     if profile is not None:
-        name = real_name(profile.remote, Path(profile.root) if profile.root else None)
+        name = _profile_name(profile)
     else:
         project = store.get_project(repo_id, include_forgotten=True)
         name = real_name(None, project.root) if project is not None else ""
     return name or repo_id[-8:]
+
+
+def _profile_name(profile: RepoProfile) -> str:
+    """A profiled repository's real name. The profile stores it spelt as the remote's URL spells
+    it (``MyRepo``), where its ``remote`` is lower case to group the clones of one remote; that
+    is the name whenever it is the remote's. A profile written before names were the
+    repositories' own carries the project's nickname or the folder's name instead, and is
+    named again from its remote and root (:func:`real_name`) until it is rewritten."""
+    derived = real_name(profile.remote, Path(profile.root) if profile.root else None)
+    if profile.remote and derived and profile.name.lower() == derived.lower():
+        return profile.name
+    return derived
+
+
+def _misnamed(profile: RepoProfile) -> bool:
+    """Whether ``profile`` was written before names were the repositories' own: profiled again
+    at the next sweep, however fresh, to store the name as its remote spells it."""
+    return profile.name != (_profile_name(profile) or profile.repo_id)
 
 
 def _bare_profile(repo_id: str, root: Path, when: datetime) -> RepoProfile:
@@ -765,12 +792,14 @@ def _bare_profile(repo_id: str, root: Path, when: datetime) -> RepoProfile:
 
 
 def profile_repo(repo_id: str, root: Path, when: datetime) -> RepoProfile:
-    """The profile of the repository at ``root``, read from git."""
-    remote = repo_profile.read_remote(root)
+    """The profile of the repository at ``root``, read from git: its ``remote`` normalised (the
+    key the clones of one remote share), its ``name`` as the remote's URL spells it."""
+    url = repo_profile.read_remote_url(root)
+    remote = repo_profile.normalise_remote(url)
     traits, files = repo_profile.read_traits(root, remote)
     return RepoProfile(
         repo_id=repo_id,
-        name=real_name(remote, root) or repo_id,
+        name=real_name(url, root) or repo_id,
         root=str(root),
         remote=remote,
         traits=traits,

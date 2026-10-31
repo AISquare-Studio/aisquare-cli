@@ -436,8 +436,9 @@ class _FleetRead:
     live: dict[str, int] = field(default_factory=dict)
     """Live rows per project, for a collapsed group's members, whose agents are not read."""
     live_total: int = 0
-    """Agents live across the fleet, the captain excluded (``fleet_service.live_total``): the
-    header's "Fleet · N live", every project's, listed or not."""
+    """Agents live across the fleet, the captain excluded, once this read's listing ended the
+    rows whose pane died (``fleet_service.live_after``): the header's "Fleet · N live", every
+    project's, listed or not."""
     error: str | None = None
     taken_at: datetime = field(default_factory=datetime.now)
     home: ProjectInfo | None = None
@@ -529,10 +530,13 @@ def _read_fleet(
             fleet_paused = fleet_service.fleet_paused_projects(store, projects)
             # The header's count: `fleet capacity`'s figure, from the rows, not the cards, which
             # leave out a folded group's members, hidden directories and forgotten projects.
-            live_total = fleet_service.live_total(store)
+            live = fleet_service.live_ids(store)
     except Exception as exc:  # the store is briefly unavailable — keep what is shown
         return _FleetRead(capturing, error=f"{type(exc).__name__}: {exc}")
     many = fleet_service.list_agents_many(listings)
+    # Less the rows this listing ended, their pane dead: counted before, the header said one
+    # too many beside the card that shows the agent exited, until the next tick.
+    live_total = fleet_service.live_after(live, many)
     # A folded project is no key: not read is not "no agents" (`group_header_text`, and
     # `_feed_open_views`, which leaves a view of one as it is).
     agents = {p.id: many.agents.get(p.id, []) for p in projects if p.id not in folded}

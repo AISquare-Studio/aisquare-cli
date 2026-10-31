@@ -12,21 +12,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   agent of every project, the captain excluded: the `live_total` of `aisquare fleet
   capacity`, so a folded group's, a hidden directory's and a forgotten project's agents
   count although no card shows them. It follows the next frame after a spawn or a stop,
-  and with none live the header is `Fleet` alone. The Welcome page's *3 Fleet* step keeps
+  and drops on the very frame whose card shows an agent exited because its pane died.
+  With none live the header is `Fleet` alone. The Welcome page's *3 Fleet* step keeps
   its title: it is about the one project being set up, whose agents it already lists.
 
 ### Changed
 
 - **Usage & stats names a repository by its actual name, never a nickname or a codename.**
   The Stats page's *Top repositories*, `aisquare metrics stats` and its `--json` `name`
-  (in `repos.rows` and `repos.top`) show the git remote's repository name
-  (`github.com/org/aisquare-cli` is `aisquare-cli`), else the checkout folder's: a project
-  nicknamed *the big one* left the owner unable to tell which repository was meant. The
-  clones of one remote, counted as one repository, are named by the remote rather than
-  by the checkout that spent the most. Repository profiles stored with a nickname show the
-  real name at once (the name is derived on read) and are rewritten with it at their daily
-  refresh; the store is not migrated. Nicknames stay everywhere else: the sidebar's cards,
-  `fleet ls`, the project views.
+  (in `repos.rows` and `repos.top`) show the git remote's repository name, spelt as its
+  URL spells it (`git@github.com:Org/MyRepo.git` is `MyRepo`), else the checkout folder's:
+  a project nicknamed *the big one* left the owner unable to tell which repository was
+  meant. The lower-cased remote stays only the key that makes the clones of one remote one
+  repository, and they are named by the remote rather than by the checkout that spent the
+  most. Repository profiles stored with a nickname show the real name at once (lower case
+  until rewritten: the stored remote has lost the case) and are rewritten with the URL's
+  spelling at the next sweep, not the next day; the store is not migrated. Nicknames stay
+  everywhere else: the sidebar's cards, `fleet ls`, the project views.
 
 ## [0.9.2] - 2026-10-30
 

@@ -5505,11 +5505,24 @@ def _counted_live(store: ContextStore) -> list[FleetAgent]:
     return [agent for agent in store.live_fleet_agents() if agent.role != CAPTAIN_ROLE]
 
 
-def live_total(store: ContextStore) -> int:
-    """How many agents are live across the fleet, the captain excluded: ``live_total`` of
-    ``aisquare fleet capacity``, read in the caller's ``store`` session (the sidebar's header
-    reads it with each frame)."""
-    return len(_counted_live(store))
+def live_ids(store: ContextStore) -> frozenset[str]:
+    """The agents live across the fleet, the captain excluded, read in the caller's ``store``
+    session: as many as ``live_total`` of ``aisquare fleet capacity``."""
+    return frozenset(agent.id for agent in _counted_live(store))
+
+
+def live_after(counted: Collection[str], many: ManyAgents) -> int:
+    """How many of ``counted`` (:func:`live_ids`, read before ``many`` was listed) are still
+    live once the listing has ended the rows whose pane died: what ``fleet capacity`` says
+    after it, without another store session. The sidebar's header, which said one agent too
+    many beside the card that showed it exited, until the next tick (review of #10)."""
+    ended = {
+        status.agent.id
+        for statuses in many.agents.values()
+        for status in statuses
+        if status.agent.ended_at is not None
+    }
+    return len(set(counted) - ended)
 
 
 def _memory_refused(record: Mapping[str, object], why: str) -> NoReturn:

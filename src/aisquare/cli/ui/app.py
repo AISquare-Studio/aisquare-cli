@@ -435,6 +435,9 @@ class _FleetRead:
     notices: dict[str, str] = field(default_factory=dict)
     live: dict[str, int] = field(default_factory=dict)
     """Live rows per project, for a collapsed group's members, whose agents are not read."""
+    live_total: int = 0
+    """Agents live across the fleet, the captain excluded (``fleet_service.live_total``): the
+    header's "Fleet · N live", every project's, listed or not."""
     error: str | None = None
     taken_at: datetime = field(default_factory=datetime.now)
     home: ProjectInfo | None = None
@@ -524,6 +527,9 @@ def _read_fleet(
             owed = fleet_service.deferred_nudge_targets(store)
             # Which are fleet-paused, for their Resume (one read of the signals, any board).
             fleet_paused = fleet_service.fleet_paused_projects(store, projects)
+            # The header's count: `fleet capacity`'s figure, from the rows, not the cards, which
+            # leave out a folded group's members, hidden directories and forgotten projects.
+            live_total = fleet_service.live_total(store)
     except Exception as exc:  # the store is briefly unavailable — keep what is shown
         return _FleetRead(capturing, error=f"{type(exc).__name__}: {exc}")
     many = fleet_service.list_agents_many(listings)
@@ -549,6 +555,7 @@ def _read_fleet(
         agents,
         notices,
         listings.live,
+        live_total,
         home=home,
         fleet_paused=fleet_paused,
     )
@@ -1710,6 +1717,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             live=read.live,
             always_show_paths=self.always_show_project_path,
         )
+        sidebar.show_live_total(read.live_total)
         self._feed_open_views(self.snapshot)
         if asked is None or self._accounts_began < asked:
             self.refresh_accounts()

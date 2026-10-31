@@ -27,6 +27,7 @@ from aisquare.core.store import store_session
 from aisquare.models import SessionUsage, TurnUsage, UsageStats
 from aisquare.services import hooks as hooks_service
 from aisquare.services import metrics as metrics_service
+from aisquare.services import project as project_service
 from aisquare.services import usage_stats
 from tests.fsperms import can_symlink
 from tests.projects import add_project
@@ -743,6 +744,24 @@ def test_a_remote_is_normalised_without_credentials_and_classified(
     remote = repo_profile.normalise_remote(url)
     assert remote == normalised and repo_profile.host_of(remote) == host
     assert "token" not in (remote or "")
+
+
+@pytest.mark.parametrize(
+    ("remote", "root", "name"),
+    [
+        ("github.com/aisquare-studio/aisquare-cli", "/w/ws7", "aisquare-cli"),  # the remote's
+        ("github.com/org/myapp", "/w/MyApp", "MyApp"),  # the folder gives it its case
+        ("gitlab.com/group/sub/tool", "/w/x", "tool"),  # the last part of a nested path
+        ("github.com/org/app", None, "app"),
+        (None, "/w/local-tool", "local-tool"),  # no remote: the checkout's folder
+        (None, None, ""),
+        (None, "/", ""),
+    ],
+)
+def test_a_repository_is_named_by_its_remote_else_its_folder(
+    remote: str | None, root: str | None, name: str
+) -> None:
+    assert usage_stats.real_name(remote, Path(root) if root is not None else None) == name
 
 
 @pytest.mark.parametrize(
@@ -1563,9 +1582,9 @@ def test_clones_and_checkouts_of_one_remote_are_one_repository(machine: Machine)
     assert merged.tokens.total == tokens(cache_read=5000) + tokens(cache_read=3000) + tokens(
         cache_read=1000
     )
-    assert merged.name == "ws2-app"  # the checkout that spent the most names it
+    assert merged.name == "app"  # the remote's name, not either checkout's folder
     assert merged.repo_id == "remote:github.com/org/app"
-    assert sorted(row.name for row in week.rows) == ["local-only", "other", "ws2-app"]
+    assert sorted(row.name for row in week.rows) == ["app", "local-only", "other"]
     # in a day's rollup too: one DayRepo per repository, whose key is the remote
     assert day.repos_active == 3 and len(day.repos) == 3
     keys = sorted(repo.key for repo in day.repos)
@@ -1599,18 +1618,110 @@ def test_a_repository_not_profiled_yet_is_counted_as_recorded_and_merges_once_it
     assert _read("today").repos.active == 1
 
 
-def test_a_nickname_names_the_repository_it_was_given_to(machine: Machine) -> None:
-    repo = machine.repo("dirname", remote="https://github.com/org/app")
-    project = add_project(repo)
+# --- a repository's name: its own, never a nickname (tsk_01m67vf4mpsgdcvt6kq6znsrwc) ------------
+
+
+def _nicknamed(repo: Path, nickname: str = "the big one", codename: str = "earnest-hawk") -> str:
+    """``repo`` added as a project, then given a nickname and a fleet codename: its id."""
+    project = project_service.set_nickname(add_project(repo), nickname)
     with store_session() as store:
-        store._conn.execute(  # type: ignore[attr-defined]
-            "UPDATE project SET nickname = ? WHERE id = ?", ("the big one", project.id)
-        )
-        store._conn.commit()  # type: ignore[attr-defined]
+        store.set_codename(project.id, codename)
+    return project.id
+
+
+def _cli_names() -> tuple[list[str], str]:
+    """The names `metrics stats` gives in `--json` (its rows, then its top), and its table."""
+    runner = CliRunner()
+    as_json = runner.invoke(
+        app, ["--json", "metrics", "stats", "--range", "lifetime", "--no-sweep"]
+    )
+    as_text = runner.invoke(app, ["metrics", "stats", "--range", "lifetime", "--no-sweep"])
+    assert as_json.exit_code == 0 and as_text.exit_code == 0, as_json.output + as_text.output
+    repos = json.loads(as_json.output)["repos"]
+    return [row["name"] for row in repos["rows"]] + [repos["top"]["name"]], as_text.output
+
+
+def test_a_nicknamed_project_is_named_by_its_remote_in_the_stats_the_table_and_the_json(
+    machine: Machine,
+) -> None:
+    """The owner could not tell which repository a nickname meant: the remote's name is shown,
+    not the nickname, not the codename and not the checkout's folder (``ws7``)."""
+    repo = machine.repo("ws7", remote="git@github.com:AISquare-Studio/aisquare-cli.git")
+    _nicknamed(repo)
     _one_turn(machine, repo, SESSION, _day(0, 9))
     usage_stats.sweep(tz=IST)
 
-    assert [row.name for row in _read("today").repos.rows] == ["the big one"]
+    repos = _read("today").repos
+    names, table = _cli_names()
+
+    assert [row.name for row in repos.rows] == ["aisquare-cli"]
+    assert repos.top is not None and repos.top.name == "aisquare-cli"
+    assert names == ["aisquare-cli", "aisquare-cli"]
+    assert "aisquare-cli" in table
+    for other in ("the big one", "earnest-hawk", "ws7"):
+        assert other not in table
+
+
+def test_a_repository_with_no_remote_is_named_by_its_folder_even_when_nicknamed(
+    machine: Machine,
+) -> None:
+    repo = machine.repo("local-tool")
+    _nicknamed(repo)
+    _one_turn(machine, repo, SESSION, _day(0, 9))
+    usage_stats.sweep(tz=IST)
+
+    names, table = _cli_names()
+
+    assert [row.name for row in _read("today").repos.rows] == ["local-tool"]
+    assert names == ["local-tool", "local-tool"]
+    assert "local-tool" in table and "the big one" not in table
+
+
+def test_a_profile_stored_with_a_nickname_shows_the_real_name_without_waiting_a_day(
+    machine: Machine,
+) -> None:
+    """Profiles written before the rule carry the nickname in ``name``, and are refreshed once a
+    day: the name is derived on read, so they show the real name at once."""
+    remote = machine.repo("ws7", remote="https://github.com/aisquare-studio/aisquare-cli")
+    local = machine.repo("local-tool")
+    _nicknamed(remote)
+    _nicknamed(local, nickname="the small one", codename="ruby-fox")
+    _one_turn(machine, remote, "a", _day(0, 9), cache_read=5000)
+    _one_turn(machine, local, "b", _day(0, 10))
+    usage_stats.sweep(now=NOW, tz=IST)
+    with store_session() as store:
+        written = store.repo_profiles()
+        for profile, old_name in zip(
+            sorted(written.values(), key=lambda p: p.root),
+            ("the small one", "the big one"),
+            strict=True,
+        ):
+            store.save_repo_profile(profile.model_copy(update={"name": old_name}))
+        stored = sorted(profile.name for profile in store.repo_profiles().values())
+
+    names, table = _cli_names()
+
+    assert sorted(profile.name for profile in written.values()) == ["aisquare-cli", "local-tool"]
+    assert stored == ["the big one", "the small one"]  # the old rows, still fresh: not refreshed
+    assert [row.name for row in _read("today").repos.rows] == ["aisquare-cli", "local-tool"]
+    assert names == ["aisquare-cli", "local-tool", "aisquare-cli"]
+    assert "the big one" not in table and "the small one" not in table
+
+
+def test_a_repository_not_profiled_yet_is_named_by_its_folder_never_its_nickname(
+    machine: Machine,
+) -> None:
+    repo = machine.repo("ws7", remote="https://github.com/org/aisquare-cli")
+    project_id = _nicknamed(repo)
+    _one_turn(machine, repo, SESSION, _day(0, 9))
+    usage_stats.sweep(tz=IST)
+    with store_session() as store:
+        store._conn.execute("DELETE FROM repo_profile")  # type: ignore[attr-defined]
+        store._conn.commit()  # type: ignore[attr-defined]
+        named = usage_stats.repo_name_of(store, project_id)
+
+    assert named == "ws7"  # no profile, no remote read on a stats read: the folder, until profiled
+    assert [row.name for row in _read("today").repos.rows] == ["ws7"]
 
 
 def test_a_rollup_counts_the_agents_started_by_role_and_the_tasks_done_each_local_day(

@@ -5483,9 +5483,7 @@ def _live_per_project() -> dict[str, int]:
     counts: dict[str, int] = {}
     rows: dict[str, ProjectInfo | None] = {}
     with store_session() as store:
-        for agent in store.live_fleet_agents():
-            if agent.role == CAPTAIN_ROLE:
-                continue
+        for agent in _counted_live(store):
             if agent.project_id not in rows:
                 rows[agent.project_id] = store.get_project(agent.project_id, include_forgotten=True)
             counts[agent.project_id] = counts.get(agent.project_id, 0) + 1
@@ -5499,6 +5497,19 @@ def _live_per_project() -> dict[str, int]:
             label = f"{label} ({row.root if row is not None else pid[:12]})"
         labelled[label] = count
     return dict(sorted(labelled.items()))
+
+
+def _counted_live(store: ContextStore) -> list[FleetAgent]:
+    """The live agents the fleet-wide budget counts: every project's, forgotten ones'
+    included, the captain excluded."""
+    return [agent for agent in store.live_fleet_agents() if agent.role != CAPTAIN_ROLE]
+
+
+def live_total(store: ContextStore) -> int:
+    """How many agents are live across the fleet, the captain excluded: ``live_total`` of
+    ``aisquare fleet capacity``, read in the caller's ``store`` session (the sidebar's header
+    reads it with each frame)."""
+    return len(_counted_live(store))
 
 
 def _memory_refused(record: Mapping[str, object], why: str) -> NoReturn:

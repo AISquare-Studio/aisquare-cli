@@ -146,6 +146,7 @@ from textual.widgets import (
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested, ReturnTo, Target
+from aisquare.cli.ui.confirm_button import ConfirmButton
 from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
 from aisquare.cli.ui.sidebar import short_path
 from aisquare.cli.ui.views.app_settings import permission_options
@@ -392,56 +393,6 @@ class PlainFields:
     preset_account: str | None
     persona: str
     persona_touched: bool
-
-
-class ConfirmTakeOverScreen(ModalScreen[bool]):
-    """The one question before a take-over stops its source (card tsk_01m3ns5a736s)."""
-
-    DEFAULT_CSS = """
-    ConfirmTakeOverScreen { align: center middle; }
-    ConfirmTakeOverScreen #take-over-box { width: 64; max-width: 96%; height: auto;
-                                           border: heavy $warning; background: $surface;
-                                           padding: 1 2; }
-    ConfirmTakeOverScreen #take-over-buttons { height: auto; align-horizontal: right;
-                                               padding-top: 1; }
-    ConfirmTakeOverScreen #take-over-buttons Button { margin-left: 2; }
-    """
-    BINDINGS: ClassVar = [Binding("escape", "cancel", "cancel")]
-
-    def __init__(self, label: str) -> None:
-        super().__init__()
-        self.label = label
-
-    def question(self) -> Text:
-        """The question as data: the label is the user's, brackets and all."""
-        text = Text()
-        text.append("Stop ")
-        text.append(self.label, style="bold")
-        text.append(" and hand its claims to the new agent?\n")
-        text.append(
-            "It is stopped as a restart stops it: its claims wait for the new agent, which "
-            "takes its label, task and tree.",
-            style="dim",
-        )
-        return text
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="take-over-box"):
-            yield Static(self.question(), id="take-over-question")
-            with Horizontal(id="take-over-buttons"):
-                yield Button("Take over", id="take-over-yes", variant="warning")
-                yield Button("Cancel", id="take-over-no")
-
-    @on(Button.Pressed, "#take-over-yes")
-    def _yes(self) -> None:
-        self.dismiss(True)
-
-    @on(Button.Pressed, "#take-over-no")
-    def _no(self) -> None:
-        self.dismiss(False)
-
-    def action_cancel(self) -> None:
-        self.dismiss(False)
 
 
 class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
@@ -888,7 +839,14 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             with Vertical(id="spawn-footer"):
                 yield Static(id="spawn-status")
                 with Horizontal(id="spawn-buttons"):
-                    yield Button("Spawn", id="spawn-submit", variant="primary")
+                    # Asks in place only to take over (:meth:`_apply_handoff`).
+                    yield ConfirmButton(
+                        "Spawn",
+                        armed_label="Take over? click again",
+                        asks=False,
+                        id="spawn-submit",
+                        variant="primary",
+                    )
                     yield Button("Cancel", id="spawn-cancel")
 
     def on_mount(self) -> None:
@@ -1416,7 +1374,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         ):
             self.query_one(selector).disabled = source is not None
         self._lock_other_screens()  # Pick…: the teammate's lock, and a running spawn's
-        submit = self.query_one("#spawn-submit", Button)
+        submit = self.query_one("#spawn-submit", ConfirmButton)
+        submit.disarm()  # armed for what the form said before
+        submit.asks = take_over
         if label.disabled and not self._label_fixed():
             label.value = self._prefill  # a take-over's lock, never the user's typing
         if source is None:
@@ -1448,10 +1408,11 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             worktree.value = agent.worktree
             prompt.disabled = True
             submit.label = "Take over"
+            submit.armed_label = Text.assemble("Stop ", agent.label, "? click again")
             note = (
-                f"{agent.label} is stopped, after one question, and the new agent takes over "
-                "its claims, its task and its tree, resuming its session unless Start fresh "
-                "is checked."
+                f"{agent.label} is stopped when Take over is pressed a second time (the first "
+                "asks), and the new agent takes over its claims, its task and its tree, "
+                "resuming its session unless Start fresh is checked."
             )
         else:
             task.value = NO_TASK
@@ -1739,14 +1700,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         if self._spawning or not self._validate():
             return
         if self._source is not None:
-            source, handoff = self._source.agent.label, self.handoff_kwargs()
-            if handoff["mode"] == "take_over":
-                self.app.push_screen(
-                    ConfirmTakeOverScreen(source),
-                    callback=lambda yes: self._hand_off(source, handoff) if yes else None,
-                )
-                return
-            self._hand_off(source, handoff)
+            # A take-over's Take over asked in place first: this is the press that confirmed.
+            self._hand_off(self._source.agent.label, self.handoff_kwargs())
             return
         project, role, kwargs = self.project, self._role, self.spawn_kwargs()
         self._set_spawning(True)

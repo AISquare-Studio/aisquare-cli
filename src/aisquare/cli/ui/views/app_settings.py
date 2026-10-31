@@ -27,9 +27,10 @@ after every save so the form shows what the file holds. Precedence: a per-spawn
 flag beats this file beats the system default; no value here is read from the
 environment.
 
-Reset all settings to default asks first, then moves the file aside
-(``services.settings.reset_settings``) and names the backup it kept; moving it
-back undoes the reset.
+Reset all settings to default asks first, in place (``ui.confirm_button``): its first
+press arms it and puts the backup it will keep in the note line under the buttons; a
+second press moves the file aside (``services.settings.reset_settings``) and names the
+backup it kept; moving it back undoes the reset.
 
 Model and effort per role are NOT here on purpose: they live in ``team harness`` and
 ``AISQUARE_MODEL_<ROLE>`` / ``AISQUARE_EFFORT_<ROLE>``, one home per concept, the rule
@@ -39,7 +40,8 @@ the owner decides, is that they stay out. The binary is a binding's, and binding
 ``team bind`` bound, with its binary, its environment (``CLAUDE_CONFIG_DIR`` and
 ``CLAUDE_CODE_TMPDIR`` called out with their values, any other variable by name only,
 since a value may be a token) and its args. *Edit* opens the bind form on it, *Unset
-key…* and *Clear* are ``team bind --unset`` and ``--clear``; each writes at once through
+key…* and *Clear* are ``team bind --unset`` and ``--clear`` (*Clear* asks in place, and
+says under its row that the whole binding goes); each writes at once through
 ``services.settings``, the writers ``team bind`` uses, apart from the form's Save. The
 one ``[team]`` value here is the ACCOUNT per role (#145): the select beside each role writes
 ``team.profiles.<role>.account`` — exactly what ``aisquare team bind <role>
@@ -93,6 +95,7 @@ from textual.widgets import (
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.attach import NewBindScreen
+from aisquare.cli.ui.confirm_button import ConfirmButton
 from aisquare.cli.ui.sidebar import short_path
 from aisquare.cli.ui.views.settings_captain import CaptainToggle
 from aisquare.cli.ui.views.settings_remote import RemoteSection
@@ -184,7 +187,8 @@ the role runs, and where it keeps its temp files (the doctor's ``role bindings``
 
 def binding_widget_id(kind: str, role: str) -> str:
     """The id of ``role``'s binding ``kind`` widget (``row``, ``edit``, ``unset``,
-    ``clear``): ``binding-<kind>-<suffix>``, one to one as :func:`role_widget_id` is."""
+    ``clear``, ``note``): ``binding-<kind>-<suffix>``, one to one as :func:`role_widget_id`
+    is."""
     return f"{BINDING_ID_PREFIX}{kind}-{widget_suffix(role)}"
 
 
@@ -247,47 +251,6 @@ class UnsetKeyScreen(ModalScreen[str | None]):
     @on(Button.Pressed, "#unset-cancel")
     def action_cancel(self) -> None:
         self.dismiss(None)
-
-
-class ConfirmClearBinding(ModalScreen[bool]):
-    """``team bind <role> --clear`` asks first: the whole binding goes."""
-
-    DEFAULT_CSS = """
-    ConfirmClearBinding { align: center middle; }
-    ConfirmClearBinding > Vertical { width: 64; height: auto; border: round $error; padding: 1 2; }
-    ConfirmClearBinding Horizontal { height: auto; margin-top: 1; }
-    ConfirmClearBinding Button { margin-right: 1; }
-    """
-    BINDINGS: ClassVar = [("escape", "cancel", "cancel")]
-
-    def __init__(self, role: str) -> None:
-        super().__init__()
-        self.role = role
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            question = Text("Clear the binding of ", style="bold")
-            question.append(self.role, style="bold")
-            question.append("?", style="bold")
-            yield Static(question)
-            yield Static(
-                Text(
-                    "Its binary, environment, args and account go, as `aisquare team bind "
-                    "<role> --clear` takes them; the role then launches as an unbound one."
-                ),
-                id="clear-explained",
-            )
-            with Horizontal():
-                yield Button("Clear", id="clear-confirm", variant="error")
-                yield Button("Cancel", id="clear-cancel")
-
-    @on(Button.Pressed, "#clear-confirm")
-    def _confirm(self) -> None:
-        self.dismiss(True)
-
-    @on(Button.Pressed, "#clear-cancel")
-    def action_cancel(self) -> None:
-        self.dismiss(False)
 
 
 def role_order(fleet: FleetSettings) -> list[str]:
@@ -397,50 +360,30 @@ class UiSettingsChanged(Message):
         self.updates = updates
 
 
+def clear_note(role: str) -> Text:
+    """What a role binding's *Clear* does, in a line under its row while it is armed."""
+    text = Text("The whole binding of ", style="bold")
+    text.append(role, style="bold")
+    text.append(
+        " goes: its binary, environment, args and account, as `aisquare team bind <role> "
+        "--clear` takes them; the role then launches as an unbound one."
+    )
+    return text
+
+
+def reset_note() -> Text:
+    """What *Reset all* keeps, in the note line under the buttons while it is armed."""
+    config = paths.config_path()
+    return Text(
+        f"Yours are kept as {config.name}.bak-<UTC date and time> beside {short_path(config)}; "
+        "every setting goes back to its default, and moving that file back undoes it.",
+        style="bold",
+    )
+
+
 def section_title(title: str, about: str) -> Text:
     """A section's header: its name in bold, then what it holds, dim."""
     return Text.assemble((title, "bold"), ("  " + about, "dim"))
-
-
-class ConfirmReset(ModalScreen[bool]):
-    """ "Reset every setting to its default?" — Reset or Cancel; Esc cancels."""
-
-    CSS = """
-    ConfirmReset { align: center middle; }
-    #resetbox { width: 64; height: auto; border: heavy $error; background: $surface;
-                padding: 1 2; }
-    #resetbox Static { height: auto; margin-bottom: 1; }
-    #resetbuttons { height: auto; }
-    #resetbuttons Button { margin-right: 1; }
-    """
-    BINDINGS: ClassVar = [("escape", "cancel", "cancel")]
-
-    def compose(self) -> ComposeResult:
-        config = paths.config_path()
-        with Vertical(id="resetbox"):
-            yield Static(Text("Reset all settings to default?", style="bold"))
-            yield Static(
-                Text(
-                    f"{config} moves aside to {config.name}.bak-<UTC date and time> beside "
-                    "it, and every setting goes back to its default. Moving that file back "
-                    "undoes the reset."
-                ),
-                id="reset-explained",
-            )
-            with Horizontal(id="resetbuttons"):
-                yield Button("Reset all", id="reset-confirm", variant="error")
-                yield Button("Cancel", id="reset-cancel")
-
-    def on_mount(self) -> None:
-        self.query_one("#reset-cancel", Button).focus()
-
-    @on(Button.Pressed, "#reset-confirm")
-    def _confirm(self) -> None:
-        self.dismiss(True)
-
-    @on(Button.Pressed, "#reset-cancel")
-    def action_cancel(self) -> None:
-        self.dismiss(False)
 
 
 class AppSettingsView(Vertical):
@@ -483,6 +426,7 @@ class AppSettingsView(Vertical):
     AppSettingsView .binding Static { height: auto; }
     AppSettingsView .binding Horizontal { height: auto; }
     AppSettingsView .binding Button { margin-right: 1; min-width: 8; }
+    AppSettingsView .binding .binding-note { display: none; color: $error; }
     AppSettingsView #bindings-empty { color: $text-muted; height: auto; }
     """
     # Under the tabs, only what both tabs need, one line each: compact buttons and the
@@ -675,8 +619,11 @@ class AppSettingsView(Vertical):
         with Horizontal(id="settings-buttons"):
             yield Button("Save", id="save-settings", variant="primary", compact=True)
             yield Button("Reload", id="reload-settings", compact=True)
-            yield Button(
+            yield ConfirmButton(
                 "Reset all settings to default",
+                armed_label="Reset all? click again",
+                note=reset_note(),
+                note_in="#settings-note",
                 id="reset-settings",
                 variant="error",
                 compact=True,
@@ -840,8 +787,17 @@ class AppSettingsView(Vertical):
                         id=binding_widget_id("unset", role),
                         disabled=not (profile.env or profile.env_files),
                     ),
-                    Button("Clear", id=binding_widget_id("clear", role), variant="error"),
+                    ConfirmButton(
+                        "Clear",
+                        armed_label="Clear? click again",
+                        note=clear_note(role),
+                        note_in=f"#{binding_widget_id('note', role)}",
+                        id=binding_widget_id("clear", role),
+                        variant="error",
+                    ),
                 ),
+                # Under the buttons, so that showing it moves none of them; hidden at rest.
+                Static(id=binding_widget_id("note", role), classes="binding-note"),
                 id=binding_widget_id("row", role),
                 classes="binding",
             )
@@ -1212,9 +1168,7 @@ class AppSettingsView(Vertical):
                 UnsetKeyScreen(role, keys), lambda key, role=role: self._unset(role, key)
             )
         elif (role := self._binding_role(button, "clear")) is not None:
-            self.app.push_screen(
-                ConfirmClearBinding(role), lambda yes, role=role: self._clear(role, yes)
-            )
+            self._clear(role)  # its Clear asked in place: this is the press that confirmed
 
     def _binding_saved(self, seat: str | None) -> None:
         if seat is not None:
@@ -1232,9 +1186,7 @@ class AppSettingsView(Vertical):
         self.notify(f"{role}: {key} unset (aisquare team bind {role} --unset {key})", markup=False)
         self.call_later(self.reload_bindings)
 
-    def _clear(self, role: str, confirmed: bool | None) -> None:
-        if not confirmed:
-            return
+    def _clear(self, role: str) -> None:
         try:
             settings_service.clear_role_binding(role)
         except Exception as exc:
@@ -1246,13 +1198,9 @@ class AppSettingsView(Vertical):
     # --- reset -------------------------------------------------------------------------
 
     @on(Button.Pressed, "#reset-settings")
-    def _ask_to_reset(self) -> None:
-        """Every setting back to its default — once the operator says so in the dialog."""
-        self.app.push_screen(ConfirmReset(), self._reset_answered)
-
-    def _reset_answered(self, confirmed: bool | None) -> None:
-        if not confirmed:
-            return
+    def _reset(self) -> None:
+        """Every setting back to its default — on the second press of *Reset all*, which the
+        first armed in place with what it keeps (:func:`reset_note`)."""
         try:
             backup = settings_service.reset_settings()
         except OSError as exc:  # the operator's filesystem saying no: nothing moved

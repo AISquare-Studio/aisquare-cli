@@ -11,7 +11,7 @@ import asyncio
 import tomllib
 from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import pytest
 from textual.app import App, ComposeResult
@@ -19,6 +19,7 @@ from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
 from textual.widgets import Button, Collapsible, Input, Select, Static, Switch, TabbedContent
 
+from aisquare.cli.ui.confirm_button import ConfirmButton
 from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.views.app_settings import (
     AGENT_ADVANCED,
@@ -27,7 +28,6 @@ from aisquare.cli.ui.views.app_settings import (
     PREFERENCES_TAB,
     REMOTE_TAB,
     AppSettingsView,
-    ConfirmReset,
     UiSettingsChanged,
 )
 from aisquare.core import paths
@@ -456,9 +456,10 @@ def test_one_save_writes_the_no_role_agents_row_and_the_release_check_together()
     assert load_config().fleet.roles[PLAIN_ROLE].permission_mode == "acceptEdits"
 
 
-def test_reset_all_asks_first_then_keeps_a_backup_and_shows_the_defaults() -> None:
-    """Reset all is a dialog first: Cancel changes nothing; Reset all moves the file aside to a
-    backup it names, and the form shows the defaults."""
+def test_reset_all_asks_in_place_then_keeps_a_backup_and_shows_the_defaults() -> None:
+    """Reset all asks in place: its first click arms it, changes nothing, and the note line
+    under the buttons names the backup it keeps; Esc disarms it and gives the note back; a
+    double click on it moves the file aside to that backup, and the form shows the defaults."""
     config = load_config()
     config.fleet.max_agents_per_project = 9
     config.accounts.pick = "default"
@@ -467,16 +468,19 @@ def test_reset_all_asks_first_then_keeps_a_backup_and_shows_the_defaults() -> No
 
     async def scenario(pilot: Pilot[None], host: AppHost) -> dict[str, object]:
         seen: dict[str, object] = {}
-        host.query_one("#reset-settings", Button).press()
+        reset = host.query_one("#reset-settings", ConfirmButton)
+        note = host.query_one("#settings-note", Static)
+        rest = (str(reset.label), str(note.content))
+        await pilot.click(reset)
         await settle(pilot)
-        seen["asked"] = isinstance(host.screen, ConfirmReset)
-        seen["explained"] = str(host.screen.query_one("#reset-explained", Static).render())
-        host.screen.query_one("#reset-cancel", Button).press()
+        seen["armed"] = (reset.armed, str(reset.label), str(note.content))
+        seen["after_one"] = paths.config_path().read_bytes()
+        await pilot.press("escape")
         await settle(pilot)
-        seen["after_cancel"] = paths.config_path().read_bytes()
-        host.query_one("#reset-settings", Button).press()
-        await settle(pilot)
-        host.screen.query_one("#reset-confirm", Button).press()
+        seen["disarmed"] = (str(reset.label), str(note.content)) == rest
+        seen["after_escape"] = paths.config_path().read_bytes()
+        seen["pushed"] = len(host.screen_stack)
+        await pilot.double_click(reset)
         await settle(pilot)
         seen["form"] = (
             host.query_one("#max-agents", Input).value,
@@ -486,9 +490,12 @@ def test_reset_all_asks_first_then_keeps_a_backup_and_shows_the_defaults() -> No
         return seen
 
     seen = drive(scenario)
-    assert seen["asked"] is True
-    assert "config.toml.bak-" in str(seen["explained"]), "the dialog names the backup it keeps"
-    assert seen["after_cancel"] == before, "Cancel changes nothing"
+    armed, label, note = cast(tuple[bool, str, str], seen["armed"])
+    assert armed is True and label == "Reset all? click again"
+    assert "config.toml.bak-" in note, "the note names the backup it keeps, before the 2nd click"
+    assert seen["after_one"] == before, "one click changes nothing"
+    assert seen["disarmed"] is True and seen["after_escape"] == before
+    assert seen["pushed"] == 1, "no dialog"
     assert not paths.config_path().exists(), "every setting is its default now"
     backups = sorted(paths.config_path().parent.glob("config.toml.bak-*"))
     assert len(backups) == 1 and backups[0].read_bytes() == before, "the file kept, unchanged"
@@ -505,7 +512,7 @@ def test_reset_all_with_nothing_changed_says_so() -> None:
     async def scenario(pilot: Pilot[None], host: AppHost) -> list[tuple[str, str]]:
         host.query_one("#reset-settings", Button).press()
         await settle(pilot)
-        host.screen.query_one("#reset-confirm", Button).press()
+        host.query_one("#reset-settings", Button).press()
         await settle(pilot)
         return host.notices
 
@@ -523,7 +530,7 @@ def test_reset_all_of_a_file_holding_no_setting_keeps_no_backup() -> None:
     async def scenario(pilot: Pilot[None], host: AppHost) -> list[tuple[str, str]]:
         host.query_one("#reset-settings", Button).press()
         await settle(pilot)
-        host.screen.query_one("#reset-confirm", Button).press()
+        host.query_one("#reset-settings", Button).press()
         await settle(pilot)
         return host.notices
 
@@ -938,7 +945,10 @@ def test_edit_opens_the_bind_form_on_the_binding_and_writes_what_team_bind_write
 
 
 def test_unset_key_and_clear_write_what_team_bind_writes() -> None:
-    from aisquare.cli.ui.views.app_settings import ConfirmClearBinding, UnsetKeyScreen
+    """Clear asks in place: one press arms it and the line under its row says the whole
+    binding goes, and it writes nothing; the focus leaving disarms it; a second press on it
+    clears."""
+    from aisquare.cli.ui.views.app_settings import UnsetKeyScreen
 
     _bind_cli("tester", "--env", "A=1", "--env", "B=2", "--arg", "-v")
     after_unset = _after_cli("tester", "--unset", "B")
@@ -954,15 +964,24 @@ def test_unset_key_and_clear_write_what_team_bind_writes() -> None:
         await settle(pilot)
         seen["unset"] = paths.config_path().read_bytes()
         seen["after_clear"] = _after_cli("tester", "--clear")
-        host.query_one("#binding-clear-tester", Button).press()
+        host.query_one(f"#{AGENT_ADVANCED}", Collapsible).collapsed = False
+        clear = host.query_one("#binding-clear-tester", ConfirmButton)
         await settle(pilot)
-        seen["confirm"] = isinstance(host.screen, ConfirmClearBinding)
-        host.screen.query_one("#clear-cancel", Button).press()
+        clear.scroll_visible(animate=False)
         await settle(pilot)
-        seen["cancelled"] = paths.config_path().read_bytes()
-        host.query_one("#binding-clear-tester", Button).press()
+        clear.focus()
+        clear.press()
         await settle(pilot)
-        host.screen.query_one("#clear-confirm", Button).press()
+        note = host.query_one("#binding-note-tester", Static)
+        seen["armed"] = (clear.armed, str(clear.label), len(host.screen_stack))
+        seen["note"] = (note.display, str(note.content))
+        seen["after_one"] = paths.config_path().read_bytes()
+        host.query_one("#binding-edit-tester", Button).focus()
+        await settle(pilot)
+        seen["disarmed"] = (clear.armed, str(clear.label), note.display)
+        clear.press()
+        await settle(pilot)
+        clear.press()
         await settle(pilot)
         seen["cleared"] = paths.config_path().read_bytes()
         seen["empty"] = bool(host.query("#bindings-empty"))
@@ -970,17 +989,21 @@ def test_unset_key_and_clear_write_what_team_bind_writes() -> None:
 
     seen = drive(scenario)
     assert seen["asked"] is True and seen["unset"] == after_unset
-    assert seen["confirm"] is True and seen["cancelled"] == after_unset, "Cancel writes nothing"
+    assert seen["armed"] == (True, "Clear? click again", 1), "no dialog"
+    shown, said = cast(tuple[bool, str], seen["note"])
+    assert shown is True and said.startswith("The whole binding of tester goes"), said
+    assert seen["after_one"] == after_unset, "one press writes nothing"
+    assert seen["disarmed"] == (False, "Clear", False)
     assert seen["cleared"] == seen["after_clear"]
     assert seen["empty"] is True
 
 
 def test_the_role_bindings_section_fits_80_columns() -> None:
     """The fleet UI runs in an 80-column tmux pane as often as not: a binding's row, its
-    called-out paths and its three buttons stay inside it."""
+    called-out paths and its three buttons stay inside it, its Clear armed too."""
     _bind_cli("reviewer", "--env", "CLAUDE_CONFIG_DIR=/srv/claude-accounts/2", "--arg", "-v")
 
-    async def run() -> tuple[int, list[int]]:
+    async def run() -> tuple[int, list[int], int]:
         host = AppHost()
         async with host.run_test(size=(80, 40)) as pilot:
             await settle(pilot)
@@ -990,10 +1013,16 @@ def test_the_role_bindings_section_fits_80_columns() -> None:
             row.scroll_visible(animate=False)
             await settle(pilot)
             buttons = [button.region.right for button in row.query(Button)]
-            return row.region.right, buttons
+            clear = row.query_one("#binding-clear-reviewer", ConfirmButton)
+            clear.focus()
+            clear.press()
+            await settle(pilot)
+            assert clear.armed
+            return row.region.right, buttons, clear.region.right
 
-    right, buttons = asyncio.run(run())
+    right, buttons, armed = asyncio.run(run())
     assert 0 < right <= 80 and buttons and max(buttons) <= 80, (right, buttons)
+    assert armed <= 80, armed
 
 
 def _binding_shown(host: App[Any], role: str) -> str | None:
@@ -1273,7 +1302,7 @@ def test_reset_all_turns_always_show_project_directory_off() -> None:
         before = host.query_one("#ui-always-show-path", Switch).value
         host.query_one("#reset-settings", Button).press()
         await settle(pilot)
-        host.screen.query_one("#reset-confirm", Button).press()
+        host.query_one("#reset-settings", Button).press()
         await settle(pilot)
         return before, host.query_one("#ui-always-show-path", Switch).value, host.ui_told
 

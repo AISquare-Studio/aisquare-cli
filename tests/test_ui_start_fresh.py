@@ -165,20 +165,25 @@ async def _tick(pilot: Pilot[None], dialog: ConfirmFresh, checkbox: str) -> str:
 
 
 def test_the_menu_lists_start_fresh_just_above_remove(alpha: ProjectInfo) -> None:
-    async def go(pilot: Pilot[None]) -> list[tuple[str | None, str]]:
+    """Start fresh is the last option; Remove from fleet, which asks in place, is the row of
+    its own right under it."""
+
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str | None, str]], bool]:
         app = fleet_app(pilot)
         app.sidebar.open_menu("prj_a")
         await settle(app)
         assert isinstance(app.screen, ProjectMenu)
         options = app.screen.query_one(OptionList)
-        return [
+        remove = app.screen.query_one("#project-menu-remove")
+        listed = [
             (options.get_option_at_index(i).id, str(options.get_option_at_index(i).prompt))
             for i in range(options.option_count)
         ]
+        return listed, remove.region.y == options.region.bottom
 
-    listed = drive(go)
-    assert [option_id for option_id, _ in listed][-2:] == ["fresh", "remove"]
-    assert ("fresh", "↺ Start fresh…") in listed
+    listed, under = drive(go)
+    assert listed[-1] == ("fresh", "↺ Start fresh…")
+    assert under, "Remove is the row right under Start fresh"
 
 
 def test_the_menu_and_the_settings_button_open_the_same_dialog(alpha: ProjectInfo) -> None:

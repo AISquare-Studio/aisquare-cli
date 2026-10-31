@@ -226,6 +226,20 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   click once the button is on screen acts at once, and an ignored click raises no toast.
   It still leaves the keyboard focus where it was, and Enter on a focused button is never
   ignored.
+- **Five yes/no questions are asked in place: click the button again to go ahead.**
+  *Remove from fleet* (a card's ⋯ menu), a role binding's *Clear* and *Reset all settings
+  to default* (⚙ Settings), *Take over* (Spawn agent, handing off from a teammate) and
+  attaching a persona to a running agent (the Personas tab) opened a dialog whose button
+  you then had to reach. Now the first click, or Enter, turns the button into its question
+  where it is (`Remove? click again`, `Reset all? click again`, `Stop coder-1? click
+  again`) and shows beside it what the second will do: what leaves the fleet, the backup
+  *Reset all* keeps, the whole binding going, the teammate stopped, the persona an attach
+  replaces. A second click on the same spot, or a double-click, or Enter again, acts. Three
+  seconds, Esc, the focus leaving it or its view changing put it back as it was. In the
+  attach picker it is the agent's row that asks, marked ▶, with the question under the
+  list. The button's own change of label never makes the click guard above ignore that
+  second click. Stop, *Start fresh*, *Discard*, *Restart all…*, *Pause all…*, the update
+  and the usage-sharing consent keep their dialogs.
 
 ### Fixed
 

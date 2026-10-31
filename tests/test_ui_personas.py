@@ -51,7 +51,6 @@ from aisquare.cli.ui import persona_dialogs as dialogs
 from aisquare.cli.ui.attach import (
     SEAT_RULE,
     AttachTargetScreen,
-    ConfirmAttachScreen,
     NewAccountRequested,
     NewBindScreen,
     Target,
@@ -1332,12 +1331,24 @@ def test_the_filter_narrows_every_section_and_agent_rows_carry_the_persona(
     ]
 
 
-def test_choosing_an_agent_confirms_then_attaches_and_says_how_it_was_delivered(
+async def double_click_row(pilot: Pilot[Any], option: str) -> None:
+    """A double click on ``option``'s row of the target picker on screen."""
+    listing = pilot.app.screen.query_one("#picker-list", OptionList)
+    index = listing.get_option_index(option)
+    inside = listing.content_region
+    at = (inside.x - listing.region.x + 4, inside.y - listing.region.y + index)
+    await pilot.double_click(listing, offset=at)
+
+
+def test_choosing_an_agent_asks_in_place_then_attaches_and_says_how_it_was_delivered(
     project: ProjectInfo,
     catalogue: dict[str, Path],
     targets: list[FleetAgentStatus],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """User, 2026-10-30: a double click in place, not a dialog's button. Enter on a running
+    agent's row arms it, marked ▶, and the line under the list asks and names the persona it
+    replaces, attaching nothing; Enter again on it attaches."""
     calls: list[tuple[str, str, str]] = []
 
     def attach(target: ProjectInfo, label: str, name: str) -> fleet_service.AttachReceipt:
@@ -1356,17 +1367,22 @@ def test_choosing_an_agent_confirms_then_attaches_and_says_how_it_was_delivered(
     async def scenario(pilot: Pilot[None], host: Host) -> list[Any]:
         await select_row(pilot, host, "user:pair")
         await press(pilot, "#persona-attach-existing")
-        await wait_for(pilot, AttachTargetScreen)
+        picker = await wait_for(pilot, AttachTargetScreen)
         await settle(pilot)
         await pilot.press("enter")  # the highlighted agent
-        confirm = await wait_for(pilot, ConfirmAttachScreen)
-        question = shown(confirm.query_one("#attach-question", Static))
-        await press(pilot, "#attach-confirm")
         await settle(pilot)
-        return [question, host.notices, type(host.screen).__name__]
+        listing = picker.query_one("#picker-list", OptionList)
+        row = str(listing.get_option("agent:coder-auth").prompt)
+        question = shown(picker.query_one("#picker-armed", Static))
+        armed = [host.screen is picker, list(calls)]
+        await pilot.press("enter")
+        await settle(pilot)
+        return [row, question, armed, host.notices, type(host.screen).__name__]
 
-    question, notices, screen = drive(scenario, project=project)
+    row, question, armed, notices, screen = drive(scenario, project=project)
+    assert row.startswith("▶ coder-auth"), row
     assert question.startswith("Attach pair to coder-auth?") and "It replaces mentor." in question
+    assert armed == [True, []], "one Enter attaches nothing and the picker stays"
     assert calls == [(project.id, "coder-auth", "pair")]
     # A `noted` toast carries the receipt's sentence: nothing reached the agent yet, and
     # the bare "(noted)" read as a briefing waiting on the board (review of #240, finding 7).
@@ -1375,26 +1391,72 @@ def test_choosing_an_agent_confirms_then_attaches_and_says_how_it_was_delivered(
     assert screen == "Screen"
 
 
-def test_cancelling_the_attach_confirmation_attaches_nothing(
+def test_a_double_click_on_an_agent_s_row_attaches(
     project: ProjectInfo,
     catalogue: dict[str, Path],
     targets: list[FleetAgentStatus],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[object] = []
-    monkeypatch.setattr(fleet_service, "attach_persona", lambda *a, **k: calls.append(a))
+    calls: list[tuple[str, str]] = []
+
+    def attach(target: ProjectInfo, label: str, name: str) -> fleet_service.AttachReceipt:
+        calls.append((label, name))
+        agent = targets[0].agent.model_copy(update={"persona": name})
+        return fleet_service.AttachReceipt(
+            agent=agent, persona=name, replaced=None, delivered="typed", how="typed it now"
+        )
+
+    monkeypatch.setattr(fleet_service, "attach_persona", attach)
 
     async def scenario(pilot: Pilot[None], host: Host) -> None:
         await select_row(pilot, host, "user:pair")
         await press(pilot, "#persona-attach-existing")
         await wait_for(pilot, AttachTargetScreen)
         await settle(pilot)
-        await pilot.press("enter")
-        await wait_for(pilot, ConfirmAttachScreen)
-        await press(pilot, "#attach-cancel")
+        await double_click_row(pilot, "agent:coder-auth")
         await settle(pilot)
 
     drive(scenario, project=project)
+    assert calls == [("coder-auth", "pair")]
+
+
+def test_disarming_the_attach_attaches_nothing_and_gives_the_row_back(
+    project: ProjectInfo,
+    catalogue: dict[str, Path],
+    targets: list[FleetAgentStatus],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Esc on an armed row disarms it, row and line as they were, and leaves the picker open;
+    moving to another row disarms it too; the next Esc closes the picker."""
+    calls: list[object] = []
+    monkeypatch.setattr(fleet_service, "attach_persona", lambda *a, **k: calls.append(a))
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[object]:
+        await select_row(pilot, host, "user:pair")
+        await press(pilot, "#persona-attach-existing")
+        picker = await wait_for(pilot, AttachTargetScreen)
+        await settle(pilot)
+        listing = picker.query_one("#picker-list", OptionList)
+        line = picker.query_one("#picker-armed", Static)
+        rest = (str(listing.get_option("agent:coder-auth").prompt), shown(line))
+        await pilot.press("enter")
+        await settle(pilot)
+        await pilot.press("escape")
+        await settle(pilot)
+        escaped = [
+            host.screen is picker,
+            (str(listing.get_option("agent:coder-auth").prompt), shown(line)) == rest,
+        ]
+        await pilot.press("enter")
+        await settle(pilot)
+        await pilot.press("down")
+        await settle(pilot)
+        moved = (str(listing.get_option("agent:coder-auth").prompt), shown(line)) == rest
+        await pilot.press("escape")
+        await settle(pilot)
+        return [*escaped, moved, isinstance(host.screen, AttachTargetScreen)]
+
+    assert drive(scenario, project=project) == [True, True, True, False]
     assert calls == []
 
 

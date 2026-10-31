@@ -17,6 +17,9 @@ What it looks at, composed and never classified a third time:
 - **The operator's commands** (``[watch.sources.<name>]``), each printing JSON lines
   ``{"id", "project", "kind", "summary"}`` every ``every_seconds``. aisquare ships no
   integration with any outside service: such a source is the operator's own script.
+- **Held spawns** (:func:`fleet.freed_holds`): a project auto admission held
+  (``capacity_busy``) whose capacity has freed up, as ``capacity_freed``, so its manager
+  retries the spawn without polling. Delivered, the hold is forgotten: one wake per hold.
 
 Delivery, per tick: the ids seen are kept in ``~/.aisquare/watch/state.json`` (written whole
 under its lock). Per project with new items, the full items go to
@@ -308,6 +311,26 @@ class Watcher:
             items += made
         return items
 
+    def capacity(self, now: datetime) -> list[WatchItem]:
+        from aisquare.services import fleet as fleet_service
+
+        return [
+            WatchItem(
+                id=f"capacity:{freed.project.id}:{freed.hold.held_at.isoformat()}",
+                project_id=freed.project.id,
+                project_name=_project_name(freed.project),
+                kind="capacity_freed",
+                summary=f"a held spawn may start: {freed.why} — retry it",
+                detail={
+                    "held_at": freed.hold.held_at.isoformat(),
+                    "until": freed.hold.until.isoformat(),
+                    "signal": freed.hold.signal,
+                    "why": freed.why,
+                },
+            )
+            for freed in fleet_service.freed_holds(now)
+        ]
+
     def look_all(
         self, now: datetime, notes: list[str] | None = None, failed: set[str] | None = None
     ) -> list[WatchItem]:
@@ -321,6 +344,7 @@ class Watcher:
             ("stale", lambda: self.stale(now)),
             ("github", lambda: self.github(now, notes)),
             ("sources", lambda: self.commands(now, notes)),
+            ("capacity", lambda: self.capacity(now)),
         ]
         items: list[WatchItem] = []
         for name, look in looks:
@@ -374,6 +398,7 @@ class Watcher:
                     "last_scan_at": now.isoformat(timespec="seconds"),
                 }
             )
+        _release_woken_holds(item for item in items if item.id not in undelivered)
         if self.settings.auto_stop:
             with contextlib.suppress(Exception):  # a stop never costs the tick its news
                 from aisquare.services import autostop
@@ -386,10 +411,25 @@ class Watcher:
         return report
 
 
+def _release_woken_holds(delivered: Iterable[WatchItem]) -> None:
+    """Forget each hold a delivered ``capacity_freed`` woke the manager for: that hold only,
+    so one a later spawn wrote stays, and wakes again when it frees up."""
+    from aisquare.services import fleet as fleet_service
+
+    for item in delivered:
+        if item.kind != "capacity_freed":
+            continue
+        with contextlib.suppress(KeyError, ValueError):
+            held_at = datetime.fromisoformat(str(item.detail["held_at"]))
+            fleet_service.release_hold(item.project_id, held_at)
+
+
 def _look_of(item_id: str) -> str:
     """Which look an item id came from (:meth:`Watcher.look_all`'s names)."""
     if item_id.startswith("needs:"):
         return "needs"
+    if item_id.startswith("capacity:"):
+        return "capacity"
     if item_id.startswith("stale:"):
         return "stale"
     if item_id.startswith("source:"):

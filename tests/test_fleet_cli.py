@@ -2427,7 +2427,14 @@ def test_capacity_json_names_the_headroom_and_every_limit(
     report = json.loads(result.output)
     assert report["available_mb"] == 1500 and report["min_free_mb"] == 2048
     assert report["admits"] is False and report["reason"] == "1500 MB available, 2048 MB needed"
-    assert report["live_total"] == 0 and report["max_agents_per_project"] == 4
+    assert report["live_total"] == 0 and report["max_agents_per_project"] == "auto"
+    assert report["busy"] is False and report["busy_floor"] == 3 and report["holds"] == []
+    assert [signal["name"] for signal in report["signals"]] == [
+        "cpu load",
+        "memory pressure",
+        "thermal",
+    ]
+    assert {signal["verdict"] for signal in report["signals"]} == {"ok"}
 
 
 def test_gate_at_the_deadline_runs_nothing_and_exits_75(

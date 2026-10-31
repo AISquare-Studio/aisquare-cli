@@ -127,7 +127,7 @@ def test_setting_a_key_back_to_its_default_takes_it_out_of_the_file(tmp_path: Pa
     config.fleet.max_agents_per_project = 6
     save_config(config, target)
     assert _file(target)["fleet"] == {"max_agents_per_project": 6, "roles": _ROLES}
-    config.fleet.max_agents_per_project = 4
+    config.fleet.max_agents_per_project = "auto"
     save_config(config, target)
     assert _file(target)["fleet"] == {"roles": _ROLES}
 
@@ -283,6 +283,14 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "min_free_mb": 2048,
             "test_gate_mb": 0,
             "test_gate_wait_minutes": 15,
+            # Auto admission by the machine's load, the default since it came (#12).
+            "max_agents_per_project": "auto",
+            "busy_floor": 3,
+            "busy_load_per_cpu": 1.0,
+            "busy_cpu_psi": 40.0,
+            "busy_memory": "warn",
+            "busy_thermal": "heavy",
+            "busy_hold_minutes": 5.0,
             # Auto-stop of finished workers (P2-W1b, #283).
             "auto_stop_finished": True,
             "auto_stop_idle_minutes": 5.0,

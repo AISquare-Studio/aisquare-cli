@@ -89,6 +89,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spelling at the next sweep, not the next day; the store is not migrated. Nicknames stay
   everywhere else: the sidebar's cards, `fleet ls`, the project views.
 
+- **Fleet admission follows the machine's load: `[fleet] max_agents_per_project` takes
+  `"auto"`, and `"auto"` is the default.** A spawn is admitted unless the machine is busy.
+  While it is busy, a spawn into a project that already runs 3 live agents is held, and a
+  project with fewer is always admitted. Busy means any one of these: the 5-minute load
+  average per logical CPU at 1.0; on Linux, `/proc/pressure/cpu` `some avg60` at 40; memory
+  pressure at `warn`; on macOS, thermal pressure at `heavy` (`notifyutil`, no root). Each
+  threshold, the floor and the hold are settings: `busy_load_per_cpu`, `busy_cpu_psi`
+  (`0` turns either off), `busy_memory`, `busy_thermal` (`"off"` turns either off),
+  `busy_floor = 3` and `busy_hold_minutes = 5`. Each number is finite and bounded: no `inf`
+  or `nan`, a hold of at most a year (525600 minutes), a floor of 1 to 1000, CPU pressure
+  up to 100, and load per CPU up to 1000. Before this, a box at load 54 on 14 cores with
+  normal memory pressure admitted every spawn.
+  - **A held spawn never waits.** It is refused with the new code `capacity_busy`, and the
+    message names the signal, its value, its threshold and the earliest retry (5 minutes
+    on). A retry inside those 5 minutes is held again without probing, and one after them
+    probes again. Under `--json`, `hint` carries `retry_at`. With `auto_stop_finished` on,
+    the project's finished workers are stopped first, and the spawn goes ahead if that
+    frees a seat. The TUI's spawn dialog shows the hold reason.
+  - **`aisquare watch` wakes the held project's manager when capacity frees up** (a
+    `capacity_freed` item: a seat freed, or the hold ran out and the machine calmed), so a
+    manager retries without polling. One wake per hold.
+  - **`fleet capacity` and the doctor's `fleet capacity` row list each signal** with its
+    value, threshold and verdict (`busy`, `ok`, `off`, `unknown`), plus the holds in force.
+    A busy machine is reported there, not warned about: the doctor row stays ok, and still
+    warns, as before, when a spawn would be refused or memory pressure is at `warn`.
+  - **The hard floors still apply in auto mode, below 3 agents too:** `min_free_mb`,
+    critical memory pressure, `max_agents_total` and a group's `max_agents`. A replacement
+    of a running agent (`restart`, `switch`) is never held.
+  - **A number keeps today's behaviour exactly.** A file that sets one (`8`, say) loads
+    unchanged and never asks the load. A file 0.8.0 wrote, which holds every default
+    including `4`, follows the new default like every other moved default. Set `4` again to
+    keep it. App settings ▸ *max agents per project* takes `auto` or a number, and shows
+    `auto` as the default. No new dependency.
+
 ### Fixed
 
 - **An idle account no longer reads as signed out because its token went stale.** Claude

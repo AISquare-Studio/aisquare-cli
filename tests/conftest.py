@@ -1020,6 +1020,22 @@ def roomy_memory(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def calm_machine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every spawn in the suite sees an idle machine, whatever the runner's load is.
+
+    Auto admission (``max_agents_per_project = "auto"``, the default) holds a spawn into a
+    project at ``busy_floor`` while the machine reads busy, and a loaded CI runner or a
+    laptop running a fleet would hold the third agent a test spawns. A test of auto
+    admission sets its own readings; the probes' own tests call ``darwin_thermal`` /
+    ``psi_some_avg60`` with their fixtures.
+    """
+    from aisquare.core import load
+
+    monkeypatch.setattr(load, "cpu_load", lambda: load.CpuLoad(0.5, 8, None))
+    monkeypatch.setattr(load, "thermal", lambda: load.Thermal(0, "test"))
+
+
+@pytest.fixture(autouse=True)
 def no_detached_root_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     """No in-process test starts the detached worker that posts a Run's root (#129 e).
 

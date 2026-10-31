@@ -61,9 +61,8 @@ NOTICE = "notice"
 COMMAND = "command"
 """A slash command a person typed (``/model``, ``/clear``…): all harness blocks, a person's."""
 
-NUDGE_TEXT = "aisquare: board update — read the delta above."
-"""The one line the fleet's nudge types: ``services.fleet.NUDGE_TEXT``, said again here so that
-reading a transcript does not import the fleet (a test holds the two equal)."""
+NUDGE_TEXT = prompt_origin.WAKE_TEXT
+"""The one line the fleet's nudge types (``services.fleet.NUDGE_TEXT``)."""
 
 _USER = b'"user"'
 """In every user entry (its ``type`` and its ``role``), in no assistant's: the quoted word, as

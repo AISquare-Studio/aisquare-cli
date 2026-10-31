@@ -16,12 +16,15 @@ Recorded on the turn's ``metric`` row (``origin``) at its ``UserPromptSubmit``, 
   prompt that is nothing but ``<task-notification>`` blocks. A slash command a person types is
   all harness blocks too, and is ``typed``.
 
-**The marker.** Every aisquare write into an agent's prompt (``services.delivery``) leaves one
-file under ``run/origin`` first, named for a digest of the text (whitespace folded, as the input box
-folds it), holding the kind and who sent it. The ``UserPromptSubmit`` it starts takes the file whose
-digest is its prompt's (:func:`take_origin`), so the origin is the one of the text that was
-submitted, not a guess from timing. A marker nobody takes (the write was refused, the agent died) is
-ignored after :data:`MAX_AGE` and removed by the next :func:`mark_origin`.
+**The marker.** Every aisquare write into an agent's prompt (``services.delivery``) leaves a
+file of its own under ``run/origin`` first, named for a digest of the text (whitespace folded,
+as the input box folds it) and a nonce, holding the kind and who sent it. The
+``UserPromptSubmit`` it starts takes the oldest live file whose digest is its prompt's
+(:func:`take_origin`), so the origin is the one of the text that was submitted, not a guess from
+timing, and two writes of the same text waiting at once (two wakes) keep one each. A marker
+nobody takes (the write was refused, the agent died) is ignored after :data:`MAX_AGE` and
+removed by the next :func:`mark_origin`. With no marker, the fleet's nudge (:data:`WAKE_TEXT`)
+is still a wake.
 
 **Who authored it.** ``wake``, ``upkeep``, ``continuation`` and ``notice`` are ``agent`` by kind
 (:data:`AGENT_KINDS`): no person writes them, whatever process sends them. A ``tell`` and a
@@ -40,6 +43,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -74,6 +78,10 @@ HUMAN_TYPED = f"{HUMAN}:{TYPED}"
 AGENT_CONTINUATION = f"{AGENT}:{CONTINUATION}"
 AGENT_NOTICE = f"{AGENT}:{NOTICE}"
 
+WAKE_TEXT = "aisquare: board update — read the delta above."
+"""The one line the fleet's nudge types (``services.fleet.NUDGE_TEXT``, held equal by a test):
+said here so that the hook and the transcript scan read it without importing the fleet."""
+
 MAX_AGE = timedelta(minutes=30)
 """How long a marker waits for its prompt: a spawn's first message is submitted once Claude Code
 has started (seconds; a trust dialog may hold it longer), a typed one within its minute of
@@ -92,6 +100,7 @@ a recorded prompt.)"""
 
 _ENV_AGENT = ("CLAUDECODE", "AISQUARE_FLEET_AGENT")
 _SENDER: ContextVar[str | None] = ContextVar("prompt_origin_sender", default=None)
+_WRITES = itertools.count()
 
 
 def compose_origin(by: str, kind: str) -> str:
@@ -148,56 +157,80 @@ def sent_by(by: str) -> Iterator[None]:
 
 def mark_origin(
     text: str, kind: str, *, by: str | None = None, now: datetime | None = None
-) -> None:
+) -> Path | None:
     """Say that ``text``, about to reach an agent's prompt, is a ``kind`` sent by ``by`` (the
     process's :func:`origin_sender` when not given; always ``agent`` for one of
-    :data:`AGENT_KINDS`). Stale markers are removed on the way."""
+    :data:`AGENT_KINDS`). One marker per write, ``<digest>.<nonce>.json``: two writes of the same
+    text waiting at once (two wakes, from the watcher and a teammate's ``task done``) keep an
+    origin each. The marker's path, for :func:`unmark_origin`; ``None`` when none was written.
+    Stale markers are removed on the way."""
     if not text.strip():
-        return
+        return None
     by = AGENT if kind in AGENT_KINDS else by or origin_sender()
     when = now or datetime.now(tz=UTC)
     folder = origin_markers_dir()
     try:
         folder.mkdir(parents=True, exist_ok=True)
         _forget_stale_markers(folder)
-        path = folder / f"{origin_digest(text)}.json"
-        temp = path.with_suffix(f".{os.getpid()}.tmp")
+        # Nanoseconds first, so the names of one text sort oldest first; the pid and a counter
+        # keep two writes in one nanosecond, or two processes, apart.
+        nonce = f"{time.time_ns():020d}-{os.getpid()}-{next(_WRITES)}"
+        path = folder / f"{origin_digest(text)}.{nonce}.json"
+        temp = folder / f".{path.name}.tmp"
         temp.write_text(
-            json.dumps({"kind": kind, "by": by, "at": when.isoformat()}),
-            encoding="utf-8",
+            json.dumps({"kind": kind, "by": by, "at": when.isoformat()}), encoding="utf-8"
         )
         temp.replace(path)
     except OSError:
-        return
+        return None
+    return path
 
 
-def unmark_origin(text: str) -> None:
-    """Withdraw ``text``'s marker: the write did not reach the prompt after all."""
-    with contextlib.suppress(OSError):
-        (origin_markers_dir() / f"{origin_digest(text)}.json").unlink()
+def unmark_origin(marker: Path | None) -> None:
+    """Withdraw the marker a write left (:func:`mark_origin`'s path): it did not reach the
+    prompt after all. Another write's marker for the same text is left alone."""
+    if marker is not None:
+        with contextlib.suppress(OSError):
+            marker.unlink()
 
 
 def take_origin(prompt: str | None, *, now: datetime | None = None) -> str | None:
-    """The origin a marker left for ``prompt``, the marker gone; ``None`` when there is none,
-    or only one older than :data:`MAX_AGE`."""
+    """The origin the oldest live marker for ``prompt`` left, that marker gone (claimed by a
+    rename, so two prompts never take the same one); ``None`` when there is none. A marker older
+    than :data:`MAX_AGE` is removed and passed over."""
     if not prompt or not prompt.strip():
         return None
-    path = origin_markers_dir() / f"{origin_digest(prompt)}.json"
+    folder = origin_markers_dir()
+    digest = origin_digest(prompt)
     try:
-        raw = path.read_text(encoding="utf-8")
+        names = sorted(
+            entry.name
+            for entry in os.scandir(folder)
+            if entry.name.startswith(f"{digest}.") and entry.name.endswith(".json")
+        )
     except OSError:
         return None
-    with contextlib.suppress(OSError):
-        path.unlink()
-    try:
-        data = json.loads(raw)
-        at = datetime.fromisoformat(str(data["at"]))
-        by, kind = str(data["by"]), str(data["kind"])
-    except (ValueError, KeyError, TypeError):
-        return None
-    if (now or datetime.now(tz=UTC)) - at > MAX_AGE or by not in (HUMAN, AGENT) or not kind:
-        return None
-    return compose_origin(AGENT if kind in AGENT_KINDS else by, kind)
+    when = now or datetime.now(tz=UTC)
+    for name in names:
+        claimed = folder / f".{name}.{os.getpid()}.taken"
+        try:
+            (folder / name).rename(claimed)  # one taker wins; the others try the next one
+            raw = claimed.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        finally:
+            with contextlib.suppress(OSError):
+                claimed.unlink()
+        try:
+            data = json.loads(raw)
+            at = datetime.fromisoformat(str(data["at"]))
+            by, kind = str(data["by"]), str(data["kind"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if when - at > MAX_AGE or by not in (HUMAN, AGENT) or not kind:
+            continue
+        return compose_origin(AGENT if kind in AGENT_KINDS else by, kind)
+    return None
 
 
 def only_harness_blocks(prompt: str | None) -> bool:
@@ -226,12 +259,18 @@ def origin_of_prompt(
     prompt: str | None, *, notice: bool = False, now: datetime | None = None
 ) -> str:
     """The origin of the turn ``prompt`` starts: its marker's, else ``agent:notice`` for Claude
-    Code's own notice (``notice``, the caller's reading: :func:`only_task_notifications`), else a
-    person typed it."""
+    Code's own notice (``notice``, the caller's reading: :func:`only_task_notifications`), else
+    ``agent:wake`` for the fleet's nudge (:data:`WAKE_TEXT`), else a person typed it."""
     marked = take_origin(prompt, now=now)
     if marked is not None:
         return marked
-    return AGENT_NOTICE if notice else HUMAN_TYPED
+    if notice:
+        return AGENT_NOTICE
+    if prompt is not None and " ".join(prompt.split()) == WAKE_TEXT:
+        # The fleet's nudge, its marker taken by another wake or gone stale: no person types
+        # it, and the report's inference reads it so too.
+        return compose_origin(AGENT, WAKE)
+    return HUMAN_TYPED
 
 
 def _forget_stale_markers(folder: Path) -> None:

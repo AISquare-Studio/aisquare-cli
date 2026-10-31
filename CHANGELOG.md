@@ -32,8 +32,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   read: asq's usage sweep (every 10 minutes while asq is open) and `metrics stats` keep that
   cache filled, so the weekly run reads it warm (2 to 5 s here, under load). Without them, a
   run reads a week or two of transcripts first, once: 17 s for 2 GB of them on this machine,
-  36 s under heavy load. The first sweep after the upgrade pays the same read once, in the
-  background.
+  36 s under heavy load. The first sweep after the upgrade pays the same read once: asq's in
+  the background, and the first `aisquare metrics stats` (or `metrics backfill`) in the
+  foreground: 3 s on this machine when it is quiet (0.6 s with a warm cache), 8 s under
+  heavy load (2.6 s warm).
 - **Who started each turn is recorded, by who authored the instruction.** Every write
   aisquare makes into an agent's prompt (a fleet spawn's first message, `fleet tell`, the
   phone's tell, the manager's wake, the quiet compaction's lines) leaves a marker for its

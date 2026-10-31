@@ -1101,3 +1101,48 @@ def test_the_usage_sweep_fills_the_facts_cache_so_the_report_reads_it_warm(
     cached = json.loads(transcript_facts.facts_cache_path().read_text(encoding="utf-8"))
     assert cached["files"][str(path)]["offset"] == path.stat().st_size
     assert cached["files"][str(path)]["facts"] == [[stamp(_at(26, 10)), "p", "text"]]
+
+
+# --- the reopen of d09a5940: one marker per write ----------------------------------------------
+
+
+def test_two_wakes_waiting_at_once_are_two_agent_wakes(as_human: None) -> None:
+    """The watcher's wake and a teammate's ``task done`` wake land within seconds: the same text,
+    one marker each, so neither turn reads as a person's (review of d09a5940, 1)."""
+    text = fleet_service.NUDGE_TEXT
+    prompt_origin.mark_origin(text, prompt_origin.WAKE)
+    prompt_origin.mark_origin(text, prompt_origin.WAKE)
+    assert [prompt_origin.origin_of_prompt(text) for _ in range(2)] == ["agent:wake"] * 2
+    assert not list(prompt_origin.origin_markers_dir().iterdir()), "both markers taken"
+
+
+def test_a_wake_with_no_marker_is_still_an_agents(as_human: None) -> None:
+    """Its marker gone stale or taken: the nudge's words are no person's, as inferred too."""
+    assert prompt_origin.origin_of_prompt(fleet_service.NUDGE_TEXT) == "agent:wake"
+    assert prompt_origin.origin_of_prompt(f"  {fleet_service.NUDGE_TEXT}\n") == "agent:wake"
+    assert prompt_origin.origin_of_prompt("aisquare: board update") == "human:typed"
+
+
+def test_two_identical_tells_keep_an_origin_each_and_a_withdrawn_one_only_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_manager")
+    first = prompt_origin.mark_origin("status?", prompt_origin.TELL)
+    prompt_origin.mark_origin("status?", prompt_origin.TELL)
+    prompt_origin.mark_origin("status?", prompt_origin.TELL)
+    prompt_origin.unmark_origin(first)  # the first paste failed: its marker, and only it, goes
+    taken = [prompt_origin.take_origin("status?") for _ in range(3)]
+    assert taken == ["agent:tell", "agent:tell", None]
+
+
+def test_the_oldest_live_marker_is_taken_first(as_human: None) -> None:
+    prompt_origin.mark_origin("go", prompt_origin.TELL, by=prompt_origin.AGENT)
+    prompt_origin.mark_origin("go", prompt_origin.TELL, by=prompt_origin.HUMAN)
+    assert [prompt_origin.take_origin("go"), prompt_origin.take_origin("go")] == [
+        "agent:tell",
+        "human:tell",
+    ]
+
+
+def test_the_nudge_text_is_said_once_for_the_hook_and_the_scan() -> None:
+    assert prompt_origin.WAKE_TEXT == fleet_service.NUDGE_TEXT == transcript_facts.NUDGE_TEXT

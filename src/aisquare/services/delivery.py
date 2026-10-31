@@ -335,14 +335,13 @@ def deliver_typed(
     box = _composer(server, pane_id) if reads_box else None
     reads_box = reads_box and box is not None
     waiting = guard is not None and reads_box and holds(box, text)
-    if origin is not None:
-        prompt_origin.mark_origin(text, origin)
+    marker = prompt_origin.mark_origin(text, origin) if origin is not None else None
     pasted = (
         PaneWrite("yes", what) if waiting else pane_write(what, lambda: server.paste(pane_id, text))
     )
     if pasted.typed != "yes":
-        if origin is not None and pasted.typed == "no":
-            prompt_origin.unmark_origin(text)
+        if pasted.typed == "no":
+            prompt_origin.unmark_origin(marker)
         return Delivered(pasted, None, 0)
     if reads_box:
         deadline = monotonic() + RENDER_WAIT
@@ -665,16 +664,15 @@ def type_then_enter(
 
     ``origin`` leaves a marker for the text first, as :func:`deliver_typed` does.
     """
-    if origin is not None:
-        prompt_origin.mark_origin(text, origin)
+    marker = prompt_origin.mark_origin(text, origin) if origin is not None else None
     wrote = pane_writes(
         (what, lambda: server.paste(pane_id, text)),
         ("Enter", lambda: server.send_keys(pane_id, "Enter")),
     )
     if wrote.typed == "yes":
         return TellResult("yes", done)
-    if origin is not None and wrote.typed == "no" and not wrote.went:
-        prompt_origin.unmark_origin(text)
+    if wrote.typed == "no" and not wrote.went:
+        prompt_origin.unmark_origin(marker)
     return pasted_unsent(wrote, label, press=press) if wrote.went else wrote
 
 

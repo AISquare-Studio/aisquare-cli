@@ -26,27 +26,45 @@ path, and a ``[`` in either is data, never markup.
 Nothing here writes to the board. Ending an agent's row is the service's
 business and what it records is the service's to record; a board write from the
 UI would be a second account of one fact.
+
+**Don't ask again** (``[ui] confirm_stop``). The tick, unticked as the dialog opens,
+is saved when Stop or Force is pressed with it ticked
+(``settings_service.stop_without_asking``) — at the press, whatever the stop then
+answers: it is an answer to the question, not to the stop. Cancel and Escape save nothing. From then
+on the shell stops at once, with no dialog (``FleetApp.on_stop_agent``), through
+:func:`start_stop` and :func:`stop_answer` — the call and the reading of its answer
+this dialog makes, so the two paths cannot drift. A file that cannot be read is not
+written over: the stop goes on, and a toast says the dialog will ask again.
 """
 
 from __future__ import annotations
 
 import inspect
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from rich.text import Text
 from textual import on
-from textual.app import ComposeResult
+from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.dom import DOMNode
 from textual.screen import ModalScreen
-from textual.widgets import Button, Static
+from textual.widgets import Button, Checkbox, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.sidebar import ALIVE_STATES
+from aisquare.cli.ui.views.app_settings import UiSettingsChanged
+from aisquare.core.config import UiSettings
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
+from aisquare.services import settings as settings_service
 
 STOP_WORKER = "agent-stop"
+DONT_ASK = "stop-dont-ask"
+"""The dialog's *Don't ask again* tick: ``[ui] confirm_stop``."""
+ASK_AGAIN_WHERE = "⚙ Settings ▸ App settings ▸ User preferences ▸ Advanced"
+"""Where *Ask before stopping an agent* is: the toast that says the dialog will not ask
+again names it, since nothing else on screen will once the dialog has gone."""
 
 _BOX_CSS = """
 StopAgentScreen { align: center middle; }
@@ -56,6 +74,8 @@ StopAgentScreen .picker-header { height: auto; padding: 1 0; }
 StopAgentScreen .picker-note { height: auto; }
 StopAgentScreen .picker-buttons { height: auto; align-horizontal: right; padding-bottom: 1; }
 StopAgentScreen .picker-buttons Button { margin-left: 2; }
+StopAgentScreen #stop-dont-ask { border: none; height: 1; padding: 0 1; margin-bottom: 1; }
+StopAgentScreen #stop-dont-ask:focus { text-style: bold reverse; }
 """
 
 
@@ -96,6 +116,45 @@ def refusal(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+def start_stop(
+    node: DOMNode, project: ProjectInfo, agent: FleetAgent, *, force: bool
+) -> Worker[Any]:
+    """Stop ``agent`` on a thread worker of ``node``: tmux, the grace wait and the kill
+    all block. The dialog's call, and the shell's when it does not ask.
+
+    Pinned to THIS row (``agent_id``), never to whoever holds the label now: the view
+    outlives its row, and a 💤 view's Stop by label stopped the replacement (review of
+    #138).
+    """
+    label, agent_id = agent.label, agent.id
+    return node.run_worker(
+        lambda: fleet_service.stop(project, label, force=force, agent_id=agent_id, actor="user"),
+        name=STOP_WORKER,
+        group=STOP_WORKER,
+        thread=True,
+        exit_on_error=False,  # a FleetError is an answer to show, not a crash
+    )
+
+
+def stop_answer(worker: Worker[Any], state: WorkerState) -> fleet_service.StopReceipt | str:
+    """What a stop worker that finished (``SUCCESS`` or ``ERROR``) answered: the service's
+    receipt, or why there is none, in the service's words (:func:`refusal`)."""
+    if state is WorkerState.SUCCESS:
+        receipt = worker.result
+        if isinstance(receipt, fleet_service.StopReceipt):
+            return receipt
+        return f"the stop answered without a receipt ({type(receipt).__name__})"
+    error = worker.error
+    return refusal(error) if error is not None else "the stop failed, with no reason"
+
+
+def warn_release_failed(app: App[Any], receipt: fleet_service.StopReceipt) -> None:
+    """``fleet stop`` prints this and exits 1: a claim left with the ended session is not a
+    clean stop, and the screen must not read as one."""
+    if receipt.release_failed:
+        app.notify(f"claims: {receipt.release_failed}", severity="warning", timeout=8, markup=False)
+
+
 class StopAgentScreen(ModalScreen[FleetAgent | None]):
     """One question before an agent is stopped; dismisses with the ended row, or ``None``."""
 
@@ -107,6 +166,8 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
         self.project = project
         self.status = status
         self._stopping = False
+        self.saved_ui: UiSettings | None = None
+        """``[ui]`` as *Don't ask again* saved it, once it has; ``None`` until then."""
 
     @property
     def label(self) -> str:
@@ -165,6 +226,7 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
         with Vertical():
             yield Static(self.question(), classes="picker-header", id="stop-question")
             yield Static(id="stop-status", classes="picker-note")
+            yield Checkbox("Don't ask again", False, id=DONT_ASK)
             with Horizontal(classes="picker-buttons"):
                 yield Button("Stop", id="stop-confirm", variant="primary")
                 force = Button("Force", id="stop-force", variant="warning")
@@ -172,32 +234,47 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
                 yield force
                 yield Button("Cancel", id="stop-cancel")
 
+    # Names no other function in the tree has: tests/test_config_writes_stay_in_the_cli.py
+    # follows calls by NAME to ``save_config`` (*Don't ask again* reaches it), and a
+    # ``_run`` here put every caller of any ``_run`` — hooks and the MCP server among them —
+    # in reach of a config write.
     @on(Button.Pressed, "#stop-confirm")
-    def _stop(self) -> None:
-        self._run(force=False)
+    def _stop_pressed(self) -> None:
+        self._stop_confirmed(force=False)
 
     @on(Button.Pressed, "#stop-force")
-    def _force(self) -> None:
-        self._run(force=True)
+    def _force_pressed(self) -> None:
+        self._stop_confirmed(force=True)
 
-    def _run(self, *, force: bool) -> None:
+    def _stop_confirmed(self, *, force: bool) -> None:
         """One stop at a time, off the UI thread: tmux, the grace wait and the kill all block."""
         if self._stopping:
             return
         self._set_stopping(True)
-        label = self.label
-        # Pinned to THIS row (``agent_id``), never to whoever holds the label now: the
-        # view outlives its row, and a 💤 view's Stop by label stopped the replacement
-        # (review of #138).
-        agent_id = self.status.agent.id
-        self.run_worker(
-            lambda: fleet_service.stop(
-                self.project, label, force=force, agent_id=agent_id, actor="user"
-            ),
-            name=STOP_WORKER,
-            group=STOP_WORKER,
-            thread=True,
-            exit_on_error=False,  # a FleetError is an answer to show, not a crash
+        self._save_dont_ask()
+        start_stop(self, self.project, self.status.agent, force=force)
+
+    def _save_dont_ask(self) -> None:
+        """Ticked at a Stop or a Force: ``[ui] confirm_stop = false``, once, and the shell told
+        (``UiSettingsChanged``), which stops at once from then on and shows the Settings
+        switch off. An unreadable file is left as it is: the stop goes on regardless."""
+        if self.saved_ui is not None or not self.query_one(f"#{DONT_ASK}", Checkbox).value:
+            return
+        try:
+            self.saved_ui = settings_service.stop_without_asking()
+        except Exception as exc:
+            self.app.notify(
+                f"Don't ask again was not saved, so Stop will ask again: {refusal(exc)}",
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
+            return
+        self.app.post_message(UiSettingsChanged(self.saved_ui))
+        self.app.notify(
+            f"Stop will not ask again. {ASK_AGAIN_WHERE} turns it back on.",
+            timeout=10,
+            markup=False,
         )
 
     @on(Button.Pressed, "#stop-cancel")
@@ -213,6 +290,7 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
         self._stopping = running
         for button in self.query(Button):
             button.disabled = running
+        self.query_one(f"#{DONT_ASK}", Checkbox).disabled = running or self.saved_ui is not None
         self._note(f"stopping {self.label} …" if running else None, style="dim")
 
     def _note(self, text: str | None, *, style: str = "bold red") -> None:
@@ -223,26 +301,13 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name != STOP_WORKER:
             return
-        if event.state is WorkerState.SUCCESS:
-            receipt = event.worker.result
-            if isinstance(receipt, fleet_service.StopReceipt):
-                if receipt.release_failed:
-                    # `fleet stop` prints this and exits 1: a claim left with the ended
-                    # session is not a clean stop, and the dialog must not read as one.
-                    self.app.notify(
-                        f"claims: {receipt.release_failed}",
-                        severity="warning",
-                        timeout=8,
-                        markup=False,
-                    )
-                self.dismiss(receipt.agent)
+        if event.state in (WorkerState.SUCCESS, WorkerState.ERROR):
+            answer = stop_answer(event.worker, event.state)
+            if isinstance(answer, fleet_service.StopReceipt):
+                warn_release_failed(self.app, answer)
+                self.dismiss(answer.agent)
                 return
-            self._refused(f"the stop answered without a receipt ({type(receipt).__name__})")
-        elif event.state is WorkerState.ERROR:
-            error = event.worker.error
-            self._refused(
-                refusal(error) if error is not None else "the stop failed, with no reason"
-            )
+            self._refused(answer)
         elif event.state is WorkerState.CANCELLED:
             self._set_stopping(False)
 

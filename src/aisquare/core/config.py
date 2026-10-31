@@ -1016,12 +1016,20 @@ class UiSettings(BaseModel):
     name in the sidebar. Off, the default, the directory is shown only when two projects
     share a name, to tell them apart.
 
+    ``confirm_stop`` on, the default: the agent view's Stop and the sidebar's ``x`` ask
+    first (the Stop dialog). Off, they stop the agent at once, gracefully (``/exit``, no
+    Force), every agent alike, the manager and the captain included. The dialog's *Don't
+    ask again* turns it off; *Ask before stopping an agent* under User preferences turns it
+    back on. The captain's ``open_stop`` ui action asks whatever this says: it opens the
+    dialog and stops nothing.
+
     Read from the config file alone, like ``[fleet]``: there is no ``AISQUARE_UI_*``
     variable. ``asq`` reads it once at start and again when App settings saves, reloads
-    or resets — not on every refresh tick.
+    or resets, or the Stop dialog saves *Don't ask again* — not on every refresh tick.
     """
 
     always_show_project_path: bool = False
+    confirm_stop: bool = True
 
 
 class SharingSettings(BaseModel):

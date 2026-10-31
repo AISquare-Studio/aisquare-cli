@@ -119,7 +119,13 @@ from aisquare.cli.ui.sidebar import (
     agent_name,
 )
 from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
-from aisquare.cli.ui.stop import StopAgentScreen
+from aisquare.cli.ui.stop import (
+    STOP_WORKER,
+    StopAgentScreen,
+    start_stop,
+    stop_answer,
+    warn_release_failed,
+)
 from aisquare.cli.ui.terminal import (
     EscapeToSidebar,
     InPlaceField,
@@ -638,11 +644,20 @@ class HelpScreen(ModalScreen[None]):
     """On macOS, after ``drag``: the copy and paste keys a Mac has. Terminal.app and iTerm2
     keep ⌘C as their own Copy, so it never reaches asq; ⌘V does, as a bracketed paste."""
 
-    def __init__(self, escape_key: str, *, at_board: bool = False, capturing: bool = False) -> None:
+    def __init__(
+        self,
+        escape_key: str,
+        *,
+        at_board: bool = False,
+        capturing: bool = False,
+        confirm_stop: bool = True,
+    ) -> None:
         super().__init__()
         self.escape_key = escape_key
         self.at_board = at_board
         self.capturing = capturing
+        self.confirm_stop = confirm_stop
+        """``[ui] confirm_stop``: whether ``x`` asks first, or stops at once."""
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="helpbox"):
@@ -681,7 +696,11 @@ class HelpScreen(ModalScreen[None]):
             *(self.MAC_COPY_KEYS if mac_keyboard() else ()),
             ("divider", "drag the line beside the sidebar to resize it; double-click puts it back"),
             ("> < =", "from the sidebar: widen, narrow, reset the divider"),
-            ("x", "from the sidebar: stop the selected agent (asks first)"),
+            (
+                "x",
+                "from the sidebar: stop the selected agent "
+                + ("(asks first)" if self.confirm_stop else "(at once: Settings says not to ask)"),
+            ),
             ("t", "themes (applied live, autosaved)"),
             ("R", "remote control — the fleet on your phone: link, QR, password, devices"),
             ("r", "refresh now"),
@@ -1143,10 +1162,18 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         (``HeadroomSummary.session_by_slot``): what the agent rows and info lines show. It
         is the slow read's, handed on when it lands — the two-second tick reads no usage."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
-        self.always_show_project_path = settings_service.ui_settings().always_show_project_path
+        ui = settings_service.ui_settings()
+        self.always_show_project_path = ui.always_show_project_path
         """``[ui] always_show_project_path``, read once at the start and again when App
         settings saves, reloads or resets (``UiSettingsChanged``) — never on the refresh tick,
         which would read ``config.toml`` every two seconds for a value only that page sets."""
+        self.confirm_stop = ui.confirm_stop
+        """``[ui] confirm_stop``: whether Stop and ``x`` ask first. Read as
+        :attr:`always_show_project_path` is, and again when the Stop dialog saves *Don't ask
+        again*, which posts the same ``UiSettingsChanged``."""
+        self._quick_stops: dict[Worker[Any], FleetAgent] = {}
+        """Each stop :meth:`on_stop_agent` started with no dialog, with the row it stops: a
+        second press for that row while it runs does nothing (:meth:`_stop_at_once`)."""
         self.snapshot: FleetSnapshot | None = None
         """The last frame that was read successfully; ``None`` before the first."""
         self.after_sign_in: ReturnTo | None = None
@@ -1500,7 +1527,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def action_help(self) -> None:
         self.push_screen(
             HelpScreen(
-                self.escape_key, at_board=self._focus_on_the_board(), capturing=self.capturing
+                self.escape_key,
+                at_board=self._focus_on_the_board(),
+                capturing=self.capturing,
+                confirm_stop=self.confirm_stop,
             )
         )
 
@@ -2033,6 +2063,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         if event.worker.name == AGENT_RENAME_WORKER:
             self._agent_renamed(event)
+            return
+        if event.worker.name == STOP_WORKER:
+            self._stopped_at_once(event)
             return
         if event.worker.name == FLEET_WORKER:
             self._fleet_read(event)
@@ -3084,7 +3117,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.post_message(AgentSelected(agent.project_id, agent.id))
 
     def on_stop_agent(self, event: StopAgent) -> None:
-        """The agent view's Stop button, or ``x`` on the selected row: one question first.
+        """The agent view's Stop button, or ``x`` on the selected row: one question first —
+        or, with ``[ui] confirm_stop`` off (the dialog's *Don't ask again*), the stop at
+        once (:meth:`_stop_at_once`). The captain's ``open_stop`` always asks (``event.ask``).
 
         ``board``, not ``project``: the captain's row stops against the home board,
         which is no listed project (T2).
@@ -3108,10 +3143,45 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if project is None or status is None:
             self.notify("that agent is no longer listed", severity="warning", timeout=4)
             return
-        self.push_screen(StopAgentScreen(project, status), callback=self.stop_finished)
+        if self.confirm_stop or event.ask:
+            self.push_screen(StopAgentScreen(project, status), callback=self.stop_finished)
+            return
+        self._stop_at_once(project, status.agent)
+
+    def _stop_at_once(self, project: ProjectInfo, agent: FleetAgent) -> None:
+        """``[ui] confirm_stop`` is off: the stop the dialog's Stop runs, with no dialog.
+
+        Graceful (``/exit``, no Force), every agent alike — the manager and the captain
+        too (the owner's decision, 2026-10-30) — off the UI thread and pinned to the row
+        (:func:`stop.start_stop`). A second press for the same row while it runs does
+        nothing: the first is already doing what it asks.
+        """
+        if agent.id in {row.id for row in self._quick_stops.values()}:
+            return
+        self.notify(f"stopping {agent.label} …", timeout=4, markup=False)
+        self._quick_stops[start_stop(self, project, agent, force=False)] = agent
+
+    def _stopped_at_once(self, event: Worker.StateChanged) -> None:
+        """A stop :meth:`_stop_at_once` started answered: the dialog's ending
+        (:meth:`stop_finished`), or a warning in the service's words where the dialog would
+        have kept them on its status line."""
+        if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            return
+        agent = self._quick_stops.pop(event.worker, None)
+        if event.state is WorkerState.CANCELLED or agent is None:
+            return
+        answer = stop_answer(event.worker, event.state)
+        if isinstance(answer, fleet_service.StopReceipt):
+            warn_release_failed(self, answer)
+            self.stop_finished(answer.agent)
+            return
+        self.notify(
+            answer, title=f"{agent.label} not stopped", severity="warning", timeout=10, markup=False
+        )
 
     def stop_finished(self, agent: FleetAgent | None) -> None:
-        """The dialog closed: toast the ended row, re-read, and leave the view it stopped.
+        """The dialog closed, or a stop made with no dialog ended (:meth:`_stopped_at_once`):
+        toast the ended row, re-read, and leave the view it stopped.
 
         ``None`` is Cancel, or a refusal the dialog is still showing — nothing
         happened, so nothing is said. Its own view would otherwise keep polling
@@ -3729,7 +3799,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """App settings saved, reloaded or reset: the sidebar's directory lines follow now, and
         the release check. Switched off, the ⬆ row goes at once; switched on, the check asks
         at once. Both waited for the hourly ask, up to an hour, while the switch's own line
-        said "no ⬆ row", and the row still opened its dialog (review of #301, m2)."""
+        said "no ⬆ row", and the row still opened its dialog (review of #301, m2).
+
+        Or the Stop dialog saved *Don't ask again* (no ``updates``): Stop and ``x`` stop at
+        once from now on, and App settings, kept alive once opened, shows its switch off."""
+        self.confirm_stop = event.ui.confirm_stop
+        for settings in self.query(AppSettingsView):
+            settings.follow_ui(event.ui)  # the Stop dialog's save: the switch reads it now
         always = event.ui.always_show_project_path
         if always != self.always_show_project_path:
             self.always_show_project_path = always

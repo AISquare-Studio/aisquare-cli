@@ -6,17 +6,20 @@ per role, the fleet's escape key, agent cap, worktree root and native-teams swit
 how launches pick an account, what a usage limit does, what the accounts share and
 each role's binding (``team bind``).
 *User preferences* is ``[ui]``, how ``asq`` shows things to the person at it: today
-*Always show project directory* (``ui.always_show_project_path``); and below it
-``[updates]``, *Check for a new release daily* (``updates.check``). *Remote* is Remote
-control (``views.settings_remote``). Save, Reload and Reset all sit under the tabs and
-act on the first two; they hide on *Remote*, whose every control acts at once.
+*Always show project directory* (``ui.always_show_project_path``); below it
+``[updates]``, *Check for a new release daily* (``updates.check``); and in its *Advanced*,
+*Ask before stopping an agent* (``ui.confirm_stop``, which the Stop dialog's *Don't ask
+again* turns off). *Remote* is Remote control (``views.settings_remote``). Save, Reload
+and Reset all sit under the tabs and act on the first two; they hide on *Remote*, whose
+every control acts at once.
 
 **What shows, and what is folded** (#41, the owner's D8: the bare minimum that works in
 view, the rest a click away). *Agent settings* shows the *Captain (experimental)* box on
 top (``views.settings_captain``: it saves at once, as it did on the hub) and how launches
 pick an account and what a usage limit does; its *Advanced* holds the roles, the fleet,
 the rest of the accounts' rules and the role bindings. *User preferences* shows its two
-switches, and folds the note on setting one from a shell. *Remote* shows Turn on/off, the
+switches, and folds *Ask before stopping an agent* (a third switch in view pushed the fold
+off an 80x24 tab) and the note on setting one from a shell. *Remote* shows Turn on/off, the
 token field when one is needed and the link, QR and password while on; its own
 *Advanced* holds the rest. A Save refused for a folded field opens that *Advanced*, so
 the reason is never out of sight. The project's own
@@ -59,7 +62,9 @@ meanwhile included.
 
 Every re-read of the file (Save, Reload, Reset all) posts :class:`UiSettingsChanged`, so
 the app, which holds ``[ui]`` for the sidebar rather than reading the file every tick,
-follows at once.
+follows at once. The Stop dialog posts it too when it saves *Don't ask again*, and the app
+hands it back here (:meth:`AppSettingsView.follow_ui`): the page is kept alive once opened,
+and its switch would otherwise read on over a file that says off.
 
 Reached from *⚙ Settings ▸ App settings*: the Settings hub opens
 ``AppSettingsView(id="app-settings")``.
@@ -160,7 +165,10 @@ _ACCOUNT_SWITCHES = {
 (``core.claude_sharing``)."""
 UPDATES_CHECK = "updates-check"
 """``[updates] check``'s switch: asq's daily release check (``services.updates``)."""
-_UI_SWITCHES = {"ui-always-show-path": "always_show_project_path"}
+_UI_SWITCHES = {
+    "ui-always-show-path": "always_show_project_path",
+    "ui-confirm-stop": "confirm_stop",
+}
 """*User preferences*' switches, by id → ``[ui]`` field."""
 AGENT_TAB = "tab-agent-settings"
 """The *Agent settings* tab's pane id: roles, the fleet, accounts. Shown first."""
@@ -171,7 +179,8 @@ REMOTE_TAB = "tab-remote"
 AGENT_ADVANCED = "agent-settings-advanced"
 """*Agent settings*' fold: the roles, the fleet and the rest of the accounts' rules."""
 PREFERENCES_ADVANCED = "user-preferences-advanced"
-"""*User preferences*' fold: the note on setting a preference from a shell."""
+"""*User preferences*' fold: *Ask before stopping an agent* (``[ui] confirm_stop``), and the
+note on setting a preference from a shell."""
 
 
 BINDING_ID_PREFIX = "binding-"
@@ -514,6 +523,10 @@ class AppSettingsView(Vertical):
     ALWAYS_SHOW_PATH_ABOUT: ClassVar[str] = (
         "Show each project's path under its name in the sidebar. "
         "Off: shown only when two projects share a name."
+    )
+    STOPPING_SECTION: ClassVar[tuple[str, str]] = ("Agents", "what Stop and x do")
+    CONFIRM_STOP_ABOUT: ClassVar[str] = (
+        "Off: they stop it at once, gracefully (no Force), the manager too."
     )
     UPDATES_SECTION: ClassVar[tuple[str, str]] = ("Updates", "whether asq looks for a new release")
     # One line: at 80x24, beside the sidebar, three pushed the tab's Advanced one scroll down.
@@ -887,6 +900,14 @@ class AppSettingsView(Vertical):
         with Collapsible(
             title="Advanced", collapsed=True, id=PREFERENCES_ADVANCED, classes="advanced"
         ):
+            # Folded, not beside the two above: at 80x24 a third switch pushed this fold's
+            # title off the tab as it opens (the gate in test_app_settings_fits_an_80x24).
+            # The Stop dialog's toast names the way here when Don't ask again is saved.
+            yield Static(section_title(*self.STOPPING_SECTION), classes="section")
+            with Horizontal(classes="row preference"):
+                yield Label("Ask before stopping an agent", classes="preference-label")
+                yield Switch(self.ui.confirm_stop, id="ui-confirm-stop")
+            yield Static(Text(self.CONFIRM_STOP_ABOUT), id="ui-confirm-stop-about", classes="about")
             yield Static(
                 Text.assemble(
                     before, ("aisquare config set ui.always_show_project_path true", "bold"), after
@@ -1009,6 +1030,22 @@ class AppSettingsView(Vertical):
         self._load_accounts()  # the slots as they are now, off the UI thread
         self.call_later(self.reload_bindings)
         self.post_message(UiSettingsChanged(self.ui, self.updates))
+
+    def follow_ui(self, ui: UiSettings) -> None:
+        """``[ui]`` as a save made elsewhere left it — the Stop dialog's *Don't ask again*:
+        each switch the file changed under the form shows the file now, as if just read.
+
+        A switch the file did not change is left as the operator set it, so an edit not yet
+        saved survives; and a re-read of this form's own posts back what it shows, which
+        changes nothing.
+        """
+        for wid, key in _UI_SWITCHES.items():
+            value = getattr(ui, key)
+            if value == self._shown.get(wid, value):
+                continue
+            self.query_one(f"#{wid}", Switch).value = value
+            self._shown[wid] = value
+        self.ui = ui
 
     # --- writing -----------------------------------------------------------------------
 

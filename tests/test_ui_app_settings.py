@@ -49,12 +49,15 @@ class AppHost(App[None]):
         self.notices: list[tuple[str, str]] = []
         self.ui_told: list[bool] = []
         """``always_show_project_path`` of each ``UiSettingsChanged`` the form posted."""
+        self.stop_told: list[bool] = []
+        """``confirm_stop`` of each ``UiSettingsChanged`` the form posted."""
 
     def compose(self) -> ComposeResult:
         yield AppSettingsView(id="app-settings")
 
     def on_ui_settings_changed(self, event: UiSettingsChanged) -> None:
         self.ui_told.append(event.ui.always_show_project_path)
+        self.stop_told.append(event.ui.confirm_stop)
 
     def notify(
         self,
@@ -1283,6 +1286,81 @@ def test_reset_all_turns_always_show_project_directory_off() -> None:
     assert not paths.config_path().exists() and load_config().ui.always_show_project_path is False
 
 
+# --- Ask before stopping an agent ([ui] confirm_stop) -----------------------------------
+
+
+def test_ask_before_stopping_is_on_by_default_and_flips_both_ways() -> None:
+    """The switch the Stop dialog's *Don't ask again* turns off: on as the form opens, off
+    saved as ``confirm_stop = false`` alone, on again saved by leaving the key out."""
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> dict[str, object]:
+        await pilot.pause()
+        switch = host.query_one("#ui-confirm-stop", Switch)
+        seen: dict[str, object] = {"at open": switch.value}
+        switch.value = False
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        seen["off"] = _config_toml().get("ui")
+        seen["others"] = overrides(load_config())
+        switch.value = True
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        seen["on"] = paths.config_path().exists() and "ui" in _config_toml()
+        seen["told"] = list(host.stop_told)
+        return seen
+
+    seen = drive(scenario)
+    assert seen["at open"] is True, "asking first is the default"
+    assert seen["off"] == {"confirm_stop": False}
+    assert seen["others"] == {"ui": {"confirm_stop": False}}, "the switch saved itself alone"
+    assert seen["on"] is False, "on again is the default: the key leaves the file"
+    assert seen["told"] == [False, True], "each save told the app what [ui] holds now"
+
+
+def test_reload_and_reset_all_read_asking_before_a_stop() -> None:
+    """A ``config set`` from a shell shows after Reload; Reset all turns asking back on."""
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> list[bool]:
+        await pilot.pause()
+        switch = host.query_one("#ui-confirm-stop", Switch)
+        settings_service.set_value("ui.confirm_stop", "false")  # from a shell
+        host.query_one("#reload-settings", Button).press()
+        await settle(pilot)
+        reloaded = switch.value
+        host.query_one("#reset-settings", Button).press()
+        await settle(pilot)
+        host.screen.query_one("#reset-confirm", Button).press()
+        await settle(pilot)
+        return [reloaded, switch.value, *host.stop_told]
+
+    assert drive(scenario) == [False, True, False, True]
+    assert load_config().ui.confirm_stop is True
+
+
+def test_a_save_made_elsewhere_moves_the_switch_it_changed_and_no_other() -> None:
+    """The Stop dialog saves *Don't ask again* while App settings, kept alive once opened,
+    shows the switch on: :meth:`AppSettingsView.follow_ui` shows the file's off, as read,
+    so a Save after it writes nothing back; an edit not yet saved on another switch stays."""
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[bool, bool, set[str]]:
+        await pilot.pause()
+        view = host.query_one(AppSettingsView)
+        host.query_one("#ui-always-show-path", Switch).value = True  # not saved yet
+        ui = settings_service.stop_without_asking()  # the Stop dialog's save
+        view.follow_ui(ui)
+        changed = view._changed()
+        return (
+            host.query_one("#ui-confirm-stop", Switch).value,
+            host.query_one("#ui-always-show-path", Switch).value,
+            changed,
+        )
+
+    confirm_stop, always, changed = drive(scenario)
+    assert confirm_stop is False, "the switch reads what the dialog saved"
+    assert always is True, "the operator's own edit is kept"
+    assert changed == {"ui-always-show-path"}, "and only that edit is still to save"
+
+
 #: Per tab, what shows as it opens (the owner's bare minimum, #41) and what its *Advanced*
 #: folds — the list posted to the board before the fold was built.
 IN_VIEW = {
@@ -1310,7 +1388,7 @@ FOLDED = {
         "#agent-settings-note",
         "#bindings-new",
     ),
-    PREFERENCES_TAB: ("#preferences-from-a-shell",),
+    PREFERENCES_TAB: ("#ui-confirm-stop", "#ui-confirm-stop-about", "#preferences-from-a-shell"),
     REMOTE_TAB: ("#settings-remote-regen", "#settings-remote-write", "#settings-remote-auto-off"),
 }
 ADVANCED = {

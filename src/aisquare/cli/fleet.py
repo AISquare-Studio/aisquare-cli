@@ -77,6 +77,7 @@ _STATE_CHIP = {
     "limited": "⏳ limited",
     "exited": "💤 exited",
     "lost": "✗ lost",
+    "paused": "⏯ paused",
     "unknown": "· unknown",
 }
 
@@ -679,14 +680,20 @@ def _one_or_every(
 
 
 def _bulk(
-    action: fleet_service.BulkAction, *, managers_only: bool, acting_session: str | None
+    action: fleet_service.BulkAction,
+    *,
+    managers_only: bool,
+    acting_session: str | None,
+    projects: list[ProjectInfo] | None = None,
 ) -> None:
-    """``restart --all`` / ``stop --all``: :func:`fleet_service.bulk`, printed as it goes.
+    """``restart --all`` / ``stop --all``, and ``pause`` / ``resume``:
+    :func:`fleet_service.bulk`, printed as it goes.
 
     Each agent's line is printed when it is done with, under its project's name, so a long
     restart shows how far it got; the count follows. Exits 1 when anything failed
     (``BulkReport.ok``), as ``stop`` and ``reap`` do, and 130 when interrupted, with the
-    report of how far it got (``--json`` included), as ``shutdown`` does.
+    report of how far it got (``--json`` included), as ``shutdown`` does. ``projects`` keeps
+    it to those projects (``pause -P``, ``--group``); ``None`` is every project.
     """
     as_json = get_state().json_output
     console = stdout_console()
@@ -696,7 +703,7 @@ def _bulk(
         if heading[-1:] != [receipt.project.id]:
             heading.append(receipt.project.id)
             console.print(_display_name(receipt.project), style="bold", markup=False)
-        for line in _bulk_lines(receipt):
+        for line in _bulk_lines(receipt, action):
             console.print(line, markup=False)
 
     try:
@@ -705,6 +712,7 @@ def _bulk(
             managers_only=managers_only,
             acting_session=acting_session,
             on_receipt=None if as_json else said,
+            projects=projects,
         )
     except fleet_service.BulkInterrupted as exc:
         # The operator's Ctrl-C: the agents before it were restarted or stopped, so they
@@ -732,7 +740,48 @@ def _emit_bulk(report: fleet_service.BulkReport, console: Console, *, as_json: b
         console.print(report.summary())
     else:
         who = "manager" if report.managers_only else "agent"
-        console.print(f"nothing to {report.action}: no {who} is running in any project")
+        how = "is paused" if report.action == "resume" else "is running"
+        where = (
+            "in any project"
+            if report.action in ("restart", "stop")
+            else "in " + ", ".join(_display_name(project) for project in report.signals)
+            if report.signals
+            else "here"
+        )
+        console.print(f"nothing to {report.action}: no {who} {how} {where}", markup=False)
+    for project in report.signals:
+        if report.action == "pause" and fleet_service.is_home_project(project):
+            # The captain's home board: its one agent is the captain, which a pause leaves,
+            # and no manager runs there to hold (REVIEW-RC092, nit 5).
+            said = (
+                f"⏸ {_display_name(project)} is fleet-paused: it is the captain's home, where "
+                "no manager runs"
+            )
+        elif report.action == "pause":
+            said = (
+                f"⏸ {_display_name(project)} is fleet-paused: its manager spawns nothing until "
+                f"`{project_service.fleet_command('resume', project)}`"
+            )
+        else:
+            said = f"▶ the fleet-paused signal on {_display_name(project)} was cleared"
+        console.print(said, markup=False)
+    for project, left in report.kept:
+        if not report.owners:
+            # Said to the agent that was refused: no command it could run brings them back, so
+            # it is told to ask the owner, whose resume it names as theirs (nit 6).
+            console.print(
+                f"⏸ {_display_name(project)} stays fleet-paused: only the owner ends a pause "
+                f"— ask the owner: their `{project_service.fleet_command('resume', project)}` "
+                "(or Resume agents… in asq) ends it; nothing was changed",
+                markup=False,
+            )
+            continue
+        agents = f"{left} agent{'' if left == 1 else 's'} {'is' if left == 1 else 'are'}"
+        console.print(
+            f"⏸ {_display_name(project)} stays fleet-paused: {agents} still paused — "
+            f"`{project_service.fleet_command('resume', project)}` brings them back",
+            markup=False,
+        )
     if report.interrupted:
         console.print(f"⚠ {report.interrupted}", markup=False)
     released = sum(
@@ -764,13 +813,20 @@ def _stop_notes(receipt: fleet_service.StopReceipt, project: ProjectInfo) -> lis
     return notes
 
 
-def _bulk_lines(receipt: fleet_service.BulkReceipt) -> list[str]:
-    """One agent's line in ``--all``'s output, and its notes under it."""
+def _bulk_lines(
+    receipt: fleet_service.BulkReceipt, action: fleet_service.BulkAction = "restart"
+) -> list[str]:
+    """One agent's line in ``--all``'s output (and ``pause``'s, ``resume``'s), and its notes
+    under it."""
     agent, result = receipt.agent, receipt.result
     if receipt.outcome == "skipped":
         said, mark = f"skipped — {receipt.why}", "·"
     elif receipt.outcome == "failed":
         said, mark = f"failed — {receipt.why}", "✗"
+    elif action == "pause":
+        said, mark = "paused — its claims, worktree and session are kept", "⏸"
+    elif action == "resume" and isinstance(result, fleet_service.RestartReceipt):
+        said, mark = f"resumed — {result.how}", "▶"
     elif isinstance(result, fleet_service.RestartReceipt):
         if receipt.dead:  # apart from the running ones (#38)
             # The row as the restart ended it: one no listing had recorded yet holds its
@@ -790,7 +846,7 @@ def _bulk_lines(receipt: fleet_service.BulkReceipt) -> list[str]:
         # the ones that say what did not happen marked: each failure is among the notes.
         failures = set(result.failures)
         lines.extend(f"      {'⚠' if note in failures else '·'} {note}" for note in result.notes)
-    elif isinstance(result, fleet_service.StopReceipt):
+    elif isinstance(result, fleet_service.StopReceipt) and action != "pause":
         lines.extend(f"      {note}" for note in _stop_notes(result, receipt.project))
     return lines
 
@@ -814,7 +870,7 @@ def _bulk_json(report: fleet_service.BulkReport) -> dict[str, object]:
             out |= _stop_json(result)  # its `agent` is the row as the stop ended it
         return out
 
-    return {
+    out: dict[str, object] = {
         "action": report.action,
         "managers_only": report.managers_only,
         "receipts": [receipt_of(receipt) for receipt in report.receipts],
@@ -825,6 +881,17 @@ def _bulk_json(report: fleet_service.BulkReport) -> dict[str, object]:
         "ok": report.ok,
         "interrupted": report.interrupted,
     }
+    if report.action in ("pause", "resume"):
+        # The projects whose `fleet-paused` signal it set or cleared, and a resume's that stay
+        # paused, with how many agents are still paused there.
+        out["signals"] = [
+            {"project": project_of(project), "paused": report.action == "pause"}
+            for project in report.signals
+        ]
+        out["kept"] = [
+            {"project": project_of(project), "still_paused": left} for project, left in report.kept
+        ]
+    return out
 
 
 def _restart_json(receipt: fleet_service.RestartReceipt) -> dict[str, object]:
@@ -1418,10 +1485,15 @@ def reap(
 
 @app.command("rename")
 def rename(
-    codename: Annotated[str, typer.Argument(help="New codename, e.g. amber-otter.")],
+    codename: Annotated[str, typer.Argument(help="New codename, e.g. amber-otter or billing-v2.")],
     project: ProjectRef = None,
 ) -> None:
-    """Set the project's fleet codename (and rename its tmux session to match)."""
+    """Set the project's fleet codename (and rename its tmux session to match).
+
+    Lowercase letters and digits in words joined by '-', starting with a letter, at most 24
+    characters. `project rename` sets it from the project's name instead. The old codename
+    still finds the project, and its board is told; branches and worktrees keep their names.
+    """
     target = _project(project)
     notes: list[str] = []
     try:
@@ -1441,6 +1513,48 @@ def rename(
     # than leave the operator to discover it at the escape hatch.
     for note in notes:
         stdout_console().print(f"  ⚠ {note}")
+
+
+@app.command("relabel")
+def relabel(
+    label: Annotated[str, typer.Argument(help="The agent's label now, e.g. coder-1.")],
+    name: Annotated[
+        list[str],
+        typer.Argument(
+            help="Its new name, any text: 'login fix' becomes login-fix (lowercase letters, "
+            "digits and '-', at most 24).",
+            metavar="NEW NAME…",
+        ),
+    ],
+    project: ProjectRef = None,
+    as_session: SessionRef = None,
+) -> None:
+    """Rename a running agent: its label everywhere and its tmux window (not the project's
+    codename — that is `fleet rename`). Its worktree and branch stay where they are."""
+    target = _project(project)
+    typed = " ".join(name)
+    try:
+        receipt = fleet_service.relabel(
+            target, label, typed, actor=fleet_service.acting_as(as_session)
+        )
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
+    if get_state().json_output:
+        payload = {
+            "label": receipt.agent.label,
+            "was": receipt.old,
+            "wanted": receipt.wanted,  # the label `typed` became, before any suffix
+            "typed": typed,
+            "changed": receipt.changed,
+            "agent": receipt.agent.model_dump(mode="json"),
+            "notes": receipt.notes,
+        }
+        typer.echo(json.dumps(payload))
+        return
+    console = stdout_console()
+    console.print(f"✓ {receipt.said}", markup=False)
+    for note in receipt.notes:
+        console.print(f"  · {note}", markup=False)
 
 
 @app.command("adopt")
@@ -1682,42 +1796,72 @@ def _group_targets(group: str) -> list[ProjectInfo]:
         return parent_service.group_projects(store, found.id)
 
 
+EveryProject = Annotated[
+    bool,
+    typer.Option("--all", help="Every project's fleet, not one (not with --project or --group)."),
+]
+PauseManagers = Annotated[
+    bool, typer.Option("--managers", help="The managers alone, not their teams.")
+]
+
+
 def _pause_or_resume(
-    project: str | None, group: str | None, as_session: str | None, *, on: bool
+    project: str | None,
+    group: str | None,
+    every: bool,
+    managers: bool,
+    as_session: str | None,
+    *,
+    on: bool,
 ) -> None:
+    """``fleet pause`` / ``fleet resume``: :func:`fleet_service.bulk`'s ``pause`` or ``resume``
+    over one project, a group's, or every project's (``--all``)."""
     if project is not None and group is not None:
         fail("give a project or --group, not both", error="usage", exit_code=2)
-    targets = _group_targets(group) if group is not None else [_project(project)]
-    verb = fleet_service.pause if on else fleet_service.resume
-    try:
-        for target in targets:
-            verb(target, session_ref=as_session)
-    except fleet_service.FleetError as exc:
-        _fail_fleet(exc)
-    if get_state().json_output:
-        payload = [{"paused": on, **_project_json(t)} for t in targets]
-        typer.echo(json.dumps(payload[0] if group is None else payload))
-        return
-    for target in targets:
-        mark, said = ("⏸", "paused") if on else ("▶", "resumed")
-        stdout_console().print(f"{mark} fleet {said} for {_display_name(target)}", markup=False)
+    if every and group is not None:
+        fail("give --group or --all, not both", error="usage", exit_code=2)
+    refuse_conflicting_scope(every, project)
+    targets: list[ProjectInfo] | None = None
+    if not every:
+        targets = _group_targets(group) if group is not None else [_project(project)]
+    _bulk(
+        "pause" if on else "resume",
+        managers_only=managers,
+        acting_session=as_session,
+        projects=targets,
+    )
 
 
 @app.command("pause")
 def pause(
-    project: ProjectRef = None, group: GroupRef = None, as_session: SessionRef = None
+    project: ProjectRef = None,
+    group: GroupRef = None,
+    every: EveryProject = False,
+    managers: PauseManagers = False,
+    as_session: SessionRef = None,
 ) -> None:
-    """Pause the fleet: the manager spawns nothing until `resume`. `--group` pauses a group's
-    members and its parent at once, and an agent may not spawn on any of them."""
-    _pause_or_resume(project, group, as_session, on=True)
+    """Pause the fleet: set its `fleet-paused` signal, so its manager spawns nothing, and
+    /exit every running agent of it as `fleet stop` does — keeping each one's label, task
+    claim, worktree, account and session for `fleet resume`. An agent that already exited
+    is left as it is. `--group` pauses a group's members and its parent, `--all` every
+    project; `--managers` the managers alone. Exits 1 when any agent failed."""
+    _pause_or_resume(project, group, every, managers, as_session, on=True)
 
 
 @app.command("resume")
 def resume(
-    project: ProjectRef = None, group: GroupRef = None, as_session: SessionRef = None
+    project: ProjectRef = None,
+    group: GroupRef = None,
+    every: EveryProject = False,
+    managers: PauseManagers = False,
+    as_session: SessionRef = None,
 ) -> None:
-    """Resume a paused fleet (`--group`: a group's members and its parent)."""
-    _pause_or_resume(project, group, as_session, on=False)
+    """Resume a paused fleet: clear its `fleet-paused` signal and start again exactly the
+    agents `fleet pause` stopped, each under its label with its session resumed, as `fleet
+    restart` does; an agent that exited without a pause stays 💤. `--group` and `--all` as
+    for `pause`; `--managers` the managers alone. Running it twice does nothing the second
+    time."""
+    _pause_or_resume(project, group, every, managers, as_session, on=False)
 
 
 def not_interactive_reason() -> str | None:
@@ -1789,13 +1933,26 @@ def ui(
             error="not_a_tty",
             detail=reason,
         )
-    try:
-        scope = fleet_service.ui_scope(project or (), group or ())
-    except fleet_service.FleetError as exc:
-        _fail_fleet(exc)
-    from aisquare.cli.ui.app import run_ui  # lazy: textual is heavy and only the UI needs it
+    registration = None
+    if project or group:
+        # --project and --group are read from the store, whose open migrates it: so the gate
+        # is passed, AND this asq registered, before it opens (#17): checked but not yet
+        # registered, it was unseen while it read, and another release could start (review
+        # of #462). run_ui keeps this registration, and ends it as it quits.
+        from aisquare.cli.ui import instance_gate
 
-    if after_update:
-        run_ui(scope=scope, after_update=True)
-    else:
-        run_ui(scope=scope)
+        registration = instance_gate.admit()
+    try:
+        try:
+            scope = fleet_service.ui_scope(project or (), group or ())
+        except fleet_service.FleetError as exc:
+            _fail_fleet(exc)
+        from aisquare.cli.ui.app import run_ui  # lazy: textual is heavy and only the UI needs it
+
+        if after_update:
+            run_ui(scope=scope, after_update=True)
+        else:
+            run_ui(scope=scope)
+    finally:
+        if registration is not None:
+            registration.deregister()  # once: run_ui's own end of it makes this a no-op

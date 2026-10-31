@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core.names import name_flaw
+from aisquare.core.names import name_flaw, slug
 from aisquare.core.store import store_session
 from aisquare.core.workspace import project_id_for
 from aisquare.models import ProjectInfo
@@ -178,3 +178,29 @@ def test_an_alias_cannot_be_another_slots_name_behind_a_variation_selector(
     assert accounts_service.resolve("2").alias is None, "nothing stored"
     with pytest.raises(accounts_service.NoSuchAccount):
         accounts_service.resolve("account 3")
+
+
+# --- a name where only [a-z0-9-] may stand ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "max_len", "slugged"),
+    [
+        ("Login Fix", 24, "login-fix"),
+        ("Café ✨ review", 24, "cafe-review"),
+        ("Søren board", 24, "s-ren-board"),  # ø has no ASCII base under NFKD: a separator
+        ("Straße", 24, "strasse"),  # case-folded, as `ß` lowercases to nothing it could be
+        ("  --2FA__work--  ", 24, "2fa-work"),
+        ("\uff26\uff55\uff4c\uff4c \ufb01x", 24, "full-fix"),  # fullwidth, a ligature
+        ("Fix the OAuth callback bug!!!", 24, "fix-the-oauth-callback-b"),
+        ("abc def", 4, "abc"),  # cut, the `-` it ends on dropped
+        ("!!!", 24, ""),
+        ("日本語", 24, ""),
+    ],
+)
+def test_slug_is_the_one_rule_for_a_name_of_letters_digits_and_dashes(
+    text: str, max_len: int, slugged: str
+) -> None:
+    """The fleet's agent labels and a project's codename typed as free text both go by it, so
+    one name makes the same of either (``fleet relabel``, the project rename)."""
+    assert slug(text, max_len=max_len) == slugged

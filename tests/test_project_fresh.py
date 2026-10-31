@@ -641,6 +641,94 @@ def test_it_is_refused_from_inside_one_of_the_projects_own_fleet_agents(
     assert fresh_service.plan(alpha).live_agents == ["coder-1"]
 
 
+def test_dry_run_is_allowed_from_inside_one_of_the_projects_own_fleet_agents(
+    runner: CliRunner,
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #3: a dry run stops nothing, so it must not trip the same-pane refusal the real
+    # run needs — a manager agent has to be able to read the plan from its own pane.
+    alpha, _beta, _, _ = two
+    with store_session() as store:
+        mine = store.upsert_fleet_agent(_agent(alpha, "coder-1"))
+    before = _rows(alpha.id)
+    monkeypatch.setenv(FLEET_AGENT_ENV_VAR, mine.id)
+    monkeypatch.setattr(fleet_service, "shutdown_plan", lambda *_, **__: _NO_SESSIONS)
+
+    dry = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    assert "stops   coder-1 first" in dry.output
+    assert _rows(alpha.id) == before and spawned == []
+
+    as_json = runner.invoke(app, ["--json", "project", "fresh", "-P", "alpha-x", "--dry-run"])
+    assert as_json.exit_code == 0, as_json.output
+    assert json.loads(as_json.stdout)["live_agents"] == ["coder-1"]
+    assert _rows(alpha.id) == before and spawned == []
+
+    # The real run from the same pane still refuses, and says the dry run is the way here.
+    refused = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--yes"])
+    assert refused.exit_code == 2, refused.output
+    said = " ".join(refused.output.split())
+    assert "can't start fresh from inside coder-1" in said
+    assert "--dry-run shows the plan from here" in said
+    # --help says so too (review of #469): it said "Refused from inside" with no exception.
+    helped = plain(runner.invoke(app, ["project", "fresh", "--help"]).output)
+    assert "own fleet agents, unless --dry-run, and while" in helped
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("tmux") is None, reason="tmux is not installed"
+)
+def test_dry_run_runs_in_a_real_fleet_pane_and_the_real_run_is_still_refused_there(
+    runner: CliRunner,
+    tmp_path: Path,
+    spawned: list[tuple[str, str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tester on #469: the test above stubs ``shutdown_plan``, so it never met its guard
+    against a caller inside the fleet's tmux server, which every fleet pane is. A dry run
+    from one was refused, ``inside_fleet``, for its own project, whose row is live. Here
+    ``TMUX`` names the fleet's socket and the session stands: the dry run lists it, and the
+    real run is refused, for an agent of the project and for anyone else in that server."""
+    alpha = _add(tmp_path / "alpha", "alpha-x")
+    srv = fleet_service.server()
+    session = fleet_service.session_name("alpha-x")
+    srv.run("new-session", "-d", "-s", session, "-n", "coder-1", "sleep 600")
+    pane = srv.run("list-panes", "-s", "-t", f"={session}", "-F", "#{pane_id}").split()[0]
+    with store_session() as store:
+        mine = store.upsert_fleet_agent(
+            _agent(alpha, "coder-1", pane_id=pane, tmux_socket=fleet_service.settings().tmux_socket)
+        )
+    monkeypatch.setenv(FLEET_AGENT_ENV_VAR, mine.id)
+    monkeypatch.setenv("TMUX", f"{srv.socket_path()},{os.getpid()},0")
+    before = _rows(alpha.id)
+
+    for agent in (mine.id, None):  # the project's own agent, then an operator attached
+        if agent is None:
+            monkeypatch.delenv(FLEET_AGENT_ENV_VAR)
+        dry = runner.invoke(app, ["--json", "project", "fresh", "-P", "alpha-x", "--dry-run"])
+        assert dry.exit_code == 0, dry.output
+        planned = json.loads(dry.stdout)
+        assert planned["live_agents"] == ["coder-1"]
+        assert planned["sessions"] == [f"asq:{session}"]
+        said = plain(runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--dry-run"]).output)
+        assert "stops coder-1 first" in said
+
+        refused = runner.invoke(app, ["--json", "project", "fresh", "-P", "alpha-x", "--yes"])
+        assert refused.exit_code == 2, refused.output
+        answer = json.loads(refused.stdout)
+        assert answer["error"] == ("inside_fleet_agent" if agent else "inside_fleet")
+        assert answer["detail"].endswith("; --dry-run shows the plan from here")
+
+    # The hint is the command's: the UI's start-fresh dialog shows the service's text as it is.
+    with pytest.raises(fresh_service.FreshRefused) as in_the_ui:
+        fresh_service.plan(alpha)
+    assert in_the_ui.value.code == "inside_fleet" and "--dry-run" not in str(in_the_ui.value)
+    assert srv.has_session(session)
+    assert _rows(alpha.id) == before and spawned == []
+
+
 def test_a_board_another_projects_fleet_reads_is_refused_naming_them(
     runner: CliRunner,
     two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],

@@ -26,7 +26,7 @@ from typer.testing import CliRunner
 
 import aisquare
 from aisquare.core import agents as agent_core
-from aisquare.core import experimental, insights
+from aisquare.core import experimental, insights, instance_scan, login_session
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
 from aisquare.models import ProjectInfo
@@ -536,6 +536,16 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+@pytest.fixture(autouse=True)
+def no_look_at_the_machines_processes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The instance gate lists this user's processes for an asq older than the registry
+    (``core.instance_scan``, #21). Under the suite that would be the developer's own asq, or
+    a sibling worktree's, and a test of ``run_ui`` would pass or refuse by what else runs on
+    the machine. So ``ps`` says nothing here, as where it is missing; the scan's own tests
+    hand it a listing of their own."""
+    monkeypatch.setattr(instance_scan, "_ps", lambda: "")
+
+
 _uid = private_fleets.uid
 
 
@@ -741,6 +751,14 @@ def no_real_ngrok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(ngrok_tunnel, "ngrok_default_config", config)
     monkeypatch.setattr(ngrok_sdk, "ngrok2_config", ngrok2)
+
+
+@pytest.fixture(autouse=True)
+def at_the_machine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test runs as a login at the machine, never an SSH login: on a Mac reached over SSH,
+    a fleet spawn refuses to start a tmux server (#20), and the suite run there would refuse
+    every spawn that starts one. A test of that refusal patches it back."""
+    monkeypatch.setattr(login_session, "remote_session", lambda: False)
 
 
 @pytest.fixture(autouse=True)

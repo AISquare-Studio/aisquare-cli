@@ -662,6 +662,52 @@ def test_real_tmux_following_a_pane_leaves_its_sessions_current_window_alone(
 
 
 @_needs_tmux
+def test_real_tmux_a_pane_on_screen_stays_attached_when_its_session_is_renamed(
+    live: TmuxServer, tmp_path: Path
+) -> None:
+    """A project renamed renames its tmux session (``asq-earnest-hawk`` → ``asq-aisquare-cli``,
+    task #6) under the panes asq has open on it. The control client follows the session by
+    its id, never its name, and the pane by its ``%id``: the same client goes on serving the
+    pane, keys typed after the rename reach it and its ``%output`` still arrives, and nothing
+    is said to the owner."""
+    shown_pane = _window(live, "asq-earnest-hawk", tmp_path, ["cat"])
+    other = _window(live, "asq-earnest-hawk", tmp_path, ["cat"])
+
+    async def drive() -> tuple[int | None, int | None, int, bool, list[str]]:
+        host = Host(live, shown_pane)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: _serving(pane) and _client(pane).answered, 10.0)
+            before = _client(pane).pid
+            live.rename_session("asq-earnest-hawk", "asq-aisquare-cli")
+            await pilot.pause(0.3)
+            outputs = _client(pane).outputs.get(shown_pane, 0)
+            await pilot.press(*"after")
+            await wait_until(pilot, _row_shows(pane, "after"), timeout=3.0)
+            after = _client(pane).outputs.get(shown_pane, 0) - outputs
+            # And the other window of the renamed session, attached to as a click on its row
+            # would, is served too.
+            pane.attach(other)
+            await wait_until(pilot, lambda: _serving(pane) and pane.facts is not None, 5.0)
+            await pilot.press("z")
+            await wait_until(pilot, _row_shows(pane, "z"), timeout=3.0)
+            return (
+                before,
+                _client(pane).pid,
+                after,
+                live.has_session("asq-aisquare-cli"),
+                list(host.notices),
+            )
+
+    before, pid, outputs, renamed, notices = run(drive())
+    assert renamed and not live.has_session("asq-earnest-hawk")
+    assert pid == before, "the same control client, never a restart"
+    assert outputs > 0, "its output kept arriving over the client"
+    assert notices == [], notices
+
+
+@_needs_tmux
 def test_real_tmux_a_stalled_client_killed_waits_out_the_retry_before_another_starts(
     live: TmuxServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -872,7 +918,12 @@ def test_real_tmux_typing_into_an_agent_sends_nothing_to_a_raw_client_elsewhere(
     client on the server at every key, whatever session it was on: 40 keys into one agent
     sent ~9.8 KB a key to a 200x50 raw client on another project (re-review of #272). A
     hidden session variable (``set-environment -h``) costs it nothing (measured on 3.2a,
-    3.4 and 3.8)."""
+    3.4 and 3.8).
+
+    The first key also claims the window's size (``core.tmux.SIZE_OWNER_OPTION``), an
+    option write that tmux redraws every client for — once per change of hands, never per
+    key — so it is typed before the raw client attaches, and the keys measured are the
+    ones after it."""
     if sys.platform == "win32":
         pytest.skip("no pty on Windows; fleet attach needs a terminal")
     typed_into = _window(live, "asq-typing", tmp_path, ["cat"], width=100, height=24)
@@ -884,6 +935,9 @@ def test_real_tmux_typing_into_an_agent_sends_nothing_to_a_raw_client_elsewhere(
             pane = host.pane
             pane.focus()
             await wait_until(pilot, lambda: _serving(pane), timeout=5.0)
+            await pilot.press(">")  # the size claim, made once
+            await wait_until(pilot, _row_shows(pane, ">"), timeout=2.0)
+            assert pane.facts is not None and str(os.getpid()) in pane.facts.size_owner
             raw, fd = _raw_client(live, "asq-elsewhere")
             try:
                 await wait_until(
@@ -900,7 +954,7 @@ def test_real_tmux_typing_into_an_agent_sends_nothing_to_a_raw_client_elsewhere(
                         quiet_since = time.monotonic()
                     elif time.monotonic() - attached > 5.5 and time.monotonic() - quiet_since > 1:
                         break
-                typed = ""
+                typed = ">"
                 for letter in "stampsmustcostnothing" * 2:
                     typed += letter
                     await pilot.press(letter)
@@ -914,7 +968,7 @@ def test_real_tmux_typing_into_an_agent_sends_nothing_to_a_raw_client_elsewhere(
                 raw.wait()
 
     sent, row = run(drive())
-    assert row.startswith("stampsmustcostnothing"), row
+    assert row.startswith(">stampsmustcostnothing"), row
     assert sent == 0, f"{sent} bytes to a raw client on another session while typing 42 keys"
 
 

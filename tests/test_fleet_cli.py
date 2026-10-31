@@ -2003,53 +2003,99 @@ def test_rename_to_a_taken_or_invalid_codename_is_refused_with_the_reason(
 # ── pause / resume ───────────────────────────────────────────────────────────
 
 
-def test_pause_and_resume_set_the_signal_as_the_acting_session(
+def test_pause_and_resume_act_as_the_acting_session(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``--as`` names who flipped the switch (a manager passes its own session);
     without it the user did, and the service is told ``None`` — never a value
-    the CLI invented. Both directions, for both verbs."""
-    pause = _install(monkeypatch, "pause", None)
-    resume = _install(monkeypatch, "resume", None)
+    the CLI invented. Both directions, for both verbs: each a bulk pause or resume of the
+    resolved project, its signal with it (``fleet_service.bulk``)."""
+    pause = _install(monkeypatch, "bulk", BulkReport("pause", False, (), signals=(PROJECT,)))
 
     paused = runner.invoke(app, ["fleet", "pause", "--as", "mgr"])
     assert paused.exit_code == 0, paused.output
-    assert "⏸ fleet paused for api" in _plain(paused.stdout)
+    assert "⏸ api is fleet-paused" in _plain(paused.stdout)
+    assert "nothing to pause: no agent is running in api" in _plain(paused.stdout)
     assert runner.invoke(app, ["fleet", "pause"]).exit_code == 0
 
+    resume = _install(monkeypatch, "bulk", BulkReport("resume", False, (), signals=(PROJECT,)))
     resumed = runner.invoke(app, ["fleet", "resume"])
     assert resumed.exit_code == 0, resumed.output
-    assert "▶ fleet resumed for api" in _plain(resumed.stdout)
+    assert "▶ the fleet-paused signal on api was cleared" in _plain(resumed.stdout)
     assert runner.invoke(app, ["fleet", "resume", "--as", "mgr"]).exit_code == 0
 
     # One service call per invocation, the acting session exactly as given.
-    as_manager = ((PROJECT,), {"session_ref": "mgr"})
-    as_user = ((PROJECT,), {"session_ref": None})
-    assert pause.calls == [as_manager, as_user]
-    assert resume.calls == [as_user, as_manager]
+    def asked(seen: Seen) -> list[tuple[str, str | None, list[ProjectInfo] | None, bool]]:
+        return [
+            (args[0], kw["acting_session"], kw["projects"], kw["managers_only"])
+            for args, kw in seen.calls
+        ]
+
+    assert asked(pause) == [("pause", "mgr", [PROJECT], False), ("pause", None, [PROJECT], False)]
+    assert asked(resume) == [
+        ("resume", None, [PROJECT], False),
+        ("resume", "mgr", [PROJECT], False),
+    ]
+
+
+def test_pause_and_resume_take_every_project_and_the_managers_alone(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _install(monkeypatch, "bulk", BulkReport("pause", True, ()))
+
+    assert runner.invoke(app, ["fleet", "pause", "--all", "--managers"]).exit_code == 0
+
+    assert seen.kwargs["projects"] is None and seen.kwargs["managers_only"] is True
+    refused = runner.invoke(app, ["fleet", "pause", "--all", "-P", "api"])
+    assert refused.exit_code == 2
 
 
 def test_pause_and_resume_json_say_which_way_the_switch_went(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _install(monkeypatch, "pause", None)
-    _install(monkeypatch, "resume", None)
-
+    _install(monkeypatch, "bulk", BulkReport("pause", False, (), signals=(PROJECT,)))
     paused = json.loads(runner.invoke(app, ["--json", "fleet", "pause"]).stdout)
+    _install(monkeypatch, "bulk", BulkReport("resume", False, (), signals=(PROJECT,)))
     resumed = json.loads(runner.invoke(app, ["--json", "fleet", "resume"]).stdout)
 
-    assert paused["paused"] is True
-    assert resumed["paused"] is False
+    assert paused["action"] == "pause" and resumed["action"] == "resume"
+    assert [s["paused"] for s in paused["signals"]] == [True]
+    assert [s["paused"] for s in resumed["signals"]] == [False]
     for payload in (paused, resumed):
-        assert set(payload) == {"paused", "project", "name", "codename", "tmux_session"}
-        assert payload["codename"] == "amber-otter"
+        [signal] = payload["signals"]
+        assert signal["project"] == {"id": PROJECT.id, "name": "api", "codename": "amber-otter"}
+
+
+def test_pause_all_says_the_captains_home_has_no_manager(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW-RC092 nit 5: ``fleet pause --all`` sets the signal of every project with a row,
+    the captain's home board among them, and said "⏸ .aisquare is fleet-paused: its manager
+    spawns nothing until …" of a board with no manager. It says it is the captain's home;
+    every other project's line is as before."""
+    from aisquare.core import paths
+
+    root = paths.aisquare_home().resolve()
+    home = ProjectInfo(id=project_id_for(root), root=root, codename="civic-egret")
+    _install(monkeypatch, "bulk", BulkReport("pause", False, (), signals=(home, PROJECT)))
+
+    paused = runner.invoke(app, ["fleet", "pause", "--all"])
+
+    assert paused.exit_code == 0, paused.output
+    said = _plain(paused.stdout)
+    assert f"⏸ {root.name} is fleet-paused: it is the captain's home, where no manager runs" in said
+    assert said.count("its manager spawns nothing") == 1, said
+    assert (
+        "⏸ api is fleet-paused: its manager spawns nothing until "
+        "`aisquare fleet resume --project amber-otter`"
+    ) in said
 
 
 def test_pause_of_an_unknown_project_is_not_found(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _install(monkeypatch, "resolve_project", NoSuchProject("'api' matches several projects"))
-    pause = _install(monkeypatch, "pause", None)
+    pause = _install(monkeypatch, "bulk", BulkReport("pause", False, ()))
 
     result = runner.invoke(app, ["--json", "fleet", "pause", "-P", "api"])
 
@@ -2074,8 +2120,8 @@ def test_pause_of_an_unknown_project_is_not_found(
         (["fleet", "attach"], {"attach_argv": list(ATTACH_ARGV)}),
         (["fleet", "reap"], {"reap": ReapReport()}),
         (["fleet", "rename", "ruby-fox"], {"rename": PROJECT}),
-        (["fleet", "pause"], {"pause": None}),
-        (["fleet", "resume"], {"resume": None}),
+        (["fleet", "pause"], {"bulk": BulkReport("pause", False, (), signals=(PROJECT,))}),
+        (["fleet", "resume"], {"bulk": BulkReport("resume", False, ())}),
     ],
     ids=lambda value: " ".join(value) if isinstance(value, list) else "",
 )

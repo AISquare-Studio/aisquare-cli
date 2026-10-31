@@ -129,6 +129,16 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
     def question(self) -> Text:
         """The whole question as data — the label is the user's, brackets and all."""
         text = Text()
+        if self.status.state == "paused":
+            text.append("Stop ")
+            text.append(self.label, style="bold")
+            text.append(" for good?\n")
+            text.append(
+                "It is paused, with no process. Stop ends the pause: the claims it kept go "
+                "back to the board, and a resume leaves it.",
+                style="dim",
+            )
+            return text
         if not self.has_process():
             text.append("Remove ")
             text.append(self.label, style="bold")

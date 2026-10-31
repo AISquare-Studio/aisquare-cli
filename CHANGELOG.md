@@ -6,6 +6,375 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-30
+
+**Pause and resume the agents of a project, or of every project: idle managers and coders
+stop spending tokens without being reaped, and come back where they were from one dialog.
+Run asq at the Mac and over SSH into the same Mac at once, on one home: each asq shows the
+others, the one over SSH shows the usage the Mac recorded, and an asq of another release
+starts nothing beside a running one until that one quits. Rename a running agent from its
+sidebar row or `fleet relabel`. Renaming a project now renames its fleet codename and tmux
+session too, and the old codename keeps working. One sidebar highlight for a click and the
+arrow keys. Usage & stats scrolls to its end, and the Accounts table fits a 160-column
+terminal beside the default sidebar.**
+
+**Upgrading:**
+- From 0.9.1, run `aisquare upgrade`, or take the update `asq` offers.
+- **Quit every other asq before you update, at the Mac and over SSH.** A 0.9.1 asq left
+  running (the one over SSH while the Mac's takes the update, say) keeps the 0.9.2 asq from
+  starting. 0.9.1 writes no instance record, so the 0.9.2 asq finds it in `ps`, names its
+  pid, terminal, start time and command, and refuses: `asq did not start. Start it again
+  once that asq has quit.`, exit 1. Quit it in its own terminal (`q`), or end it with `kill
+  <pid>`, which skips its clean quit (the refusal says what that loses), and start asq
+  again. Nothing is killed for you. A 0.9.1 asq started in the 10 seconds before is not
+  counted, nor is one on another home, nor any on Windows, where there is no `ps` to ask.
+  From 0.9.2 on, an asq of another release is asked instead: `Quit the other asq? [y/N]`.
+- **The store migrates from v40 (0.9.1's) to v42 on first open, automatically, in two
+  steps.** v41 adds one table, `project_codename_alias` (the codenames a renamed project
+  gave up), and its index; v42 adds one nullable column, `fleet_agent.paused_at`: when
+  `fleet pause` ended the row. Nothing is rewritten or dropped.
+- **Moving back to 0.9.1 is safe.** Its migrator treats a store at or past its own version
+  as current: `user_version` stays 42, and it never reads the alias table or `paused_at`.
+  So `--project <old codename>` finds nothing there (use the new one), and a paused agent's
+  row reads as one `fleet stop` ended (its `ended_by` is `stopped`, a value 0.9.1 knows):
+  it is in neither asq's sidebar nor `fleet ls`, `fleet ls --all` lists it as `💤
+  exited(0)`, and Restart all leaves it. Its task stays claimed (the pause leased it to
+  2126), and 0.9.1 knows of no pause to end: `fleet restart <label>` brings the agent back
+  as any stopped agent, holding the claim when it resumes its transcript, and otherwise
+  only `aisquare task release <id>` gives the task back to the board. 0.9.1 also lets a
+  spawn take a paused agent's label (and a second manager start beside a paused one), and
+  its `reap` removes a paused agent's worktree once it is clean and pushed, keeping its
+  branch until the default branch has its work (0.9.2's resume makes the tree again on
+  that branch); back on 0.9.2, a paused agent whose label another row took is not
+  resumed, and its claims wait for `task release`. **Resume paused agents before moving
+  back.** Moved forward again, 0.9.2 reads the paused rows and the old codenames as it left
+  them.
+- **Several asqs on one home add no migration (the store stays at v42), and what they
+  leave behind, 0.9.1 ignores.** The instance registry is a folder, `~/.aisquare/instances/`
+  (each asq removes its own record as it quits; a crashed one's stays until a 0.9.2 asq
+  clears it), which 0.9.1 never reads and its `uninstall --purge` deletes with the home.
+  The login each Keychain item held, kept for SSH usage, is a `usage-login:` row in
+  `ui_state` (macOS only), which 0.9.1 never asks for: it reads `ui_state` by exact key. A
+  fleet tmux window may carry a `@asq-size-owner` option, which 0.9.1 never reads, so its
+  asq resizes the pane as it always did.
+- **`aisquare upgrade` and `aisquare uninstall` refuse while an asq runs on the home**
+  (asqs of 0.9.2 or later; quit a 0.9.1 asq yourself), where 0.9.1 went ahead: a script
+  that runs `upgrade --yes` beside an open asq exits 1 now, and so does a move back with
+  `upgrade --version 0.9.1`. Quit the asqs first (`q` in each). Inside asq, its Update and
+  Uninstall refuse only while another asq runs.
+- **No setting, extra or dependency is added or removed.** Two new commands, `aisquare
+  fleet relabel` and `aisquare instances`, and two new flags on `fleet pause` and `fleet
+  resume`, `--all` and `--managers`.
+- **`fleet pause` now exits the agents, not only the signal.** In 0.9.1 it set the
+  project's `fleet-paused` signal and nothing else; now it also pauses every running agent
+  of the project (or `--group`, `--all`), and `fleet resume` starts them again. A script
+  that ran `fleet pause` to hold a manager's spawns stops the running agents too now;
+  `aisquare team signal fleet-paused on`, run in the project (it takes no `-P` or
+  `--group`), still sets the signal alone, and `team signal fleet-paused off` clears it.
+  An agent's `fleet resume` (with `--as`, or from an agent's window) no longer clears a
+  signal-only pause: it is refused and exits 1.
+- **Renaming a project renames its codename and tmux session**, so the `--project` a
+  manager quotes is the name on its card. A project you nicknamed before 0.9.2 keeps its
+  codename until it is renamed again; `aisquare project rename "<its name>"` gives it the
+  codename its name gives now. Branches and worktrees keep their names.
+- **Only the owner ends a pause:** asq, Remote, or a shell that is no agent's window, with
+  no `--as`. Any caller may pause (a manager pausing its team leaves its own row running);
+  an agent's `fleet resume`, or its `stop`, `restart` or `switch` of a paused teammate, is
+  refused, and a paused agent is not renamed until it is resumed.
+- **`fleet relabel` renames a running agent only:** not the manager or the captain, not an
+  agent that ended or is paused, and never to `manager` or `captain`. A name another live
+  or paused agent holds gets a suffix, and the old label finds nothing afterwards, until a
+  later spawn is given it.
+- **For `--json` readers:** `fleet pause --json` and `fleet resume --json` print the bulk
+  report (`receipts`, `summary`, `ok`, as `restart --all` does, with `signals` and `kept`)
+  where 0.9.1 printed `{"paused", "project", "name", "codename", "tmux_session"}` (a list
+  of them for `--group`); a fleet agent's `state` may now be `paused` and its row carries
+  `paused_at`; `project rename --json` adds a `notes` list. `aisquare instances --json` is
+  new: `{"instances": [...]}`, each an asq's record plus `heartbeat_age_s` and `this`. The
+  `upgrade --json` and `uninstall --json` plans add `asqs` (the asqs running, named), and
+  their refusal while one runs is `"error": "asq_running"`. Under `accounts usage --json` a
+  reading another process took carries `"recorded_elsewhere": true`, and a usage `cause`
+  may be `keychain_locked_ssh`.
+
+### Added
+
+- **Rename a running fleet agent: from its sidebar row, or `aisquare fleet relabel`.**
+  Double-click an agent's row, or press F2 while the sidebar has the keys and the row is
+  highlighted, and its label becomes a field: type any name, and the line under it shows
+  the label it will become (`Login Fix` → `login-fix`; a name that starts with a digit takes
+  the role first, `2FA work` → `coder-2fa-work` for a coder; a name a paused agent keeps is
+  suffixed when saved, and the toast says so); Enter or a click away saves,
+  Esc cancels. `aisquare fleet relabel coder-1 login fix` does the same from a shell
+  (`--json` too) and prints `✓ coder-1 is now login-fix`; the sidebar's toast says so too.
+  A name another running or paused agent of the project holds gets the next free suffix
+  (`login-fix-2`), and you are told. From then on the agent is that label everywhere:
+  `fleet tell`, `stop`, `restart`, `switch`, the board's lines and its tmux window (if tmux
+  cannot rename the window, the label still changes and a note says why, with the tmux
+  command when one helps). The old label finds nothing, and its refusal says what the agent
+  is called now, until a later spawn is given that label. An ended agent
+  whose label the rename takes keeps its row, listed as `~login-fix` by `fleet ls --all`,
+  and no restart by label brings it back. An `agent_renamed` line on the board tells the
+  manager on its next turn; it wakes nobody. The agent keeps its worktree and branch, as
+  they are: its restart, stop and reap find them by the row. The manager and the captain
+  keep their labels, no agent can take `manager` or `captain`, and an agent that ended,
+  or is paused, is not renamed (resume a paused one first). `fleet rename` still renames
+  the project's codename.
+- **Pause and resume the agents of a project, or of every project**, so idle managers and
+  coders stop spending tokens without being reaped, and come back from one dialog — before
+  a reboot or an OS update too. A pause exits each running agent's Claude process as
+  `fleet stop` does (`/exit`, the grace, the window killed) and keeps everything else of
+  it: its row, label, role, task claim, worktree, branch, account and transcript. Its
+  claims are parked on its session, as a hand-over parks them, and held however long it
+  stays paused (their lease no longer lapses): nothing is released, and no
+  `agent_exited` goes out (the board says `agent_paused`, which wakes nobody). A resume
+  starts exactly the agents a pause stopped, each through `fleet restart`: under its label,
+  its session resumed from its transcript (`claude --resume`) and one carry-on line typed,
+  or, with no transcript, started fresh with the board's hand-off prompt, taking its claims
+  over. An agent that exited without a pause stays 💤, and a second resume does nothing.
+  A paused agent whose task was done or dropped meanwhile is not resumed: the owner's
+  resume ends its pause (its claims go back to the board, and `reap` may take its tree) and
+  says so. A paused manager whose task closed is left paused by a resume; the owner's
+  `fleet stop manager` ends that pause.
+  - **asq:** Settings ▸ Fleet has *Pause all…* and *Resume all…* beside *Restart all…*
+    and *Stop all…*, in the same dialog (who, by project; *Managers only*; Cancel
+    focused), run off the UI thread with a toast for each agent it paused or brought back
+    (a resumed one's reads `✓ restarted`) and one that sums it up, the skipped included. A
+    project card's ⋯ menu has *Pause agents…* and *Resume agents…*, and so has the
+    project's Settings tab: the same dialog for that project alone, the one that would
+    act on nothing greyed (*Resume* clears a `fleet-paused` signal with no agent paused
+    too). A paused agent shows `⏯ paused` in the sidebar (`paused ⏯` on Remote), and its
+    view offers *Resume* (that agent alone, as `fleet restart <label>` does: the project
+    stays fleet-paused until *Resume agents…* or `fleet resume`), and *Stop*, which ends the
+    pause for good. With its manager paused,
+    a project's Manager tab says so and offers *▶ Resume agents…* in place of *Start
+    manager*.
+  - A paused agent survives a rename. It keeps its label: `fleet relabel` and the sidebar
+    refuse to rename it until it is resumed, and give no running agent its label. Renaming
+    its project leaves it paused, and it resumes in the renamed project's tmux session, in
+    its own worktree and branch.
+  - A paused agent survives its tmux server: `fleet reap --server-down` after a reboot
+    leaves it paused, its worktree and claims intact. `reap` removes neither its worktree
+    nor its branch, a spawn does not take its label (it is given the next suffix, and a
+    second manager is refused while the project's own is paused), and Restart all, Stop
+    all, `fleet shutdown` and the restart of agents an update lost leave it.
+  - Only the owner ends a pause: asq, Remote, or a shell that is no agent's window, with no
+    `--as`. The owner's `fleet stop <label>` of a paused agent ends its pause: its row is
+    recorded stopped, the claims it kept go back to the board and its exit is announced.
+    The owner's `fleet restart <label>` resumes that one agent as `fleet resume` would, but
+    leaves the project's `fleet-paused` signal as it is, and refuses an agent whose task
+    closed (the owner's stop ends that pause, and so does the owner's resume, except for a
+    manager). A paused agent has no process to
+    move, so `fleet switch` refuses it: resume it first. An agent's stop, restart, switch or
+    resume of a paused teammate is refused and changes nothing, the project's
+    `fleet-paused` signal included, whether it is run from the agent's own window with no
+    `--as`, with `--as <session>`, or with `--as captain`; the captain acts as the owner from
+    its own window alone. That includes a paused agent whose task closed: only the owner
+    ends that pause.
+- **Run asq at the Mac and over SSH into the same Mac at once, on one home.** Both work on
+  the same store, boards and fleet tmux server, so every agent shows in each and can be
+  driven from either; [docs/multi-instance.md](docs/multi-instance.md) says what they
+  share and what only one holds at a time.
+  - **Each asq knows the others.** Every asq registers in `~/.aisquare/instances/` as it
+    starts (the folder `0700`, its files `0600`), rewrites its record every 5 seconds from
+    a thread of its own, and removes it as it quits. A record is live while its asq holds
+    its lock (so a crashed asq's is ignored at once, whoever has its pid since, and deleted
+    by the next asq to start or the next heartbeat of a running one); one from another host
+    sharing the home, while its heartbeat is under a minute old. Looking never changes the
+    folder. While two or more asqs are open, a chip under the sidebar's status line says
+    how many and where, `2 asq · Mac + ssh (here)` (`local` in place of `Mac` off macOS, a
+    host name for an asq on another machine), and its tooltip names each one's release,
+    host, pid, terminal and start; it is hidden with one asq open, and turns to a warning
+    with a `⚠` when two run different releases. `aisquare instances` lists the live asqs
+    (kind, host, pid, version, since, heartbeat age), and `--json` gives `{"instances":
+    [...]}`. `aisquare doctor` and asq's Doctor page have an `asq instances` row: ok while
+    every live asq runs this aisquare's release and store schema, a warning naming each one
+    that does not.
+  - **One release per home.** asq checks the other asqs before it opens the store or
+    touches tmux, Remote or the captain's socket (`ui --project` and `ui --group` too,
+    before their store read). Beside one of another release or store schema it names both
+    and where the other runs, and asks `Quit the other asq? [y/N]`. On `y` the other quits
+    as `q` quits it, and its terminal says which asq asked it to (and, as ever, what it
+    could not save); this one starts once it has gone. If it has not quit within 15 seconds
+    (it may be finishing a restart of the fleet), this one says so and starts nothing. On
+    `n`, Ctrl-C, the end of input, or with no terminal to ask in, it starts nothing, exits
+    1 and says how to quit the other by hand (`q` in it, with its kind, host, pid and
+    terminal). It refuses without asking beside an asq that cannot be asked to quit (it says
+    what `kill <pid>` would lose), a record this release cannot read (most likely a later
+    release's: the file is named, and ignored once a minute old with no lock held), and an
+    asq that has held the home's check for over 2 seconds (start again in a moment). Only a
+    home asq cannot write to lets it start unchecked, which it says once.
+  - **A 0.9.1 asq is found too, and never killed.** An asq of a release before the
+    registry writes no record, so the check also runs one `ps` of this user's processes
+    (bounded at 2 seconds, outside the home's lock), and a command line that opens asq's UI
+    (`asq` or `aisquare`, bare or with `ui`, as a script, by an interpreter or as `python -m
+    aisquare`) with no live record is one: the refusal names its pid, terminal, start time
+    and command, and what `kill <pid>` loses against its own quit. Left out: this process
+    and its parents, the pids live records name, a process under 10 seconds old, and one
+    whose `AISQUARE_HOME` or `HOME` names another home. With no `ps`, a failing or slow
+    one, or on Windows, one INFO line goes to the log and the check is the registry's
+    alone.
+  - **Usage over SSH, from what the Mac recorded.** An SSH login cannot read the login
+    Keychain, so its asq fetched no usage (`headroom … skipped - login keychain is
+    locked`). Now every process that reads a Keychain item records which login it held (a
+    token fingerprint, or none once signed out) in one `ui_state` row per item, and a
+    process whose Keychain read says locked serves the readings recorded for that same
+    login, never another's: the Accounts table's session cell marks them `· Mac`, and its
+    tooltip, the usage line and `aisquare accounts usage` say `via the Mac's asq · 2m ago
+    (the login Keychain is locked in this SSH session)`. A sign-out or an expired login the
+    Mac saw reads the same over SSH, on the Accounts page, Welcome, the doctor and a
+    launch's account pick. A slot with no row shows nothing, as before, and its fix line
+    says to open asq on the Mac itself, or run `security unlock-keychain` in the SSH
+    session. Linux and Windows write no rows.
+  - **A shared pane's size follows the asq you last typed in.** Two asqs showing one
+    agent's pane each resized its window to their own size, and every attach or resize of
+    one undid the other's. Now a key, a paste or a click in a pane makes that asq the
+    window's size owner (a drag to select text does not), and tmux itself refuses any other
+    asq's resize of the window while the owner runs, so the other never sizes it back: its
+    pane's top-right corner shows `[sized by the other asq (ssh)]` (or `(Mac)`) while the
+    sizes differ, and it sizes the pane again, with no key pressed, once the owner quits.
+  - **On macOS an SSH login never starts the fleet's tmux server.** A tmux server lives in
+    the security session of the login that started it, and agents in one started over SSH
+    cannot read their Claude Code login from the Keychain. So where no fleet server runs,
+    whatever would start one from an SSH login (a spawn, asq's *Start manager* included,
+    `fleet restart`, the Accounts page's sign-in window, any window at the fleet's socket)
+    is refused before anything is written: `not started: start asq on the Mac first:
+    agents started from an SSH login can't read the Keychain`. The login's session is asked
+    (`SessionGetInfo`), not `SSH_CONNECTION`: a pane of a server the Mac started is no SSH
+    login, whoever attaches to it. Once the Mac has started the server, agents spawn into
+    it from SSH as before.
+
+### Changed
+
+- **Renaming a project renames its fleet codename and tmux session too.** Saving a card's
+  name (double-click, F2 or the menu's *Rename*), the Settings tab's nickname, or `aisquare
+  project rename "AISquare CLI"` sets the codename to the name's slug, `aisquare-cli`
+  (lowercased, accents folded, at most 24 characters), and renames the session
+  `asq-earnest-hawk` → `asq-aisquare-cli` on every tmux server the project's agents use.
+  Clearing the name takes the slug of the folder's name. A slug that is taken gets the next
+  free suffix (`aisquare-cli-2`), and you are told why: another project's codename, another
+  project's folder name (which `--project` already names it by), a codename another project
+  gave up at a rename, or an `asq-` tmux session that is not this project's. A name with no
+  letter to slug (`!!!`) saves the nickname and leaves the codename, saying so. The card's
+  rename saves the name at once and does the codename and tmux half in the background; a
+  toast names the new codename. If that half fails, the name is still saved and the toast
+  says why. Projects that are never renamed keep their generated `adjective-animal`
+  codename.
+- **The old codename still works.** `--project earnest-hawk` finds the project after a
+  rename, and the old codename stays reserved for it while the project is registered: no
+  other project is given it (`fleet rename` refuses it, and a project rename or a new
+  project's generated codename passes over it), and renaming the project back to it makes it
+  its codename again. A checkout added later in a folder named `earnest-hawk` makes
+  `--project earnest-hawk` name two projects, which is refused naming both rather than
+  moved to either. A rename posts one note, "project renamed: earnest-hawk → aisquare-cli;
+  --project earnest-hawk still works" (or, when the old codename names another project too,
+  "…; use --project aisquare-cli (--project earnest-hawk names another project too)"), on
+  each board the project's agents read, a paused agent's included (and the captain's, while
+  one is live), so a live manager learns the new name on its next turn. Hints printed after
+  the rename use the new codename. Branches (`fleet/earnest-hawk/…`) and worktrees keep
+  their names. A coder spawned again for a task carries on in that task's branch under the
+  old codename. Open panes stay attached. A watcher source that names the old codename
+  still reaches the project.
+- **A card shows the codename when its name does not give it.** A generated codename that
+  was never renamed, one set with `fleet rename`, or a suffixed one appears dim under the
+  name (`· earnest-hawk`), after the directory when that is shown too. The name's tooltip
+  shows the codename, its tmux session and `--project` either way.
+- **`aisquare fleet rename` accepts any codename of that shape** (`billing-v2`, not only
+  `amber-otter`): lowercase letters and digits in words joined by `-`, starting with a
+  letter, at most 24 characters, and not `p`, `pr` or `prj` (how every project id begins).
+  It refuses another project's folder name and a codename another registered project gave
+  up, since `--project <it>` already names that project. It keeps the old codename working
+  and tells the boards, as a project rename does.
+- **An exact codename now wins over a folder name in `--project`.** A codename matched
+  together with another checkout's folder name (two clones of `aisquare-cli`) was refused
+  as ambiguous. Now it names the project that holds the codename. The captain's `ui` actions
+  follow the same rule.
+- **`fleet pause` and `fleet resume` pause and resume the agents, not only the signal.**
+  `fleet pause [-P <project> | --group <group> | --all] [--managers]` sets the project's
+  `fleet-paused` signal, as before, and then pauses every running agent of it, its
+  manager first, one line each, then a count (`--all` and `--managers` are new; the
+  captain, and the agent that runs the command, are not paused); `fleet resume` resumes the
+  paused agents, the manager last, and clears the signal where no agent stays paused:
+  `--managers`, or an agent whose resume failed, leaves it on, and says so. A signal that
+  cannot be set or cleared refuses the command before any agent is touched, as before; an
+  agent that fails is its own line and exits 1. With the board off (`AISQUARE_TEAM=0`),
+  where 0.9.1 refused, the agents are paused and resumed with no signal. `--json` prints the
+  report `restart --all` prints, with `signals` and `kept`. The manager's rule is
+  unchanged: it spawns nothing while `fleet-paused` is on, and `fleet shutdown` still
+  clears the signal (and leaves a paused agent paused). `fleet ls` shows a paused agent as
+  `⏯ paused`, however long ago it was paused.
+- **One sidebar highlight, for a click and the arrow keys.** The sidebar had two, a
+  click's and a keyboard cursor the arrows moved apart from it; now a click and Up/Down move
+  the same one. A click on a project, an agent or ⚙ Settings opens it, as before. Up/Down
+  open each project, agent or Settings row they land on, and the keyboard stays in the
+  sidebar: an agent's pane or the Settings hub takes it on Enter or a click, not as an
+  arrow passes over. Rows that act rather than show (`+`, *Spawn agent*, *Start captain*,
+  the update row, a group header) are only highlighted by the arrows, with no dialog popped;
+  Enter acts on them. Enter, F2, `x` and the other sidebar keys act on the highlighted row,
+  so `x` asks to stop the agent the arrows just reached. *Spawn agent* reached by the
+  arrows opens on the project whose view is on screen, else the first listed. A held arrow
+  does not open every view it passes.
+- **`aisquare upgrade` and `aisquare uninstall` refuse while an asq runs on the home, and so
+  do asq's Update, Uninstall and ⬆ *Restart & update* while another asq runs.** Left
+  running, an asq would go on running the old release over the new one's files, or lose
+  the program it runs with nothing left to quit it cleanly; 0.9.1 went ahead. The refusal
+  names each asq, `asq 0.9.2 (ssh on mini, pid 4242)`, and says to quit it first (`q` in
+  it). With `--yes` the command exits 1 (`--json`: `"error": "asq_running"`); without it,
+  the plan says why under a `✗` and exits 1, and `--dry-run` prints that plan and changes
+  nothing. In asq it is a toast, and the asq does not quit for nothing. Only asqs
+  in the registry are counted: one from 0.9.1 writes no record, and the 0.9.2 asq started
+  beside it refuses instead.
+
+### Fixed
+
+- **Settings ▸ Usage & stats scrolls to its last section.** Its body was a plain
+  `Vertical` (`height: 1fr`) inside the page's `VerticalScroll`, so it was cut to the
+  window and the page never scrolled: at 160x48, Accounts, Busiest days, Models and
+  Features could not be reached. It sizes to its content now.
+- **The Fleet line says "1 account".** With one account's week read, the Accounts page
+  and `aisquare accounts usage` said `week: 0.8 of 1 accounts left`.
+- **The Accounts table fits a 160-column terminal beside the default sidebar, with no
+  sideways scroll.** A row was
+  167 cells on the 123 the page has there, so the week-resets column was cut and a
+  horizontal scrollbar showed. The resets columns show the distance alone
+  (`in 4h 59m`, `in 6d 12h`; a kept reading whose window has reset reads `reset`), with the
+  whole reset, clock time or age and all, on hover; their headers read `5h resets` and `wk
+  resets`, as Claude Code's status line does; the name and email columns are 12 and 17
+  cells (a longer value ends in `…`, the whole of it on hover); and the *↑*, *↓*,
+  *Log in*, *Disable* and *Remove* buttons are as wide as their longest labels. A narrower
+  terminal still scrolls the table sideways as one.
+- **`aisquare task add` of a dropped or done task's title adds a new task.** The title's key
+  was still held by the closed task, so the add answered `already tracked (idempotent)`
+  forever, and recurring work (a release checklist, a re-run after a revert) could not be
+  added again. It gets a fresh key and number now, and says what it replaces:
+  `✓ added: #9 … (supersedes dropped #4)`; `--json` carries `supersedes` (`number`, `id`,
+  `status`), `null` when nothing was replaced. A title whose task is still open stays
+  idempotent, as before.
+- **The prompt log no longer records Claude Code's own blocks as your prompts.** A
+  background task's `<task-notification>`, a slash command's `<command-name>`,
+  `<command-message>`, `<command-args>` and `<local-command-caveat>`, and a hook's
+  `<system-reminder>` arrive in the prompt field, and `aisquare log` listed them as turns.
+  A prompt that is only such blocks is not recorded; one that mixes them with your words
+  keeps the words. A tag that is never closed is left as typed.
+- **A leading `--json` gives root usage errors as JSON.** `aisquare --json nosuchcmd` and
+  `aisquare --json --badopt` printed the human error box on stderr and nothing on stdout,
+  though `--json`'s help says a leading `--json` gets usage errors as JSON. Both print one
+  JSON object (`{"error": "unknown_command", …}`, `{"error": "usage", …}`) and exit 2 now.
+  `--json` taken as another option's value (`aisquare --profile --json --badopt`) stays
+  human.
+- **`aisquare project fresh --help` reads as one paragraph, and `--dry-run` works inside a
+  fleet agent.** Newer typer and rich kept the docstring's line breaks, so the help came out
+  ragged, with words like `worktree` and `(with` alone on a line. A dry run was refused from
+  inside one of the project's own fleet agents, though it stops nothing; a manager can read
+  the plan from its own pane now. The real run is still refused there.
+- **Turning usage sharing off while its first upload is out no longer loses the opt-out
+  notice.** `aisquare metrics share off` and *Turn sharing off* wrote the switch first and
+  only then looked for a shipment in flight. A first shipment whose reply landed in between
+  saw sharing off and recorded nothing, so *off* found nothing running and nothing ever
+  sent, and no notice went: the server kept the install as opted in. Nothing was posted
+  after *off*, and nothing was kept. *Off* now looks for a shipment in flight before it
+  writes the switch, and no shipment can start while it does; the one notice is sent, best
+  effort, as it is whenever anything was sent.
+
 ## [0.9.1] - 2026-10-27
 
 **Usage & stats: what every Claude Code session on this machine spent, by day,
@@ -5815,7 +6184,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.1...v0.8.2

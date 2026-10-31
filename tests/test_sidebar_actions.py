@@ -494,7 +494,7 @@ def test_the_cursor_target_of_an_action_row_is_no_project(tmp_path: Path, script
         for key in ("down", "down", "down"):  # add → start-captain → spawn-agent
             await pilot.press(key)
             await settle(app)
-            seen.append((app.sidebar._cursor_key, app.sidebar._cursor_target()))
+            seen.append((app.sidebar.selected_key, app.sidebar._cursor_target()))
         return seen
 
     assert drive(body) == [("add", None), ("start-captain", None), ("spawn-agent", None)]

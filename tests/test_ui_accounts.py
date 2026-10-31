@@ -351,6 +351,37 @@ def test_usage_bar_fills_five_cells_and_colours_by_pressure() -> None:
     assert styles[12] == "green" and styles[60] == "yellow" and styles[95] == "bold red"
 
 
+def test_every_reset_a_window_can_show_fits_its_column_whole() -> None:
+    """Review of PR 454: a week ``in 15h 30m`` away is 10 cells and a kept reading's
+    ``reset 45m ago`` 13, so 9-cell columns cut them. Every minute a week can be from its
+    reset, and every minute of a five-hour session window, fits its column; a kept reading
+    whose window has reset reads ``reset``, with its age on hover."""
+    widths = {column.key: column.width for column in COLUMNS}
+    status = _status(2, "two@example.com")
+    longest = {"session-resets": "", "week-resets": ""}
+    for minutes in range(0, 7 * 24 * 60 + 1):
+        usage = ClaudeUsage(
+            available=True,
+            session_percent=10,
+            session_resets_at=NOW + timedelta(minutes=min(minutes, 5 * 60), seconds=30),
+            week_percent=10,
+            week_resets_at=NOW + timedelta(minutes=minutes, seconds=30),
+        )
+        cells = account_cells(status, usage, now=NOW)
+        for key, text in longest.items():
+            shown = cells[key].plain
+            assert len(shown) <= widths[key], (minutes, key, shown)
+            longest[key] = max(text, shown, key=len)
+    assert longest == {"session-resets": "in 1h 01m", "week-resets": "in 10h 01m"}  # the widest
+
+    kept = ClaudeUsage(
+        available=True, session_resets_at=NOW - timedelta(minutes=45), week_percent=10
+    )
+    cells = account_cells(status, kept, now=NOW)
+    assert cells["session-resets"].plain == "reset"
+    assert accounts_view.reset_tooltip(kept, "session", now=NOW) == "reset 45m ago"
+
+
 def test_account_cells_say_who_how_much_what_is_wrong_and_the_plan_last() -> None:
     usage = ClaudeUsage(
         available=True,
@@ -364,8 +395,8 @@ def test_account_cells_say_who_how_much_what_is_wrong_and_the_plan_last() -> Non
     assert signed["slot"] == "2" and signed["name"] == "account 2"
     assert signed["email"] == "two@example.com" and signed["plan"] == "max 5x"
     assert signed["session"] == "▮▯▯▯▯ 12%" and signed["week"] == "▮▮▯▯▯ 40%"  # USED
-    assert signed["session-resets"].startswith("in 3h 10m")
-    assert signed["week-resets"].startswith("in 6d 12h (")
+    assert signed["session-resets"] == "in 3h 10m"  # the distance; the clock is the tooltip
+    assert signed["week-resets"] == "in 6d 12h"
     assert list(signed) == [column.key for column in COLUMNS]
     # Rank 1 is the default (#8 on the board): no ★ column, and no status column either.
     assert "default" not in signed and "status" not in signed
@@ -3470,7 +3501,7 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
     assert out["heights"] == [1, 1, 1, 1]  # never wrapped onto a second line
     assert out["header"][:3] == ["↑", "↓", "#"]  # the arrows first (#8 on the board)
     assert out["header"][5:8] == ["session used", "week used", ""]  # USED; Log in
-    assert out["header"][8:] == ["session resets", "week resets", "plan"]  # the plan last
+    assert out["header"][8:] == ["5h resets", "wk resets", "plan"]  # the plan last
     assert out["name 2"].rstrip().endswith("…") and out["email 2"].rstrip().endswith("…")
     assert out["open"] == closed  # the open field moved no column on any row…
     field_region, name_box = out["field"]
@@ -3647,8 +3678,9 @@ def test_log_in_again_reads_whole_on_screen_at_160_columns_unscrolled(
     no_network: dict[str, Any],
 ) -> None:
     """The tester on #408: with the status column still there *Log in again* read
-    'Log in ag' at 160 columns. Without it (#406), the 14-wide login column shows the
-    whole label on a healthy row, on screen, with nothing scrolled."""
+    'Log in ag' at 160 columns. Without it (#406), the login column, as wide as the label
+    (12 cells, a compact button), shows it whole on a healthy row, on screen, with nothing
+    scrolled."""
     no_network["usage"] = _table_usage
 
     async def run() -> dict[str, Any]:
@@ -3672,6 +3704,63 @@ def test_log_in_again_reads_whole_on_screen_at_160_columns_unscrolled(
     assert out["scroll"] == 0 and out["label"] == "Log in again"
     assert "Log in again" in out["line"] and "…" not in out["line"], out["line"]
     assert out["seen"] and out["on_screen"]
+
+
+def test_the_whole_table_fits_160_by_48_with_no_sideways_scroll(
+    no_network: dict[str, Any],
+) -> None:
+    """The screenshot capture (seq 4391): at 160 columns a row was 167 cells on a 123-cell
+    page, so the week-resets column was cut and a horizontal scrollbar showed. Now the
+    header and the four rows are no wider than the table, nothing scrolls, and every label
+    is drawn whole on screen, the arranging buttons' too (a Button pads its label by a cell
+    each side unless told not to); a resets cell shows the distance alone and its tooltip
+    the whole reset, clock and all."""
+    week_resets = datetime.now(tz=UTC) + timedelta(hours=15, minutes=30, seconds=30)
+
+    def usage(account: ClaudeAccount) -> ClaudeUsage:
+        # The page reads the wall clock: the widest a week's reset reads, ``in 15h 30m``,
+        # half a minute clear of a minute's edge.
+        return _table_usage(account).model_copy(update={"week_resets_at": week_resets})
+
+    no_network["usage"] = usage
+
+    async def run() -> dict[str, Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_table_frame)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 3, 4))
+            await settle_page(app, group=_NO_WORKER)
+            table = view.query_one("#claude-table")
+            header = view.query_one("#claude-header")
+            screen = _painted(app)
+            week = row(view, 1).cell("week-resets")
+            return {
+                "rows": len(view.rows()),
+                "table": table.scrollable_content_region.width,
+                "widths": [line.outer_size.width for line in (header, *view.rows())],
+                "max_scroll_x": table.max_scroll_x,
+                "scrollbar": table.show_horizontal_scrollbar,
+                "header": screen[header.region.y],
+                "lines": {r.slot: screen[r.region.y] for r in view.rows()},
+                "week": (shown(week), week.tooltip),
+            }
+
+    out = asyncio.run(run())
+    assert out["rows"] == 4
+    assert max(out["widths"]) <= out["table"] == 123, out["widths"]
+    assert out["max_scroll_x"] == 0 and not out["scrollbar"], out
+    for title in ("signed in as", "session used", "week used", "5h resets", "wk resets", "plan"):
+        assert title in out["header"], (title, out["header"])
+    lines = out["lines"]
+    assert "Log in again" in lines[1] and "Disable" in lines[1], lines[1]  # slot 1: no Remove
+    for slot in (2, 3):
+        assert "Log in " in lines[slot] and "Disable" in lines[slot], lines[slot]
+        assert "Remove" in lines[slot], lines[slot]
+    assert "Enable" in lines[4] and "Remove" in lines[4], lines[4]  # slot 4 is disabled
+    text, tip = out["week"]
+    assert text == "in 15h 30m", text  # the distance alone, whole in the 10-cell column
+    assert tip is not None and tip.startswith("in 15h 30m (") and tip.endswith(")"), tip
 
 
 @pytest.mark.parametrize("size", [(160, 50), (100, 40)], ids=["160x50", "100x40"])

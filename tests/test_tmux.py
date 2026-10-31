@@ -114,6 +114,7 @@ def _facts_line(**overrides: str) -> str:
         "mouse_all_flag": "0",
         "start_time": "1790343472",
         "window_activity": "1790350000",
+        tmux_module.SIZE_OWNER_OPTION: "",
         "pane_title": "fedora",
     }
     values.update(overrides)
@@ -2052,6 +2053,19 @@ def test_live_rename_session_moves_the_windows_with_it(live: TmuxServer) -> None
     with pytest.raises(TmuxError, match="cannot be targeted"):
         live.rename_session("asq-test-owl", "asq.test")
     assert live.list_sessions() == ["asq-test-owl"]
+
+
+@requires_tmux
+def test_live_rename_window_names_the_window_its_pane_is_in(live: TmuxServer) -> None:
+    """``fleet relabel`` addresses the window by the row's pane id, as ``kill_window`` does."""
+    first = _spawn(live, "asq-test-fox", "coder-1", CAT)
+    second = _spawn(live, "asq-test-fox", "coder-2", CAT)
+    live.rename_window(first.pane_id, "login-fix")
+    names = {w.pane_id: w.name for w in live.list_windows("asq-test-fox")}
+    assert names == {first.pane_id: "login-fix", second.pane_id: "coder-2"}
+
+    with pytest.raises(TmuxError):
+        live.rename_window("%999", "nobody")
 
 
 @requires_tmux

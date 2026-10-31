@@ -25,6 +25,7 @@ from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import ContextStore, GroupSettings, store_session
 from aisquare.core.workspace import find_project_root, project_id_for
 from aisquare.models import FreshCounts, FreshPlan, FreshReport, ProjectGroup, ProjectInfo
+from aisquare.services import fleet as fleet_service
 from aisquare.services import fresh as fresh_service
 from aisquare.services import install_route
 from aisquare.services import parent as parent_service
@@ -176,30 +177,63 @@ def rename(
         ),
     ] = None,
     clear: Annotated[
-        bool, typer.Option("--clear", help="Drop the nickname: the folder's name shows again.")
+        bool,
+        typer.Option(
+            "--clear",
+            help="Drop the nickname: the folder's name shows again, and the codename becomes "
+            "its slug.",
+        ),
     ] = False,
 ) -> None:
-    """Give a project a nickname — what the sidebar and the lists call it.
+    """Give a project a nickname — what the sidebar and the lists call it — and its fleet
+    codename the slug of it.
 
-    Free text, like naming a browser tab: what you are doing there. The codename
-    (`fleet rename`) still names its tmux session and branches.
+    Free text, like naming a browser tab: what you are doing there. The codename names the
+    project's tmux session and `--project`: "Billing v2" makes it billing-v2 (billing-v2-2
+    when another project has that), and its tmux session asq-billing-v2. --clear gives
+    both back to the folder's name. The old codename still finds the project, and its
+    board is told; branches and worktrees keep their names. `fleet rename` sets a codename
+    of your own.
     """
     if nickname is None and not clear:
         fail("pass a nickname, or --clear", error="usage")
     if nickname is not None and clear:
         fail("pass a nickname or --clear, not both", error="usage")
     target = _project_ref(project) if project is not None else project_service.info()
+    notes: list[str] = []
     try:
-        renamed = project_service.set_nickname(target, nickname)
+        followed = fleet_service.rename_project(target, nickname, notes=notes)
     except ValueError as exc:
         fail(str(exc), error="bad_nickname", ref=target.id)
     except KeyError:
         fail(str(project_service.NotAdded(target)), error="not_found", ref=target.id)
-    emit_project_action(
+    if get_state().json_output:
+        typer.echo(json.dumps({**json.loads(followed.model_dump_json()), "notes": notes}))
+        return
+    console = stdout_console()
+    console.print(
         f"✓ {project_service.display_name(target)} is now called "
-        f"{project_service.display_name(renamed)}",
-        renamed,
+        f"{project_service.display_name(followed)}",
+        markup=False,  # a nickname is text, not markup
     )
+    if followed.codename and followed.codename != target.codename:
+        was = ""
+        if target.codename:
+            # Said to work only while it names this project alone (task #6, reopened).
+            works = fleet_service.old_codename_works(followed.id, target.codename)
+            was = (
+                f", was {target.codename} (--project {target.codename} still works)"
+                if works
+                else f", was {target.codename} (--project {target.codename} names another "
+                f"project too: use --project {followed.codename})"
+            )
+        console.print(
+            f"  fleet codename: {followed.codename} "
+            f"(tmux {fleet_service.session_name(followed.codename)}){was}",
+            markup=False,
+        )
+    for note in notes:
+        console.print(f"  ⚠ {note}", markup=False)
 
 
 @app.command("onboard")
@@ -369,6 +403,34 @@ def prune(
 
 # --- start fresh ---------------------------------------------------------------------------
 
+_FRESH_HELP = (
+    "Start fresh: clear the project's board and fleet, then start a blank manager "
+    "(alias: reset).\n"
+    "\n"
+    "Every live agent is stopped as `fleet shutdown` stops it, each agent's worktree "
+    "is removed, and the board's tasks, notes, sessions, signals and work briefs "
+    "(with their kept evidence), the manager's state file and the fleet's rows are "
+    "deleted; task and brief numbers start at #1 again. The checkout, every other "
+    "branch, the registration and its settings, the symbol index and every other "
+    "project are kept, and so are its context entries, prompt log and fleet branches "
+    "unless --memory, --prompts or --branches says otherwise. No command report is "
+    "deleted, but with their briefs gone they are no longer pinned as evidence "
+    "(unless another board's brief cites one), and normal retention takes them. Work "
+    "its worktrees or branches hold that no remote has refuses the reset, named, "
+    "unless --discard-unpushed. It prints the plan and asks first at a terminal "
+    "(twice when discarding); off a terminal it is a dry run unless --yes, and under "
+    "--json without --yes it prints the plan and changes nothing. Refused from "
+    "inside one of the project's own fleet agents, unless --dry-run, and while "
+    "another project's fleet agents read its board."
+)
+"""``fresh``'s ``--help`` text, passed explicitly (not the docstring below): a plain
+multi-line docstring here renders ragged ("worktree", "(with" alone on their own line)
+under newer typer/rich, which keep a source line break as a hard one instead of folding
+it into the paragraph before rewrapping to the terminal width. Adjacent string literals
+carry no such break — the same trick the ``help=`` texts above already use — but ruff's
+formatter joins a *bare* multi-line string statement (a docstring) into one line, so it
+has to live in its own assignment instead."""
+
 
 def fresh(
     project: Annotated[
@@ -419,27 +481,16 @@ def fresh(
 ) -> None:
     """Start fresh: clear the project's board and fleet, then start a blank manager (alias: reset).
 
-    Every live agent is stopped as `fleet shutdown` stops it, each agent's worktree
-    is removed, and the board's tasks, notes, sessions, signals and work briefs (with
-    their kept evidence), the manager's state file and the fleet's rows are deleted;
-    task and brief numbers start at #1 again. The checkout, every other branch, the
-    registration and its settings, the symbol index and every other project are kept,
-    and so are its context entries, prompt log and fleet branches unless
-    --memory, --prompts or --branches says otherwise. No command report is deleted,
-    but with their briefs gone they are no longer pinned as evidence (unless another
-    board's brief cites one), and normal retention takes them. Work its worktrees or
-    branches hold that no remote has refuses the reset, named, unless
-    --discard-unpushed. It prints the plan and asks first at a terminal (twice when
-    discarding); off a terminal it is a dry run unless --yes, and under --json
-    without --yes it prints the plan and changes nothing. Refused from inside one
-    of the project's own fleet agents, and while another project's fleet agents
-    read its board.
+    See ``_FRESH_HELP`` above for the full text ``--help`` shows.
     """
     target = _project_ref(project) if project is not None else project_service.info()
     try:
-        planned = fresh_service.plan(target, memory=memory, prompts=prompts, branches=branches)
+        planned = fresh_service.plan(
+            target, memory=memory, prompts=prompts, branches=branches, dry_run=dry_run
+        )
     except fresh_service.FreshRefused as exc:
-        fail(str(exc), error=exc.code, ref=target.id, detail=str(exc), exit_code=2)
+        said = _fresh_refused(exc)
+        fail(said, error=exc.code, ref=target.id, detail=said, exit_code=2)
     if dry_run or (get_state().json_output and not yes):
         _emit_fresh_plan(planned, discard=discard_unpushed)
         return
@@ -486,7 +537,7 @@ def fresh(
             ack_wait=fleet_service.settings().prompt_ack_seconds,
         )
     except fresh_service.FreshRefused as exc:
-        said = str(exc)
+        said = _fresh_refused(exc)
         if exc.code == "unpushed_work" and exc.plan is not None and discard_unpushed:
             # Work found since the list confirmed at the terminal, before anything was
             # stopped: the flag they passed, named again, would only ask about the same list.
@@ -518,7 +569,16 @@ def fresh(
         raise typer.Exit(code=1)
 
 
-app.command("fresh")(fresh)
+def _fresh_refused(exc: fresh_service.FreshRefused) -> str:
+    """The refusal as this command says it: one about the caller's own pane names the dry run,
+    which runs there. Not in the service's text, which the UI's start-fresh dialog shows as it
+    is, and which has no ``--dry-run`` (review of #469)."""
+    if exc.code in ("inside_fleet_agent", "inside_fleet"):
+        return f"{exc}; --dry-run shows the plan from here"
+    return str(exc)
+
+
+app.command("fresh", help=_FRESH_HELP)(fresh)
 app.command("reset", hidden=True, help="Alias of 'fresh'.")(fresh)
 
 

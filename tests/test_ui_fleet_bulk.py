@@ -434,7 +434,7 @@ def test_a_quit_is_refused_while_the_run_goes_on_and_quits_once_it_ended(acted: 
     refused, toasts, quit_after = drive(go)
     assert refused is None, "asq quit under a run of every agent"
     assert toasts == [
-        "Settings ▸ Fleet's restart or stop of every agent is still running — quit when it ends"
+        "a restart, stop, pause or resume of many agents is still running — quit when it ends"
     ]
     assert quit_after == 0
 

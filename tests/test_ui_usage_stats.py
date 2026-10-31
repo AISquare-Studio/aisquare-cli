@@ -39,7 +39,7 @@ from aisquare.models import USAGE_RANGES, UsageDay, UsageRange, UsageStats, Usag
 from aisquare.services import usage_stats
 from tests.test_ui_settings_hub import GOOD
 from tests.ui_workers import settle_page, settle_until
-from tests.usage_stats_support import IST, NOW, Machine, prompt, request
+from tests.usage_stats_support import IST, NOW, Machine, pin_clock, prompt, request
 
 T = TypeVar("T")
 SIZE = (120, 60)
@@ -143,8 +143,11 @@ def _page(view: UsageStatsView) -> dict[str, str]:
 
 
 def test_the_hub_has_a_usage_and_stats_link_that_opens_the_page_under_settings(
-    machine: Machine,
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The page's own loader reads its 7-day range by the clock: pinned to NOW, or the history
+    # around NOW fell out of it from about 2026-11-02 on (a date bomb).
+    pin_clock(monkeypatch, usage_stats)
     _history(machine)
 
     async def go() -> tuple[str | None, str | None, bool, str]:
@@ -313,6 +316,26 @@ def test_each_range_renders_its_figures(machine: Machine, range_: UsageRange) ->
     if range_ in ("today", "7d", "lifetime"):  # the days the two features were counted on
         assert "cli.fleet.spawn" in page["features"]
     assert page["status"].startswith("Updated ")
+
+
+def test_the_page_scrolls_down_to_its_last_section_at_160_by_48(machine: Machine) -> None:
+    """The body under the range switcher sized itself to the window (a plain ``Vertical``,
+    ``height: 1fr``) and clipped what did not fit, so the page never scrolled (max_scroll_y
+    0) and Accounts, Busiest days, Models and Features were out of reach at 160x48."""
+    _history(machine)
+
+    async def go(pilot: Pilot[None], view: UsageStatsView) -> tuple[int, Region, Region]:
+        await settle_until(view.app, lambda: _painted(view, "7d"))
+        await settle_page(view.app)
+        can_scroll = view.max_scroll_y
+        view.scroll_end(animate=False)
+        await settle_page(view.app)
+        return can_scroll, view.region, view.query_one("#usage-features", Static).region
+
+    can_scroll, page, features = _drive_page(real_loader(), go, size=(160, 48))
+
+    assert can_scroll > 0
+    assert features.height > 0 and page.contains_region(features), (page, features)
 
 
 def test_the_range_buttons_show_which_range_is_on_and_a_click_switches(machine: Machine) -> None:

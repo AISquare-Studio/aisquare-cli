@@ -45,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/i
 ```
 
 That installs the latest release. To pin one, every release from 0.9.0 on
-carries its own copy: `curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.1/install.sh | sh`.
+carries its own copy: `curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.2/install.sh | sh`.
 
 macOS, Linux and WSL2. It installs uv, a Python 3.13 for the CLI alone,
 `aisquare-cli`, tmux, gh, git and Claude Code, offers Node for browser tools,
@@ -69,7 +69,17 @@ Then `asq` opens on Welcome, three steps to a running fleet:
 
 Click any agent to see and drive its session. **Press `F12`** to hand focus
 back to the sidebar, where `w` returns to Welcome and `q` quits. **The agents
-keep running**; reopen `asq` and it re-attaches to what it finds.
+keep running**; reopen `asq` and it re-attaches to what it finds. To stop them
+spending tokens without losing them, *⚙ Settings ▸ Fleet ▸ Pause all…* exits each
+one and keeps its task, worktree and session; *Resume all…* brings each back where
+it was.
+
+You can open `asq` over SSH into the same Mac while the Mac's own is open: both
+show the same fleet, and a line in the sidebar says where each one runs. Start
+the first agent at the Mac, since on macOS an SSH login can't start the fleet's
+tmux server (agents in it couldn't read the Keychain).
+[Running more than one asq](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/multi-instance.md)
+has the rest, including what happens when the two run different releases.
 
 The manager never writes code and never merges — a human does that.
 
@@ -79,9 +89,13 @@ Everything the UI does is also a plain command, and every one takes `--json`;
 `aisquare --help` lists them:
 
 ```sh
-aisquare fleet ls                      # this project's agents and their live state
-aisquare fleet attach                  # the same session in raw tmux, full fidelity
-aisquare doctor                        # is everything wired? (and how to fix anything)
+aisquare fleet ls                         # this project's agents and their live state
+aisquare fleet relabel coder-1 login fix  # give an agent a name you chose: login-fix
+aisquare fleet pause --all                # every project's agents stop, kept for resume
+aisquare fleet resume --all               # ...and come back where they were
+aisquare fleet attach                     # the same session in raw tmux, full fidelity
+aisquare instances                        # the asqs open on this home: at the Mac, over SSH
+aisquare doctor                           # is everything wired? (and how to fix anything)
 ```
 
 ## The captain (experimental, off by default)

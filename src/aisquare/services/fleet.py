@@ -39,7 +39,7 @@ import subprocess
 import time
 import unicodedata
 import uuid
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -55,12 +55,14 @@ from aisquare.core import (
     codenames,
     experimental,
     harness,
+    login_session,
     orchestrator,
     paths,
     personas,
     selfcli,
 )
 from aisquare.core import memory as memory_core
+from aisquare.core import names as names_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
@@ -75,6 +77,8 @@ from aisquare.core.ids import new_agent_id
 from aisquare.core.locking import holding
 from aisquare.core.spawn import git_env
 from aisquare.core.store import (
+    FLEET_RENAMED,
+    RETIRED_LABEL,
     AmbiguousIdError,
     ContextStore,
     StoreUnopenable,
@@ -256,6 +260,11 @@ class CapacityRefused(FleetError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class _LostToARelabel(FleetError):
+    """A worktree spawn's label went, while it started, to an agent working in another tree
+    (:func:`relabel`): the tree the spawn made is nobody's, and :func:`spawn` removes it."""
 
 
 class EndedMeanwhile(NoSuchAgent):
@@ -818,6 +827,64 @@ def slugify(text: str, *, limit: int = 32) -> str:
     return slug[:limit].rstrip("-")
 
 
+LABEL_RULE = "a label is 2 to 24 lowercase letters, digits and '-', starting with a letter"
+"""The rule :data:`LABEL` holds, in the words a refusal of a typed name says it."""
+
+
+def label_from_text(text: str, role: str) -> str:
+    """The label free ``text`` becomes (:func:`relabel`; the sidebar shows it while it is typed).
+
+    :func:`aisquare.core.names.slug` of it — lowercased, its accents folded, each run of
+    anything else outside ``[a-z0-9]`` one ``-``, no ``-`` at either end, cut to 24 with no
+    ``-`` left at its end — with ``<role>-`` before one that starts with a digit (``2FA work``
+    for a coder is ``coder-2fa-work``: a label starts with a letter), cut to 24 again. Always
+    a :data:`LABEL`. Text that leaves fewer than two letters or digits (``!!!``, ``x``) is
+    refused (:class:`FleetError`), the rule said.
+    """
+    slugged = names_core.slug(text, max_len=24)
+    if len(slugged.replace("-", "")) < 2:
+        raise FleetError(
+            f"{text.strip()!r} leaves no label to keep — {LABEL_RULE}, so type at least two "
+            "letters or digits"
+        )
+    if not slugged[0].isalpha():
+        stem = slugify(role)
+        slugged = f"{stem if stem[:1].isalpha() else 'agent'}-{slugged}"
+    label = slugged[:24].rstrip("-")
+    if not is_label(label):  # pragma: no cover - every branch above makes one
+        raise FleetError(f"{text.strip()!r} makes no label — {LABEL_RULE}")
+    return label
+
+
+def relabel_refusal(agent: FleetAgent) -> str | None:
+    """Why ``agent`` cannot be renamed (:func:`relabel`), or ``None`` when it can — what the
+    sidebar asks before it offers a rename, with no store read.
+
+    The manager and the captain run under the one label their role has (:func:`_fixed_label`),
+    which the fleet and the board find them by. An ended agent runs nothing a name could
+    follow: its label is the next spawn's to take. A paused one (:func:`_paused_row`) runs
+    nothing either, and keeps its label for ``fleet resume``, which brings it back under it:
+    resumed, it is renamed as any running agent is."""
+    if agent.role == "manager" or agent.label == MANAGER_LABEL:
+        return (
+            f"the manager is always labelled {MANAGER_LABEL!r} — the fleet and the board find "
+            "it by that name, so it is not renamed"
+        )
+    if agent.role == CAPTAIN_ROLE or is_the_captains_row(agent):
+        return (
+            f"the captain is always labelled {CAPTAIN_LABEL!r} — the fleet and the board find "
+            "it by that name, so it is not renamed"
+        )
+    if _paused_row(agent):
+        return (
+            f"{agent.label} is paused — only a running agent is renamed; `fleet resume` "
+            "brings it back under this label, and it can be renamed then"
+        )
+    if agent.ended_at is not None:
+        return f"{agent.label} has ended — only a running agent is renamed"
+    return None
+
+
 def branch_name(codename: str, *, task_id: str | None, title: str | None) -> str:
     """``fleet/<codename>/<task-short-id>-<slug>``; ``fleet/<codename>/<slug>`` without a task.
 
@@ -933,7 +1000,7 @@ def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> 
             current = store.get_project(project.id)
             if current is not None and current.codename:
                 return current
-            name = codenames.codename_for(project.id, taken=store.codenames_in_use())
+            name = codenames.codename_for(project.id, taken=_generation_taken(store))
             try:
                 return store.set_codename(project.id, name)
             except sqlite3.IntegrityError:
@@ -947,6 +1014,13 @@ def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> 
         return assign(store)
     with store_session() as opened:
         return assign(opened)
+
+
+def _stored_codename(project_id: str) -> str | None:
+    """The codename ``project_id``'s live row holds now, or ``None`` (no row, or none yet)."""
+    with store_session() as store:
+        row = store.get_project(project_id)
+    return row.codename if row is not None else None
 
 
 def _kept_codename(store: ContextStore, project: ProjectInfo) -> str | None:
@@ -967,10 +1041,19 @@ def _codename_to_add(store: ContextStore, project: ProjectInfo) -> str:
     kept = _kept_codename(store, project)
     if kept is not None:
         return kept
-    return codenames.codename_for(project.id, taken=store.codenames_in_use())
+    return codenames.codename_for(project.id, taken=_generation_taken(store))
 
 
-def _is_home_project(project: ProjectInfo) -> bool:
+def _generation_taken(store: ContextStore) -> set[str]:
+    """What the generated walk (:func:`codenames.codename_for`) passes over: every codename in
+    use, and every one a live project gave up at a rename, which ``--project`` still finds that
+    project by (:meth:`ContextStore.aliases_in_use`). A new project generated onto one moved
+    that reference to itself without a word (task #6, reopened). The walk and its first
+    candidate are unchanged for a project whose name collides with neither."""
+    return store.codenames_in_use() | store.aliases_in_use()
+
+
+def is_home_project(project: ProjectInfo) -> bool:
     """Whether ``project`` is the aisquare home's own row — the captain's home board."""
     home = paths.aisquare_home().resolve()
     return project.id == project_id_for(home)
@@ -1036,20 +1119,41 @@ def next_label(
     wanted: str | None = None,
     task_id: str | None = None,
     store: ContextStore | None = None,
+    trees: Path | None = None,
+    replaces: str | None = None,
 ) -> str:
     """The label a new agent gets: the asked one, or ``<role>-<task>`` / ``<role>-<n>``,
-    suffixed ``-2``, ``-3`` while a LIVE agent already holds it (§5.7).
+    suffixed ``-2``, ``-3`` while a LIVE or PAUSED agent already holds it (§5.7).
 
     The stem before a suffix is trimmed so the whole stays within 24 characters
     (:func:`_fitted`). A bound role's characters are its own and kept as they are
     (``data_eng-1``): only a label somebody typed is checked against the rule.
+
+    A paused agent (:func:`_paused_heads`) keeps its label, and with it its worktree, for
+    ``fleet resume``: taken by a new spawn, the new agent sat in the paused one's tree and
+    the resume found its label started again. ``replaces`` is the restart's of that very
+    row (:func:`restart`), which is how a paused agent gets its own label back.
+
+    ``trees`` is where a NEW worktree is made (``<root>/<worktree_dir>``, :func:`spawn`'s for
+    an agent with none of its own yet): a label whose tree there a live or paused agent works
+    in is held too. That agent was relabelled (:func:`relabel`), which moves no tree, and its
+    tree keeps the label it was spawned under, which no other agent may start in.
     """
     fixed = _fixed_label(role, wanted)
     if fixed is not None:
         return fixed
 
     def pick(store: ContextStore) -> str:
-        live = {agent.label for agent in store.fleet_agents(project.id, live_only=True)}
+        paused = [
+            agent
+            for agent in _paused_heads(store.fleet_label_heads(project.id)).values()
+            if agent.id != replaces
+        ]
+        rows = [*store.fleet_agents(project.id, live_only=True), *paused]
+        live = {agent.label for agent in rows}
+        if trees is not None:
+            here = trees.resolve()
+            live |= {a.cwd.name for a in rows if a.worktree and a.cwd.resolve().parent == here}
         if wanted is not None:
             base = wanted
         elif task_id:
@@ -1069,6 +1173,41 @@ def next_label(
         return pick(store)
     with store_session() as opened:
         return pick(opened)
+
+
+def _why_held(
+    store: ContextStore,
+    project: ProjectInfo,
+    label: str,
+    trees: Path | None,
+    replaces: str | None = None,
+) -> str:
+    """Why :func:`next_label` passed over the asked ``label``, in a spawn's note: a live agent
+    holds it, a paused one (:func:`_paused_heads`, its label kept for ``fleet resume``), or
+    (``trees`` given) a relabelled one, live or paused, still works in the tree named for it
+    — which ``fleet ls`` lists under its new label, so the note names that one."""
+    if store.fleet_agent_by_label(project.id, label, live_only=True) is None:
+        paused = [
+            agent
+            for agent in _paused_heads(store.fleet_label_heads(project.id)).values()
+            if agent.id != replaces
+        ]
+        if any(agent.label == label for agent in paused):
+            return f"label {label!r} is held by a paused agent"
+        if trees is not None:
+            path = _tree_at(trees / label)
+            holder = next(
+                (
+                    row
+                    for row in [*store.fleet_agents(project.id, live_only=True), *paused]
+                    if row.worktree and _tree_at(row.cwd) == path
+                ),
+                None,
+            )
+            if holder is not None:
+                how = "paused" if _paused_row(holder) else "still works"
+                return f"label {label!r} is the worktree {holder.label} {how} in ({holder.cwd})"
+    return f"label {label!r} is held by a live agent"
 
 
 def _fork_label(
@@ -1486,7 +1625,7 @@ def _worktree_for(
     """
     if own is not None and not own.exists():
         return _remake_worktree(root, own, own_branch, notes)
-    path = root / worktree_dir / label
+    path = _tree_path(root, worktree_dir, label, own)
     if path.exists():
         if start_point is not None:
             raise FleetError(
@@ -1523,6 +1662,35 @@ def _worktree_for(
             _add_worktree(root, path, branch, new=True, start_point=start_point)
     _exclude_worktrees(common, worktree_dir, notes)
     return path
+
+
+def _carried_on(root: Path, branch: str, codename: str, retired: Sequence[str]) -> str:
+    """``branch`` (:func:`branch_name`'s, under ``codename``), or — when there is none and the
+    project was renamed — the branch of the same name under a codename it had before
+    (``retired``, newest first) that there is: a spawn for a task an agent worked on before
+    the rename carries on in that agent's branch. Branches are never renamed with the
+    project, and named under the new codename alone, the task's commits were left behind on
+    ``fleet/<old>/…`` and its next coder started from the default branch."""
+    if not retired or _branch_exists(root, branch):
+        return branch
+    leaf = branch.removeprefix(f"{_FLEET_BRANCH_PREFIX}{codename}/")
+    for old in retired:
+        earlier = f"{_FLEET_BRANCH_PREFIX}{old}/{leaf}"
+        if _branch_exists(root, earlier):
+            return earlier
+    return branch
+
+
+def _tree_path(root: Path, worktree_dir: str, label: str, own: Path | None) -> Path:
+    """Where a worktree agent labelled ``label`` works: ``<root>/<worktree_dir>/<label>``, or
+    ``own``, the tree a replacement's row recorded (:func:`_respawn`), when it is one of
+    today's ``worktree_dir``. A relabelled agent's tree keeps the label it was spawned under
+    (:func:`relabel` moves no tree, nor a branch), and it is still that agent's: its restart,
+    switch or take-over carries on there, never in a new tree under its new label."""
+    trees = root / worktree_dir
+    if own is not None and own.resolve().parent == trees.resolve():
+        return own
+    return trees / label
 
 
 def _branch_exists(root: Path, branch: str) -> bool:
@@ -1775,7 +1943,8 @@ def _remove_finished_worktrees(
     coder that pushes onto an integration branch (``push HEAD:feat/…``) never was:
     its worktrees stayed for good, 15 of them and 1.2 GB on one night. Each tree kept
     is on the report with why. A tree a live agent still sits in (a respawn reused it)
-    is never touched.
+    is never touched, nor a PAUSED agent's (:func:`_paused_row`): ``fleet resume`` starts it
+    there again, uncommitted work and all.
 
     A tree, or a project root, that cannot be looked at (a folder above it this user may not
     search, a mount that answered ``EIO``) is kept and said so, and the sweep goes on. Asked
@@ -1823,8 +1992,8 @@ def _remove_finished_worktrees(
     in_use = {here for here, agent in trees if here is not None and agent.ended_at is None}
     in_use.add(root.resolve())
     for path, agent in owners.items():
-        if path in in_use or agent.ended_at is None:
-            continue
+        if path in in_use or agent.ended_at is None or _paused_row(agent):
+            continue  # a paused agent's tree is where `fleet resume` starts it again
         try:
             if not _present(agent.cwd):
                 continue
@@ -1963,7 +2132,7 @@ def _sweep_fleet_branches(
     for good once merged, and the repo collected one a task (review of #259, round 15).
     A branch some worktree has out, the tree gone by hand or not, or is rebasing or
     bisecting (:func:`_branches_in_use`, what ``branch -D`` refuses: review of #259, round
-    34, 1/10), is left alone, and so is one a LIVE row names; when the trees cannot be
+    34, 1/10), is left alone, and so is one a LIVE or paused row names; when the trees cannot be
     asked, every branch is. The deletes are made under the lock a spawn makes its tree under
     (:func:`_branches_locked`), after asking the trees again: never meanwhile, as a branch
     a spawn has just made, or is about to check out, reads as out of every tree. Each is
@@ -1979,7 +2148,8 @@ def _sweep_fleet_branches(
     hand, or one its agent left for another — is left as it is, and so is a recorded one
     that is not ``fleet/…`` (``fix/auth``): only branches :func:`branch_name` makes go.
     """
-    live = {row.branch for row in rows if row.ended_at is None}
+    paused = _paused_heads(rows)  # a paused agent's branch is where its resume carries on
+    live = {row.branch for row in rows if row.ended_at is None or row.id in paused}
     recorded = {
         row.branch
         for row in rows
@@ -2085,17 +2255,22 @@ def fleet_trees(project: ProjectInfo, rows: Sequence[FleetAgent]) -> list[Path]:
 
 def fleet_branch_tips(project: ProjectInfo, rows: Sequence[FleetAgent]) -> dict[str, str]:
     """The local branches ``project fresh --branches`` deletes, with their tips: each
-    ``fleet/<codename>/…`` branch, and each other ``fleet/…`` one ``rows`` recorded (from
-    before a ``fleet rename``). Never a remote branch, nor any other local one; ``{}`` for a
-    project that is no git checkout. Raises :class:`FleetError` when git cannot be run."""
+    ``fleet/<codename>/…`` branch, under its codename or one it gave up at a rename that no
+    project holds now (:meth:`ContextStore.codename_aliases`), and each other ``fleet/…`` one
+    ``rows`` recorded. Under its current codename alone, a ``fleet/<old>/…`` branch no row
+    recorded was left, and a spawn for its task would carry on there (:func:`_carried_on`;
+    review of #456, 5). Never a remote branch, nor any other local one; ``{}`` for a project
+    that is no git checkout. Raises :class:`FleetError` when git cannot be run."""
     if not is_git_project(project.root):
         return {}
-    own = f"{_FLEET_BRANCH_PREFIX}{project.codename}/" if project.codename else None
+    with store_session() as store:
+        retired = store.codename_aliases(project.id)
+    own = tuple(f"{_FLEET_BRANCH_PREFIX}{name}/" for name in (project.codename, *retired) if name)
     recorded = {row.branch for row in rows if row.branch}
     return {
         branch: tip
         for branch, tip in (_fleet_branches(project.root) or {}).items()
-        if (own is not None and branch.startswith(own)) or branch in recorded
+        if (own and branch.startswith(own)) or branch in recorded
     }
 
 
@@ -2183,13 +2358,17 @@ def project_sessions(project: ProjectInfo) -> list[str] | None:
     found: list[str] = []
     for socket in _shutdown_sockets(targets, config):
         srv = _server_at(socket, config)
-        for name, _, _ in _fleet_sessions(srv, targets, socket=socket, config=config, every=False):
+        for name, _, expected in _fleet_sessions(
+            srv, targets, socket=socket, config=config, every=False
+        ):
             try:
                 if srv.has_session_or_raise(name):
                     found.append(f"{socket}:{name}")
             except TmuxUnavailable:
                 return []  # no usable tmux here: nothing could be stopped from here either
             except (TmuxError, OSError):
+                if name != session_name(project.codename) and not expected:
+                    continue  # a retired codename's, asked just in case
                 return None
     return found
 
@@ -2661,6 +2840,9 @@ def _derive(
     recent output (:data:`ACTIVITY_WINDOW`) means working; and when tmux cannot
     be asked at all the answer is ``unknown``, never a guess.
 
+    A row ``fleet pause`` ended reads ``paused`` (:data:`PAUSED_DETAIL`), never ``exited``:
+    it is no agent that finished, and ``fleet resume`` brings it back.
+
     So is another server at the row's socket (``held``, :func:`_observe`): it reads
     ``unknown`` whatever its board says, saying why (:data:`ANOTHER_SERVER`). Its agent is
     one no tmux client reaches, if it runs at all, and its pane id there is another
@@ -2670,6 +2852,8 @@ def _derive(
     takes its coders' questions (review of #259, round 2).
     """
     if agent.ended_at is not None:
+        if _paused_row(agent):
+            return "paused", PAUSED_DETAIL
         return "exited", _exit_detail(agent.exit_status)
     if observed:
         if pane is None:
@@ -3292,11 +3476,23 @@ def _task_for(store: ContextStore, board_id: str, task_id: str | None) -> TeamTa
 def _live_agent(
     store: ContextStore, project: ProjectInfo, label: str, *, agent_id: str | None = None
 ) -> FleetAgent:
-    """The live row ``label`` names; with ``agent_id``, only if it is THAT row (:func:`stop`)."""
+    """The live row ``label`` names; with ``agent_id``, only if it is THAT row (:func:`stop`).
+
+    A ``label`` the agent was relabelled from (:func:`relabel`) names nothing now, and the
+    refusal says what it is called instead. Pinned to ``agent_id`` — a view that read the
+    row before the rename — the row is found by its id all the same."""
     agent = store.fleet_agent_by_label(project.id, label, live_only=True)
+    if agent is None and agent_id is not None:
+        pinned = store.get_fleet_agent(agent_id)
+        if (
+            pinned is not None
+            and pinned.ended_at is None
+            and _renamed_from(store, project, label) == pinned.id
+        ):
+            return pinned
     if agent is None:
         raise NoSuchAgent(
-            f"no live agent {label!r} in {_name(project)} — "
+            f"no live agent {label!r} in {_name(project)}{_renamed_hint(store, project, label)} — "
             f"`{project_service.fleet_command('ls', project)}` shows who is running"
         )
     if agent_id is not None and agent.id != agent_id:
@@ -3522,7 +3718,7 @@ def spawn(
     _refuse_an_agents_opening_command(
         project, role, prompt, spawned_by, kickoff_first=task_id is not None and kickoff
     )
-    if experimental.captain_role(role) and not _is_home_project(project):
+    if experimental.captain_role(role) and not is_home_project(project):
         raise FleetError(
             "the captain lives on the home board, one per home — `aisquare captain` starts "
             f"it; it cannot be spawned into {_name(project)}"
@@ -3611,6 +3807,16 @@ def spawn(
                 f"project; `{project_service.fleet_command('stop', project, 'manager')}` "
                 "first"
             )
+        # A paused manager is the project's manager still: its label is fixed, so a second
+        # one took it, and `fleet resume` then found the label started again and left the
+        # paused one with its claims parked for good. Its own resume replaces it.
+        paused = next((a for a in _paused_heads(rows).values() if a.label == MANAGER_LABEL), None)
+        if paused is not None and paused.id != replaces:
+            raise FleetError(
+                f"{_name(project)}'s manager is paused ({paused.id}) — "
+                f"`{project_service.fleet_command('resume', project)}` brings it back, or "
+                f"`{project_service.fleet_command('stop', project, 'manager')}` ends it for good"
+            )
     if experimental.captain_role(role):
         existing = next((agent for agent in live if agent.role == CAPTAIN_ROLE), None)
         if existing is not None:
@@ -3655,15 +3861,29 @@ def spawn(
                 codename=observed,
             )
         else:
-            picked = next_label(project, role, wanted=label, task_id=resolved_task_id, store=store)
-    if label is not None and picked != label:
-        if role == "manager":
-            notes.append(f"the manager is always labelled {MANAGER_LABEL!r} (asked: {label!r})")
-        else:
-            notes.append(f"label {label!r} is held by a live agent — using {picked!r}")
+            # A new tree's place is held where a relabelled agent still works in it; a
+            # replacement keeps its own (`_tree_path`).
+            fresh = use_worktree and own_worktree is None
+            trees = project.root / config.worktree_dir if fresh else None
+            picked = next_label(
+                project,
+                role,
+                wanted=label,
+                task_id=resolved_task_id,
+                store=store,
+                trees=trees,
+                replaces=replaces,
+            )
+            if label is not None and picked != label and role != "manager":
+                held = _why_held(store, project, label, trees, replaces)
+                notes.append(f"{held} — using {picked!r}")
+    if label is not None and picked != label and role == "manager":
+        notes.append(f"the manager is always labelled {MANAGER_LABEL!r} (asked: {label!r})")
+    # The tree it will work in, when it gets one: its label's, or a replacement's own.
+    tree = _tree_path(project.root, config.worktree_dir, picked, own_worktree)
 
     def refuse_if_taken() -> None:
-        _refuse_occupied_worktree(project, config.worktree_dir, picked)
+        _refuse_occupied_worktree(project, tree, picked, again=own_worktree is not None)
 
     if use_worktree:
         if not is_git_project(project.root):
@@ -3716,8 +3936,16 @@ def spawn(
     # (`_write_row`), so a refusal from here on leaves no row behind (review of #259,
     # round 17).
     with store_session() as store:
+        # The codename the row holds NOW: a caller's copy read before a rename (a Spawn dialog
+        # left open, a `restart`'s project) named the session and the branch by the old one,
+        # and tmux made `asq-<old>` again beside the renamed session.
+        row = store.get_project(project.id)
+        if row is not None and row.codename and row.codename != project.codename:
+            project = project.model_copy(update={"codename": row.codename})
         project = ensure_codename(project, store)
         codename = project.codename or _codename_to_add(store, project)
+        # The codenames it had before a rename: its earlier agents' branches are under them.
+        retired = store.codename_aliases(project.id)
     if codename != observed:
         # A forgotten project's ended rows keep their windows under the codename its
         # tombstone kept, which the caller's registration did not carry.
@@ -3906,7 +4134,7 @@ def spawn(
     # from its brain folder under the home, so no project's CLAUDE.md or hooks brief it as a
     # worker (T2, 13121). The row records it and a restart replays it.
     home = cwd if cwd is not None else project.root
-    start = project.root / config.worktree_dir / picked if common is not None else home
+    start = tree if common is not None else home
     settled: str | None = None
     if choice.account is not None:
         # Here as well as in the window's `aisquare launch`, so the receipt — the manager's
@@ -3935,12 +4163,17 @@ def spawn(
     )
     with tree_lock:
         cwd = home
+        # Whether this spawn makes its tree, which it then removes should its label go to a
+        # relabelled agent meanwhile (`_LostToARelabel`): a tree that was there stays.
+        makes_tree = common is not None and not tree.exists()
         if common is not None:
             branch = branch_name(
                 codename,
                 task_id=resolved_task_id,
                 title=task.title if task is not None else picked,
             )
+            if start_point is None:  # a fork's branch is cut new, under today's codename
+                branch = _carried_on(project.root, branch, codename, retired)
             cwd = _worktree_for(
                 project.root,
                 config.worktree_dir,
@@ -3956,6 +4189,13 @@ def spawn(
         if settled is not None and os.path.realpath(cwd) == os.path.realpath(start):
             # Only for the folder it shared for: a restart's own tree can be elsewhere.
             env[claude_accounts_service.SHARED_ENV] = settled
+        # The codename asked again as the window opens: a rename (one gesture on a card) that
+        # landed during the tree work above renamed the session, and a window opened under
+        # the codename read before it started `asq-<old>` anew, where `attach` and a scoped
+        # `shutdown` never looked (review of #456, 3). The branch keeps the name it was given.
+        renamed = _stored_codename(project.id)
+        if renamed is not None and renamed != codename:
+            codename, tmux_session = renamed, session_name(renamed)
         try:
             # Every pair is this window's alone: `spawn_window` keeps them out of
             # the session environment, so a later spawn — or a window opened by hand
@@ -4047,18 +4287,22 @@ def spawn(
             first_prompt="pending" if first is not None else None,
             first_prompt_at=_now() if first is not None else None,
         )
-        stored = _record(
-            agent,
-            project,
-            srv,
-            wanted=label,
-            notes=notes,
-            cap=config.max_agents_per_project,
-            total=0 if experimental.captain_role(role) else config.max_agents_total,
-            onboard=onboard,
-            codename=codename,
-            replaces=replaces,
-        )
+        try:
+            stored = _record(
+                agent,
+                project,
+                srv,
+                wanted=label,
+                notes=notes,
+                cap=config.max_agents_per_project,
+                total=0 if experimental.captain_role(role) else config.max_agents_total,
+                onboard=onboard,
+                codename=codename,
+                replaces=replaces,
+            )
+        except _LostToARelabel as exc:
+            unmade = _unmake_tree(project.root, cwd) if makes_tree else ""
+            raise FleetError(f"{exc}{unmade}; spawn again") from exc
     if picks and spec is None and _the_owners_spawn(spawned_by):
         # The next spawn's pick, once this agent is up: a spawn refused on its way chose nothing.
         try:
@@ -4635,6 +4879,55 @@ def _forget_an_exited_server(
     return forgotten
 
 
+SSH_START_REFUSAL = (
+    "start asq on the Mac first: agents started from an SSH login can't read the Keychain"
+)
+"""Why an SSH login on macOS starts no fleet tmux server (:func:`_refuse_a_server_from_ssh`)."""
+
+
+def _refuse_a_server_from_ssh() -> None:
+    """Refuse to start the fleet's tmux server from an SSH login on macOS (#20).
+
+    A tmux server runs in the security session of the process that started it, and so does
+    every pane it opens (``core.login_session``): one started from an SSH login opens agents
+    that cannot read the Claude Code login in the Keychain, whoever attaches to it later. A server
+    the Mac started is joined from SSH as ever: only the start is refused. Asked once
+    :func:`_before_a_server_starts` read that no server listens, so a spawn into a running
+    server pays nothing for it.
+    """
+    if login_session.remote_session():
+        raise FleetError(
+            f"not started: {SSH_START_REFUSAL}. No fleet tmux server runs yet: start an agent "
+            "in asq at the Mac, and agents start from SSH after that"
+        )
+
+
+def _no_server_listens(answer: SocketAnswer | None) -> bool:
+    """Whether a window opened at a socket that answered ``answer`` (``TmuxServer.listener``)
+    would START a server there: a stale file (``None``) or none (``"gone"``). A listener
+    (``"answers"``) is joined, and a socket that could not be asked (``"unasked"``) is not
+    taken for an empty one. The one rule both askers keep: the start's own check
+    (:func:`_before_a_server_starts`) and ``restart``'s before its stop
+    (:func:`_refuse_a_server_start_from_ssh`)."""
+    return answer != "answers" and answer != "unasked"
+
+
+def _refuse_a_server_start_from_ssh(srv: TmuxServer) -> None:
+    """:func:`_refuse_a_server_from_ssh` where no server listens at ``srv``'s socket, for a
+    caller that must refuse before it stops or records anything: ``restart``, whose contract
+    is that every refusal not depending on the stop comes first. From SSH over a stale socket
+    it recorded the dead row, and only its replacement's spawn refused (review of #464).
+    Asked of the session first: at the machine, or off macOS, no socket is read."""
+    if not login_session.remote_session():
+        return
+    try:
+        answer = srv.listener(srv.socket_path())
+    except TmuxUnavailable:
+        return
+    if _no_server_listens(answer):
+        _refuse_a_server_from_ssh()
+
+
 def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[FleetAgent]:
     """What must hold before anything starts a tmux server at the fleet's socket path, asked in
     this one place; the rows whose exited server's start it forgot. ``srv`` is the fleet's
@@ -4651,11 +4944,16 @@ def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[Flee
     One read of the socket says which, if either, applies. Each asked it, so a check cost
     two connects, and a spawn checks twice (review of #259, round 5). A server listening
     there, the usual case, is one connect and nothing else.
+
+    Where none listens, an SSH login on macOS starts none (:func:`_refuse_a_server_from_ssh`,
+    #20), before anything is written.
     """
     try:
         answer = srv.listener(srv.socket_path())
     except TmuxUnavailable:
         return []  # no POSIX uid: no tmux server can exist here
+    if _no_server_listens(answer):  # this one would start it
+        _refuse_a_server_from_ssh()
     reads = tmux_core.SocketReads()  # that answer, for every row recorded at the path
     reads.heard_listener(srv, None, answer)
     if answer is None:
@@ -4733,14 +5031,22 @@ def open_window(
     )
 
 
-def _refuse_occupied_worktree(project: ProjectInfo, worktree_dir: str, label: str) -> None:
+def _refuse_occupied_worktree(
+    project: ProjectInfo, tree: Path, label: str, *, again: bool = False
+) -> None:
     """Refuse the tree a LIVE agent is working in — before anything touches it.
 
-    ``next_label`` keeps live labels apart, so the only way to arrive here is a
-    parallel spawn that picked this label from a snapshot taken a moment
-    earlier. The tree at ``<worktree_dir>/<label>`` is then the winner's, and
+    ``next_label`` keeps live labels apart, and the trees of relabelled agents, so the only
+    way a new spawn arrives here is a parallel spawn that picked this label from a snapshot
+    taken a moment earlier. ``tree`` (:func:`_tree_path`: ``<worktree_dir>/<label>``, or a
+    replacement's own) is then the winner's, and
     neither starting a second agent in it nor (worse) checking another branch
     out from under the first one is acceptable.
+
+    ``again`` is a replacement's (a restart, a switch, a resume; ``own_worktree``): the
+    agent's own tree, another agent's now, as 0.9.1's spawn can make a paused agent's. No
+    label was taken and spawning again starts nothing, so it says what frees the tree
+    (REVIEW-RC092, nit 1).
 
     The winner's row can still appear AFTER this read, and the two halves of
     that race need two different guards: :func:`_relabel` refuses the second
@@ -4749,10 +5055,16 @@ def _refuse_occupied_worktree(project: ProjectInfo, worktree_dir: str, label: st
     :func:`_reuse_worktree` asks this function again immediately before its
     ``git checkout`` (``refuse_if_taken``).
     """
-    path = (project.root / worktree_dir / label).resolve()
+    path = tree.resolve()
     with store_session() as store:
         live = store.fleet_agents(project.id, live_only=True)
     holder = next((a for a in live if a.worktree and a.cwd.resolve() == path), None)
+    if holder is not None and again:
+        stop = project_service.fleet_command("stop", project, holder.label)
+        raise FleetError(
+            f"{path} is the live worktree of {holder.label} ({holder.id}) now, so {label} is "
+            f"not started in it again until `{stop}` frees it"
+        )
     if holder is not None:
         raise FleetError(
             f"{path} is the live worktree of {holder.label} ({holder.id}) — a parallel spawn "
@@ -4816,6 +5128,21 @@ def _record(
             f"could not record the agent ({exc}) — its tmux window was killed rather than "
             "left running unrecorded"
         ) from exc
+
+
+def _unmake_tree(root: Path, tree: Path) -> str:
+    """Remove the worktree a refused spawn made (:class:`_LostToARelabel`), under the branch
+    lock the spawn holds; what that did, said as the end of the refusal. Not forced: the
+    agent never ran in it (``launch`` waits for the row), and a tree with anything in it
+    stays rather than lose it."""
+    try:
+        removed = _git(root, "worktree", "remove", str(tree))
+    except FleetError as exc:
+        return f" — the worktree it made at {tree} could not be removed ({exc})"
+    if removed.returncode != 0:
+        why = removed.stderr.strip() or "no reason"
+        return f" — the worktree it made at {tree} could not be removed ({why})"
+    return f" — the worktree it made at {tree} was removed"
 
 
 def _kill_unrecorded(srv: TmuxServer, pane_id: str) -> None:
@@ -4902,12 +5229,26 @@ def _relabel(
     two live agents editing one checkout on one branch — the thing worktrees
     exist to prevent — with only the row's label to say otherwise. So the
     spawn is refused instead; the window is killed by the caller.
+
+    Unless the label went to an agent working somewhere else: one :func:`relabel` named so
+    meanwhile, whose tree keeps the label it was spawned under. Then the tree at this
+    agent's cwd is this spawn's alone, named for a label it does not hold, and the refusal
+    (:class:`_LostToARelabel`) names the holder and where it works; :func:`spawn` removes
+    the tree it made.
     """
     if agent.role == "manager":
         raise FleetError(f"{_name(project)} already has a manager — one per project")
     if experimental.captain_role(agent.role):
         raise FleetError("the home already has a captain — one per home")
     if agent.worktree:
+        holder = store.fleet_agent_by_label(project.id, agent.label, live_only=True)
+        if holder is not None and _tree_at(holder.cwd) != _tree_at(agent.cwd):
+            raise _LostToARelabel(
+                f"label {agent.label!r} was taken while this agent was starting: "
+                f"{holder.label} ({holder.id}) holds it now and works in {holder.cwd} — "
+                f"this agent's worktree {agent.cwd} is named for that label, so it is refused "
+                "rather than recorded under another"
+            )
         raise FleetError(
             f"label {agent.label!r} was taken while this agent was starting, and "
             f"{agent.cwd} is that label's worktree — the agent that won the label works "
@@ -5645,6 +5986,38 @@ def _past_trust_prompt(
 #: (`--all`), whatever tmux still holds.
 RECENTLY_ENDED = timedelta(hours=24)
 
+PAUSED_DETAIL = "no process; its claims, worktree and session wait for fleet resume"
+"""A paused agent's ``detail`` (:func:`_derive`): its claims, label, worktree and transcript
+are kept, and no process runs."""
+PAUSED_LEFT = "paused — fleet resume brings it back"
+"""Why a Restart all, and the restart of the agents an update lost (``restart_leaves``), leave
+a paused agent. A Stop all and a ``fleet pause`` leave it by its state, ``paused``, as they
+leave an exited one by ``exited``."""
+PAUSED_LEASE = timedelta(days=36500)
+"""How far out a paused agent's claims are leased (:func:`pause_agent`): the owner decided they
+are kept while it is paused, and the 120-minute lease lapsing let any other session claim
+them. A hundred years, not a date at the end of the calendar, so a reader adding to a lease
+never overflows. The resumed session's first hook, or a fresh start's adoption of the claims,
+leases them again as any lease is (``renew_leases``)."""
+
+
+def _paused_row(agent: FleetAgent) -> bool:
+    """Whether ``fleet pause`` ended this row and its pause still holds (``paused_at``, v42)."""
+    return agent.ended_at is not None and agent.paused_at is not None
+
+
+def _paused_heads(rows: Iterable[FleetAgent]) -> dict[str, FleetAgent]:
+    """The paused agents among ``rows`` (oldest first, as the store lists them), by row id:
+    each label's newest row, when ``fleet pause`` ended it (:func:`_paused_row`).
+
+    An older paused row that a newer one took the label from is no paused agent: the label
+    went on without it, and ``fleet resume`` leaves it (``restart``'s pin)."""
+    newest: dict[tuple[str, str], FleetAgent] = {}
+    for row in rows:
+        newest[(row.project_id, row.label)] = row
+    return {row.id: row for row in newest.values() if _paused_row(row)}
+
+
 #: How long a hand-over's ``team.HANDOVER_STATE`` mark keeps the row it is moving out
 #: of every reconciler's hands (:func:`_handed_over`). The hand-over ends that row
 #: within its stop — the grace (5 s) and a second for the status, then the kill; on a
@@ -5715,6 +6088,9 @@ def list_agents(
       :func:`_with_lingering_windows` — for :data:`RECENTLY_ENDED`: that is
       the 💤 row the UI shows the last screen behind and hangs **Restart** on.
       ``fleet ls`` shows the same rows, so the two never disagree.
+
+    And it keeps each PAUSED agent (:func:`_paused_heads`), however long ago ``fleet pause``
+    ended it: ``paused``, for ``fleet resume`` to bring back, with no window of its own.
     """
     with store_session() as store:
         listing = _listing(store, project)
@@ -5765,9 +6141,12 @@ def _statuses(
         listing.by_id,
     )
     now = _now()
+    # The paused agents, however long ago they were paused: each label's newest row
+    # `fleet pause` ended, which `fleet resume` brings back. No window of theirs stands.
+    paused = set(_paused_heads(agents))
     if live_only:
         cutoff = now - RECENTLY_ENDED
-        agents = [a for a in agents if a.ended_at is None or a.ended_at >= cutoff]
+        agents = [a for a in agents if a.ended_at is None or a.ended_at >= cutoff or a.id in paused]
     tmux_session = session_name(current.codename) if current.codename else None
     config = config or settings()
     # Each row's address once for this read (`_where`): asked about five times per row
@@ -5783,7 +6162,7 @@ def _statuses(
     if ended:
         agents = [ended.get(agent.id, agent) for agent in agents]
     if live_only:
-        agents = _with_lingering_windows(agents, views, config, addresses)
+        agents = _with_lingering_windows(agents, views, config, addresses, keep=paused)
     statuses = [
         _status(
             agent,
@@ -5795,6 +6174,16 @@ def _statuses(
             address=addresses[agent.id],
         )
         for agent in agents
+    ]
+    # A paused row a resume (or a respawn of its label) has since replaced is history, as
+    # any ended row is (`fleet ls --all`): exited, never a second paused agent of the label.
+    statuses = [
+        status.model_copy(
+            update={"state": "exited", "detail": _exit_detail(status.agent.exit_status)}
+        )
+        if status.state == "paused" and status.agent.id not in paused
+        else status
+        for status in statuses
     ]
     return _with_first_prompts(
         _with_trust_prompts(statuses, config, by_id, addresses), current, config, addresses
@@ -6003,11 +6392,16 @@ def _with_lingering_windows(
     views: Mapping[_Address, _Observed | None],
     config: FleetSettings | None = None,
     addresses: Mapping[str, _Address] | None = None,
+    *,
+    keep: Collection[str] = (),
 ) -> list[FleetAgent]:
     """Every live row, plus each ended row whose window still stands (see
-    :func:`_lingering_windows`). ``addresses`` as for :func:`_where`."""
+    :func:`_lingering_windows`), and the ended rows ``keep`` names: the paused agents
+    (:func:`_paused_heads`), which have none. ``addresses`` as for :func:`_where`."""
     shown = {agent.id for agent in _lingering_windows(agents, views, config, addresses).values()}
-    return [agent for agent in agents if agent.ended_at is None or agent.id in shown]
+    return [
+        agent for agent in agents if agent.ended_at is None or agent.id in shown or agent.id in keep
+    ]
 
 
 def _kill_lingering_window(
@@ -6084,6 +6478,20 @@ def manager_of(project: ProjectInfo) -> FleetAgent | None:
     with store_session() as store:
         agent = store.fleet_agent_by_label(project.id, MANAGER_LABEL, live_only=True)
     return agent if agent is not None and agent.role == "manager" else None
+
+
+def paused_manager_of(project: ProjectInfo) -> FleetAgentStatus | None:
+    """The project's PAUSED manager, as a listing shows it (``paused``, :data:`PAUSED_DETAIL`):
+    the newest row of its label, when ``fleet pause`` ended it (:func:`_paused_row`); else
+    ``None``. Read of the store alone: a paused agent has no window to ask tmux about. What
+    the Manager tab shows with no frame to read it from (``ProjectView``), where
+    :func:`manager_of`'s ``None`` read as no manager yet and offered *Start manager*, which
+    :func:`spawn` refuses beside a paused one (review of the #457 fold, n3)."""
+    with store_session() as store:
+        agent = store.fleet_agent_by_label(project.id, MANAGER_LABEL, live_only=False)
+    if agent is None or agent.role != "manager" or not _paused_row(agent):
+        return None
+    return FleetAgentStatus(agent=agent, state="paused", detail=PAUSED_DETAIL)
 
 
 def tell(
@@ -6599,29 +7007,34 @@ def _moved(name: str, now: str | None, launched: str | None, then: str | None) -
     return harness.clean_effort(now) != harness.clean_effort(launched)
 
 
-def _the_owners_spawn(spawned_by: str) -> bool:
+def _the_owners_spawn(spawned_by: str, store: ContextStore | None = None) -> bool:
     """Whether a spawn is the owner's choice, whose model and effort are the next pick
     (manager decision, seq 3428 b): the owner's shell or asq (``user``, from no fleet agent's
     environment), or the captain acting on the owner's words, from its own call path alone
     (:func:`_the_captains_row`; its spawn takes no model today, ``captain.actions.spawn``).
     A spawn an agent makes (``fleet spawn … --as <session>``, ``--as captain`` included, or
     run from a fleet agent's own shell, which inherits its ``AISQUARE_FLEET_AGENT``) runs its
-    flags for that one agent."""
+    flags for that one agent. ``store``, a caller's open session, is read for the captain's
+    row (:func:`_the_captains_row`)."""
     own = orchestrator.env_fleet_agent()
     if own is None:
         return spawned_by == "user"
     # In a fleet agent's environment the captain's own call path alone is the owner's: never
     # an `--as captain` any agent can type (seq 3609, 2).
-    return _the_captains_row(own)
+    return _the_captains_row(own, store)
 
 
-def _the_captains_row(agent_id: str) -> bool:
+def _the_captains_row(agent_id: str, store: ContextStore | None = None) -> bool:
     """Whether ``agent_id`` (a process's ``AISQUARE_FLEET_AGENT``) is the live captain's own row,
     with the captain on: the one caller in a fleet agent's environment that acts on the
-    owner's words (seq 3609, 2). Never decided by a name a caller passes."""
+    owner's words (seq 3609, 2). Never decided by a name a caller passes. Read through
+    ``store`` when given, else in a session of its own."""
     if not experimental.captain_enabled():
         return False
-    with store_session() as store:
+    if store is None:
+        with store_session() as opened:
+            row = opened.get_fleet_agent(agent_id)
+    else:
         row = store.get_fleet_agent(agent_id)
     return row is not None and row.ended_at is None and row.role == CAPTAIN_ROLE
 
@@ -6719,6 +7132,7 @@ def stop(
     actor: str | None = None,
     reason: str | None = None,
     ended_by: EndedBy = "stopped",
+    paused: bool = False,
 ) -> StopReceipt:
     """``/exit`` the agent named ``label``, wait ``grace`` seconds, then kill its window.
 
@@ -6753,8 +7167,25 @@ def stop(
     after it died is stopped. So is a row recorded as died with no window left, its label's
     newest, which is all the stop does to it (``StopReceipt.marked_only``). :func:`restart`
     ends a vanished pane's row here as ``died``, and a row already ended is handed back to
-    it as it is, window and all.
+    it as it is, window and all. ``paused`` is :func:`pause_agent`'s, under ``handover``: the
+    row ends ``stopped`` with ``paused_at`` (v42) in the one statement that ends it.
+
+    A PAUSED agent (:func:`_paused_heads`) has no process and no window: stopping it is the
+    owner's word that it stays down. Its row is recorded stopped, the claims the pause kept
+    go back to the board, and its exit is announced as a stop's is
+    (:func:`_stop_a_paused_agent`); ``fleet resume`` leaves it from then on.
     """
+    if not (handover or live_only) and ended_by == "stopped":
+        unpaused = _stop_a_paused_agent(
+            project, label, agent_id=agent_id, actor=actor, reason=reason
+        )
+        if unpaused is not None:
+            receipt, wakes = unpaused
+            if nudge and wakes:  # outside the store session, as `_stop_row` nudges
+                nudge_manager(
+                    project.id, reason=f"{label} exited", board=_board_of_row(receipt.agent)
+                )
+            return receipt
     with store_session() as store:
         try:
             agent = _live_agent(store, project, label, agent_id=agent_id)
@@ -6811,6 +7242,7 @@ def stop(
         ended_by=ended_by,
         actor=actor,
         reason=reason,
+        paused=paused,
     )
 
 
@@ -6825,6 +7257,7 @@ def _stop_row(
     actor: str | None = None,
     reason: str | None = None,
     ended_by: EndedBy = "stopped",
+    paused: bool = False,
 ) -> StopReceipt:
     """``/exit`` the agent in ``agent``'s pane, wait ``grace`` seconds, then kill its window.
 
@@ -7012,7 +7445,9 @@ def _stop_row(
         # window earlier, in a connection of its own, neither closed the gap nor
         # paid for itself (round 5).
         _record_the_branch(store, agent)
-        ended = store.end_fleet_agent_if_live(agent.id, exit_status=exit_status, ended_by=ended_by)
+        ended = store.end_fleet_agent_if_live(
+            agent.id, exit_status=exit_status, ended_by=ended_by, paused=paused
+        )
         if ended is None:
             current = store.get_fleet_agent(agent.id)
             if current is not None and exited_here and not handover:
@@ -7070,6 +7505,82 @@ def _stop_row(
     if not handover and nudge and wakes:
         nudge_manager(ended.project_id, reason=f"{ended.label} exited", board=_board_of_row(ended))
     return StopReceipt(ended, released, release_failed, withheld=handover)
+
+
+def _the_owners(who: str | None, store: ContextStore | None = None) -> bool:
+    """Whether ``who`` (a stop's ``actor``, a restart's, switch's or resume's ``spawned_by``)
+    is the owner, who alone ends a pause, by a stop, a restart or a resume
+    (:func:`_paused_by_the_owner`). Decided as the owner's spawn is
+    (:func:`_the_owners_spawn`), by the caller's environment first: from no fleet agent's,
+    ``user`` (asq, Remote, the owner's shell with no ``--as``); from a fleet agent's, the
+    captain's own row alone, whatever ``who`` says. Decided by ``who`` alone, an agent's own
+    window with no ``--as`` was ``user`` and resumed the owner's paused team, signal and all,
+    and any agent's ``--as captain`` ended a pause (review of the #457 fold, m1). ``None`` is
+    an internal caller's, which asks for no one. ``store``, a caller's open session."""
+    return who is None or _the_owners_spawn(who, store)
+
+
+def _paused_by_the_owner(
+    project: ProjectInfo, label: str, *, closes: str | None = None
+) -> FleetError:
+    """The refusal of a stop, restart, switch or resume an agent asked for of a paused
+    teammate: ending a pause is the owner's (decision 1 of #9) — a manager's cycle that
+    stopped one released its claims, and one that restarted one undid the pause. Any caller
+    may pause, so it never says who paused the agent: told "paused by the owner", a manager
+    that paused its own team was told what never happened (REVIEW-RC092, nit 6). It says to
+    ask the owner, and names their resume as theirs: every way to end a pause is the owner's
+    alone (asq, Remote, their own shell). ``closes`` is why the owner's resume would end this
+    pause rather than bring the agent back (its task closed, ``BulkRow.closes``)."""
+    ends = f"ends its pause, as its {closes}" if closes is not None else "brings it back"
+    resume = project_service.fleet_command("resume", project)
+    return FleetError(
+        f"{label} is paused, and only the owner ends a pause — ask the owner: their "
+        f"`{resume}` (or Resume agents… in asq) {ends}; nothing was changed"
+    )
+
+
+def _stop_a_paused_agent(
+    project: ProjectInfo,
+    label: str,
+    *,
+    agent_id: str | None,
+    actor: str | None,
+    reason: str | None,
+) -> tuple[StopReceipt, bool] | None:
+    """:func:`stop` of a PAUSED agent: its row recorded stopped, the claims its pause kept
+    released, its exit announced; the receipt, and whether the exit wakes the manager. ``None``
+    when ``label`` (or the pinned ``agent_id``) names no paused agent: a live row, a 💤 one,
+    or a paused row another took the label from, which :func:`stop` deals with as before.
+
+    Asked first, with nothing live under the label: the row is the label's newest, read and
+    marked in one store session, so a ``fleet resume`` that started it again meanwhile
+    leaves a running agent, which this never releases the claims of (its resume keeps the
+    session id, and with it the claims).
+
+    The pause is the owner's, and so is ending it: a stop an agent asks for (``actor`` a
+    session, ``fleet stop --as``, a manager's cycle) is refused, saying so, with nothing
+    changed (:func:`_paused_by_the_owner`)."""
+    with store_session() as store:
+        if store.fleet_agent_by_label(project.id, label) is not None:
+            return None  # a live row: `stop` stops it
+        row = (
+            store.fleet_agent_by_label(project.id, label, live_only=False)
+            if agent_id is None
+            else store.get_fleet_agent(agent_id)
+        )
+        if row is None or not _paused_row(row):
+            return None
+        head = store.fleet_agent_by_label(project.id, row.label, live_only=False)
+        if head is None or head.id != row.id:
+            return None
+        if not _the_owners(actor, store):
+            raise _paused_by_the_owner(project, row.label)
+        stopped = store.mark_fleet_agent_stopped(row.id)
+        released, failed = _release_or_say(store, stopped, why="agent stopped")
+        wakes = _emit_exit(
+            store, stopped, actor=actor, released=len(released), reason=reason
+        ) and not _managers_own(store, stopped, actor)
+    return StopReceipt(stopped, released, failed), wakes
 
 
 def _managers_own(store: ContextStore, ended: FleetAgent, actor: str | None) -> bool:
@@ -7451,14 +7962,25 @@ def _fleet_sessions(
     "``asq-a`` was already gone" for a socket it never lived on (review of
     #203, round 4). The ``--all`` prefix sweep lists what exists, so its
     entries are expected by construction.
+
+    A scoped one also asks, just in case, for the session of each codename the project gave
+    up at a rename that no project holds now (:meth:`ContextStore.codename_aliases`): an
+    agent spawned while the project was renamed can start in ``asq-<old>``, beside the
+    renamed session, and a scoped shutdown or ``project fresh`` that never looked there left
+    it running (review of #456, 3).
     """
     sessions: list[tuple[str, str | None, bool]] = []
+    retired: dict[str, list[str]] = {}
+    if not every and targets:
+        with store_session() as store:
+            retired = {p.id: store.codename_aliases(p.id) for p, _ in targets if p.codename}
     for project, agents in targets:
         if not project.codename:
             continue
         lived_here = any(_address(agent, config) == socket for agent in agents)
         if lived_here or socket == _Address(config.tmux_socket):
             sessions.append((session_name(project.codename), project.id, lived_here))
+            sessions += [(session_name(n), project.id, False) for n in retired.get(project.id, [])]
     named = {name for name, _, _ in sessions}
     if every:
         listed = [name for name in srv.sessions_or_raise() if name.startswith(SESSION_PREFIX)]
@@ -8234,7 +8756,9 @@ def _reconcile_pauses(
     return failures
 
 
-def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -> ShutdownPlan:
+def shutdown_plan(
+    project: ProjectInfo | None = None, *, forget: bool = False, allow_inside: bool = False
+) -> ShutdownPlan:
     """What :func:`shutdown` would end — read-only, and it refuses the same way.
 
     The guards run here too, so the plan an operator is asked to confirm is one
@@ -8243,6 +8767,10 @@ def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -
     before anything is printed. A session query that fails AFTER a good probe refuses
     the same way: the operator confirms this list, so a list missing a session
     the run would still kill is worse than no list at all.
+
+    ``allow_inside`` lifts the last of those, :func:`_refuse_from_inside`, for a caller that
+    never carries the plan out (``project fresh --dry-run``): only the kill takes the pane
+    down, and listing the sessions kills nothing.
 
     Each row's disposition is the run's own verdict (:func:`_shutdown_verdict`), so what
     the plan says it stops, leaves live or records lost is what the run does with it.
@@ -8268,7 +8796,8 @@ def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -
             config=config,
         )
     sockets = _shutdown_sockets(targets, config)
-    _refuse_from_inside(sockets, config)
+    if not allow_inside:
+        _refuse_from_inside(sockets, config)
     answering = _shutdown_probe(sockets, config)
     sessions: list[str] = []
     for socket in sockets:
@@ -8589,9 +9118,29 @@ def switch(
     ``/exit``: what ``before_stop`` saw can have changed by then, and the mark hides a turn's
     ``working`` from every later reader. It raises to refuse; the mark is taken back and
     nothing has been stopped.
+
+    A PAUSED agent has no process to move: an agent's switch of it is refused as the owner's
+    pause (:func:`_paused_by_the_owner`), and the owner is told to resume it first. Pinned to
+    another row (``agent_id``) than the paused one its label names now, the pin is stale, as
+    for a running one (:func:`_replaced`).
     """
     with store_session() as store:
-        agent = _live_agent(store, project, label, agent_id=agent_id)
+        try:
+            agent = _live_agent(store, project, label, agent_id=agent_id)
+        except NoSuchAgent:
+            head = store.fleet_agent_by_label(project.id, label, live_only=False)
+            if head is None or not _paused_row(head):
+                raise
+            if agent_id is not None and head.id != agent_id:
+                # Pinned to another row (a view read before the label moved): a stale pin.
+                raise _replaced(project, label, head, agent_id) from None
+            if not _the_owners(spawned_by, store):
+                raise _paused_by_the_owner(project, label) from None
+            resume = project_service.fleet_command("resume", project)
+            raise FleetError(
+                f"{label} is paused, with no process to move: `{resume}` brings it back, and "
+                "a switch then moves it; nothing was changed"
+            ) from None
         session = store.get_session(agent.session_id) if agent.session_id else None
         if _handed_over(agent, session, _now()):
             # The automatic path refuses a session already in flight
@@ -8823,6 +9372,7 @@ def _respawn(
     account_pinned: bool = False,
     model: str | None = None,
     effort: str | None = None,
+    admit: bool | None = None,
 ) -> tuple[SpawnReceipt, bool, list[str]]:
     """Start ``agent`` again — same label, role, task and worktree — resuming when it can.
 
@@ -8844,7 +9394,9 @@ def _respawn(
     so one that starts new takes them over with its row
     (``spawn(takes_over=…)``); a resumed one keeps the id and with it the
     claims. The restart of an agent that exited, or was lost, is not a
-    hand-over — its claims went back with its end — so it passes neither.
+    hand-over — its claims went back with its end — so it passes neither. A paused
+    agent's restart takes its claims over as a hand-over does, and is ADMITTED as a new
+    agent is (``admit``; ``None`` is ``not takes_over``): nothing of it runs to free a seat.
 
     The replacement replays the row's launch spec (#144; ``spawn(spec=…)``);
     ``permission_mode`` is a restart's explicit one, which wins over the spec
@@ -8926,7 +9478,7 @@ def _respawn(
         own_branch=agent.branch,
         board_and_hub=board_and_hub,
         # A hand-over replaces a running agent 1:1: admitted as the agent it replaces.
-        admit=not takes_over,
+        admit=not takes_over if admit is None else admit,
         # Its own first line, never a kickoff: the resume line and the hand-off prompt
         # both name the task already.
         kickoff=False,
@@ -9045,7 +9597,7 @@ def _refuse_a_replay_spawn_refuses(project: ProjectInfo, agent: FleetAgent) -> N
         _fixed_label(agent.role, agent.label)
     except FleetError as exc:
         raise FleetError(f"{exc} — {keep}") from exc
-    if experimental.captain_role(agent.role) and not _is_home_project(project):
+    if experimental.captain_role(agent.role) and not is_home_project(project):
         raise FleetError(
             "the captain lives on the home board, one per home — `aisquare captain` starts "
             f"it; {agent.label!r} cannot be started again in {_name(project)}, so nothing "
@@ -9153,7 +9705,9 @@ def _refuse_a_take_over_that_would_move(project: ProjectInfo, agent: FleetAgent,
             f"as {role} it would be labelled {fixed!r}, not {agent.label!r}{where} — {keeps}"
         )
     if agent.worktree:
-        path = project.root / settings().worktree_dir / agent.label
+        # Its own tree when that is still under today's `worktree_dir`, whatever it is
+        # labelled now (a relabel moves no tree).
+        path = _tree_path(project.root, settings().worktree_dir, agent.label, agent.cwd)
         if path.resolve() != agent.cwd.resolve():
             raise FleetError(
                 f"as {role} it would start in {path}, not in {agent.cwd} where it works now "
@@ -9277,6 +9831,16 @@ def restart(
     project that died and was not stopped on purpose, its state, its task and the command
     that brings it back (:func:`_dead_team_line`, #38). ``team`` is that team as the caller
     read it already (:func:`bulk`); ``None`` lists the project for it.
+
+    A PAUSED row (:func:`pause_agent`) is how ``fleet resume`` brings an agent back
+    (:func:`bulk`'s ``resume``), and so is ``fleet restart`` of its label: its claims were
+    kept, parked on its session, so a resumed replacement keeps them with the session id and
+    a fresh one takes them over with its row, as a hand-over's does (``takes_over``); it is
+    admitted as any agent that has no process is. Its first line says it was paused
+    (:func:`_restart_prompt`), and so does the board's ``restarted`` line. Only the owner
+    resumes it (:func:`_the_owners`): an agent's restart is refused, from its own window with
+    no ``--as`` and with any ``--as`` alike, its ``fleet resume`` included
+    (:func:`_paused_by_the_owner`).
     """
     for flag, value in (("--model", model), ("--effort", effort)):
         if value is not None and not value.strip():
@@ -9293,11 +9857,22 @@ def restart(
         agent = store.fleet_agent_by_label(project.id, label, live_only=False)
         if agent is None:
             raise NoSuchAgent(
-                f"no agent {label!r} in {_name(project)} — "
-                f"`{project_service.fleet_command('ls', project, '--all')}` shows every row"
+                f"no agent {label!r} in {_name(project)}{_renamed_hint(store, project, label)}"
+                f" — `{project_service.fleet_command('ls', project, '--all')}` shows every row"
+            )
+        if agent.label.startswith(RETIRED_LABEL):
+            # A 💤 row whose label a relabel gave another agent (`store.RETIRED_LABEL`): it
+            # has no label of its own to come back under.
+            raise FleetError(
+                f"cannot restart {label!r}: a rename gave its label, "
+                f"{agent.label.removeprefix(RETIRED_LABEL)!r}, to another agent — nothing "
+                "was restarted"
             )
         if agent_id is not None and agent.id != agent_id:
             raise _replaced(project, label, agent, agent_id)
+        if _paused_row(agent) and not _the_owners(spawned_by, store):
+            # An agent may not resume a paused teammate: the pause is the owner's.
+            raise _paused_by_the_owner(project, label)
         session = store.get_session(agent.session_id) if agent.session_id else None
         if agent.ended_at is None and _handed_over(agent, session, _now()):
             # A `switch` (or another restart) is between its `/exit` and its end: the
@@ -9354,6 +9929,10 @@ def restart(
         choice = claude_accounts_service.choose(
             _account_wanted(account, slot), role=runs_as, project=project
         )
+        # The replacement's spawn opens its window where no server may listen: from SSH on
+        # macOS it would refuse to start one there, so the restart refuses now, with the row
+        # and its last screen as they were (#20; review of #464).
+        _refuse_a_server_start_from_ssh(server())
     except (FleetError, claude_accounts_service.NoSuchAccount) as exc:
         raise FleetError(f"cannot restart {label!r}: {exc}") from exc
     # The row's own slot is no new pin; a take-over's account is the human's choice.
@@ -9434,6 +10013,8 @@ def restart(
     # once the replacement is up and recorded, so a restart that is refused on
     # the way (tmux, a parallel spawn) leaves the 💤 row and its last screen as
     # they were.
+    # A paused agent's claims wait on its session, as a hand-over's do (`pause_agent`).
+    paused = _paused_row(agent)
     # A manager is told which of its team died with it, and the command that brings each
     # back (#38): after a crash nobody else knows to. Read once its own row is dealt with.
     team_line = (
@@ -9451,11 +10032,13 @@ def restart(
             account=account,
             fresh=fresh,
             team_line=team_line,
-            reason="restarted",
+            reason="resumed after a pause" if paused else "restarted",
             spawned_by=spawned_by,
             size=size,
             resume_prompt=_restart_prompt(agent),
-            takes_over=handed_over is not None,
+            takes_over=handed_over is not None or paused,
+            # Paused, it has no process whose seat and memory its replacement takes over.
+            admit=True if paused else None,
             permission_mode=permission_mode,
             role=role,
             persona=persona,
@@ -9464,8 +10047,13 @@ def restart(
             # An agent that ended on its own: the owner's `fleet stop` of its 💤 row while
             # the replacement starts wins at the insert, as the guard above has it before
             # (last delta review, m3). Not a hand-over, whose own stop writes `stopped`, nor
-            # a row stopped already, which this restart was asked to bring back.
-            replaces=agent.id if handed_over is None and agent.ended_by != "stopped" else None,
+            # a row stopped already, which this restart was asked to bring back. A paused
+            # row is stopped and still guarded: the stop that ends its pause clears the mark.
+            replaces=(
+                agent.id
+                if handed_over is None and (agent.ended_by != "stopped" or paused)
+                else None
+            ),
             account_pinned=pinned and account is not None,
             model=model,
             effort=effort,
@@ -9483,6 +10071,11 @@ def restart(
     notes.extend(more)
     typed = receipt.prompt_typed or "no"
     how = _how_started(resumed, typed=typed)
+    if paused:
+        # Resumed, the paused row is history: recorded as a stop, which every reader before
+        # `paused` existed knows (moving back to 0.9.1 reads every row a project has).
+        with contextlib.suppress(Exception), store_session() as store:
+            store.mark_fleet_agent_stopped(agent.id)
     # The suppression is entered FIRST, as in `switch`: a store that cannot be opened
     # costs the courtesy, never a restarted agent reported as not restarted.
     with contextlib.suppress(Exception), store_session() as store:  # the courtesy, not the record
@@ -9490,7 +10083,7 @@ def restart(
             store,
             _board_of_row(receipt.agent),
             "restarted",
-            f"{label} restarted — {how}",
+            f"{label} {'resumed after a pause' if paused else 'restarted'} — {how}",
             session_id=receipt.agent.session_id,
         )
     return RestartReceipt(
@@ -9993,6 +10586,13 @@ def _restart_prompt(agent: FleetAgent) -> str:
             "You are the captain, restarted and resumed mid-session: call attention() to see "
             "what needs the owner now, then carry on from where you left off."
         )
+    if _paused_row(agent):
+        # `fleet resume`: the owner paused it, and nothing of its work went anywhere.
+        return (
+            f"You are {agent.label}, resumed after `fleet pause` with your session, claims and "
+            "worktree as you left them: re-read `aisquare board` and `git status`, then "
+            "continue exactly where you left off without redoing work that is already committed."
+        )
     return (
         f"You are {agent.label}, restarted and resumed mid-session: re-read `aisquare board` "
         "and `git status`, then continue exactly where you left off without redoing work "
@@ -10064,7 +10664,89 @@ def _handoff_prompt(
     return "\n".join(lines)
 
 
-# --- every agent at once: ``fleet restart|stop --all`` and Settings ▸ Fleet ---------
+# --- pause: an agent's process exits, and everything else of it waits for the resume ---
+
+
+def pause_agent(
+    project: ProjectInfo,
+    label: str,
+    *,
+    agent_id: str | None = None,
+    actor: str | None = None,
+    grace: float = 5.0,
+) -> StopReceipt:
+    """Pause the RUNNING agent ``label``: ``/exit`` it as :func:`stop` does, and keep the rest.
+
+    Stopped as a hand-over stops it (:func:`_stop_row` with ``handover``): its session is
+    marked first (:func:`_mark_handing_over`), so its own ``SessionEnd`` parks its claims
+    rather than releasing them, and no ``agent_exited`` goes out: nothing finished, and no
+    manager is woken for it. The row ends ``stopped`` with ``paused_at`` (v42): its label,
+    worktree, branch, account, task and transcript stay, and its claims are leased for
+    :data:`PAUSED_LEASE`, so no other session claims them while it is paused. ``reap``
+    removes neither its tree nor its branch, a spawn may not take its label
+    (:func:`next_label`), a Restart all leaves it
+    (:data:`PAUSED_LEFT`), and ``fleet resume`` — or ``fleet restart`` of the label — starts
+    it again under its label, its session resumed (:func:`restart`). The session's presence
+    is retired with its claims kept: a pane killed past the grace fires no ``SessionEnd``,
+    and its session stayed on the board as a live one. The board's word is ``agent_paused``,
+    which wakes nobody.
+
+    ``agent_id`` pins the row, as for :func:`stop`; ``actor`` is who asked. A row a hand-over
+    is already moving is refused, as :func:`restart` refuses it. The receipt is the stop's,
+    its row as the pause left it, ``withheld`` when a session's claims were parked.
+    """
+    with store_session() as store:
+        agent = _live_agent(store, project, label, agent_id=agent_id)
+        session = store.get_session(agent.session_id) if agent.session_id else None
+    if session is not None:
+        # Refused when a hand-over holds it already (the mark is a compare-and-set).
+        _mark_handing_over(project, agent, session, "pause", label)
+    try:
+        receipt = stop(project, label, handover=True, agent_id=agent.id, grace=grace, paused=True)
+    finally:
+        # Taken back however the stop ends, as `restart` takes its own: the mark's one
+        # reader, the old process's SessionEnd, has run by then or never will. A mark left on
+        # reads `switching` on a session that ended; the presence is retired below either way.
+        if session is not None:
+            _unmark_handing_over(session)
+    ended = receipt.agent
+    with store_session() as store:
+        if not _paused_row(ended):
+            # Ended meanwhile by a listing, as died: a session no hand-over mark could hold
+            # (none on the board). It was paused all the same.
+            ended = store.mark_fleet_agent_paused(ended.id) or ended
+        if session is not None:
+            current = store.get_session(session.id)
+            if current is not None and current.ended_at is None:
+                with suppress(sqlite3.Error):  # the board's courtesy; the claims stay either way
+                    store.end_session(session.id, release_claims=False)
+            if _paused_row(ended):
+                try:
+                    # Kept while it is paused, however long (the owner's decision 1): its
+                    # 120-minute lease lapsing made them any session's to claim.
+                    store.renew_leases(session.id, _now() + PAUSED_LEASE)
+                except sqlite3.Error as exc:
+                    raise FleetError(
+                        f"{ended.label} is paused, but its claims' leases could not be held "
+                        f"({type(exc).__name__}: {exc}) — they lapse when their lease does, "
+                        "and another session may claim them then"
+                    ) from exc
+        if _paused_row(ended):
+            resume = project_service.fleet_command("resume", project)
+            with suppress(Exception):  # the courtesy, not the record
+                _team()._emit(
+                    store,
+                    _board_of_row(ended),
+                    "agent_paused",
+                    f"{ended.label} paused — its claims, worktree and session are kept; "
+                    f"`{resume}` brings it back",
+                    session_id=ended.session_id,
+                    actor=actor,
+                )
+    return replace(receipt, agent=ended)
+
+
+# --- every agent at once: ``fleet restart|stop --all``, ``fleet pause|resume`` and Settings ▸ Fleet
 
 PROCESS_STATES: frozenset[str] = frozenset(
     {"working", "waiting", "attention", "limited", "unknown"}
@@ -10072,7 +10754,11 @@ PROCESS_STATES: frozenset[str] = frozenset(
 """The states in which an agent has a process to stop: what the agent view's Stop is for, and
 the agents :func:`bulk` acts on. An exited (💤) or lost row has none, and is left as it is."""
 
-BulkAction = Literal["restart", "stop"]
+BulkAction = Literal["restart", "stop", "pause", "resume"]
+"""What :func:`bulk` does to each agent: ``restart`` and ``stop`` (``--all``, Settings ▸
+Fleet), ``pause`` (:func:`pause_agent`) and ``resume`` (:func:`restart` of a paused row),
+``fleet pause`` and ``fleet resume``, each project's ``fleet-paused`` signal with them."""
+BULK_ACTIONS: tuple[BulkAction, ...] = ("restart", "stop", "pause", "resume")
 BulkOutcome = Literal["done", "skipped", "failed"]
 
 THIS_SESSION = "this session"
@@ -10095,6 +10781,12 @@ GONE_SINCE = "its row is gone since it was shown"
 PROJECT_FORGOTTEN = "its project was forgotten"
 """Why a restart by :func:`bulk` leaves a running agent of a forgotten project: the spawn of
 its replacement is a deliberate add, and would bring the project back to every listing."""
+NOT_PAUSED = "not paused"
+"""Why a resume by :func:`bulk` leaves a row: running, or exited (💤) without a pause — only
+the agents a ``fleet pause`` stopped come back."""
+THE_CAPTAIN = "the captain — `aisquare captain` runs it"
+"""Why a pause by :func:`bulk` leaves the captain: it is the owner's, on the home board, and
+no project's fleet."""
 
 
 @dataclass(frozen=True)
@@ -10105,6 +10797,15 @@ class BulkRow:
     project: ProjectInfo
     status: FleetAgentStatus
     skip: str | None = None
+    closes: str | None = None
+    """A resume's: why it ends this paused agent's pause rather than resuming it — its task is
+    done or dropped, so nothing is left to resume. The pause ends as the owner's stop ends it,
+    its claims released, and ``reap`` may take its tree (review of #457, m4)."""
+    refused: str | None = None
+    """A resume's, by an agent: the owner's refusal (:func:`_paused_by_the_owner`). The row is
+    reported failed and never tried, and its project's ``fleet-paused`` signal is left as it
+    is. Refused only as each row was tried, the resume cleared the owner's signal first and
+    set it again after (review of the #457 fold, m2)."""
 
     @property
     def agent(self) -> FleetAgent:
@@ -10135,11 +10836,36 @@ class BulkPlan:
     """A restart's: by project id, the agents that died and were not stopped on purpose,
     whatever ``managers_only`` drew (:func:`dead_team`'s rule, read with the plan). A
     manager this run restarts is told those not restarted by it (#38)."""
+    only: frozenset[str] | None = None
+    """The project ids the plan was asked for (``fleet pause -P``, a card's menu); ``None``
+    for every project."""
+    projects: tuple[ProjectInfo, ...] = ()
+    """Every project the plan covers, with agents or not: a pause sets the ``fleet-paused``
+    signal of each, and a resume clears it where it leaves no agent paused (:func:`bulk`)."""
+    paused: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    """A resume's: by project id, the row ids of every paused agent, whatever
+    ``managers_only`` drew. A project's signal is cleared only when the resume acts on each
+    of them (review of #457, m2)."""
+    fleet_paused: frozenset[str] = frozenset()
+    """A resume's: the ids of the projects whose ``fleet-paused`` signal reads on. A resume
+    clears one with no paused agent too: a signal-only pause from an earlier version."""
+    owners: bool = True
+    """Whether the plan is the owner's (:func:`_the_owners`). A resume an agent asks for
+    starts no paused agent (``BulkRow.refused``) and clears no ``fleet-paused`` signal, one
+    with no agent paused included (review of the #457 fold, round 2, m1)."""
 
     @property
     def targets(self) -> list[BulkRow]:
-        """The rows the action acts on."""
-        return [row for row in self.rows if row.skip is None]
+        """The rows the action acts on: neither left nor refused."""
+        return [row for row in self.rows if row.skip is None and row.refused is None]
+
+    @property
+    def acts(self) -> bool:
+        """Whether confirming it does anything: an agent to act on, or, for the owner's
+        resume, a ``fleet-paused`` signal to clear."""
+        return bool(self.targets) or (
+            self.action == "resume" and self.owners and bool(self.fleet_paused)
+        )
 
     def managers(self) -> BulkPlan:
         """The same read, the managers' rows alone: the dialog's *Managers only* switch,
@@ -10170,6 +10896,15 @@ class BulkReceipt:
         return self.result.release_failed if isinstance(self.result, StopReceipt) else None
 
 
+DONE_WORD: dict[BulkAction, str] = {
+    "restart": "restarted",
+    "stop": "stopped",
+    "pause": "paused",
+    "resume": "resumed",
+}
+"""What :func:`bulk` did to an agent it acted on, in its summary's words."""
+
+
 @dataclass(frozen=True)
 class BulkReport:
     """Every receipt of one :func:`bulk`, in the order the plan gave them."""
@@ -10181,6 +10916,17 @@ class BulkReport:
     interrupted: str | None = None
     """Set when the operator interrupted the run (:class:`BulkInterrupted`): the agent it was
     on, and that the rest were left as they were. The receipts are the ones made before."""
+    signals: tuple[ProjectInfo, ...] = ()
+    """A pause's or a resume's: each project whose ``fleet-paused`` signal it set or cleared
+    (:func:`bulk`). Empty with the board off, where no signal exists."""
+    kept: tuple[tuple[ProjectInfo, int], ...] = ()
+    """A resume's: each project it left ``fleet-paused``, with how many of its agents are
+    still paused (``--managers``, a resume that failed): its manager spawns nothing beside a
+    team that is not back (review of #457, m2). An agent's resume keeps every project whose
+    pause reads on, a signal-only one with ``0`` (:attr:`owners`)."""
+    owners: bool = True
+    """Whether the run was the owner's (:attr:`BulkPlan.owners`): an agent's resume is
+    refused, and is not ``ok`` when it left any project paused (:attr:`kept`)."""
 
     def of(self, outcome: BulkOutcome) -> list[BulkReceipt]:
         return [receipt for receipt in self.receipts if receipt.outcome == outcome]
@@ -10194,13 +10940,14 @@ class BulkReport:
             or self.unread
             or self.interrupted
             or any(receipt.release_failed for receipt in self.receipts)
+            or (not self.owners and bool(self.kept))
         )
 
     def summary(self) -> str:
         """``restarted 4 · skipped 1 · failed 0``, and the projects that could not be read."""
-        done = "restarted" if self.action == "restart" else "stopped"
+        done = DONE_WORD[self.action]
         acted = self.of("done")
-        dead = sum(1 for receipt in acted if receipt.dead)
+        dead = sum(1 for receipt in acted if receipt.dead) if self.action == "restart" else 0
         # Running and dead apart, when any was dead (#38).
         split = f" ({len(acted) - dead} running, {dead} dead)" if dead else ""
         line = (
@@ -10213,7 +10960,11 @@ class BulkReport:
 
 
 def bulk_plan(
-    action: BulkAction, *, managers_only: bool = False, acting_session: str | None = None
+    action: BulkAction,
+    *,
+    managers_only: bool = False,
+    acting_session: str | None = None,
+    projects: Sequence[ProjectInfo] | None = None,
 ) -> BulkPlan:
     """Every agent :func:`bulk` would act on in every project, and every one it would leave.
 
@@ -10234,6 +10985,19 @@ def bulk_plan(
     - for a restart, a row whose task is done or dropped, which :func:`restart` refuses;
     - for a restart, a row of a forgotten project (:data:`PROJECT_FORGOTTEN`).
 
+    A pause acts on the rows a stop acts on, and leaves the captain (:data:`THE_CAPTAIN`) and
+    every paused agent besides. A resume acts on the paused agents alone (``paused``, the
+    listing's own state for them): every other row is left (:data:`NOT_PAUSED`). One whose
+    task is done or dropped is acted on all the same, to end its pause (``BulkRow.closes``);
+    a paused manager's is left, as a restart leaves it. A pause takes each project's manager
+    first, as a stop does; a resume brings it back last, as a restart does.
+
+    ``projects`` keeps the plan to those projects (``fleet pause -P``, a card's menu), each
+    covered whether or not it has a fleet row, or a registration: a pause sets its signal all
+    the same (:attr:`BulkPlan.projects`), as ``fleet pause`` always did. For every project, a
+    pause and a resume cover each project with a fleet row, and a resume each project whose
+    pause reads on as well.
+
     Every directory is read, captured ones too, and a forgotten registration that holds a
     live row, as ``shutdown`` reads them (:func:`_shutdown_targets`): a ``project forget``
     that races a spawn leaves a tombstone over a running agent, which ``stop --all`` left
@@ -10243,20 +11007,32 @@ def bulk_plan(
     listing, a store session and the board's sessions included, for no agent at all (review
     of #266, round 3).
     """
-    if action not in ("restart", "stop"):
-        raise ValueError(f"bulk action {action!r} is neither restart nor stop")
+    if action not in BULK_ACTIONS:
+        raise ValueError(f"bulk action {action!r} is none of {', '.join(BULK_ACTIONS)}")
+    only = frozenset(project.id for project in projects) if projects is not None else None
     with store_session() as store:
         every = store.list_projects(include_forgotten=True)
         forgotten = store.forgotten_among([project.id for project in every])
         heads = store.fleet_label_heads()
         with_rows = {agent.project_id for agent in heads}
         live = {agent.project_id for agent in heads if agent.ended_at is None}
-        projects = [
-            project
-            for project in every
-            if project.id in with_rows and (project.id not in forgotten or project.id in live)
-        ]
+        if projects is not None:
+            # As the store has each now, else as the caller resolved it (not registered).
+            registered = {project.id: project for project in every}
+            covered = [registered.get(project.id, project) for project in projects]
+        else:
+            if action == "resume":
+                with_rows |= _paused_projects(store, every)
+            covered = [
+                project
+                for project in every
+                if project.id in with_rows and (project.id not in forgotten or project.id in live)
+            ]
+        signalled = frozenset(_paused_projects(store, covered)) if action == "resume" else None
         own, own_session = _own_rows(store, acting_session)
+        # Only the owner ends a pause (`_the_owners`): an agent's resume is refused row by row,
+        # before anything is written (review of the #457 fold, m1 and m2).
+        owners = action != "resume" or _the_owners(acting_session or "user", store)
     # Each project's label heads, from the one read above (`_label_heads` for one project):
     # read again per project, a plan asked the store 1 + N times (last delta review, n6).
     heads_of: dict[str, dict[str, FleetAgent]] = {}
@@ -10265,20 +11041,30 @@ def bulk_plan(
     rows: list[BulkRow] = []
     unread: list[tuple[ProjectInfo, str]] = []
     dead_teams: dict[str, tuple[FleetAgentStatus, ...]] = {}
-    for project in projects:
+    paused_of: dict[str, frozenset[str]] = {}
+    for project in covered:
+        if project.id not in with_rows:
+            continue  # no agent of it was ever started: its signal is all there is to it
         try:
             statuses = list_agents(project)
             label_heads = heads_of.get(project.id, {}) if action == "restart" else {}
             if action == "restart":
                 statuses = [*statuses, *_dead_heads(statuses, label_heads)]
                 dead_teams[project.id] = tuple(_dead_of(statuses, label_heads))
+            if action == "resume":  # every paused agent, whatever `managers_only` draws (m2)
+                paused_of[project.id] = frozenset(
+                    status.agent.id for status in statuses if status.state == "paused"
+                )
             if managers_only:  # before the board is asked about any coder's task
                 statuses = [status for status in statuses if status.agent.role == "manager"]
-            closed = _closed_tasks(statuses) if action == "restart" else {}
+            if action == "resume":
+                closed = _closed_tasks([s for s in statuses if s.state == "paused"])
+            else:
+                closed = _closed_tasks(statuses) if action == "restart" else {}
         except Exception as exc:  # one project's listing is its line, never the others'
             unread.append((project, str(exc) or type(exc).__name__))
             continue
-        if action == "restart":
+        if action in ("restart", "resume"):
             # The manager LAST: brought back after its team, its first message names only
             # the agents still dead (`_dead_team_line`), and it is never told to restart one
             # this run is about to (#38).
@@ -10290,9 +11076,23 @@ def bulk_plan(
         for status in statuses:
             agent = status.agent
             skip: str | None
+            closes: str | None = None
+            refused: str | None = None
             if agent.id in own or (own_session is not None and agent.session_id == own_session):
                 skip = THIS_SESSION
-            elif status.state not in PROCESS_STATES and action == "stop":
+            elif action == "resume":
+                skip = None if status.state == "paused" else NOT_PAUSED
+                if skip is None and not owners:
+                    why = closed.get(agent.id) if agent.label != MANAGER_LABEL else None
+                    refused = str(_paused_by_the_owner(project, agent.label, closes=why))
+                elif skip is None and agent.id in closed:
+                    # Its task closed while it was paused: nothing is left to resume, and its
+                    # pause is ended (m4). A manager's is refused by `restart`, as before.
+                    if agent.label == MANAGER_LABEL:
+                        skip = closed[agent.id]
+                    else:
+                        closes = closed[agent.id]
+            elif status.state not in PROCESS_STATES and action in ("stop", "pause"):
                 skip = status.state
             elif (
                 status.state not in PROCESS_STATES
@@ -10303,10 +11103,43 @@ def bulk_plan(
                 skip = f"held: {status.detail or ANOTHER_SERVER}"
             elif action == "restart" and project.id in forgotten:
                 skip = PROJECT_FORGOTTEN
+            elif action == "pause" and is_the_captains_row(agent):
+                skip = THE_CAPTAIN
             else:
                 skip = closed.get(agent.id)
-            rows.append(BulkRow(project, status, skip))
-    return BulkPlan(action, managers_only, tuple(rows), tuple(unread), dead_teams)
+            rows.append(BulkRow(project, status, skip, closes, refused))
+    return BulkPlan(
+        action,
+        managers_only,
+        tuple(rows),
+        tuple(unread),
+        dead_teams,
+        only,
+        tuple(covered),
+        paused_of,
+        signalled or frozenset(),
+        owners,
+    )
+
+
+def fleet_paused_projects(store: ContextStore, projects: Sequence[ProjectInfo]) -> frozenset[str]:
+    """The ids of ``projects`` whose ``fleet-paused`` signal reads on, read once through
+    ``store``: what asq's frame carries, so a project's *Resume agents…* clears a signal with
+    no agent paused (:func:`_paused_projects`)."""
+    return frozenset(_paused_projects(store, projects))
+
+
+def _paused_projects(store: ContextStore, every: Sequence[ProjectInfo]) -> set[str]:
+    """The ids of ``every`` project whose ``fleet-paused`` signal reads on somewhere
+    (:func:`_pause_where_on`): a resume of every project clears those too, agents or none.
+    None with the board off, or when the signals cannot be read (the resume says so)."""
+    if not orchestrator.team_enabled():
+        return set()
+    try:
+        signals = _team().board_signals_in(store)
+    except Exception:
+        return set()
+    return {project.id for project in every if _pause_where_on(project, signals)}
 
 
 def _label_heads(project: ProjectInfo) -> dict[str, FleetAgent]:
@@ -10327,7 +11160,8 @@ def _left_dead(status: FleetAgentStatus, heads: Mapping[str, FleetAgent]) -> str
 
     The owner's rule: an agent that ended for any reason it was not told to — killed,
     crashed, its tmux server gone, a reboot — is restarted; one aisquare stopped on purpose
-    is not. A row still live (exited or lost, not recorded yet) died. An ended one says how
+    is not, nor one ``fleet pause`` paused (:data:`PAUSED_LEFT`), which ``fleet resume``
+    brings back. A row still live (exited or lost, not recorded yet) died. An ended one says how
     (``FleetAgent.ended_by``); one ended before that column, by its exit status: a signal or
     an error died, and an end with no status may have been a stop. Left besides: a row
     another one took the label from, one whose agent exited 0 (:data:`ENDED_CLEANLY`), and
@@ -10340,6 +11174,8 @@ def _left_dead(status: FleetAgentStatus, heads: Mapping[str, FleetAgent]) -> str
     if agent.ended_at is None:
         # Not recorded yet (a listing that could not write): its pane says how it ended.
         return ENDED_CLEANLY if status.detail == _exit_detail(0) else None
+    if _paused_row(agent):
+        return PAUSED_LEFT  # `fleet resume`'s to bring back, never a Restart all's
     if agent.ended_by == "stopped":
         return STOPPED_ON_PURPOSE
     if agent.exit_status == 0:
@@ -10479,6 +11315,7 @@ def bulk(
     acting_session: str | None = None,
     shown: BulkPlan | None = None,
     on_receipt: Callable[[BulkReceipt], None] | None = None,
+    projects: Sequence[ProjectInfo] | None = None,
 ) -> BulkReport:
     """Restart or stop every running agent in every project: ``fleet restart|stop --all``,
     and Settings ▸ Fleet in asq. A restart brings back every agent that died too (#38).
@@ -10507,21 +11344,63 @@ def bulk(
     how far it got. As a bare ``KeyboardInterrupt``, ``--json`` printed nothing at all,
     and a script had no record of which agents it had already acted on (review of #266,
     round 2).
+
+    ``pause`` and ``resume`` are ``fleet pause`` and ``fleet resume``: a pause sets the
+    ``fleet-paused`` signal of every project the plan covers (:attr:`BulkPlan.projects`)
+    before it pauses any agent (:func:`pause_agent`), so a manager spawns nothing while its
+    team goes down; a resume clears it first where it brings back every paused agent of the
+    project (:func:`_resumes_clear`), and then restarts each paused agent through
+    :func:`restart`, its team before its manager. A project it leaves an agent paused in
+    stays fleet-paused (``--managers``; set again after a resume that failed), and is on the
+    report's ``kept``. A paused agent whose task closed meanwhile has its pause ended, not
+    resumed (:func:`_end_a_closed_pause`). A signal that cannot be written refuses the run
+    there (:class:`FleetError`, as :func:`pause` refuses it), before any agent is touched;
+    the projects whose signal was written are on the report (:attr:`BulkReport.signals`).
+    ``projects`` keeps it to those projects, as for :func:`bulk_plan`.
     """
-    if shown is not None and (shown.action, shown.managers_only) != (action, managers_only):
+    only = frozenset(project.id for project in projects) if projects is not None else None
+    if shown is not None and (shown.action, shown.managers_only, shown.only) != (
+        action,
+        managers_only,
+        only,
+    ):
         raise ValueError("the plan shown is for another action or scope than the one asked")
     receipts: list[BulkReceipt] = []
     unread: tuple[tuple[ProjectInfo, str], ...] = ()
-    doing = "restarting" if action == "restart" else "stopping"
+    signals: tuple[ProjectInfo, ...] = ()
+    kept: list[tuple[ProjectInfo, int]] = []
+    owners = True
+    doing = {"restart": "restarting", "stop": "stopping", "pause": "pausing"}.get(
+        action, "resuming"
+    )
     where = "before anything was done"
     try:
-        now = bulk_plan(action, managers_only=managers_only, acting_session=acting_session)
-        unread = now.unread
+        now = bulk_plan(
+            action, managers_only=managers_only, acting_session=acting_session, projects=projects
+        )
+        unread, owners = now.unread, now.owners
         rows = now.rows if shown is None else _as_shown(shown, now)
+        if action == "pause":
+            signals = _set_pauses(now.projects, on=True, session_ref=acting_session)
+        elif action == "resume":
+            # Cleared only where the resume leaves no agent paused (m2): the manager it brings
+            # back then spawns again, its team back beside it.
+            clear, kept = _resumes_clear(now, rows)
+            if not owners and orchestrator.team_enabled():
+                # Not the owner's: refused, nothing written (round 2, m1). Read and checked
+                # first as the owner's clear is, on the projects it would clear, so an
+                # ambiguous or unknown --as and a damaged store answer as they always did.
+                read = {project.id for project, _ in now.unread}
+                for project in now.projects:
+                    if project.id not in read:
+                        _set_pause(project, "off", acting_session, write=False)
+            signals = _set_pauses(clear, on=False, session_ref=acting_session)
         for row in rows:
             named = f"{row.agent.label} ({_name(row.project)})"
             if row.skip is not None:
                 receipt = BulkReceipt(row.project, row.agent, "skipped", row.skip, dead=row.dead)
+            elif row.refused is not None:
+                receipt = BulkReceipt(row.project, row.agent, "failed", row.refused, dead=row.dead)
             else:
                 where = f"while {doing} {named}"
                 # A manager is restarted after its team (`bulk_plan`): told of those this
@@ -10537,11 +11416,109 @@ def bulk(
             where = f"after {named}"
             if on_receipt is not None:
                 on_receipt(receipt)
+        if action == "resume":
+            signals, kept = _pause_again_where_left(signals, kept, acting_session)
     except KeyboardInterrupt:
         said = f"interrupted {where}; the rest were left as they were"
-        report = BulkReport(action, managers_only, tuple(receipts), unread, interrupted=said)
+        report = BulkReport(
+            action,
+            managers_only,
+            tuple(receipts),
+            unread,
+            interrupted=said,
+            signals=signals,
+            kept=tuple(kept),
+            owners=owners,
+        )
         raise BulkInterrupted(report) from None
-    return BulkReport(action, managers_only, tuple(receipts), unread)
+    return BulkReport(
+        action,
+        managers_only,
+        tuple(receipts),
+        unread,
+        signals=signals,
+        kept=tuple(kept),
+        owners=owners,
+    )
+
+
+def _resumes_clear(
+    plan: BulkPlan, rows: Sequence[BulkRow]
+) -> tuple[list[ProjectInfo], list[tuple[ProjectInfo, int]]]:
+    """The projects whose ``fleet-paused`` signal a resume clears before it starts anyone, and
+    those it leaves paused, with how many agents stay paused: cleared only where the resume
+    acts on every paused agent of the project (:attr:`BulkPlan.paused`), a signal-only pause
+    from an earlier version with none included. ``--managers``, or a paused agent it leaves,
+    keeps the signal on (review of #457, m2), and so does one an agent's resume was refused
+    (``BulkRow.refused``). An agent's resume clears none at all (:attr:`BulkPlan.owners`):
+    every project whose pause reads on is kept. A project whose agents could not be read is
+    neither."""
+    unread = {project.id for project, _ in plan.unread}
+    if not plan.owners:
+        # Only the owner ends a pause, its signal included: an agent's resume clears none,
+        # not even a signal-only one (review of the #457 fold, round 2, m1).
+        return [], [
+            (project, len(plan.paused.get(project.id, frozenset())))
+            for project in plan.projects
+            if project.id not in unread
+            and (project.id in plan.fleet_paused or plan.paused.get(project.id))
+        ]
+    acting: dict[str, set[str]] = {}
+    for row in rows:
+        if row.skip is None and row.refused is None:
+            acting.setdefault(row.project.id, set()).add(row.agent.id)
+    clear: list[ProjectInfo] = []
+    kept: list[tuple[ProjectInfo, int]] = []
+    for project in plan.projects:
+        if project.id in unread:
+            continue
+        left = plan.paused.get(project.id, frozenset()) - acting.get(project.id, set())
+        if left:
+            kept.append((project, len(left)))
+        else:
+            clear.append(project)
+    return clear, kept
+
+
+def _pause_again_where_left(
+    cleared: Sequence[ProjectInfo], kept: list[tuple[ProjectInfo, int]], session_ref: str | None
+) -> tuple[tuple[ProjectInfo, ...], list[tuple[ProjectInfo, int]]]:
+    """After a resume: a project it cleared that still has a paused agent (its resume failed,
+    or it was paused again meanwhile) is fleet-paused again, and named among ``kept``: its
+    manager spawns nothing beside a team that is not back (m2). Never raises: the resume is
+    done, and a signal that cannot be set leaves it cleared, as it was."""
+    still: list[ProjectInfo] = []
+    for project in cleared:
+        with store_session() as store:
+            left = len(_paused_heads(store.fleet_label_heads(project.id)))
+        if left and orchestrator.team_enabled():
+            with suppress(FleetError):
+                pause(project, session_ref=session_ref)
+                kept.append((project, left))
+                continue
+        still.append(project)
+    return tuple(still), kept
+
+
+def _set_pauses(
+    projects: Sequence[ProjectInfo], *, on: bool, session_ref: str | None
+) -> tuple[ProjectInfo, ...]:
+    """Set (``on``, :func:`pause`) or clear (:func:`resume`) each project's ``fleet-paused``
+    signal, in turn; the projects it was written for. A clear is said only where the pause
+    read on before it (:func:`is_paused`): :func:`resume` writes nothing where it is off,
+    and a second resume said it cleared what it found off. It is asked all the same, for
+    its refusals (an ``--as`` it cannot resolve, a pause it cannot read). The first that
+    cannot be written raises, as ``fleet pause`` always refused it. Nothing with the board
+    off: no signal exists there, and nothing reads one."""
+    if not orchestrator.team_enabled():
+        return ()
+    done: list[ProjectInfo] = []
+    for project in projects:
+        was_on = on or is_paused(project)
+        (pause if on else resume)(project, session_ref=session_ref)
+        if was_on:
+            done.append(project)
+    return tuple(done)
 
 
 def _as_shown(shown: BulkPlan, now: BulkPlan) -> list[BulkRow]:
@@ -10560,9 +11537,13 @@ def _as_shown(shown: BulkPlan, now: BulkPlan) -> list[BulkRow]:
             continue
         if row.skip is not None:
             rows.append(row)  # left when it was drawn, and left now for the reason it was shown
+        elif shown.action == "resume" and (found is None or found.status.state != "paused"):
+            # Resumed or stopped meanwhile: only a paused agent is the resume's.
+            rows.append(replace(row, skip=NOT_PAUSED))
         elif found is None:
-            rows.append(replace(row, skip=ALREADY_EXITED if shown.action == "stop" else GONE_SINCE))
-        elif shown.action == "stop" and found.status.state not in PROCESS_STATES:
+            gone = ALREADY_EXITED if shown.action in ("stop", "pause") else GONE_SINCE
+            rows.append(replace(row, skip=gone))
+        elif shown.action in ("stop", "pause") and found.status.state not in PROCESS_STATES:
             rows.append(replace(row, skip=ALREADY_EXITED))
         else:
             # A restart acts on a row that died since it was shown (#38): it is started
@@ -10598,6 +11579,20 @@ def _bulk_one(
         if action == "stop":
             _still_running(row)
             result = stop(project, agent.label, agent_id=agent.id, live_only=True, actor=spawned_by)
+        elif action == "pause":
+            _still_running(row)
+            result = pause_agent(project, agent.label, agent_id=agent.id, actor=spawned_by)
+        elif action == "resume" and row.closes is not None:
+            return _end_a_closed_pause(row, actor=spawned_by)
+        elif action == "resume":
+            result = restart(
+                project,
+                agent.label,
+                agent_id=agent.id,
+                spawned_by=spawned_by,
+                before_stop=lambda: _still_paused(row),
+                team=team,
+            )
         else:
             result = restart(
                 project,
@@ -10618,7 +11613,7 @@ def _bulk_one(
         # Pinned to the row: a stop's ended between the read and its turn, and its label is
         # free, still its own or another agent's now; a restart's was stopped on purpose or
         # started again meanwhile (#38). Nothing was done to any of them.
-        why = ALREADY_EXITED if action == "stop" else str(exc)
+        why = ALREADY_EXITED if action in ("stop", "pause") else str(exc)
         return BulkReceipt(project, agent, "skipped", why, dead=dead)
     except FleetError as exc:
         return BulkReceipt(project, agent, "failed", str(exc), dead=dead)
@@ -10695,6 +11690,37 @@ def _still_to_restart(row: BulkRow) -> None:
                 ended.project_id, reason=f"{ended.label} exited", board=_board_of_row(ended)
             )
         raise NoSuchAgent(left)
+
+
+def _end_a_closed_pause(row: BulkRow, *, actor: str) -> BulkReceipt:
+    """A resume's turn for a paused agent whose task closed while it was paused
+    (:attr:`BulkRow.closes`): its pause ends as the owner's stop ends it — recorded stopped,
+    the claims it kept released, its exit announced — and the receipt says so, as a skip:
+    nothing was resumed. ``reap`` may take its tree from then on (review of #457, m4)."""
+    project, agent = row.project, row.agent
+    _still_paused(row)
+    ended = _stop_a_paused_agent(
+        project, agent.label, agent_id=agent.id, actor=actor, reason=row.closes
+    )
+    if ended is None:
+        raise NoSuchAgent(NOT_PAUSED)
+    receipt, wakes = ended
+    if wakes:  # outside the store session, as every stop nudges
+        nudge_manager(project.id, reason=f"{agent.label} exited", board=_board_of_row(agent))
+    why = f"{row.closes}: its pause was ended, not resumed (its claims released)"
+    return BulkReceipt(project, agent, "skipped", why, result=receipt, dead=row.dead)
+
+
+def _still_paused(row: BulkRow) -> None:
+    """Refuse ``row`` (``NoSuchAgent``, :data:`NOT_PAUSED`) unless it is still a paused agent,
+    read again just before a resume by :func:`bulk` starts it: its label's newest row, ended
+    by ``fleet pause``. One stopped meanwhile (its pause ended for good), or resumed by
+    another hand, is left."""
+    with store_session() as store:
+        agent = store.get_fleet_agent(row.agent.id)
+        head = store.fleet_agent_by_label(row.project.id, row.agent.label, live_only=False)
+    if agent is None or not _paused_row(agent) or head is None or head.id != agent.id:
+        raise NoSuchAgent(NOT_PAUSED)
 
 
 def restart_leaves(project: ProjectInfo, status: FleetAgentStatus) -> str | None:
@@ -10974,42 +12000,506 @@ def rename(project: ProjectInfo, codename: str, *, notes: list[str] | None = Non
     one. So ``notes`` collects what it cost, the way :class:`SpawnReceipt` does,
     naming the session that still holds the old name and the one tmux command
     that fixes it.
+
+    The old codename still names the project (:meth:`ContextStore.set_codename` keeps it as
+    an alias), and the boards the project's agents read are told (:func:`_codename_changed`).
     """
     if not codenames.is_codename(codename):
         raise FleetError(
-            f"codename {codename!r} must look like adjective-animal: two words of "
-            "3 to 7 lowercase letters joined by '-'"
+            f"codename {codename!r} must be lowercase letters and digits, in words joined by "
+            f"single '-', starting with a letter, at most {codenames.CODENAME_MAX} characters "
+            "(amber-otter, aisquare-cli)"
         )
     with store_session() as store:
         store.onboard_project(project)
         current = store.get_project(project.id) or project
-        old = current.codename
-        if old == codename:
+        if current.codename == codename:
             return current
+        if codename in store.folder_names_in_use(project.id):
+            raise FleetError(
+                f"codename {codename!r} is another project's folder name: `--project "
+                f"{codename}` names that one, and would name this one instead — pick another"
+            )
+        if codename in store.aliases_in_use(project.id):
+            # Reserved for the live project that gave it up: its agents were given it, and
+            # taken here, their `fleet stop --project <it>` acted on this one (task #6,
+            # reopened; the manager's rule overrides "the current holder wins").
+            owner_id = store.codename_alias_owners().get(codename)
+            owner = store.get_project(owner_id) if owner_id is not None else None
+            had = _name(owner) if owner is not None else "another project"
+            raise FleetError(
+                f"codename {codename!r} is one {had} had: `--project {codename}` still names "
+                "it — pick another"
+            )
         try:
-            updated = store.set_codename(project.id, codename)
+            old, updated = store.swap_codename(project.id, codename)
         except sqlite3.IntegrityError as exc:
             raise FleetError(f"codename {codename!r} is already taken by another project") from exc
-    if old:
-        srv = server()
-        old_session, new_session = session_name(old), session_name(codename)
-        try:
-            if srv.has_session(old_session):
-                srv.rename_session(old_session, new_session)
-        except TmuxError as exc:
-            if notes is not None:
-                notes.append(
-                    f"the codename is {codename}, but tmux could not be told ({exc}) — if a "
-                    f"session named {old_session} is still running this project's agents, "
-                    f"`{project_service.fleet_command('attach', updated)}` looks for "
-                    f"{new_session} and will refuse until it is renamed: `tmux -L {srv.socket} "
-                    f"rename-session -t ={old_session} {new_session}` does that, and renaming "
-                    "again will not "
-                    "(it renames from the stored codename, which is already the new one). "
-                    "`fleet ls`, `tell`, `stop` and `reap` are unaffected — they address "
-                    "panes by id"
-                )
+    _codename_changed(updated, old, notes)
     return updated
+
+
+def follow_name(project: ProjectInfo, *, notes: list[str] | None = None) -> ProjectInfo:
+    """Give ``project`` the codename its name gives (:func:`codenames.codename_from_text`),
+    and rename its tmux session with it: the half of a project rename (``project rename``, a
+    card, the Settings tab) that comes after its nickname is written.
+
+    The name is the one every list shows (:func:`project_service.display_name`): the
+    nickname, or the folder's once it is cleared. One another project holds — as its
+    codename, or as its folder's name, which ``--project`` already names it by — gets the
+    first free suffix (``billing-2``, :func:`codenames.first_free`), and ``notes`` says whose
+    it is. Taken from a folder, ``--project billing`` would have moved from the project in
+    ``~/work/billing`` to this one, with no refusal (review of #456, 1). A name that gives
+    no codename (``!!!``) leaves the codename as it is, and ``notes`` says so. A project with
+    no codename yet (no agent ever ran there) is given this one, so its first agent is not
+    named what its card is not.
+
+    Two renames of one project at once (a card's and the Settings tab's, two quick card
+    renames) each re-read its codename before the walk and learn from the write which one
+    they replaced (:meth:`ContextStore.swap_codename`); the session follows whichever
+    codename is stored when each finishes (:func:`_codename_changed`).
+
+    Never onboards: the nickname was written on the row as it is, captured or added. The
+    tmux half fails open, as :func:`rename`'s does. ``FleetError`` when the project is not
+    registered (forgotten meanwhile), or every candidate was taken by another process while
+    writing it; the nickname is the caller's and is already saved either way.
+    """
+    with store_session() as store:
+        current = store.get_project(project.id)
+        if current is None:
+            raise FleetError(f"{_name(project)} is no longer registered")
+        shown = project_service.display_name(current)
+        wanted = codenames.codename_from_text(shown)
+        if wanted is None:
+            if notes is not None:
+                kept = f"stays {current.codename}" if current.codename else "is not set"
+                notes.append(
+                    f"{shown!r} gives no codename ({codenames.why_no_codename(shown)}), so the "
+                    f"fleet codename {kept} — "
+                    f"`{project_service.fleet_command('rename', current)} <codename>` sets one"
+                )
+            return current
+        folders = store.folder_names_in_use(project.id)
+        retired = store.aliases_in_use(project.id)
+        standing = _standing_codenames(store, project.id)
+        for _ in range(_CODENAME_RETRIES):
+            # Its own codename read again each time round: another rename of it may have
+            # written one since, and that one is this project's to keep, not taken.
+            row = store.get_project(project.id)
+            own = row.codename if row is not None else None
+            taken = store.codenames_in_use() | folders | retired | standing
+            taken -= {own} if own else set()
+            codename = codenames.first_free(wanted, taken)
+            if codename == own:
+                return row or current
+            try:
+                old, updated = store.swap_codename(project.id, codename)
+            except sqlite3.IntegrityError:
+                continue  # another process took it between the read and the write
+            break
+        else:
+            raise FleetError(
+                f"could not give {_name(current)} the codename {wanted}: every free name "
+                f"this walk tried was taken by another project while writing it "
+                f"({_CODENAME_RETRIES} attempts)"
+            )
+        holder = None
+        if codename != wanted:
+            listed = store.list_projects(all=True, include_forgotten=True)
+            holder = next((p for p in listed if p.codename == wanted), None)
+    if notes is not None and codename != wanted:
+        if holder is not None:
+            notes.append(f"{wanted} is {_name(holder)}'s codename, so this project's is {codename}")
+        elif wanted in folders:
+            notes.append(
+                f"{wanted} is another project's folder name (`--project {wanted}` names it), "
+                f"so this project's codename is {codename}"
+            )
+        elif wanted in retired:
+            notes.append(
+                f"{wanted} is a codename another project had (`--project {wanted}` still "
+                f"names it), so this project's is {codename}"
+            )
+        elif wanted in standing:
+            notes.append(
+                f"a tmux session {session_name(wanted)} is already running, and it is not this "
+                f"project's, so this project's codename is {codename}"
+            )
+    _codename_changed(updated, old, notes)
+    return updated
+
+
+def _standing_codenames(store: ContextStore, project_id: str) -> set[str]:
+    """The codenames ``asq-`` sessions on the project's servers already use and the project
+    does not: a stray one (a forgotten project's, one made by hand) would hold the name a
+    rename gives, and the project's own session could not be renamed onto it. Asked of every
+    server one of the project's rows lives on and today's, by the lenient listing: a server
+    that cannot be asked names nothing, and the rename's tmux half says what it could not do.
+    """
+    config = settings()
+    rows = store.fleet_agents(project_id, live_only=False)
+    row = store.get_project(project_id, include_forgotten=True)
+    own = {*(store.codename_aliases(project_id)), *([row.codename] if row and row.codename else [])}
+    addresses = {_address(agent, config) for agent in rows} | {_Address(config.tmux_socket)}
+    standing: set[str] = set()
+    for address in addresses:
+        try:
+            names = _server_at(address, config).list_sessions()
+        except (TmuxError, OSError):
+            continue
+        standing.update(
+            name.removeprefix(SESSION_PREFIX) for name in names if name.startswith(SESSION_PREFIX)
+        )
+    return standing - own
+
+
+def old_codename_works(project_id: str, old: str) -> bool:
+    """Whether ``--project <old>`` names ``project_id`` alone now: what a rename's note, the
+    CLI's line and the toast say only when it is so (task #6, reopened). A folder of that
+    name added since makes it name two, and they say which reference to use instead."""
+    with store_session() as store:
+        return [p.id for p in store.find_projects(old)] == [project_id]
+
+
+def rename_project(
+    project: ProjectInfo,
+    nickname: str | None,
+    *,
+    notes: list[str] | None = None,
+    follow_unchanged: bool = True,
+) -> ProjectInfo:
+    """A project renamed, both halves: its nickname (:func:`project_service.set_nickname`,
+    whose ``ValueError`` and ``KeyError`` come through as they are, nothing written), then
+    its codename and tmux session (:func:`follow_name`). The second fails open: the
+    nickname is saved, and ``notes`` says why the codename is not what the name gives.
+    ``project rename`` and the Settings tab; a card runs the halves apart, the second in a
+    worker.
+
+    Without ``follow_unchanged``, a save that leaves the name as it was is no rename, and
+    the codename is left alone: the Settings tab's Save always writes, and saved unchanged it
+    put the slug back over a codename ``fleet rename`` had set (task #6, reopened). ``project
+    rename`` keeps it: typing the name a project already has is how one nicknamed before
+    0.9.2 takes the codename it gives."""
+    with store_session() as store:
+        before = store.get_project(project.id)
+    renamed = project_service.set_nickname(project, nickname)
+    if not follow_unchanged and before is not None and before.nickname == renamed.nickname:
+        return renamed
+    try:
+        return follow_name(renamed, notes=notes)
+    except FleetError as exc:
+        if notes is not None:
+            notes.append(f"the fleet codename was not changed: {exc}")
+        return renamed
+
+
+def _codename_changed(updated: ProjectInfo, old: str | None, notes: list[str] | None) -> None:
+    """What follows a codename written over ``old``: the tmux session renamed with it, and
+    one note on each board the project's agents read — its own, a hub its live or paused rows
+    recorded, and the captain's home board while a captain is live there — saying the new
+    name and that the old one still works (the agents were given the old one: their start
+    packs and prompts say ``--project <old>``), so each learns it on its next turn. Nothing
+    for a project that had no codename: no agent was ever given one. Both halves fail open,
+    into ``notes``: the row is what everything else reads.
+
+    Existing branches (``fleet/<old>/…``) and worktrees keep their names: the rows record
+    them, and a spawn for a task finds its branch under the old name (:func:`_carried_on`).
+    """
+    if not old or not updated.codename or old == updated.codename:
+        return
+    config = settings()
+    home = project_id_for(paths.aisquare_home().resolve())
+    with store_session() as store:
+        # The codename stored NOW, and every one the project had: two renames of it at once
+        # finish their tmux halves in either order, and the session follows the row whichever
+        # finishes last, from whichever earlier name it still has (review of #456, 2).
+        stored = store.get_project(updated.id, include_forgotten=True)
+        codename = (stored.codename if stored is not None else None) or updated.codename
+        # Never one another project holds now: that session is its own.
+        held = store.codenames_in_use() - {codename}
+        earlier = [
+            name
+            for name in dict.fromkeys([old, *store.codename_aliases(updated.id)])
+            if name != codename and name not in held
+        ]
+        rows = store.fleet_agents(updated.id, live_only=False)
+        boards = {updated.id, *store.fleet_agent_boards(updated.id, live_only=True)}
+        # A paused agent's too: it reads that board again when it is resumed, under the
+        # session the rename renamed (`_paused_heads`).
+        boards |= {_board_of_row(row) for row in _paused_heads(rows).values()}
+        if store.fleet_agents(home, live_only=True):
+            boards.add(home)  # the captain's home board, while a captain reads it
+    new_session = session_name(codename)
+    # Every server one of its rows lives on, an ended one's too (its window lingers and holds
+    # the session, which `fleet attach` finds), and today's: renamed on today's alone, a
+    # session on a socket the rows recorded elsewhere kept the old name, and `attach`, the
+    # Settings tab's attach line and a scoped `shutdown` looked for the new one there.
+    addresses = {_address(row, config) for row in rows} | {_Address(config.tmux_socket)}
+    for address in sorted(addresses, key=lambda a: (a.name, str(a.path or ""))):
+        srv = _server_at(address, config)
+        for old_session in map(session_name, earlier):
+            try:
+                if not srv.has_session(old_session):
+                    continue
+                if srv.has_session(new_session):
+                    # Both stand: an agent started under the old name while the project was
+                    # renamed, or a session of the new name left from before (a forgotten
+                    # project's, one made by hand). tmux will not merge two sessions; a
+                    # scoped shutdown also looks in the old one (`_fleet_sessions`).
+                    if notes is not None:
+                        notes.append(
+                            f"{old_session} was not renamed: a session named {new_session} "
+                            f"already runs on tmux ({address}). `fleet ls`, `tell`, `stop` and "
+                            f"`reap` reach this project's agents by pane id, and a scoped "
+                            f"`shutdown` stops both; "
+                            f"`{project_service.fleet_command('attach', updated)}` shows "
+                            f"{new_session}"
+                        )
+                    continue
+                srv.rename_session(old_session, new_session)
+            except TmuxError as exc:
+                with contextlib.suppress(TmuxError):
+                    if srv.has_session(new_session) and not srv.has_session(old_session):
+                        continue  # another rename of the project moved it meanwhile
+                if notes is not None:
+                    flag = f"-L {address.name}" if address.path is None else f"-S {address.path}"
+                    notes.append(
+                        f"the codename is {codename}, but tmux ({address}) could not be told "
+                        f"({exc}) — if a session named {old_session} is still running this "
+                        f"project's agents, "
+                        f"`{project_service.fleet_command('attach', updated)}` looks for "
+                        f"{new_session} and will refuse until it is renamed: `tmux {flag} "
+                        f"rename-session -t ={old_session} {new_session}` does that, and "
+                        "renaming again will not (it renames from the stored codename, which "
+                        "is already the new one). `fleet ls`, `tell`, `stop` and `reap` are "
+                        "unaffected — they address panes by id"
+                    )
+    text = f"project renamed: {old} → {updated.codename}; " + (
+        f"--project {old} still works"
+        if old_codename_works(updated.id, old)
+        else f"use --project {updated.codename} (--project {old} names another project too)"
+    )
+    for board in sorted(boards):
+        # One board's failure is that board's: the rest are still told (review of #456, 7).
+        try:
+            _team().add_note(text, board_id=board)
+        except _team().TeamDisabledError:
+            break  # team off: no board is read
+        except Exception as exc:  # a store error: the rename stands
+            if notes is not None:
+                notes.append(f"board {board} could not be told of the new codename ({exc})")
+
+
+@dataclass(frozen=True)
+class RelabelReceipt:
+    """What :func:`relabel` did: the row as it is now, the label it had, the label the typed
+    name became (:func:`label_from_text`, before any suffix), and what to tell the owner."""
+
+    agent: FleetAgent
+    old: str
+    wanted: str
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def changed(self) -> bool:
+        return self.agent.label != self.old
+
+    @property
+    def said(self) -> str:
+        """``coder-1 is now login-fix``, the line the CLI and the sidebar's toast both say."""
+        if not self.changed:
+            return f"{self.old} is already called {self.old} — nothing changed"
+        return f"{self.old} is now {self.agent.label}"
+
+
+def relabel(
+    project: ProjectInfo, label: str, text: str, *, actor: str | None = None
+) -> RelabelReceipt:
+    """Rename the live agent ``label`` to the label ``text`` becomes (:func:`label_from_text`):
+    ``fleet relabel`` and the sidebar's agent row both call this.
+
+    Refused for the manager and the captain, and for an agent that ended or is paused
+    (:func:`relabel_refusal`), and to ``manager`` or ``captain``, labels their roles keep. A
+    label another LIVE agent of the project holds takes the next free suffix
+    (``login-fix-2``), and a note says so; the agent's own label is no change. So does one a
+    PAUSED agent keeps for its resume (:func:`_paused_heads`): retired as another agent's
+    history, its pause was lost, and ``fleet resume`` found nothing under its label. The
+    write is one compare-and-set against the partial ``fleet_agent_live_label`` index
+    (``store.relabel_fleet_agent``): a rename or a spawn that takes the label meanwhile
+    trips it, and the next suffix is tried, so two live rows never share a label.
+
+    From then on the agent IS the new label: every lookup by label (``tell``, ``stop``,
+    ``restart``, ``switch``, a hand-off, ``fleet ls``) finds it there, and its earlier rows
+    of the old label move with it, so the old one names nothing (a refusal by it says what it
+    is called now). The ended rows the new label already had — another agent's — are retired
+    (``~login-fix``, ``store.RETIRED_LABEL``): looked up by its newest row, the label is this
+    agent's, before it ends and after, whenever those rows were started. The board names its
+    posts by the row's label, read when they are shown, so its identity
+    (``AISQUARE_FLEET_AGENT``, the row's id; ``--as``, its session) needs nothing. An
+    ``agent_renamed`` event on its board tells the manager. Its worktree and branch are NOT
+    moved: it is live in them, and every later step finds the tree by the row's ``cwd``
+    (:func:`_tree_path`). The tmux window is renamed to match, failing OPEN as
+    :func:`rename` does: the row is what everything reads, and a note says what tmux said.
+    """
+    notes: list[str] = []
+    with store_session() as store:
+        agent = store.fleet_agent_by_label(project.id, label, live_only=True)
+        if agent is None:
+            ended = store.fleet_agent_by_label(project.id, label, live_only=False)
+            if ended is not None:
+                raise FleetError(f"cannot rename {label!r}: {relabel_refusal(ended)}")
+            raise NoSuchAgent(
+                f"no live agent {label!r} in {_name(project)}"
+                f"{_renamed_hint(store, project, label)} — "
+                f"`{project_service.fleet_command('ls', project)}` shows who is running"
+            )
+        refusal = relabel_refusal(agent)
+        if refusal is not None:
+            raise FleetError(f"cannot rename {label!r}: {refusal}")
+        wanted = label_from_text(text, agent.role)
+        if wanted in (MANAGER_LABEL, CAPTAIN_LABEL):
+            raise FleetError(
+                f"cannot rename {label!r} to {wanted!r}: that label is reserved for the "
+                f"{wanted}, whom the fleet and the board find by it — pick another name"
+            )
+        if wanted == agent.label:
+            return RelabelReceipt(agent, label, wanted, notes)
+        whose = "another live agent's"
+        for _ in range(_LABEL_RETRIES):
+            paused = {
+                row.label for row in _paused_heads(store.fleet_label_heads(project.id)).values()
+            }
+            others = paused | {
+                row.label
+                for row in store.fleet_agents(project.id, live_only=True)
+                if row.id != agent.id
+            }
+            whose = "a paused agent's" if wanted in paused else "another live agent's"
+            picked = free_label(wanted, others)
+            if picked == agent.label:
+                notes.append(f"{wanted} is {whose} label — {label} keeps its own")
+                return RelabelReceipt(agent, label, wanted, notes)
+            try:
+                renamed = store.relabel_fleet_agent(agent.id, agent.label, picked)
+            except sqlite3.IntegrityError:
+                continue  # another rename or a spawn took it meanwhile: the next suffix
+            if renamed is None:
+                now = store.get_fleet_agent(agent.id)
+                if now is None or now.ended_at is not None:
+                    raise NoSuchAgent(f"{label} ({agent.id}) ended meanwhile — nothing renamed")
+                raise FleetError(f"{label} was renamed {now.label} meanwhile — nothing changed")
+            break
+        else:
+            raise FleetError(f"could not rename {label!r}: every label tried was taken meanwhile")
+        if picked != wanted:
+            notes.append(f"{wanted} is {whose} label — named it {picked}")
+        by = f" — renamed by {_actor_name(store, actor)}" if actor is not None else ""
+        # The row is the record; the event, the courtesy. Written as no session's, so the
+        # agent's own next delta, which leaves out its own posts, tells it its new name too.
+        with contextlib.suppress(Exception):
+            _team()._emit(
+                store,
+                _board_of_row(renamed),
+                "agent_renamed",
+                f"{label} is now {renamed.label}{by}",
+                actor=actor,
+                meta={"agent": renamed.id, "from": label, "to": renamed.label},
+            )
+    _rename_window(renamed, notes)
+    return RelabelReceipt(renamed, label, wanted, notes)
+
+
+def free_label(wanted: str, taken: Collection[str]) -> str:
+    """``wanted``, or the first ``wanted-2``, ``-3`` … (within 24 characters, :func:`_fitted`)
+    that no label in ``taken`` is."""
+    if wanted not in taken:
+        return wanted
+    for n in range(2, 1000):
+        candidate = _fitted(wanted, f"-{n}")
+        if candidate not in taken:
+            return candidate
+    raise FleetError(f"no free label for {wanted!r}")
+
+
+_WINDOW_RENAMES = 3
+"""How many times :func:`_rename_window` asks tmux at most: once, and again for each relabel
+of the row that landed while it did (the latest relabel's own pass names it after that)."""
+
+
+def _rename_window(agent: FleetAgent, notes: list[str]) -> None:
+    """Name ``agent``'s tmux window the label its row has NOW, failing OPEN with a note
+    (:func:`relabel`).
+
+    The row is read again right before tmux is asked, and again after: two quick relabels of
+    one agent (the CLI and the sidebar) finish their tmux calls in either order, and the one
+    that finished last left the older label on the window. A label that changed meanwhile is
+    named again; an agent that ended meanwhile is left as it is.
+
+    Only on the server its row was started on: one that started since numbers its panes from
+    ``%0`` again, and its pane under the row's id is another agent's (:func:`_outlived`)."""
+    srv = server_of(agent)
+    label = agent.label
+    try:
+        if _outlived(agent, srv.started_at()):
+            notes.append(
+                "its tmux window was not renamed: the server at its socket is not the one it "
+                f"was started on, where {agent.pane_id} is another agent's pane"
+            )
+            return
+        named: str | None = None
+        for _ in range(_WINDOW_RENAMES):
+            now = _label_now(agent)
+            if now is None or now == named:
+                return
+            label = now
+            srv.rename_window(agent.pane_id, label)
+            named = label
+    except TmuxError as exc:
+        notes.append(
+            f"the label is {label}, but tmux could not rename its window ({exc}) — "
+            f"`tmux -L {agent.tmux_socket} rename-window -t {agent.pane_id} {label}` does "
+            "that. `fleet ls`, `tell`, `stop` and `reap` are unaffected — they address panes by id"
+        )
+
+
+def _label_now(agent: FleetAgent) -> str | None:
+    """The label ``agent``'s row has now, ``None`` once it has ended; the one it was handed
+    when the store cannot say (its window is named that rather than not at all)."""
+    try:
+        with store_session() as store:
+            row = store.get_fleet_agent(agent.id)
+    except Exception:
+        return agent.label
+    return row.label if row is not None and row.ended_at is None else None
+
+
+def _renamed_from(store: ContextStore, project: ProjectInfo, label: str) -> str | None:
+    """The id of the row :func:`relabel` took ``label`` from, while no row of that label has
+    been started since (a label is free again once renamed away); ``None`` otherwise."""
+    raw = store.ui_state(f"{FLEET_RENAMED}{project.id}:{label}")
+    if raw is None:
+        return None
+    try:
+        record = json.loads(raw)
+        agent_id, at = record["agent"], datetime.fromisoformat(record["at"])
+    except (ValueError, TypeError, KeyError):
+        return None
+    if not isinstance(agent_id, str):
+        return None
+    newest = store.fleet_agent_by_label(project.id, label, live_only=False)
+    return agent_id if newest is None or newest.created_at < at else None
+
+
+def _renamed_hint(store: ContextStore, project: ProjectInfo, label: str) -> str:
+    """`` (renamed: it is login-fix now)``, for a refusal by a label :func:`relabel` took from
+    an agent; empty for any other."""
+    agent_id = _renamed_from(store, project, label)
+    agent = store.get_fleet_agent(agent_id) if agent_id is not None else None
+    if agent is None:
+        return ""
+    if agent.ended_at is not None:
+        return f" (renamed {agent.label}, which has since ended)"
+    return f" (renamed: it is {agent.label} now)"
 
 
 def pause(project: ProjectInfo, *, session_ref: str | None = None) -> None:
@@ -11029,7 +12519,9 @@ def resume(project: ProjectInfo, *, session_ref: str | None = None) -> None:
     _set_pause(project, "off", session_ref)
 
 
-def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> None:
+def _set_pause(
+    project: ProjectInfo, value: str, session_ref: str | None, *, write: bool = True
+) -> None:
     """Set ``project``'s pause to ``value``: ``on`` on every board it lives on
     (:func:`_pause_signals`), ``off`` wherever it reads on (:func:`_pause_where_on`).
 
@@ -11051,6 +12543,10 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
     or disk is full``, a readonly store, ``disk I/O error``) is a ``FleetError`` that names
     it: the root group maps damage alone, and re-raised, it ended in a traceback, ``--json``
     printing nothing (round 36, 2/9).
+
+    Without ``write``, everything is read and checked as for the write, ``--as`` resolved
+    with it, and nothing is written: an agent's resume (:func:`bulk`), refused as not the
+    owner's only once these have answered as they always did (the fold of #457, r4).
 
     Each write is a ``signal`` event in the delta of every session on that board. Off on
     every board one of the project's rows ever recorded, ``fleet resume -P a`` put
@@ -11084,7 +12580,7 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
             if broken:
                 named = ", ".join(f"{name} on {board}" for board, name in broken)
                 raise FleetError(f"cannot {doing} the pause: {named} could not be read")
-            team.set_signals_in(store, signals, value, session_ref=session_ref)
+            team.set_signals_in(store, signals if write else [], value, session_ref=session_ref)
     except sqlite3.Error as exc:
         if isinstance(exc, StoreUnopenable) or is_corrupt_error(exc):
             raise  # damage, which the CLI's root group says how to recover from

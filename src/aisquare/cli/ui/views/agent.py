@@ -285,7 +285,8 @@ class SlotLabels:
 
 
 def shown_pane(status: FleetAgentStatus) -> str | None:
-    """The pane a view of ``status`` shows and types into — ``None`` for a ``lost`` row, and
+    """The pane a view of ``status`` shows and types into — ``None`` for a ``lost`` row, a
+    ``paused`` one (its window was killed, and its id is the next agent's to be given), and
     for one the listing held as another server's.
 
     ``lost`` is the listing's word for a live row it found no pane of its own
@@ -306,7 +307,7 @@ def shown_pane(status: FleetAgentStatus) -> str | None:
     word alone, the tabs showed and typed into another agent's pane under it (review of
     #259, round 1).
     """
-    return None if status.state == "lost" or status.held else status.agent.pane_id
+    return None if status.state in ("lost", "paused") or status.held else status.agent.pane_id
 
 
 RESTART_WORKER = "agent-restart"
@@ -430,8 +431,8 @@ class AgentView(Vertical):
             self.pane.attach(wanted)
 
     def _paint_actions(self) -> None:
-        """Stop where ``STOP_STATES`` says — a process, or a dead window; Restart always (an
-        exited row is exactly its case).
+        """Stop where ``STOP_STATES`` says — a process, a dead window, or a pause to end;
+        Restart always (an exited row is exactly its case), named *Resume* on a paused row.
 
         Greyed while THIS view's own restart runs, and only then (a stop runs inside its
         own modal dialog): ``self.workers``
@@ -447,15 +448,25 @@ class AgentView(Vertical):
         stop = self.query_one("#agent-stop", Button)
         stop.display = self.status.state in STOP_STATES
         stop.disabled = busy
+        paused = self.status.state == "paused"
         stop.tooltip = (
             "/exit, a grace period, then the window is killed (as `fleet stop` does)"
             if self.status.state in _STOPPABLE
+            else "End the pause for good: its claims go back to the board, and `fleet resume` "
+            "leaves it (as `fleet stop` does)"
+            if paused
             else "Remove the dead window tmux kept for the last screen; the row leaves the "
             "listing (as `fleet stop` does)"
         )
         restart = self.query_one("#agent-restart", Button)
         restart.disabled = busy
-        restart.label = "Restart" if self.status.state in _STOPPABLE else "Restart (resume)"
+        restart.label = (
+            "Restart"
+            if self.status.state in _STOPPABLE
+            else "Resume"
+            if paused
+            else "Restart (resume)"
+        )
         restart.tooltip = (
             "Start it again under this label — same role, task, worktree, account and "
             "persona; its session is resumed from the transcript when that is on disk (as "

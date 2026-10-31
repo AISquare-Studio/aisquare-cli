@@ -143,6 +143,10 @@ PROJECT_OF: dict[tuple[str, str], str] = {
         _TARGET + ", or under ``--all`` each receipt's own, the project its row was read in"
     ),
     ("cli/fleet.py", "_emit_shutdown"): _TARGET,
+    ("cli/fleet.py", "_emit_bulk"): (
+        "each project whose ``fleet-paused`` signal the pause set (``BulkReport.signals``), "
+        "the ones ``--project``, ``--group`` or ``--all`` named"
+    ),
     ("cli/fleet.py", "attach"): _TARGET,
     ("cli/project.py", "_emit_fresh"): _TARGET,
     ("services/fresh.py", "start_fresh"): (
@@ -195,7 +199,16 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ),
     ("services/fleet.py", "switch"): _FLEET_OP,
     ("services/fleet.py", "restart"): _FLEET_OP,
-    ("services/fleet.py", "rename"): "the project renamed, with its new codename",
+    ("services/fleet.py", "pause_agent"): _FLEET_OP,
+    ("services/fleet.py", "_paused_by_the_owner"): (
+        _FLEET_OP + ", or the paused row's project in a bulk plan (``bulk_plan``'s covered)"
+    ),
+    ("services/fleet.py", "_refuse_occupied_worktree"): (
+        "the project the spawn acts on, whose live row holds the tree (REVIEW-RC092, n1)"
+    ),
+    ("services/fleet.py", "_codename_changed"): "the project renamed, with its new codename",
+    ("services/fleet.py", "follow_name"): "the project renamed, as its row holds it now",
+    ("services/fleet.py", "relabel"): _FLEET_OP,
     ("services/fleet.py", "attach_argv"): _FLEET_OP,
     ("services/hooks.py", "hand_over"): (
         "the limited agent's own row's project (``agent.project_id``), which the "

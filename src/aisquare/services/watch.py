@@ -265,7 +265,12 @@ class Watcher:
     def commands(self, now: datetime, notes: list[str]) -> list[WatchItem]:
         items: list[WatchItem] = []
         projects = {p.id: p for p in self._projects()}
-        by_name = {p.codename: p for p in projects.values() if p.codename}
+        # A source may still say a codename the project gave up at a rename; one a project
+        # holds now names that project.
+        with store_session() as store:
+            former = store.codename_alias_owners()
+        by_name = {name: projects[pid] for name, pid in former.items() if pid in projects}
+        by_name.update({p.codename: p for p in projects.values() if p.codename})
         for name, source in sorted(self.settings.sources.items()):
             key = f"source:{name}"
             if not self._due(key, source.every_seconds, now):

@@ -108,6 +108,7 @@ REPO = Path(__file__).resolve().parents[1]
 # in it should be added here; the test that guards this list is below.
 DOCUMENTED = (
     "README.md",
+    "docs/multi-instance.md",
     # Found by widening the staleness sweep past root-plus-`docs/`. The template
     # asks a reporter to run `aisquare doctor` and paste the output, so by this
     # guard's own rule — commands meant to be RUN get the document listed — it
@@ -775,8 +776,11 @@ CENSUS = {
     ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
     # Re-measured 2026-10-07 when the README became a front page (roadmap 9.5):
     # the two quickstarts and the plain-command block, with the `uv tool install`
-    # line and the installer URL as the two classified mentions.
-    "README.md": (5, 2),
+    # line and the installer URL as the two classified mentions. 2026-10-28: the
+    # plain-command block gained `fleet relabel`.
+    "README.md": (6, 2),
+    # 2026-10-30 (#20): `aisquare instances` and its `--json`, in one block.
+    "docs/multi-instance.md": (2, 0),
 }
 
 

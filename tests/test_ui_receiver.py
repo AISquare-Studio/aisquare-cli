@@ -45,11 +45,13 @@ from aisquare.cli.ui.views.project import ProjectView
 from aisquare.core.store import store_session
 from aisquare.models import ProjectInfo
 from aisquare.services import project_groups as groups_service
+from aisquare.services import settings as settings_service
 from aisquare.services.captain import actions
 from aisquare.services.captain import state as captain_state
 from tests import test_ui_shell as ui_suite
 from tests.test_captain_sidebar import until
 from tests.test_ui_shell import Script, drive, fleet_app, seed, status
+from tests.ui_workers import settle_page
 
 # The UI suite's fixtures, bound here so pytest finds them for this module's tests
 # (``no_real_tmux`` is autouse there: every tmux call held to a private socket).
@@ -283,6 +285,31 @@ def test_open_stop_opens_the_stop_dialog_for_that_agent_and_stops_nothing(
     reply, project_id, agent_id = drive(body)
     assert reply == {"ok": True, "said": "stop dialog open for coder-1 (alpha)"}
     assert (project_id, agent_id) == ("prj_aaa", "agt_aaa_coder-1")
+    assert recorder.calls == [], "the dialog asks the owner; the action itself stops nothing"
+
+
+@UNIX_SOCKETS
+@pytest.mark.needs_captain
+def test_open_stop_asks_even_when_the_owner_said_dont_ask_again(
+    tmp_path: Path, script: Script, ui_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``[ui] confirm_stop`` off makes the owner's own Stop and ``x`` stop at once. The
+    captain's ``open_stop`` is not the owner's click: it still opens the dialog, and the
+    action itself still stops nothing."""
+    fleet(tmp_path, script)
+    settings_service.set_value("ui.confirm_stop", "false")
+    recorder = ui_suite.stopper(monkeypatch, status("prj_aaa", "coder-1", "coder", "working").agent)
+
+    async def body(pilot: Pilot[None]) -> tuple[dict[str, Any], bool, str]:
+        app = fleet_app(pilot)
+        reply = await send(pilot, ui_path, "open_stop", "alpha/coder-1")
+        await settle_page(app)
+        return reply, app.confirm_stop, type(app.screen).__name__
+
+    reply, asks, screen = drive(body)
+    assert asks is False, "the premise: the owner's clicks stop at once"
+    assert reply == {"ok": True, "said": "stop dialog open for coder-1 (alpha)"}
+    assert screen == "StopAgentScreen"
     assert recorder.calls == [], "the dialog asks the owner; the action itself stops nothing"
 
 

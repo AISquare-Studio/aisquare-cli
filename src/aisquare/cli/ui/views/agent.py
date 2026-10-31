@@ -11,10 +11,12 @@ markup, so a label or a model name with brackets in it reaches the screen intact
 when its slow headroom read lands; a changed ``pane_id`` (a restart) re-attaches
 the pane.
 
-**Stop** and **Restart** are the actions §4.2 promised. Stop only asks: it
-posts :class:`StopAgent` and the shell opens the dialog (``cli/ui/stop.py``),
+**Stop** and **Restart** are the actions §4.2 promised. Stop only posts
+:class:`StopAgent`, and the shell opens the dialog (``cli/ui/stop.py``),
 which owns the service call — one confirmation, *Force* included, over the
-same ``services.fleet.stop`` the CLI runs. It shows where
+same ``services.fleet.stop`` the CLI runs. With ``[ui] confirm_stop`` off (the
+dialog's *Don't ask again*) the shell opens no dialog and stops the agent at
+once, gracefully (``FleetApp._stop_at_once``). It shows where
 ``sidebar.STOP_STATES`` says: while the agent HAS a process (``ALIVE_STATES``,
 the constant the card's "agents alive" chip counts by), and on a 💤 exited
 row, whose dead window `remain-on-exit` kept for the last screen (#138) — Stop
@@ -323,13 +325,16 @@ class AgentView(Vertical):
     never had: a manager ended with ctrl+c inside its window showed 💤 forever
     with nothing to click, and ``fleet spawn manager`` refused until a hand-run
     ``reap``. Stop asks the shell for its dialog (:class:`StopAgent`); the dialog
-    runs the stop and owns its answer, including a refusal. Restart runs the
+    runs the stop and owns its answer, including a refusal. With ``[ui]
+    confirm_stop`` off the shell stops the agent at once instead, with no dialog,
+    and a refusal is a warning toast. Restart runs the
     service off the UI thread; the shell's next frame is what repaints, never an
     optimistic guess. A restart resumes the agent's own
     session when its transcript is on disk, so the manager comes back knowing
     its intake and its coders; the shell then shows the new row if this view is
     still the one on screen (:class:`AgentRestarted`). Both buttons ignore a mouse
-    press that lands just as the view came up or moved under the pointer
+    press that reaches the app before the view that came up or moved under the pointer
+    is painted, and take one after it at once
     (:class:`~aisquare.cli.ui.click_guard.GuardedButton`).
     """
 
@@ -387,8 +392,9 @@ class AgentView(Vertical):
             header = InfoLine(id="agent-header")
             header.show_line(self.status, self.labels.labels, self.usage)
             yield header
-            # Guarded (``click_guard``): a click that was aimed at what this view replaced
-            # must not stop or restart the agent it shows instead.
+            # Guarded (``click_guard``): a click that was aimed at what this view replaced,
+            # made before the view was painted, must not stop or restart the agent it shows
+            # instead.
             yield GuardedButton("Stop", id="agent-stop", compact=True)
             yield GuardedButton("Restart", id="agent-restart", compact=True, variant="primary")
         yield from self.compose_bars()

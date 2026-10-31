@@ -269,8 +269,9 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
         "updates": {"check": True},
         # The symbol index (#285); its ignore list was [snapshot]'s until #399.
         "code": {"enabled": True, "max_file_kb": 1024, "ignore": []},
-        # App settings ▸ User preferences, added since.
-        "ui": {"always_show_project_path": False},
+        # App settings ▸ User preferences, added since; the Stop dialog's Don't ask again
+        # turns confirm_stop off (0.9.2).
+        "ui": {"always_show_project_path": False, "confirm_stop": True},
         # The fleet's admission (#283), the role tool policy (#280: the reviewer's deny is its
         # own, not its extra_args), the first message's two (P0-W1a, #122), the idle check's
         # quiet window (P0-W1b, #123), the delivery guards (P0-W2, #276), whether a pane's

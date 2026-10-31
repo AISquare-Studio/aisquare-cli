@@ -179,11 +179,16 @@ class StopAgent(Message):
     Both controls ask the SHELL rather than calling the service, because the
     shell is what holds the :class:`ProjectInfo` a stop needs (``on_spawn_agent``
     resolves a project the same way) and what owns the dialog.
+
+    With ``[ui] confirm_stop`` off the shell stops at once, with no dialog — unless
+    ``ask``: the captain's ``open_stop`` ui action sets it, since that action opens a
+    question for the owner and stops nothing itself (``receiver.py``).
     """
 
-    def __init__(self, project_id: str, agent_id: str) -> None:
+    def __init__(self, project_id: str, agent_id: str, *, ask: bool = False) -> None:
         self.project_id = project_id
         self.agent_id = agent_id
+        self.ask = ask
         super().__init__()
 
 
@@ -983,7 +988,7 @@ class CardChips(Static):
 
 
 class CardMenuButton(Static):
-    """⋯ — the card's menu: Rename, Pin / Unpin, Open settings, Start fresh…, Remove from fleet…"""
+    """⋯ — the card's menu: Rename, Pin / Unpin, Open settings, Start fresh…, Remove from fleet"""
 
     DEFAULT_CSS = """
     CardMenuButton { width: 2; height: 1; content-align: right middle; color: $text-muted; }

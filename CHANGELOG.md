@@ -434,11 +434,14 @@ the default sidebar.**
     minutes by default; `0` turns the guard off), because the 5-minute load average moves
     minutes after a burst of spawns does: a manager fanning out a board, or a spawn loop,
     was admitted in full before it did. One more is held as a busy spawn is:
-    `capacity_busy`, its signal `burst`, with `retry_at` when the oldest of those admits is
-    5 minutes old, and `aisquare watch` wakes the manager then. Spawns that race for the
-    last seat settle to exactly `busy_burst`. Below the floor nothing is counted, and a
-    restart or switch of a running agent is not a new agent. With `busy_burst = 0`, only
-    `max_agents_total`, or a number here, bounds a project while the machine reads calm.
+    `capacity_busy`, its signal `burst`, with `retry_at` when the oldest of those admits
+    is 5 minutes old, and `aisquare watch` wakes the manager then. Spawns started in
+    parallel are settled once their rows are written, in the order they were written, from
+    below the floor too: 10 started at once into an empty project leave 5 (the floor's 3,
+    then the burst's 2), and the rest are refused as held, their windows closed. The
+    floor's agents are not counted, and a restart or switch of a running agent is not a
+    new agent. With `busy_burst = 0`, only `max_agents_total`, or a number here, bounds a
+    project while the machine reads calm.
   - **A held spawn never waits.** It is refused with the new code `capacity_busy`, and the
     message names the signal, its value, its threshold and the earliest retry (5 minutes
     on). A retry inside those 5 minutes is held again without probing, and one after them

@@ -1067,6 +1067,67 @@ def test_spawns_that_race_into_the_burst_back_their_row_out(
     assert len(_ledger(project)) == 2, "the backed-out row records no admit"
 
 
+def _parallel(
+    tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch, project: ProjectInfo, n: int
+) -> list[FleetAgent | fleet_service.CapacityRefused]:
+    """``n`` spawns started at once: each one's window starts the next whole spawn, so every
+    one reads the live count before any row is written (REVIEW-485 round 2's repro)."""
+    original = tmux.spawn_window
+    left = [n - 1]
+    outcomes: list[FleetAgent | fleet_service.CapacityRefused] = []
+
+    def one() -> None:
+        try:
+            outcomes.append(_coder(project))
+        except fleet_service.CapacityRefused as refused:
+            outcomes.append(refused)
+
+    def spawn_then_the_next(*args: object, **kwargs: object) -> WindowInfo:
+        window = original(*args, **kwargs)  # type: ignore[arg-type]
+        if left[0] > 0:
+            left[0] -= 1
+            one()
+        return window
+
+    monkeypatch.setattr(tmux, "spawn_window", spawn_then_the_next)
+    one()
+    monkeypatch.setattr(tmux, "spawn_window", original)
+    return outcomes
+
+
+@pytest.mark.parametrize(("before", "started", "refused"), [(0, 10, 5), (2, 4, 1), (0, 5, 0)])
+def test_spawns_started_in_parallel_below_the_floor_settle_to_the_floor_plus_the_burst(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+    monkeypatch: pytest.MonkeyPatch,
+    before: int,
+    started: int,
+    refused: int,
+) -> None:
+    """REVIEW-485 round 2: the live count was read before any row was written, so spawns
+    started together into a project below the floor all read it below and were admitted
+    uncounted: 10 from empty left 10 live. Each is settled by its row's place in the order
+    the rows were written now: the floor's 3, then the burst's 2."""
+    for _ in range(before):
+        _coder(project)
+    outcomes = _parallel(tmux, monkeypatch, project, started)
+    held = [o for o in outcomes if isinstance(o, fleet_service.CapacityRefused)]
+    assert len(outcomes) == started and len(held) == refused
+    assert all(o.code == "capacity_busy" and "busy_burst = 2" in str(o) for o in held)
+    assert len(_live(project)) == 5, "busy_floor 3 + busy_burst 2"
+    assert len(_ledger(project)) == 2, "the two past the floor are recorded"
+    assert len(tmux.killed) == refused, "each backed-out window is killed"
+    if refused:
+        [hold] = fleet_service.holds()
+        assert hold.burst and hold.until == NOW + timedelta(minutes=5)
+        with pytest.raises(fleet_service.CapacityRefused):
+            _coder(project)  # sequential, at 5 live: held before anything starts
+        assert len(tmux.killed) == refused
+
+
 def test_an_unreadable_or_far_off_ledger_never_holds_for_good(
     tmux: FakeTmux,
     claude_on_path: Path,

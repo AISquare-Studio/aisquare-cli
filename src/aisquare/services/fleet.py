@@ -5285,8 +5285,8 @@ class _Seats:
     ``max_agents_per_project``; in auto mode ``busy_floor`` while the machine reads busy
     (``busy`` names the signal), else no count at all (``None``). ``hold_minutes`` and
     ``project_name`` are the hold a busy back-out writes, as a held spawn writes one.
-    ``burst``: a spawn above ``busy_floor`` on a calm machine records its admit against
-    ``busy_burst`` (:func:`_verify_burst`), with ``floor`` the project's; ``0`` records
+    ``burst``: a spawn on a calm machine in auto mode is settled against ``busy_burst`` once
+    its row is written (:func:`_verify_burst`), with ``floor`` the project's; ``0`` settles
     none."""
 
     cap: int | None
@@ -5702,25 +5702,31 @@ def _admit_by_burst(
     The load average is five minutes', so a manager fanning out a board, or a spawn loop, was
     admitted in full before it moved, with no per-project number left to stop it.
 
-    Room left: admitted, the row recording its admit when it is written
-    (:func:`_verify_burst`, which settles a race). None: with ``auto_stop_finished``, the
+    Every spawn admitted here is settled when its row is written (:func:`_verify_burst`),
+    whatever ``live`` was: ``live`` is read before any window or row, so spawns started in
+    parallel into a project below the floor all read it below, and were all admitted
+    uncounted (review of #485, round 2). Below the floor here, nothing more is asked now.
+
+    At the floor or above it: room left, admitted. None: with ``auto_stop_finished``, the
     project's finished workers are stopped, and a project they take below the floor is
     admitted; else the project is held, as a busy machine holds it (``capacity_busy``, a hold
     with its retry, the watcher's wake), until the oldest admit that fills the burst is
-    ``busy_hold_minutes`` old. Below the floor a project is always admitted, uncounted."""
+    ``busy_hold_minutes`` old, before anything is started."""
     floor, burst = _busy_floor(config), _busy_burst(config)
-    if burst <= 0 or live < floor:
+    if burst <= 0:
         return _Seats(None)
     minutes = _hold_minutes(config)
+    seats = _Seats(
+        None, hold_minutes=minutes, project_name=_name(project), burst=burst, floor=floor
+    )
+    if live < floor:
+        return seats
     window = timedelta(minutes=minutes)
     retry = _burst_retry(_burst_admits_of(project.id), burst, window, now)
     if retry is not None and config.auto_stop_finished:
         live = _after_stopping_finished(project, live, notes)
         if live < floor:
-            return _Seats(None)
-    seats = _Seats(
-        None, hold_minutes=minutes, project_name=_name(project), burst=burst, floor=floor
-    )
+            return seats
     if retry is None:
         return seats
     fresh = Hold(project.id, now, retry, _burst_signal(burst, minutes), _name(project), True)
@@ -5735,15 +5741,23 @@ def _admit_by_burst(
 
 
 def _verify_burst(store: ContextStore, stored: FleetAgent, seats: _Seats) -> None:
-    """Record ``stored``'s admit above the floor against ``busy_burst``, or back the row out
-    when racing spawns filled the burst first (:func:`_admit_by_burst`).
+    """Settle ``stored`` against ``busy_burst`` once it is written (:func:`_admit_by_burst`):
+    by its place among the project's live rows in the order they were written
+    (:meth:`~aisquare.core.store.SqliteStore.live_fleet_agent_ids_written`), not by the count
+    its spawn read before any row was written. Write order, not ``created_at``: spawns that
+    stamp in one order and write in the other each found themselves first, and all were
+    admitted uncounted. Below ``floor``: admitted, uncounted. At or past it: its admit is
+    recorded, or the row is backed out when the burst is full.
 
     Each admit is appended compare-and-set, the admits older than ``busy_hold_minutes``
-    dropped on the way: of N parallel spawns that all found room, the first to append win the
-    seats left and the rest find none, settled as :func:`_verify_cap` settles the floor. A
-    backed-out row is held as a refused spawn is. A ledger that cannot be written admits,
-    unrecorded: a spawn is never failed by its own bookkeeping."""
+    dropped on the way: of N parallel spawns past the floor, the first to append win the seats
+    left and the rest find none, so 10 started at once into an empty project leave the floor
+    plus the burst. A backed-out row is held as a refused spawn is. A ledger that cannot be
+    written admits, unrecorded: a spawn is never failed by its own bookkeeping."""
     if seats.burst <= 0:
+        return
+    order = store.live_fleet_agent_ids_written(stored.project_id)
+    if stored.id not in order or order.index(stored.id) < seats.floor:
         return
     key = _BUSY_BURST_KEY + stored.project_id
     window = timedelta(minutes=seats.hold_minutes)

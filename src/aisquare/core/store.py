@@ -1812,6 +1812,7 @@ class ContextStore(Protocol):
     def first_prompt_rows(self, since: datetime) -> list[FleetAgent]: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
+    def live_fleet_agent_ids_written(self, project_id: str) -> list[str]: ...
     def live_fleet_agents(self) -> list[FleetAgent]: ...
     def fleet_label_heads(self, project_id: str | None = None) -> list[FleetAgent]: ...
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
@@ -5605,6 +5606,19 @@ class SqliteStore:
             (project_id,),
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
+
+    def live_fleet_agent_ids_written(self, project_id: str) -> list[str]:
+        """The ids of ``project_id``'s live fleet rows in the order they were written: by
+        ``rowid``, which an insert takes and an upsert's update keeps (``fleet_agent`` is a
+        plain table). ``created_at`` is stamped before the write, so two spawns can stamp in
+        one order and write in the other; a read just after a row's own insert sees exactly
+        the rows written before it, so every racer agrees on its place (auto admission's
+        burst, :func:`aisquare.services.fleet._verify_burst`)."""
+        rows = self._conn.execute(
+            "SELECT id FROM fleet_agent WHERE project_id = ? AND ended_at IS NULL ORDER BY rowid",
+            (project_id,),
+        ).fetchall()
+        return [str(row[0]) for row in rows]
 
     def live_fleet_agents(self) -> list[FleetAgent]:
         """Every live fleet row, in every project, forgotten ones' included, oldest first.

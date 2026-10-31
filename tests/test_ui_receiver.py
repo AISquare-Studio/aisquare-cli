@@ -547,25 +547,34 @@ def test_focus_project_on_a_card_in_a_folded_group_selects_it_and_says_where_it_
 def test_focus_project_on_a_card_the_active_only_filter_hides_says_so(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
-    """Hidden by the filter, not folded: the reply names the filter, not a group."""
+    """Hidden by the filter, not folded: the reply names the filter, not a group, and says
+    when the highlight shows — the filter off, as a folded card's shows with its group open."""
     fleet(tmp_path, script)
     script["prj_bbb"] = [status("prj_bbb", "old", "coder", "lost", minute=1)]  # none live
 
-    async def body(pilot: Pilot[None]) -> tuple[dict[str, Any], list[str], str | None]:
+    async def body(
+        pilot: Pilot[None],
+    ) -> tuple[dict[str, Any], list[str], list[str], str | None, list[str]]:
         app = fleet_app(pilot)
         app.sidebar.set_active_only(True)
         await pilot.pause()
         reply = await send(pilot, ui_path, "focus_project", "beta")
-        return reply, cursor_keys(app), app.sidebar.selected_key
+        shown, held = cursor_keys(app, shown=True), cursor_keys(app)
+        selected = app.sidebar.selected_key
+        app.sidebar.set_active_only(False)
+        await pilot.pause()
+        return reply, shown, held, selected, cursor_keys(app, shown=True)
 
-    reply, cursor, selected = drive(body)
+    reply, shown, held, selected, unfiltered = drive(body)
     assert reply == {
         "ok": True,
         "said": "selected beta; the active-only filter hides its card (it has no live agent), "
-        "so the sidebar cursor stayed where it was",
+        "so the sidebar shows its highlight once the filter is off",
     }
-    assert cursor == [], "no cursor on a row nobody can see"
+    assert shown == [], "no highlight on a row nobody can see"
+    assert held == ["project:prj_bbb"], "one highlight, on the hidden card's title"
     assert selected == "project:prj_bbb", "selected all the same: its view opens"
+    assert unfiltered == ["project:prj_bbb"], "the filter off, the highlight is on screen"
 
 
 # --- T1's real client, end to end ----------------------------------------------------------

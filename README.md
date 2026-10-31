@@ -74,6 +74,13 @@ spending tokens without losing them, *⚙ Settings ▸ Fleet ▸ Pause all…* e
 one and keeps its task, worktree and session; *Resume all…* brings each back where
 it was.
 
+A few buttons ask before they act, in place rather than in a dialog: *Remove from
+fleet*, *Reset all settings*, a role binding's *Clear*, *Take over* and attaching a
+persona to a running agent. The first click turns the button into its question
+(`Remove? click again`) and says beside it what will happen; click it again, or
+double-click it, to go ahead. Esc, or three seconds without that second click, puts
+it back.
+
 The manager never writes code and never merges — a human does that.
 
 ## Everything is also a command

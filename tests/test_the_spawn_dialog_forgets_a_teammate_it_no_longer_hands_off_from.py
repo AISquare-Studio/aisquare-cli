@@ -69,11 +69,11 @@ def shows(dialog: SpawnDialog) -> tuple[Any, Any, Any]:
 
 
 async def press(pilot: Pilot[None], *, take_over: bool) -> None:
-    """Press the button; a take-over asks its one question first."""
+    """Press the button; a take-over asks first, in place: a second click on it takes over."""
     await pilot.click("#spawn-submit")
     await settle(pilot)
     if take_over:
-        await pilot.click("#take-over-yes")
+        await pilot.click("#spawn-submit")  # the second click on it takes over
         await settle(pilot)
 
 

@@ -532,12 +532,12 @@ the default sidebar.**
   sidebar read through it. A launch's, a spawn's or a hand-over's account pick never
   starts or waits for the refresh, nor for any other read of an account's usage under way
   in the same asq: it skips an account whose token is stale (or decides by its kept
-  reading), and reads an account another read is holding itself, without waiting for it
-  (one request more); the Accounts page, `accounts usage`, the status line or the sidebar
-  refresh a stale token. Disabled accounts, accounts never signed in and a Keychain that
-  will not say are as before. A 401 on a token Claude Code still holds as valid is not
-  refreshed by it outside a session: there the retry catches a token another session
-  renewed meanwhile, and otherwise *Log in* follows the minute.
+  reading), and reads for itself an account another read is holding, without waiting for
+  it (one request more); the Accounts page, `accounts usage`, the status line or the
+  sidebar refresh a stale token. Disabled accounts, accounts never signed in and a
+  Keychain that will not say are as before. A 401 on a token Claude Code still holds as
+  valid is not refreshed by it outside a session: there the retry catches a token another
+  session renewed meanwhile, and otherwise *Log in* follows the minute.
 
 ## [0.9.1] - 2026-10-27
 

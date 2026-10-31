@@ -3666,9 +3666,11 @@ def headroom_choice(
 
     An account the usage endpoint asked to wait (F1 of #400) is not asked
     again, by a launch or a hand-over: the pick decides by its newest reading
-    recorded in the last :data:`USAGE_MAX_AGE_SECONDS`, and says so, or skips
-    it with a note naming the wait when that reading is older or missing. The
-    cache's older figure, shown on the page with its age, is never picked by.
+    recorded inside the pick's own window (``max_age``: a launch's minute,
+    :data:`PICK_MAX_AGE_SECONDS`; a live hand-over's
+    :data:`USAGE_MAX_AGE_SECONDS`), and says so, or skips it with a note
+    naming the wait when that reading is older or missing. The cache's older
+    figure, shown on the page with its age, is never picked by.
     """
     skip = set(exclude)
     signed = signed_in_slots(accounts, now=now)

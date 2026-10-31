@@ -5673,7 +5673,9 @@ def _admit_by_load(
         return _Seats(
             floor, busy=busy, hold_minutes=_hold_minutes(config), project_name=_name(project)
         )
-    if hold is None or now >= hold.until:
+    if hold is None or now >= hold.until or hold.burst:
+        # A burst hold in force is not this refusal's: the probes read busy, and it names
+        # what they read, under a busy hold of its own (review of #485, round 2).
         until = now + timedelta(minutes=_hold_minutes(config))
         fresh = Hold(project.id, now, until, busy, _name(project))
         try:

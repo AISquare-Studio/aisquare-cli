@@ -1147,6 +1147,37 @@ def test_an_unreadable_or_far_off_ledger_never_holds_for_good(
         fleet_service.stop(project, agent.label, force=True)
 
 
+def test_a_busy_machine_under_a_burst_hold_is_refused_for_the_signal_it_reads(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+) -> None:
+    """REVIEW-485 round 2: with a burst hold in force, a machine that turned busy was refused
+    with the burst's text as its busy reason, no probe signal named, no busy hold written and
+    nothing logged. The busy refusal names what the probes read, under a busy hold of its own."""
+    for _ in range(5):
+        _coder(project)
+    with pytest.raises(fleet_service.CapacityRefused):
+        _coder(project)
+    [burst] = fleet_service.holds()
+    assert burst.burst
+    machine.busy()
+    now[0] = NOW + timedelta(minutes=1)
+    with pytest.raises(fleet_service.CapacityRefused) as held:
+        _coder(project)
+    message = str(held.value)
+    assert "the machine is busy — cpu load 3.86 per CPU (load5 54.0 / 14)" in message
+    assert "burst:" not in message
+    [hold] = fleet_service.holds()
+    assert not hold.burst and hold.held_at == now[0] and "cpu load 3.86" in hold.signal
+    assert held.value.retry_at == hold.until == now[0] + timedelta(minutes=5)
+    log = paths.aisquare_home() / "fleet" / "admission.jsonl"
+    lines = [json.loads(row) for row in log.read_text(encoding="utf-8").splitlines()]
+    assert [line["kind"] for line in lines] == ["burst", "busy"]
+
+
 def test_fleet_capacity_and_the_doctor_say_the_burst(
     tmux: FakeTmux,
     claude_on_path: Path,

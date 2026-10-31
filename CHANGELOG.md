@@ -95,14 +95,15 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   Stop (or Force), and from then on the agent view's Stop button and the sidebar's `x` stop
   the agent at once, with no dialog: gracefully, as the dialog's Stop does (`/exit`, the
   grace, then the window killed; never Force), for every agent alike, the manager and the
-  captain included. A toast says `stopping <label> …`, then `✓ stopped` as before, and asq
-  leaves the stopped agent's view; a stop the fleet refuses is a warning toast with its
-  reason, and the agent is left as it was. Pressing Stop again while the stop runs does
-  nothing. The choice is kept in `~/.aisquare/config.toml` as `[ui] confirm_stop = false`;
-  *⚙ Settings ▸ App settings ▸ User preferences ▸ Advanced ▸ Ask before stopping an agent*
-  turns the dialog back on (or off), and so does `aisquare config set ui.confirm_stop true`.
-  Cancel or Esc never saves the tick. The captain's `ui open_stop` still opens the dialog
-  and stops nothing, whatever the setting says.
+  captain included. A toast says `stopping <label> …` until the stop answers, then
+  `✓ stopped` as before, and asq leaves the stopped agent's view; a stop the fleet refuses
+  is a warning toast with its reason, and the agent is left as it was. Pressing Stop again
+  while the stop runs does nothing. The choice is kept in `~/.aisquare/config.toml` as
+  `[ui] confirm_stop = false`; *⚙ Settings ▸ App settings ▸ User preferences ▸ Advanced ▸
+  Ask before stopping an agent* turns the dialog back on (or off), and so does `aisquare
+  config set ui.confirm_stop true`. Cancel or Esc never saves the tick, and the dialog
+  still opens on Stop, so `x` then Enter stops as before. The captain's `ui open_stop`
+  still opens the dialog and stops nothing, whatever the setting says.
 - **Pause and resume the agents of a project, or of every project**, so idle managers and
   coders stop spending tokens without being reaped, and come back from one dialog — before
   a reboot or an OS update too. A pause exits each running agent's Claude process as

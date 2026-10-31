@@ -14,17 +14,18 @@ itself (flips, Save, Reload, Reset all): tests/test_ui_app_settings.py.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
+from textual.notifications import Notification, Notifications
 from textual.pilot import Pilot
 from textual.widgets import Button, Checkbox, Switch
 from textual.widgets._toast import Toast
 
 from aisquare.cli.ui.app import FleetApp, HelpScreen
 from aisquare.cli.ui.sidebar import AppSettingsSelected
-from aisquare.cli.ui.stop import ASK_AGAIN_WHERE, DONT_ASK, StopAgentScreen
+from aisquare.cli.ui.stop import ASK_AGAIN_WHERE, DONT_ASK, StopAgentScreen, grace_seconds
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.core import paths
 from aisquare.core.config import load_config, overrides
@@ -63,13 +64,44 @@ def one_coder(tmp_path: Path, script: Script) -> FleetAgentStatus:
     return live
 
 
-def said(app: FleetApp) -> list[tuple[str, str, str]]:
-    """Every toast so far: its title, its message and its severity."""
-    return [(n.title, str(n.message), n.severity) for n in app._notifications]
+POSTED: list[Notification] = []
+"""Every toast this test's app was given, as it was given: :func:`said` reads these, never
+the app's live collection, which Textual reaps of expired toasts as it is read — a 4 s toast
+read after a test ran past 4 s was gone (review of #477, M3)."""
 
 
-def messages(app: FleetApp) -> list[str]:
-    return [message for _title, message, _severity in said(app)]
+@pytest.fixture(autouse=True)
+def posted(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Notification]]:
+    """Record each toast as Textual takes it in: ``notify`` and a held ``Notify`` alike."""
+    real = Notifications.add
+
+    def recording(self: Notifications, notification: Notification) -> Notifications:
+        POSTED.append(notification)
+        return real(self, notification)
+
+    POSTED.clear()
+    monkeypatch.setattr(Notifications, "add", recording)
+    yield POSTED
+    POSTED.clear()
+
+
+def said() -> list[tuple[str, str, str]]:
+    """Every toast posted so far, expired or not: its title, its message and its severity."""
+    return [(n.title, str(n.message), n.severity) for n in POSTED]
+
+
+def messages() -> list[str]:
+    return [message for _title, message, _severity in said()]
+
+
+def up_now(app: FleetApp) -> list[str]:
+    """The toasts the app holds right now: what was taken down is not among them."""
+    return [str(n.message) for n in app._notifications]
+
+
+def rendered(app: FleetApp) -> list[str]:
+    """The toasts on screen, as drawn."""
+    return [toast.render().plain for toast in app.screen.query(Toast)]
 
 
 async def open_view(pilot: Pilot[None], app: FleetApp, agent_id: str) -> AgentView:
@@ -149,6 +181,37 @@ def test_the_dialog_offers_dont_ask_again_unticked_and_cancel_or_escape_saves_no
     assert recorder.calls == []
 
 
+def test_the_dialog_opens_on_stop_so_x_then_enter_stops_as_before(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #477, M1: the tick, first in the box, took the app's ``*`` focus, so ``x``
+    then Enter ticked it and stopped nothing. Stop has the focus as the dialog opens, as it
+    had before the tick; Enter stops, gracefully, and leaves the tick and the file alone."""
+    live = one_coder(tmp_path, script)
+    recorder = stopper(monkeypatch, live.agent)
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, bool, bool]:
+        app = fleet_app(pilot)
+        await open_view(pilot, app, CODER)
+        app.sidebar.focus()
+        await pilot.press("x")
+        await pilot.pause()
+        dialog = app.screen
+        assert isinstance(dialog, StopAgentScreen), f"x opened {type(dialog).__name__}"
+        focused = app.focused.id if app.focused is not None else None
+        tick = dialog.query_one(f"#{DONT_ASK}", Checkbox)
+        await pilot.press("enter")
+        await settle(app)
+        await pilot.pause()
+        return focused, tick.value, isinstance(app.screen, StopAgentScreen)
+
+    focused, ticked, still_open = drive(go)
+    assert focused == "stop-confirm"
+    assert recorder.calls == [("prj_a", "coder-auth", False, CODER)], "Enter stopped it"
+    assert ticked is False and not still_open
+    assert load_config().ui.confirm_stop is True, "and saved nothing"
+
+
 # --- (2) ticked: saved, told, shown, kept -----------------------------------------------
 
 
@@ -177,7 +240,7 @@ def test_ticked_stop_or_force_saves_dont_ask_again_for_good(
                 "switch after": switch.value,
                 "app asks": app.confirm_stop,
                 "dialog open": isinstance(app.screen, StopAgentScreen),
-                "said": messages(app),
+                "said": messages(),
             }
         )
         return seen
@@ -253,7 +316,7 @@ def test_an_unreadable_config_is_not_written_over_and_the_stop_goes_on(
         dialog.query_one("#stop-confirm", Button).press()
         await settle(app)
         await pilot.pause()
-        return said(app), app.confirm_stop
+        return said(), app.confirm_stop
 
     toasts, asks = drive(go)
     assert paths.config_path().read_text(encoding="utf-8") == broken
@@ -288,7 +351,7 @@ def test_with_asking_off_stop_and_x_stop_at_once_pinned_to_the_row_manager_too(
         await press_stop(pilot, app, CODER)
         seen["button: dialog"] = isinstance(app.screen, StopAgentScreen)
         wanted = f"✓ stopped coder-auth ({CODER})"
-        await watch_until(lambda: wanted in messages(app))
+        await watch_until(lambda: wanted in messages())
         await settle(app)
         seen["button: left for"] = app.content.current
         await open_view(pilot, app, "agt_a_manager")
@@ -296,9 +359,10 @@ def test_with_asking_off_stop_and_x_stop_at_once_pinned_to_the_row_manager_too(
         await pilot.press("x")
         await pilot.pause()
         seen["x: dialog"] = isinstance(app.screen, StopAgentScreen)
-        await watch_until(lambda: "✓ stopped manager (agt_a_manager)" in messages(app))
+        await watch_until(lambda: "✓ stopped manager (agt_a_manager)" in messages())
         await settle(app)
-        seen["said"] = messages(app)
+        seen["said"] = messages()
+        seen["up now"] = up_now(app)
         return seen
 
     seen = drive(go)
@@ -308,9 +372,10 @@ def test_with_asking_off_stop_and_x_stop_at_once_pinned_to_the_row_manager_too(
     ]
     assert seen["button: dialog"] is False and seen["x: dialog"] is False
     assert seen["button: left for"] == "project-prj_a"
-    said_ = seen["said"]
-    assert isinstance(said_, list)
+    said_, up = seen["said"], seen["up now"]
+    assert isinstance(said_, list) and isinstance(up, list)
     assert "stopping coder-auth …" in said_ and "stopping manager …" in said_
+    assert not [m for m in up if m.startswith("stopping ")], "each answer took its toast down"
 
 
 def test_a_stop_without_asking_runs_off_the_ui_thread_and_a_second_press_does_nothing(
@@ -319,7 +384,10 @@ def test_a_stop_without_asking_runs_off_the_ui_thread_and_a_second_press_does_no
     """``stop`` blocks (/exit, the grace, the kill): the service here holds until the test
     lets it go, and the presses made meanwhile — the button again, then ``x`` — ask it
     nothing. Run on the UI thread, the press could not return until the service gave up on
-    its own, which ``timed_out`` records: a red, rather than a hang."""
+    its own, which ``timed_out`` records: a red, rather than a hang.
+
+    Meanwhile ``stopping coder-auth …`` stays up — for longer than the grace, which a 4 s
+    timeout was not (review of #477, m1) — and the answer takes it down."""
     live = one_coder(tmp_path, script)
     settings_service.set_value("ui.confirm_stop", "false")
     entered = threading.Event()
@@ -344,33 +412,47 @@ def test_a_stop_without_asking_runs_off_the_ui_thread_and_a_second_press_does_no
 
     monkeypatch.setattr(fleet_service, "stop", blocking_stop)
 
-    async def go(pilot: Pilot[None]) -> tuple[bool, int, bool]:
+    async def go(pilot: Pilot[None]) -> tuple[bool, int, bool, list[float], list[str]]:
         app = fleet_app(pilot)
         view = await press_stop(pilot, app, CODER)
-        started = entered.wait(5)
+        # On the loop's clock, not a blocking wait: the press reaches the shell in a few
+        # message hops, and a wait that held the loop held them too (load ~100). A stop on
+        # the UI thread would freeze the loop instead, until ``timed_out``.
+        await watch_until(entered.is_set)
+        started = entered.is_set()
         view.query_one("#agent-stop", Button).press()  # again, while it runs
         await pilot.pause()
         app.sidebar.focus()
         await pilot.press("x")  # and the key
-        await pilot.pause()
+        # A second stop, were one started, would reach the service within this.
+        await watch_until(lambda: len(calls) > 1, timeout=1.0)
         meanwhile = len(calls)
         dialog = isinstance(app.screen, StopAgentScreen)
+        left = [n.time_left for n in app._notifications if n.message == "stopping coder-auth …"]
         release.set()
-        await watch_until(lambda: f"✓ stopped coder-auth ({CODER})" in messages(app))
+        await watch_until(lambda: f"✓ stopped coder-auth ({CODER})" in messages())
         await settle(app)
-        return started, meanwhile, dialog
+        return started, meanwhile, dialog, left, up_now(app)
 
-    started, meanwhile, dialog = drive(go)
+    started, meanwhile, dialog, left, after = drive(go)
     assert timed_out == [], "the stop ran on the UI thread: the app could not release it"
     assert started and meanwhile == 1 and not dialog
     assert calls == [CODER], "one stop, pinned to the row"
+    assert len(left) == 1, "one stopping toast, however many presses"
+    assert left[0] > grace_seconds() + 5, "it outlasts the grace and the kill after it"
+    assert "stopping coder-auth …" not in after, "the answer took it down"
 
 
 def _stopped_without_asking(
-    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch, stop: StopFn
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch, stop: StopFn, last: str
 ) -> tuple[list[tuple[str, str, str]], list[str], str]:
     """Press Stop once with asking off, against ``stop``: every toast, as recorded and as
-    rendered, and the view on screen once the answer has been handled."""
+    rendered, and the view on screen once the answer has been handled.
+
+    ``last`` is the words the answer's last toast holds: waited for as posted, then as
+    drawn, and the drawing read at once — not "a warning", which the scripted pane's own
+    ``(pane gone)`` toast can be first (load ~100), and not after a settle, which can
+    outlast a toast."""
     one_coder(tmp_path, script)
     settings_service.set_value("ui.confirm_stop", "false")
     monkeypatch.setattr(fleet_service, "stop", stop)
@@ -378,10 +460,11 @@ def _stopped_without_asking(
     async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str, str]], list[str], str]:
         app = fleet_app(pilot)
         await press_stop(pilot, app, CODER)
-        await watch_until(lambda: any(s != "information" for _t, _m, s in said(app)))
+        await watch_until(lambda: any(last in m for m in messages()))
+        await watch_until(lambda: any(last in line for line in rendered(app)))
+        drawn = rendered(app)
         await settle(app)
-        rendered = [toast.render().plain for toast in app.screen.query(Toast)]
-        return said(app), rendered, type(app.current_view()).__name__
+        return said(), drawn, type(app.current_view()).__name__
 
     return drive(go, notifications=True)
 
@@ -399,7 +482,9 @@ def test_a_refusal_without_asking_is_a_warning_in_the_services_own_words(
     def refusing(project: ProjectInfo, label: str, **kw: object) -> fleet_service.StopReceipt:
         raise fleet_service.FleetError(reason)
 
-    toasts, rendered, view = _stopped_without_asking(tmp_path, script, monkeypatch, refusing)
+    toasts, rendered, view = _stopped_without_asking(
+        tmp_path, script, monkeypatch, refusing, reason
+    )
     assert ("coder-auth not stopped", reason, "warning") in toasts
     assert any(reason in line for line in rendered), rendered
     assert not any(m.startswith("✓ stopped") for _t, m, _s in toasts)
@@ -412,7 +497,9 @@ def test_a_stop_without_a_receipt_is_a_warning_and_no_stop(
     def no_receipt(project: ProjectInfo, label: str, **kw: object) -> None:
         return None
 
-    toasts, _rendered, view = _stopped_without_asking(tmp_path, script, monkeypatch, no_receipt)
+    toasts, _rendered, view = _stopped_without_asking(
+        tmp_path, script, monkeypatch, no_receipt, "the stop answered without a receipt"
+    )
     assert (
         "coder-auth not stopped",
         "the stop answered without a receipt (NoneType)",
@@ -430,7 +517,9 @@ def test_claims_a_stop_without_asking_could_not_release_are_warned_of(
     def half(project: ProjectInfo, label: str, **kw: object) -> fleet_service.StopReceipt:
         return fleet_service.StopReceipt(ended(live.agent), [], "the store was [locked]")
 
-    toasts, _rendered, _view = _stopped_without_asking(tmp_path, script, monkeypatch, half)
+    toasts, _rendered, _view = _stopped_without_asking(
+        tmp_path, script, monkeypatch, half, f"✓ stopped coder-auth ({CODER})"
+    )
     assert ("", "claims: the store was [locked]", "warning") in toasts
     assert any(m == f"✓ stopped coder-auth ({CODER})" for _t, m, _s in toasts)
 

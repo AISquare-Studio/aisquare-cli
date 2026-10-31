@@ -160,6 +160,10 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
 
     DEFAULT_CSS = _BOX_CSS
     BINDINGS: ClassVar = [Binding("escape", "cancel", "cancel")]
+    AUTO_FOCUS = "#stop-confirm"
+    """Stop, as before *Don't ask again* came first in the box: ``x`` then Enter stops. The
+    app's ``*`` focused the first focusable, the tick, and Enter ticked it (review of #477,
+    M1)."""
 
     def __init__(self, project: ProjectInfo, status: FleetAgentStatus) -> None:
         super().__init__()

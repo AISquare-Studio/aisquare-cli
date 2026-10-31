@@ -51,7 +51,7 @@ from textual.css.query import NoMatches
 from textual.dom import DOMNode
 from textual.geometry import Region
 from textual.message import Message
-from textual.notifications import SeverityLevel
+from textual.notifications import Notification, Notify, SeverityLevel
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
 from textual.widget import Widget
@@ -281,6 +281,10 @@ PROJECT_FRESH_WORKER = "project-fresh"
 """The thread worker *Start fresh…* clears a project's board and fleet on (``project fresh``),
 one a project at a time (:func:`_fresh_group`)."""
 AGENT_RENAME_WORKER = "agent-relabel"
+STOPPING_TOAST_CAP = 600.0
+"""Seconds a stop made with no dialog keeps its ``stopping …`` toast at most: it is taken
+down when the stop answers (``FleetApp._stopped_at_once``); this only bounds a toast whose
+answer never comes."""
 """The thread worker an agent row's name field renames its agent on (``fleet relabel``)."""
 TOAST_PLACES = 3
 """The places a refusal's toast names before it counts the rest: at 80x24 a longer list
@@ -1171,9 +1175,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """``[ui] confirm_stop``: whether Stop and ``x`` ask first. Read as
         :attr:`always_show_project_path` is, and again when the Stop dialog saves *Don't ask
         again*, which posts the same ``UiSettingsChanged``."""
-        self._quick_stops: dict[Worker[Any], FleetAgent] = {}
-        """Each stop :meth:`on_stop_agent` started with no dialog, with the row it stops: a
-        second press for that row while it runs does nothing (:meth:`_stop_at_once`)."""
+        self._quick_stops: dict[Worker[Any], tuple[FleetAgent, Notification]] = {}
+        """Each stop :meth:`on_stop_agent` started with no dialog, with the row it stops and
+        its ``stopping …`` toast: a second press for that row while it runs does nothing
+        (:meth:`_stop_at_once`), and the toast goes when the stop answers."""
         self.snapshot: FleetSnapshot | None = None
         """The last frame that was read successfully; ``None`` before the first."""
         self.after_sign_in: ReturnTo | None = None
@@ -3154,12 +3159,15 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         Graceful (``/exit``, no Force), every agent alike — the manager and the captain
         too (the owner's decision, 2026-10-30) — off the UI thread and pinned to the row
         (:func:`stop.start_stop`). A second press for the same row while it runs does
-        nothing: the first is already doing what it asks.
+        nothing: the first is already doing what it asks, and its ``stopping …`` toast says
+        so until the stop answers. A timeout would say it for less than the grace alone
+        (review of #477, m1), so the toast is held and taken down with the answer.
         """
-        if agent.id in {row.id for row in self._quick_stops.values()}:
+        if agent.id in {row.id for row, _toast in self._quick_stops.values()}:
             return
-        self.notify(f"stopping {agent.label} …", timeout=4, markup=False)
-        self._quick_stops[start_stop(self, project, agent, force=False)] = agent
+        toast = Notification(f"stopping {agent.label} …", timeout=STOPPING_TOAST_CAP)
+        self.post_message(Notify(toast))
+        self._quick_stops[start_stop(self, project, agent, force=False)] = (agent, toast)
 
     def _stopped_at_once(self, event: Worker.StateChanged) -> None:
         """A stop :meth:`_stop_at_once` started answered: the dialog's ending
@@ -3167,8 +3175,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         have kept them on its status line."""
         if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
             return
-        agent = self._quick_stops.pop(event.worker, None)
-        if event.state is WorkerState.CANCELLED or agent is None:
+        stopping = self._quick_stops.pop(event.worker, None)
+        if stopping is None:
+            return
+        agent, toast = stopping
+        # Textual's own Toast takes itself down on a click with this; there is no public way.
+        self._unnotify(toast)
+        if event.state is WorkerState.CANCELLED:
             return
         answer = stop_answer(event.worker, event.state)
         if isinstance(answer, fleet_service.StopReceipt):

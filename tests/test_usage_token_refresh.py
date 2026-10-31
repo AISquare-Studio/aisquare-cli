@@ -429,6 +429,106 @@ def test_removing_an_account_forgets_its_refresh(
     assert _row(work) is None
 
 
+# --------------------------------------------------------------------------- 5. a pick
+#
+# A launch's, a spawn's and a hand-over's headroom pick is waited on by its caller: a refresh
+# there held up an admitted `fleet spawn` for up to a minute, saying nothing (review of #485,
+# m1). The pick skips the stale account, as it did before the refresh existed, or decides by
+# its kept reading; the page, `accounts usage` and the status line still refresh it.
+
+
+def _pick(*accounts: ClaudeAccount, endpoint: _Usage, max_age: float | None) -> Any:
+    return service.headroom_choice(
+        list(accounts), switch_at=90, fetch=endpoint, now=NOW, max_age=max_age
+    )
+
+
+def _promptly(pick: Any) -> Any:
+    """Run ``pick`` in a thread and give it 5 s: a pick that waited on the refresh (which the
+    test holds until it is done) is still running then."""
+    done: list[Any] = []
+    picker = threading.Thread(target=lambda: done.append(pick()), daemon=True)
+    picker.start()
+    picker.join(5)
+    assert not picker.is_alive(), "the pick waited on the refresh"
+    return done[0]
+
+
+@pytest.mark.parametrize(
+    "max_age", [service.PICK_MAX_AGE_SECONDS, None], ids=["launch, cached", "hand-over, live"]
+)
+def test_a_headroom_pick_starts_no_refresh_and_takes_another_account(
+    max_age: float | None, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work = _expired()
+    home = _slot("home@example.com", "tok-home")
+    endpoint = _Usage({"tok-home": _payload(20), "tok-renewed-1": _payload(55)})
+    claude = FakeClaude(monkeypatch, True)
+    claude.before = threading.Event()  # a refresh, were one started, would hold the pick
+    try:
+        picked, notes = _promptly(lambda: _pick(work, home, endpoint=endpoint, max_age=max_age))
+    finally:
+        claude.before.set()
+
+    assert claude.runs == [], "the pick started no refresh"
+    assert picked is not None and picked.slot == home.slot
+    assert any(core.label(work) in note and "expired" in note for note in notes), notes
+    assert _row(work) is None, "nothing claimed for it either"
+
+
+def test_after_a_pick_skipped_a_rejected_token_the_page_still_refreshes_it(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 401 is a failure with a token, which the five-minute cache remembers: the pick's must
+    not be, or the page's read a moment later is answered *Log in* from it, no refresh."""
+    work = _slot("work@example.com", "tok-old")
+    home = _slot("home@example.com", "tok-home")
+    endpoint = _Usage({"tok-old": 401, "tok-home": _payload(20), "tok-renewed-1": _payload(30)})
+    claude = FakeClaude(monkeypatch, True)
+
+    picked, _notes = _pick(work, home, endpoint=endpoint, max_age=service.PICK_MAX_AGE_SECONDS)
+    assert picked is not None and picked.slot == home.slot and claude.runs == []
+
+    page = service.cached_usage([work], now=NOW + timedelta(seconds=10), fetch=endpoint)
+
+    assert claude.runs == [work.slot], "the page's read refreshed it"
+    assert page[work.slot].available and page[work.slot].session_percent == 30
+
+
+def test_a_pick_gives_way_to_a_refresh_this_process_runs(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """asq's sidebar refreshing a slot holds its fetch lock for as long as Claude Code takes; a
+    spawn from the dialog, in the same process, does not wait for it: it decides without that
+    slot, and the refresh goes on."""
+    work = _expired()
+    endpoint = _Usage({"tok-renewed-1": _payload(55)})
+    _read_before_it_expired(work, endpoint, 40)
+    home = _slot("home@example.com", "tok-home")
+    endpoint.by_token["tok-home"] = _payload(20)
+    claude = FakeClaude(monkeypatch, True)
+    claude.before = threading.Event()
+    page: dict[int, ClaudeUsage] = {}
+    reader = threading.Thread(
+        target=lambda: page.update(service.cached_usage([work], now=NOW, fetch=endpoint))
+    )
+    reader.start()
+    try:
+        assert claude.started.wait(10)
+        picked, notes = _promptly(
+            lambda: _pick(work, home, endpoint=endpoint, max_age=service.PICK_MAX_AGE_SECONDS)
+        )
+        assert reader.is_alive(), "the pick returned while the refresh still ran"
+    finally:
+        claude.before.set()
+        reader.join(10)
+
+    assert picked is not None and picked.slot == home.slot
+    assert any(core.label(work) in note and "refreshing" in note for note in notes), notes
+    assert claude.runs == [work.slot], "the page's refresh, and only it"
+    assert page[work.slot].session_percent == 55
+
+
 # --------------------------------------------------------------------------- the command
 
 

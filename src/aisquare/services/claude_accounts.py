@@ -2167,6 +2167,8 @@ TOKEN_REFRESH_TRIES = 2
 _TOKEN_REFRESH_KEY = "usage-token-refresh:{slot}"
 """The ``ui_state`` row a slot's refresh is recorded in (:class:`TokenRefresh`)."""
 _STALE_TOKEN = frozenset({UsageCause.token_expired, UsageCause.token_rejected})
+_TOKEN_STATES = _STALE_TOKEN | {UsageCause.token_refreshing}
+"""What a read can say of a token on its way to a refresh: what a pick never remembers."""
 
 RefreshPhase = Literal["running", "waiting", "failed"]
 
@@ -2291,6 +2293,7 @@ def _refresh_stale(
     *,
     now: datetime | None,
     fetch: Fetch | None,
+    start: bool = True,
 ) -> RefreshRows:
     """Have Claude Code refresh each of ``accounts``' stale token and read it again, in place in
     ``readings``: an answer is then recorded as any other, and the rows returned are written,
@@ -2302,9 +2305,14 @@ def _refresh_stale(
     read at or after it runs the retry; after that, the stale reading as before. The
     refreshes run at once, one thread each. No Claude Code to run, or no store to claim in:
     the reading stands, as before this existed, and no store is opened for it.
+
+    ``start=False``, for a reader that cannot wait (a headroom pick): none is started or
+    waited for. A refresh running, or waiting for its retry, is answered as for any read
+    meanwhile; a token none is about, or whose retry is due, keeps its stale reading, which
+    the pick skips as it did before this existed, and the next reader that can wait starts it.
     """
-    command = _token_refresh_command()
-    if command is None:
+    command = _token_refresh_command() if start else None
+    if start and command is None:
         return {}
     moment = now or _now()
     tokens: dict[int, str] = {}
@@ -2321,7 +2329,7 @@ def _refresh_stale(
                     continue
                 key = _TOKEN_REFRESH_KEY.format(slot=account.slot)
                 held = TokenRefresh.load(account.slot, store.ui_state(key))
-                turn = _refresh_turn(held, token, moment)
+                turn = _refresh_turn(held, token, moment) if start else None
                 if turn is not None:
                     claim = TokenRefresh(
                         slot=account.slot,
@@ -2346,7 +2354,7 @@ def _refresh_stale(
     except sqlite3.Error:
         return {}
     running = [account for account in accounts if account.slot in claimed]
-    if not running:
+    if not running or command is None:
         return {}
 
     def _refresh(account: ClaudeAccount) -> ClaudeUsage | None:
@@ -2354,16 +2362,29 @@ def _refresh_stale(
             return None
         return usage(account, now=now, fetch=fetch, fresh=True)
 
+    meanwhile = {
+        str(account.config_dir): _refreshing_usage(readings[account.slot], account.slot, None)
+        for account in running
+    }
+    with _FETCH_LOCKS_LOCK:  # for a pick in this process that would wait on the fetch lock
+        _REFRESHING.update(meanwhile)
     again: dict[int, ClaudeUsage | None] = {}
-    with ThreadPoolExecutor(max_workers=min(HEADROOM_WORKERS, len(running))) as pool:
-        futures = {pool.submit(_refresh, account): account.slot for account in running}
-        for future, slot in futures.items():
-            try:
-                again[slot] = future.result()
-            except Exception as exc:  # one account's failure must not cost the rest
-                again[slot] = unreadable_usage(
-                    UsageCause.read_failed, f"usage read failed ({type(exc).__name__})", slot=slot
-                )
+    try:
+        with ThreadPoolExecutor(max_workers=min(HEADROOM_WORKERS, len(running))) as pool:
+            futures = {pool.submit(_refresh, account): account.slot for account in running}
+            for future, slot in futures.items():
+                try:
+                    again[slot] = future.result()
+                except Exception as exc:  # one account's failure must not cost the rest
+                    again[slot] = unreadable_usage(
+                        UsageCause.read_failed,
+                        f"usage read failed ({type(exc).__name__})",
+                        slot=slot,
+                    )
+    finally:
+        with _FETCH_LOCKS_LOCK:
+            for key in meanwhile:
+                _REFRESHING.pop(key, None)
     after = now or _now()
     rows: RefreshRows = {}
     for account in running:
@@ -2390,6 +2411,7 @@ def read_usage(
     *,
     now: datetime | None = None,
     fetch: Fetch | None = None,
+    refresh: bool = True,
 ) -> dict[int, ClaudeUsage]:
     """Every account's reading, RECORDED, read concurrently: one round trip, not one per account.
 
@@ -2413,7 +2435,9 @@ def read_usage(
 
     A token found expired or refused (a 401), on an enabled account, is Claude Code's to
     refresh, and is read again after (:func:`_refresh_stale`): a log-in is asked for only
-    once that and its retry, a minute on, did not take.
+    once that and its retry, a minute on, did not take. ``refresh=False`` is a headroom
+    pick's, which a launch, a spawn or a hand-over waits on: no refresh is started or waited
+    for, and a stale token's reading stands for that read (``start`` there).
 
     A slot whose Keychain is locked here, and whose token the Mac's asq saw has expired
     since (:class:`SeenLogin`), is answered as the Mac answers it: the token has expired,
@@ -2469,7 +2493,7 @@ def read_usage(
     ]
     settled: RefreshRows = {}
     if stale:  # before the locked slots' answer below, which no refresh here can change
-        settled = _refresh_stale(stale, readings, now=now, fetch=fetch)
+        settled = _refresh_stale(stale, readings, now=now, fetch=fetch, start=refresh)
     for account in asked:
         seen = rows.get(account.slot)
         if (
@@ -2547,6 +2571,11 @@ _FETCH_LOCKS: dict[str, threading.Lock] = {}
 _FETCH_ROUNDS: dict[str, int] = {}
 """How many fetch rounds each config dir has had in this process: see :func:`_fetching`."""
 _FETCH_LOCKS_LOCK = threading.Lock()
+_REFRESHING: dict[str, ClaudeUsage] = {}
+"""The config dirs whose stale token this process is refreshing (:func:`_refresh_stale`), each
+with what a read meanwhile is answered: a pick gives way to it (:func:`_fetching`)."""
+_GIVE_WAY_SECONDS = 0.05
+"""How often a pick waiting on a slot's fetch lock looks whether a refresh holds it."""
 
 
 def _fetch_rounds(accounts: Sequence[ClaudeAccount]) -> dict[str, int]:
@@ -2559,9 +2588,12 @@ def _fetch_rounds(accounts: Sequence[ClaudeAccount]) -> dict[str, int]:
 
 
 @contextlib.contextmanager
-def _fetching(accounts: Sequence[ClaudeAccount], seen: Mapping[str, int]) -> Iterator[bool]:
+def _fetching(
+    accounts: Sequence[ClaudeAccount], seen: Mapping[str, int], *, give_way: bool = False
+) -> Iterator[tuple[bool, dict[str, ClaudeUsage]]]:
     """Hold each account's fetch lock while its usage is fetched; yields whether another call
-    ended a round for any of them since ``seen`` (:func:`_fetch_rounds`) was read.
+    ended a round for any of them since ``seen`` (:func:`_fetch_rounds`) was read, and the
+    slots given way to (below), by config dir.
 
     The sidebar's read and the page's, or either and a launch's pick, asked for the same
     slot at the same moment and each sent a request (review of #261, m4). Now the second
@@ -2569,25 +2601,50 @@ def _fetching(accounts: Sequence[ClaudeAccount], seen: Mapping[str, int]) -> Ite
     served what that round read. Counted rounds, not "had to wait": a call can miss the
     cache just before another records and take the lock just after it is let go. Taken
     in one order, so two calls over overlapping slots cannot deadlock.
+
+    ``give_way``, a pick's: it waits for a fetch, never for a stale token's refresh, which
+    holds the lock up to :data:`TOKEN_REFRESH_TIMEOUT_SECONDS`. A slot this process is
+    refreshing (:data:`_REFRESHING`) is left to it, with what a read meanwhile is answered,
+    and is not fetched.
     """
     keys = sorted({str(account.config_dir) for account in accounts})
     with _FETCH_LOCKS_LOCK:
-        locks = [_FETCH_LOCKS.setdefault(key, threading.Lock()) for key in keys]
-    held: list[threading.Lock] = []
+        locks = {key: _FETCH_LOCKS.setdefault(key, threading.Lock()) for key in keys}
+    held: list[tuple[str, threading.Lock]] = []
+    left: dict[str, ClaudeUsage] = {}
+    taken = False
     try:
-        for lock in locks:
-            lock.acquire()
-            held.append(lock)
+        for key in keys:
+            meanwhile = _take(locks[key], key, give_way=give_way)
+            if meanwhile is None:
+                held.append((key, locks[key]))
+            else:
+                left[key] = meanwhile
+        taken = True
         with _FETCH_LOCKS_LOCK:
-            moved = any(_FETCH_ROUNDS.get(key, 0) != seen.get(key, 0) for key in keys)
-        yield moved
+            moved = any(_FETCH_ROUNDS.get(key, 0) != seen.get(key, 0) for key, _lock in held)
+        yield moved, left
     finally:
-        if len(held) == len(locks):
+        if taken:
             with _FETCH_LOCKS_LOCK:
-                for key in keys:
+                for key, _lock in held:
                     _FETCH_ROUNDS[key] = _FETCH_ROUNDS.get(key, 0) + 1
-        for lock in reversed(held):
+        for _key, lock in reversed(held):
             lock.release()
+
+
+def _take(lock: threading.Lock, key: str, *, give_way: bool) -> ClaudeUsage | None:
+    """Acquire ``key``'s fetch ``lock``: ``None`` once it is held. Giving way, it is not taken
+    while this process refreshes that slot's token: what a read meanwhile is answered, then."""
+    if not give_way:
+        lock.acquire()
+        return None
+    while not lock.acquire(timeout=_GIVE_WAY_SECONDS):
+        with _FETCH_LOCKS_LOCK:
+            meanwhile = _REFRESHING.get(key)
+        if meanwhile is not None:
+            return meanwhile
+    return None
 
 
 def _recorded_usage(
@@ -2738,6 +2795,7 @@ def cached_usage(
     force: bool = False,
     now: datetime | None = None,
     fetch: Fetch | None = None,
+    refresh: bool = True,
 ) -> dict[int, ClaudeUsage]:
     """Every account's reading, fetched only when the last one is older than ``max_age`` seconds.
 
@@ -2762,6 +2820,11 @@ def cached_usage(
     under the same ``max_age``, forced or not: nothing here can fetch it. Without such a
     reading it is answered as it was, with the last good one on record for that login and
     why nothing newer is shown, and with no request; its failure is remembered nowhere.
+
+    ``refresh=False`` is a headroom pick's (:func:`headroom_choice`), which a launch, a spawn
+    or a hand-over waits on: it never starts or waits for a stale token's refresh (see
+    :func:`read_usage`), not even one this process runs (:func:`_fetching`), and what it
+    found of a token is not remembered: the next read that can wait refreshes it.
     """
     if not accounts:
         return {}
@@ -2783,11 +2846,17 @@ def cached_usage(
     stale = [account for account in accounts if account.slot not in readings]
     if not stale:
         return _with_last_good(accounts, readings, logins, moment)
-    with _fetching(stale, seen) as moved:
+    with _fetching(stale, seen, give_way=not refresh) as (moved, left):
         if moved and not force:  # another call fetched meanwhile: what it read serves
             readings.update(_served(stale, logins, since=since, now=moment))
             stale = [account for account in stale if account.slot not in readings]
-        fetched = read_usage(stale, now=now, fetch=fetch)
+        for account in stale:  # a pick, given way to this process's refresh of the slot
+            if (meanwhile := left.get(str(account.config_dir))) is not None:
+                readings[account.slot] = meanwhile.model_copy(
+                    update={"slot": account.slot, "fetched_at": moment}
+                )
+        stale = [account for account in stale if account.slot not in readings]
+        fetched = read_usage(stale, now=now, fetch=fetch, refresh=refresh)
         for account in stale:
             reading = fetched[account.slot]
             token = logins.tokens.get(account.slot)
@@ -2797,7 +2866,10 @@ def cached_usage(
             # A locked slot's failure is this process's Keychain, not the token's, and says
             # nothing of what the Mac records next (a status line's reading, taken before it,
             # would be served as kept behind it): never remembered.
-            if token is not None and account.slot not in logins.borrowed:
+            # A pick's word on a token (stale, or being refreshed) is not the refresh's: it
+            # is never remembered, so the next read that can wait is not answered from it.
+            picked_only = not refresh and reading.cause in _TOKEN_STATES
+            if token is not None and account.slot not in logins.borrowed and not picked_only:
                 with _UNANSWERED_LOCK:
                     key = (str(account.config_dir), token)
                     if reading.available:
@@ -3615,7 +3687,9 @@ def headroom_choice(
     candidate with the lowest usage, because "every account is nearly out"
     still has a least bad answer. An account whose usage cannot be read is
     skipped and named; ``None`` when nothing could be measured, so the
-    caller's next rung decides.
+    caller's next rung decides. A stale token's refresh is never started or
+    waited for here (``refresh=False``): its account is skipped, or decided by
+    its kept reading, and the next read that can wait refreshes it.
 
     An account the usage endpoint asked to wait (F1 of #400) is not asked
     again, by a launch or a hand-over: the pick decides by its newest reading
@@ -3646,12 +3720,14 @@ def headroom_choice(
         notes.append("headroom: every account is at a limit it named — the default decides")
         return None, notes
     candidates = open_ones
+    # Never waiting on a stale token's refresh (``refresh=False``): the launch, spawn or
+    # hand-over behind the pick would, up to a minute and saying nothing (review of #485, m1).
     if max_age is None:
-        readings = read_usage(candidates, now=now, fetch=fetch)
+        readings = read_usage(candidates, now=now, fetch=fetch, refresh=False)
     elif len(candidates) == 1 and least_bad:
         return candidates[0], [*notes, *_over_the_line(candidates[0], switch_at, now=now)]
     else:
-        readings = cached_usage(candidates, max_age=max_age, now=now, fetch=fetch)
+        readings = cached_usage(candidates, max_age=max_age, now=now, fetch=fetch, refresh=False)
     readings = dict(readings)
     # A kept reading — the last good figure a failed read shows (F1 of #400), or a slot the
     # endpoint asked to wait — is never taken for a live one: the pick decides by it only

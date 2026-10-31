@@ -36,8 +36,9 @@ class GuardedButton(Button):
     the last one. A view switched to, the button mounted or shown again, and a bar
     re-laid out around it all change that region, and each puts the guard up. So does its
     screen becoming the current one again (``App.screen_change_signal``), as when a
-    dialog over it closes. The guard comes down once that change has been painted and
-    every input the app had queued by then has been judged (:meth:`changed_under_pointer`).
+    dialog over it closes (:meth:`changed_under_pointer`). The guard comes down once the
+    layout pass that paints the change is out and the app has judged every input it had
+    queued by then (:meth:`_laid_out`), and not a frame later.
     An ignored press posts nothing, says nothing and leaves the focus where it was. The
     verdict is made once per press, at its mouse-down, and stands for the focus and the
     click alike.
@@ -49,8 +50,11 @@ class GuardedButton(Button):
     _placed_at: Region = NULL_REGION
     _change: int = 0
     """How many times what is under the pointer has changed; only the latest change's paint
-    takes the guard down (:meth:`_cleared`)."""
+    takes the guard down (:meth:`_painted`)."""
     _guarding: bool = False
+    _unpainted: bool = False
+    """A change the button's own place does not show is waiting for the layout pass that
+    paints it (:meth:`changed_under_pointer`)."""
     _down_guarded: bool | None = None
     """The verdict on the press in progress, made at its mouse-down (:meth:`focus_on_click`);
     ``None`` once its click has used it."""
@@ -63,28 +67,38 @@ class GuardedButton(Button):
         region = self.region  # NULL_REGION while it, or the view it is on, is hidden
         if region != self._placed_at:
             self._placed_at = region
-            self.changed_under_pointer()
+            self._put_up()
+        elif not self._unpainted:
+            return
+        self._unpainted = False
+        # This pass has painted the change: ``Screen._refresh_layout`` paints, then publishes
+        # (a turn later while Textual batches updates), and the rest of the screen's update
+        # runs before the app reads another message. A press the app had queued by now was
+        # made on what the screen showed before: the app busy mounting the view that put
+        # this button under the pointer is the 2026-10-19 case. So the guard comes down
+        # from the back of the app's queue, and every input ahead of it is judged with the
+        # guard up first. Not ``call_after_refresh``: that runs after the screen's NEXT
+        # refresh, behind every callback queued there, and on the Settings hub that was the
+        # restyle of the focus moving to its first link, up to a second later (ui-tester on
+        # #8, PR #478 at 41569b99).
+        self.app.call_later(self._painted, self._change)
 
     def _screen_changed(self, screen: Screen[Any]) -> None:
         if screen is self.screen:
             self.changed_under_pointer()
 
     def changed_under_pointer(self) -> None:
-        """Put the guard up until this change is painted: what is under the pointer just
-        changed in a way the button's own place does not show."""
+        """Put the guard up until the next layout pass has painted the screen: what is under
+        the pointer just changed in a way the button's own place does not show."""
+        self._put_up()
+        self._unpainted = True
+        self.refresh(layout=True)  # that pass, asked for now: nothing may have moved
+
+    def _put_up(self) -> None:
         self._change += 1
         self._guarding = True
-        self.call_after_refresh(self._painted, self._change)
 
     def _painted(self, change: int) -> None:
-        # The paint is out, but a press the app had queued before it was made on what the
-        # screen showed before: the app busy mounting the view that put this button under
-        # the pointer is the 2026-10-19 case. Taking the guard down here would let that
-        # press through when the app reached it. Down at the back of the app's queue, every
-        # input queued ahead of it is judged with the guard up first.
-        self.app.call_later(self._cleared, change)
-
-    def _cleared(self, change: int) -> None:
         if change == self._change:  # an older change's paint leaves a newer one's guard up
             self._guarding = False
 

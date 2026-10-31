@@ -127,7 +127,6 @@ def test_a_press_queued_before_the_paint_is_ignored_and_takes_no_focus() -> None
         # The app is held, so its queue cannot move; the screen lays out and paints apart.
         await watch_until(lambda: host.get_widget_at(*where)[0] is button)
         laid_out = host.get_widget_at(*where)[0] is button
-        await guard_paint.painted(button)
         free.set()
         await settle_page(host)
         ignored, focused = list(host.pressed), host.focused_id()

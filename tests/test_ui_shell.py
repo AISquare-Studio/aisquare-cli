@@ -5391,8 +5391,6 @@ def test_a_press_waiting_as_the_view_switches_in_acts_on_nothing_and_one_after_i
 
         await watch_until(under_the_pointer)
         guarded = under_the_pointer()
-        for button in guarded:
-            await guard_paint.painted(button)
         free.set()
         await settle(app)
         ignored, screen = list(acted), type(app.screen).__name__

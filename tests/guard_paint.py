@@ -11,7 +11,7 @@ its press, so a test about a press that lands while the guard is up holds the pa
 A press that reaches the app before a real paint, as on 2026-10-19, is made with
 :func:`busy` and :func:`queue_press`: the app is kept busy, as it is while it awaits the
 mount of a view, the press waits in its queue as the terminal's driver puts it there, and
-the screen lays out and paints apart; :func:`painted` waits for that paint.
+the screen lays out and paints apart.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ import pytest
 from textual import events
 from textual.app import App
 from textual.geometry import Offset
-from textual.widget import Widget
 
 from aisquare.cli.ui.click_guard import GuardedButton
 
@@ -70,14 +69,6 @@ def busy(app: App[Any]) -> asyncio.Event:
     free = asyncio.Event()
     app.call_later(free.wait)
     return free
-
-
-async def painted(widget: Widget) -> None:
-    """Return once the screen has been refreshed after every wait for a refresh ``widget`` has
-    asked for so far: a :class:`GuardedButton`'s own wait for its paint among them."""
-    done = asyncio.Event()
-    widget.call_after_refresh(done.set)
-    await asyncio.wait_for(done.wait(), 10)
 
 
 def queue_press(app: App[Any], where: Offset) -> None:

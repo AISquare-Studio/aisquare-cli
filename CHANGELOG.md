@@ -209,8 +209,9 @@ terminal beside the default sidebar.**
     aisquare`) with no live record is one: the refusal names its pid, terminal, start time
     and command, and what `kill <pid>` loses against its own quit. Left out: this process
     and its parents, the pids live records name, a process under 10 seconds old, and one
-    whose `AISQUARE_HOME` or `HOME` names another home. With no `ps`, a failing or slow one, or on Windows, one INFO line
-    goes to the log and the check is the registry's alone.
+    whose `AISQUARE_HOME` or `HOME` names another home. With no `ps`, a failing or slow
+    one, or on Windows, one INFO line goes to the log and the check is the registry's
+    alone.
   - **Usage over SSH, from what the Mac recorded.** An SSH login cannot read the login
     Keychain, so its asq fetched no usage (`headroom … skipped - login keychain is
     locked`). Now every process that reads a Keychain item records which login it held (a
@@ -228,9 +229,8 @@ terminal beside the default sidebar.**
     one undid the other's. Now a key, a paste or a click in a pane makes that asq the
     window's size owner (a drag to select text does not), and tmux itself refuses any other
     asq's resize of the window while the owner runs, so the other never sizes it back: its
-    pane's top-right corner shows `[sized by the other asq (ssh)]` (or `(Mac)`)
-    while the sizes differ, and it sizes the pane again, with no key pressed, once the
-    owner quits.
+    pane's top-right corner shows `[sized by the other asq (ssh)]` (or `(Mac)`) while the
+    sizes differ, and it sizes the pane again, with no key pressed, once the owner quits.
   - **On macOS an SSH login never starts the fleet's tmux server.** A tmux server lives in
     the security session of the login that started it, and agents in one started over SSH
     cannot read their Claude Code login from the Keychain. So where no fleet server runs,

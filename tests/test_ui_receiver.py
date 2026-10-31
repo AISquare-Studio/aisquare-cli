@@ -542,6 +542,32 @@ def test_focus_project_on_a_card_in_a_folded_group_selects_it_and_says_where_it_
     assert selected == "project:prj_bbb"
 
 
+@UNIX_SOCKETS
+@pytest.mark.needs_captain
+def test_focus_project_on_a_card_the_active_only_filter_hides_says_so(
+    tmp_path: Path, script: Script, ui_path: Path
+) -> None:
+    """Hidden by the filter, not folded: the reply names the filter, not a group."""
+    fleet(tmp_path, script)
+    script["prj_bbb"] = [status("prj_bbb", "old", "coder", "lost", minute=1)]  # none live
+
+    async def body(pilot: Pilot[None]) -> tuple[dict[str, Any], list[str], str | None]:
+        app = fleet_app(pilot)
+        app.sidebar.set_active_only(True)
+        await pilot.pause()
+        reply = await send(pilot, ui_path, "focus_project", "beta")
+        return reply, cursor_keys(app), app.sidebar.selected_key
+
+    reply, cursor, selected = drive(body)
+    assert reply == {
+        "ok": True,
+        "said": "selected beta; the active-only filter hides its card (it has no live agent), "
+        "so the sidebar cursor stayed where it was",
+    }
+    assert cursor == [], "no cursor on a row nobody can see"
+    assert selected == "project:prj_bbb", "selected all the same: its view opens"
+
+
 # --- T1's real client, end to end ----------------------------------------------------------
 
 

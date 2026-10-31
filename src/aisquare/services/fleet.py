@@ -59,6 +59,7 @@ from aisquare.core import (
     orchestrator,
     paths,
     personas,
+    prompt_origin,
     selfcli,
 )
 from aisquare.core import memory as memory_core
@@ -5759,6 +5760,7 @@ def _type_prompt(
             monotonic=_monotonic,
             what="the prompt",
             guard=guard,
+            origin=prompt_origin.SPAWN,
         )
     if delivered.refused is not None and delivered.in_box:
         notes.append(
@@ -6599,6 +6601,7 @@ def tell(
                 monotonic=_monotonic,
                 done="typed into its pane (it was waiting)",
                 guard=settings().draft_quiet_seconds,
+                origin=prompt_origin.TELL,
             )
         if done.refused is not None and done.in_box:
             return TellResult("no", noted(done.refused))
@@ -12772,6 +12775,7 @@ def nudge_manager(project_id: str, *, reason: str, board: str | None = None) -> 
                 guard=settings().draft_quiet_seconds,
                 re_press=_NUDGE_RE_PRESS,
                 last_wait=_NUDGE_LAST_WAIT,
+                origin=prompt_origin.WAKE,
             )
             deferred = f"{NUDGE_DEFERRED}{session.id}"
             if done.refused is not None:
@@ -12891,6 +12895,7 @@ def type_line(agent: FleetAgent, text: str, *, acked: Callable[[], bool]) -> del
         monotonic=_monotonic,
         what="the line",
         guard=settings().draft_quiet_seconds,
+        origin=prompt_origin.UPKEEP,
     )
 
 

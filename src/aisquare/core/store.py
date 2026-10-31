@@ -47,6 +47,8 @@ from aisquare.models import (
     EndedBy,
     FleetAgent,
     LaunchSpec,
+    OutcomeSessionRow,
+    OutcomeTurnRow,
     PendingRevocation,
     Pool,
     ProjectExplainability,
@@ -56,6 +58,7 @@ from aisquare.models import (
     RepoProfile,
     RepoTraits,
     SessionUsage,
+    TaskEventRow,
     TaskStatus,
     TeamEvent,
     TeamSession,
@@ -1282,6 +1285,12 @@ CREATE INDEX IF NOT EXISTS project_codename_alias_project
 # Nullable and in :data:`_PRODUCTS`, so the step is the column alone.
 _SCHEMA_V42 = ""
 
+# v43 (task #11, the weekly outcomes report): ``metric.origin``, who started the turn, recorded at
+# its ``UserPromptSubmit`` (``core.prompt_origin``): ``human:typed``, ``agent:tell``,
+# ``agent:spawn``, ``agent:continuation``… A row from before it reads NULL, and the report infers
+# those, labelled as inferred. Nullable and in :data:`_PRODUCTS`, so the step is the column alone.
+_SCHEMA_V43 = ""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1326,6 +1335,7 @@ _MIGRATIONS = (
     _SCHEMA_V40,
     _SCHEMA_V41,
     _SCHEMA_V42,
+    _SCHEMA_V43,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1414,6 +1424,7 @@ _PRODUCTS: dict[int, _Products] = {
     ),
     40: _Products(("project_codename_alias", "project_codename_alias_project")),
     41: _Products(columns=(("fleet_agent", "paused_at", "TEXT"),)),
+    42: _Products(columns=(("metric", "origin", "TEXT"),)),
 }
 
 _PROJECT_COLUMNS = (
@@ -1466,6 +1477,7 @@ _METRIC_FIELDS = (
     "tokens_out",
     "tool_calls",
     "delivery_source",
+    "origin",
 )
 _METRIC_COLUMNS = ", ".join(_METRIC_FIELDS)
 
@@ -1682,6 +1694,11 @@ class ContextStore(Protocol):
         self, since: datetime, until: datetime
     ) -> tuple[list[tuple[datetime, str]], list[datetime]]: ...
     def usage_turn_count(self) -> int: ...
+    def outcome_turns(self, since: datetime, until: datetime) -> list[OutcomeTurnRow]: ...
+    def outcome_sessions(self, session_ids: Collection[str]) -> dict[str, OutcomeSessionRow]: ...
+    def task_events(
+        self, since: datetime, until: datetime, kinds: Collection[str]
+    ) -> list[TaskEventRow]: ...
     def unattributed_usage(self, limit: int = 5_000) -> list[SessionUsage]: ...
     def attribute_usage(
         self,
@@ -2159,6 +2176,7 @@ def _row_to_metric(row: sqlite3.Row) -> TurnMetric:
         tokens_out=row["tokens_out"],
         tool_calls=row["tool_calls"],
         delivery_source=row["delivery_source"],
+        origin=row["origin"],
     )
 
 
@@ -3739,6 +3757,7 @@ class SqliteStore:
             metric.tokens_out,
             metric.tool_calls,
             metric.delivery_source,
+            metric.origin,
         )
         placeholders = ", ".join("?" for _ in _METRIC_FIELDS)
         self._conn.execute(
@@ -4007,6 +4026,88 @@ class SqliteStore:
     def usage_turn_count(self) -> int:
         """How many turn rows are recorded, of any date."""
         return int(self._conn.execute("SELECT COUNT(*) FROM usage_turn").fetchone()[0])
+
+    def outcome_turns(self, since: datetime, until: datetime) -> list[OutcomeTurnRow]:
+        """The turn rows (``metric`` rows a ``UserPromptSubmit`` or a Stop hook's continuation
+        opened, never a ``session_start`` or ``agent_request`` call) started in
+        ``[since, until)``, oldest first."""
+        rows = self._conn.execute(
+            "SELECT session_id, project_id, started_at, ended_at, origin FROM metric "
+            "WHERE trigger = 'prompt_submit' AND started_at >= ? AND started_at < ? "
+            "ORDER BY started_at, trace_id",
+            (since.astimezone(UTC).isoformat(), until.astimezone(UTC).isoformat()),
+        ).fetchall()
+        return [
+            OutcomeTurnRow(
+                session_id=row["session_id"],
+                project_id=row["project_id"],
+                started_at=datetime.fromisoformat(row["started_at"]),
+                ended_at=_maybe_dt(row["ended_at"]),
+                origin=row["origin"],
+            )
+            for row in rows
+        ]
+
+    def outcome_sessions(self, session_ids: Collection[str]) -> dict[str, OutcomeSessionRow]:
+        """For each of ``session_ids`` the store knows: its board role, whether a fleet row ran
+        it (and gave it a first message), and its transcript, by the usage row or the board's."""
+        found: dict[str, OutcomeSessionRow] = {}
+        ids = sorted(set(session_ids))
+        for start in range(0, len(ids), 500):
+            chunk = ids[start : start + 500]
+            marks = ", ".join("?" for _ in chunk)
+            for row in self._conn.execute(
+                "SELECT session_id, transcript_path FROM usage_session "
+                f"WHERE session_id IN ({marks})",
+                chunk,
+            ).fetchall():
+                found[row["session_id"]] = OutcomeSessionRow(
+                    session_id=row["session_id"], transcript_path=row["transcript_path"]
+                )
+            for row in self._conn.execute(
+                f"SELECT id, role, transcript_path FROM team_session WHERE id IN ({marks})", chunk
+            ).fetchall():
+                session = found.setdefault(row["id"], OutcomeSessionRow(session_id=row["id"]))
+                session.role = row["role"]
+                session.transcript_path = session.transcript_path or row["transcript_path"]
+            for row in self._conn.execute(
+                f"SELECT session_id, role, first_prompt FROM fleet_agent "
+                f"WHERE session_id IN ({marks})",
+                chunk,
+            ).fetchall():
+                session = found.setdefault(
+                    row["session_id"], OutcomeSessionRow(session_id=row["session_id"])
+                )
+                session.fleet = True
+                session.role = (
+                    session.role if session.role not in (None, "unassigned") else row["role"]
+                )
+                session.first_prompt = session.first_prompt or row["first_prompt"] is not None
+        return found
+
+    def task_events(
+        self, since: datetime, until: datetime, kinds: Collection[str]
+    ) -> list[TaskEventRow]:
+        """The board events of ``kinds`` (``task_done``, ``task_reopened``…) written in
+        ``[since, until)`` on every board, oldest first."""
+        wanted = sorted(set(kinds))
+        if not wanted:
+            return []
+        marks = ", ".join("?" for _ in wanted)
+        rows = self._conn.execute(
+            f"SELECT created_at, kind, project_id, task_id FROM team_event "
+            f"WHERE kind IN ({marks}) AND created_at >= ? AND created_at < ? ORDER BY seq",
+            (*wanted, since.astimezone(UTC).isoformat(), until.astimezone(UTC).isoformat()),
+        ).fetchall()
+        return [
+            TaskEventRow(
+                created_at=datetime.fromisoformat(row["created_at"]),
+                kind=row["kind"],
+                project_id=row["project_id"],
+                task_id=row["task_id"],
+            )
+            for row in rows
+        ]
 
     def usage_transcripts(self) -> dict[str, str]:
         """Every transcript path a session row recorded → that session's id: what the sweep

@@ -6,6 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+**Upgrading:**
+- **The store migrates to v43 on first open, automatically**: one nullable column,
+  `metric.origin`, who started the turn. Nothing is rewritten or dropped, and 0.9.2, which
+  treats a store at or past its own version as current, never reads it.
+
+### Added
+
+- **`aisquare outcomes`: what your agents achieved this week, and how much of it you
+  steered.** One ISO week on the local clock (Monday 00:00 to now; `--week last` or
+  `--week 2026-W43` for another), against the week before to the same point, as text or
+  `--json`. No day, month or all-time view, by design. Four sections: **outcomes** per
+  repository, by its real name (the remote's, else the folder's, never a nickname): the
+  pull requests you authored merged and opened (`gh`, one GraphQL call, the only network
+  call; skipped, and said so, without it), your commits and their lines in the checkouts
+  the agents worked in (a rebased commit once, none GitHub made), board tasks done and
+  reopened; **effort**: agent-hours (the turns' durations), sessions, turns, tool calls,
+  files edited, tokens, list-price cost, and cost per merged PR and per done task;
+  **direction**, who steered: the share of turns a person started against those an agent
+  did, agent-minutes and tool calls per human prompt, interrupts and denied tool uses, and
+  each session as directive, guided or collaborative (after Anthropic's Economic Index),
+  never human tokens against agent tokens; and **vs last week**. `aisquare outcomes --help`
+  says how each figure is measured. The first run reads a week or two of transcripts once
+  (about 6 s for 2 GB here), and keeps what it found in `~/.aisquare/cache/`.
+- **Who started each turn is recorded.** Every write aisquare makes into an agent's prompt
+  (a fleet spawn's first message, `fleet tell`, the phone's tell, the manager's wake, the
+  quiet compaction's lines) leaves a marker for its text, which the turn's
+  `UserPromptSubmit` takes: the turn's row says `agent:tell`, `human:tell`, `agent:spawn`…,
+  or `human:typed` when a person typed it. A Stop hook that keeps a turn going opens a row
+  of its own (`agent:continuation`), so its time is counted too. Turns from before are
+  inferred for the report, and said to be.
+
 ## [0.9.2] - 2026-10-30
 
 **Pause and resume the agents of a project, or of every project: idle managers and coders

@@ -764,6 +764,10 @@ class TurnMetric(BaseModel):
     """Token and tool counts stay ``None`` until they come from real evidence
     (Explainability spans) — hook payloads do not carry them, and a fabricated
     number is worse than a null because it survives into a comparison."""
+    origin: str | None = None
+    """Who started the turn, ``<by>:<kind>`` (``core.prompt_origin``): ``human:typed`` for a
+    prompt a person typed, ``agent:tell``, ``agent:spawn``, ``agent:continuation``… for one
+    aisquare delivered. ``None`` on a row from before it was recorded (v43)."""
 
 
 class MetricsSummary(BaseModel):
@@ -913,6 +917,42 @@ class UsageTurnRow(BaseModel):
     usage: dict[str, Any] = Field(default_factory=dict)
     account_slot: int | None = None
     account_type: str | None = None
+
+
+class OutcomeTurnRow(BaseModel):
+    """A turn as the weekly outcomes report reads it: a ``metric`` row opened at the turn's
+    ``UserPromptSubmit`` (or at a Stop hook that kept it going), closed at its ``Stop``
+    (``store.outcome_turns``)."""
+
+    session_id: str | None = None
+    project_id: str
+    started_at: datetime
+    ended_at: datetime | None = None
+    origin: str | None = None
+
+
+class OutcomeSessionRow(BaseModel):
+    """What the outcomes report knows of one session beside its turns
+    (``store.outcome_sessions``): the role it ran as, whether a fleet row ran it and gave it a
+    first message, and where its transcript is."""
+
+    session_id: str
+    role: str | None = None
+    """Its board role (``coder``, ``manager``…), ``None`` for a session on no board."""
+    fleet: bool = False
+    """A fleet row ran it (``fleet_agent.session_id``)."""
+    first_prompt: bool = False
+    """Its fleet row was given a first message (``fleet_agent.first_prompt`` is set)."""
+    transcript_path: str | None = None
+
+
+class TaskEventRow(BaseModel):
+    """A board task's state change, as the outcomes report counts it (``store.task_events``)."""
+
+    created_at: datetime
+    kind: str
+    project_id: str
+    task_id: str | None = None
 
 
 class TokenCounts(BaseModel):
@@ -1105,6 +1145,118 @@ class FleetDay(BaseModel):
     agents_spawned: dict[str, int] = Field(default_factory=dict)
     """Agents started that day by role; a role that is not one of the built-in ones is ``other``."""
     tasks_done: int = 0
+
+
+class OutcomeRepo(BaseModel):
+    """One repository's week in ``aisquare outcomes``, by its real name."""
+
+    name: str
+    """The remote's repository name, else the folder's; never a project's nickname."""
+    key: str
+    """What identifies it: its normalised remote, else its root."""
+    github: str | None = None
+    """``owner/name`` when it is on GitHub: what ``gh`` is asked about."""
+    prs_merged: int | None = None
+    """``None``: not asked (no ``gh``, or not a GitHub repository)."""
+    prs_opened: int | None = None
+    commits: int = 0
+    lines_added: int = 0
+    lines_deleted: int = 0
+    tasks_done: int = 0
+    tasks_reopened: int = 0
+
+
+class OutcomeTotals(BaseModel):
+    """What the agents achieved in the week: pull requests, commits, board tasks."""
+
+    prs_merged: int | None = None
+    """``None`` when no repository's pull requests could be counted (``prs_note`` says why)."""
+    prs_opened: int | None = None
+    prs_note: str | None = None
+    """Why pull requests were not counted, or not everywhere: ``gh`` missing, failing, …"""
+    commits: int = 0
+    lines_added: int = 0
+    lines_deleted: int = 0
+    tasks_done: int = 0
+    tasks_reopened: int = 0
+    repos: list[OutcomeRepo] = Field(default_factory=list)
+
+
+class OutcomeEffort(BaseModel):
+    """What the week took."""
+
+    agent_hours: float = 0.0
+    timed_turns: int = 0
+    """Turns whose end is known, which ``agent_hours`` sums."""
+    untimed_turns: int = 0
+    """Turns with no end recorded (no Stop, no later prompt): not in ``agent_hours``."""
+    sessions: int = 0
+    turns: int = 0
+    tool_calls: int = 0
+    files_edited: int = 0
+    tokens: UsageTokens = Field(default_factory=UsageTokens)
+    cost_usd: float = 0.0
+    cost_per_merged_pr: float | None = None
+    cost_per_done_task: float | None = None
+
+
+class OutcomeDirection(BaseModel):
+    """Who steered the week: the turns a person started against those an agent did, the work
+    each human prompt bought, the interventions and how sessions were run."""
+
+    turns: int = 0
+    human_turns: int = 0
+    agent_turns: int = 0
+    human_share: float | None = None
+    """``human_turns / turns``, ``None`` with no turn."""
+    by_origin: dict[str, int] = Field(default_factory=dict)
+    """Turns by ``by:kind`` (``core.prompt_origin``)."""
+    inferred_turns: int = 0
+    """Of ``turns``, those whose origin was not recorded and was inferred."""
+    agent_minutes_per_human_prompt: float | None = None
+    tool_calls_per_human_prompt: float | None = None
+    interrupts: int = 0
+    denied_permissions: int = 0
+    sessions: int = 0
+    """Sessions with a turn in the week: the ones a mode is given."""
+    directive: int = 0
+    guided: int = 0
+    collaborative: int = 0
+
+
+class OutcomeDelta(BaseModel):
+    """A headline figure against the week before."""
+
+    name: str
+    this_week: float | None = None
+    last_week: float | None = None
+    change: float | None = None
+    """``this_week - last_week``; ``None`` when either is unknown."""
+    change_pct: float | None = None
+    """``change / last_week``; ``None`` when last week's is zero or unknown."""
+
+
+class WeeklyOutcomes(BaseModel):
+    """``aisquare outcomes``: one ISO week, local time (``services.outcomes``)."""
+
+    week: str
+    """``2026-W44``."""
+    since: datetime
+    until: datetime
+    """The week's end, or now for the week in progress."""
+    in_progress: bool = False
+    tz_offset_minutes: int = 0
+    empty: bool = False
+    """Nothing recorded in the week: no turn, no usage, no task moved."""
+    compared_with: str = ""
+    compared_since: datetime | None = None
+    compared_until: datetime | None = None
+    """The week before, to the same point when this one is in progress."""
+    outcomes: OutcomeTotals = Field(default_factory=OutcomeTotals)
+    effort: OutcomeEffort = Field(default_factory=OutcomeEffort)
+    direction: OutcomeDirection = Field(default_factory=OutcomeDirection)
+    vs_last_week: list[OutcomeDelta] = Field(default_factory=list)
+    prices_as_of: str = ""
 
 
 class DailyRollup(BaseModel):

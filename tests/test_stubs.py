@@ -28,6 +28,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("log",),
     ("note",),
     ("board",),
+    ("outcomes",),
     ("launch",),
     ("exec",),
     ("reports", "list"),

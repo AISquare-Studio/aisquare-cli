@@ -723,6 +723,19 @@ def refresh_profiles(
     return done
 
 
+def real_name(remote: str | None, root: Path | None) -> str:
+    """A repository's real name: its remote's repository name (``github.com/org/aisquare-cli``
+    is ``aisquare-cli``), spelt as its folder is when the folder bears that name (a normalised
+    remote is lower case); else its folder's name. Never a project's nickname, which a profile's
+    ``name`` may be. ``""`` when there is neither."""
+    folder = root.name if root is not None else ""
+    if remote:
+        name = remote.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        if name:
+            return folder if folder.lower() == name.lower() else name
+    return folder
+
+
 def _display_name(store: ContextStore, repo_id: str, root: Path) -> str:
     project = store.get_project(repo_id)
     return (project.nickname if project is not None and project.nickname else None) or (

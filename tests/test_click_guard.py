@@ -11,6 +11,7 @@ own buttons are tested through the shell in ``tests/test_ui_shell.py``.
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
@@ -18,6 +19,7 @@ import pytest
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
+from textual.geometry import Offset
 from textual.pilot import Pilot
 from textual.screen import ModalScreen
 from textual.widgets import Button, ContentSwitcher, Static
@@ -138,6 +140,104 @@ def test_a_press_queued_before_the_paint_is_ignored_and_takes_no_focus() -> None
     assert laid_out, "the press must reach the app with the button under it"
     assert ignored == [], "the press made before the button was painted pressed it"
     assert focused == "typing"
+    assert pressed == ["restart"]
+    assert told == []
+
+
+async def _shown_again(pilot: Pilot[None], host: Host) -> tuple[GuardedButton, Offset]:
+    """The button shown once, then the view before it back, with the keyboard on
+    ``#typing``: the next switch puts the button under a pointer resting at the place
+    returned."""
+    button = await _shown(pilot, host)
+    where = button.region.offset
+    host.query_one(ContentSwitcher).current = "one"
+    host.query_one("#typing", Button).focus()
+    await settle_page(host)
+    return button, where
+
+
+def test_a_press_after_a_layout_pass_made_in_a_batch_is_ignored() -> None:
+    """UI tester on #8 (re-pass 2, PR #478 at 695e19bb): the guard came down from the layout
+    pass, and while Textual batches updates it publishes a pass before it paints it. A press
+    that reaches the app after such a pass and before any paint was aimed at what the
+    screen still showed: it presses nothing and takes no focus. A pass made after the
+    batch paints the button, and the next press goes through."""
+
+    async def go(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[bool, list[str], str | None, list[str], list[str]]:
+        button, where = await _shown_again(pilot, host)
+        with host.batch_update():
+            host.query_one(ContentSwitcher).current = "two"
+            host.refresh_css()  # a layout pass now, in the batch: published, not painted
+            laid_out = host.get_widget_at(*where)[0] is button
+            guard_paint.queue_press(host, where)
+        await settle_page(host)
+        ignored, focused = list(host.pressed), host.focused_id()
+        await pilot.click(button)
+        await settle_page(host)
+        return laid_out, ignored, focused, host.pressed, host.notices()
+
+    laid_out, ignored, focused, pressed, told = drive(go)
+    assert laid_out, "the press must reach the app with the button laid out under it"
+    assert ignored == [], "a press before the batched pass was painted pressed the button"
+    assert focused == "typing"
+    assert pressed == ["restart"]
+    assert told == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a pty for the terminal")
+@pytest.mark.parametrize(
+    "unread",
+    [
+        pytest.param(1 << 20, id="the-writer-still-writing"),
+        pytest.param(
+            512,
+            id="in-the-tty",
+            marks=pytest.mark.skipif(
+                sys.platform != "darwin", reason="only macOS says what a pty holds unread"
+            ),
+        ),
+    ],
+)
+def test_a_press_before_the_terminal_has_the_frame_is_ignored(
+    monkeypatch: pytest.MonkeyPatch, unread: int
+) -> None:
+    """UI tester on #8 (re-pass 2, PR #478 at 695e19bb): in 2 of 74 switches the frame that
+    showed agent-1's view reached the terminal some 270 ms after asq had drawn it, and a
+    press made in between, on agent-2's view, opened agent-1's Stop dialog. Here the
+    terminal reads nothing until told. A press that reaches the app after the paint and
+    before the terminal has the frame presses nothing and takes no focus; once the terminal
+    has read it all, the next press goes through."""
+
+    async def go(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[bool, bool, list[str], str | None, bool, list[str], list[str]]:
+        button, where = await _shown_again(pilot, host)
+        terminal = guard_paint.terminal_behind(monkeypatch, host, unread)
+        try:
+            host.query_one(ContentSwitcher).current = "two"
+            await watch_until(lambda: host.get_widget_at(*where)[0] is button)
+            await settle_page(host)
+            laid_out, up = host.get_widget_at(*where)[0] is button, button.guarding
+            guard_paint.queue_press(host, where)
+            await settle_page(host)
+            ignored, focused = list(host.pressed), host.focused_id()
+            await terminal.catch_up()
+            await watch_until(lambda: not button.guarding, timeout=5)
+            down = not button.guarding
+        finally:
+            terminal.close()
+        await pilot.click(button)
+        await settle_page(host)
+        return laid_out, up, ignored, focused, down, host.pressed, host.notices()
+
+    laid_out, up, ignored, focused, down, pressed, told = drive(go)
+    assert laid_out, "the press must reach the app with the button painted under it"
+    assert up, "the guard came down before the terminal had the frame"
+    assert ignored == [], "a press before the terminal had the frame pressed the button"
+    assert focused == "typing"
+    assert down, "the guard stayed up after the terminal had read it all"
     assert pressed == ["restart"]
     assert told == []
 

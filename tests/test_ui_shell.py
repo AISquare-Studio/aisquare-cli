@@ -37,7 +37,7 @@ from textual._xterm_parser import XTermParser
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
-from textual.geometry import Region
+from textual.geometry import Offset, Region
 from textual.pilot import Pilot
 from textual.widget import Widget
 from textual.widgets import Button, Checkbox, Input, OptionList, Static, Switch, Tabs
@@ -5348,6 +5348,17 @@ def _acting_fleet(
     return acted
 
 
+def _manager_1_under(app: FleetApp, where: dict[str, Offset]) -> list[GuardedButton]:
+    """Manager 1's buttons, once its view is laid out with each under the place in ``where``
+    for its id; none before."""
+    view = app.current_view()
+    if not isinstance(view, AgentView) or view.status.agent.id != "agt_b_manager":
+        return []
+    buttons = [view.query_one(f"#{id_}", GuardedButton) for id_ in where]
+    under = [app.get_widget_at(*where[button.id or ""])[0] for button in buttons]
+    return buttons if under == buttons else []
+
+
 def test_a_press_waiting_as_the_view_switches_in_acts_on_nothing_and_one_after_its_paint_acts(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5381,16 +5392,8 @@ def test_a_press_waiting_as_the_view_switches_in_acts_on_nothing_and_one_after_i
         for id_ in ids:
             guard_paint.queue_press(app, where[id_])
 
-        def under_the_pointer() -> list[GuardedButton]:
-            view = app.current_view()
-            if not isinstance(view, AgentView) or view.status.agent.id != "agt_b_manager":
-                return []
-            buttons = [view.query_one(f"#{id_}", GuardedButton) for id_ in ids]
-            under = [app.get_widget_at(*where[button.id or ""])[0] for button in buttons]
-            return buttons if under == buttons else []
-
-        await watch_until(under_the_pointer)
-        guarded = under_the_pointer()
+        await watch_until(lambda: _manager_1_under(app, where))
+        guarded = _manager_1_under(app, where)
         free.set()
         await settle(app)
         ignored, screen = list(acted), type(app.screen).__name__
@@ -5408,6 +5411,65 @@ def test_a_press_waiting_as_the_view_switches_in_acts_on_nothing_and_one_after_i
     assert typing_reaches, "an ignored press took the keyboard off the pane"
     assert not [toast for toast in told if "ignored a click" in toast], told
     assert acted == [("restart", "prj_b")], "the click once the view is painted acts at once"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a pty for the terminal")
+def test_a_press_before_the_terminal_shows_the_switched_in_view_acts_on_nothing(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UI tester on #8 (re-pass 2, PR #478 at 695e19bb), the 2026-10-19 case again: agent-2's
+    view settled, agent-1's row clicked, Stop clicked 50-67 ms after. In 2 of 74 runs the
+    frame with agent-1's view reached the terminal 270 ms after asq had drawn it, and the
+    press, made on agent-2's view, opened "Stop agent-1?"; Restart, which does not ask,
+    would have restarted it. Here the terminal is that far behind when manager 1's view is
+    drawn: presses on both start nothing, ask nothing and leave the keyboard on the pane.
+    Once the terminal has caught up, a click acts at once."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", "brave-lynx"))
+    script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
+    one = status("prj_b", "manager", "manager", "working")
+    script["prj_b"] = [one]
+    acted = _acting_fleet(monkeypatch, script, one)
+    ids = ("agent-restart", "agent-stop")
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[bool], list[tuple[str, str]], str, bool, list[str]]:
+        app = fleet_app(pilot)
+        told = toast_log.record(app)
+        await pilot.click(row_for(app, "agt_a_manager"))
+        await settle(app)
+        before = app.current_view()
+        assert isinstance(before, AgentView)
+        where = {id_: before.query_one(f"#{id_}", Button).region.offset for id_ in ids}
+        terminal = guard_paint.terminal_behind(monkeypatch, app, 1 << 20)
+        try:
+            app.post_message(AgentSelected("prj_b", "agt_b_manager"))
+            await watch_until(lambda: _manager_1_under(app, where))
+            await settle(app)
+            buttons = _manager_1_under(app, where)
+            up = [button.guarding for button in buttons]
+            for id_ in ids:
+                guard_paint.queue_press(app, where[id_])
+            await settle(app)
+            ignored, screen = list(acted), type(app.screen).__name__
+            view = app.current_view()
+            assert isinstance(view, AgentView)
+            typing_reaches = app.focused is view.pane
+            await terminal.catch_up()
+            await watch_until(lambda: not any(button.guarding for button in buttons))
+        finally:
+            terminal.close()
+        await pilot.click(view.query_one("#agent-restart", Button))
+        await settle(app)
+        return up, ignored, screen, typing_reaches, list(told)
+
+    up, ignored, screen, typing_reaches, told = drive(go, notifications=True)
+    assert up == [True, True], "manager 1's buttons took presses before the terminal had them"
+    assert ignored == [], "a press made before the view reached the terminal acted"
+    assert screen != "StopAgentScreen", "a press made before the view reached the terminal asked"
+    assert typing_reaches, "an ignored press took the keyboard off the pane"
+    assert not [toast for toast in told if "ignored a click" in toast], told
+    assert acted == [("restart", "prj_b")], "the click once the terminal has the view acts"
 
 
 def test_stop_clicked_right_after_its_dialog_closes_opens_it_again(

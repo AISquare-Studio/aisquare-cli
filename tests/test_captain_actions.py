@@ -1941,9 +1941,10 @@ def test_a_re_add_of_a_done_title_says_what_the_new_card_supersedes(
     ok(actions.task("alpha", "done", first["id"]))
 
     again = ok(actions.task("alpha", "add", "ship the release"))
-    assert again["created"] and again["supersedes"] == first["id"]
-    assert again["id"] != first["id"]
     number = task_now(first["id"]).number
+    assert again["created"] and again["id"] != first["id"]
+    # The shape `task add --json` gives it (REVIEW-480, nit 1).
+    assert again["supersedes"] == {"number": number, "id": first["id"], "status": "done"}
     assert audit(alpha.id)[-1]["said"].endswith(f"ship the release (supersedes done #{number})")
 
     still = ok(actions.task("alpha", "add", "ship the release"))

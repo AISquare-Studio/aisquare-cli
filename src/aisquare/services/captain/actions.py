@@ -682,7 +682,12 @@ def _task(target: ProjectInfo, verb: str, ref: str, note: str | None) -> Outcome
                 "id": card.id,
                 "status": card.status,
                 "created": created,
-                "supersedes": old.id if old is not None else None,
+                # The shape `task add --json` gives it (REVIEW-480, nit 1).
+                "supersedes": (
+                    {"number": old.number, "id": old.id, "status": old.status}
+                    if old is not None
+                    else None
+                ),
             },
             said=f"{state}: {card.id} {card.title}{team_service.supersedes_note(old)}",
             receipt=_receipt(before),

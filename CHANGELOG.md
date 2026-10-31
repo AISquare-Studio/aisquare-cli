@@ -148,6 +148,15 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   section is never filtered, the open view stays open when its card is hidden, and
   shift+↑/↓ step over the hidden rows. The choice is remembered across restarts
   (`fleet.active_only`).
+- **↻ in the Onboard view reloads its directory tree.** The tree read the disk once, so a
+  repo cloned after the view opened could only be onboarded by typing its path. The ↻ at
+  the start of the hint line, or ctrl+r while the keyboard is anywhere in the view (the
+  path box too; an agent's pane keeps its own ctrl+r), lists what is on disk now: open
+  folders stay open, and the cursor stays on its row while that row is there. A typed path
+  whose folder did not exist yet is judged again, so it turns ✓ and Onboard can be pressed.
+  Opening the view again with `+` reloads it too. A reload during an onboard run leaves the
+  run, its log and its button as they were, and reloads asked for close together run one
+  after another, so a held ctrl+r keeps the open folders and the cursor where they were.
 
 ### Changed
 

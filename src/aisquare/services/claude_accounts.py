@@ -2560,8 +2560,6 @@ _FETCH_LOCKS: dict[str, threading.Lock] = {}
 _FETCH_ROUNDS: dict[str, int] = {}
 """How many fetch rounds each config dir has had in this process: see :func:`_fetching`."""
 _FETCH_LOCKS_LOCK = threading.Lock()
-NOT_WAITED = "another read of it is under way in this process: not waited for"
-"""Why a pick (:func:`headroom_choice`) has no reading of a slot another call holds."""
 
 
 def _fetch_rounds(accounts: Sequence[ClaudeAccount]) -> dict[str, int]:
@@ -2576,10 +2574,9 @@ def _fetch_rounds(accounts: Sequence[ClaudeAccount]) -> dict[str, int]:
 @contextlib.contextmanager
 def _fetching(
     accounts: Sequence[ClaudeAccount], seen: Mapping[str, int], *, give_way: bool = False
-) -> Iterator[tuple[bool, set[str]]]:
+) -> Iterator[bool]:
     """Hold each account's fetch lock while its usage is fetched; yields whether another call
-    ended a round for any of those it holds since ``seen`` (:func:`_fetch_rounds`) was read,
-    and the config dirs whose lock it gave way on (below).
+    ended a round for any of those it holds since ``seen`` (:func:`_fetch_rounds`) was read.
 
     The sidebar's read and the page's, or either and a launch's pick, asked for the same
     slot at the same moment and each sent a request (review of #261, m4). Now the second
@@ -2590,27 +2587,25 @@ def _fetching(
 
     ``give_way``, a pick's (:func:`headroom_choice`, which a spawn, a launch and a switch wait
     on): it waits on no lock at all. Each is tried without waiting, and a slot whose lock
-    another call in this process holds is given way on and not fetched: that call may be a
-    round refreshing a stale token, which holds every slot of the round for up to
-    :data:`TOKEN_REFRESH_TIMEOUT_SECONDS`, and keeping a registry in step with which locks
-    a round holds kept missing cases (review of #485, rounds 2 and 3).
+    another call in this process holds is read by the pick itself, unlocked
+    (:func:`cached_usage`): one request more, never a wait. That call may be a round
+    refreshing a stale token, which holds every slot of the round for up to
+    :data:`TOKEN_REFRESH_TIMEOUT_SECONDS`, and keeping a registry in step with which locks a
+    round holds kept missing cases (review of #485, rounds 2 to 4).
     """
     keys = sorted({str(account.config_dir) for account in accounts})
     with _FETCH_LOCKS_LOCK:
         locks = {key: _FETCH_LOCKS.setdefault(key, threading.Lock()) for key in keys}
     held: list[tuple[str, threading.Lock]] = []
-    busy: set[str] = set()
     taken = False
     try:
         for key in keys:
             if locks[key].acquire(blocking=not give_way):
                 held.append((key, locks[key]))
-            else:
-                busy.add(key)
         taken = True
         with _FETCH_LOCKS_LOCK:
             moved = any(_FETCH_ROUNDS.get(key, 0) != seen.get(key, 0) for key, _lock in held)
-        yield moved, busy
+        yield moved
     finally:
         if taken:
             with _FETCH_LOCKS_LOCK:
@@ -2618,28 +2613,6 @@ def _fetching(
                     _FETCH_ROUNDS[key] = _FETCH_ROUNDS.get(key, 0) + 1
         for _key, lock in reversed(held):
             lock.release()
-
-
-def _read_elsewhere(
-    accounts: Sequence[ClaudeAccount], logins: _Logins, moment: datetime
-) -> dict[int, ClaudeUsage]:
-    """A pick's answer for each of ``accounts``, whose fetch lock another call in this process
-    holds (:func:`_fetching`): its last good reading, as the shared cache serves it to that
-    call's own readers, five minutes deep (:data:`USAGE_MAX_AGE_SECONDS`); else a reading
-    that says it was not waited for (:data:`NOT_WAITED`), which the pick skips. Never a fetch,
-    never a refresh."""
-    since = moment - timedelta(seconds=USAGE_MAX_AGE_SECONDS)
-    served = _served(accounts, logins, since=since, now=moment)
-    # Stamped now, as a failed try is: an older good reading is then shown KEPT behind it
-    # (:func:`_with_last_good`), which the pick takes only inside its own window. Unstamped,
-    # a reading of any age up to LAST_GOOD_LOOKBACK came back as a live one, and was picked.
-    return {
-        account.slot: served.get(account.slot)
-        or unreadable_usage(
-            UsageCause.read_failed, NOT_WAITED, slot=account.slot, fetched_at=moment
-        )
-        for account in accounts
-    }
 
 
 def _recorded_usage(
@@ -2820,9 +2793,10 @@ def cached_usage(
     or a hand-over waits on: it never starts or waits for a stale token's refresh (see
     :func:`read_usage`), and it waits on no fetch lock (:func:`_fetching`): a slot another
     call in this process is reading (the sidebar's round, the Accounts page's, a refresh) is
-    answered by its last good reading of the last five minutes, or skipped
-    (:func:`_read_elsewhere`), and neither fetched nor refreshed. What it found of a token
-    is not remembered: the next read that can wait refreshes it.
+    read by the pick itself, unlocked, as a live hand-over reads every slot: one request
+    more, a stale token answered as it stands (no request, and no refresh), and the age rule
+    the pick's own ``max_age``. What it found of a token is not remembered: the next read
+    that can wait refreshes it.
     """
     if not accounts:
         return {}
@@ -2844,14 +2818,12 @@ def cached_usage(
     stale = [account for account in accounts if account.slot not in readings]
     if not stale:
         return _with_last_good(accounts, readings, logins, moment)
-    with _fetching(stale, seen, give_way=not refresh) as (moved, busy):
+    with _fetching(stale, seen, give_way=not refresh) as moved:
         if moved and not force:  # another call fetched meanwhile: what it read serves
             readings.update(_served(stale, logins, since=since, now=moment))
             stale = [account for account in stale if account.slot not in readings]
-        if busy:  # a pick: another call in this process reads these; not waited for
-            elsewhere = [account for account in stale if str(account.config_dir) in busy]
-            readings.update(_read_elsewhere(elsewhere, logins, moment))
-            stale = [account for account in stale if account.slot not in readings]
+        # A pick reads a slot whose lock another call holds itself, unlocked and never
+        # refreshing (``refresh`` is False): one request more, never a wait.
         fetched = read_usage(stale, now=now, fetch=fetch, refresh=refresh)
         for account in stale:
             reading = fetched[account.slot]
@@ -3636,8 +3608,10 @@ PICK_MAX_AGE_SECONDS = 60.0
 ``pick = "headroom"`` is the default since 0.8.1, so every ``fleet spawn`` and
 ``aisquare claude`` walks that rung, and read live it sent one request per account each
 time, a second after the sidebar had read them too (review of #261, m1). A minute is the
-sidebar's own tick, so a burst of spawns, or a spawn beside the sidebar's or the page's
-read, is served by one reading. And a five-hour window moves a point or two a minute
+sidebar's own tick, so a burst of spawns, or a spawn after the sidebar's or the page's
+read, is served by one reading; a spawn DURING such a read reads the slots it holds itself
+rather than wait on them (one request more each: review of #485, round 4). It is the only
+age rule a pick has. And a five-hour window moves a point or two a minute
 under the heaviest use, far less than the room under ``switch_at`` a pick looks for;
 the cache's five minutes could start an agent on an account that crossed the line since.
 A hand-over after a limit still reads live (:func:`choose_for_handover`); one before the
@@ -3687,8 +3661,8 @@ def headroom_choice(
     waited for here (``refresh=False``), nor is any other read of the usage
     under way in this process: a stale token's account is skipped, or decided
     by its kept reading, and the next read that can wait refreshes it; an
-    account another call is reading is decided by its last good reading of the
-    last five minutes, or skipped (:func:`cached_usage`).
+    account another call is reading is read by the pick itself, without
+    waiting (:func:`cached_usage`).
 
     An account the usage endpoint asked to wait (F1 of #400) is not asked
     again, by a launch or a hand-over: the pick decides by its newest reading

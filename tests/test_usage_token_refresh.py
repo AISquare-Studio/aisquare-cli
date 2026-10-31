@@ -529,6 +529,43 @@ def test_a_pick_gives_way_to_a_refresh_this_process_runs(
     assert page[work.slot].session_percent == 55
 
 
+def test_a_pick_gives_way_to_a_refresh_round_that_holds_a_sibling_slot_too(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW-485 round 2: the sidebar and the Accounts page read every account in one round,
+    and the round holds each slot's fetch lock through the refresh of one. A pick needing a
+    sibling slot (home, read fine) waited on its lock until Claude Code was done; it takes
+    the round's own reading of it instead, and gives way on the slot being refreshed."""
+    work = _expired()
+    endpoint = _Usage({"tok-renewed-1": _payload(55)})
+    _read_before_it_expired(work, endpoint, 40)
+    home = _slot("home@example.com", "tok-home")
+    endpoint.by_token["tok-home"] = _payload(20)
+    claude = FakeClaude(monkeypatch, True)
+    claude.before = threading.Event()
+    page: dict[int, ClaudeUsage] = {}
+    reader = threading.Thread(
+        target=lambda: page.update(service.cached_usage([work, home], now=NOW, fetch=endpoint))
+    )
+    reader.start()
+    try:
+        assert claude.started.wait(10)
+        asked = endpoint.calls.count("tok-home")
+        picked, notes = _promptly(
+            lambda: _pick(work, home, endpoint=endpoint, max_age=service.PICK_MAX_AGE_SECONDS)
+        )
+        assert reader.is_alive(), "the pick returned while the refresh still ran"
+        assert endpoint.calls.count("tok-home") == asked, "the round's reading, not asked again"
+    finally:
+        claude.before.set()
+        reader.join(10)
+
+    assert picked is not None and picked.slot == home.slot
+    assert any(core.label(work) in note and "refreshing" in note for note in notes), notes
+    assert claude.runs == [work.slot], "the page's refresh, and only it"
+    assert page[work.slot].session_percent == 55 and page[home.slot].session_percent == 20
+
+
 # --------------------------------------------------------------------------- the command
 
 

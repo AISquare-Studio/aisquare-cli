@@ -2294,6 +2294,7 @@ def _refresh_stale(
     now: datetime | None,
     fetch: Fetch | None,
     start: bool = True,
+    round_of: Sequence[ClaudeAccount] = (),
 ) -> RefreshRows:
     """Have Claude Code refresh each of ``accounts``' stale token and read it again, in place in
     ``readings``: an answer is then recorded as any other, and the rows returned are written,
@@ -2310,6 +2311,12 @@ def _refresh_stale(
     waited for. A refresh running, or waiting for its retry, is answered as for any read
     meanwhile; a token none is about, or whose retry is due, keeps its stale reading, which
     the pick skips as it did before this existed, and the next reader that can wait starts it.
+
+    While the refreshes run, every slot of ``round_of`` (:func:`read_usage`'s round, whose
+    fetch locks :func:`cached_usage` holds throughout) is in :data:`_REFRESHING` with its
+    answer so far: a pick in this process takes it rather than wait on the lock. The sidebar
+    and the Accounts page read every account in one round, so a pick that needed a sibling
+    slot, read fine, waited on it for as long as Claude Code took (review of #485, round 2).
     """
     command = _token_refresh_command() if start else None
     if start and command is None:
@@ -2366,6 +2373,9 @@ def _refresh_stale(
         str(account.config_dir): _refreshing_usage(readings[account.slot], account.slot, None)
         for account in running
     }
+    for account in round_of:  # the round's other slots, read already, their locks held too
+        if account.slot in readings:
+            meanwhile.setdefault(str(account.config_dir), readings[account.slot])
     with _FETCH_LOCKS_LOCK:  # for a pick in this process that would wait on the fetch lock
         _REFRESHING.update(meanwhile)
     again: dict[int, ClaudeUsage | None] = {}
@@ -2383,8 +2393,9 @@ def _refresh_stale(
                     )
     finally:
         with _FETCH_LOCKS_LOCK:
-            for key in meanwhile:
-                _REFRESHING.pop(key, None)
+            for key, answer in meanwhile.items():
+                if _REFRESHING.get(key) is answer:  # ours: another round's stays
+                    del _REFRESHING[key]
     after = now or _now()
     rows: RefreshRows = {}
     for account in running:
@@ -2493,7 +2504,9 @@ def read_usage(
     ]
     settled: RefreshRows = {}
     if stale:  # before the locked slots' answer below, which no refresh here can change
-        settled = _refresh_stale(stale, readings, now=now, fetch=fetch, start=refresh)
+        settled = _refresh_stale(
+            stale, readings, now=now, fetch=fetch, start=refresh, round_of=accounts
+        )
     for account in asked:
         seen = rows.get(account.slot)
         if (
@@ -2572,8 +2585,9 @@ _FETCH_ROUNDS: dict[str, int] = {}
 """How many fetch rounds each config dir has had in this process: see :func:`_fetching`."""
 _FETCH_LOCKS_LOCK = threading.Lock()
 _REFRESHING: dict[str, ClaudeUsage] = {}
-"""The config dirs whose stale token this process is refreshing (:func:`_refresh_stale`), each
-with what a read meanwhile is answered: a pick gives way to it (:func:`_fetching`)."""
+"""The config dirs whose fetch lock a round refreshing a stale token holds in this process
+(:func:`_refresh_stale`): the refreshed slots and their siblings in the round, each with what
+a read meanwhile is answered. A pick gives way to every one of them (:func:`_fetching`)."""
 _GIVE_WAY_SECONDS = 0.05
 """How often a pick waiting on a slot's fetch lock looks whether a refresh holds it."""
 
@@ -2603,9 +2617,9 @@ def _fetching(
     in one order, so two calls over overlapping slots cannot deadlock.
 
     ``give_way``, a pick's: it waits for a fetch, never for a stale token's refresh, which
-    holds the lock up to :data:`TOKEN_REFRESH_TIMEOUT_SECONDS`. A slot this process is
-    refreshing (:data:`_REFRESHING`) is left to it, with what a read meanwhile is answered,
-    and is not fetched.
+    holds the lock up to :data:`TOKEN_REFRESH_TIMEOUT_SECONDS`. A slot whose lock a round
+    refreshing a token holds (:data:`_REFRESHING`: the refreshed slot, or a sibling the round
+    read already) is left to it, with what a read meanwhile is answered, and is not fetched.
     """
     keys = sorted({str(account.config_dir) for account in accounts})
     with _FETCH_LOCKS_LOCK:
@@ -2635,7 +2649,8 @@ def _fetching(
 
 def _take(lock: threading.Lock, key: str, *, give_way: bool) -> ClaudeUsage | None:
     """Acquire ``key``'s fetch ``lock``: ``None`` once it is held. Giving way, it is not taken
-    while this process refreshes that slot's token: what a read meanwhile is answered, then."""
+    while a round of this process that refreshes a token holds it (the refreshed slot or a
+    sibling of it): what a read meanwhile is answered, then."""
     if not give_way:
         lock.acquire()
         return None

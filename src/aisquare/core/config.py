@@ -745,6 +745,16 @@ def _versioned(dumped: dict[str, Any]) -> dict[str, Any]:
     return {_VERSION_KEY: kept if newer else CONFIG_VERSION, **dumped}
 
 
+BUSY_HOLD_DEFAULT_MINUTES = 5.0
+"""How long auto admission holds a project, by default (``busy_hold_minutes``)."""
+BUSY_HOLD_MAX_MINUTES = 365 * 24 * 60
+"""The longest hold ``busy_hold_minutes`` takes: a year of minutes."""
+BUSY_FLOOR_MAX = 1000
+"""The highest ``busy_floor``: past any fleet a machine runs."""
+BUSY_LOAD_PER_CPU_MAX = 1000.0
+"""The highest ``busy_load_per_cpu``: past any load a machine survives."""
+
+
 class FleetSettings(BaseModel):
     """The fleet: one private tmux server, one session per project, agents as windows.
 
@@ -773,7 +783,11 @@ class FleetSettings(BaseModel):
     (``0`` turns either off), memory pressure at ``busy_memory``, macOS's thermal pressure
     at ``busy_thermal`` (``"off"`` turns either off) — ``core.load``. ``min_free_mb``,
     ``max_agents_total`` and a group's ``max_agents`` refuse in either mode, below the
-    floor too.
+    floor too. Each ``busy_*`` number is finite and bounded (no ``inf``, no ``nan``): the
+    hold lasts at most :data:`BUSY_HOLD_MAX_MINUTES`, a year, the floor at most
+    :data:`BUSY_FLOOR_MAX` agents, CPU pressure is a percentage, and the load per CPU at
+    most :data:`BUSY_LOAD_PER_CPU_MAX`. Unbounded, ``busy_hold_minutes = inf`` saved, and
+    every held spawn then crashed computing its retry time instead of refusing.
 
     Auto-stop (P2-W1b, #283): with ``auto_stop_finished`` a worker of a role in
     ``auto_stop_roles`` that has finished — its task closed (or a ``result`` posted),
@@ -831,12 +845,16 @@ class FleetSettings(BaseModel):
     min_free_mb: int = 2048
     test_gate_mb: int = 0
     test_gate_wait_minutes: int = 15
-    busy_floor: int = Field(default=3, ge=0)
-    busy_load_per_cpu: float = Field(default=1.0, ge=0)
-    busy_cpu_psi: float = Field(default=40.0, ge=0)
+    busy_floor: int = Field(default=3, ge=0, le=BUSY_FLOOR_MAX)
+    busy_load_per_cpu: float = Field(
+        default=1.0, ge=0, le=BUSY_LOAD_PER_CPU_MAX, allow_inf_nan=False
+    )
+    busy_cpu_psi: float = Field(default=40.0, ge=0, le=100, allow_inf_nan=False)
     busy_memory: Literal["warn", "critical", "off"] = "warn"
     busy_thermal: Literal["moderate", "heavy", "trapping", "sleeping", "off"] = "heavy"
-    busy_hold_minutes: float = Field(default=5.0, ge=0)
+    busy_hold_minutes: float = Field(
+        default=BUSY_HOLD_DEFAULT_MINUTES, ge=0, le=BUSY_HOLD_MAX_MINUTES, allow_inf_nan=False
+    )
     auto_stop_finished: bool = True
     auto_stop_idle_minutes: float = Field(default=5.0, ge=0)
     auto_stop_roles: list[str] = Field(

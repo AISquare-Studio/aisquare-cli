@@ -10,6 +10,7 @@ fixtures, its in-memory tmux), with the probes faked: the machine is whatever a 
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from datetime import UTC, datetime, timedelta
@@ -367,9 +368,20 @@ def test_a_malformed_cpu_pressure_file_never_crashes_a_spawn(
         '{"held_at": 7, "until": null, "signal": "x"}',
         '["not", "a", "hold"]',
         "not json",
+        # Review of #12, round 2: out of range. The tester's tampered store, whose local
+        # time is past the calendar; a short hold far in the future; one that ends before
+        # it began; one longer than the longest hold.
+        '{"held_at": "2026-10-30T22:00:00+00:00", "until": "9999-12-31T23:59:59-12:00", '
+        '"signal": "x"}',
+        '{"held_at": "9999-12-31T23:50:00+00:00", "until": "9999-12-31T23:55:00+00:00", '
+        '"signal": "x"}',
+        '{"held_at": "2026-10-30T22:05:00+00:00", "until": "2026-10-30T22:00:00+00:00", '
+        '"signal": "x"}',
+        '{"held_at": "2026-10-30T22:00:00+00:00", "until": "2027-12-30T22:00:00+00:00", '
+        '"signal": "x"}',
     ],
 )
-def test_a_naive_or_unparsable_hold_is_unreadable_and_crashes_nothing(
+def test_a_naive_unparsable_or_out_of_range_hold_is_unreadable_and_crashes_nothing(
     tmux: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
@@ -378,8 +390,10 @@ def test_a_naive_or_unparsable_hold_is_unreadable_and_crashes_nothing(
     recorded: str,
 ) -> None:
     """Review of #12 (3): a hold with a naive time was taken as read, and ``now < until``
-    raised ``TypeError`` in the spawn, ``fleet capacity`` and the watcher. Unreadable, it is
-    no hold: the probes answer, and a busy machine writes a readable hold over it."""
+    raised ``TypeError`` in the spawn, ``fleet capacity`` and the watcher; round 2: one whose
+    ``until`` is out of range crashed the refusal, or would hold the project for good.
+    Unreadable, it is no hold: the probes answer, and a busy machine writes a readable hold
+    over it."""
     key = "fleet:busy_hold:" + project.id
     _three(project)
     with store_session() as store:
@@ -394,6 +408,93 @@ def test_a_naive_or_unparsable_hold_is_unreadable_and_crashes_nothing(
     assert held.value.code == "capacity_busy"
     [hold] = fleet_service.holds()
     assert (hold.held_at, hold.until) == (NOW, NOW + timedelta(minutes=5)), "written over it"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("busy_hold_minutes", math.inf),
+        ("busy_hold_minutes", math.nan),
+        ("busy_hold_minutes", 1e12),
+        ("busy_hold_minutes", 365 * 24 * 60 + 1),
+        ("busy_hold_minutes", -1),
+        ("busy_load_per_cpu", math.inf),
+        ("busy_load_per_cpu", math.nan),
+        ("busy_load_per_cpu", 1001),
+        ("busy_cpu_psi", math.inf),
+        ("busy_cpu_psi", 101),
+        ("busy_floor", 1001),
+    ],
+)
+def test_every_busy_number_is_finite_and_bounded(field: str, value: float) -> None:
+    """Review of #12, round 2: ``busy_hold_minutes = inf`` (or ``1e12``) was taken, and every
+    held spawn then raised ``OverflowError`` computing its retry instead of refusing."""
+    with pytest.raises(ValueError):
+        FleetSettings(**{field: value})
+    year = FleetSettings(busy_hold_minutes=365 * 24 * 60, busy_cpu_psi=100, busy_floor=1000)
+    assert (year.busy_hold_minutes, year.busy_cpu_psi, year.busy_floor) == (525_600, 100, 1000)
+
+
+@pytest.mark.parametrize("value", ["inf", "nan", "1e12"])
+def test_config_set_refuses_an_unbounded_hold_and_keeps_the_file(value: str) -> None:
+    settings_service.set_value("fleet.busy_hold_minutes", "10")
+    with pytest.raises(ValueError):
+        settings_service.set_value("fleet.busy_hold_minutes", value)
+    assert load_config().fleet.busy_hold_minutes == 10
+
+
+@pytest.mark.parametrize(
+    ("minutes", "held_for"),
+    [(math.inf, 525_600), (1e12, 525_600), (math.nan, 5), (-5.0, 0)],
+)
+def test_a_hold_past_the_bounds_is_clamped_and_still_refuses(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+    monkeypatch: pytest.MonkeyPatch,
+    minutes: float,
+    held_for: float,
+) -> None:
+    """The second guard, for a settings object changed without validation: clamped to a year
+    (``nan``: the default), the held spawn is the refusal it should be, not an
+    ``OverflowError``."""
+    config = _settings(monkeypatch)
+    config.busy_hold_minutes = minutes  # an assignment pydantic does not validate
+    machine.busy()
+    _three(project)
+    with pytest.raises(fleet_service.CapacityRefused) as held:
+        _coder(project)
+    assert held.value.code == "capacity_busy"
+    assert held.value.retry_at == NOW + timedelta(minutes=held_for)
+    [hold] = fleet_service.holds()
+    assert hold.until == NOW + timedelta(minutes=held_for), "and it reads back as a hold"
+
+
+def test_json_fleet_spawn_says_capacity_busy_even_with_an_infinite_hold(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tester's repro through the real CLI: with the hold at ``inf`` the held spawn exited
+    1 with an EMPTY stdout under ``--json``, so a manager parsing it got nothing."""
+    config = _settings(monkeypatch)
+    config.busy_hold_minutes = math.inf
+    machine.busy()
+    _three(project)
+    monkeypatch.chdir(project.root)
+    result = runner.invoke(app, ["--json", "fleet", "spawn", "coder", "--no-worktree"])
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "capacity_busy"
+    assert "cpu load 3.86 per CPU" in payload["detail"]
+    retry = (NOW + timedelta(minutes=525_600)).isoformat(timespec="seconds")
+    assert payload["hint"] == f"retry_at {retry}"
 
 
 # --- the hard floors and numeric mode --------------------------------------------------------

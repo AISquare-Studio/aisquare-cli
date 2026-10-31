@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import json
+import math
 import os
 import re
 import shutil
@@ -66,6 +67,8 @@ from aisquare.core import memory as memory_core
 from aisquare.core import names as names_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
+    BUSY_HOLD_DEFAULT_MINUTES,
+    BUSY_HOLD_MAX_MINUTES,
     CLAUDE_PERMISSION_MODES,
     LAST_ARGS_ONLY_DENY,
     REVIEWER_ARGS,
@@ -5527,9 +5530,17 @@ class Hold:
     @classmethod
     def from_meta(cls, project_id: str, text: str) -> Hold | None:
         """The hold ``text`` records, or ``None`` for one that cannot be read (no hold): not
-        JSON, a field missing, or a time that is not an ISO time with its offset. A naive
-        time cannot be compared with the clock's, and taken as read it crashed the spawn,
-        ``fleet capacity`` and the watcher; unreadable, the probes answer instead."""
+        JSON, a field missing, a time that is not an ISO time with its offset, or a hold no
+        spawn could have written. A naive time cannot be compared with the clock's, and
+        taken as read it crashed the spawn, ``fleet capacity`` and the watcher; unreadable,
+        the probes answer instead.
+
+        No spawn writes a hold that ends before it began, lasts longer than
+        :data:`BUSY_HOLD_MAX_MINUTES`, ends further off than that from now, or at a time this
+        machine's clock cannot show (``9999-12-31T23:59:59-12:00``: its local time is past
+        the calendar, and the refusal's retry crashed). Each such is a tampered or damaged
+        store, and read as no hold: one far in the future would otherwise hold the project
+        for good."""
         try:
             said = json.loads(text)
             held_at = datetime.fromisoformat(said["held_at"])
@@ -5538,6 +5549,14 @@ class Hold:
         except (ValueError, KeyError, TypeError):
             return None
         if held_at.utcoffset() is None or until.utcoffset() is None:
+            return None
+        longest = timedelta(minutes=BUSY_HOLD_MAX_MINUTES)
+        try:
+            held_at.astimezone()
+            until.astimezone()
+            if until < held_at or until - held_at > longest or until - _now() > longest:
+                return None
+        except (OverflowError, ValueError, OSError):
             return None
         return cls(project_id, held_at, until, signal)
 
@@ -5611,7 +5630,7 @@ def _admit_by_load(
         )
         return _Seats(floor, busy=busy)
     if hold is None or now >= hold.until:
-        hold = Hold(project.id, now, now + timedelta(minutes=config.busy_hold_minutes), busy)
+        hold = Hold(project.id, now, now + timedelta(minutes=_hold_minutes(config)), busy)
         with contextlib.suppress(Exception), store_session() as store:
             store.set_meta(_BUSY_HOLD_META + project.id, hold.as_meta())
         _log_admission(
@@ -5621,6 +5640,17 @@ def _admit_by_load(
     raise CapacityRefused(
         "capacity_busy", _held(project, live, floor, hold, now), retry_at=hold.until
     )
+
+
+def _hold_minutes(config: FleetSettings) -> float:
+    """``busy_hold_minutes``, clamped to ``0`` … :data:`BUSY_HOLD_MAX_MINUTES`; ``nan`` is the
+    default. The config refuses anything else; this guards a settings object built or
+    changed without validation, whose ``inf`` raised ``OverflowError`` out of a held spawn,
+    which then refused nothing and printed nothing under ``--json``."""
+    minutes = config.busy_hold_minutes
+    if math.isnan(minutes):
+        return BUSY_HOLD_DEFAULT_MINUTES
+    return min(max(minutes, 0.0), float(BUSY_HOLD_MAX_MINUTES))
 
 
 def _after_stopping_finished(project: ProjectInfo, live: int, notes: list[str]) -> int:

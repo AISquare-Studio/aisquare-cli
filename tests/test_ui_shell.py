@@ -58,6 +58,7 @@ from aisquare.cli.ui.sidebar import (
     STOP_STATES,
     Activatable,
     AgentRow,
+    AgentSelected,
     CardChips,
     Disclosure,
     GroupHeader,
@@ -108,7 +109,7 @@ from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project_groups as groups_service
 from aisquare.services.captain import state as captain_state
-from tests import guard_clock, toast_log
+from tests import guard_paint, toast_log
 from tests.fleet_fakes import list_agents_as
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
 from tests.ui_workers import settle_page, settle_until_held, watch_until
@@ -3416,23 +3417,16 @@ async def open_stop_dialog(pilot: Pilot[None], app: FleetApp, agent_id: str) -> 
     has ever mounted, so a test that opens a second agent would otherwise click
     the first view's button, which is not on screen and opens nothing.
 
-    The click lands as a person's would, a moment after the view came up: past the click
-    guard's window (``click_guard``), which the guard's own clock is moved on for.
+    The click lands as a person's would, once the view is on screen: after its paint, which
+    is what the click guard (``click_guard``) waits for.
     """
-    from aisquare.cli.ui import click_guard
-
     await pilot.click(row_for(app, agent_id))
     await pilot.pause()
     await settle(app)
     view = app.current_view()
     assert isinstance(view, AgentView), f"the row opened {type(view).__name__}"
-    real = click_guard.clock
-    click_guard.clock = lambda: real() + click_guard.CLICK_GUARD + 1
-    try:
-        await pilot.click(view.query_one("#agent-stop", Button))
-        await pilot.pause()
-    finally:
-        click_guard.clock = real
+    await pilot.click(view.query_one("#agent-stop", Button))
+    await pilot.pause()
     screen = app.screen
     assert isinstance(screen, StopAgentScreen), f"Stop opened {type(screen).__name__}"
     return screen
@@ -3445,8 +3439,6 @@ def test_stop_from_an_agent_view_still_asks_after_its_projects_read_failed(
     none of its agents (``refresh_data`` fails open, the cost on the card), and Stop on
     the agent's still-open view was then refused as "no longer listed" while the agent
     ran. The dialog opens on the row the view shows; the service decides."""
-    from aisquare.cli.ui import click_guard
-
     seed(tmp_path, ("prj_a", "alpha", None))
     live = [status("prj_a", "coder-auth", "coder", "working")]
     failing: list[Exception] = []
@@ -3466,13 +3458,8 @@ def test_stop_from_an_agent_view_still_asks_after_its_projects_read_failed(
         assert isinstance(view, AgentView)
         failing.append(fleet_service.FleetUnavailable("database is locked"))
         await refreshed(app)
-        real = click_guard.clock
-        click_guard.clock = lambda: real() + click_guard.CLICK_GUARD + 1
-        try:
-            await pilot.click(view.query_one("#agent-stop", Button))
-            await pilot.pause()
-        finally:
-            click_guard.clock = real
+        await pilot.click(view.query_one("#agent-stop", Button))
+        await pilot.pause()
         said = [str(n.message) for n in app._notifications]
         return type(app.screen).__name__, said
 
@@ -5140,7 +5127,6 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         )  # fmt: skip
 
     monkeypatch.setattr(fleet_service, "restart", fake_restart)
-    clock = guard_clock.install(monkeypatch)
 
     async def go(
         pilot: Pilot[None],
@@ -5151,7 +5137,6 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         view = app.current_view()
         assert isinstance(view, AgentView)
         stop_shown = view.query_one("#agent-stop", Button).display
-        clock.step()  # the 💤 row read, then Restart: past the click guard's window
         await pilot.click("#agent-restart")
         await settle(app)
         await pilot.pause()
@@ -5345,7 +5330,16 @@ def _acting_fleet(
             tmux_session="asq-brave-lynx",
         )  # fmt: skip
 
-    def fake_stop(project: ProjectInfo, label: str, **kw: object) -> fleet_service.StopReceipt:
+    def fake_stop(
+        project: ProjectInfo,
+        label: str,
+        *,
+        force: bool = False,
+        grace: float = 5.0,
+        agent_id: str | None = None,
+        actor: str | None = None,
+    ) -> fleet_service.StopReceipt:
+        # The full signature: the Stop dialog reads ``grace`` off it to word its question.
         acted.append(("stop", project.id))
         return fleet_service.StopReceipt(one.agent, [])
 
@@ -5354,46 +5348,68 @@ def _acting_fleet(
     return acted
 
 
-def test_a_click_on_stop_or_restart_as_the_view_switches_in_acts_on_nothing(
+def test_a_press_waiting_as_the_view_switches_in_acts_on_nothing_and_one_after_its_paint_acts(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """User feedback (2026-10-19), the other half: a view that came up under a resting
-    pointer took the click aimed at the one before it, on its Stop or Restart. Within
-    CLICK_GUARD of the view switching in, a click on either starts no worker and says
-    so; the same click after it acts."""
+    pointer took the click aimed at the one before it, on its Stop or Restart. Presses on
+    both wait at the app while it puts manager 1's view up, and the view is laid out and
+    painted before the app reads them, its buttons under them. They start no worker, say
+    nothing and leave the keyboard on the pane. A click once the view is on screen acts at
+    once: there is no time to wait out (user, 2026-10-30)."""
     seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", "brave-lynx"))
     script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
     one = status("prj_b", "manager", "manager", "working")
     script["prj_b"] = [one]
     acted = _acting_fleet(monkeypatch, script, one)
-    clock = guard_clock.install(monkeypatch)
+    ids = ("agent-restart", "agent-stop")
 
-    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], list[str]]:
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[bool, list[tuple[str, str]], str, bool, list[str]]:
         app = fleet_app(pilot)
         told = toast_log.record(app)
         await pilot.click(row_for(app, "agt_a_manager"))
         await settle(app)
-        clock.step()  # a while on manager 0's pane
-        await pilot.click(row_for(app, "agt_b_manager"))
-        await settle(app)
-        view = app.current_view()
-        assert isinstance(view, AgentView) and view.status.agent.id == "agt_b_manager"
-        await pilot.click(view.query_one("#agent-restart", Button))
-        await pilot.click(view.query_one("#agent-stop", Button))
-        await settle(app)
-        toasts = list(told)
-        ignored = list(acted)
-        clock.step()
-        await pilot.click(view.query_one("#agent-restart", Button))
-        await settle(app)
-        return ignored, toasts
+        before = app.current_view()
+        assert isinstance(before, AgentView)
+        # Where the pointer rests, on manager 0's buttons; manager 1's come up in their place.
+        where = {id_: before.query_one(f"#{id_}", Button).region.offset for id_ in ids}
+        # The row's message, and the app still busy putting its view up when the presses come.
+        app.post_message(AgentSelected("prj_b", "agt_b_manager"))
+        free = guard_paint.busy(app)
+        for id_ in ids:
+            guard_paint.queue_press(app, where[id_])
 
-    ignored, toasts = drive(go, notifications=True)
-    assert ignored == [], "a click as the view switched in restarted or stopped an agent"
-    for verb in ("Restart", "Stop"):
-        notice = f"ignored a click on {verb} — the view had just changed under the pointer"
-        assert toasts.count(notice) == 1, toasts
-    assert acted == [("restart", "prj_b")], "the click after the window restarts as it did"
+        def under_the_pointer() -> list[GuardedButton]:
+            view = app.current_view()
+            if not isinstance(view, AgentView) or view.status.agent.id != "agt_b_manager":
+                return []
+            buttons = [view.query_one(f"#{id_}", GuardedButton) for id_ in ids]
+            under = [app.get_widget_at(*where[button.id or ""])[0] for button in buttons]
+            return buttons if under == buttons else []
+
+        await watch_until(under_the_pointer)
+        guarded = under_the_pointer()
+        for button in guarded:
+            await guard_paint.painted(button)
+        free.set()
+        await settle(app)
+        ignored, screen = list(acted), type(app.screen).__name__
+        view = app.current_view()
+        assert isinstance(view, AgentView)
+        typing_reaches = app.focused is view.pane
+        await pilot.click(view.query_one("#agent-restart", Button))
+        await settle(app)
+        return bool(guarded), ignored, screen, typing_reaches, list(told)
+
+    laid_out, ignored, screen, typing_reaches, told = drive(go, notifications=True)
+    assert laid_out, "the presses must reach the app with manager 1's buttons under them"
+    assert ignored == [], "a press made as the view switched in restarted or stopped an agent"
+    assert screen != "StopAgentScreen", "a press made as the view switched in asked to stop"
+    assert typing_reaches, "an ignored press took the keyboard off the pane"
+    assert not [toast for toast in told if "ignored a click" in toast], told
+    assert acted == [("restart", "prj_b")], "the click once the view is painted acts at once"
 
 
 def test_enter_on_a_focused_restart_is_not_guarded(
@@ -5405,7 +5421,7 @@ def test_enter_on_a_focused_restart_is_not_guarded(
     one = status("prj_b", "manager", "manager", "working")
     script["prj_b"] = [one]
     acted = _acting_fleet(monkeypatch, script, one)
-    guard_clock.install(monkeypatch)
+    guard_paint.install(monkeypatch)  # the view's paint is held back: the guard stays up
 
     async def go(pilot: Pilot[None]) -> bool:
         app = fleet_app(pilot)
@@ -5420,7 +5436,7 @@ def test_enter_on_a_focused_restart_is_not_guarded(
         await settle(app)
         return guarding
 
-    assert drive(go) is True, "the window was open when Enter was pressed"
+    assert drive(go) is True, "the guard was up when Enter was pressed"
     assert acted == [("restart", "prj_b")]
 
 

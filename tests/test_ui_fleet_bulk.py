@@ -33,7 +33,7 @@ from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
-from tests import toast_log
+from tests import guard_paint, toast_log
 from tests.fleet_fakes import list_agents_as
 from tests.test_ui_shell import seed, settle, shown, status
 from tests.ui_workers import settle_page
@@ -335,14 +335,16 @@ def test_escape_and_cancel_close_the_dialog_and_act_on_nobody(acted: Acted) -> N
     assert acted.calls == []
 
 
-def test_a_click_on_confirm_as_the_dialog_appears_leaves_cancel_the_focus(acted: Acted) -> None:
+def test_a_click_on_confirm_as_the_dialog_appears_leaves_cancel_the_focus(
+    acted: Acted, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Review of #266, round 2: the click the guard ignored still took the focus off
     Cancel on its mouse-down, and the Enter after it ran Stop all."""
+    guard_paint.install(monkeypatch)  # the dialog's paint is held back: it has just appeared
 
     async def go(pilot: Pilot[None]) -> tuple[str | None, bool]:
         app = _app(pilot)
         dialog = await _open(pilot, "stop")
-        dialog.query_one("#bulk-confirm", GuardedButton).changed_under_pointer()
         await pilot.click(_confirm(dialog))
         await settle(app)
         focused = app.focused.id if app.focused else None

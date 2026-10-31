@@ -5517,6 +5517,9 @@ class Hold:
     until: datetime
     signal: str
     """The busy signal in its own words (:meth:`core.load.Signal.said`)."""
+    project_name: str = ""
+    """The project as its refusal named it: what ``fleet capacity`` shows when the store has
+    no row for it to name it by."""
 
     def as_meta(self) -> str:
         return json.dumps(
@@ -5524,6 +5527,7 @@ class Hold:
                 "held_at": self.held_at.isoformat(),
                 "until": self.until.isoformat(),
                 "signal": self.signal,
+                "project": self.project_name,
             }
         )
 
@@ -5546,7 +5550,8 @@ class Hold:
             held_at = datetime.fromisoformat(said["held_at"])
             until = datetime.fromisoformat(said["until"])
             signal = str(said["signal"])
-        except (ValueError, KeyError, TypeError):
+            name = said.get("project")
+        except (ValueError, KeyError, TypeError, AttributeError):
             return None
         if held_at.utcoffset() is None or until.utcoffset() is None:
             return None
@@ -5558,7 +5563,7 @@ class Hold:
                 return None
         except (OverflowError, ValueError, OSError):
             return None
-        return cls(project_id, held_at, until, signal)
+        return cls(project_id, held_at, until, signal, name if isinstance(name, str) else "")
 
 
 def holds() -> list[Hold]:
@@ -5620,7 +5625,7 @@ def _admit_by_load(
         if hold is not None:
             release_hold(project.id, hold.held_at)
         return _Seats(None)
-    floor = config.busy_floor
+    floor = _busy_floor(config)
     if live >= floor and config.auto_stop_finished:
         live = _after_stopping_finished(project, live, notes)
     if live < floor:
@@ -5630,7 +5635,8 @@ def _admit_by_load(
         )
         return _Seats(floor, busy=busy)
     if hold is None or now >= hold.until:
-        hold = Hold(project.id, now, now + timedelta(minutes=_hold_minutes(config)), busy)
+        until = now + timedelta(minutes=_hold_minutes(config))
+        hold = Hold(project.id, now, until, busy, _name(project))
         with contextlib.suppress(Exception), store_session() as store:
             store.set_meta(_BUSY_HOLD_META + project.id, hold.as_meta())
         _log_admission(
@@ -5640,6 +5646,13 @@ def _admit_by_load(
     raise CapacityRefused(
         "capacity_busy", _held(project, live, floor, hold, now), retry_at=hold.until
     )
+
+
+def _busy_floor(config: FleetSettings) -> int:
+    """``busy_floor``, at least 1: a project below it is always admitted. The config refuses
+    0; this guards a settings object changed without validation, at whose 0 a project with
+    no agent at all was held."""
+    return max(config.busy_floor, 1)
 
 
 def _hold_minutes(config: FleetSettings) -> float:
@@ -5721,8 +5734,8 @@ def freed_holds(now: datetime | None = None) -> list[Freed]:
             continue
         if isinstance(cap, int):
             why = f"max_agents_per_project = {cap}: auto admission holds nothing now"
-        elif live < config.busy_floor:
-            why = f"{live} live agents, below busy_floor = {config.busy_floor}"
+        elif live < _busy_floor(config):
+            why = f"{live} live agents, below busy_floor = {_busy_floor(config)}"
         elif now >= hold.until:
             reading = reading or load_core.read(busy_thresholds(config))
             if reading.busy is not None:
@@ -5888,7 +5901,8 @@ def capacity() -> CapacityReport:
         load_core.cpu_load(), head, load_core.thermal(), busy_thresholds(config)
     ).signals
     now = _now()
-    in_force = tuple((_held_name(hold.project_id), hold) for hold in holds() if now < hold.until)
+    in_force = tuple((_held_name(hold), hold) for hold in holds() if now < hold.until)
+    busy_floor = _busy_floor(config)
     report = CapacityReport(
         headroom=head,
         min_free_mb=floor,
@@ -5898,7 +5912,7 @@ def capacity() -> CapacityReport:
         admits=True,
         reason="",
         signals=signals,
-        busy_floor=config.busy_floor,
+        busy_floor=busy_floor,
         holds=in_force if config.max_agents_per_project == "auto" else (),
         read_at=now,
     )
@@ -5914,12 +5928,12 @@ def capacity() -> CapacityReport:
         why = busy.said() if busy is not None else "a hold in force"
         reason = (
             f"the machine is busy ({why}) — a spawn would be admitted into a project running "
-            f"fewer than {config.busy_floor} agents, held in {', '.join(held)}"
+            f"fewer than {busy_floor} agents, held in {', '.join(held)}"
         )
     elif report.auto and report.busy is not None:
         reason = (
             f"the machine is busy ({report.busy.said()}) — a spawn would be admitted: no "
-            f"project runs {config.busy_floor} agents"
+            f"project runs {busy_floor} agents"
         )
     elif head.pressure == "warn":
         reason = "a spawn would be admitted, with a warning: memory pressure is warn"
@@ -5928,14 +5942,17 @@ def capacity() -> CapacityReport:
     return replace(report, admits=admits, reason=reason)
 
 
-def _held_name(project_id: str) -> str:
-    """A held project as :func:`_live_per_project` names it, or its id when it cannot be read."""
+def _held_name(hold: Hold) -> str:
+    """A held project as :func:`_live_per_project` names it; with no row to name it by, as
+    its refusal named it, and only a hold an older build wrote without that by its id."""
     try:
         with store_session() as store:
-            row = store.get_project(project_id, include_forgotten=True)
+            row = store.get_project(hold.project_id, include_forgotten=True)
     except Exception:
         row = None
-    return _name(row) if row is not None else project_id[:12]
+    if row is not None:
+        return _name(row)
+    return hold.project_name or hold.project_id[:12]
 
 
 GATE_POLL_SECONDS = 5.0

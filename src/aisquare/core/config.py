@@ -784,9 +784,10 @@ class FleetSettings(BaseModel):
     at ``busy_thermal`` (``"off"`` turns either off) — ``core.load``. ``min_free_mb``,
     ``max_agents_total`` and a group's ``max_agents`` refuse in either mode, below the
     floor too. Each ``busy_*`` number is finite and bounded (no ``inf``, no ``nan``): the
-    hold lasts at most :data:`BUSY_HOLD_MAX_MINUTES`, a year, the floor at most
-    :data:`BUSY_FLOOR_MAX` agents, CPU pressure is a percentage, and the load per CPU at
-    most :data:`BUSY_LOAD_PER_CPU_MAX`. Unbounded, ``busy_hold_minutes = inf`` saved, and
+    hold lasts at most :data:`BUSY_HOLD_MAX_MINUTES`, a year, the floor is 1 to
+    :data:`BUSY_FLOOR_MAX` agents (a project below it is always admitted, so at 0 one with
+    no agent at all was held), CPU pressure is a percentage, and the load per CPU at most
+    :data:`BUSY_LOAD_PER_CPU_MAX`. Unbounded, ``busy_hold_minutes = inf`` saved, and
     every held spawn then crashed computing its retry time instead of refusing.
 
     Auto-stop (P2-W1b, #283): with ``auto_stop_finished`` a worker of a role in
@@ -845,7 +846,7 @@ class FleetSettings(BaseModel):
     min_free_mb: int = 2048
     test_gate_mb: int = 0
     test_gate_wait_minutes: int = 15
-    busy_floor: int = Field(default=3, ge=0, le=BUSY_FLOOR_MAX)
+    busy_floor: int = Field(default=3, ge=1, le=BUSY_FLOOR_MAX)
     busy_load_per_cpu: float = Field(
         default=1.0, ge=0, le=BUSY_LOAD_PER_CPU_MAX, allow_inf_nan=False
     )

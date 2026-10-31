@@ -17,7 +17,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   threshold, the floor and the hold are settings: `busy_load_per_cpu`, `busy_cpu_psi`
   (`0` turns either off), `busy_memory`, `busy_thermal` (`"off"` turns either off),
   `busy_floor = 3` and `busy_hold_minutes = 5`. Each number is finite and bounded: no `inf`
-  or `nan`, a hold of at most a year (525600 minutes), a floor of at most 1000, CPU pressure
+  or `nan`, a hold of at most a year (525600 minutes), a floor of 1 to 1000, CPU pressure
   up to 100, and load per CPU up to 1000. Before this, a box at load 54 on 14 cores with
   normal memory pressure admitted every spawn.
   - **A held spawn never waits.** It is refused with the new code `capacity_busy`, and the

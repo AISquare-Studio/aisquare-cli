@@ -206,6 +206,7 @@ def test_on_the_owners_box_the_fourth_agent_is_held_naming_the_signal_and_the_re
     assert _live(project) == ["coder-1", "coder-2", "coder-3"]
     [hold] = fleet_service.holds()
     assert (hold.project_id, hold.held_at, hold.until) == (project.id, NOW, held.value.retry_at)
+    assert hold.project_name == project_service.display_name(project), "named as refused"
     log = paths.aisquare_home() / "fleet" / "admission.jsonl"
     [line] = [json.loads(row) for row in log.read_text(encoding="utf-8").splitlines()]
     assert line["outcome"] == "capacity_busy" and line["live"] == 3
@@ -424,6 +425,8 @@ def test_a_naive_unparsable_or_out_of_range_hold_is_unreadable_and_crashes_nothi
         ("busy_cpu_psi", math.inf),
         ("busy_cpu_psi", 101),
         ("busy_floor", 1001),
+        ("busy_floor", 0),
+        ("busy_floor", -1),
     ],
 )
 def test_every_busy_number_is_finite_and_bounded(field: str, value: float) -> None:
@@ -441,6 +444,66 @@ def test_config_set_refuses_an_unbounded_hold_and_keeps_the_file(value: str) -> 
     with pytest.raises(ValueError):
         settings_service.set_value("fleet.busy_hold_minutes", value)
     assert load_config().fleet.busy_hold_minutes == 10
+
+
+def test_config_set_refuses_a_busy_floor_of_0_and_keeps_the_file() -> None:
+    """Review of #12, round 3: at ``busy_floor = 0`` a project with no agent at all was held,
+    where the rule is that a project below the floor is always admitted; ``fleet capacity``
+    said a spawn would be admitted, and the watcher took the agent-less held project for
+    gone and dropped its hold."""
+    settings_service.set_value("fleet.busy_floor", "2")
+    with pytest.raises(ValueError):
+        settings_service.set_value("fleet.busy_floor", "0")
+    assert load_config().fleet.busy_floor == 2
+    assert settings_service.set_value("fleet.busy_floor", "1") == "1"
+
+
+def test_a_floor_of_0_set_without_validation_still_admits_a_project_with_no_agent(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second guard: the floor is read as at least 1, so the first agent of a project is
+    admitted however busy the machine, and the second is held."""
+    config = _settings(monkeypatch)
+    config.busy_floor = 0  # an assignment pydantic does not validate
+    machine.busy()
+    assert _coder(project).label == "coder-1"
+    with pytest.raises(fleet_service.CapacityRefused, match="busy_floor = 1") as held:
+        _coder(project)
+    assert held.value.code == "capacity_busy"
+    assert fleet_service.capacity().busy_floor == 1
+
+
+def test_the_held_row_names_a_project_the_store_has_no_row_for(
+    machine: Machine, now: list[datetime], runner: CliRunner
+) -> None:
+    """A hold whose project has no store row (an agent-less project held at floor 0, by the
+    build before the floor was bounded) is shown by the name its refusal used, not its id;
+    one an older build wrote without a name falls back to the id."""
+    paths.ensure_home()
+    named = fleet_service.Hold(
+        "prj_nowhere_named", NOW, NOW + timedelta(minutes=5), "cpu load 9 per CPU", "alpha"
+    )
+    unnamed = json.dumps(
+        {
+            "held_at": NOW.isoformat(),
+            "until": (NOW + timedelta(minutes=5)).isoformat(),
+            "signal": "x",
+        }
+    )
+    with store_session() as store:
+        store.set_meta("fleet:busy_hold:prj_nowhere_named", named.as_meta())
+        store.set_meta("fleet:busy_hold:prj_nowhere_bare", unnamed)
+    shown = dict(fleet_service.capacity().holds)
+    assert set(shown) == {"alpha", "prj_nowhere_"}
+    assert shown["alpha"].project_name == "alpha"
+    lines = runner.invoke(app, ["fleet", "capacity"]).stdout.splitlines()
+    assert any(line.startswith("held:     alpha, retry in ") for line in lines), lines
+    assert not any("prj_nowhere_named" in line for line in lines), lines
 
 
 @pytest.mark.parametrize(

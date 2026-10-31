@@ -140,7 +140,7 @@ def test_it_is_read_at_the_start_and_reset_all_turns_it_off(tmp_path: Path) -> N
         await _open_app_settings(app)
         app.query_one("#reset-settings", Button).press()
         await settle(app)
-        app.screen.query_one("#reset-confirm", Button).press()
+        app.query_one("#reset-settings", Button).press()
         await settle(app)
         return at_start, _subtitles(app)["prj_u"]
 

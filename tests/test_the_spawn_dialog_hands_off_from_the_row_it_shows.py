@@ -129,7 +129,7 @@ def test_a_take_over_of_the_exited_row_sends_that_rows_id_after_the_question(
         await settle(pilot)
         await pilot.click("#spawn-submit")
         await settle(pilot)
-        await pilot.click("#take-over-yes")
+        await pilot.click("#spawn-submit")  # the second click on it takes over
         await settle(pilot)
 
     drive(git_project, scenario)

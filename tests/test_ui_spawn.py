@@ -2047,7 +2047,9 @@ def test_take_over_locks_the_label_and_task_to_the_teammates_and_asks_first(
     teammates: list[FleetAgentStatus],
 ) -> None:
     """Take over keeps the teammate's label, task and tree, so those are locked to its own;
-    and it stops the teammate, so one question comes first. Cancel starts nothing."""
+    and it stops the teammate, so it asks first, in place: its first click arms it, naming the
+    teammate it stops, and starts nothing; Esc disarms it and leaves the dialog open; a double
+    click on it takes over. No dialog comes up over the form."""
     task = add_task(git_project, "Wire the auth flow")
     teammates.append(teammate(git_project, task_id=task.id))
 
@@ -2059,21 +2061,17 @@ def test_take_over_locks_the_label_and_task_to_the_teammates_and_asks_first(
         assert (label_input(dialog).value, label_input(dialog).disabled) == ("coder-1", True)
         assert (select(dialog, "task").value, select(dialog, "task").disabled) == (task.id, True)
         assert str(submit(dialog).label) == "Take over"
+        how = str(dialog.query_one("#spawn-how-note", Static).render())
+        assert "coder-1 is stopped when Take over is pressed a second time" in how, how
         await pilot.click("#spawn-submit")
         await settle(pilot)
-        assert isinstance(host.screen, spawn_module.ConfirmTakeOverScreen)
-        await pilot.click("#take-over-no")
+        assert str(submit(dialog).label) == "Stop coder-1? click again"
+        assert host.screen is dialog and hand_offs.calls == []
+        await pilot.press("escape")
         await settle(pilot)
-        assert isinstance(host.screen, SpawnDialog) and hand_offs.calls == []
-        # Pressed, not clicked, and the question awaited: a click right after the question
-        # closed opened nothing on windows-latest (`NoMatches: '#take-over-yes' on
-        # SpawnDialog()`, rc/p0 run 39985702872), the dialog not yet hit-testable again.
-        submit(dialog).press()
-        question = await wait_for_screen(pilot, spawn_module.ConfirmTakeOverScreen)
-        # Pressed on the question itself for the same reason: a click the moment it was
-        # pushed landed before it could be hit-tested, so no hand-off was ever asked for
-        # (a gate under load at cc8d5e0c, captain on and off, and 1 in 5 alone).
-        question.query_one("#take-over-yes", Button).press()
+        assert host.screen is dialog and hand_offs.calls == []
+        assert str(submit(dialog).label) == "Take over"
+        await pilot.double_click("#spawn-submit")
         await settle(pilot)
         return list(host.results)
 
@@ -2081,6 +2079,32 @@ def test_take_over_locks_the_label_and_task_to_the_teammates_and_asks_first(
     sent = {**NO_CHANGE, "mode": "take_over", "agent_id": teammates[0].agent.id}
     assert hand_offs.calls == [(git_project.id, "coder-1", sent)]
     assert len(results) == 1
+
+
+def test_a_fork_spawns_on_one_press(
+    git_project: ProjectInfo, hand_offs: HandOffRecorder, teammates: list[FleetAgentStatus]
+) -> None:
+    """Only a take-over asks: Fork, like Spawn, acts on its one press, and a take-over
+    armed, then switched to Fork, is disarmed."""
+    teammates.append(teammate(git_project))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> str:
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        dialog.query_one("#spawn-take-over", RadioButton).value = True
+        await settle(pilot)
+        submit(dialog).press()
+        await settle(pilot)
+        dialog.query_one("#spawn-fork", RadioButton).value = True
+        await settle(pilot)
+        label = str(submit(dialog).label)
+        submit(dialog).press()
+        await settle(pilot)
+        return label
+
+    assert drive(git_project, scenario) == "Fork"
+    [(_, _, sent)] = hand_offs.calls
+    assert sent["mode"] == "fork"
 
 
 def test_start_fresh_and_a_changed_role_are_sent(
@@ -2139,8 +2163,8 @@ def test_account_set_to_this_shells_is_sent_as_this_shells(
         await settle(pilot)
         await pilot.click("#spawn-submit")
         await settle(pilot)
-        if take_over:
-            await pilot.click("#take-over-yes")
+        if take_over:  # the click that armed it, and the one that takes over
+            await pilot.click("#spawn-submit")
             await settle(pilot)
 
     drive(git_project, scenario)

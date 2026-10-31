@@ -82,7 +82,6 @@ from aisquare.cli.ui.project_menu import (
     RENAME,
     RESUME,
     SETTINGS,
-    ConfirmRemove,
     ProjectMenu,
 )
 from aisquare.cli.ui.receiver import listen_for_ui, stop_listening_for_ui
@@ -273,7 +272,7 @@ HEADROOM_SECONDS = 60.0
 """How often the status line's headroom is re-read — never on the two-second tick. A read
 goes to the network only for an account whose cached usage is over five minutes old."""
 PROJECT_REMOVE_WORKER = "project-remove"
-"""The thread worker a card's *Remove from fleet…* forgets its project on (``project forget``)."""
+"""The thread worker a card's *Remove from fleet* forgets its project on (``project forget``)."""
 PROJECT_CODENAME_WORKER = "project-codename"
 """The thread worker a card's rename gives the project its new codename and renames its tmux
 session on (``services.fleet.follow_name``), once the nickname is written."""
@@ -2717,10 +2716,6 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         project_id = project.id
 
-        def confirmed(yes: bool | None) -> None:
-            if yes:
-                self._remove_project(project_id)
-
         def chosen(choice: str | None) -> None:
             if choice == RENAME:
                 # Once the menu has gone: closing it hands the focus back to the sidebar.
@@ -2733,8 +2728,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 self.post_message(BulkAsked("pause" if choice == PAUSE else "resume", project_id))
             elif choice == FRESH:
                 self.post_message(StartFresh(project_id))
-            elif choice == REMOVE:
-                self.push_screen(ConfirmRemove(project), confirmed)
+            elif choice == REMOVE:  # pressed twice in the menu, which asked in place
+                self._remove_project(project_id)
 
         agents = self.snapshot.agents.get(project_id) if self.snapshot else None
         signal_on = self.snapshot is not None and project_id in self.snapshot.fleet_paused
@@ -2935,7 +2930,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             view.active = "tab-settings"
 
     def _remove_project(self, project_id: str) -> None:
-        """*Remove from fleet…*, confirmed: ``aisquare project forget``, off the UI thread.
+        """*Remove from fleet*, pressed twice: ``aisquare project forget``, off the UI thread.
 
         Refused (``ProjectBusyError``) while the project has live agents; the toast
         names them and the way out.

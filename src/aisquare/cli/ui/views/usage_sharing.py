@@ -7,9 +7,9 @@ shared, and the state beneath: off ("Nothing leaves this machine"), on (when it 
 and whether the server linked it to the signed-in AISquare account), or forced off by the
 environment (``DO_NOT_TRACK``, ``AISQUARE_NO_TELEMETRY``, ``CI``) with the button greyed and the
 reason named. A :class:`~aisquare.cli.ui.click_guard.GuardedButton`, not a ``Switch``: a click
-that lands on it as the page appears must not be how someone agrees to share. Turning it on
-sends the first shipment at once; turning it off purges what was kept and sends the one opt-out
-notice. Both run off the UI thread (:data:`SHARE_WORKER`).
+that reaches it before the page is painted must not be how someone agrees to share; one after
+is. Turning it on sends the first shipment at once; turning it off purges what was kept and
+sends the one opt-out notice. Both run off the UI thread (:data:`SHARE_WORKER`).
 
 **The question** (:class:`ConsentDialog`) is asked once, by the shell, after onboarding and only
 where nothing forces sharing off: *Share anonymous usage* / *No thanks* / *See what would be
@@ -305,7 +305,9 @@ class PreviewDialog(ModalScreen[None]):
 
 
 class ConsentDialog(ModalScreen[str]):
-    """The one-time question. Answers ``share`` or ``declined``; Escape is *No thanks*."""
+    """The one-time question. Answers ``share`` or ``declined``; Escape is *No thanks*.
+    *Share anonymous usage* is a :class:`~aisquare.cli.ui.click_guard.GuardedButton`: a click
+    that reaches it before the dialog is painted shares nothing."""
 
     CSS = """
     ConsentDialog { align: center middle; }

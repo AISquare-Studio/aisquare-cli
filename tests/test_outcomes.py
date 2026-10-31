@@ -28,6 +28,7 @@ from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo, TeamEvent, TeamSession, TurnMetric
 from aisquare.services import fleet as fleet_service
 from aisquare.services import github_prs, outcomes, transcript_facts, usage_stats
+from tests.rendered import plain
 from tests.usage_stats_support import IST, Machine, prompt, request, stamp, tokens, write
 
 NOW = datetime(2026, 10, 29, 15, 0, tzinfo=IST)
@@ -425,7 +426,7 @@ def test_a_bad_week_on_the_command_line_is_a_usage_error_naming_the_option(
     result = CliRunner().invoke(app, ["outcomes", "--week", text, "--no-gh"])
     assert result.exit_code == 2, result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
-    flat = " ".join(result.output.split())
+    flat = plain(result.output)  # GitHub Actions styles the `-` of `--week` as its own span
     assert "--week" in flat and said in flat, flat
 
 

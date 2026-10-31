@@ -45,6 +45,7 @@ from tests.test_ui_shell import (
     composited,
     drive,
     fleet_app,
+    highlighted,
     refreshed,
     seed,
     settle,
@@ -101,9 +102,10 @@ def exited(project_id: str, label: str) -> FleetAgentStatus:
 
 
 def cursor(app: FleetApp) -> str:
-    """The selection key of the one row under the keyboard cursor."""
-    (row,) = app.query(".cursor").results(Activatable)
-    return row.selection_key
+    """The selection key of the one row the arrows move: the sidebar's one highlight, which a
+    click moves too (``.selected``; the keyboard's own ``.cursor`` is gone, task #77)."""
+    (key,) = highlighted(app)
+    return key
 
 
 # --- what counts as live --------------------------------------------------------------------

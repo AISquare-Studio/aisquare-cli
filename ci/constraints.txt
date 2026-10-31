@@ -16,4 +16,4 @@ mypy==2.4.0
 # neither reads uv.lock: pip resolved truststore 0.10.5 against the lock's 0.10.4 (review
 # of #403, n8). Both installs take this file. Move them with the lock.
 truststore==0.10.4
-certifi==2026.10.19
+certifi==2026.10.23

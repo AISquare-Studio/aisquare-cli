@@ -196,3 +196,33 @@ def test_the_first_busy_signal_is_the_one_a_hold_names() -> None:
     busy = reading.busy
     assert busy is not None and busy.name == "memory pressure"
     assert [s.name for s in reading.signals if s.busy] == ["memory pressure", "thermal"]
+
+
+# --- review of #12: no probe raises -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("avg60", ["1.2.3", ".", "4.5.6.7"])
+def test_a_malformed_cpu_pressure_is_no_reading_and_no_probe_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, avg60: str
+) -> None:
+    """Review of #12 (2): ``float()`` on ``avg60=1.2.3`` raised ``ValueError`` through
+    ``cpu_load`` and ``read``, and a Linux spawn in auto mode crashed. Not a number is no
+    reading; and whatever a probe does, ``read`` answers, every signal ``unknown``."""
+    psi = tmp_path / "cpu"
+    psi.write_text(f"some avg10=0.00 avg60={avg60} avg300=0.00 total=0\n", encoding="ascii")
+    assert load.psi_some_avg60(psi) is None
+    monkeypatch.setattr(load, "PSI_CPU", psi)
+    monkeypatch.setattr(os, "getloadavg", lambda: (1.0, 2.0, 3.0), raising=False)
+    monkeypatch.setattr(os, "cpu_count", lambda: 8)
+    assert REAL_CPU_LOAD() == load.CpuLoad(2.0, 8, None)
+
+    def broken() -> object:
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(os, "cpu_count", broken)
+    assert REAL_CPU_LOAD() == load.UNKNOWN_LOAD
+    monkeypatch.setattr(load, "cpu_load", broken)
+    monkeypatch.setattr(memory, "headroom", broken)
+    monkeypatch.setattr(load, "thermal", broken)
+    reading = load.read(DEFAULTS)
+    assert set(_verdicts(reading).values()) == {"unknown"} and reading.busy is None

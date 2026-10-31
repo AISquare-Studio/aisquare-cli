@@ -44,6 +44,8 @@ project = fleet_suite.project
 later = autostop_suite.later
 
 NOW = datetime(2026, 10, 30, 22, 0, tzinfo=UTC)
+#: The real CPU probe, taken at import, before the suite's ``calm_machine`` replaces it.
+REAL_CPU_LOAD = load.cpu_load
 #: The owner's box when the task was written: 3.86 per logical CPU.
 OWNERS_LOAD = (54.0, 14)
 
@@ -330,6 +332,68 @@ def test_a_signal_turned_off_holds_nothing(
     _settings(monkeypatch, busy_load_per_cpu=0)
     machine.busy()
     assert len([_coder(project) for _ in range(5)]) == 5
+
+
+def test_a_malformed_cpu_pressure_file_never_crashes_a_spawn(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #12 (2), through the real CPU probe: a Linux ``/proc/pressure/cpu`` whose
+    ``avg60`` is not a number crashed every auto-mode spawn with ``ValueError``."""
+    psi = tmp_path / "cpu"
+    psi.write_text("some avg10=0.00 avg60=1.2.3 avg300=0.00 total=0\n", encoding="ascii")
+    monkeypatch.setattr(load, "PSI_CPU", psi)
+    monkeypatch.setattr(load, "cpu_load", REAL_CPU_LOAD)
+    monkeypatch.setattr("os.getloadavg", lambda: (0.5, 0.5, 0.5), raising=False)
+    monkeypatch.setattr("os.cpu_count", lambda: 8)
+    assert [_coder(project).label for _ in range(4)] == [
+        "coder-1",
+        "coder-2",
+        "coder-3",
+        "coder-4",
+    ]
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        '{"held_at": "2026-10-30T22:00:00", "until": "2026-10-30T22:05:00", "signal": "x"}',
+        '{"held_at": "2026-10-30T22:00:00+00:00", "until": "2026-10-30T22:05:00", "signal": "x"}',
+        '{"held_at": "yesterday", "until": "2026-10-30T22:05:00+00:00", "signal": "x"}',
+        '{"held_at": 7, "until": null, "signal": "x"}',
+        '["not", "a", "hold"]',
+        "not json",
+    ],
+)
+def test_a_naive_or_unparsable_hold_is_unreadable_and_crashes_nothing(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+    recorded: str,
+) -> None:
+    """Review of #12 (3): a hold with a naive time was taken as read, and ``now < until``
+    raised ``TypeError`` in the spawn, ``fleet capacity`` and the watcher. Unreadable, it is
+    no hold: the probes answer, and a busy machine writes a readable hold over it."""
+    key = "fleet:busy_hold:" + project.id
+    _three(project)
+    with store_session() as store:
+        store.set_meta(key, recorded)
+    assert fleet_service.Hold.from_meta(project.id, recorded) is None
+    assert fleet_service.holds() == [] and fleet_service.freed_holds(NOW) == []
+    assert fleet_service.capacity().holds == ()
+    assert _coder(project).label == "coder-4", "calm: admitted, the probes answered"
+    machine.busy()
+    with pytest.raises(fleet_service.CapacityRefused) as held:
+        _coder(project)
+    assert held.value.code == "capacity_busy"
+    [hold] = fleet_service.holds()
+    assert (hold.held_at, hold.until) == (NOW, NOW + timedelta(minutes=5)), "written over it"
 
 
 # --- the hard floors and numeric mode --------------------------------------------------------

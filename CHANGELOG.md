@@ -29,7 +29,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     manager retries without polling. One wake per hold.
   - **`fleet capacity` and the doctor's `fleet capacity` row list each signal** with its
     value, threshold and verdict (`busy`, `ok`, `off`, `unknown`), plus the holds in force.
-    The doctor warns while auto admission reads the machine busy.
+    A busy machine is reported there, not warned about: the doctor row stays ok, and still
+    warns, as before, when a spawn would be refused or memory pressure is at `warn`.
   - **The hard floors still apply in auto mode, below 3 agents too:** `min_free_mb`,
     critical memory pressure, `max_agents_total` and a group's `max_agents`. A replacement
     of a running agent (`restart`, `switch`) is never held.

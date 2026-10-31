@@ -122,17 +122,20 @@ class Reading:
         return next((signal for signal in self.signals if signal.busy), None)
 
 
+UNKNOWN_LOAD = CpuLoad(None, None, None)
+UNKNOWN_THERMAL = Thermal(None, "unknown")
+
+
 def cpu_load() -> CpuLoad:
     """This machine's CPU load now. Never raises; ``None`` for what cannot be read."""
     try:
-        load5: float | None = os.getloadavg()[1]
-    except (AttributeError, OSError):  # Windows has no load average
-        load5 = None
-    try:
-        cpus = os.cpu_count()
-    except Exception:  # a count is an answer or unknown, never a crash at spawn
-        cpus = None
-    return CpuLoad(load5, cpus, psi_some_avg60(PSI_CPU))
+        try:
+            load5: float | None = os.getloadavg()[1]
+        except (AttributeError, OSError):  # Windows has no load average
+            load5 = None
+        return CpuLoad(load5, os.cpu_count(), psi_some_avg60(PSI_CPU))
+    except Exception:  # a probe is an answer or unknown, never a crash at spawn
+        return UNKNOWN_LOAD
 
 
 def psi_some_avg60(psi: Path) -> float | None:
@@ -142,7 +145,10 @@ def psi_some_avg60(psi: Path) -> float | None:
     except OSError:
         return None
     found = re.search(r"^some\b.*?\bavg60=([0-9.]+)", text, re.MULTILINE)
-    return float(found.group(1)) if found else None
+    try:
+        return float(found.group(1)) if found else None
+    except ValueError:  # `avg60=1.2.3`, `avg60=.`: not a number, so no reading
+        return None
 
 
 def thermal() -> Thermal:
@@ -152,7 +158,7 @@ def thermal() -> Thermal:
     try:
         return darwin_thermal(_notifyutil)
     except Exception:  # a probe is an answer or unknown, never a crash at spawn
-        return Thermal(None, "unknown")
+        return UNKNOWN_THERMAL
 
 
 def darwin_thermal(notifyutil: Callable[[str], str | None]) -> Thermal:
@@ -160,7 +166,7 @@ def darwin_thermal(notifyutil: Callable[[str], str | None]) -> Thermal:
     said = notifyutil(_THERMAL_KEY) or ""
     found = re.search(rf"^{re.escape(_THERMAL_KEY)}\s+(\d+)\s*$", said.strip(), re.MULTILINE)
     if found is None:
-        return Thermal(None, "unknown")
+        return UNKNOWN_THERMAL
     return Thermal(int(found.group(1)), "notifyutil")
 
 
@@ -181,8 +187,12 @@ def _notifyutil(key: str) -> str | None:
 
 
 def read(thresholds: Thresholds) -> Reading:
-    """Every probe, now, against ``thresholds``. Never raises."""
-    return evaluate(cpu_load(), memory.headroom(), thermal(), thresholds)
+    """Every probe, now, against ``thresholds``. Never raises: whatever breaks reads every
+    signal ``unknown``, and an unknown signal holds nothing."""
+    try:
+        return evaluate(cpu_load(), memory.headroom(), thermal(), thresholds)
+    except Exception:  # a probe is an answer or unknown, never a crash at spawn
+        return evaluate(UNKNOWN_LOAD, memory.UNKNOWN, UNKNOWN_THERMAL, thresholds)
 
 
 def evaluate(

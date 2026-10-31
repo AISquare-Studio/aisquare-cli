@@ -5526,17 +5526,20 @@ class Hold:
 
     @classmethod
     def from_meta(cls, project_id: str, text: str) -> Hold | None:
-        """The hold ``text`` records, or ``None`` for one that cannot be read (no hold)."""
+        """The hold ``text`` records, or ``None`` for one that cannot be read (no hold): not
+        JSON, a field missing, or a time that is not an ISO time with its offset. A naive
+        time cannot be compared with the clock's, and taken as read it crashed the spawn,
+        ``fleet capacity`` and the watcher; unreadable, the probes answer instead."""
         try:
             said = json.loads(text)
-            return cls(
-                project_id,
-                datetime.fromisoformat(said["held_at"]),
-                datetime.fromisoformat(said["until"]),
-                str(said["signal"]),
-            )
+            held_at = datetime.fromisoformat(said["held_at"])
+            until = datetime.fromisoformat(said["until"])
+            signal = str(said["signal"])
         except (ValueError, KeyError, TypeError):
             return None
+        if held_at.utcoffset() is None or until.utcoffset() is None:
+            return None
+        return cls(project_id, held_at, until, signal)
 
 
 def holds() -> list[Hold]:

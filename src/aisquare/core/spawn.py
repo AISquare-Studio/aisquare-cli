@@ -56,6 +56,10 @@ otherwise inherit a live identity:
     our own. A background worker of ours is not an agent session and has no
     business wearing one's identity; it also outlives the pane whose hook
     started it, which is the whole point of detaching it.
+  * ``services/claude_accounts.py::_run_token_refresh`` — ``claude mcp get``
+    of a server no one has, on an account whose token went stale: Claude
+    Code's own startup refreshes the token. No model request; a chore on the
+    account, in a plain session's environment, so no identity.
 
 Excluded, nothing stripped — these are not model processes at all, and
 narrowing their environment would be change without a reason:
@@ -295,6 +299,13 @@ SEAMS: dict[str, Seam] = {
         "the foreground Claude Code session `aisquare accounts add` waits on so the user can "
         "sign in — the same plain session as `accounts run`, and identity-stripped for the "
         "same reason",
+        strips_identity=True,
+    ),
+    "aisquare/services/claude_accounts.py::_run_token_refresh": Seam(
+        EXCLUDED,
+        "`claude mcp get` of a server no one has, on an account whose token went stale: Claude "
+        "Code's startup refreshes the token, with no model request — a chore, not a session, "
+        "run in a plain session's environment (`session_env`), identity-stripped",
         strips_identity=True,
     ),
     "aisquare/core/claude_accounts.py::_ask_keychain": Seam(

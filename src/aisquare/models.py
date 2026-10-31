@@ -299,6 +299,8 @@ class UsageCause(StrEnum):
     token_missing = "token_missing"
     token_expired = "token_expired"
     token_rejected = "token_rejected"
+    # one of the two above, while Claude Code is asked to refresh the token (not a log-in yet)
+    token_refreshing = "token_refreshing"
 
     # the macOS Keychain would not say
     keychain_locked = "keychain_locked"
@@ -375,6 +377,9 @@ class ClaudeUsage(BaseModel):
     """No usage request is sent for this account before then: the endpoint's
     ``Retry-After``, or an exponential default when it sent none. Recorded on disk, so
     every ``aisquare`` process, the Accounts page and ``--refresh`` wait it out too."""
+    refresh_retry_at: datetime | None = None
+    """A stale token's quiet refresh (``token_refreshing``) failed once: the one retry is due
+    then, made by the first read at or after it. ``None`` while the first is still running."""
     recorded_elsewhere: bool = False
     """Not taken by this process: its Keychain is locked (an SSH login into the Mac), so the
     figure is one another process recorded for the login a process that could read the

@@ -995,6 +995,7 @@ class UsageRepoRow(BaseModel):
 
     repo_id: str
     name: str
+    """Its actual name: the git remote's, else the checkout folder's — never a nickname."""
     tokens: UsageTokens = Field(default_factory=UsageTokens)
     cost_usd: float = 0.0
     sessions: int = 0

@@ -169,6 +169,67 @@ def test_a_button_its_bar_moves_is_guarded_again_and_one_left_in_place_is_not(
     assert moved == [], "the click on the button that had just moved pressed it"
 
 
+def test_a_press_that_reaches_the_app_with_the_pop_is_ignored() -> None:
+    """Re-review of #478 (seq 5737): a dialog closing off the button puts the guard up until
+    the frame that shows the button again. A press queued at the app in the same turn as
+    the pop was aimed at the dialog: ignored, and the focus stays where it was."""
+
+    async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], str | None, list[str]]:
+        button = await _shown(pilot, host)
+        where = button.region.offset
+        host.query_one("#neighbour", Button).focus()
+        await host.push_screen(Dialog())
+        await settle_page(host)
+        host.pop_screen()
+        guard_paint.queue_press(host, where)
+        await settle_page(host)
+        return host.pressed, host.focused_id(), host.notices()
+
+    assert drive(go) == ([], "neighbour", [])
+
+
+def test_a_press_right_after_the_frame_that_uncovers_the_button_presses_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UI tester on #8 (seq 5724, PR #478 at 26643fa7): Stop, clicked once the dialog over it
+    had visibly gone, was dropped as late as 0.36 s after. The screen beneath repaints on its
+    resume with no layout pass of its own, and the guard came down on the layout pass it
+    asked for, a frame or more later. A press that reaches the app right after the frame
+    that shows the button again presses it. No settling between the pop and the press."""
+    frame = guard_paint.next_frame(monkeypatch)
+
+    async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], list[str]]:
+        button = await _shown(pilot, host)
+        where = button.region.offset
+        await host.push_screen(Dialog())
+        await settle_page(host)
+        host.pop_screen()
+        frame.then(lambda: guard_paint.queue_press(host, where))
+        await settle_page(host)
+        return host.pressed, host.notices()
+
+    assert drive(go) == (["restart"], [])
+
+
+def test_the_guard_comes_down_after_an_installed_dialog_closes() -> None:
+    """Re-review of #478 (seq 5737): Textual prunes a dialog it does not keep, and the prune
+    lays out the screen beneath, which takes a guard down on its own. An installed dialog is
+    kept, and nothing lays the screen out on its pop. The guard asks for that pass itself."""
+
+    async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], bool]:
+        button = await _shown(pilot, host)
+        host.install_screen(Dialog(), name="dialog")
+        await host.push_screen("dialog")
+        await settle_page(host)
+        host.pop_screen()
+        await settle_page(host)
+        await pilot.click(button)
+        await settle_page(host)
+        return host.pressed, button.guarding
+
+    assert drive(go) == (["restart"], False)
+
+
 def test_a_dialog_closing_off_the_button_guards_it_again(hold: PaintHold) -> None:
     async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], list[str]]:
         button = await _shown(pilot, host)

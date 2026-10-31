@@ -112,7 +112,7 @@ from aisquare.services.captain import state as captain_state
 from tests import guard_paint, toast_log
 from tests.fleet_fakes import list_agents_as
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
-from tests.ui_workers import settle_page, settle_until_held, watch_until
+from tests.ui_workers import released, settle_page, settle_until_held, watch_until
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -5408,6 +5408,44 @@ def test_a_press_waiting_as_the_view_switches_in_acts_on_nothing_and_one_after_i
     assert typing_reaches, "an ignored press took the keyboard off the pane"
     assert not [toast for toast in told if "ignored a click" in toast], told
     assert acted == [("restart", "prj_b")], "the click once the view is painted acts at once"
+
+
+def test_stop_clicked_right_after_its_dialog_closes_opens_it_again(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UI tester on #8 (seq 5724, PR #478 at 26643fa7): Esc or Cancel on the Stop dialog, then
+    a click on Stop once the dialog had visibly gone, was often dropped, as late as 0.36 s
+    after. A click that reaches the app right after the frame that shows the view again
+    acts: the dialog opens again. No settling between the close and the click."""
+    seed(tmp_path, ("prj_b", "beta", "brave-lynx"))
+    one = status("prj_b", "manager", "manager", "working")
+    script["prj_b"] = [one]
+    acted = _acting_fleet(monkeypatch, script, one)
+    frame = guard_paint.next_frame(monkeypatch)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[str]]:
+        app = fleet_app(pilot)
+        told = toast_log.record(app)
+        await pilot.click(row_for(app, "agt_b_manager"))
+        await settle(app)
+        view = app.current_view()
+        assert isinstance(view, AgentView)
+        stop = view.query_one("#agent-stop", Button)
+        where = stop.region.offset
+        stop.press()
+        await settle(app)
+        await released(pilot, stop)  # Button's own 0.2 s after a press, not the guard
+        dialog = app.screen
+        assert isinstance(dialog, StopAgentScreen)
+        dialog.action_cancel()  # what Esc and Cancel run
+        frame.then(lambda: guard_paint.queue_press(app, where))
+        await settle(app)
+        return type(app.screen).__name__, list(told)
+
+    screen, told = drive(go, notifications=True)
+    assert screen == "StopAgentScreen", "the click right after the dialog closed was dropped"
+    assert not [toast for toast in told if "ignored a click" in toast], told
+    assert acted == []
 
 
 def test_enter_on_a_focused_restart_is_not_guarded(

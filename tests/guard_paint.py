@@ -11,18 +11,22 @@ its press, so a test about a press that lands while the guard is up holds the pa
 A press that reaches the app before a real paint, as on 2026-10-19, is made with
 :func:`busy` and :func:`queue_press`: the app is kept busy, as it is while it awaits the
 mount of a view, the press waits in its queue as the terminal's driver puts it there, and
-the screen lays out and paints apart.
+the screen lays out and paints apart. :func:`next_frame` runs a step right after the next
+frame, before the app reads another message: a press in the gap between a frame and the
+next one.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 from textual import events
 from textual.app import App
 from textual.geometry import Offset
+from textual.screen import Screen
 
 from aisquare.cli.ui.click_guard import GuardedButton
 
@@ -69,6 +73,34 @@ def busy(app: App[Any]) -> asyncio.Event:
     free = asyncio.Event()
     app.call_later(free.wait)
     return free
+
+
+class NextFrame:
+    """Steps to run once the current screen's next frame is out (:func:`next_frame`)."""
+
+    def __init__(self) -> None:
+        self.steps: list[Callable[[], None]] = []
+
+    def then(self, step: Callable[[], None]) -> None:
+        self.steps.append(step)
+
+
+def next_frame(monkeypatch: pytest.MonkeyPatch) -> NextFrame:
+    """Run each step handed to the result on the loop's turn after the current screen next
+    paints (``Screen._compositor_refresh``): after the whole update that painted it, and
+    before the app reads another message."""
+    frame = NextFrame()
+    compositor_refresh = Screen._compositor_refresh
+
+    def painted(screen: Screen[Any]) -> None:
+        compositor_refresh(screen)
+        if screen.is_current:
+            loop = asyncio.get_running_loop()
+            while frame.steps:
+                loop.call_soon(frame.steps.pop(0))
+
+    monkeypatch.setattr(Screen, "_compositor_refresh", painted)
+    return frame
 
 
 def queue_press(app: App[Any], where: Offset) -> None:

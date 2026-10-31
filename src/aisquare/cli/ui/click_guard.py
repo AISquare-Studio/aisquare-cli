@@ -71,16 +71,17 @@ class GuardedButton(Button):
         elif not self._unpainted:
             return
         self._unpainted = False
-        # This pass has painted the change: ``Screen._refresh_layout`` paints, then publishes
-        # (a turn later while Textual batches updates), and the rest of the screen's update
-        # runs before the app reads another message. A press the app had queued by now was
-        # made on what the screen showed before: the app busy mounting the view that put
-        # this button under the pointer is the 2026-10-19 case. So the guard comes down
-        # from the back of the app's queue, and every input ahead of it is judged with the
-        # guard up first. Not ``call_after_refresh``: that runs after the screen's NEXT
-        # refresh, behind every callback queued there, and on the Settings hub that was the
-        # restyle of the focus moving to its first link, up to a second later (ui-tester on
-        # #8, PR #478 at 41569b99).
+        # This pass has painted the change: ``Screen._refresh_layout`` paints, then publishes,
+        # and the rest of the screen's update runs before the app reads another message.
+        # (While Textual batches updates it publishes first and paints on the screen's next
+        # message; a press would have to reach the app in between.) A press the app had
+        # queued by now was made on what the screen showed before: the app busy mounting
+        # the view that put this button under the pointer is the 2026-10-19 case. So the
+        # guard comes down from the back of the app's queue, and every input ahead of it is
+        # judged with the guard up first. Not ``call_after_refresh``: that runs after the
+        # screen's NEXT refresh, behind every callback queued there, and on the Settings hub
+        # that was the restyle of the focus moving to its first link, up to a second later
+        # (UI tester on #8, PR #478 at 41569b99).
         self.app.call_later(self._painted, self._change)
 
     def _screen_changed(self, screen: Screen[Any]) -> None:
@@ -92,7 +93,12 @@ class GuardedButton(Button):
         the pointer just changed in a way the button's own place does not show."""
         self._put_up()
         self._unpainted = True
-        self.refresh(layout=True)  # that pass, asked for now: nothing may have moved
+        # That pass, asked of the screen itself, now: nothing may have moved. Its own flag is
+        # set at once, so the frame the screen paints next (its resume's repaint, when a
+        # dialog over it closed) is that pass. Asked of the button instead, the request
+        # reached the screen as a message, often after that frame, and the guard stayed up
+        # 0.1-0.36 s after the dialog had visibly gone (UI tester on #8, 26643fa7).
+        self.screen.refresh(layout=True)
 
     def _put_up(self) -> None:
         self._change += 1

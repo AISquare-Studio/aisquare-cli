@@ -211,6 +211,14 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   so `x` asks to stop the agent the arrows just reached. *Spawn agent* reached by the
   arrows opens on the project whose view is on screen, else the first listed. A held arrow
   does not open every view it passes.
+- **`asq` fades the side that does not have the keyboard.** With focus in the sidebar
+  the content (an agent's pane, or a page such as Settings) is drawn slightly fainter;
+  with focus in the content, the sidebar is. The side your keys go to is drawn as
+  before, and the divider still lights while the sidebar has focus. Typing meant for an
+  agent used to land on the sidebar's one-key bindings with nothing but that one-column
+  divider to say so. In a faded pane, text and backgrounds in the 16 basic terminal
+  colours keep their strength (Textual's `opacity` blends those by number); everything
+  else fades.
 
 ### Fixed
 

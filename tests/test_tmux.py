@@ -114,6 +114,7 @@ def _facts_line(**overrides: str) -> str:
         "mouse_all_flag": "0",
         "start_time": "1790343472",
         "window_activity": "1790350000",
+        tmux_module.SIZE_OWNER_OPTION: "",
         "pane_title": "fedora",
     }
     values.update(overrides)

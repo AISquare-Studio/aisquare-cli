@@ -171,7 +171,7 @@ from aisquare.cli.ui.views.settings_hub import SettingsHubView
 from aisquare.cli.ui.views.settings_remote import RemoteChip
 from aisquare.cli.ui.views.usage_stats import UsageStatsView
 from aisquare.cli.ui.views.welcome import WelcomeView
-from aisquare.core import clipboard, experimental, feature_use, paths
+from aisquare.core import clipboard, experimental, feature_use, instances, paths
 from aisquare.core import sharing as usage_share_core
 from aisquare.core.console import stderr_console
 from aisquare.core.feature_use import view_feature
@@ -450,6 +450,9 @@ class _FleetRead:
     before Settings switched it on found nothing of it, which is not "no captain"."""
     fleet_paused: frozenset[str] = frozenset()
     """The projects whose ``fleet-paused`` signal reads on (``FleetSnapshot.fleet_paused``)."""
+    asqs: tuple[instances.Instance, ...] | None = None
+    """The asqs live on this home (#20), for the chip under the status line; ``None`` when the
+    read did not ask (a read a test builds) or the registry could not be read."""
 
 
 def _read_frame(
@@ -462,7 +465,19 @@ def _read_frame(
     home board and row when the captain is on (``experimental.captain``). ``viewed`` and
     ``scope`` as for :func:`_read_fleet`."""
     read = _read_fleet(show_captured, viewed, scope, captain=captain)
-    return replace(_read_captain(read), captain_asked=True) if captain else read
+    read = replace(_read_captain(read), captain_asked=True) if captain else read
+    return replace(read, asqs=_live_asqs())
+
+
+def _live_asqs() -> tuple[instances.Instance, ...] | None:
+    """The asqs live on this home (``core.instances``), read with each frame on the read's
+    thread, so the chip (#20) costs no timer of its own. Read only: a stale record is pruned by
+    the next asq to start and by every running asq's heartbeat (``core.instances``), never by a
+    look. ``None`` when the registry could not be read."""
+    try:
+        return tuple(instances.live_instances(prune=False))
+    except Exception:  # the chip is not worth a frame
+        return None
 
 
 def _read_fleet(
@@ -587,6 +602,15 @@ class RemoteNews(Message):
         self.text = text
         self.trouble = trouble
         self.done = done
+
+
+class QuitAsked(Message):
+    """Another asq asked this one to quit, to start in its place (``cli.ui.instance_gate``):
+    posted from the registration's beat thread (``core.instances``)."""
+
+    def __init__(self, request: instances.QuitRequest) -> None:
+        super().__init__()
+        self.request = request
 
 
 class HelpScreen(ModalScreen[None]):
@@ -1248,6 +1272,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # for actions the receiver then refused one by one (review of #240, F6).
         if self.captain_on:
             listen_for_ui(self)
+        # Another asq's request to quit (#17) reaches the app from here on: before, there is
+        # no loop to post to, and the request waits in its file.
+        registration = instances.this_registration()
+        if registration is not None:
+            registration.deliver_quits_to(lambda request: self.post_message(QuitAsked(request)))
 
     async def on_captain_switched(self, event: CaptainSwitched) -> None:
         """Settings' *Captain* box (#33): all that :attr:`captain_on` gates, at once, with no
@@ -1454,6 +1483,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     def on_unmount(self) -> None:
         stop_listening_for_ui(self)  # first: no ui action lands on a shell that is quitting
+        registration = instances.this_registration()
+        if registration is not None:
+            registration.deliver_quits_to(None)
         # The TUI is leaving: no ngrok may outlive it. The saved switches stay, so a
         # Remote that was on comes back on at the next start (restore()). It stops on a
         # thread of its own, started first so the saves below overlap it; run_ui waits
@@ -1631,6 +1663,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         after a wait (738d5594). ``None`` (the first frame, which no call asked for) asks."""
         sidebar = self.sidebar
         self.capturing = read.capturing
+        if read.asqs is not None:  # read beside the store, so said whatever the store said
+            mine = instances.this_instance()
+            sidebar.show_instances(read.asqs, None if mine is None else mine.id)
         if read.error is not None:  # the store is briefly unavailable — keep what is shown
             self.store_error = read.error
             if self.snapshot is None:
@@ -3824,6 +3859,24 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     hand_off: tuple[str, ...] | None = None
     """The ``aisquare`` command this terminal goes to when asq quits (``run_ui``)."""
 
+    quit_asked_by: instances.QuitRequest | None = None
+    """The asq that asked this one to quit (:class:`QuitAsked`), for ``run_ui`` to say so in
+    this terminal once the screen is gone."""
+
+    async def on_quit_asked(self, event: QuitAsked) -> None:
+        """Another asq, of another release, asked this one to quit to start in its place
+        (#17): quit as ``q`` does, its refusals included (a restart of the fleet still
+        running), which the asker waits out and then says."""
+        self.notify(
+            f"{event.request.who} asked this asq to quit, to start in its place",
+            severity="warning",
+            timeout=10,
+            markup=False,
+        )
+        await self.action_quit()
+        if self._exit:  # not when the quit was refused: a quit later is the person's own
+            self.quit_asked_by = event.request
+
     def on_doctor_view_hand_off(self, event: DoctorView.HandOff) -> None:
         """Update or Uninstall in the Doctor view: quit, and let ``run_ui`` hand over.
 
@@ -3852,6 +3905,18 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         running = self._work_running(_writing_workers())
         if running is not None:
             self.notify(f"{running} is still running — try again when it ends", severity="warning")
+            return
+        button = _HANDED_OVER.get(event.args[0], event.args[0])
+        # The others as the registration's beat thread last read them: the UI thread reads no
+        # folder (review of #462). An asq that started since is the command's to refuse.
+        registration = instances.this_registration()
+        others = () if registration is None else tuple(i.label for i in registration.others)
+        refusal = lifecycle_service.asqs_refusal(
+            event.args[0], others, again=f"press {button} again"
+        )
+        if refusal is not None:
+            # Refused here as the command refuses it (#17), before this asq quits for nothing.
+            self.notify(refusal, severity="warning", timeout=10, markup=False)
             return
         self.hand_off = event.args
         self._hand_off_since = _hand_off_clock()
@@ -4171,19 +4236,53 @@ def run_ui(**options: Any) -> None:
     wait, so a quit at once keeps it; an Update or Uninstall it drops is said as it quits
     (:func:`_hand_off_undone`). A hangup or a SIGTERM ends the process as ever, its ngrok
     first (``ngrok_ends_with``).
+
+    Before anything, the instance gate (``instance_gate.admit``, #17): beside a live asq of
+    another release this one starts nothing, unless that one quits on a yes. Passed, it is
+    registered until the waits above are over, and leaves the registry before a hand-over.
     """
+    from aisquare.cli.ui import instance_gate
+
+    registration = instance_gate.admit()
+    try:
+        hand_off = _run_registered(registration, options)
+    finally:
+        if registration is not None:
+            registration.deregister()
+    # The terminal is ours again, and Remote, its ngrok, the panel's writes, the phones' and
+    # the pushes are done: give it to the command, whose exec skips what an exit would run.
+    if hand_off is not None:
+        from aisquare.core import selfcli
+
+        selfcli.exec_self(hand_off)
+
+
+def _run_registered(
+    registration: instances.Registration | None, options: dict[str, Any]
+) -> tuple[str, ...] | None:
+    """:func:`run_ui` once the gate is passed: the app, run, and the waits after it; the
+    command it hands over to, if one."""
     from aisquare.services import remote_server
 
     # The release check runs in the asq a person opens, never in an app a test builds unless
     # the test passes one: each FleetApp started a check worker and an hourly ask, one more
     # thread worker beside the reads the UI tests time (Windows CI on bff5c05e).
     app = FleetApp(**{"release_check": updates_service.check_for_release, **options})
+    if registration is not None:
+        registration.start()  # the heartbeat, and the look for another asq's quit request
     with ngrok_ends_with():
         app.run()
         # Read with getattr so an app still needs only `run()`, `unsaved` and `remote` to be
         # run here.
         hand_off = getattr(app, "hand_off", None)
         undone = None if hand_off is None else _hand_off_undone(hand_off)
+        asked = getattr(app, "quit_asked_by", None)
+        if asked is not None:
+            stderr_console().print(
+                f"asq quit: {asked.who} asked it to, to start in its place",
+                markup=False,
+                highlight=False,
+            )
         for line in app.unsaved:
             stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
         try:
@@ -4216,9 +4315,4 @@ def run_ui(**options: Any) -> None:
                 clipboard.flush()
             except KeyboardInterrupt:
                 remote_server._remote_quit_now(undone)
-    # The terminal is ours again, and Remote, its ngrok, the panel's writes, the phones' and
-    # the pushes are done: give it to the command, whose exec skips what an exit would run.
-    if hand_off is not None:
-        from aisquare.core import selfcli
-
-        selfcli.exec_self(hand_off)
+    return hand_off

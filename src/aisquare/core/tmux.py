@@ -82,12 +82,13 @@ import shutil
 import socket as socket_module
 import subprocess
 import sys
+import time
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from aisquare.core import paths
 from aisquare.core.memory import _sysctl
@@ -110,6 +111,20 @@ deleted the one buffer. Verified on 3.7c, and
 ``test_live_two_pastes_at_once_reach_the_pane_they_were_addressed_to`` keeps
 both halves: the fix, and the old behaviour as the control on the mechanism.
 """
+
+SIZE_OWNER_OPTION = "@asq-size-owner"
+"""The window user option naming the asq whose widget sizes the window: the one its owner
+last typed in (``cli.ui.terminal``, "Size between two asq"), as :meth:`SizeOwner.value`.
+
+Two asq processes on one server — the Mac's own and one over SSH into the same Mac — each
+forwarded its own widget size as ``resize-window``, and every attach or resize of one undid
+the other's. A WINDOW option, read in every frame's ``display-message`` (``#{@asq-size-owner}``
+in :data:`_FACTS_FIELDS`), so knowing who sizes a window costs no tmux process. Written only
+when the size changes hands (:meth:`TmuxServer.claim_size`): tmux redraws every attached
+client at any option change, which is why the per-key stamps are not options
+(``core.tmux_control.STAMP_PREFIX``) — one claim sent 139 bytes to an idle 100x24 raw client
+on another session (tmux 3.8), once. Unset and a dead owner both mean "nobody": the asq that
+shows the window sizes it, as before there was an owner."""
 
 #: Per-call suffix, so no two ``load``/``paste`` pairs can cross. The pid
 #: separates processes; the counter separates calls within one (``next`` on an
@@ -255,6 +270,7 @@ _FACTS_FIELDS = (
     "mouse_all_flag",
     "start_time",
     "window_activity",
+    SIZE_OWNER_OPTION,
     "pane_title",
 )
 _FACTS_FORMAT = _SEP.join(f"#{{{name}}}" for name in _FACTS_FIELDS)
@@ -687,6 +703,71 @@ class PaneFacts:
     down; ``None`` when tmux does not say. Asked with the rest for the same reason: the
     remote's needs-you asked whether a pane was quiet in a third process, after two for
     the facts and the start, on every quarter-second poll of an agent action."""
+    size_owner: str = ""
+    """The window's :data:`SIZE_OWNER_OPTION` as tmux holds it — ``""`` when no asq claimed
+    it. Raw: :meth:`SizeOwner.parse` reads it, and whether that asq still runs is the
+    reader's question."""
+
+
+_SIZE_OWNER = re.compile(r"([1-9]\d*)@([A-Za-z0-9._-]+)/([a-z]*)/(\d+)", re.ASCII)
+"""A claim's value. Digits, a hostname's characters, ``/`` and ``@`` only: it is compared
+inside a tmux format (:func:`resize_unless_owned_command`), where ``,`` ``}`` and ``#`` mean
+something."""
+
+
+class SizeOwner(NamedTuple):
+    """The asq that sizes a window (:data:`SIZE_OWNER_OPTION`): ``pid@host/where/stamp``."""
+
+    pid: int
+    host: str
+    """The machine's short name, as that asq read it. Said, never checked: tmux's socket is a
+    file on this machine, so every asq that can claim a window runs here."""
+    where: str
+    """How that asq's terminal reached the machine: ``ssh``, ``mac`` (the Mac's own
+    terminal), or ``local`` — what the other asq's hint names (``cli.ui.terminal``)."""
+    stamp: int
+    """When it took the size (``time.time_ns``): each claim's value is its own."""
+
+    def value(self) -> str:
+        return f"{self.pid}@{self.host}/{self.where}/{self.stamp}"
+
+    @classmethod
+    def parse(cls, text: str) -> SizeOwner | None:
+        """The owner :meth:`value` wrote, or ``None`` for anything else — unset included."""
+        found = _SIZE_OWNER.fullmatch(text.strip())
+        if found is None:
+            return None
+        pid, host, where, stamp = found.groups()
+        return cls(int(pid), host, where, int(stamp))
+
+    @classmethod
+    def claiming(
+        cls,
+        pid: int,
+        *,
+        kind: str | None = None,
+        environ: Mapping[str, str] | None = None,
+        platform: str | None = None,
+    ) -> SizeOwner:
+        """The value asq process ``pid`` claims a window with, now. ``kind`` is that asq's
+        own in the instance registry (``core.instances``: ``ssh`` or ``native``), which knows
+        a tmux whose client attached over SSH; the environment says only how the asq STARTED,
+        and is read only when no registry kind is given."""
+        env = os.environ if environ is None else environ
+        system = sys.platform if platform is None else platform
+        remote = (
+            kind == "ssh"
+            if kind is not None
+            else any(env.get(marker) for marker in ("SSH_CONNECTION", "SSH_TTY"))
+        )
+        if remote:
+            where = "ssh"
+        elif system == "darwin":
+            where = "mac"
+        else:
+            where = "local"
+        host = re.sub(r"[^A-Za-z0-9_-]", "", socket_module.gethostname().split(".")[0])
+        return cls(pid, host or "localhost", where, time.time_ns())
 
 
 @dataclass(frozen=True)
@@ -788,6 +869,7 @@ def _facts(line: str) -> PaneFacts:
         mouse_drag=values["mouse_button_flag"] == "1" or values["mouse_all_flag"] == "1",
         server_started=_epoch(values["start_time"]),
         last_output=_epoch(values["window_activity"]),
+        size_owner=values[SIZE_OWNER_OPTION],
     )
 
 
@@ -829,6 +911,53 @@ def frame_bound(scrollback: int, height: int | None) -> int | None:
     frame is exactly the screen already.
     """
     return height if scrollback and height is not None and height > 0 else None
+
+
+def resize_command(pane_id: str, width: int, height: int) -> list[str]:
+    """``resize-window`` of the pane's window, which also pins it to manual sizing."""
+    return ["resize-window", "-t", pane_id, "-x", str(max(1, width)), "-y", str(max(1, height))]
+
+
+_HELD = f"#{{{SIZE_OWNER_OPTION}}}"
+"""The window's claim, as a format reads it."""
+
+
+def resize_unless_owned_command(
+    pane_id: str, width: int, height: int, owner_pid: int, gone: str | None
+) -> list[str]:
+    """A ``resize-window`` that tmux runs only while the window's :data:`SIZE_OWNER_OPTION` is
+    unset, names asq ``owner_pid``, or still holds ``gone`` — a claim the caller saw to be an
+    ended asq's; otherwise the claim is printed. tmux decides as it runs it (``if-shell -F``,
+    no shell), so a claim that lands after the caller last looked is never undone: asked
+    first and resized on the answer, a resize sent on a "nobody" read before another asq's
+    claim landed after it, and the window kept that size (tester of #463, 7 in 121 runs).
+
+    Never down the control client's pipe: there the command ``if-shell`` runs answers in a
+    ``%begin``/``%end`` block of its own, and only when the condition holds (measured on
+    3.8), so how many answers come would depend on the claim. ``gone`` is a value
+    :meth:`SizeOwner.parse` read, so nothing in it means anything in a format."""
+    if gone is not None and SizeOwner.parse(gone) is None:
+        gone = None
+    held = _HELD
+    sizable = f"#{{||:#{{==:{held},}},#{{m:{owner_pid}@*,{held}}}}}"
+    if gone is not None:
+        sizable = f"#{{||:{sizable},#{{==:{held},{gone.strip()}}}}}"
+    resize = " ".join(resize_command(pane_id, width, height))
+    refused = f"display-message -p -t {pane_id} '{held}'"
+    return ["if-shell", "-F", "-t", pane_id, sizable, resize, refused]
+
+
+def size_claim_commands(
+    pane_id: str, owner: SizeOwner, width: int, height: int
+) -> tuple[list[str], list[str]]:
+    """The two commands of a size claim, chained wherever they are sent: ``owner`` named in
+    :data:`SIZE_OWNER_OPTION`, then the window sized to its widget — always, even to the size
+    the claimer's last frame showed: that frame can be older than another asq's resize, and a
+    claim that trusted it left the window at the other's size for good. A resize to the size
+    a window has changes nothing in it. The value is digits last, so it never ends in ``;``
+    (:func:`_data_arg`)."""
+    claim = ["set-option", "-w", "-t", pane_id, SIZE_OWNER_OPTION, owner.value()]
+    return claim, resize_command(pane_id, width, height)
 
 
 def frame_commands(
@@ -1919,6 +2048,20 @@ class TmuxServer:
 
     def resize(self, pane_id: str, width: int, height: int) -> None:
         """Size the pane's window to the pane the UI is showing it in."""
-        self.run(
-            "resize-window", "-t", pane_id, "-x", str(max(1, width)), "-y", str(max(1, height))
-        )
+        self.run(*resize_command(pane_id, width, height))
+
+    def resize_unless_owned(
+        self, pane_id: str, width: int, height: int, *, owner_pid: int, gone: str | None = None
+    ) -> str | None:
+        """Size the pane's window as :meth:`resize` does — unless another asq has claimed it
+        (:func:`resize_unless_owned_command`, which says when). ``None`` when it was sized;
+        the claim that refused it, as tmux holds it, when not. One process, as a resize."""
+        said = self.run(*resize_unless_owned_command(pane_id, width, height, owner_pid, gone))
+        return said.strip() or None
+
+    def claim_size(self, pane_id: str, owner: SizeOwner, width: int, height: int) -> None:
+        """Name ``owner`` as the asq that sizes the pane's window (:data:`SIZE_OWNER_OPTION`),
+        and size it to ``width`` x ``height``: one process, the resize run only when the claim
+        was (:func:`size_claim_commands`)."""
+        claim, resize = size_claim_commands(pane_id, owner, width, height)
+        self.run(*claim, ";", *resize)

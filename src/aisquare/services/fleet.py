@@ -55,6 +55,7 @@ from aisquare.core import (
     codenames,
     experimental,
     harness,
+    login_session,
     orchestrator,
     paths,
     personas,
@@ -4878,6 +4879,55 @@ def _forget_an_exited_server(
     return forgotten
 
 
+SSH_START_REFUSAL = (
+    "start asq on the Mac first: agents started from an SSH login can't read the Keychain"
+)
+"""Why an SSH login on macOS starts no fleet tmux server (:func:`_refuse_a_server_from_ssh`)."""
+
+
+def _refuse_a_server_from_ssh() -> None:
+    """Refuse to start the fleet's tmux server from an SSH login on macOS (#20).
+
+    A tmux server runs in the security session of the process that started it, and so does
+    every pane it opens (``core.login_session``): one started from an SSH login opens agents
+    that cannot read the Claude Code login in the Keychain, whoever attaches to it later. A server
+    the Mac started is joined from SSH as ever: only the start is refused. Asked once
+    :func:`_before_a_server_starts` read that no server listens, so a spawn into a running
+    server pays nothing for it.
+    """
+    if login_session.remote_session():
+        raise FleetError(
+            f"not started: {SSH_START_REFUSAL}. No fleet tmux server runs yet: start an agent "
+            "in asq at the Mac, and agents start from SSH after that"
+        )
+
+
+def _no_server_listens(answer: SocketAnswer | None) -> bool:
+    """Whether a window opened at a socket that answered ``answer`` (``TmuxServer.listener``)
+    would START a server there: a stale file (``None``) or none (``"gone"``). A listener
+    (``"answers"``) is joined, and a socket that could not be asked (``"unasked"``) is not
+    taken for an empty one. The one rule both askers keep: the start's own check
+    (:func:`_before_a_server_starts`) and ``restart``'s before its stop
+    (:func:`_refuse_a_server_start_from_ssh`)."""
+    return answer != "answers" and answer != "unasked"
+
+
+def _refuse_a_server_start_from_ssh(srv: TmuxServer) -> None:
+    """:func:`_refuse_a_server_from_ssh` where no server listens at ``srv``'s socket, for a
+    caller that must refuse before it stops or records anything: ``restart``, whose contract
+    is that every refusal not depending on the stop comes first. From SSH over a stale socket
+    it recorded the dead row, and only its replacement's spawn refused (review of #464).
+    Asked of the session first: at the machine, or off macOS, no socket is read."""
+    if not login_session.remote_session():
+        return
+    try:
+        answer = srv.listener(srv.socket_path())
+    except TmuxUnavailable:
+        return
+    if _no_server_listens(answer):
+        _refuse_a_server_from_ssh()
+
+
 def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[FleetAgent]:
     """What must hold before anything starts a tmux server at the fleet's socket path, asked in
     this one place; the rows whose exited server's start it forgot. ``srv`` is the fleet's
@@ -4894,11 +4944,16 @@ def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[Flee
     One read of the socket says which, if either, applies. Each asked it, so a check cost
     two connects, and a spawn checks twice (review of #259, round 5). A server listening
     there, the usual case, is one connect and nothing else.
+
+    Where none listens, an SSH login on macOS starts none (:func:`_refuse_a_server_from_ssh`,
+    #20), before anything is written.
     """
     try:
         answer = srv.listener(srv.socket_path())
     except TmuxUnavailable:
         return []  # no POSIX uid: no tmux server can exist here
+    if _no_server_listens(answer):  # this one would start it
+        _refuse_a_server_from_ssh()
     reads = tmux_core.SocketReads()  # that answer, for every row recorded at the path
     reads.heard_listener(srv, None, answer)
     if answer is None:
@@ -9867,6 +9922,10 @@ def restart(
         choice = claude_accounts_service.choose(
             _account_wanted(account, slot), role=runs_as, project=project
         )
+        # The replacement's spawn opens its window where no server may listen: from SSH on
+        # macOS it would refuse to start one there, so the restart refuses now, with the row
+        # and its last screen as they were (#20; review of #464).
+        _refuse_a_server_start_from_ssh(server())
     except (FleetError, claude_accounts_service.NoSuchAccount) as exc:
         raise FleetError(f"cannot restart {label!r}: {exc}") from exc
     # The row's own slot is no new pin; a take-over's account is the human's choice.

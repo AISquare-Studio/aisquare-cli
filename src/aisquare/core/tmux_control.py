@@ -94,6 +94,7 @@ from aisquare.core.spawn import tmux_client_env
 from aisquare.core.tmux import (
     MIN_VERSION,
     Capture,
+    SizeOwner,
     TmuxError,
     TmuxServer,
     TmuxTimedOut,
@@ -104,6 +105,7 @@ from aisquare.core.tmux import (
     framed,
     parse_frame,
     paste_buffer_name,
+    size_claim_commands,
 )
 
 CONTROL_MINIMUM: tuple[int, int] = MIN_VERSION
@@ -552,6 +554,16 @@ class ControlClient:
     def command(self, *args: str, done: Done | None = None) -> None:
         """Run one tmux command; ``done`` is delivered its :class:`Reply`."""
         self._pipe_send([(args, done, False)])
+
+    def claim_size(
+        self, pane_id: str, owner: SizeOwner, width: int, height: int, *, done: Done | None = None
+    ) -> None:
+        """:meth:`TmuxServer.claim_size` down the pipe, one chain, ahead of the input that
+        claims it: the key that takes the size starts no tmux process. ``done`` is delivered
+        the resize's answer — the claim's failure, when the claim failed and the resize never
+        ran."""
+        claim, resize = size_claim_commands(pane_id, owner, width, height)
+        self._pipe_send([(claim, None, False), (resize, done, False)], chain=True)
 
     def capture(
         self,

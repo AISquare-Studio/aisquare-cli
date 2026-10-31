@@ -943,6 +943,9 @@ class OutcomeSessionRow(BaseModel):
     """A fleet row ran it (``fleet_agent.session_id``)."""
     first_prompt: bool = False
     """Its fleet row was given a first message (``fleet_agent.first_prompt`` is set)."""
+    spawned_by: str | None = None
+    """Who its fleet row says spawned it: ``user`` (a person: their shell, asq, the phone) or the
+    session that asked for it (``fleet_agent.spawned_by``)."""
     transcript_path: str | None = None
 
 

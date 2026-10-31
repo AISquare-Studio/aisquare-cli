@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from typer.testing import CliRunner
@@ -136,7 +137,15 @@ def _event(project_id: str, kind: str, task_id: str, at: datetime) -> None:
         )
 
 
-def _fleet(session_id: str, project_id: str, role: str, cwd: Path) -> None:
+def _fleet(
+    session_id: str,
+    project_id: str,
+    role: str,
+    cwd: Path,
+    *,
+    label: str | None = None,
+    spawned_by: str | None = None,
+) -> None:
     with store_session() as store:
         store.upsert_session(
             TeamSession(
@@ -149,11 +158,12 @@ def _fleet(session_id: str, project_id: str, role: str, cwd: Path) -> None:
         )
         store.upsert_fleet_agent(
             FleetAgent(
-                id=f"agt_{role}",
+                id=f"agt_{label or role}",
                 project_id=project_id,
-                label=role,
+                label=label or role,
                 role=role,
-                pane_id=f"%{len(role)}",
+                pane_id=f"%{len(label or role)}",
+                spawned_by=spawned_by,
                 session_id=session_id,
                 cwd=cwd,
                 created_at=_at(26, 9),
@@ -388,6 +398,9 @@ def test_the_local_week_starts_at_local_midnight_whatever_utc_says() -> None:
         ("2025-W53", "2025 has no week 53: its weeks are W01 to W52"),
         ("2026-W00", "2026 has no week 0"),
         ("2026-W45", "2026-W45 has not begun: this week is 2026-W44"),
+        ("9999-W52", "9999-W52 has not begun: this week is 2026-W44"),
+        ("0000-W01", "0000-W01 is before 1970: give a week from 1970-W01 on, such as 2026-W44"),
+        ("0001-W01", "0001-W01 is before 1970"),
     ],
 )
 def test_a_bad_week_is_refused_saying_what_is_accepted(text: str, said: str) -> None:
@@ -395,10 +408,25 @@ def test_a_bad_week_is_refused_saying_what_is_accepted(text: str, said: str) -> 
         outcomes.parse_week(text, now=NOW, tz=IST)
 
 
-def test_a_bad_week_on_the_command_line_is_a_usage_error_naming_the_option() -> None:
-    result = CliRunner().invoke(app, ["outcomes", "--week", "yesterday", "--no-gh"])
-    assert result.exit_code == 2
-    assert "--week" in result.output and "is not a week" in result.output
+@pytest.mark.parametrize(
+    ("text", "said"),
+    [
+        ("yesterday", "is not a week"),
+        ("0000-W01", "is before 1970"),
+        ("0001-W01", "is before 1970"),
+        ("9999-W52", "has not begun"),
+    ],
+)
+def test_a_bad_week_on_the_command_line_is_a_usage_error_naming_the_option(
+    text: str, said: str
+) -> None:
+    """Exit 2 with the usual usage error, never a traceback: a year this clock cannot place
+    (0, 1, 9999) crashed with exit 1 (review of 8ad337d7, 2)."""
+    result = CliRunner().invoke(app, ["outcomes", "--week", text, "--no-gh"])
+    assert result.exit_code == 2, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    flat = " ".join(result.output.split())
+    assert "--week" in flat and said in flat, flat
 
 
 def test_turns_either_side_of_local_midnight_land_in_their_own_week(machine: Machine) -> None:
@@ -778,11 +806,48 @@ def test_a_stale_marker_is_ignored(as_human: None) -> None:
     assert prompt_origin.take_origin("late") is None
 
 
-def test_only_claude_codes_own_blocks_are_a_notice() -> None:
+SLASH_COMMAND = (
+    "<command-name>/model</command-name><command-message>model</command-message>"
+    "<command-args>sonnet</command-args>"
+)
+
+
+def test_only_a_task_notification_is_claude_codes_notice_and_a_slash_command_a_persons() -> None:
     notice = "<task-notification><task-id>x</task-id></task-notification>"
-    assert prompt_origin.only_harness_blocks(notice)
-    assert not prompt_origin.only_harness_blocks(notice + " and also fix it")
+    assert prompt_origin.only_task_notifications(notice)
+    assert not prompt_origin.only_task_notifications(notice + " and also fix it")
+    assert prompt_origin.only_harness_blocks(SLASH_COMMAND)
+    assert not prompt_origin.only_task_notifications(SLASH_COMMAND), "a person typed /model"
     assert prompt_origin.origin_of_prompt(notice, notice=True) == "agent:notice"
+
+
+@pytest.mark.parametrize("kind", ["wake", "upkeep", "continuation", "notice"])
+def test_what_no_person_writes_is_an_agents_whoever_sends_it(as_human: None, kind: str) -> None:
+    """The ``aisquare watch`` daemon, asq and a person's ``task done`` send wakes from no agent's
+    environment: the wake is still the agent's (review of 8ad337d7, 1)."""
+    prompt_origin.mark_origin("aisquare: board update", kind)
+    assert prompt_origin.take_origin("aisquare: board update") == f"agent:{kind}"
+    prompt_origin.mark_origin("by hand", kind, by=prompt_origin.HUMAN)
+    assert prompt_origin.take_origin("by hand") == f"agent:{kind}"
+    assert prompt_origin.authored(f"human:{kind}") == f"agent:{kind}"
+    assert prompt_origin.authored("human:tell") == "human:tell"
+
+
+def test_a_spawns_first_message_is_its_spawners(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A person's spawn (``user``, from no agent's environment) is theirs; an agent session's,
+    by its ``--as`` or its environment, and aisquare's own (``usage-limit``) are an agent's."""
+    from aisquare.services import delivery
+
+    for name in ("CLAUDECODE", "AISQUARE_FLEET_AGENT"):
+        monkeypatch.delenv(name, raising=False)
+    assert fleet_service._spawn_author("user") == "human"
+    assert fleet_service._spawn_author("ses-manager") == "agent"
+    assert fleet_service._spawn_author("usage-limit") == "agent"
+    with prompt_origin.sent_by(fleet_service._spawn_author("ses-manager")):
+        delivery.write_prompt_file("agt_01y", "You are a coder.")
+    assert prompt_origin.take_origin("You are a coder.") == "agent:spawn"
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_manager")
+    assert fleet_service._spawn_author("user") == "agent", "a fleet agent's own shell"
 
 
 def test_a_spawns_first_message_file_leaves_a_spawn_marker(as_human: None) -> None:
@@ -906,3 +971,133 @@ def test_a_repository_is_named_in_its_remotes_own_case(machine: Machine) -> None
         "acme/widgetapp",
         "github.com/acme/widgetapp",
     )
+
+
+# --- the reopen of 8ad337d7 --------------------------------------------------------------------
+
+
+def _solo_project(machine: Machine, name: str) -> tuple[Path, str]:
+    repo = machine.repo(name)
+    found = usage_stats.repo_of(repo)
+    assert found is not None
+    with store_session() as store:
+        store.ensure_project(ProjectInfo(id=found[0], root=repo))
+    return repo, found[0]
+
+
+def test_a_recorded_wake_is_an_agents_whatever_its_sender_wrote(machine: Machine) -> None:
+    """Review of 8ad337d7, 1, repro B: one person's prompt, three wakes and a compaction line,
+    as a sender-trusting build recorded them (``human:wake``…): one human turn of five, and the
+    session is directive."""
+    _turn("s-wakes", "prj_w", _at(26, 9), _at(26, 9, 10), origin="human:typed")
+    for hour in (10, 11, 12):
+        _turn("s-wakes", "prj_w", _at(26, hour), _at(26, hour, 5), origin="human:wake")
+    _turn("s-wakes", "prj_w", _at(26, 13), _at(26, 13, 5), origin="human:upkeep")
+    d = _report(use_gh=False).direction
+    assert (d.turns, d.human_turns) == (5, 1)
+    assert d.by_origin == {"agent:wake": 3, "agent:upkeep": 1, "human:typed": 1}
+    assert (d.directive, d.guided, d.collaborative) == (1, 0, 0)
+
+
+def test_an_older_spawn_is_inferred_from_who_the_row_says_spawned_it(machine: Machine) -> None:
+    """The same rule as recording: the row's ``spawned_by`` is ``user`` (a person: shell, asq,
+    phone) or a session (an agent). Inferred, and counted as inferred."""
+    repo, pid = _solo_project(machine, "spawns")
+    for session_id, label, spawner in (
+        (S_COD, "coder-mine", "user"),
+        (S_PLAIN, "coder-managers", "ses-manager-1"),
+    ):
+        machine.session(
+            1,
+            repo,
+            session_id,
+            prompt(_at(26, 10), cwd=repo, text=f"Claim the task, {label}."),
+            request(_at(26, 10, 1), f"{label}-1", cwd=repo),
+        )
+        _fleet(session_id, pid, "coder", repo, label=label, spawned_by=spawner)
+        _turn(session_id, pid, _at(26, 10), _at(26, 10, 30))
+    usage_stats.sweep(now=NOW, tz=IST)
+    d = _report(use_gh=False).direction
+    assert d.by_origin == {"human:spawn": 1, "agent:spawn": 1}
+    assert d.inferred_turns == 2 and d.human_turns == 1
+
+
+def test_a_slash_command_is_a_persons_even_in_a_workers_pane(
+    machine: Machine, tmp_path: Path, as_human: None
+) -> None:
+    """``/model`` is all harness blocks, but a person typed it: not Claude Code's notice, and not
+    a manager's tell either (review of 8ad337d7, 5). Recorded the same way."""
+    from aisquare.services import hooks as hooks_service
+    from tests.projects import add_project
+
+    repo, pid = _solo_project(machine, "slash")
+    machine.session(
+        1,
+        repo,
+        S_COD,
+        prompt(_at(26, 10), cwd=repo, text="Claim task 1."),
+        request(_at(26, 10, 1), "s1", cwd=repo),
+        prompt(_at(26, 11), cwd=repo, text=SLASH_COMMAND),
+        request(_at(26, 11, 1), "s2", cwd=repo),
+        prompt(_at(26, 12), cwd=repo, text="<task-notification><id>b</id></task-notification>"),
+        request(_at(26, 12, 1), "s3", cwd=repo),
+    )
+    _fleet(S_COD, pid, "coder", repo, spawned_by="ses-manager-1")
+    for hour in (10, 11, 12):
+        _turn(S_COD, pid, _at(26, hour), _at(26, hour, 30))
+    usage_stats.sweep(now=NOW, tz=IST)
+    d = _report(use_gh=False).direction
+    assert d.by_origin == {"agent:spawn": 1, "human:typed": 1, "agent:notice": 1}
+
+    add_project(tmp_path)  # onboarded: a hook in a project nobody added records nothing
+    hooks_service.capture_prompt(SLASH_COMMAND, tmp_path, session_id="ses-slash")
+    assert [row.origin for row in _rows("ses-slash")] == ["human:typed"]
+
+
+NEW_YORK = ZoneInfo("America/New_York")
+"""Its clocks went back on Sunday 1 Nov 2026, 02:00 EDT: 2026-W44 is 169 hours long."""
+
+
+def test_a_whole_week_is_compared_with_the_whole_week_before_across_a_clock_change(
+    machine: Machine,
+) -> None:
+    """Review of 8ad337d7, 3: W45 against W44, all of it, though W44 is an hour longer."""
+    now = datetime(2026, 11, 10, 12, 0, tzinfo=NEW_YORK)
+    result = outcomes.week_report("2026-W45", now=now, tz=NEW_YORK, use_gh=False)
+    assert result.compared_since == datetime(2026, 10, 26, 0, 0, tzinfo=NEW_YORK)
+    assert result.compared_until == datetime(2026, 11, 2, 0, 0, tzinfo=NEW_YORK)
+    elapsed = result.compared_until.astimezone(UTC) - result.compared_since.astimezone(UTC)
+    assert elapsed == timedelta(days=7, hours=1)
+
+
+def test_a_week_in_progress_is_compared_at_the_same_local_weekday_and_time(
+    machine: Machine,
+) -> None:
+    """Sunday 12:00 EST is compared with the Sunday before at 12:00 EDT, not 13:00."""
+    now = datetime(2026, 11, 1, 12, 0, tzinfo=NEW_YORK)
+    result = outcomes.week_report(None, now=now, tz=NEW_YORK, use_gh=False)
+    assert result.week == "2026-W44" and result.in_progress
+    until = result.compared_until
+    assert until is not None
+    local = until.astimezone(NEW_YORK)
+    assert (local.date(), local.hour, local.minute) == (datetime(2026, 10, 25).date(), 12, 0)
+    assert local.utcoffset() == timedelta(hours=-4)
+
+
+def test_the_usage_sweep_fills_the_facts_cache_so_the_report_reads_it_warm(
+    machine: Machine,
+) -> None:
+    """Review of 8ad337d7, 4: the sweep reads the transcripts anyway, so it brings the facts
+    cache to their ends; the report then has nothing left to read."""
+    repo = machine.repo("warm")
+    path = machine.session(
+        1,
+        repo,
+        S_PLAIN,
+        prompt(_at(26, 10), cwd=repo, text="go"),
+        request(_at(26, 10, 1), "w1", cwd=repo),
+    )
+    usage_stats.sweep(now=datetime.now(UTC), tz=IST)
+    cached = json.loads(transcript_facts.facts_cache_path().read_text(encoding="utf-8"))
+    assert cached["files"][str(path)]["offset"] == path.stat().st_size
+    assert cached["files"][str(path)]["facts"] == [[stamp(_at(26, 10)), "p", "text"]]

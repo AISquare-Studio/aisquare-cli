@@ -60,10 +60,11 @@ def outcomes(
       files edited distinct files an Edit, Write or NotebookEdit named.
       cost per PR  the week's list-price cost / PRs merged (or / tasks).
     DIRECTION, who steered (never human tokens against agent tokens)
-      turn origin  who started each turn. Human: typed it, or sent it by
-                   fleet tell or the phone. Agent: a fleet spawn's first
-                   message, a manager's tell, a Stop-hook continuation, a
-                   watch wake, Claude Code's own notice. Recorded at
+      turn origin  who authored the prompt that started each turn. Human:
+                   typed it (slash commands too), or ran the fleet tell or
+                   spawn (terminal, asq, phone). Agent: a manager's tell or
+                   spawn, a watch wake, a Stop-hook continuation, a
+                   compaction line, a task notification. Recorded at
                    UserPromptSubmit; older turns are inferred, and said so.
       leverage     agent-minutes and tool calls per human prompt.
       interventions  interrupts ("[Request interrupted by user]") and

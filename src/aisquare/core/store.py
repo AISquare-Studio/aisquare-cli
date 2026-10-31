@@ -4071,7 +4071,7 @@ class SqliteStore:
                 session.role = row["role"]
                 session.transcript_path = session.transcript_path or row["transcript_path"]
             for row in self._conn.execute(
-                f"SELECT session_id, role, first_prompt FROM fleet_agent "
+                f"SELECT session_id, role, first_prompt, spawned_by FROM fleet_agent "
                 f"WHERE session_id IN ({marks})",
                 chunk,
             ).fetchall():
@@ -4083,6 +4083,7 @@ class SqliteStore:
                     session.role if session.role not in (None, "unassigned") else row["role"]
                 )
                 session.first_prompt = session.first_prompt or row["first_prompt"] is not None
+                session.spawned_by = session.spawned_by or row["spawned_by"]
         return found
 
     def task_events(

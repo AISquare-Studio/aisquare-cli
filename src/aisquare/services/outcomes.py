@@ -38,11 +38,15 @@ after it, and its tokens say nothing of that.
 - *Turn origin*: each turn's origin, ``human`` or ``agent`` (``core.prompt_origin``): recorded at
   its ``UserPromptSubmit`` since the store's v43 (the release after 0.9.2). An older turn's is
   inferred, and counted as inferred: its prompt in the transcript is the fleet's nudge
-  (``agent:wake``) or only Claude Code's notice (``agent:notice``); else it is a fleet agent's
-  first message (``agent:spawn``); else a prompt to a fleet worker, which its manager tells
-  (``agent:tell``); else a person typed it. So is the turn of a session no hook saw (its
-  transcript's prompts, with no duration). A Stop-hook continuation before v43 had no turn row:
-  its transcript entry is counted as an inferred ``agent:continuation``, with no duration.
+  (``agent:wake``) or Claude Code's ``<task-notification>`` (``agent:notice``); a slash command is
+  a person's (``human:typed``); else it is a fleet agent's first message, its spawner's as the
+  fleet row recorded it (``human:spawn`` for ``user``, a person's shell, asq or phone;
+  ``agent:spawn`` for a session); else a prompt to a fleet worker, which its manager tells
+  (``agent:tell``); else a person typed it. Origins follow who authored the instruction: a wake,
+  the quiet compaction's lines, a continuation and a notice are an agent's whoever sent them.
+  Inferred too: the turns of a session no hook saw (its transcript's prompts, with no duration). A
+  Stop-hook continuation before v43 had no turn row: its transcript entry is counted as an
+  inferred ``agent:continuation``, with no duration.
 - *Leverage*: agent-minutes, and tool calls, per human prompt.
 - *Interventions*: interrupts (Esc while it worked: ``[Request interrupted by user]``) and tool
   uses denied at their permission prompt.
@@ -106,6 +110,9 @@ LOOKAHEAD = timedelta(days=1)
 GITHUB_COMMITTER = "noreply@github.com"
 _SHA = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _WEEK = re.compile(r"^(\d{4})-?W(\d{1,2})$", re.IGNORECASE)
+FIRST_YEAR = 1970
+"""The first year ``--week`` may name: no transcript or turn is older, and a clock can place any
+week from then on."""
 
 
 class WeekError(ValueError):
@@ -170,12 +177,31 @@ def parse_week(text: str | None, *, now: datetime, tz: tzinfo | None) -> Week:
             "(year, W, week number)"
         )
     year, number = int(match.group(1)), int(match.group(2))
+    named = f"{year:04d}-W{number:02d}"
+    if year > current.year:
+        raise WeekError(f"{named} has not begun: this week is {current.label}")
+    if year < FIRST_YEAR:
+        raise WeekError(
+            f"{named} is before {FIRST_YEAR}: give a week from {FIRST_YEAR}-W01 on, such as "
+            f"{current.label}"
+        )
     if not 1 <= number <= weeks_in(year):
         raise WeekError(f"{year} has no week {number}: its weeks are W01 to W{weeks_in(year):02d}")
-    week = week_of(date.fromisocalendar(year, number, 1), tz)
+    try:
+        week = week_of(date.fromisocalendar(year, number, 1), tz)
+    except (ValueError, OverflowError) as exc:  # a clock this platform cannot place the week on
+        raise WeekError(f"{named} cannot be read on this clock ({exc})") from exc
     if week.start > now:
         raise WeekError(f"{week.label} has not begun: this week is {current.label}")
     return week
+
+
+def _a_week_earlier(moment: datetime, tz: tzinfo | None) -> datetime:
+    """The same local weekday and wall time a week before ``moment``: across a change of the
+    clocks, seven days of wall time, not 168 hours."""
+    local = usage_stats._local(moment, tz)
+    naive = local.replace(tzinfo=None) - timedelta(days=7)
+    return naive.replace(tzinfo=tz) if tz is not None else naive.astimezone()
 
 
 @dataclass(frozen=True)
@@ -272,7 +298,13 @@ def _week_report_in(
 ) -> WeeklyOutcomes:
     this = Window(week.start, min(week.end, now))
     before = week_of(week.monday - timedelta(days=7), tz)
-    last = Window(before.start, min(before.end, before.start + (this.until - this.since)))
+    # A whole week against the whole week before, as long as each is (a week with a change of
+    # the clocks is 167 or 169 hours); one in progress against the week before to the same
+    # local weekday and wall time.
+    last = Window(
+        before.start,
+        before.end if now >= week.end else min(before.end, _a_week_earlier(this.until, tz)),
+    )
     result = WeeklyOutcomes(
         week=week.label,
         since=this.since,
@@ -821,7 +853,8 @@ def _window_turns(read: _Read, window: Window) -> list[_Turn]:
             following = rows[index + 1].started_at if index + 1 < len(rows) else None
             seconds = _turn_seconds(row, following, stops)
             if row.origin:
-                out.append(_Turn(session_id, row.started_at, row.origin, False, seconds))
+                origin = prompt_origin.authored(row.origin)
+                out.append(_Turn(session_id, row.started_at, origin, False, seconds))
                 continue
             origin = _infer_origin(row.started_at, prompts, session, times)
             out.append(_Turn(session_id, row.started_at, origin, True, seconds))
@@ -895,10 +928,14 @@ def _infer_origin(
         return prompt_origin.compose_origin(prompt_origin.AGENT, prompt_origin.WAKE)
     if nearest is not None and nearest.detail == transcript_facts.NOTICE:
         return prompt_origin.AGENT_NOTICE
+    if nearest is not None and nearest.detail == transcript_facts.COMMAND:
+        return prompt_origin.HUMAN_TYPED  # a slash command: a person typed it, in any pane
     if session is not None and session.fleet:
         first = prompts[0] if prompts else None
         if session.first_prompt and first is not None and nearest is first:
-            return prompt_origin.compose_origin(prompt_origin.AGENT, prompt_origin.SPAWN)
+            # Its spawner's, as the row recorded it: `user` is a person's shell, asq or phone.
+            by = prompt_origin.HUMAN if session.spawned_by == "user" else prompt_origin.AGENT
+            return prompt_origin.compose_origin(by, prompt_origin.SPAWN)
         if (session.role or "") not in HUMAN_LED_ROLES:
             return prompt_origin.compose_origin(prompt_origin.AGENT, prompt_origin.TELL)
     return prompt_origin.HUMAN_TYPED

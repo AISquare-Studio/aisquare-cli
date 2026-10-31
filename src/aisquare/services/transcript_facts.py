@@ -4,8 +4,9 @@ The weekly outcomes report (``services.outcomes``) needs five facts no table rec
 its moment, read off Claude Code's transcripts:
 
 - **prompt**: a message that opened a turn (``core.usage._is_prompt``), classed as ``text``,
-  ``wake`` (the fleet's nudge, :data:`~aisquare.services.fleet.NUDGE_TEXT`) or ``notice``
-  (Claude Code's own blocks only, ``core.prompt_origin.only_harness_blocks``). What decides the
+  ``wake`` (the fleet's nudge, :data:`~aisquare.services.fleet.NUDGE_TEXT`), ``notice`` (Claude
+  Code's own ``<task-notification>``, ``core.prompt_origin.only_task_notifications``) or
+  ``command`` (a slash command a person typed: harness blocks only, no notice). What decides the
   origin of a turn recorded before ``metric.origin`` existed.
 - **continuation**: a Stop hook that kept the turn going (its feedback entry, ``isMeta``, opens
   with ``Stop hook feedback:``).
@@ -46,7 +47,7 @@ from aisquare.core import usage as usage_core
 KEEP = timedelta(days=120)
 """How long a fact is kept in the cache after its moment."""
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 PROMPT = "p"
 CONTINUATION = "c"
@@ -57,6 +58,8 @@ EDIT = "e"
 TEXT = "text"
 WAKE = "wake"
 NOTICE = "notice"
+COMMAND = "command"
+"""A slash command a person typed (``/model``, ``/clear``…): all harness blocks, a person's."""
 
 NUDGE_TEXT = "aisquare: board update — read the delta above."
 """The one line the fleet's nudge types: ``services.fleet.NUDGE_TEXT``, said again here so that
@@ -303,8 +306,11 @@ def _lines_holding(
 def _lines_matching_call(data: bytes, pattern: re.Pattern[bytes]) -> Iterator[tuple[int, bytes]]:
     position = 0
     while (match := pattern.search(data, position)) is not None:
-        start = data.rfind(b"\n", 0, match.start()) + 1
-        end = data.find(b"\n", match.end())
+        # `span`, not `start()` and `end()`: the call-graph guards resolve a call by its bare
+        # name, and both name hook-unsafe functions elsewhere (tests/test_config_writes_…).
+        found_at, found_end = match.span()
+        start = data.rfind(b"\n", 0, found_at) + 1
+        end = data.find(b"\n", found_end)
         if end == -1:
             end = len(data)
         yield start, data[start:end]
@@ -358,8 +364,10 @@ def _user_fact(line: bytes) -> list[str] | None:
         return None
     if " ".join(text.split()) == NUDGE_TEXT:
         return [stamp, PROMPT, WAKE]
-    if prompt_origin.only_harness_blocks(text):
+    if prompt_origin.only_task_notifications(text):
         return [stamp, PROMPT, NOTICE]
+    if prompt_origin.only_harness_blocks(text):
+        return [stamp, PROMPT, COMMAND]
     return [stamp, PROMPT, TEXT]
 
 

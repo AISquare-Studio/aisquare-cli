@@ -27,15 +27,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   did, agent-minutes and tool calls per human prompt, interrupts and denied tool uses, and
   each session as directive, guided or collaborative (after Anthropic's Economic Index),
   never human tokens against agent tokens; and **vs last week**. `aisquare outcomes --help`
-  says how each figure is measured. The first run reads a week or two of transcripts once
-  (about 6 s for 2 GB here), and keeps what it found in `~/.aisquare/cache/`.
-- **Who started each turn is recorded.** Every write aisquare makes into an agent's prompt
-  (a fleet spawn's first message, `fleet tell`, the phone's tell, the manager's wake, the
-  quiet compaction's lines) leaves a marker for its text, which the turn's
-  `UserPromptSubmit` takes: the turn's row says `agent:tell`, `human:tell`, `agent:spawn`…,
-  or `human:typed` when a person typed it. A Stop hook that keeps a turn going opens a row
-  of its own (`agent:continuation`), so its time is counted too. Turns from before are
-  inferred for the report, and said to be.
+  says how each figure is measured. The interrupts, denials, edited files and the origin of
+  older turns come from Claude Code's transcripts, kept in `~/.aisquare/cache/` as they are
+  read: asq's usage sweep (every 10 minutes while asq is open) and `metrics stats` keep that
+  cache filled, so the weekly run reads it warm (2 to 5 s here, under load). Without them, a
+  run reads a week or two of transcripts first, once: 17 s for 2 GB of them on this machine,
+  36 s under heavy load. The first sweep after the upgrade pays the same read once, in the
+  background.
+- **Who started each turn is recorded, by who authored the instruction.** Every write
+  aisquare makes into an agent's prompt (a fleet spawn's first message, `fleet tell`, the
+  phone's tell, the manager's wake, the quiet compaction's lines) leaves a marker for its
+  text, which the turn's `UserPromptSubmit` takes. A wake, a compaction line, a Stop hook's
+  continuation and Claude Code's `<task-notification>` are an agent's whoever sends them; a
+  tell and a spawn are their sender's: `human:tell` from your terminal, asq or the phone,
+  `agent:tell` from a manager; a spawn you run is `human:spawn`, one an agent session runs
+  (its `--as` session, or its environment) `agent:spawn`. A prompt you type, slash commands
+  included, is `human:typed`. A Stop hook that keeps a turn going opens a row of its own
+  (`agent:continuation`), so its time is counted too. Turns from before are inferred for the
+  report by the same rule (a spawn by what its fleet row recorded of its spawner), and said
+  to be.
 
 ## [0.9.2] - 2026-10-30
 

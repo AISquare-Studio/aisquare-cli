@@ -81,6 +81,7 @@ from aisquare.models import (
     UsageTurnRow,
 )
 from aisquare.services import metrics as metrics_service
+from aisquare.services import transcript_facts
 
 SWEEP_EVERY = timedelta(minutes=10)
 """How often :func:`maybe_sweep` reads the transcripts again."""
@@ -490,8 +491,31 @@ def _sweep(
     report.attributed = _attribute(store, types, repos)
     report.profiles = refresh_profiles(store, seen_repos, now=now)
     report.features = feature_use.fold(store)
+    _warm_facts(found, known, now)
     store.set_meta(_SWEPT_KEY, (now or datetime.now(UTC)).isoformat())
     return report
+
+
+FACTS_SPAN = timedelta(days=15)
+"""How far back the sweep keeps the transcript-facts cache filled: this ISO week and the one
+before, which ``aisquare outcomes`` reads."""
+
+
+def _warm_facts(found: list[Transcript], known: dict[str, str], now: datetime | None) -> None:
+    """Bring the transcript-facts cache (``services.transcript_facts``) up to the transcripts'
+    ends, as the sweep has just read them: ``aisquare outcomes`` then reads it warm, where on its
+    own it reads a week or two of transcripts first. Each by the path its session's row recorded
+    (``known``: path → session), which is the one the report asks for, else as it was found.
+    Incremental (a file's new bytes only, and none of a file untouched for :data:`FACTS_SPAN`),
+    and it fails open: a cache that could not be filled costs the report's speed, never the
+    sweep."""
+    when = now or datetime.now(UTC)
+    recorded = {session_id: path for path, session_id in known.items()}
+    paths = [Path(recorded.get(t.session_id, str(t.path))) for t in found]
+    try:
+        transcript_facts.read_facts(paths, since=when - FACTS_SPAN, now=when)
+    except Exception as exc:
+        metrics_service.log_failure("transcript facts not read by the sweep", exc)
 
 
 @dataclass

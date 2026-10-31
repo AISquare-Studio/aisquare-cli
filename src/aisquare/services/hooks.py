@@ -1292,10 +1292,11 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
     """
     began = datetime.now(tz=UTC)
     # Who sent it, decided first and from the prompt itself: the marker an aisquare write left
-    # for this text (taken, so it is never read twice), else Claude Code's own notice, else a
-    # person typed it (``core.prompt_origin``). Never raises.
+    # for this text (taken, so it is never read twice), else Claude Code's own notice of a
+    # finished task, else a person typed it, a slash command too (``core.prompt_origin``).
+    # Never raises.
     origin = prompt_origin.origin_of_prompt(
-        prompt, notice=prompt_origin.only_harness_blocks(prompt)
+        prompt, notice=prompt_origin.only_task_notifications(prompt)
     )
     # ``capture.enabled``, read once a prompt (#268). Off, the prompt is neither stored nor
     # spooled; the turn row below still opens, without text, and the teammate delta is the

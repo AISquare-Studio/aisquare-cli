@@ -342,8 +342,8 @@ def test_restarting_the_captain_selects_its_new_row_and_keeps_the_doctor_global(
         await until(pilot, agent_opened(pilot, exited.agent.id), what="the exited captain selected")
         view = app.current_view()
         assert isinstance(view, AgentView)
-        # Pressed, as Enter on it would: the click guard (0.8.2) drops a mouse press this
-        # soon after the view came up, and the guard is not what is tested here.
+        # Pressed, as Enter on it would: the click guard drops a mouse press that reaches the
+        # app before the view is painted, and the guard is not what is tested here.
         view.query_one("#agent-restart", Button).press()
         await ui_suite.settle(app)
         await until(pilot, agent_opened(pilot, "agt_captain_new"), what="the new row selected")

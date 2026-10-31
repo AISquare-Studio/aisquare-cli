@@ -194,8 +194,9 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
     Answers the plan it showed when confirmed, ``None`` on Cancel or Escape. Confirm is
     greyed until the plan is read, and stays greyed when it acts on nobody. It is a
     :class:`GuardedButton`: the dialog opens where *Restart all…* was clicked, and a
-    second click landing on it as it appears is not a confirmation. ``project`` keeps it to
-    that project's agents (a card's *Pause agents*), its title naming it.
+    second click that reaches it before the dialog is painted is not a confirmation; one
+    after it is, at once. ``project`` keeps it to that project's agents (a card's *Pause
+    agents*), its title naming it.
     """
 
     CSS = """

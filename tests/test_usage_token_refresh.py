@@ -500,7 +500,7 @@ def test_a_pick_gives_way_to_a_refresh_this_process_runs(
 ) -> None:
     """asq's sidebar refreshing a slot holds its fetch lock for as long as Claude Code takes; a
     spawn from the dialog, in the same process, does not wait for it: it decides without that
-    slot, and the refresh goes on."""
+    slot (nothing of it is on record from the last five minutes), and the refresh goes on."""
     work = _expired()
     endpoint = _Usage({"tok-renewed-1": _payload(55)})
     _read_before_it_expired(work, endpoint, 40)
@@ -524,7 +524,7 @@ def test_a_pick_gives_way_to_a_refresh_this_process_runs(
         reader.join(10)
 
     assert picked is not None and picked.slot == home.slot
-    assert any(core.label(work) in note and "refreshing" in note for note in notes), notes
+    assert any(core.label(work) in note and service.NOT_WAITED in note for note in notes), notes
     assert claude.runs == [work.slot], "the page's refresh, and only it"
     assert page[work.slot].session_percent == 55
 
@@ -534,8 +534,9 @@ def test_a_pick_gives_way_to_a_refresh_round_that_holds_a_sibling_slot_too(
 ) -> None:
     """REVIEW-485 round 2: the sidebar and the Accounts page read every account in one round,
     and the round holds each slot's fetch lock through the refresh of one. A pick needing a
-    sibling slot (home, read fine) waited on its lock until Claude Code was done; it takes
-    the round's own reading of it instead, and gives way on the slot being refreshed."""
+    sibling slot (home) waited on its lock until Claude Code was done. It waits on neither:
+    home has nothing on record from the last five minutes, so the pick skips it as well,
+    asks the endpoint nothing, and the caller's next rung decides."""
     work = _expired()
     endpoint = _Usage({"tok-renewed-1": _payload(55)})
     _read_before_it_expired(work, endpoint, 40)
@@ -555,15 +556,110 @@ def test_a_pick_gives_way_to_a_refresh_round_that_holds_a_sibling_slot_too(
             lambda: _pick(work, home, endpoint=endpoint, max_age=service.PICK_MAX_AGE_SECONDS)
         )
         assert reader.is_alive(), "the pick returned while the refresh still ran"
-        assert endpoint.calls.count("tok-home") == asked, "the round's reading, not asked again"
+        assert endpoint.calls.count("tok-home") == asked, "home is not fetched by the pick"
     finally:
         claude.before.set()
         reader.join(10)
 
-    assert picked is not None and picked.slot == home.slot
-    assert any(core.label(work) in note and "refreshing" in note for note in notes), notes
+    assert picked is None, "neither is waited for, and neither has a reading to pick by"
+    for account in (work, home):
+        assert any(core.label(account) in note and service.NOT_WAITED in note for note in notes), (
+            notes
+        )
     assert claude.runs == [work.slot], "the page's refresh, and only it"
     assert page[work.slot].session_percent == 55 and page[home.slot].session_percent == 20
+
+
+@pytest.mark.parametrize(
+    ("pick_at", "home_age"),
+    [(61, 0), (0, 120), (0, 0)],
+    ids=["(a) pick 61 s on", "(b) home read 2 min before", "home read just now"],
+)
+def test_a_pick_never_waits_on_a_slot_the_page_holds_but_does_not_refresh(
+    pick_at: int, home_age: int, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW-485 round 3, the tester's repro: the page's round takes home's and work's locks,
+    another round records home meanwhile, so the page is served home from that and refreshes
+    work alone, holding home's lock all the while. A pick that needed home waited on it for
+    the whole refresh. It waits on no lock: home is picked by its reading on record, which is
+    past the pick's own minute in (a) and two minutes old in (b), and nothing is fetched."""
+    work = _expired()
+    endpoint = _Usage({"tok-renewed-1": _payload(55)})
+    _read_before_it_expired(work, endpoint, 40)
+    home = _slot("home@example.com", "tok-home")
+    endpoint.by_token["tok-home"] = _payload(20)
+    claude = FakeClaude(monkeypatch, True)
+    claude.before = threading.Event()
+    looked = threading.Event()
+    real_served = service._served
+    reader_ident: list[int] = []
+
+    def served(*args: Any, **kwargs: Any) -> dict[int, ClaudeUsage]:
+        out = real_served(*args, **kwargs)
+        if reader_ident and threading.get_ident() == reader_ident[0]:
+            looked.set()
+        return out
+
+    monkeypatch.setattr(service, "_served", served)
+    other = service._fetching([home], service._fetch_rounds([home]))
+    other.__enter__()  # another call in this process is fetching home
+    page: dict[int, ClaudeUsage] = {}
+
+    def read_page() -> None:
+        reader_ident.append(threading.get_ident())
+        page.update(service.cached_usage([work, home], now=NOW, fetch=endpoint))
+
+    reader = threading.Thread(target=read_page)
+    reader.start()
+    try:
+        assert looked.wait(10), "the page looked at the cache"
+        service.read_usage([home], now=NOW - timedelta(seconds=home_age), fetch=endpoint)
+        other.__exit__(None, None, None)  # its round ends: the page is served home from it
+        assert claude.started.wait(10), "the page refreshes work, holding home's lock too"
+        asked = len(endpoint.calls)
+        picked, notes = _promptly(
+            lambda: service.headroom_choice(
+                [work, home],
+                switch_at=90,
+                fetch=endpoint,
+                now=NOW + timedelta(seconds=pick_at),
+                max_age=service.PICK_MAX_AGE_SECONDS,
+            )
+        )
+        assert reader.is_alive(), "the pick returned while the refresh still ran"
+        assert len(endpoint.calls) == asked, "the pick fetched nothing"
+    finally:
+        claude.before.set()
+        reader.join(10)
+    assert picked is not None and picked.slot == home.slot, notes
+    assert claude.runs == [work.slot], "the page's refresh, and only it"
+
+
+@pytest.mark.parametrize("on_record", [True, False], ids=["home on record", "nothing on record"])
+def test_with_every_lock_held_a_pick_waits_on_none_and_fetches_nothing(
+    on_record: bool, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every slot's fetch lock held by another call in this process, as long as it likes: the
+    pick returns at once, by what is on record from the last five minutes, or with no pick
+    (the caller's next rung decides), and asks the endpoint nothing."""
+    work = _slot("work@example.com", "tok-work")
+    home = _slot("home@example.com", "tok-home")
+    endpoint = _Usage({"tok-work": _payload(70), "tok-home": _payload(20)})
+    if on_record:
+        service.read_usage([home], now=NOW - timedelta(seconds=150), fetch=endpoint)
+    claude = FakeClaude(monkeypatch, True)
+    asked = len(endpoint.calls)
+    with service._fetching([work, home], service._fetch_rounds([work, home])):
+        picked, notes = _promptly(
+            lambda: _pick(work, home, endpoint=endpoint, max_age=service.PICK_MAX_AGE_SECONDS)
+        )
+    assert len(endpoint.calls) == asked and claude.runs == []
+    assert any(core.label(work) in note and service.NOT_WAITED in note for note in notes), notes
+    if on_record:
+        assert picked is not None and picked.slot == home.slot
+    else:
+        assert picked is None
+        assert any(core.label(home) in note and service.NOT_WAITED in note for note in notes)
 
 
 # --------------------------------------------------------------------------- the command

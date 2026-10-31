@@ -2294,7 +2294,6 @@ def _refresh_stale(
     now: datetime | None,
     fetch: Fetch | None,
     start: bool = True,
-    round_of: Sequence[ClaudeAccount] = (),
 ) -> RefreshRows:
     """Have Claude Code refresh each of ``accounts``' stale token and read it again, in place in
     ``readings``: an answer is then recorded as any other, and the rows returned are written,
@@ -2311,12 +2310,6 @@ def _refresh_stale(
     waited for. A refresh running, or waiting for its retry, is answered as for any read
     meanwhile; a token none is about, or whose retry is due, keeps its stale reading, which
     the pick skips as it did before this existed, and the next reader that can wait starts it.
-
-    While the refreshes run, every slot of ``round_of`` (:func:`read_usage`'s round, whose
-    fetch locks :func:`cached_usage` holds throughout) is in :data:`_REFRESHING` with its
-    answer so far: a pick in this process takes it rather than wait on the lock. The sidebar
-    and the Accounts page read every account in one round, so a pick that needed a sibling
-    slot, read fine, waited on it for as long as Claude Code took (review of #485, round 2).
     """
     command = _token_refresh_command() if start else None
     if start and command is None:
@@ -2369,33 +2362,18 @@ def _refresh_stale(
             return None
         return usage(account, now=now, fetch=fetch, fresh=True)
 
-    meanwhile = {
-        str(account.config_dir): _refreshing_usage(readings[account.slot], account.slot, None)
-        for account in running
-    }
-    for account in round_of:  # the round's other slots, read already, their locks held too
-        if account.slot in readings:
-            meanwhile.setdefault(str(account.config_dir), readings[account.slot])
-    with _FETCH_LOCKS_LOCK:  # for a pick in this process that would wait on the fetch lock
-        _REFRESHING.update(meanwhile)
     again: dict[int, ClaudeUsage | None] = {}
-    try:
-        with ThreadPoolExecutor(max_workers=min(HEADROOM_WORKERS, len(running))) as pool:
-            futures = {pool.submit(_refresh, account): account.slot for account in running}
-            for future, slot in futures.items():
-                try:
-                    again[slot] = future.result()
-                except Exception as exc:  # one account's failure must not cost the rest
-                    again[slot] = unreadable_usage(
-                        UsageCause.read_failed,
-                        f"usage read failed ({type(exc).__name__})",
-                        slot=slot,
-                    )
-    finally:
-        with _FETCH_LOCKS_LOCK:
-            for key, answer in meanwhile.items():
-                if _REFRESHING.get(key) is answer:  # ours: another round's stays
-                    del _REFRESHING[key]
+    with ThreadPoolExecutor(max_workers=min(HEADROOM_WORKERS, len(running))) as pool:
+        futures = {pool.submit(_refresh, account): account.slot for account in running}
+        for future, slot in futures.items():
+            try:
+                again[slot] = future.result()
+            except Exception as exc:  # one account's failure must not cost the rest
+                again[slot] = unreadable_usage(
+                    UsageCause.read_failed,
+                    f"usage read failed ({type(exc).__name__})",
+                    slot=slot,
+                )
     after = now or _now()
     rows: RefreshRows = {}
     for account in running:
@@ -2504,9 +2482,7 @@ def read_usage(
     ]
     settled: RefreshRows = {}
     if stale:  # before the locked slots' answer below, which no refresh here can change
-        settled = _refresh_stale(
-            stale, readings, now=now, fetch=fetch, start=refresh, round_of=accounts
-        )
+        settled = _refresh_stale(stale, readings, now=now, fetch=fetch, start=refresh)
     for account in asked:
         seen = rows.get(account.slot)
         if (
@@ -2584,12 +2560,8 @@ _FETCH_LOCKS: dict[str, threading.Lock] = {}
 _FETCH_ROUNDS: dict[str, int] = {}
 """How many fetch rounds each config dir has had in this process: see :func:`_fetching`."""
 _FETCH_LOCKS_LOCK = threading.Lock()
-_REFRESHING: dict[str, ClaudeUsage] = {}
-"""The config dirs whose fetch lock a round refreshing a stale token holds in this process
-(:func:`_refresh_stale`): the refreshed slots and their siblings in the round, each with what
-a read meanwhile is answered. A pick gives way to every one of them (:func:`_fetching`)."""
-_GIVE_WAY_SECONDS = 0.05
-"""How often a pick waiting on a slot's fetch lock looks whether a refresh holds it."""
+NOT_WAITED = "another read of it is under way in this process: not waited for"
+"""Why a pick (:func:`headroom_choice`) has no reading of a slot another call holds."""
 
 
 def _fetch_rounds(accounts: Sequence[ClaudeAccount]) -> dict[str, int]:
@@ -2604,10 +2576,10 @@ def _fetch_rounds(accounts: Sequence[ClaudeAccount]) -> dict[str, int]:
 @contextlib.contextmanager
 def _fetching(
     accounts: Sequence[ClaudeAccount], seen: Mapping[str, int], *, give_way: bool = False
-) -> Iterator[tuple[bool, dict[str, ClaudeUsage]]]:
+) -> Iterator[tuple[bool, set[str]]]:
     """Hold each account's fetch lock while its usage is fetched; yields whether another call
-    ended a round for any of them since ``seen`` (:func:`_fetch_rounds`) was read, and the
-    slots given way to (below), by config dir.
+    ended a round for any of those it holds since ``seen`` (:func:`_fetch_rounds`) was read,
+    and the config dirs whose lock it gave way on (below).
 
     The sidebar's read and the page's, or either and a launch's pick, asked for the same
     slot at the same moment and each sent a request (review of #261, m4). Now the second
@@ -2616,28 +2588,29 @@ def _fetching(
     cache just before another records and take the lock just after it is let go. Taken
     in one order, so two calls over overlapping slots cannot deadlock.
 
-    ``give_way``, a pick's: it waits for a fetch, never for a stale token's refresh, which
-    holds the lock up to :data:`TOKEN_REFRESH_TIMEOUT_SECONDS`. A slot whose lock a round
-    refreshing a token holds (:data:`_REFRESHING`: the refreshed slot, or a sibling the round
-    read already) is left to it, with what a read meanwhile is answered, and is not fetched.
+    ``give_way``, a pick's (:func:`headroom_choice`, which a spawn, a launch and a switch wait
+    on): it waits on no lock at all. Each is tried without waiting, and a slot whose lock
+    another call in this process holds is given way on and not fetched: that call may be a
+    round refreshing a stale token, which holds every slot of the round for up to
+    :data:`TOKEN_REFRESH_TIMEOUT_SECONDS`, and keeping a registry in step with which locks
+    a round holds kept missing cases (review of #485, rounds 2 and 3).
     """
     keys = sorted({str(account.config_dir) for account in accounts})
     with _FETCH_LOCKS_LOCK:
         locks = {key: _FETCH_LOCKS.setdefault(key, threading.Lock()) for key in keys}
     held: list[tuple[str, threading.Lock]] = []
-    left: dict[str, ClaudeUsage] = {}
+    busy: set[str] = set()
     taken = False
     try:
         for key in keys:
-            meanwhile = _take(locks[key], key, give_way=give_way)
-            if meanwhile is None:
+            if locks[key].acquire(blocking=not give_way):
                 held.append((key, locks[key]))
             else:
-                left[key] = meanwhile
+                busy.add(key)
         taken = True
         with _FETCH_LOCKS_LOCK:
             moved = any(_FETCH_ROUNDS.get(key, 0) != seen.get(key, 0) for key, _lock in held)
-        yield moved, left
+        yield moved, busy
     finally:
         if taken:
             with _FETCH_LOCKS_LOCK:
@@ -2647,19 +2620,21 @@ def _fetching(
             lock.release()
 
 
-def _take(lock: threading.Lock, key: str, *, give_way: bool) -> ClaudeUsage | None:
-    """Acquire ``key``'s fetch ``lock``: ``None`` once it is held. Giving way, it is not taken
-    while a round of this process that refreshes a token holds it (the refreshed slot or a
-    sibling of it): what a read meanwhile is answered, then."""
-    if not give_way:
-        lock.acquire()
-        return None
-    while not lock.acquire(timeout=_GIVE_WAY_SECONDS):
-        with _FETCH_LOCKS_LOCK:
-            meanwhile = _REFRESHING.get(key)
-        if meanwhile is not None:
-            return meanwhile
-    return None
+def _read_elsewhere(
+    accounts: Sequence[ClaudeAccount], logins: _Logins, moment: datetime
+) -> dict[int, ClaudeUsage]:
+    """A pick's answer for each of ``accounts``, whose fetch lock another call in this process
+    holds (:func:`_fetching`): its last good reading, as the shared cache serves it to that
+    call's own readers, five minutes deep (:data:`USAGE_MAX_AGE_SECONDS`); else a reading
+    that says it was not waited for (:data:`NOT_WAITED`), which the pick skips. Never a fetch,
+    never a refresh."""
+    since = moment - timedelta(seconds=USAGE_MAX_AGE_SECONDS)
+    served = _served(accounts, logins, since=since, now=moment)
+    return {
+        account.slot: served.get(account.slot)
+        or unreadable_usage(UsageCause.read_failed, NOT_WAITED, slot=account.slot)
+        for account in accounts
+    }
 
 
 def _recorded_usage(
@@ -2838,8 +2813,11 @@ def cached_usage(
 
     ``refresh=False`` is a headroom pick's (:func:`headroom_choice`), which a launch, a spawn
     or a hand-over waits on: it never starts or waits for a stale token's refresh (see
-    :func:`read_usage`), not even one this process runs (:func:`_fetching`), and what it
-    found of a token is not remembered: the next read that can wait refreshes it.
+    :func:`read_usage`), and it waits on no fetch lock (:func:`_fetching`): a slot another
+    call in this process is reading (the sidebar's round, the Accounts page's, a refresh) is
+    answered by its last good reading of the last five minutes, or skipped
+    (:func:`_read_elsewhere`), and neither fetched nor refreshed. What it found of a token
+    is not remembered: the next read that can wait refreshes it.
     """
     if not accounts:
         return {}
@@ -2861,16 +2839,14 @@ def cached_usage(
     stale = [account for account in accounts if account.slot not in readings]
     if not stale:
         return _with_last_good(accounts, readings, logins, moment)
-    with _fetching(stale, seen, give_way=not refresh) as (moved, left):
+    with _fetching(stale, seen, give_way=not refresh) as (moved, busy):
         if moved and not force:  # another call fetched meanwhile: what it read serves
             readings.update(_served(stale, logins, since=since, now=moment))
             stale = [account for account in stale if account.slot not in readings]
-        for account in stale:  # a pick, given way to this process's refresh of the slot
-            if (meanwhile := left.get(str(account.config_dir))) is not None:
-                readings[account.slot] = meanwhile.model_copy(
-                    update={"slot": account.slot, "fetched_at": moment}
-                )
-        stale = [account for account in stale if account.slot not in readings]
+        if busy:  # a pick: another call in this process reads these; not waited for
+            elsewhere = [account for account in stale if str(account.config_dir) in busy]
+            readings.update(_read_elsewhere(elsewhere, logins, moment))
+            stale = [account for account in stale if account.slot not in readings]
         fetched = read_usage(stale, now=now, fetch=fetch, refresh=refresh)
         for account in stale:
             reading = fetched[account.slot]
@@ -3703,8 +3679,11 @@ def headroom_choice(
     still has a least bad answer. An account whose usage cannot be read is
     skipped and named; ``None`` when nothing could be measured, so the
     caller's next rung decides. A stale token's refresh is never started or
-    waited for here (``refresh=False``): its account is skipped, or decided by
-    its kept reading, and the next read that can wait refreshes it.
+    waited for here (``refresh=False``), nor is any other read of the usage
+    under way in this process: a stale token's account is skipped, or decided
+    by its kept reading, and the next read that can wait refreshes it; an
+    account another call is reading is decided by its last good reading of the
+    last five minutes, or skipped (:func:`cached_usage`).
 
     An account the usage endpoint asked to wait (F1 of #400) is not asked
     again, by a launch or a hand-over: the pick decides by its newest reading
@@ -3735,8 +3714,9 @@ def headroom_choice(
         notes.append("headroom: every account is at a limit it named — the default decides")
         return None, notes
     candidates = open_ones
-    # Never waiting on a stale token's refresh (``refresh=False``): the launch, spawn or
-    # hand-over behind the pick would, up to a minute and saying nothing (review of #485, m1).
+    # Never waiting on a stale token's refresh, nor on a fetch lock another call holds
+    # (``refresh=False``): the launch, spawn or hand-over behind the pick would, up to a
+    # minute and saying nothing (review of #485: m1, rounds 2 and 3).
     if max_age is None:
         readings = read_usage(candidates, now=now, fetch=fetch, refresh=False)
     elif len(candidates) == 1 and least_bad:

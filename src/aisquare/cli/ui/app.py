@@ -2836,9 +2836,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                     f"kept {where}: {kept.reason}", severity="warning", timeout=10, markup=False
                 )
             if result.manager_error is not None:
-                spawn = project_service.fleet_command("spawn", result.project, "manager")
+                hint = fresh_service.manager_hint(result)
                 self.notify(
-                    f"no manager started: {result.manager_error} — start one: {spawn}",
+                    f"no manager started: {result.manager_error} — {hint}",
                     severity="error",
                     timeout=12,
                     markup=False,
@@ -3906,7 +3906,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if running is not None:
             self.notify(f"{running} is still running — try again when it ends", severity="warning")
             return
-        button = _HANDED_OVER.get(event.args[0], event.args[0])
+        # The button pressed: the ⬆ dialog's hands over as Doctor's Update does, and is
+        # not named so (REVIEW-RC092-MI, nit 4).
+        if event.args == UPDATE_HAND_OFF:
+            button = "Restart & update"
+        else:
+            button = _HANDED_OVER.get(event.args[0], event.args[0])
         # The others as the registration's beat thread last read them: the UI thread reads no
         # folder (review of #462). An asq that started since is the command's to refuse.
         registration = instances.this_registration()

@@ -9765,8 +9765,13 @@ def restart(
     team: Sequence[FleetAgentStatus] | None = None,
     model: str | None = None,
     effort: str | None = None,
+    verb: str = "restart",
 ) -> RestartReceipt:
     """Start an agent again under its own label — the **Restart** of #138.
+
+    ``verb`` is the command's word in its refusals: ``resume`` from :func:`bulk`'s resume,
+    whose refusal said "cannot restart" of an agent the owner asked to resume
+    (REVIEW-RC092-MI, nit 2).
 
     ``model`` and ``effort`` (``fleet restart … --model``) are the replacement's, over the
     recorded launch and what the agent ran, for that agent alone: never the pick (#16).
@@ -9848,7 +9853,7 @@ def restart(
             raise FleetError(f"{flag} needs a value: name one, or leave it out")
     if permission_mode is not None and permission_mode not in ("", *CLAUDE_PERMISSION_MODES):
         raise FleetError(
-            f"cannot restart {label!r}: {permission_mode!r} is not a Claude Code permission "
+            f"cannot {verb} {label!r}: {permission_mode!r} is not a Claude Code permission "
             f"mode ({', '.join(CLAUDE_PERMISSION_MODES)}, or empty for no flag) — nothing "
             "was stopped"
         )
@@ -9864,9 +9869,9 @@ def restart(
             # A 💤 row whose label a relabel gave another agent (`store.RETIRED_LABEL`): it
             # has no label of its own to come back under.
             raise FleetError(
-                f"cannot restart {label!r}: a rename gave its label, "
+                f"cannot {verb} {label!r}: a rename gave its label, "
                 f"{agent.label.removeprefix(RETIRED_LABEL)!r}, to another agent — nothing "
-                "was restarted"
+                f"was {'resumed' if verb == 'resume' else 'restarted'}"
             )
         if agent_id is not None and agent.id != agent_id:
             raise _replaced(project, label, agent, agent_id)
@@ -9880,14 +9885,14 @@ def restart(
             # fell through to a plain `stop` here released the parked claims,
             # announced the exit and failed the switch on its own row — with the
             # restart's replacement not holding the task (review of #163, round 2).
-            raise _in_hand_over(project, "restart", label)
+            raise _in_hand_over(project, verb, label)
         try:
             # `spawn`'s refusal for the task (done, dropped, gone from the board), on the
             # board the replacement will read, as `switch` asks it.
             board_and_hub = _board_and_hub(store, current, agent, session)
             task = _task_for(store, board_and_hub[0], agent.task_id)
         except FleetError as exc:
-            raise FleetError(f"cannot restart {label!r}: {exc}") from exc
+            raise FleetError(f"cannot {verb} {label!r}: {exc}") from exc
         # The session's own newest entries, as `switch` reads them: the project's
         # last 60 filtered down lost them on a busy board (review of #205, third round).
         recent = (
@@ -9934,7 +9939,7 @@ def restart(
         # and its last screen as they were (#20; review of #464).
         _refuse_a_server_start_from_ssh(server())
     except (FleetError, claude_accounts_service.NoSuchAccount) as exc:
-        raise FleetError(f"cannot restart {label!r}: {exc}") from exc
+        raise FleetError(f"cannot {verb} {label!r}: {exc}") from exc
     # The row's own slot is no new pin; a take-over's account is the human's choice.
     pinned = _account_pinned(agent) if account is None else account != THIS_SHELL_ACCOUNT
     account = str(choice.account.slot) if choice.account is not None else None
@@ -11592,6 +11597,7 @@ def _bulk_one(
                 spawned_by=spawned_by,
                 before_stop=lambda: _still_paused(row),
                 team=team,
+                verb="resume",
             )
         else:
             result = restart(

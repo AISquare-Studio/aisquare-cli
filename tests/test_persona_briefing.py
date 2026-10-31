@@ -47,8 +47,11 @@ PINNED = "\n".join(
         "sessions:",
         "  - 11111111 coder (you) — 0m ago",
         "Protocol: check this board before starting work; teammate updates",
-        "arrive automatically on each prompt. Tasks are shared and idempotent —",
-        'e.g. `aisquare task add "wire auth flow"` (safe to re-run). Claim before',
+        # 0.9.2: re-adding a done or dropped task's title adds a new one (#447), and the
+        # protocol says so in place of "safe to re-run" (REVIEW-RC092-MI, minor 1).
+        "arrive automatically on each prompt. Tasks are shared; re-adding an open one is",
+        'idempotent (`aisquare task add "wire auth flow"`), but a done or dropped one\'s',
+        "title adds a new task, so re-add only what is still open. Claim before",
         "working: `aisquare task claim <id> --as 11111111`; finish with",
         "`aisquare task done <id> --as 11111111`. Share decisions/results:",
         '`aisquare note "…" --as 11111111`. Full board: `aisquare board`.',

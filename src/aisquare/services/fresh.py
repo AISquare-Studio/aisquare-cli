@@ -391,6 +391,18 @@ def count_words(counts: FreshCounts) -> list[str]:
     return [f"{n} {one if n == 1 else many}" for n, one, many in words if n is not None]
 
 
+def manager_hint(report: FreshReport) -> str:
+    """What to run when no manager started (``report.manager_error``): its spawn, said to run
+    at the Mac when an SSH login was refused it. The stop can end the fleet server's last
+    session, and from SSH no spawn starts a server (#20), so the same spawn typed here is
+    refused again (REVIEW-RC092-MI, nit 3)."""
+    spawn = project_service.fleet_command("spawn", report.project, "manager")
+    said = report.manager_error or ""
+    if fleet_service.SSH_START_REFUSAL in said:
+        return f"start one at the Mac: {spawn}"
+    return f"start one: {spawn}"
+
+
 def cleared_words(report: FreshReport) -> list[str]:
     """:func:`count_words` of what ``report`` cleared, its events with how many of them were
     written during the reset (``FreshReport.stop_events``: the stop's own, and what an agent

@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import importlib
 import json
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -21,16 +23,22 @@ from pathlib import Path
 import pytest
 from textual.app import App, ComposeResult
 from textual.content import Content
+from textual.geometry import Region
 from textual.message import Message
 from textual.pilot import Pilot
-from textual.widgets import Button, DirectoryTree, Input, Static
+from textual.widgets import Button, DirectoryTree, Input, RichLog, Static
+from textual.widgets.directory_tree import DirEntry
+from textual.widgets.tree import TreeNode
 
+from aisquare.cli.ui import app as ui_app
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView, FixApplied
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded, ProjectTree
 from aisquare.core.selfcli import CliResult
 from aisquare.core.workspace import project_id_for
 from aisquare.models import CheckStatus, DoctorCheck, ProjectInfo, SetupReport
 from aisquare.services import onboarding
+from tests.test_ui_shell import drive, fleet_app, script  # noqa: F401 — `script` is a fixture
+from tests.ui_workers import settle_page, settle_until
 
 # --------------------------------------------------------------------------- fakes
 
@@ -327,6 +335,435 @@ def test_start_refuses_without_a_valid_path(tmp_path: Path) -> None:
 
     assert asyncio.run(drive()) is False
     assert run.calls == [], "nothing runs for a path that does not exist"
+
+
+# --------------------------------------------------------------------------- reloading the tree
+
+
+def _node(tree: DirectoryTree, path: Path) -> TreeNode[DirEntry] | None:
+    """The tree's node for ``path``, among every node it has listed, open or not."""
+    nodes = [tree.root]
+    while nodes:
+        node = nodes.pop()
+        if node.data is not None and node.data.path == path:
+            return node
+        nodes.extend(node.children)
+    return None
+
+
+def _listed(tree: DirectoryTree, path: Path) -> bool:
+    """``path`` has a node and no reload is still running (it holds the tree's lock to the
+    end, the cursor put back last)."""
+    return _node(tree, path) is not None and not tree.lock.is_locked
+
+
+@pytest.mark.parametrize("linked", [False, True], ids=["root", "root-through-a-symlink"])
+def test_reload_lists_folders_made_since_and_keeps_what_was_open(
+    tmp_path: Path, linked: bool
+) -> None:
+    home = tmp_path / "home"
+    (home / "code" / "old").mkdir(parents=True)
+    home = home.resolve()  # the tree lists resolved paths
+    root = home
+    if linked:
+        # macOS's /var is one: the children are listed under /private/var, and a root
+        # left unresolved lost the cursor on every reload.
+        root = tmp_path / "link"
+        try:
+            root.symlink_to(home, target_is_directory=True)
+        except OSError:
+            pytest.skip("no symlinks here (Windows without the privilege)")
+    code, old = home / "code", home / "code" / "old"
+    cloned, later = home / "cloned", home / "code" / "later"
+
+    async def drive_view() -> dict[str, object]:
+        view = OnboardView(root, run=Scripted({}), validate=_validate)
+        async with Host(view).run_test(size=(120, 40)) as pilot:
+            tree = view.query_one("#onboard-tree", ProjectTree)
+            await _settle(pilot, lambda: _listed(tree, code))
+            folder = _node(tree, code)
+            assert folder is not None
+            folder.expand()
+            await _settle(pilot, lambda: _listed(tree, old))
+            opened = _node(tree, old)
+            assert opened is not None
+            tree.move_cursor(opened)
+            await pilot.pause()
+            cloned.mkdir()
+            later.mkdir()
+            await pilot.pause(0.1)
+            unread = (_node(tree, cloned), _node(tree, later))
+            await pilot.click("#onboard-reload")
+            await _settle(pilot, lambda: _listed(tree, cloned) and _listed(tree, later))
+            folder = _node(tree, code)
+            cursor = tree.cursor_node
+            seen: dict[str, object] = {
+                "unread": unread,
+                "open": folder is not None and folder.is_expanded,
+                "cursor": cursor.data.path if cursor and cursor.data else None,
+            }
+            fresh = _node(tree, cloned)
+            assert fresh is not None
+            tree.move_cursor(fresh)
+            tree.focus()
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+            seen["typed"] = view.query_one("#onboard-path", Input).value
+            seen["verdict"] = _text(view.query_one("#onboard-verdict", Static))
+            return seen
+
+    seen = asyncio.run(drive_view())
+    assert seen["unread"] == (None, None), "control: the tree read the disk once, at mount"
+    assert seen["open"], "an open folder stays open across the reload"
+    assert seen["cursor"] == old, "and the cursor stays on the row it was on"
+    assert seen["typed"] == str(cloned), "the new folder can be selected"
+    assert str(seen["verdict"]).startswith("✓ will register")
+
+
+async def _quiet(pilot: Pilot[None], view: OnboardView, tree: ProjectTree) -> None:
+    """Until no reload is in flight and the tree's lock has stayed free for 0.3 s: the
+    collapse came after the last reload, when the loader rebuilt a root queued again."""
+    deadline = time.monotonic() + 15.0
+    calm = 0
+    while calm < 6:
+        if time.monotonic() > deadline:
+            raise AssertionError("the tree never went quiet")
+        await pilot.pause(0.05)
+        calm = calm + 1 if not view.reloading and not tree.lock.is_locked else 0
+
+
+BURSTS = 50
+"""Bursts of five ctrl+r: before the fix about one in fifteen lost the open folders, so
+fifty miss it about one run in forty (tester, seq 5308)."""
+
+
+def test_reloads_close_together_keep_open_folders_open_and_the_cursor(tmp_path: Path) -> None:
+    """A double-click on ↻, or ctrl+r pressed again and again (tester, seq 5308).
+
+    Each reload posts a NodeExpanded for every folder it opens again. A second reload
+    started at once reset the root while the first one's NodeExpanded(root) was still to
+    be handled; handled then, it put the root on the loader's queue again, and the loader
+    rebuilt it with every folder closed and the cursor on another row, so the next Enter
+    picked another folder.
+    """
+    code, old = tmp_path / "code", tmp_path / "code" / "old"
+    old.mkdir(parents=True)
+    (tmp_path / "other" / "inside").mkdir(parents=True)
+
+    async def drive_view() -> tuple[int, bool, Path | None] | None:
+        view = OnboardView(tmp_path, run=Scripted({}), validate=_validate)
+        async with Host(view).run_test(size=(120, 40)) as pilot:
+            tree = view.query_one("#onboard-tree", ProjectTree)
+            await _settle(pilot, lambda: _listed(tree, code))
+            folder = _node(tree, code)
+            assert folder is not None
+            folder.expand()
+            await _settle(pilot, lambda: _listed(tree, old))
+            opened = _node(tree, old)
+            assert opened is not None
+            tree.move_cursor(opened)
+            tree.focus()
+            await pilot.pause()
+            for burst in range(BURSTS):
+                await pilot.press(*["ctrl+r"] * 5)
+                await _quiet(pilot, view, tree)
+                folder, cursor = _node(tree, code), tree.cursor_node
+                kept_open = folder is not None and folder.is_expanded
+                at = cursor.data.path if cursor is not None and cursor.data is not None else None
+                if not kept_open or at != old:
+                    return burst, kept_open, at
+            return None
+
+    lost = asyncio.run(drive_view())
+    assert lost is None, f"(burst, code still open, cursor on): {lost}"
+
+
+def test_ctrl_r_reloads_and_judges_the_typed_path_again(tmp_path: Path) -> None:
+    later = tmp_path / "later"
+
+    async def drive_view() -> tuple[str, str, str, bool, str | None]:
+        view = OnboardView(tmp_path, run=Scripted({}), validate=_validate)
+        async with Host(view).run_test(size=(120, 40)) as pilot:
+            tree = view.query_one("#onboard-tree", ProjectTree)
+            verdict = view.query_one("#onboard-verdict", Static)
+            box = view.query_one("#onboard-path", Input)
+            await _settle(pilot, lambda: not tree.lock.is_locked)
+            box.value = str(later)
+            box.focus()
+            await pilot.pause()
+            missing = _text(verdict)
+            later.mkdir()
+            await pilot.pause(0.1)
+            stale = _text(verdict)
+            await pilot.press("ctrl+r")  # from the path box, which takes every printable key
+            await _settle(pilot, lambda: _listed(tree, later))
+            focused = view.app.focused
+            return (
+                missing,
+                stale,
+                _text(verdict),
+                view.query_one("#onboard-run", Button).disabled,
+                focused.id if focused is not None else None,
+            )
+
+    missing, stale, after, disabled, focused = asyncio.run(drive_view())
+    assert missing.startswith("✗") and "does not exist" in missing
+    assert stale == missing, "control: nothing judges the path again on its own"
+    assert after.startswith("✓ will register") and str(later) in after
+    assert not disabled, "the folder now exists: the button is armed"
+    assert focused == "onboard-path", "the keyboard stays in the box"
+
+
+async def _until(done: Callable[[], bool], *, timeout: float = 5.0) -> bool:
+    """Whether ``done()`` holds within ``timeout`` seconds, looked for with ``asyncio.sleep``
+    alone: a tree whose message pump is stuck stalls every ``Pilot.pause``."""
+    deadline = time.monotonic() + timeout
+    while not done():
+        if time.monotonic() > deadline:
+            return False
+        await asyncio.sleep(0.05)
+    return True
+
+
+def test_a_folder_opened_as_a_reload_runs_does_not_stop_the_tree(tmp_path: Path) -> None:
+    """A folder opened while a reload holds the tree's lock is listed, and so is the next.
+
+    The tree's own ``reload`` gives it a new load queue and cancels its loader: a folder
+    the loader had taken and was waiting on the lock with was never marked done, the tree
+    waited on it for ever, and no folder opened after it was listed. The view reloads with
+    ``reload_node`` on the root, which does neither, and only once the tree has handled
+    what it holds, so the loader is never left waiting as a reload starts. With that wait
+    in place the tree's ``reload`` passes this too: it pins the behaviour, not the call.
+    """
+    for name in ("a", "b"):
+        (tmp_path / name / "inner").mkdir(parents=True)
+
+    async def drive_view() -> tuple[bool, bool]:
+        view = OnboardView(tmp_path, run=Scripted({}), validate=_validate)
+        async with Host(view).run_test(size=(120, 40)) as pilot:
+            tree = view.query_one("#onboard-tree", ProjectTree)
+            await _settle(pilot, lambda: _listed(tree, tmp_path / "b"))
+            stranded = tree._load_queue  # the queue the folder opened next is put on
+            await tree.lock.acquire()  # as a reload still listing a slow folder holds it
+            try:
+                first = _node(tree, tmp_path / "a")
+                assert first is not None
+                first.expand()
+                await asyncio.sleep(0.2)  # the loader has taken it and waits on the lock
+                view.reload()
+                await asyncio.sleep(0)
+            finally:
+                tree.lock.release()
+            reopened = await _until(lambda: _listed(tree, tmp_path / "a" / "inner"))
+            then = _node(tree, tmp_path / "b")
+            assert then is not None
+            then.expand()
+            listed = await _until(lambda: _listed(tree, tmp_path / "b" / "inner"))
+            if not listed:
+                # Mark the stranded folder done by hand, or the stuck tree never lets the
+                # app close either: this fails rather than hangs.
+                with contextlib.suppress(ValueError):
+                    while True:
+                        stranded.task_done()
+            return reopened, listed
+
+    reopened, listed = asyncio.run(drive_view())
+    assert reopened, "the folder opened as the reload ran is listed, and stays open"
+    assert listed, "and a folder opened after the reload is listed too"
+
+
+def test_a_reload_while_onboarding_leaves_the_run_its_log_and_its_button(tmp_path: Path) -> None:
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cloned = tmp_path / "cloned"
+    scripted = Scripted({"init": _result(_report(proj)), "doctor": _result(_checks_json([OK]))})
+    started, release = threading.Event(), threading.Event()
+
+    def held(args: Sequence[str], *, cwd: Path | None = None) -> CliResult:
+        if "init" in args:
+            started.set()
+            release.wait(30)
+        return scripted(args, cwd=cwd)
+
+    async def drive_view() -> dict[str, object]:
+        view = OnboardView(tmp_path, run=held, validate=_validate)
+        host = Host(view)
+        async with host.run_test(size=(120, 50)) as pilot:
+            tree = view.query_one("#onboard-tree", ProjectTree)
+            run_button = view.query_one("#onboard-run", Button)
+            log = view.query_one("#onboard-log", RichLog)
+            view.query_one("#onboard-path", Input).value = str(proj)
+            await pilot.pause()
+            try:
+                await pilot.click("#onboard-run")
+                await _settle(pilot, started.is_set)
+                before = (list(view.log_lines), len(log.lines))
+                cloned.mkdir()
+                await pilot.click("#onboard-reload")
+                await _settle(pilot, lambda: _listed(tree, cloned))
+                during = {
+                    "running": view.running,
+                    "log": (list(view.log_lines), len(log.lines)),
+                    "run disabled": run_button.disabled,
+                    "reload disabled": view.query_one("#onboard-reload", Button).disabled,
+                }
+            finally:
+                release.set()
+            await _settle(pilot, lambda: view.outcome is not None)
+            return {
+                "before": before,
+                "during": during,
+                "received": [type(m).__name__ for m in host.received],
+                "log": list(view.log_lines),
+                "run disabled": run_button.disabled,
+            }
+
+    seen = asyncio.run(drive_view())
+    during = seen["during"]
+    assert isinstance(during, dict)
+    assert during["running"], "the run goes on"
+    assert during["log"] == seen["before"], "its log is not touched"
+    assert during["run disabled"], "nor its button, which stays off until the run ends"
+    assert not during["reload disabled"], "↻ is allowed during a run"
+    assert seen["received"] == ["ProjectOnboarded"]
+    assert "$ aisquare --json doctor" in list(seen["log"])  # type: ignore[call-overload]
+    assert not seen["run disabled"], "the run's end arms the button as ever"
+
+
+def _home(tmp_path: Path) -> Path:
+    """A home directory with one folder in it, resolved as the tree lists it."""
+    home = (tmp_path / "home").resolve()
+    (home / "old").mkdir(parents=True)
+    return home
+
+
+def _onboard_at(home: Path, monkeypatch: pytest.MonkeyPatch) -> type[OnboardView]:
+    """The shell's Onboard view, rooted at ``home`` rather than the real home directory."""
+
+    class AtHome(OnboardView):
+        def __init__(self, **options: object) -> None:
+            super().__init__(home, **options)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ui_app, "OnboardView", AtHome)
+    return AtHome
+
+
+def test_opening_onboard_again_lists_the_folders_made_since(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script: object,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+) -> None:
+    """The shell builds the Onboard view on the first ``+`` and keeps it: the second ``+``
+    shows the same view, and a folder cloned while it was away is in its tree."""
+    home = _home(tmp_path)
+    AtHome = _onboard_at(home, monkeypatch)
+    cloned = home / "cloned"
+
+    async def fn(pilot: Pilot[None]) -> tuple[object, bool, str | None, bool]:
+        app = fleet_app(pilot)
+        await pilot.press("plus")
+        await settle_page(app)
+        view = app.query_one(AtHome)
+        tree = view.query_one(ProjectTree)
+        await settle_until(app, lambda: _listed(tree, home / "old"))
+        app.sidebar.focus()
+        await pilot.press("w")
+        await settle_page(app)
+        cloned.mkdir()
+        await settle_page(app)
+        away = _node(tree, cloned)
+        app.sidebar.focus()
+        await pilot.press("plus")
+        await settle_until(app, lambda: _listed(tree, cloned))
+        kept = app.query_one(AtHome) is view
+        return away, kept, app.content.current, _node(tree, cloned) is not None
+
+    away, kept, current, listed = drive(fn)
+    assert away is None, "control: a view not shown does not read the disk"
+    assert kept, "the second + shows the view the first one built"
+    assert current == "onboard"
+    assert listed, "and its tree lists the folder cloned since"
+
+
+def test_at_80_columns_the_reload_button_is_on_the_screen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script: object,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+) -> None:
+    """The narrowest terminal the shell is laid out for: its content pane is 45 columns
+    and the hint 48, so a ↻ after the hint sat at x=82 on an 80-column screen."""
+    _onboard_at(_home(tmp_path), monkeypatch)
+
+    async def fn(pilot: Pilot[None]) -> tuple[Region, Region, Region, Region]:
+        app = fleet_app(pilot)
+        await pilot.press("plus")
+        await settle_page(app)
+        head = app.query_one("#onboard-head")
+        return (
+            app.screen.region,
+            head.region,
+            app.query_one("#onboard-reload", Button).region,
+            app.query_one("#onboard-head .hint", Static).region,
+        )
+
+    screen, head, button, hint = drive(fn, size=(80, 24))
+    assert button.area and screen.contains_region(button), f"↻ at {button} on {screen}"
+    assert head.contains_region(button), f"↻ at {button} is inside its line, {head}"
+    assert head.contains_region(hint), f"the hint, {hint}, wraps rather than clips in {head}"
+
+
+def test_ctrl_r_reaches_the_view_from_each_of_its_widgets_and_nothing_outside_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script: object,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+) -> None:
+    """Read off the mounted shell's binding chain: from every widget of the view that can
+    take the keyboard, ctrl+r is the view's reload (no widget of its own takes it first);
+    from the sidebar, outside the view, nothing has it, and ``r`` and ``R`` are still the
+    shell's refresh and remote."""
+    home = _home(tmp_path)
+    _onboard_at(home, monkeypatch)
+    cloned = home / "cloned"
+
+    async def fn(
+        pilot: Pilot[None],
+    ) -> tuple[dict[str, tuple[bool, str] | None], dict[str, str | None], bool]:
+        app = fleet_app(pilot)
+        await pilot.press("plus")
+        await settle_page(app)
+        view = app.query_one(OnboardView)
+        box = view.query_one("#onboard-path", Input)
+        box.value = str(home / "old")  # arms Onboard: one more widget to take the keyboard
+        await settle_page(app)
+        reached: dict[str, tuple[bool, str] | None] = {}
+        for widget in [w for w in view.query("*") if w.focusable]:
+            widget.focus()
+            await settle_page(app)
+            active = app.active_bindings.get("ctrl+r")
+            reached[widget.id or type(widget).__name__] = (
+                None if active is None else (active.node is view, active.binding.action)
+            )
+        app.sidebar.focus()
+        await settle_page(app)
+        outside = {
+            key: (active.binding.action if (active := app.active_bindings.get(key)) else None)
+            for key in ("ctrl+r", "r", "R")
+        }
+        cloned.mkdir()
+        box.focus()
+        await settle_page(app)
+        await pilot.press("ctrl+r")
+        tree = view.query_one(ProjectTree)
+        await settle_until(app, lambda: _listed(tree, cloned))
+        return reached, outside, _node(tree, cloned) is not None
+
+    reached, outside, listed = drive(fn)
+    assert {"onboard-path", "onboard-tree", "onboard-reload", "onboard-run"} <= set(reached)
+    assert set(reached.values()) == {(True, "reload")}, reached
+    assert outside == {"ctrl+r": None, "r": "refresh_now", "R": "remote_panel"}
+    assert listed, "pressed in the path box, ctrl+r reloads the tree"
 
 
 # --------------------------------------------------------------------------- DoctorView

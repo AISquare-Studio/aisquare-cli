@@ -2163,7 +2163,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.call_after_refresh(self._maybe_ask_sharing)  # once, after onboarding: see there
 
     async def on_add_project(self, event: AddProject) -> None:
+        kept = next(iter(self.content.query_children(OnboardView)), None)
         await self._show("onboard", lambda: OnboardView(id="onboard"))
+        if kept is not None:
+            kept.reload()  # built once and kept: a folder cloned since it was last open shows
         self.sidebar.select(None)
 
     def _moved_on(self, event: ViewSelected, key: str) -> bool:

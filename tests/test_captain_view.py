@@ -95,6 +95,7 @@ def test_the_captain_slot_leads_the_actions_block_under_a_header_with_no_star(
         assert [child.id for child in app.query_one("#fleet-header").children] == [
             "fleet-title",
             "add-project",
+            "active-only",  # the + and its active-only filter: no ★
         ]
         header = app.query_one("#fleet-header")
         assert "★" not in "".join(shown(s) for s in header.query(Static))

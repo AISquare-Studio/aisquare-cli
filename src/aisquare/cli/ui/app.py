@@ -113,6 +113,7 @@ from aisquare.cli.ui.sidebar import (
     Sidebar,
     SpawnAgent,
     StopAgent,
+    ToggleActiveOnly,
     UpdateSelected,
     UsageStatsSelected,
     ViewSelected,
@@ -338,6 +339,9 @@ SELECTED_KEY = "fleet.selected"
 """``ui_state`` key for what is open: ``project:<id>``, ``agent:<project>/<id>``, ``settings``
 (the hub), ``app-settings``, ``accounts`` or ``doctor:<project or ''>`` (#144)."""
 SHOW_CAPTURED_KEY = "fleet.show_captured"
+ACTIVE_ONLY_KEY = "fleet.active_only"
+"""``ui_state`` key for the sidebar's active-only filter (the header's ○/●, ``l``): ``"1"``
+while only the projects with a live agent are listed, no row while every project is."""
 
 
 def _ui_state(key: str) -> str | None:
@@ -691,6 +695,7 @@ class HelpScreen(ModalScreen[None]):
                 if self.capturing
                 else []
             ),
+            ("l ○", "from the sidebar: list only the projects with a live agent, or all again"),
             ("+  w", "onboard a project · back to the Welcome page"),
             ("F1", "command palette"),
             ("q", "quit — from the sidebar; inside a pane every key goes to the agent"),
@@ -777,12 +782,34 @@ class Panes(Horizontal):
     - **The focus signal.** Focus is in the sidebar or in a pane (§4.3), and
       the sidebar's ``border-right`` used to say which. The divider is that
       line now — one column, the one the hand grabs — and lights ``$accent``
-      while focus is in the sidebar.
+      while focus is in the sidebar. A one-column line was too quiet to stop
+      a sentence typed at the agent from landing on the sidebar's one-key
+      bindings, so the side WITHOUT the focus is faded too (``-unfocused``):
+      the side the keys go to is the brighter one.
 
     The app keeps no handler for any of it, and nothing here assumes there is
     one ``Divider`` on the screen: the handle and the navigator are this
     container's direct children, and a later split inside a view is not its
     business.
+    """
+
+    # The fade's strength, in one place. `opacity`, not `text-opacity` or `tint`: it
+    # is the one of the three Textual multiplies into every widget below at paint
+    # time, so a focus change restyles the side alone (`_fade`). The other two are
+    # set per widget, so they need a rule for every descendant: each focus change
+    # then restyled every row of the sidebar (~80 ms of CPU at 50 projects of 3
+    # agents, growing with the fleet), and the universal selector is matched against
+    # every node the app restyles. The fade is not free to paint: a faded pane
+    # repaints at about 1.8x the cost of one with the focus (every segment is
+    # blended), still no slower than with `text-opacity` and faster than with
+    # `tint`; the pane being typed into is never faded. What it gives up: Textual
+    # blends a 16-colour SGR colour (31 red, 42 green background…) by its ANSI
+    # number and maps that to the theme afterwards, so such text and backgrounds in
+    # a pane keep their strength; the pane's own text, and the 256- and 24-bit
+    # colours Claude Code draws in (the bundled tmux conf passes `Tc`), fade with
+    # the rest.
+    DEFAULT_CSS = """
+    Panes > .-unfocused { opacity: 0.82; }
     """
 
     MIN_CONTENT: ClassVar[int] = 40
@@ -828,17 +855,47 @@ class Panes(Horizontal):
         self._mark_focus()
 
     def _mark_focus(self) -> None:
-        """Light the divider iff focus is in the sidebar — read off the screen, not the event.
+        """Light the divider iff focus is in the sidebar, and fade the side focus is not
+        in — read off the screen, not the event.
 
         A pane's ``DescendantBlur`` bubbles up through the content switcher while
         the sidebar's ``DescendantFocus`` is posted straight here, so the two can
         arrive in either order; the screen's ``focused`` is already settled by
-        the time either does.
+        the time either does. The side is the direct child the focused widget is
+        in; with nothing focused, or the focus outside this container, no side
+        has it and none is faded.
         """
         focused = self.screen.focused
-        sidebar = self.sidebar
-        beside = focused is not None and (focused is sidebar or sidebar in focused.ancestors)
-        self.divider.set_class(beside, "-neighbour-focused")
+        side = (
+            None
+            if focused is None
+            else next((node for node in focused.ancestors_with_self if node.parent is self), None)
+        )
+        divider = self.divider
+        divider.set_class(side is self.sidebar, "-neighbour-focused")
+        for child in self.children:
+            if child is not divider:
+                self._fade(child, side is not None and child is not side)
+
+    def _fade(self, side: Widget, faded: bool) -> None:
+        """Fade ``side`` or bring it back, restyling ``side`` alone.
+
+        ``set_class`` would match the CSS again for every widget below it, and
+        only ``side``'s own rules change: the fade is ``opacity``, which Textual
+        multiplies in from the ancestors, and setting it repaints the children.
+        What the children keep of the old opacity is dropped by hand:
+        ``get_visual_style`` caches the ancestors' opacity until
+        ``notify_style_update``, and an OptionList (the Board's live feed), a
+        DataTable or a Tree paints from that cache, so without this they kept
+        the fade after focus came back (review of #470, M2). That call is the
+        one step of a restyle the children need, and it matches no CSS.
+        """
+        if side.has_class("-unfocused") is faded:
+            return
+        side.set_class(faded, "-unfocused", update=False)
+        self.app.stylesheet.update_nodes([side])
+        for widget in side.walk_children(Widget):
+            widget.notify_style_update()
 
 
 class _WorkerThreads(WorkerManager):
@@ -1236,6 +1293,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._theme_restored = True
         self.watch(self.content, "current", self._content_switched, init=False)
         self.show_captured = _ui_state(SHOW_CAPTURED_KEY) == "1"
+        self.sidebar.set_active_only(_ui_state(ACTIVE_ONLY_KEY) == "1")
         # The first frame is read here, on the UI thread, before anything is drawn: there
         # is nothing on screen yet for the read to hold up, and what was open last time is
         # reopened from it below. Every frame after it is read in a thread (`refresh_data`).
@@ -1536,6 +1594,22 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             "showing captured directories too — `a` hides them again"
             if self.show_captured
             else "captured directories hidden — `a` shows them",
+            timeout=4,
+        )
+
+    def on_toggle_active_only(self, event: ToggleActiveOnly) -> None:
+        """The header's ○/● or ``l``: only the projects with a live agent, or all of them.
+
+        The sidebar filters the frame it holds, so nothing is re-read: each tick then
+        shows a project as its agents start, and hides it as the last one exits.
+        """
+        on = not self.sidebar.active_only
+        self.sidebar.set_active_only(on)
+        _remember_ui_state(ACTIVE_ONLY_KEY, "1" if on else None)
+        self.notify(
+            "showing only the projects with a live agent — `l` shows them all"
+            if on
+            else "showing every project — `l` shows only the active ones",
             timeout=4,
         )
 
@@ -2163,7 +2237,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.call_after_refresh(self._maybe_ask_sharing)  # once, after onboarding: see there
 
     async def on_add_project(self, event: AddProject) -> None:
+        kept = next(iter(self.content.query_children(OnboardView)), None)
         await self._show("onboard", lambda: OnboardView(id="onboard"))
+        if kept is not None:
+            kept.reload()  # built once and kept: a folder cloned since it was last open shows
         self.sidebar.select(None)
 
     def _moved_on(self, event: ViewSelected, key: str) -> bool:
@@ -2432,13 +2509,22 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.refresh_data()
 
     def on_move_row(self, event: MoveRow) -> None:
+        # One step is one row ON SCREEN: the captured rows count only while `a` shows them,
+        # and none the active-only filter hides counts.
         if event.kind == "group":
-            self._layout(lambda s: project_groups.step_group(s, event.ident, event.delta), "move")
-        else:
-            # One step is one row ON SCREEN: the captured rows count only while `a` shows them.
-            shown = self._listing_captured()
+            groups = self.sidebar.hidden_groups
             self._layout(
-                lambda s: project_groups.step(s, event.ident, event.delta, all=shown), "move"
+                lambda s: project_groups.step_group(s, event.ident, event.delta, hidden=groups),
+                "move",
+            )
+        else:
+            shown = self._listing_captured()
+            hidden = self.sidebar.hidden_projects
+            self._layout(
+                lambda s: project_groups.step(
+                    s, event.ident, event.delta, all=shown, hidden=hidden
+                ),
+                "move",
             )
 
     def on_toggle_pin(self, event: TogglePin) -> None:

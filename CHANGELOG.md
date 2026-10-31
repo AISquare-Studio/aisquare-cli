@@ -242,6 +242,23 @@ terminal beside the default sidebar.**
     (`SessionGetInfo`), not `SSH_CONNECTION`: a pane of a server the Mac started is no SSH
     login, whoever attaches to it. Once the Mac has started the server, agents spawn into
     it from SSH as before.
+- **Active only, in the sidebar's header**: the ○ after the `+` (or `l` while the sidebar
+  has focus) lists only the projects with a live agent — working, waiting, asking for you,
+  limited or unknown; an exited, lost or paused one does not count. A project comes and goes
+  on the two-second refresh as its agents start and exit; a group header with no member
+  shown, and the 📌 Pinned label with no pinned entry shown, go with them. The Captain
+  section is never filtered, the open view stays open when its card is hidden, and
+  shift+↑/↓ step over the hidden rows. The choice is remembered across restarts
+  (`fleet.active_only`).
+- **↻ in the Onboard view reloads its directory tree.** The tree read the disk once, so a
+  repo cloned after the view opened could only be onboarded by typing its path. The ↻ at
+  the start of the hint line, or ctrl+r while the keyboard is anywhere in the view (the
+  path box too; an agent's pane keeps its own ctrl+r), lists what is on disk now: open
+  folders stay open, and the cursor stays on its row while that row is there. A typed path
+  whose folder did not exist yet is judged again, so it turns ✓ and Onboard can be pressed.
+  Opening the view again with `+` reloads it too. A reload during an onboard run leaves the
+  run, its log and its button as they were, and reloads asked for close together run one
+  after another, so a held ctrl+r keeps the open folders and the cursor where they were.
 
 ### Changed
 
@@ -323,6 +340,14 @@ terminal beside the default sidebar.**
   nothing. In asq it is a toast, and the asq does not quit for nothing. Only asqs
   in the registry are counted: one from 0.9.1 writes no record, and the 0.9.2 asq started
   beside it refuses instead.
+- **`asq` fades the side that does not have the keyboard.** With focus in the sidebar
+  the content (an agent's pane, or a page such as Settings) is drawn slightly fainter;
+  with focus in the content, the sidebar is. The side your keys go to is drawn as
+  before, and the divider still lights while the sidebar has focus. Typing meant for an
+  agent used to land on the sidebar's one-key bindings with nothing but that one-column
+  divider to say so. In a faded pane, text and backgrounds in the 16 basic terminal
+  colours keep their strength (Textual's `opacity` blends those by number); everything
+  else fades.
 
 ### Fixed
 

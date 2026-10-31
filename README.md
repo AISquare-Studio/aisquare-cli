@@ -74,6 +74,13 @@ spending tokens without losing them, *⚙ Settings ▸ Fleet ▸ Pause all…* e
 one and keeps its task, worktree and session; *Resume all…* brings each back where
 it was.
 
+You can open `asq` over SSH into the same Mac while the Mac's own is open: both
+show the same fleet, and a line in the sidebar says where each one runs. Start
+the first agent at the Mac, since on macOS an SSH login can't start the fleet's
+tmux server (agents in it couldn't read the Keychain).
+[Running more than one asq](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/multi-instance.md)
+has the rest, including what happens when the two run different releases.
+
 The manager never writes code and never merges — a human does that.
 
 ## Everything is also a command
@@ -87,6 +94,7 @@ aisquare fleet relabel coder-1 login fix  # give an agent a name you chose: logi
 aisquare fleet pause --all                # every project's agents stop, kept for resume
 aisquare fleet resume --all               # ...and come back where they were
 aisquare fleet attach                     # the same session in raw tmux, full fidelity
+aisquare instances                        # the asqs open on this home: at the Mac, over SSH
 aisquare doctor                           # is everything wired? (and how to fix anything)
 ```
 

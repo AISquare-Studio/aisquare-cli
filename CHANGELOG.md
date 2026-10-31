@@ -217,11 +217,12 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   four Fleet buttons, *Share anonymous usage* and Usage & stats' *Turn sharing on/off*
   ignored every mouse click for a second after the view came up, moved them or a dialog
   over them closed, and said so in a toast (`ignored a click on Restart — the view had just
-  changed under the pointer`). They now ignore only a click made before the change was
-  drawn: the one aimed at what was under the pointer before, which is what stopped a
-  manager on 2026-10-19. A click once the button is on screen acts at once, and an ignored
-  click raises no toast. It still leaves the keyboard focus where it was, and Enter on a
-  focused button is never ignored.
+  changed under the pointer`). They now ignore only a click that reaches asq before the
+  change is drawn: the one aimed at what was under the pointer before, which is what
+  stopped a manager on 2026-10-19. A click that is still on its way when the change is
+  drawn (over a slow SSH link, say) is not held back. A click once the button is on screen
+  acts at once, and an ignored click raises no toast. It still leaves the keyboard focus
+  where it was, and Enter on a focused button is never ignored.
 
 ### Fixed
 

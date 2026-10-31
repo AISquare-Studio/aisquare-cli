@@ -28,8 +28,8 @@ from textual.widgets import Button
 
 
 class GuardedButton(Button):
-    """A :class:`Button` that ignores a mouse press made before the screen showed it where it
-    now is.
+    """A :class:`Button` that ignores a mouse press that reached the app before the screen
+    showed it where it now is.
 
     It watches its own place on its screen. After each layout pass
     (``Screen.screen_layout_refresh_signal``) it compares the region it occupies with

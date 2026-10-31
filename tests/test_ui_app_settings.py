@@ -1356,9 +1356,9 @@ def test_reload_and_reset_all_read_asking_before_a_stop() -> None:
         host.query_one("#reload-settings", Button).press()
         await settle(pilot)
         reloaded = switch.value
-        host.query_one("#reset-settings", Button).press()
+        host.query_one("#reset-settings", Button).press()  # arms it
         await settle(pilot)
-        host.screen.query_one("#reset-confirm", Button).press()
+        host.query_one("#reset-settings", Button).press()  # the second press resets
         await settle(pilot)
         return [reloaded, switch.value, *host.stop_told]
 

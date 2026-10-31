@@ -253,8 +253,9 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   seconds, Esc, the focus leaving it or its view changing put it back as it was. In the
   attach picker it is the agent's row that asks, marked ▶, with the question above the
   list. The button's own change of label never makes the click guard above ignore that
-  second click. Stop, *Start fresh*, *Discard*, *Restart all…*, *Pause all…*, the update
-  and the usage-sharing consent keep their dialogs.
+  second click. Stop (unless *Don't ask again* is ticked), *Start fresh*, *Discard*,
+  *Restart all…*, *Pause all…*, the update and the usage-sharing consent keep their
+  dialogs.
 
 ### Fixed
 

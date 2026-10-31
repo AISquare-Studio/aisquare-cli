@@ -24,7 +24,7 @@ from textual.widgets import Button, Checkbox, Switch
 from textual.widgets._toast import Toast
 
 from aisquare.cli.ui.app import FleetApp, HelpScreen
-from aisquare.cli.ui.sidebar import AppSettingsSelected
+from aisquare.cli.ui.sidebar import AgentSelected, AppSettingsSelected
 from aisquare.cli.ui.stop import ASK_AGAIN_WHERE, DONT_ASK, StopAgentScreen, grace_seconds
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.core import paths
@@ -32,9 +32,12 @@ from aisquare.core.config import load_config, overrides
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
+from tests import guard_paint
 from tests.test_ui_shell import (
     Script,
     StopRecorder,
+    _acting_fleet,
+    _manager_1_under,
     drive,
     ended,
     fleet_app,
@@ -446,6 +449,72 @@ def test_a_stop_without_asking_runs_off_the_ui_thread_and_a_second_press_does_no
     assert len(left) == 1, "one stopping toast, however many presses"
     assert left[0] > grace_seconds() + 5, "it outlasts the grace and the kill after it"
     assert "stopping coder-auth …" not in after, "the answer took it down"
+
+
+def test_with_asking_off_a_press_waiting_as_the_view_switches_in_stops_nothing(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 2026-10-19 case, with *Don't ask again* ticked: no dialog stands between a stale
+    click and the stop now, only the click guard (task #8). A press on manager 0's Stop
+    waits at the app while it puts manager 1's view up in its place, and is read once that
+    view is laid out and painted, its Stop under the press: it stops nothing and says
+    nothing. A click once the view is on screen stops manager 1 at once, with no dialog.
+
+    The guard's own test is tests/test_ui_shell.py's
+    ``test_a_press_waiting_as_the_view_switches_in_acts_on_nothing_and_one_after_its_paint_acts``,
+    with asking on, where a press that got through would have opened the dialog. Validator's
+    gate on #478, #486 and #477 merged (MINOR 3)."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", "brave-lynx"))
+    script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
+    one = status("prj_b", "manager", "manager", "working")
+    script["prj_b"] = [one]
+    acted = _acting_fleet(monkeypatch, script, one)
+    settings_service.set_value("ui.confirm_stop", "false")
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        seen: dict[str, object] = {"asking": app.confirm_stop}
+        before = await open_view(pilot, app, "agt_a_manager")
+        # Where the pointer rests, on manager 0's Stop; manager 1's comes up in its place.
+        where = {"agent-stop": before.query_one("#agent-stop", Button).region.offset}
+        # The row's message, and the app still busy putting its view up when the press comes.
+        app.post_message(AgentSelected("prj_b", "agt_b_manager"))
+        free = guard_paint.busy(app)
+        guard_paint.queue_press(app, where["agent-stop"])
+        await watch_until(lambda: _manager_1_under(app, where))
+        seen["laid out under"] = bool(_manager_1_under(app, where))
+        free.set()
+        await settle(app)
+        # A stop, were one started, would reach the service within this: it runs off the
+        # UI thread.
+        await watch_until(lambda: bool(acted), timeout=1.0)
+        seen["queued: acted"] = list(acted)
+        seen["queued: dialog"] = isinstance(app.screen, StopAgentScreen)
+        seen["queued: said"] = messages()
+        view = app.current_view()
+        if not isinstance(view, AgentView):  # a stop got through: its view was left
+            return seen
+        await pilot.click(view.query_one("#agent-stop", Button))
+        await pilot.pause()
+        seen["clicked: dialog"] = isinstance(app.screen, StopAgentScreen)
+        await watch_until(lambda: bool(acted))
+        await settle(app)
+        seen["clicked: acted"] = list(acted)
+        seen["clicked: said"] = messages()
+        return seen
+
+    seen = drive(go)
+    assert seen["asking"] is False
+    assert seen["laid out under"], "the press must reach the app with manager 1's Stop under it"
+    assert seen["queued: acted"] == [], "a press made as the view switched in stopped manager 1"
+    assert seen["queued: dialog"] is False
+    queued_said = seen["queued: said"]
+    assert isinstance(queued_said, list)
+    assert not [m for m in queued_said if "stopping" in m or "ignored a click" in m], queued_said
+    assert seen["clicked: dialog"] is False, "asking is off: the click stops with no dialog"
+    assert seen["clicked: acted"] == [("stop", "prj_b")], "the click once painted stops at once"
+    clicked_said = seen["clicked: said"]
+    assert isinstance(clicked_said, list) and "stopping manager …" in clicked_said
 
 
 def _stopped_without_asking(

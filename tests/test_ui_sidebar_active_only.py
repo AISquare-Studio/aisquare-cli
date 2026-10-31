@@ -1,9 +1,9 @@
 """The sidebar's active-only filter: the ○ after the header's ``+``, or ``l`` from the sidebar.
 
 On (●), the sidebar lists only the projects with a live agent — an agent in ``ALIVE_STATES``,
-the card's "alive" chip; an exited or lost row is no live agent. A group header none of whose
-members passes is hidden with them, and so is the Pinned label with no pinned entry shown; the
-Captain section is not a project and is never filtered. The choice is remembered across a
+the card's "alive" chip; an exited, lost or paused row is no live agent. A group header none of
+whose members passes is hidden with them, and so is the Pinned label with no pinned entry shown;
+the Captain section is not a project and is never filtered. The choice is remembered across a
 relaunch under ``fleet.active_only``.
 
 Driven through the whole app: what is asserted is what the sidebar SHOWS (``display``), the
@@ -120,6 +120,13 @@ def test_every_alive_state_is_a_live_agent(state: str) -> None:
 def test_an_exited_or_lost_row_is_no_live_agent(state: str) -> None:
     assert not has_live_agent("prj_a", {"prj_a": [status("prj_a", "x", "coder", state)]})
     assert not has_live_agent("prj_a", {"prj_a": []})
+
+
+def test_a_paused_row_is_no_live_agent() -> None:
+    """A ⏯ paused agent (rc/0.9.2's `fleet pause`) has no process: not in ``ALIVE_STATES``,
+    nor the card's alive chip, so a project whose agents are all paused is hidden too."""
+    assert "paused" not in ALIVE_STATES
+    assert not has_live_agent("prj_a", {"prj_a": [status("prj_a", "x", "coder", "paused")]})
 
 
 def test_a_project_folded_away_counts_its_live_rows_from_the_store() -> None:

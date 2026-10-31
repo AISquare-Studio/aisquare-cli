@@ -34,7 +34,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from statistics import median
 
-from aisquare.core import paths, pricing
+from aisquare.core import paths, pricing, prompt_origin
 from aisquare.core import usage as usage_core
 from aisquare.core.ids import new_trace_id, new_usage_id
 from aisquare.core.store import ContextStore, store_session
@@ -105,6 +105,37 @@ def close_turn(session_id: str | None, *, store: ContextStore | None = None) -> 
     except Exception:  # never disrupt the session for a metrics write
         return None
     return closed.trace_id if closed is not None else None
+
+
+def continue_turn(session_id: str | None, *, store: ContextStore | None = None) -> str | None:
+    """Open a row for the stretch a Stop hook's decision starts (``{"decision": "block"}``): the
+    agent goes on with no ``UserPromptSubmit``, so nothing else would. The row is the session's
+    previous turn's project, a baseline as that one was (the CI was not asked), and its origin is
+    ``agent:continuation``; the next Stop closes it. Its trace id, or ``None`` for a session with
+    no turn recorded, or a write that failed. Silent either way."""
+    if not session_id:
+        return None
+    try:
+        if store is not None:
+            return _continue_turn(store, session_id)
+        with store_session() as owned:
+            return _continue_turn(owned, session_id)
+    except Exception:  # never disrupt the session for a metrics write
+        return None
+
+
+def _continue_turn(store: ContextStore, session_id: str) -> str | None:
+    last = store.turn_metrics(session_id=session_id, limit=1)
+    if not last:
+        return None
+    reason = last[0].client_reason
+    metric = baseline_turn(
+        last[0].project_id,
+        session_id=session_id,
+        reason=reason if reason in BASELINE_REASONS else ClientReason.disabled,
+    ).model_copy(update={"origin": prompt_origin.AGENT_CONTINUATION})
+    store.open_turn(metric)
+    return metric.trace_id
 
 
 def recent(

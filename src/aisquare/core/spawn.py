@@ -56,6 +56,10 @@ otherwise inherit a live identity:
     our own. A background worker of ours is not an agent session and has no
     business wearing one's identity; it also outlives the pane whose hook
     started it, which is the whole point of detaching it.
+  * ``services/claude_accounts.py::_run_token_refresh`` — ``claude mcp get``
+    of a server no one has, on an account whose token went stale: Claude
+    Code's own startup refreshes the token. No model request; a chore on the
+    account, in a plain session's environment, so no identity.
 
 Excluded, nothing stripped — these are not model processes at all, and
 narrowing their environment would be change without a reason:
@@ -87,6 +91,8 @@ narrowing their environment would be change without a reason:
     A listing, no model.
   * ``core/instance_scan.py::_environment`` — ``ps -E -p <pid>`` on macOS and the BSDs: one
     such asq's ``AISQUARE_HOME``/``HOME``, whether it runs on this home (#21). No model.
+  * ``core/process_table.py::ps_text`` — ``ps -A -o pid=,ppid=,pcpu=,rss=,etime=``: every
+    process at once, for ``fleet top`` and asq's Agent resources page. A listing, no model.
   * ``cli/watch.py::action_open_transcript`` — a pager/viewer on a file.
   * ``cli/ui/terminal.py::wsl_path`` — ``wslpath -u`` on a Windows path pasted into a
     pane under WSL (#288). A path converter, no model.
@@ -297,6 +303,13 @@ SEAMS: dict[str, Seam] = {
         "same reason",
         strips_identity=True,
     ),
+    "aisquare/services/claude_accounts.py::_run_token_refresh": Seam(
+        EXCLUDED,
+        "`claude mcp get` of a server no one has, on an account whose token went stale: Claude "
+        "Code's startup refreshes the token, with no model request — a chore, not a session, "
+        "run in a plain session's environment (`session_env`), identity-stripped",
+        strips_identity=True,
+    ),
     "aisquare/core/claude_accounts.py::_ask_keychain": Seam(
         EXCLUDED,
         "`/usr/bin/security find-generic-password` on macOS — reads the login Claude Code keeps "
@@ -323,6 +336,12 @@ SEAMS: dict[str, Seam] = {
         "a detached `aisquare metrics ship` of ours — the opt-in usage shipper, started from a "
         "command at most every half hour; a worker, not an agent session, and it outlives the "
         "command that started it",
+        strips_identity=True,
+    ),
+    "aisquare/services/outcomes.py::_commit_lines": Seam(
+        EXCLUDED,
+        "`git diff-tree --numstat` over a week's commits, for `aisquare outcomes`' lines added "
+        "and deleted, run in `git_env()`; no model",
         strips_identity=True,
     ),
     "aisquare/core/repo_profile.py::git_output": Seam(
@@ -362,6 +381,11 @@ SEAMS: dict[str, Seam] = {
         EXCLUDED,
         "`ps -E -p <pid>` on macOS and the BSDs: one asq's AISQUARE_HOME and HOME, whether it "
         "runs on this home (#21). No model",
+    ),
+    "aisquare/core/process_table.py::ps_text": Seam(
+        EXCLUDED,
+        "`ps -A -o pid=,ppid=,pcpu=,rss=,etime=`: every process at once, for `fleet top` and "
+        "asq's Agent resources page. A listing, no model",
     ),
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"
@@ -472,6 +496,11 @@ SEAMS: dict[str, Seam] = {
         "`vm_stat` (macOS): the page counts the fleet's admission reads as available memory "
         "(#283); no model",
         strips_identity=True,
+    ),
+    "aisquare/core/load.py::_notifyutil": Seam(
+        EXCLUDED,
+        "`notifyutil -g com.apple.system.thermalpressurelevel` (macOS): the thermal pressure "
+        'level auto admission reads (`max_agents_per_project = "auto"`); a number, no model',
     ),
     "aisquare/services/ngrok_tunnel.py::popen_tied": Seam(
         EXCLUDED,

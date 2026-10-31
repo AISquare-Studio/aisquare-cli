@@ -2406,9 +2406,12 @@ def _check_fleet_capacity() -> DoctorCheck:
     """``fleet capacity``: memory headroom and live agents against admission's limits (#283).
 
     What the next ``fleet spawn`` would meet, read as ``aisquare fleet capacity`` reads it:
-    ok with the numbers; warn when a spawn would be refused (below ``min_free_mb``,
-    critical pressure, the fleet at ``max_agents_total``) or memory pressure is at warn.
-    Read-only, and it does not bring a home into being.
+    ok with the numbers and each load signal (value, threshold, verdict); warn when a spawn
+    would be refused (below ``min_free_mb``, critical pressure, the fleet at
+    ``max_agents_total``) or memory pressure is at warn. A busy CPU or a warm machine is
+    said, not warned of: it comes and goes, holds only a project at ``busy_floor``, and
+    ``install`` would list it as something to look at on every busy box. Read-only, and it
+    does not bring a home into being.
     """
     name = "fleet capacity"
     try:
@@ -2422,16 +2425,27 @@ def _check_fleet_capacity() -> DoctorCheck:
         f"{head.available_mb} MB available" if head.available_mb is not None else "memory unread"
     )
     budget = f" of {report.max_agents_total}" if report.max_agents_total else ""
+    burst = (
+        f"busy_burst {report.busy_burst} per {report.busy_hold_minutes:g} min"
+        if report.busy_burst
+        else "busy_burst off"
+    )
+    mode = f"auto, {burst}" if report.auto else f"max {report.max_agents_per_project} per project"
+    signals = "; ".join(
+        f"{signal.name} {signal.value} ({signal.threshold}: {signal.verdict})"
+        for signal in report.signals
+    )
     detail = (
         f"{memory}, pressure {head.pressure}, floor {report.min_free_mb or 'off'}; "
-        f"{report.live_total}{budget} agents live — {report.reason}"
+        f"{report.live_total}{budget} agents live — {report.reason}; admission {mode}: "
+        f"{signals}"
     )
     if not report.admits or head.pressure == "warn":
         return _warn(
             name,
             detail,
-            "aisquare fleet capacity lists the live agents — stop one, free memory, or "
-            "change max_agents_total / min_free_mb in [fleet]",
+            "aisquare fleet capacity lists the live agents and the load — stop one, free "
+            "memory, or change max_agents_total / min_free_mb / busy_* in [fleet]",
         )
     return _ok(name, detail)
 

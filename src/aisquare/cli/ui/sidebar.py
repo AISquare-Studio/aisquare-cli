@@ -5,8 +5,9 @@ with a disclosure, its name (the nickname, else the basename — renamed in plac
 chips (agents alive · 🔔 count), a ⋯ menu, and a dim subtitle — the path when two projects
 share a name, and the fleet codename when it is not the one the name gives
 (:func:`project_subtitle`); under it one ``AgentRow`` per fleet agent (role icon,
-label, state chip, exit status). Above the projects, one *actions* block under the Fleet
-header — *▶ Start captain* (the captain's own row while one is live) and *Spawn agent*, whose
+label, state chip, exit status). The Fleet header counts the agents live across the fleet
+(:func:`fleet_title`); above the projects, one *actions* block under it
+— *▶ Start captain* (the captain's own row while one is live) and *Spawn agent*, whose
 dialog asks which project — and under the separator, one
 row, *⚙ Settings* (the Settings hub: App settings, Accounts, Doctor), under it the
 ⬆ row while a newer aisquare is out (:func:`update_row_text`), and under that
@@ -206,6 +207,10 @@ class AccountsSelected(Message):
 
 class UsageStatsSelected(Message):
     """The Usage & stats page: what this machine's Claude Code sessions spent, by range."""
+
+
+class ResourcesSelected(Message):
+    """The Agent resources page: what each live agent consumes, read again while it shows."""
 
 
 class SettingsSelected(ViewSelected):
@@ -1813,6 +1818,24 @@ class OthersSection(Vertical):
 # --- the pane ---------------------------------------------------------------------
 
 
+def fleet_title(live_total: int) -> Text:
+    """The header: ``Fleet``, then ``· N live`` while any agent is live across the fleet —
+    every project's, the captain excluded: ``aisquare fleet capacity``'s ``live_total``."""
+    title = Text("Fleet")
+    if live_total > 0:
+        title.append(f" · {live_total} live", style="not bold")
+    return title
+
+
+def fleet_title_tooltip(live_total: int) -> str | None:
+    if live_total <= 0:
+        return None
+    return (
+        f"{live_total} agent{'' if live_total == 1 else 's'} live across every project, "
+        "the captain excluded — aisquare fleet capacity"
+    )
+
+
 MOVE_KEYS = Binding.Group("move", compact=True)
 """The sidebar's ↓ and ↑, as the footer shows them: one entry."""
 
@@ -1898,6 +1921,8 @@ class Sidebar(Vertical):
         """The last row highlighted: where the arrows go on from while none is. Clearing the
         highlight (the Welcome page, onboarding) leaves the place it was."""
         self.last_frame: tuple[list[ProjectInfo], dict[str, list[FleetAgentStatus]]] | None = None
+        self.live_total = 0
+        """The header's "Fleet · N live", from the last frame read (:func:`fleet_title`)."""
         self.arrangement: Arrangement | None = None
         """The order the last frame was painted in (groups, pins, loose) — #140."""
         self._marked: list[str] = []
@@ -1908,7 +1933,7 @@ class Sidebar(Vertical):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="fleet-header"):
-            yield Static(Text("Fleet"), id="fleet-title")
+            yield Static(fleet_title(self.live_total), id="fleet-title")
             yield AddButton()
         yield ActionsSection(captain=self.captain, id="actions")
         yield Static("", id="projects-notice")
@@ -2065,6 +2090,16 @@ class Sidebar(Vertical):
         self.last_frame = (projects, agents)
         self._ring_on_attention(status for statuses in agents.values() for status in statuses)
         self._apply_selection()
+
+    def show_live_total(self, live_total: int) -> None:
+        """The header's count, from the frame just read: shown at once after a spawn or a stop,
+        and gone with the last live agent. A frame that could not be read keeps the last."""
+        if live_total == self.live_total:
+            return
+        self.live_total = live_total
+        title = self.query_one("#fleet-title", Static)
+        title.update(fleet_title(live_total))
+        title.tooltip = fleet_title_tooltip(live_total)
 
     def show_paths(self, always: bool) -> None:
         """``[ui] always_show_project_path`` changed (App settings saved, reloaded or reset):

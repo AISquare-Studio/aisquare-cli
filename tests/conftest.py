@@ -941,6 +941,18 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+@pytest.fixture(autouse=True)
+def no_token_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No usage read in the suite starts a real ``claude`` to refresh a stale token: there is
+    no Claude Code to run it with, so an expired or rejected token answers as it did before
+    the quiet refresh existed, and nothing is claimed for it. The runner itself is stubbed
+    too. ``tests/test_usage_token_refresh.py`` puts a fake Claude Code in their place."""
+    from aisquare.services import claude_accounts as service
+
+    monkeypatch.setattr(service, "_token_refresh_command", lambda: None)
+    monkeypatch.setattr(service, "_run_token_refresh", lambda _account, _command: False)
+
+
 #: The detached start of an index build (#285), as written, for the tests of it:
 #: ``no_detached_code_index_build`` replaces it for every other test.
 REAL_START_CODE_INDEX = hooks_service.start_code_index
@@ -1005,6 +1017,22 @@ def roomy_memory(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         memory, "headroom", lambda: memory.Headroom(65_536, 131_072, "normal", None, "test")
     )
+
+
+@pytest.fixture(autouse=True)
+def calm_machine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every spawn in the suite sees an idle machine, whatever the runner's load is.
+
+    Auto admission (``max_agents_per_project = "auto"``, the default) holds a spawn into a
+    project at ``busy_floor`` while the machine reads busy, and a loaded CI runner or a
+    laptop running a fleet would hold the third agent a test spawns. A test of auto
+    admission sets its own readings; the probes' own tests call ``darwin_thermal`` /
+    ``psi_some_avg60`` with their fixtures.
+    """
+    from aisquare.core import load
+
+    monkeypatch.setattr(load, "cpu_load", lambda: load.CpuLoad(0.5, 8, None))
+    monkeypatch.setattr(load, "thermal", lambda: load.Thermal(0, "test"))
 
 
 @pytest.fixture(autouse=True)

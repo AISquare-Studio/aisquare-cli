@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import json
+import math
 import os
 import re
 import shutil
@@ -59,12 +60,16 @@ from aisquare.core import (
     orchestrator,
     paths,
     personas,
+    prompt_origin,
     selfcli,
 )
+from aisquare.core import load as load_core
 from aisquare.core import memory as memory_core
 from aisquare.core import names as names_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
+    BUSY_HOLD_DEFAULT_MINUTES,
+    BUSY_HOLD_MAX_MINUTES,
     CLAUDE_PERMISSION_MODES,
     LAST_ARGS_ONLY_DENY,
     REVIEWER_ARGS,
@@ -253,13 +258,17 @@ class CapacityRefused(FleetError):
     """A spawn the machine has no room for (#283): ``code`` says which limit.
 
     ``capacity_project`` (``max_agents_per_project``), ``capacity_fleet``
-    (``max_agents_total``, every project's live agents) or ``capacity_memory``
-    (``min_free_mb``, or the kernel's memory pressure at critical).
+    (``max_agents_total``, every project's live agents), ``capacity_memory``
+    (``min_free_mb``, or the kernel's memory pressure at critical), ``capacity_group`` (a
+    group's ``max_agents``) or ``capacity_busy`` (auto admission held the spawn: the
+    machine is busy and the project runs ``busy_floor`` agents; ``retry_at`` is the
+    earliest a retry probes again).
     """
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, retry_at: datetime | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.retry_at = retry_at
 
 
 class _LostToARelabel(FleetError):
@@ -3624,7 +3633,8 @@ def spawn(
     under ``hub`` when the caller names one, ``""`` for none.
 
     Every ``None`` means "the role's default" (config, then built-in). Refuses
-    past ``max_agents_per_project``, a second manager, a worktree in a non-git
+    past ``max_agents_per_project`` (in auto mode, past ``busy_floor`` while the machine is
+    busy: :func:`_admit_by_load`), a second manager, a worktree in a non-git
     project, and an unknown role — each with the reason in the message.
 
     The window runs ``python -P -m aisquare launch <role> …`` (§3.4; ``-P`` is
@@ -3824,12 +3834,12 @@ def spawn(
                 f"the home already has a captain ({existing.id}) — one per home; "
                 "`aisquare captain` attaches to it"
             )
-    if len(live) >= config.max_agents_per_project:
+    cap = config.max_agents_per_project
+    if isinstance(cap, int) and len(live) >= cap:
         raise CapacityRefused(
             "capacity_project",
             f"{_name(project)} already runs {len(live)} agents "
-            f"(max_agents_per_project = {config.max_agents_per_project}) — stop one, "
-            "or raise the limit in [fleet]",
+            f"(max_agents_per_project = {cap}) — stop one, or raise the limit in [fleet]",
         )
     _refuse_by_group(project, spawned_by, admit=admit)
     # The machine's own limits (#283), after the project's: the fleet-wide budget and
@@ -3837,8 +3847,12 @@ def spawn(
     # ``admit`` is False for a live 1:1 replacement (a restart of a running agent, a
     # switch: `_respawn(takes_over=True)`): its own seat and memory are freed as it
     # starts, and refused after the stop, the agent was lost (review of #323).
+    seats = _Seats(cap if isinstance(cap, int) else None)
     if admit and not experimental.captain_role(role):
         notes.extend(_admit_or_make_room(config))
+        # Auto admission, after the hard floors above: they refuse below its floor too.
+        if not isinstance(cap, int):
+            seats = _admit_by_load(project, len(live), config, notes)
     # Before the store opens: with no hub, `_board_for` runs git (review of #259, round 29,
     # 5/8), and the refusals above need neither.
     board, hub = (
@@ -4050,7 +4064,8 @@ def spawn(
     if first is not None and way == "argv":
         # Written before the window opens, so its launch finds it; named to the launch by
         # path, so the command tmux carries and the row records never holds the text.
-        prompt_file = delivery.write_prompt_file(agent_id, first)
+        with prompt_origin.sent_by(_spawn_author(spawned_by)):
+            prompt_file = delivery.write_prompt_file(agent_id, first)
         flags += [delivery.FIRST_PROMPT_FLAG, str(prompt_file)]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *model_flags, *extra])
     env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
@@ -4294,7 +4309,7 @@ def spawn(
                 srv,
                 wanted=label,
                 notes=notes,
-                cap=config.max_agents_per_project,
+                cap=seats,
                 total=0 if experimental.captain_role(role) else config.max_agents_total,
                 onboard=onboard,
                 codename=codename,
@@ -4333,18 +4348,19 @@ def spawn(
     if first is not None and way == "argv":
         typed = "yes"  # handed over with the launch: nothing to type, no Enter to lose
     elif first is not None:
-        typed, acked = _type_prompt(
-            srv,
-            stored.pane_id,
-            first,
-            typing,
-            folder=cwd,
-            to=(project, stored.label),
-            agent_id=stored.id,
-            reads_box=claude_code or harness.is_default_agent(resolution.binary),
-            guard=config.draft_quiet_seconds,
-            done=done,
-        )
+        with prompt_origin.sent_by(_spawn_author(spawned_by)):
+            typed, acked = _type_prompt(
+                srv,
+                stored.pane_id,
+                first,
+                typing,
+                folder=cwd,
+                to=(project, stored.label),
+                agent_id=stored.id,
+                reads_box=claude_code or harness.is_default_agent(resolution.binary),
+                guard=config.draft_quiet_seconds,
+                done=done,
+            )
         if typed == "unsent":
             _first_prompt_unsent(stored, "its first message is still in its input box")
     if first is not None and typed not in ("no", "maybe") and acked is None:
@@ -5079,7 +5095,7 @@ def _record(
     *,
     wanted: str | None,
     notes: list[str],
-    cap: int,
+    cap: _Seats,
     onboard: bool,
     codename: str,
     total: int = 0,
@@ -5157,7 +5173,7 @@ def _write_row(
     *,
     wanted: str | None,
     notes: list[str],
-    cap: int,
+    cap: _Seats,
     onboard: bool,
     codename: str,
     total: int = 0,
@@ -5187,6 +5203,7 @@ def _write_row(
             _verify_cap(store, stored, cap)
             _verify_budget(store, stored, total)
             _verify_group_cap(store, stored)
+            _verify_burst(store, stored, cap)
             return stored
     raise FleetError(f"could not record {agent.label!r}: every label tried was taken")
 
@@ -5262,8 +5279,27 @@ def _relabel(
     return agent.model_copy(update={"label": relabel})
 
 
-def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
-    """Back the row out if it is past ``max_agents_per_project``.
+@dataclass(frozen=True)
+class _Seats:
+    """The live rows a spawn's project may hold once its own is written (:func:`_verify_cap`):
+    ``max_agents_per_project``; in auto mode ``busy_floor`` while the machine reads busy
+    (``busy`` names the signal), else no count at all (``None``). ``hold_minutes`` and
+    ``project_name`` are the hold a busy back-out writes, as a held spawn writes one.
+    ``burst``: a spawn on a calm machine in auto mode is settled against ``busy_burst`` once
+    its row is written (:func:`_verify_burst`), with ``floor`` the project's; ``0`` settles
+    none."""
+
+    cap: int | None
+    busy: str | None = None
+    hold_minutes: float = BUSY_HOLD_DEFAULT_MINUTES
+    project_name: str = ""
+    burst: int = 0
+    floor: int = 0
+
+
+def _verify_cap(store: ContextStore, stored: FleetAgent, seats: _Seats) -> None:
+    """Back the row out if it is past ``max_agents_per_project``, or past auto admission's
+    ``busy_floor`` while it read the machine busy (``capacity_busy``).
 
     ``spawn`` checks the cap before it starts anything, but that read and this
     write are different transactions with a worktree and a tmux window between
@@ -5274,10 +5310,35 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
     sides of a race. The row is ended rather than deleted (the store has no
     delete): its label is freed and no live listing shows it.
     """
+    cap = seats.cap
+    if cap is None:
+        return
     live = store.fleet_agents(stored.project_id, live_only=True)
     if len(live) <= cap or all(agent.id != stored.id for agent in live[cap:]):
         return
     store.end_fleet_agent(stored.id, ended_by="stopped")  # backed out on purpose
+    if seats.busy is not None:
+        # Held like any other held spawn: a hold, a retry time, and the watcher's wake.
+        now = _now()
+        hold = _hold_project(
+            store,
+            Hold(
+                stored.project_id,
+                now,
+                now + timedelta(minutes=seats.hold_minutes),
+                seats.busy,
+                seats.project_name,
+            ),
+            live=len(live) - 1,
+            floor=cap,
+        )
+        raise CapacityRefused(
+            "capacity_busy",
+            f"that would be {len(live)} live agents while the machine is busy ({hold.signal}; "
+            f"busy_floor = {cap}) — another spawn took the last seat while this one was "
+            f"starting; {_retry(hold, now)}",
+            retry_at=hold.until,
+        )
     raise FleetError(
         f"that would be {len(live)} live agents (max_agents_per_project = {cap}) — another "
         "spawn took the last slot while this one was starting; stop one, or raise the "
@@ -5452,6 +5513,493 @@ def _admit_or_make_room(config: FleetSettings) -> list[str]:
     return [f"stopped finished workers to make room: {made}", *_admit(config)]
 
 
+# --- auto admission: how busy the machine is -----------------------------------------
+
+_BUSY_HOLD_META = "fleet:busy_hold:"
+"""``team_meta`` key prefix of a held project's :class:`Hold`, by project id."""
+
+
+def busy_thresholds(config: FleetSettings) -> load_core.Thresholds:
+    """``[fleet] busy_*``, as the probes take them."""
+    return load_core.Thresholds(
+        load_per_cpu=config.busy_load_per_cpu,
+        cpu_psi=config.busy_cpu_psi,
+        memory=config.busy_memory,
+        thermal=config.busy_thermal,
+    )
+
+
+@dataclass(frozen=True)
+class Hold:
+    """A project auto admission held (``capacity_busy``): the signal that read busy, and
+    until when a retry is held again without probing.
+
+    Kept past ``until`` for ``aisquare watch``, which wakes the project's manager once its
+    capacity frees up (:func:`freed_holds`) and then forgets it; a spawn into the project
+    admitted with the machine not busy forgets it too.
+    """
+
+    project_id: str
+    held_at: datetime
+    until: datetime
+    signal: str
+    """The busy signal in its own words (:meth:`core.load.Signal.said`)."""
+    project_name: str = ""
+    """The project as its refusal named it: what ``fleet capacity`` shows when the store has
+    no row for it to name it by."""
+    burst: bool = False
+    """Held by ``busy_burst`` rather than by a busy machine: a retry inside it is answered by
+    the admits it counts, read again, never by the hold alone (:func:`_burst_retry`)."""
+
+    def as_meta(self) -> str:
+        return json.dumps(
+            {
+                "held_at": self.held_at.isoformat(),
+                "until": self.until.isoformat(),
+                "signal": self.signal,
+                "project": self.project_name,
+                "kind": "burst" if self.burst else "busy",
+            }
+        )
+
+    @classmethod
+    def from_meta(cls, project_id: str, text: str) -> Hold | None:
+        """The hold ``text`` records, or ``None`` for one that cannot be read (no hold): not
+        JSON, a field missing, a time that is not an ISO time with its offset, or a hold no
+        spawn could have written. A naive time cannot be compared with the clock's, and
+        taken as read it crashed the spawn, ``fleet capacity`` and the watcher; unreadable,
+        the probes answer instead.
+
+        No spawn writes a hold that ends before it began, lasts longer than
+        :data:`BUSY_HOLD_MAX_MINUTES`, ends further off than that from now, or at a time this
+        machine's clock cannot show (``9999-12-31T23:59:59-12:00``: its local time is past
+        the calendar, and the refusal's retry crashed). Each such is a tampered or damaged
+        store, and read as no hold: one far in the future would otherwise hold the project
+        for good."""
+        try:
+            said = json.loads(text)
+            held_at = datetime.fromisoformat(said["held_at"])
+            until = datetime.fromisoformat(said["until"])
+            signal = str(said["signal"])
+            name = said.get("project")
+            burst = said.get("kind") == "burst"
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return None
+        if held_at.utcoffset() is None or until.utcoffset() is None:
+            return None
+        longest = timedelta(minutes=BUSY_HOLD_MAX_MINUTES)
+        try:
+            held_at.astimezone()
+            until.astimezone()
+            if until < held_at or until - held_at > longest or until - _now() > longest:
+                return None
+        except (OverflowError, ValueError, OSError):
+            return None
+        name = name if isinstance(name, str) else ""
+        return cls(project_id, held_at, until, signal, name, burst=burst)
+
+
+def holds() -> list[Hold]:
+    """Every hold auto admission keeps: in force, or past it and not yet woken for. A store
+    that cannot be read keeps none."""
+    try:
+        with store_session() as store:
+            found = store.list_meta(_BUSY_HOLD_META)
+    except Exception:
+        return []
+    read = (Hold.from_meta(key.removeprefix(_BUSY_HOLD_META), text) for key, text in found.items())
+    return [hold for hold in read if hold is not None]
+
+
+def _hold_of(project_id: str) -> Hold | None:
+    try:
+        with store_session() as store:
+            text = store.get_meta(_BUSY_HOLD_META + project_id)
+    except Exception:  # a hold that cannot be read is none: the probes answer
+        return None
+    return Hold.from_meta(project_id, text) if text else None
+
+
+def release_hold(project_id: str, held_at: datetime | None = None) -> None:
+    """Forget ``project_id``'s hold; given ``held_at``, only that one, so a hold a later spawn
+    wrote meanwhile stays. Never fails."""
+    key = _BUSY_HOLD_META + project_id
+    with contextlib.suppress(Exception), store_session() as store:
+        if held_at is not None:
+            text = store.get_meta(key)
+            hold = Hold.from_meta(project_id, text) if text else None
+            if hold is None or hold.held_at != held_at:
+                return
+        store.delete_meta(key)
+
+
+def _admit_by_load(
+    project: ProjectInfo, live: int, config: FleetSettings, notes: list[str]
+) -> _Seats:
+    """Auto admission (``max_agents_per_project = "auto"``) of one spawn into ``project``,
+    which runs ``live`` agents: the seats its row is settled against, or a hold.
+
+    The machine reads busy by the project's hold while one is in force, without a probe;
+    else by the probes (:func:`core.load.read`). Not busy: admitted, any hold forgotten.
+    Busy, with the project below ``busy_floor``: admitted, the row settled against the
+    floor. Busy at the floor: with ``auto_stop_finished``, the project's finished workers
+    are stopped and the count read again (P2-W1b); still at it, the project is held for
+    ``busy_hold_minutes`` and the spawn refused (``capacity_busy``) at once: a held spawn
+    never waits. Each new hold is a line in ``admission.jsonl``.
+
+    Not busy, at the floor or above it: :func:`_admit_by_burst`, since the load average
+    moves minutes after a burst of spawns does.
+    """
+    now = _now()
+    hold = _hold_of(project.id)
+    if hold is not None and now < hold.until and not hold.burst:
+        busy: str | None = hold.signal
+    else:
+        signal = load_core.read(busy_thresholds(config)).busy
+        busy = signal.said() if signal is not None else None
+    if busy is None:
+        seats = _admit_by_burst(project, live, config, notes, now)
+        if hold is not None:
+            release_hold(project.id, hold.held_at)
+        return seats
+    floor = _busy_floor(config)
+    if live >= floor and config.auto_stop_finished:
+        live = _after_stopping_finished(project, live, notes)
+    if live < floor:
+        notes.append(
+            f"the machine is busy ({busy}) — admitted: {_name(project)} runs {live} of the "
+            f"{floor} agents a project always gets (busy_floor)"
+        )
+        return _Seats(
+            floor, busy=busy, hold_minutes=_hold_minutes(config), project_name=_name(project)
+        )
+    if hold is None or now >= hold.until or hold.burst:
+        # A burst hold in force is not this refusal's: the probes read busy, and it names
+        # what they read, under a busy hold of its own (review of #485, round 2).
+        until = now + timedelta(minutes=_hold_minutes(config))
+        fresh = Hold(project.id, now, until, busy, _name(project))
+        try:
+            with store_session() as store:
+                hold = _hold_project(store, fresh, live=live, floor=floor)
+        except Exception:  # a hold that cannot be written still refuses, unremembered
+            hold = fresh
+    raise CapacityRefused(
+        "capacity_busy", _held(project, live, floor, hold, now), retry_at=hold.until
+    )
+
+
+_BUSY_BURST_KEY = "fleet:busy_burst:"
+"""``ui_state`` key prefix of a project's admits above ``busy_floor`` on a calm machine, by
+project id: a JSON list of ``[at, agent id]``, oldest first, each written compare-and-set
+(:func:`_verify_burst`), so racing spawns append one at a time and none is lost."""
+_BURST_TRIES = 20
+"""How often :func:`_verify_burst` retries a compare-and-set another spawn won meanwhile."""
+
+
+def _admit_by_burst(
+    project: ProjectInfo, live: int, config: FleetSettings, notes: list[str], now: datetime
+) -> _Seats:
+    """Auto admission's guard on a calm machine: a project at or above ``busy_floor`` is
+    admitted at most ``busy_burst`` new agents per ``busy_hold_minutes`` (``0`` turns it off).
+    The load average is five minutes', so a manager fanning out a board, or a spawn loop, was
+    admitted in full before it moved, with no per-project number left to stop it.
+
+    Every spawn admitted here is settled when its row is written (:func:`_verify_burst`),
+    whatever ``live`` was: ``live`` is read before any window or row, so spawns started in
+    parallel into a project below the floor all read it below, and were all admitted
+    uncounted (review of #485, round 2). Below the floor here, nothing more is asked now.
+
+    At the floor or above it: room left, admitted. None: with ``auto_stop_finished``, the
+    project's finished workers are stopped, and a project they take below the floor is
+    admitted; else the project is held, as a busy machine holds it (``capacity_busy``, a hold
+    with its retry, the watcher's wake), until the oldest admit that fills the burst is
+    ``busy_hold_minutes`` old, before anything is started."""
+    floor, burst = _busy_floor(config), _busy_burst(config)
+    if burst <= 0:
+        return _Seats(None)
+    minutes = _hold_minutes(config)
+    seats = _Seats(
+        None, hold_minutes=minutes, project_name=_name(project), burst=burst, floor=floor
+    )
+    if live < floor:
+        return seats
+    window = timedelta(minutes=minutes)
+    retry = _burst_retry(_burst_admits_of(project.id), burst, window, now)
+    if retry is not None and config.auto_stop_finished:
+        live = _after_stopping_finished(project, live, notes)
+        if live < floor:
+            return seats
+    if retry is None:
+        return seats
+    fresh = Hold(project.id, now, retry, _burst_signal(burst, minutes), _name(project), True)
+    try:
+        with store_session() as store:
+            hold = _hold_project(store, fresh, live=live, floor=floor)
+    except Exception:  # a hold that cannot be written still refuses, unremembered
+        hold = fresh
+    raise CapacityRefused(
+        "capacity_busy", _burst_held(project, live, floor, hold, now), retry_at=hold.until
+    )
+
+
+def _verify_burst(store: ContextStore, stored: FleetAgent, seats: _Seats) -> None:
+    """Settle ``stored`` against ``busy_burst`` once it is written (:func:`_admit_by_burst`):
+    by its place among the project's live rows in the order they were written
+    (:meth:`~aisquare.core.store.SqliteStore.live_fleet_agent_ids_written`), not by the count
+    its spawn read before any row was written. Write order, not ``created_at``: spawns that
+    stamp in one order and write in the other each found themselves first, and all were
+    admitted uncounted. Below ``floor``: admitted, uncounted. At or past it: its admit is
+    recorded, or the row is backed out when the burst is full.
+
+    Each admit is appended compare-and-set, the admits older than ``busy_hold_minutes``
+    dropped on the way: of N parallel spawns past the floor, the first to append win the seats
+    left and the rest find none, so 10 started at once into an empty project leave the floor
+    plus the burst. A backed-out row is held as a refused spawn is. A ledger that cannot be
+    written admits, unrecorded: a spawn is never failed by its own bookkeeping."""
+    if seats.burst <= 0:
+        return
+    order = store.live_fleet_agent_ids_written(stored.project_id)
+    if stored.id not in order or order.index(stored.id) < seats.floor:
+        return
+    key = _BUSY_BURST_KEY + stored.project_id
+    window = timedelta(minutes=seats.hold_minutes)
+    for _ in range(_BURST_TRIES):
+        text = store.ui_state(key)
+        now = _now()
+        admits = [a for a in _burst_admits(text) if now - window < a[0] <= now + window]
+        retry = _burst_retry(admits, seats.burst, window, now)
+        if retry is not None:
+            break
+        written = [[at.isoformat(), ident] for at, ident in [*admits, (now, stored.id)]]
+        if store.replace_ui_state(key, text, json.dumps(written)):
+            return
+    else:
+        return
+    store.end_fleet_agent(stored.id, ended_by="stopped")  # backed out on purpose
+    live = len(store.fleet_agents(stored.project_id, live_only=True))
+    signal = _burst_signal(seats.burst, seats.hold_minutes)
+    fresh = Hold(stored.project_id, now, retry, signal, seats.project_name, burst=True)
+    hold = _hold_project(store, fresh, live=live, floor=seats.floor)
+    raise CapacityRefused(
+        "capacity_busy",
+        f"that would be {seats.burst + 1} agents started above busy_floor = {seats.floor} "
+        f"in the last {seats.hold_minutes:g} min (busy_burst = {seats.burst}) — another "
+        f"spawn took the burst's last seat while this one was starting; {_retry(hold, now)}",
+        retry_at=hold.until,
+    )
+
+
+def _burst_admits(text: str | None) -> list[tuple[datetime, str]]:
+    """The admits a ledger (:data:`_BUSY_BURST_KEY`) records, in the order they were written.
+    One that cannot be read is no admit, and a ledger that cannot be read none at all: the
+    guard then admits, as it does with nothing recorded."""
+    try:
+        raw = json.loads(text) if text else []
+    except ValueError:
+        return []
+    admits: list[tuple[datetime, str]] = []
+    for item in raw if isinstance(raw, list) else []:
+        try:
+            at, ident = datetime.fromisoformat(item[0]), str(item[1])
+            at.astimezone()
+        except (TypeError, ValueError, IndexError, KeyError, OverflowError, OSError):
+            continue
+        if at.utcoffset() is not None:
+            admits.append((at, ident))
+    return admits
+
+
+def _burst_admits_of(project_id: str) -> list[tuple[datetime, str]]:
+    try:
+        with store_session() as store:
+            return _burst_admits(store.ui_state(_BUSY_BURST_KEY + project_id))
+    except Exception:  # a ledger that cannot be read records nothing: admitted
+        return []
+
+
+def _burst_retry(
+    admits: Sequence[tuple[datetime, str]], burst: int, window: timedelta, now: datetime
+) -> datetime | None:
+    """When a project whose admits above the floor are ``admits`` may take one more under
+    ``busy_burst``: ``None`` now; else once the oldest of the ``burst`` newest admits within
+    ``window`` is ``window`` old. An admit stamped further off than ``window`` from now, past
+    or future, is none: a future one would otherwise hold the project for good."""
+    if burst <= 0:
+        return None
+    recent = sorted(at for at, _ in admits if now - window < at <= now + window)
+    if len(recent) < burst:
+        return None
+    return min(recent[len(recent) - burst], now) + window
+
+
+def _busy_burst(config: FleetSettings) -> int:
+    """``busy_burst``, at least 0 (off); the config refuses anything below."""
+    return max(config.busy_burst, 0)
+
+
+def _burst_signal(burst: int, minutes: float) -> str:
+    """A burst hold's signal, as ``fleet capacity`` and the watcher say it."""
+    return (
+        f"burst: {burst} agents started above busy_floor in the last {minutes:g} min, "
+        f"busy_burst = {burst}"
+    )
+
+
+def _burst_held(project: ProjectInfo, live: int, floor: int, hold: Hold, now: datetime) -> str:
+    """A burst hold's refusal: the admits, the floor, and the earliest retry."""
+    return (
+        f"{_name(project)} is held, nothing started: it runs {live} live agents "
+        f"(busy_floor = {floor}) and the machine is calm, but {hold.signal} — the load "
+        f"average moves minutes behind a burst of spawns; {_retry(hold, now)}; "
+        "busy_burst = 0 in [fleet] turns the guard off"
+    )
+
+
+def _hold_project(store: ContextStore, fresh: Hold, *, live: int, floor: int) -> Hold:
+    """The project's hold in force, else ``fresh``, written and logged
+    (``admission.jsonl``): what a held spawn and a busy back-out (:func:`_verify_cap`) both
+    answer by, so a retry inside it is held again without probing, and ``aisquare watch``
+    wakes the manager when it frees up."""
+    text = store.get_meta(_BUSY_HOLD_META + fresh.project_id)
+    kept = Hold.from_meta(fresh.project_id, text) if text else None
+    if kept is not None and kept.burst == fresh.burst and fresh.held_at < kept.until:
+        return kept
+    store.set_meta(_BUSY_HOLD_META + fresh.project_id, fresh.as_meta())
+    _log_admission(
+        "capacity_busy",
+        {
+            "project": fresh.project_id,
+            "live": live,
+            "busy_floor": floor,
+            "signal": fresh.signal,
+            "kind": "burst" if fresh.burst else "busy",
+        },
+    )
+    return fresh
+
+
+def _busy_floor(config: FleetSettings) -> int:
+    """``busy_floor``, at least 1: a project below it is always admitted. The config refuses
+    0; this guards a settings object changed without validation, at whose 0 a project with
+    no agent at all was held."""
+    return max(config.busy_floor, 1)
+
+
+def _hold_minutes(config: FleetSettings) -> float:
+    """``busy_hold_minutes``, clamped to ``0`` … :data:`BUSY_HOLD_MAX_MINUTES`; ``nan`` is the
+    default. The config refuses anything else; this guards a settings object built or
+    changed without validation, whose ``inf`` raised ``OverflowError`` out of a held spawn,
+    which then refused nothing and printed nothing under ``--json``."""
+    minutes = config.busy_hold_minutes
+    if math.isnan(minutes):
+        return BUSY_HOLD_DEFAULT_MINUTES
+    return min(max(minutes, 0.0), float(BUSY_HOLD_MAX_MINUTES))
+
+
+def _after_stopping_finished(project: ProjectInfo, live: int, notes: list[str]) -> int:
+    """``project``'s finished workers stopped (P2-W1b), and its live count after; ``live``
+    when none was."""
+    try:
+        stopped = [item.verdict for item in autostop.reap_finished([project]) if item.stopped]
+        if not stopped:
+            return live
+        with store_session() as store:
+            left = len(store.fleet_agents(project.id, live_only=True))
+    except Exception:  # a stop that fails holds the spawn, as none would
+        return live
+    made = ", ".join(f"{v.agent.label} ({v.reason})" for v in stopped)
+    notes.append(f"stopped finished workers to make room: {made}")
+    return left
+
+
+def _held(project: ProjectInfo, live: int, floor: int, hold: Hold, now: datetime) -> str:
+    """A hold's refusal: the signal, its value and threshold, and the earliest retry."""
+    ago = int((now - hold.held_at).total_seconds())
+    read = f", read {ago // 60}m {ago % 60:02d}s ago" if ago > 0 else ""
+    return (
+        f"{_name(project)} is held, nothing started: it runs {live} live agents "
+        f"(busy_floor = {floor}) and the machine is busy — {hold.signal}{read}; "
+        f"{_retry(hold, now)}; a number for max_agents_per_project in [fleet] turns auto "
+        "admission off"
+    )
+
+
+def _retry(hold: Hold, now: datetime) -> str:
+    """``retry at <time> or later (in 4m 59s). `aisquare watch` wakes …``: a hold's retry."""
+    left = max(int((hold.until - now).total_seconds()), 0)
+    at = hold.until.astimezone().isoformat(timespec="seconds")
+    return (
+        f"retry at {at} or later (in {left // 60}m {left % 60:02d}s). `aisquare watch` wakes "
+        "the manager when a seat frees up"
+    )
+
+
+@dataclass(frozen=True)
+class Freed:
+    """A held project that could take a spawn again (:func:`freed_holds`), and why."""
+
+    hold: Hold
+    project: ProjectInfo
+    why: str
+
+
+def freed_holds(now: datetime | None = None) -> list[Freed]:
+    """The holds whose project's capacity has freed up: what ``aisquare watch`` wakes a
+    manager for, so it retries without polling.
+
+    Freed: the project runs fewer than ``busy_floor`` live agents, or the hold is past its
+    ``until`` and the probes no longer read busy (asked once, and only then), or auto
+    admission is off. A burst hold (:attr:`Hold.burst`) is freed once its admits leave room
+    under ``busy_burst`` (they age out at its ``until``, or the setting changed) and the
+    probes do not read busy. A hold whose project is gone is forgotten. Never raises.
+    """
+    found = holds()
+    if not found:
+        return []
+    now = now or _now()
+    config = settings()
+    cap = config.max_agents_per_project
+    reading: load_core.Reading | None = None
+    out: list[Freed] = []
+    for hold in found:
+        try:
+            with store_session() as store:
+                project = store.get_project(hold.project_id)
+                live = len(store.fleet_agents(hold.project_id, live_only=True))
+        except Exception:  # asked again next tick
+            continue
+        if project is None:
+            release_hold(hold.project_id, hold.held_at)
+            continue
+        if isinstance(cap, int):
+            why = f"max_agents_per_project = {cap}: auto admission holds nothing now"
+        elif live < _busy_floor(config):
+            why = f"{live} live agents, below busy_floor = {_busy_floor(config)}"
+        elif hold.burst:
+            window = timedelta(minutes=_hold_minutes(config))
+            admits = _burst_admits_of(hold.project_id)
+            if _burst_retry(admits, _busy_burst(config), window, now) is not None:
+                continue
+            reading = reading or load_core.read(busy_thresholds(config))
+            if reading.busy is not None:
+                continue
+            why = (
+                f"fewer than busy_burst = {_busy_burst(config)} agents started above "
+                f"busy_floor in the last {_hold_minutes(config):g} min"
+                if _busy_burst(config)
+                else "busy_burst = 0: the burst guard holds nothing now"
+            )
+        elif now >= hold.until:
+            reading = reading or load_core.read(busy_thresholds(config))
+            if reading.busy is not None:
+                continue
+            why = "the machine is no longer busy"
+        else:
+            continue
+        out.append(Freed(hold, project, why))
+    return out
+
+
 def _said(head: memory_core.Headroom) -> str:
     available = f"{head.available_mb} MB available" if head.available_mb is not None else ""
     psi = f"PSI some avg10 {head.psi_some_avg10:g}" if head.psi_some_avg10 is not None else ""
@@ -5480,25 +6028,68 @@ def _live_per_project() -> dict[str, int]:
     name where two share it: two checkouts of one repo, neither nicknamed, are two
     projects, and one entry for both read as one project over its cap (review of #323).
     """
+    counts, rows = _live_by_project()
+    labels = _project_labels(rows)
+    return dict(sorted((labels[pid], count) for pid, count in counts.items()))
+
+
+def _live_by_project() -> tuple[dict[str, int], dict[str, ProjectInfo | None]]:
+    """Live agents per project id, the captain excluded, and each project's row (``None``
+    for one the store no longer has)."""
     counts: dict[str, int] = {}
     rows: dict[str, ProjectInfo | None] = {}
     with store_session() as store:
-        for agent in store.live_fleet_agents():
-            if agent.role == CAPTAIN_ROLE:
-                continue
+        for agent in _counted_live(store):
             if agent.project_id not in rows:
                 rows[agent.project_id] = store.get_project(agent.project_id, include_forgotten=True)
             counts[agent.project_id] = counts.get(agent.project_id, 0) + 1
-    names = {pid: _name(row) if row is not None else pid[:12] for pid, row in rows.items()}
+    return counts, rows
+
+
+def _project_labels(
+    rows: Mapping[str, ProjectInfo | None], named: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Each project id as lists name it, with its root beside the name where two share it
+    (review of #323). A project with no row is named by ``named`` (a hold's own name),
+    else by its id."""
+    names = {
+        pid: _name(row) if row is not None else (named or {}).get(pid) or pid[:12]
+        for pid, row in rows.items()
+    }
     shared = {name for name in names.values() if list(names.values()).count(name) > 1}
-    labelled: dict[str, int] = {}
-    for pid, count in counts.items():
+    labels: dict[str, str] = {}
+    for pid, name in names.items():
         row = rows[pid]
-        label = names[pid]
-        if label in shared:
-            label = f"{label} ({row.root if row is not None else pid[:12]})"
-        labelled[label] = count
-    return dict(sorted(labelled.items()))
+        labels[pid] = (
+            f"{name} ({row.root if row is not None else pid[:12]})" if name in shared else name
+        )
+    return labels
+
+
+def _counted_live(store: ContextStore) -> list[FleetAgent]:
+    """The live agents the fleet-wide budget counts: every project's, forgotten ones'
+    included, the captain excluded."""
+    return [agent for agent in store.live_fleet_agents() if agent.role != CAPTAIN_ROLE]
+
+
+def live_ids(store: ContextStore) -> frozenset[str]:
+    """The agents live across the fleet, the captain excluded, read in the caller's ``store``
+    session: as many as ``live_total`` of ``aisquare fleet capacity``."""
+    return frozenset(agent.id for agent in _counted_live(store))
+
+
+def live_after(counted: Collection[str], many: ManyAgents) -> int:
+    """How many of ``counted`` (:func:`live_ids`, read before ``many`` was listed) are still
+    live once the listing has ended the rows whose pane died: what ``fleet capacity`` says
+    after it, without another store session. The sidebar's header, which said one agent too
+    many beside the card that showed it exited, until the next tick (review of #10)."""
+    ended = {
+        status.agent.id
+        for statuses in many.agents.values()
+        for status in statuses
+        if status.agent.ended_at is not None
+    }
+    return len(set(counted) - ended)
 
 
 def _memory_refused(record: Mapping[str, object], why: str) -> NoReturn:
@@ -5532,15 +6123,56 @@ class CapacityReport:
     min_free_mb: int
     """The floor a spawn needs now: ``min_free_mb``, or ``+512`` just after a refusal."""
     max_agents_total: int
-    max_agents_per_project: int
+    max_agents_per_project: int | Literal["auto"]
     live: dict[str, int]
     """Live agents per project (by the name lists use), the captain excluded."""
     admits: bool
     reason: str
+    signals: tuple[load_core.Signal, ...] = ()
+    """Every load signal against its threshold (:func:`core.load.read`), read in either mode;
+    only auto admission holds by them."""
+    busy_floor: int = 3
+    holds: tuple[tuple[str, Hold], ...] = ()
+    """The holds in force, each with its project's label (as :attr:`live` labels it), for
+    display: a spawn into one is held without a probe. Matched by ``Hold.project_id``."""
+    projects: dict[str, str] = field(default_factory=dict)
+    """Each label of :attr:`live` → its project id: what a hold is matched by. Two
+    checkouts named alike are two labels and two ids, never one."""
+    read_at: datetime | None = None
+    """When the report was read: what a hold's retry is measured from."""
+    busy_burst: int = 0
+    """``busy_burst``: the new agents a project above the floor is admitted per
+    :attr:`busy_hold_minutes` on a calm machine; ``0``, off."""
+    busy_hold_minutes: float = BUSY_HOLD_DEFAULT_MINUTES
+    bursts: tuple[tuple[str, int, datetime], ...] = ()
+    """Each project (as :attr:`live` labels it) whose burst is full: its admits above the
+    floor within :attr:`busy_hold_minutes`, and when the next may start."""
 
     @property
     def live_total(self) -> int:
         return sum(self.live.values())
+
+    @property
+    def auto(self) -> bool:
+        return self.max_agents_per_project == "auto"
+
+    @property
+    def busy(self) -> load_core.Signal | None:
+        """The first signal that reads busy, or ``None``."""
+        return next((signal for signal in self.signals if signal.busy), None)
+
+    def held(self, name: str) -> bool:
+        """Whether a spawn into the project :attr:`live` labels ``name`` would be held now: at
+        the floor, and the machine busy or a busy hold in force on that project's id, or its
+        burst full (:attr:`bursts`)."""
+        if not self.auto or self.live.get(name, 0) < self.busy_floor:
+            return False
+        pid = self.projects.get(name)
+        return (
+            self.busy is not None
+            or any(hold.project_id == pid and not hold.burst for _, hold in self.holds)
+            or any(label == name for label, _, _ in self.bursts)
+        )
 
     def as_json(self) -> dict[str, Any]:
         head = self.headroom
@@ -5557,16 +6189,80 @@ class CapacityReport:
             "live": self.live,
             "admits": self.admits,
             "reason": self.reason,
+            "busy_floor": self.busy_floor,
+            "busy_burst": self.busy_burst,
+            "busy_hold_minutes": self.busy_hold_minutes,
+            "busy": self.busy is not None,
+            "signals": [signal.as_json() for signal in self.signals],
+            "holds": [
+                {
+                    "project": name,
+                    "project_id": hold.project_id,
+                    "held_at": hold.held_at.isoformat(timespec="seconds"),
+                    "until": hold.until.isoformat(timespec="seconds"),
+                    "signal": hold.signal,
+                    "kind": "burst" if hold.burst else "busy",
+                }
+                for name, hold in self.holds
+            ],
+            "bursts": [
+                {
+                    "project": name,
+                    "project_id": self.projects.get(name),
+                    "started": started,
+                    "retry_at": retry.isoformat(timespec="seconds"),
+                }
+                for name, started, retry in self.bursts
+            ],
         }
 
 
 def capacity() -> CapacityReport:
     """What the next spawn would meet: the same reads :func:`_admit` makes, nothing written."""
     config = settings()
-    live = _live_per_project()
+    counts, rows = _live_by_project()
     head = memory_core.headroom()
     floor = _memory_floor(config.min_free_mb)
-    total = sum(live.values())
+    total = sum(counts.values())
+    signals = load_core.evaluate(
+        load_core.cpu_load(), head, load_core.thermal(), busy_thresholds(config)
+    ).signals
+    now = _now()
+    auto = config.max_agents_per_project == "auto"
+    in_force = [hold for hold in holds() if now < hold.until] if auto else []
+    for hold in in_force:
+        if hold.project_id not in rows:
+            rows[hold.project_id] = _project_row(hold.project_id)
+    labels = _project_labels(rows, {hold.project_id: hold.project_name for hold in in_force})
+    live = dict(sorted((labels[pid], count) for pid, count in counts.items()))
+    busy_floor = _busy_floor(config)
+    burst, minutes = _busy_burst(config), _hold_minutes(config)
+    bursts: list[tuple[str, int, datetime]] = []
+    for pid, count in counts.items() if auto and burst > 0 else ():
+        if count < busy_floor:
+            continue
+        window = timedelta(minutes=minutes)
+        stamps = [at for at, _ in _burst_admits_of(pid) if now - window < at <= now + window]
+        retry = _burst_retry([(at, "") for at in stamps], burst, window, now)
+        if retry is not None:
+            bursts.append((labels[pid], len(stamps), retry))
+    report = CapacityReport(
+        headroom=head,
+        min_free_mb=floor,
+        max_agents_total=config.max_agents_total,
+        max_agents_per_project=config.max_agents_per_project,
+        live=live,
+        admits=True,
+        reason="",
+        signals=signals,
+        busy_floor=busy_floor,
+        holds=tuple((labels[hold.project_id], hold) for hold in in_force),
+        projects={labels[pid]: pid for pid in counts},
+        read_at=now,
+        busy_burst=burst,
+        busy_hold_minutes=minutes,
+        bursts=tuple(sorted(bursts)),
+    )
     admits, reason = True, "a spawn would be admitted"
     if config.max_agents_total > 0 and total >= config.max_agents_total:
         admits, reason = False, f"the fleet is at max_agents_total = {config.max_agents_total}"
@@ -5574,19 +6270,40 @@ def capacity() -> CapacityReport:
         admits, reason = False, "memory pressure is critical"
     elif config.min_free_mb > 0 and head.available_mb is not None and head.available_mb < floor:
         admits, reason = False, f"{head.available_mb} MB available, {floor} MB needed"
+    elif report.auto and (held := [name for name in live if report.held(name)]):
+        busy = report.busy
+        if busy is not None or any(not hold.burst for _, hold in report.holds):
+            why = busy.said() if busy is not None else "a hold in force"
+            reason = (
+                f"the machine is busy ({why}) — a spawn would be admitted into a project "
+                f"running fewer than {busy_floor} agents, held in {', '.join(held)}"
+            )
+        else:
+            reason = (
+                f"a spawn would be admitted, held in {', '.join(held)}: {burst} agents "
+                f"started above busy_floor = {busy_floor} in the last {minutes:g} min "
+                f"(busy_burst = {burst})"
+            )
+    elif report.auto and report.busy is not None:
+        reason = (
+            f"the machine is busy ({report.busy.said()}) — a spawn would be admitted: no "
+            f"project runs {busy_floor} agents"
+        )
     elif head.pressure == "warn":
         reason = "a spawn would be admitted, with a warning: memory pressure is warn"
     elif not head.known:
         reason = "a spawn would be admitted: this machine's memory cannot be read"
-    return CapacityReport(
-        headroom=head,
-        min_free_mb=floor,
-        max_agents_total=config.max_agents_total,
-        max_agents_per_project=config.max_agents_per_project,
-        live=live,
-        admits=admits,
-        reason=reason,
-    )
+    return replace(report, admits=admits, reason=reason)
+
+
+def _project_row(project_id: str) -> ProjectInfo | None:
+    """A held project's row, forgotten ones too; ``None`` when there is none, or the store
+    cannot say (its hold is then named by its own name)."""
+    try:
+        with store_session() as store:
+            return store.get_project(project_id, include_forgotten=True)
+    except Exception:
+        return None
 
 
 GATE_POLL_SECONDS = 5.0
@@ -5759,6 +6476,7 @@ def _type_prompt(
             monotonic=_monotonic,
             what="the prompt",
             guard=guard,
+            origin=prompt_origin.SPAWN,
         )
     if delivered.refused is not None and delivered.in_box:
         notes.append(
@@ -6599,6 +7317,7 @@ def tell(
                 monotonic=_monotonic,
                 done="typed into its pane (it was waiting)",
                 guard=settings().draft_quiet_seconds,
+                origin=prompt_origin.TELL,
             )
         if done.refused is not None and done.in_box:
             return TellResult("no", noted(done.refused))
@@ -7022,6 +7741,16 @@ def _the_owners_spawn(spawned_by: str, store: ContextStore | None = None) -> boo
     # In a fleet agent's environment the captain's own call path alone is the owner's: never
     # an `--as captain` any agent can type (seq 3609, 2).
     return _the_captains_row(own, store)
+
+
+def _spawn_author(spawned_by: str) -> str:
+    """Who authored a spawn's first message, for the turn it starts (``core.prompt_origin``): a
+    person (``human``) when a person ran the spawn, from their shell, asq or the phone
+    (``spawned_by`` is ``user`` and no agent's environment is around it); an agent otherwise:
+    its ``--as`` session, a fleet agent's or Claude Code's own shell, or aisquare acting alone
+    (``usage-limit``). A restart's and a switch's first line are their spawner's the same way."""
+    human = spawned_by == "user" and prompt_origin.origin_sender() == prompt_origin.HUMAN
+    return prompt_origin.HUMAN if human else prompt_origin.AGENT
 
 
 def _the_captains_row(agent_id: str, store: ContextStore | None = None) -> bool:
@@ -12772,6 +13501,7 @@ def nudge_manager(project_id: str, *, reason: str, board: str | None = None) -> 
                 guard=settings().draft_quiet_seconds,
                 re_press=_NUDGE_RE_PRESS,
                 last_wait=_NUDGE_LAST_WAIT,
+                origin=prompt_origin.WAKE,
             )
             deferred = f"{NUDGE_DEFERRED}{session.id}"
             if done.refused is not None:
@@ -12891,6 +13621,7 @@ def type_line(agent: FleetAgent, text: str, *, acked: Callable[[], bool]) -> del
         monotonic=_monotonic,
         what="the line",
         guard=settings().draft_quiet_seconds,
+        origin=prompt_origin.UPKEEP,
     )
 
 

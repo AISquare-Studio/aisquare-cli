@@ -28,7 +28,7 @@ import typer
 from rich.console import Console
 from rich.text import Text
 
-from aisquare.cli.common import USAGE_ERROR, fail, refuse_conflicting_scope
+from aisquare.cli.common import USAGE_ERROR, fail, format_reset, refuse_conflicting_scope
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
@@ -88,7 +88,8 @@ def _fail_fleet(exc: Exception) -> NoReturn:
     Most specific first — every subclass is also a ``FleetError``, so the order
     here IS the mapping: ``fleet_unavailable`` (no usable tmux), ``not_found``
     (the project reference), ``no_such_agent`` (the label), a capacity refusal's
-    own code (``capacity_project``, ``capacity_fleet``, ``capacity_memory``), and
+    own code (``capacity_project``, ``capacity_fleet``, ``capacity_memory``,
+    ``capacity_group``, ``capacity_busy`` — whose ``hint`` is its earliest retry), and
     ``fleet_error`` for everything else the service refused with a reason.
     """
     if isinstance(exc, fleet_service.FleetUnavailable):
@@ -97,6 +98,9 @@ def _fail_fleet(exc: Exception) -> NoReturn:
         fail(str(exc), error="not_found", detail=str(exc))
     if isinstance(exc, fleet_service.NoSuchAgent):
         fail(str(exc), error="no_such_agent", detail=str(exc))
+    if isinstance(exc, fleet_service.CapacityRefused) and exc.retry_at is not None:
+        retry = f"retry_at {exc.retry_at.isoformat(timespec='seconds')}"
+        fail(str(exc), error=exc.code, detail=str(exc), hint=retry)
     if isinstance(exc, fleet_service.CapacityRefused | adopt_service.AdoptRefused):
         fail(str(exc), error=exc.code, detail=str(exc))
     fail(str(exc), error="fleet_error", detail=str(exc))
@@ -1646,7 +1650,7 @@ def _ago(delta: timedelta) -> str:
 
 @app.command("capacity")
 def capacity() -> None:
-    """Memory headroom and live agents against every admission limit (#283)."""
+    """Memory headroom, the machine's load and live agents against every admission limit."""
     report = fleet_service.capacity()
     if get_state().json_output:
         typer.echo(json.dumps(report.as_json()))
@@ -1665,9 +1669,106 @@ def capacity() -> None:
     budget = str(report.max_agents_total) if report.max_agents_total else "no budget"
     out.print(f"agents:   {report.live_total} live ({budget}; max_agents_total)", markup=False)
     for name, count in report.live.items():
-        out.print(f"  {name}: {count} of {report.max_agents_per_project}", markup=False)
-    mark = "✓" if report.admits else "✗"
+        if not report.auto:
+            out.print(f"  {name}: {count} of {report.max_agents_per_project}", markup=False)
+        else:
+            held = " — held" if report.held(name) else ""
+            out.print(f"  {name}: {count}{held}", markup=False)
+    if report.auto:
+        out.print(
+            f"load:     auto admission (max_agents_per_project): busy holds a project at "
+            f"{report.busy_floor} agents (busy_floor)",
+            markup=False,
+        )
+        burst = (
+            f"at most {report.busy_burst} new agents per project per "
+            f"{report.busy_hold_minutes:g} min above busy_floor (busy_burst)"
+            if report.busy_burst
+            else "off (busy_burst = 0): no per-project limit while the machine is calm"
+        )
+        out.print(f"burst:    {burst}", markup=False)
+    else:
+        out.print(
+            f"load:     not consulted (max_agents_per_project = {report.max_agents_per_project})",
+            markup=False,
+        )
+    name_w = max((len(signal.name) for signal in report.signals), default=0)
+    value_w = max((len(signal.value) for signal in report.signals), default=0)
+    threshold_w = max((len(signal.threshold) for signal in report.signals), default=0)
+    for signal in report.signals:
+        out.print(
+            f"  {signal.name:<{name_w}}  {signal.value:<{value_w}}  "
+            f"{signal.threshold:<{threshold_w}}  {signal.verdict}",
+            markup=False,
+        )
+    for name, hold in report.holds:
+        retry = format_reset(hold.until, now=report.read_at)
+        out.print(f"held:     {name}, retry {retry} ({hold.signal})", markup=False)
+    shown = {name for name, hold in report.holds if hold.burst}
+    for name, started, at in report.bursts:
+        if name not in shown:
+            retry = format_reset(at, now=report.read_at)
+            out.print(
+                f"held:     {name}, retry {retry} (burst: {started} agents started above "
+                f"busy_floor in the last {report.busy_hold_minutes:g} min)",
+                markup=False,
+            )
+    holding = report.auto and (report.busy is not None or bool(report.holds) or bool(report.bursts))
+    mark = "✗" if not report.admits else "⚠" if holding else "✓"
     out.print(f"{mark} {report.reason}", markup=False)
+
+
+TOP_WIDTH = 132
+"""The width ``fleet top`` lays its table out at when stdout is not a terminal (a pipe, a
+file, an agent's shell): rich's default 80 would cut every name to a few letters."""
+
+
+@app.command("top")
+def top(
+    project: Annotated[
+        str | None,
+        typer.Option(
+            "--project",
+            "-P",
+            help="Only this project's agents: codename, name or id prefix (default: every "
+            "project's).",
+            metavar="PROJECT",
+        ),
+    ] = None,
+    sort: Annotated[
+        str,
+        typer.Option("--sort", help="Heaviest first by: cpu, mem or tokens.", metavar="KEY"),
+    ] = "cpu",
+) -> None:
+    """What each live agent consumes, read once: CPU, memory and processes of its pane's
+    process tree, uptime, and its session's tokens and cost so far — with a totals row.
+
+    One `ps` and one tmux listing for every agent at once; reads only, stops nothing. In asq:
+    ⚙ Settings ▸ Agent resources, which refreshes every few seconds while it is open.
+    """
+    from aisquare.cli import fleet_top_render as render  # lazy: only `top` draws the table
+    from aisquare.services import fleet_top
+
+    if sort not in fleet_top.SORT_KEYS:
+        raise typer.BadParameter(
+            f"{sort!r} is not one of {', '.join(fleet_top.SORT_KEYS)}", param_hint="--sort"
+        )
+    by = next(key for key in fleet_top.SORT_KEYS if key == sort)
+    scope = {_project(project).id} if project is not None else None
+    report = fleet_top.sample(scope)
+    if get_state().json_output:
+        typer.echo(json.dumps(report.as_json(by)))
+        return
+    out = stdout_console()
+    if not out.is_terminal:
+        out.width = max(out.width, TOP_WIDTH)
+    out.print(render.summary(report, by), markup=False, style="dim")
+    if not report.agents:
+        out.print("  (no live agents)", markup=False)
+        return
+    out.print(render.top_table(report, by))
+    for line in render.notes(report):
+        out.print(line, markup=False, style="dim")
 
 
 _DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smh]?)\s*$")

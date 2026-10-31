@@ -18,7 +18,7 @@ own fields — so there is one picker and no second spawn or attach path.
 
 Opened to attach (``attaching``, the Personas tab), a running agent's row asks first, in
 place (user, 2026-10-30: a double click in place, not a dialog's button): the first choice
-of it, a click or Enter, arms it, marked ▶, and the line under the list asks the question
+of it, a click or Enter, arms it, marked ▶, and the line above the list asks the question
 and names the persona it replaces; a second choice of the same row answers it. It disarms as
 :class:`~aisquare.cli.ui.confirm_button.ConfirmButton` does (:class:`Arming`): after a few
 seconds, on Esc, when the list loses the focus or another row is highlighted, and when the
@@ -237,8 +237,8 @@ class AttachTargetScreen(ModalScreen[Target | None]):
 
     DEFAULT_CSS = _BOX_CSS.format(name="AttachTargetScreen") + (
         "AttachTargetScreen #picker-list { height: 22; }"
-        # Two lines whether armed or not: grown, the box would centre again and move the row
-        # under the pointer that armed it.
+        # Two lines whether armed or not: grown, it would push the list, and the row under the
+        # pointer that armed it, down.
         "AttachTargetScreen #picker-armed { height: 2; text-wrap: nowrap;"
         " text-overflow: ellipsis; }"
     )
@@ -292,9 +292,10 @@ class AttachTargetScreen(ModalScreen[Target | None]):
                 placeholder="filter agents, binds and accounts",
                 id="picker-filter",
             )
-            yield OptionList(id="picker-list")
             if self.attaching:
+                # Above the list: under it, the box ran out at 80x24 and cut it off.
                 yield Static(self._at_rest(), id="picker-armed", classes="picker-note")
+            yield OptionList(id="picker-list")
             yield Static(id="picker-status", classes="picker-note")
             with Horizontal(classes="picker-buttons"):
                 yield Button("+ New bind", id="picker-new-bind")
@@ -425,6 +426,7 @@ class AttachTargetScreen(ModalScreen[Target | None]):
                 listing.replace_option_prompt(was, f"  {self._prompts[was]}")
         if now is None:
             note.update(self._at_rest())
+            note.tooltip = None
             return
         # The same cells as at rest, ▶ in place of its indent: a row that grew or wrapped
         # would move the rows under it, and the pointer resting on it.
@@ -435,15 +437,23 @@ class AttachTargetScreen(ModalScreen[Target | None]):
         persona = self.persona_name or "the persona"
         label = target.key if target is not None else now
         replaces = target.persona if target is not None else None
-        question = Text(f"Attach {persona} to {label}?", style="bold")
-        if replaces and replaces != persona:
-            question.append(f" It replaces {replaces}.", style="bold")
-        question.append(" Choose it again to attach.")
-        question.append(
-            "\nA waiting agent has the briefing typed now; a busy one gets it as a board note.",
-            style="dim",
+        # The persona it replaces first, where a long name cannot cut it off; each line cut
+        # short with an ellipsis at 80 columns has its whole in the tooltip.
+        replacing = bool(replaces) and replaces != persona
+        question = Text(
+            f"Replace {replaces} with {persona} on {label}?"
+            if replacing
+            else f"Attach {persona} to {label}?",
+            style="bold",
         )
+        question.append("\nChoose it again to attach. A busy agent gets it as a board note.")
         note.update(question)
+        note.tooltip = (
+            f"Attach {persona} to {label}?"
+            + (f" It replaces {replaces}." if replacing else "")
+            + " Choose its row again to attach. A waiting agent has the briefing typed now;"
+            " a busy one gets it as a board note."
+        )
 
     @on(OptionList.OptionHighlighted, "#picker-list")
     def _moved(self, event: OptionList.OptionHighlighted) -> None:

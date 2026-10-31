@@ -41,7 +41,7 @@ the owner decides, is that they stay out. The binary is a binding's, and binding
 ``CLAUDE_CODE_TMPDIR`` called out with their values, any other variable by name only,
 since a value may be a token) and its args. *Edit* opens the bind form on it, *Unset
 key…* and *Clear* are ``team bind --unset`` and ``--clear`` (*Clear* asks in place, and
-says under its row that the whole binding goes); each writes at once through
+the note line under the buttons says the whole binding goes); each writes at once through
 ``services.settings``, the writers ``team bind`` uses, apart from the form's Save. The
 one ``[team]`` value here is the ACCOUNT per role (#145): the select beside each role writes
 ``team.profiles.<role>.account`` — exactly what ``aisquare team bind <role>
@@ -187,8 +187,7 @@ the role runs, and where it keeps its temp files (the doctor's ``role bindings``
 
 def binding_widget_id(kind: str, role: str) -> str:
     """The id of ``role``'s binding ``kind`` widget (``row``, ``edit``, ``unset``,
-    ``clear``, ``note``): ``binding-<kind>-<suffix>``, one to one as :func:`role_widget_id`
-    is."""
+    ``clear``): ``binding-<kind>-<suffix>``, one to one as :func:`role_widget_id` is."""
     return f"{BINDING_ID_PREFIX}{kind}-{widget_suffix(role)}"
 
 
@@ -361,7 +360,8 @@ class UiSettingsChanged(Message):
 
 
 def clear_note(role: str) -> Text:
-    """What a role binding's *Clear* does, in a line under its row while it is armed."""
+    """What a role binding's *Clear* does, in the note line under the buttons while it is
+    armed: the whole binding goes first, where the line's ellipsis cannot cut it."""
     text = Text("The whole binding of ", style="bold")
     text.append(role, style="bold")
     text.append(
@@ -426,7 +426,6 @@ class AppSettingsView(Vertical):
     AppSettingsView .binding Static { height: auto; }
     AppSettingsView .binding Horizontal { height: auto; }
     AppSettingsView .binding Button { margin-right: 1; min-width: 8; }
-    AppSettingsView .binding .binding-note { display: none; color: $error; }
     AppSettingsView #bindings-empty { color: $text-muted; height: auto; }
     """
     # Under the tabs, only what both tabs need, one line each: compact buttons and the
@@ -787,17 +786,17 @@ class AppSettingsView(Vertical):
                         id=binding_widget_id("unset", role),
                         disabled=not (profile.env or profile.env_files),
                     ),
+                    # Its note in the line under Save and Reset all, as Reset all's: always in
+                    # sight, where a line under the row could be scrolled out of it.
                     ConfirmButton(
                         "Clear",
                         armed_label="Clear? click again",
                         note=clear_note(role),
-                        note_in=f"#{binding_widget_id('note', role)}",
+                        note_in="#settings-note",
                         id=binding_widget_id("clear", role),
                         variant="error",
                     ),
                 ),
-                # Under the buttons, so that showing it moves none of them; hidden at rest.
-                Static(id=binding_widget_id("note", role), classes="binding-note"),
                 id=binding_widget_id("row", role),
                 classes="binding",
             )

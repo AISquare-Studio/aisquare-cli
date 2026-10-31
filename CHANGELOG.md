@@ -236,7 +236,7 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   *Reset all* keeps, the whole binding going, the teammate stopped, the persona an attach
   replaces. A second click on the same spot, or a double-click, or Enter again, acts. Three
   seconds, Esc, the focus leaving it or its view changing put it back as it was. In the
-  attach picker it is the agent's row that asks, marked ▶, with the question under the
+  attach picker it is the agent's row that asks, marked ▶, with the question above the
   list. The button's own change of label never makes the click guard above ignore that
   second click. Stop, *Start fresh*, *Discard*, *Restart all…*, *Pause all…*, the update
   and the usage-sharing consent keep their dialogs.

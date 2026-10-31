@@ -945,9 +945,9 @@ def test_edit_opens_the_bind_form_on_the_binding_and_writes_what_team_bind_write
 
 
 def test_unset_key_and_clear_write_what_team_bind_writes() -> None:
-    """Clear asks in place: one press arms it and the line under its row says the whole
-    binding goes, and it writes nothing; the focus leaving disarms it; a second press on it
-    clears."""
+    """Clear asks in place: one press arms it and the note line under the buttons, always in
+    sight, says the whole binding goes, and it writes nothing; the focus leaving disarms it; a
+    second press on it clears."""
     from aisquare.cli.ui.views.app_settings import UnsetKeyScreen
 
     _bind_cli("tester", "--env", "A=1", "--env", "B=2", "--arg", "-v")
@@ -972,13 +972,13 @@ def test_unset_key_and_clear_write_what_team_bind_writes() -> None:
         clear.focus()
         clear.press()
         await settle(pilot)
-        note = host.query_one("#binding-note-tester", Static)
+        note = host.query_one("#settings-note", Static)
         seen["armed"] = (clear.armed, str(clear.label), len(host.screen_stack))
         seen["note"] = (note.display, str(note.content))
         seen["after_one"] = paths.config_path().read_bytes()
         host.query_one("#binding-edit-tester", Button).focus()
         await settle(pilot)
-        seen["disarmed"] = (clear.armed, str(clear.label), note.display)
+        seen["disarmed"] = (clear.armed, str(clear.label), str(note.content).startswith("Saved"))
         clear.press()
         await settle(pilot)
         clear.press()
@@ -993,7 +993,7 @@ def test_unset_key_and_clear_write_what_team_bind_writes() -> None:
     shown, said = cast(tuple[bool, str], seen["note"])
     assert shown is True and said.startswith("The whole binding of tester goes"), said
     assert seen["after_one"] == after_unset, "one press writes nothing"
-    assert seen["disarmed"] == (False, "Clear", False)
+    assert seen["disarmed"] == (False, "Clear", True), "the note line has its own text back"
     assert seen["cleared"] == seen["after_clear"]
     assert seen["empty"] is True
 

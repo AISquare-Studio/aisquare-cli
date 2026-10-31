@@ -213,6 +213,17 @@ def test_at_80x24_reset_all_and_a_binding_s_clear_armed_stay_whole_in_the_view()
         await pilot.click(clear)
         await settle(app)
         seen["clear"] = (clear.armed, _whole(clear, view.region))
+        # Review of #486, m3: in a line under its row, Clear's note could be scrolled out of
+        # sight; in the note line under the buttons it is always in it.
+        note = app.query_one("#settings-note", Static)
+        seen["clear note"] = (
+            str(note.content).startswith("The whole binding of reviewer goes"),
+            _whole(note, view.region),
+        )
         return seen
 
-    assert drive(go, size=(80, 24)) == {"reset": (True, True), "clear": (True, True)}
+    assert drive(go, size=(80, 24)) == {
+        "reset": (True, True),
+        "clear": (True, True),
+        "clear note": (True, True),
+    }

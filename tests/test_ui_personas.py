@@ -1347,8 +1347,9 @@ def test_choosing_an_agent_asks_in_place_then_attaches_and_says_how_it_was_deliv
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """User, 2026-10-30: a double click in place, not a dialog's button. Enter on a running
-    agent's row arms it, marked ▶, and the line under the list asks and names the persona it
-    replaces, attaching nothing; Enter again on it attaches."""
+    agent's row arms it, marked ▶, and the line above the list asks and names the persona it
+    replaces first (all of it in the line's tooltip), attaching nothing; Enter again on it
+    attaches."""
     calls: list[tuple[str, str, str]] = []
 
     def attach(target: ProjectInfo, label: str, name: str) -> fleet_service.AttachReceipt:
@@ -1373,22 +1374,71 @@ def test_choosing_an_agent_asks_in_place_then_attaches_and_says_how_it_was_deliv
         await settle(pilot)
         listing = picker.query_one("#picker-list", OptionList)
         row = str(listing.get_option("agent:coder-auth").prompt)
-        question = shown(picker.query_one("#picker-armed", Static))
-        armed = [host.screen is picker, list(calls)]
+        line = picker.query_one("#picker-armed", Static)
+        question = shown(line)
+        armed = [host.screen is picker, list(calls), str(line.tooltip)]
         await pilot.press("enter")
         await settle(pilot)
         return [row, question, armed, host.notices, type(host.screen).__name__]
 
     row, question, armed, notices, screen = drive(scenario, project=project)
     assert row.startswith("▶ coder-auth"), row
-    assert question.startswith("Attach pair to coder-auth?") and "It replaces mentor." in question
-    assert armed == [True, []], "one Enter attaches nothing and the picker stays"
+    assert question.startswith("Replace mentor with pair on coder-auth?"), question
+    assert "Choose it again to attach" in question
+    stays, attached, tooltip = armed
+    assert (stays, attached) == (True, []), "one Enter attaches nothing and the picker stays"
+    assert tooltip.startswith("Attach pair to coder-auth? It replaces mentor."), tooltip
     assert calls == [(project.id, "coder-auth", "pair")]
     # A `noted` toast carries the receipt's sentence: nothing reached the agent yet, and
     # the bare "(noted)" read as a briefing waiting on the board (review of #240, finding 7).
     said = "✓ attached pair to coder-auth (noted) — it reaches it with its next prompt"
     assert (said, "information") in notices
     assert screen == "Screen"
+
+
+def test_at_80x24_the_attach_question_is_on_screen_with_its_row(
+    project: ProjectInfo,
+    catalogue: dict[str, Path],
+    targets: list[FleetAgentStatus],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #486, M1: under the list, the question was cut off with the bottom of the
+    box at 80x24, and the user saw the row marked and not what it asked. Above the list it
+    is in sight, both its lines, and the armed row did not move."""
+    monkeypatch.setattr(fleet_service, "attach_persona", lambda *a, **k: None)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[object]:
+        await select_row(pilot, host, "user:pair")
+        await press(pilot, "#persona-attach-existing")
+        picker = await wait_for(pilot, AttachTargetScreen)
+        await settle(pilot)
+        listing = picker.query_one("#picker-list", OptionList)
+        before = listing.region
+        await pilot.press("enter")
+        await settle(pilot)
+        line = picker.query_one("#picker-armed", Static)
+        box = picker.query_one(Vertical).region
+        screen = Region(0, 0, *host.size)
+        return [
+            str(listing.get_option("agent:coder-auth").prompt).startswith("▶"),
+            line.region.height,
+            box.contains_region(line.region) and screen.contains_region(line.region),
+            listing.region == before,
+            shown(line).startswith("Replace mentor with pair on coder-auth?"),
+            # m4: neither line is cut at 80 columns, and the whole is in its tooltip.
+            max(len(text) for text in shown(line).splitlines()) <= line.content_region.width,
+            "It replaces mentor." in str(line.tooltip),
+        ]
+
+    assert drive(scenario, project=project, size=(80, 24)) == [
+        True,
+        2,
+        True,
+        True,
+        True,
+        True,
+        True,
+    ]
 
 
 def test_a_double_click_on_an_agent_s_row_attaches(

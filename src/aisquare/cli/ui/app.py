@@ -108,6 +108,7 @@ from aisquare.cli.ui.sidebar import (
     RenameAgent,
     RenameProject,
     ResizeSidebar,
+    ResourcesSelected,
     SettingsRow,
     SettingsSelected,
     Sidebar,
@@ -166,6 +167,7 @@ from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnb
 from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.remote import RemotePanel
+from aisquare.cli.ui.views.resources import ResourcesView
 from aisquare.cli.ui.views.settings_captain import CaptainSwitched
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
 from aisquare.cli.ui.views.settings_remote import RemoteChip
@@ -1350,6 +1352,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return False
         elif kind == "usage-stats":
             self.post_message(UsageStatsSelected())
+            return False
+        elif kind == "resources":
+            self.post_message(ResourcesSelected())
             return False
         elif kind == "doctor":
             self.post_message(DoctorSelected(ident or None))
@@ -3728,6 +3733,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.sidebar.select(SETTINGS_KEY)
         self._remember_selection("usage-stats")
 
+    async def on_resources_selected(self, event: ResourcesSelected) -> None:
+        """The hub's *Agent resources*: what each live agent consumes, sampled while it shows
+        (``views.resources``); *⚙ Settings* stays the highlighted row, as for Usage & stats."""
+        await self._show("resources", lambda: ResourcesView(id="resources"))
+        self.sidebar.select(SETTINGS_KEY)
+        self._remember_selection("resources")
+
     def on_accounts_changed(self, event: AccountsChanged) -> None:
         """The page added, removed or signed in something: the status line follows once the
         frame that shows it is read (a slot signed out or in counts in the ⚠ from it)."""
@@ -4129,6 +4141,7 @@ def _waited_reads() -> dict[str, str]:
         captain,
         doctor,
         fleet_bulk,
+        resources,
         settings_remote,
         welcome,
     )
@@ -4151,6 +4164,7 @@ def _waited_reads() -> dict[str, str]:
         agent.LABELS_WORKER: "an agent's account names",
         board.LABELS_WORKER: "a board's account names",
         fleet_bulk.PLAN_WORKER: "Settings ▸ Fleet's read of the running agents",
+        resources.SAMPLE_WORKER: "Agent resources' read of the agents",
         app_settings.ACCOUNTS_WORKER: "App settings' accounts",
         welcome.worker_name("look"): "Welcome's checks",
         welcome.worker_name("candidates"): "Welcome's folder list",

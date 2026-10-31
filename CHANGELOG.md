@@ -57,6 +57,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   report by the same rule (a spawn by what its fleet row recorded of its spawner), and said
   to be.
 
+- **See what each running agent consumes: `aisquare fleet top`, and asq's ⚙ Settings ▸
+  Agent resources.** One row per live agent of every project (project, label, role,
+  account): the CPU, resident memory and number of processes of its pane's whole process
+  tree (`claude` and what it runs: MCP servers, a `pytest`, a build), how long it has run,
+  and its session's tokens and list-price cost so far, heaviest CPU first, with a totals
+  row. `fleet top` reads once and prints the table; `--sort cpu|mem|tokens`, `--project/-P`
+  for one fleet, `--json` for one object (`agents`, `totals`). The asq page draws the same
+  table, sorts by CPU, memory or tokens (keys `1` to `3`, or its buttons), reads again
+  every 5 s while it is open and nothing while it is not; `r` reads at once. Each read is
+  one `ps -A` and one tmux listing for every agent at once, about a quarter of a second for
+  26 agents. CPU is `ps`'s figure, in percent of one core: on macOS a decaying average over
+  about the last minute, on Linux the CPU time over the process's life. Tokens start from
+  what the session's Stop hooks recorded and add what its transcript gained since, so a
+  long turn counts as it runs. Read-only: nothing on the page stops or restarts anything,
+  and an agent whose pane is gone reads `gone` until `fleet ls` or `reap` records it — so
+  does one left from before a reboot or a `kill-server`, whose pane id the next tmux server
+  gave to another agent: that agent's processes are counted once, for it.
+
 ### Changed
 
 - **Usage & stats names a repository by its actual name, never a nickname or a codename.**

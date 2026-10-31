@@ -109,5 +109,6 @@ Some refusals come without a question, because there is nothing this asq can ask
 The one case asq starts without the check is a home it can't write to. It says so once, and the
 other asqs won't see it.
 
-`aisquare upgrade` and `aisquare uninstall` refuse while another asq runs on the home, and asq's
-own Update and Uninstall buttons do too. Quit the other asqs first.
+`aisquare upgrade` and `aisquare uninstall` refuse while another asq runs on the home (asqs of
+0.9.2 or later; quit a 0.9.1 asq yourself), and asq's own Update and Uninstall buttons do too.
+Quit the other asqs first.

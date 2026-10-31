@@ -10,13 +10,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 **Pause and resume the agents of a project, or of every project: idle managers and coders
 stop spending tokens without being reaped, and come back where they were from one dialog.
-Rename a running agent from its sidebar row or `fleet relabel`. Renaming a project now
-renames its fleet codename and tmux session too, and the old codename keeps working. One
-sidebar highlight for a click and the arrow keys. Usage & stats scrolls to its end, and the
-Accounts table fits a 160-column terminal beside the default sidebar.**
+Run asq at the Mac and over SSH into the same Mac at once, on one home: each asq shows the
+others, the one over SSH shows the usage the Mac recorded, and an asq of another release
+starts nothing beside a running one until that one quits. Rename a running agent from its
+sidebar row or `fleet relabel`. Renaming a project now renames its fleet codename and tmux
+session too, and the old codename keeps working. One sidebar highlight for a click and the
+arrow keys. Usage & stats scrolls to its end, and the Accounts table fits a 160-column
+terminal beside the default sidebar.**
 
 **Upgrading:**
 - From 0.9.1, run `aisquare upgrade`, or take the update `asq` offers.
+- **Quit every other asq before you update, at the Mac and over SSH.** A 0.9.1 asq left
+  running (the one over SSH while the Mac's takes the update, say) keeps the 0.9.2 asq from
+  starting. 0.9.1 writes no instance record, so the 0.9.2 asq finds it in `ps`, names its
+  pid, terminal, start time and command, and refuses: `asq did not start. Start it again
+  once that asq has quit.`, exit 1. Quit it in its own terminal (`q`), or end it with `kill
+  <pid>`, which skips its clean quit (the refusal says what that loses), and start asq
+  again. Nothing is killed for you. A 0.9.1 asq started in the 10 seconds before is not
+  counted, nor is one on another home, nor any on Windows, where there is no `ps` to ask.
+  From 0.9.2 on, an asq of another release is asked instead: `Quit the other asq? [y/N]`.
 - **The store migrates from v40 (0.9.1's) to v42 on first open, automatically, in two
   steps.** v41 adds one table, `project_codename_alias` (the codenames a renamed project
   gave up), and its index; v42 adds one nullable column, `fleet_agent.paused_at`: when
@@ -37,9 +49,22 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   resumed, and its claims wait for `task release`. **Resume paused agents before moving
   back.** Moved forward again, 0.9.2 reads the paused rows and the old codenames as it left
   them.
-- **No setting, extra or dependency is added or removed.** One new command, `aisquare
-  fleet relabel`, and two new flags on `fleet pause` and `fleet resume`, `--all` and
-  `--managers`.
+- **Several asqs on one home add no migration (the store stays at v42), and what they
+  leave behind, 0.9.1 ignores.** The instance registry is a folder, `~/.aisquare/instances/`
+  (each asq removes its own record as it quits; a crashed one's stays until a 0.9.2 asq
+  clears it), which 0.9.1 never reads and its `uninstall --purge` deletes with the home.
+  The login each Keychain item held, kept for SSH usage, is a `usage-login:` row in
+  `ui_state` (macOS only), which 0.9.1 never asks for: it reads `ui_state` by exact key. A
+  fleet tmux window may carry a `@asq-size-owner` option, which 0.9.1 never reads, so its
+  asq resizes the pane as it always did.
+- **`aisquare upgrade` and `aisquare uninstall` refuse while an asq runs on the home**
+  (asqs of 0.9.2 or later; quit a 0.9.1 asq yourself), where 0.9.1 went ahead: a script
+  that runs `upgrade --yes` beside an open asq exits 1 now, and so does a move back with
+  `upgrade --version 0.9.1`. Quit the asqs first (`q` in each). Inside asq, its Update and
+  Uninstall refuse only while another asq runs.
+- **No setting, extra or dependency is added or removed.** Two new commands, `aisquare
+  fleet relabel` and `aisquare instances`, and two new flags on `fleet pause` and `fleet
+  resume`, `--all` and `--managers`.
 - **`fleet pause` now exits the agents, not only the signal.** In 0.9.1 it set the
   project's `fleet-paused` signal and nothing else; now it also pauses every running agent
   of the project (or `--group`, `--all`), and `fleet resume` starts them again. A script
@@ -64,7 +89,12 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   report (`receipts`, `summary`, `ok`, as `restart --all` does, with `signals` and `kept`)
   where 0.9.1 printed `{"paused", "project", "name", "codename", "tmux_session"}` (a list
   of them for `--group`); a fleet agent's `state` may now be `paused` and its row carries
-  `paused_at`; `project rename --json` adds a `notes` list.
+  `paused_at`; `project rename --json` adds a `notes` list. `aisquare instances --json` is
+  new: `{"instances": [...]}`, each an asq's record plus `heartbeat_age_s` and `this`. The
+  `upgrade --json` and `uninstall --json` plans add `asqs` (the asqs running, named), and
+  their refusal while one runs is `"error": "asq_running"`. Under `accounts usage --json` a
+  reading another process took carries `"recorded_elsewhere": true`, and a usage `cause`
+  may be `keychain_locked_ssh`.
 
 ### Added
 
@@ -140,6 +170,78 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
     `--as`, with `--as <session>`, or with `--as captain`; the captain acts as the owner from
     its own window alone. That includes a paused agent whose task closed: only the owner
     ends that pause.
+- **Run asq at the Mac and over SSH into the same Mac at once, on one home.** Both work on
+  the same store, boards and fleet tmux server, so every agent shows in each and can be
+  driven from either; [docs/multi-instance.md](docs/multi-instance.md) says what they
+  share and what only one holds at a time.
+  - **Each asq knows the others.** Every asq registers in `~/.aisquare/instances/` as it
+    starts (the folder `0700`, its files `0600`), rewrites its record every 5 seconds from
+    a thread of its own, and removes it as it quits. A record is live while its asq holds
+    its lock (so a crashed asq's is ignored at once, whoever has its pid since, and deleted
+    by the next asq to start or the next heartbeat of a running one); one from another host
+    sharing the home, while its heartbeat is under a minute old. Looking never changes the
+    folder. While two or more asqs are open, a chip under the sidebar's status line says
+    how many and where, `2 asq · Mac + ssh (here)` (`local` in place of `Mac` off macOS, a
+    host name for an asq on another machine), and its tooltip names each one's release,
+    host, pid, terminal and start; it is hidden with one asq open, and turns to a warning
+    with a `⚠` when two run different releases. `aisquare instances` lists the live asqs
+    (kind, host, pid, version, since, heartbeat age), and `--json` gives `{"instances":
+    [...]}`. `aisquare doctor` and asq's Doctor page have an `asq instances` row: ok while
+    every live asq runs this aisquare's release and store schema, a warning naming each one
+    that does not.
+  - **One release per home.** asq checks the other asqs before it opens the store or
+    touches tmux, Remote or the captain's socket (`ui --project` and `ui --group` too,
+    before their store read). Beside one of another release or store schema it names both
+    and where the other runs, and asks `Quit the other asq? [y/N]`. On `y` the other quits
+    as `q` quits it, and its terminal says which asq asked it to (and, as ever, what it
+    could not save); this one starts once it has gone. If it has not quit within 15 seconds
+    (it may be finishing a restart of the fleet), this one says so and starts nothing. On
+    `n`, Ctrl-C, the end of input, or with no terminal to ask in, it starts nothing, exits
+    1 and says how to quit the other by hand (`q` in it, with its kind, host, pid and
+    terminal). It refuses without asking beside an asq that cannot be asked to quit (it says
+    what `kill <pid>` would lose), a record this release cannot read (most likely a later
+    release's: the file is named, and ignored once a minute old with no lock held), and an
+    asq that has held the home's check for over 2 seconds (start again in a moment). Only a
+    home asq cannot write to lets it start unchecked, which it says once.
+  - **A 0.9.1 asq is found too, and never killed.** An asq of a release before the
+    registry writes no record, so the check also runs one `ps` of this user's processes
+    (bounded at 2 seconds, outside the home's lock), and a command line that opens asq's UI
+    (`asq` or `aisquare`, bare or with `ui`, as a script, by an interpreter or as `python -m
+    aisquare`) with no live record is one: the refusal names its pid, terminal, start time
+    and command, and what `kill <pid>` loses against its own quit. Left out: this process
+    and its parents, the pids live records name, a process under 10 seconds old, and one
+    whose `AISQUARE_HOME` or `HOME` names another home. With no `ps`, a failing or slow
+    one, or on Windows, one INFO line goes to the log and the check is the registry's
+    alone.
+  - **Usage over SSH, from what the Mac recorded.** An SSH login cannot read the login
+    Keychain, so its asq fetched no usage (`headroom … skipped - login keychain is
+    locked`). Now every process that reads a Keychain item records which login it held (a
+    token fingerprint, or none once signed out) in one `ui_state` row per item, and a
+    process whose Keychain read says locked serves the readings recorded for that same
+    login, never another's: the Accounts table's session cell marks them `· Mac`, and its
+    tooltip, the usage line and `aisquare accounts usage` say `via the Mac's asq · 2m ago
+    (the login Keychain is locked in this SSH session)`. A sign-out or an expired login the
+    Mac saw reads the same over SSH, on the Accounts page, Welcome, the doctor and a
+    launch's account pick. A slot with no row shows nothing, as before, and its fix line
+    says to open asq on the Mac itself, or run `security unlock-keychain` in the SSH
+    session. Linux and Windows write no rows.
+  - **A shared pane's size follows the asq you last typed in.** Two asqs showing one
+    agent's pane each resized its window to their own size, and every attach or resize of
+    one undid the other's. Now a key, a paste or a click in a pane makes that asq the
+    window's size owner (a drag to select text does not), and tmux itself refuses any other
+    asq's resize of the window while the owner runs, so the other never sizes it back: its
+    pane's top-right corner shows `[sized by the other asq (ssh)]` (or `(Mac)`) while the
+    sizes differ, and it sizes the pane again, with no key pressed, once the owner quits.
+  - **On macOS an SSH login never starts the fleet's tmux server.** A tmux server lives in
+    the security session of the login that started it, and agents in one started over SSH
+    cannot read their Claude Code login from the Keychain. So where no fleet server runs,
+    whatever would start one from an SSH login (a spawn, asq's *Start manager* included,
+    `fleet restart`, the Accounts page's sign-in window, any window at the fleet's socket)
+    is refused before anything is written: `not started: start asq on the Mac first:
+    agents started from an SSH login can't read the Keychain`. The login's session is asked
+    (`SessionGetInfo`), not `SSH_CONNECTION`: a pane of a server the Mac started is no SSH
+    login, whoever attaches to it. Once the Mac has started the server, agents spawn into
+    it from SSH as before.
 
 ### Changed
 
@@ -211,6 +313,16 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   so `x` asks to stop the agent the arrows just reached. *Spawn agent* reached by the
   arrows opens on the project whose view is on screen, else the first listed. A held arrow
   does not open every view it passes.
+- **`aisquare upgrade` and `aisquare uninstall` refuse while an asq runs on the home, and so
+  do asq's Update, Uninstall and ⬆ *Restart & update* while another asq runs.** Left
+  running, an asq would go on running the old release over the new one's files, or lose
+  the program it runs with nothing left to quit it cleanly; 0.9.1 went ahead. The refusal
+  names each asq, `asq 0.9.2 (ssh on mini, pid 4242)`, and says to quit it first (`q` in
+  it). With `--yes` the command exits 1 (`--json`: `"error": "asq_running"`); without it,
+  the plan says why under a `✗` and exits 1, and `--dry-run` prints that plan and changes
+  nothing. In asq it is a toast, and the asq does not quit for nothing. Only asqs
+  in the registry are counted: one from 0.9.1 writes no record, and the 0.9.2 asq started
+  beside it refuses instead.
 
 ### Fixed
 

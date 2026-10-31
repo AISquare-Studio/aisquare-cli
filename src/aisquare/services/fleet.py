@@ -59,6 +59,7 @@ from aisquare.core import (
     orchestrator,
     paths,
     personas,
+    prompt_origin,
     selfcli,
 )
 from aisquare.core import memory as memory_core
@@ -4050,7 +4051,8 @@ def spawn(
     if first is not None and way == "argv":
         # Written before the window opens, so its launch finds it; named to the launch by
         # path, so the command tmux carries and the row records never holds the text.
-        prompt_file = delivery.write_prompt_file(agent_id, first)
+        with prompt_origin.sent_by(_spawn_author(spawned_by)):
+            prompt_file = delivery.write_prompt_file(agent_id, first)
         flags += [delivery.FIRST_PROMPT_FLAG, str(prompt_file)]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *model_flags, *extra])
     env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
@@ -4333,18 +4335,19 @@ def spawn(
     if first is not None and way == "argv":
         typed = "yes"  # handed over with the launch: nothing to type, no Enter to lose
     elif first is not None:
-        typed, acked = _type_prompt(
-            srv,
-            stored.pane_id,
-            first,
-            typing,
-            folder=cwd,
-            to=(project, stored.label),
-            agent_id=stored.id,
-            reads_box=claude_code or harness.is_default_agent(resolution.binary),
-            guard=config.draft_quiet_seconds,
-            done=done,
-        )
+        with prompt_origin.sent_by(_spawn_author(spawned_by)):
+            typed, acked = _type_prompt(
+                srv,
+                stored.pane_id,
+                first,
+                typing,
+                folder=cwd,
+                to=(project, stored.label),
+                agent_id=stored.id,
+                reads_box=claude_code or harness.is_default_agent(resolution.binary),
+                guard=config.draft_quiet_seconds,
+                done=done,
+            )
         if typed == "unsent":
             _first_prompt_unsent(stored, "its first message is still in its input box")
     if first is not None and typed not in ("no", "maybe") and acked is None:
@@ -5783,6 +5786,7 @@ def _type_prompt(
             monotonic=_monotonic,
             what="the prompt",
             guard=guard,
+            origin=prompt_origin.SPAWN,
         )
     if delivered.refused is not None and delivered.in_box:
         notes.append(
@@ -6623,6 +6627,7 @@ def tell(
                 monotonic=_monotonic,
                 done="typed into its pane (it was waiting)",
                 guard=settings().draft_quiet_seconds,
+                origin=prompt_origin.TELL,
             )
         if done.refused is not None and done.in_box:
             return TellResult("no", noted(done.refused))
@@ -7046,6 +7051,16 @@ def _the_owners_spawn(spawned_by: str, store: ContextStore | None = None) -> boo
     # In a fleet agent's environment the captain's own call path alone is the owner's: never
     # an `--as captain` any agent can type (seq 3609, 2).
     return _the_captains_row(own, store)
+
+
+def _spawn_author(spawned_by: str) -> str:
+    """Who authored a spawn's first message, for the turn it starts (``core.prompt_origin``): a
+    person (``human``) when a person ran the spawn, from their shell, asq or the phone
+    (``spawned_by`` is ``user`` and no agent's environment is around it); an agent otherwise:
+    its ``--as`` session, a fleet agent's or Claude Code's own shell, or aisquare acting alone
+    (``usage-limit``). A restart's and a switch's first line are their spawner's the same way."""
+    human = spawned_by == "user" and prompt_origin.origin_sender() == prompt_origin.HUMAN
+    return prompt_origin.HUMAN if human else prompt_origin.AGENT
 
 
 def _the_captains_row(agent_id: str, store: ContextStore | None = None) -> bool:
@@ -12796,6 +12811,7 @@ def nudge_manager(project_id: str, *, reason: str, board: str | None = None) -> 
                 guard=settings().draft_quiet_seconds,
                 re_press=_NUDGE_RE_PRESS,
                 last_wait=_NUDGE_LAST_WAIT,
+                origin=prompt_origin.WAKE,
             )
             deferred = f"{NUDGE_DEFERRED}{session.id}"
             if done.refused is not None:
@@ -12915,6 +12931,7 @@ def type_line(agent: FleetAgent, text: str, *, acked: Callable[[], bool]) -> del
         monotonic=_monotonic,
         what="the line",
         guard=settings().draft_quiet_seconds,
+        origin=prompt_origin.UPKEEP,
     )
 
 

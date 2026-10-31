@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+**Upgrading:**
+- **The store migrates to v43 on first open, automatically**: one nullable column,
+  `metric.origin`, who started the turn. Nothing is rewritten or dropped, and 0.9.2, which
+  treats a store at or past its own version as current, never reads it.
+
 ### Added
 
 - **The sidebar's header says how many agents are live: `Fleet · 19 live`.** Every live
@@ -15,6 +20,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and drops on the very frame whose card shows an agent exited because its pane died.
   With none live the header is `Fleet` alone. The Welcome page's *3 Fleet* step keeps
   its title: it is about the one project being set up, whose agents it already lists.
+
+- **`aisquare outcomes`: what your agents achieved this week, and how much of it you
+  steered.** One ISO week on the local clock (Monday 00:00 to now; `--week last` or
+  `--week 2026-W43` for another), against the week before to the same point, as text or
+  `--json`. No day, month or all-time view, by design. Four sections: **outcomes** per
+  repository, by its real name (the remote's, else the folder's, never a nickname): the
+  pull requests you authored merged and opened (`gh`, one GraphQL call, the only network
+  call; skipped, and said so, without it), your commits and their lines in the checkouts
+  the agents worked in (a rebased commit once, none GitHub made), board tasks done and
+  reopened; **effort**: agent-hours (the turns' durations), sessions, turns, tool calls,
+  files edited, tokens, list-price cost, and cost per merged PR and per done task;
+  **direction**, who steered: the share of turns a person started against those an agent
+  did, agent-minutes and tool calls per human prompt, interrupts and denied tool uses, and
+  each session as directive, guided or collaborative (after Anthropic's Economic Index),
+  never human tokens against agent tokens; and **vs last week**. `aisquare outcomes --help`
+  says how each figure is measured. The interrupts, denials, edited files and the origin of
+  older turns come from Claude Code's transcripts, kept in `~/.aisquare/cache/` as they are
+  read: asq's usage sweep (every 10 minutes while asq is open) and `metrics stats` keep that
+  cache filled, so the weekly run reads it warm (2 to 5 s here, under load). Without them, a
+  run reads a week or two of transcripts first, once: 17 s for 2 GB of them on this machine,
+  36 s under heavy load. The first sweep after the upgrade pays the same read once: asq's in
+  the background, and the first `aisquare metrics stats` (or `metrics backfill`) in the
+  foreground: 3 s on this machine when it is quiet (0.6 s with a warm cache), 8 s under
+  heavy load (2.6 s warm).
+- **Who started each turn is recorded, by who authored the instruction.** Every write
+  aisquare makes into an agent's prompt (a fleet spawn's first message, `fleet tell`, the
+  phone's tell, the manager's wake, the quiet compaction's lines) leaves a marker for its
+  text, which the turn's `UserPromptSubmit` takes. A wake, a compaction line, a Stop hook's
+  continuation and Claude Code's `<task-notification>` are an agent's whoever sends them; a
+  tell and a spawn are their sender's: `human:tell` from your terminal, asq or the phone,
+  `agent:tell` from a manager; a spawn you run is `human:spawn`, one an agent session runs
+  (its `--as` session, or its environment) `agent:spawn`. A prompt you type, slash commands
+  included, is `human:typed`. A Stop hook that keeps a turn going opens a row of its own
+  (`agent:continuation`), so its time is counted too. Turns from before are inferred for the
+  report by the same rule (a spawn by what its fleet row recorded of its spawner), and said
+  to be.
 
 ### Changed
 

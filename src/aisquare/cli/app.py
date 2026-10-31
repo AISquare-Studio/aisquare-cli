@@ -42,6 +42,7 @@ from aisquare.cli import (
 from aisquare.cli import config as config_cli
 from aisquare.cli import instances as instances_cli
 from aisquare.cli import metrics as metrics_cli
+from aisquare.cli import outcomes as outcomes_cli
 from aisquare.cli.global_flags import DISPATCHED_WORDS, GlobalFlagsGroup
 from aisquare.core import feature_use, sharing
 from aisquare.core.state import RuntimeState, get_state, set_state
@@ -235,6 +236,7 @@ app.add_typer(task.app, name="task")
 app.add_typer(brief.app, name="brief")
 app.command("note")(team.note)
 app.command("board")(team.board)
+app.command("outcomes")(outcomes_cli.outcomes)
 launch.register(app)  # needs context_settings to forward agent args
 command_reports.register(app)  # `exec` forwards everything after -- to the command
 app.command("serve")(serve.serve)

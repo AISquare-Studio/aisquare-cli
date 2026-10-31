@@ -336,6 +336,12 @@ SEAMS: dict[str, Seam] = {
         "command that started it",
         strips_identity=True,
     ),
+    "aisquare/services/outcomes.py::_commit_lines": Seam(
+        EXCLUDED,
+        "`git diff-tree --numstat` over a week's commits, for `aisquare outcomes`' lines added "
+        "and deleted, run in `git_env()`; no model",
+        strips_identity=True,
+    ),
     "aisquare/core/repo_profile.py::git_output": Seam(
         EXCLUDED,
         "`git config`/`remote -v`/`ls-files` for a repository's profile (Usage & stats): a "
